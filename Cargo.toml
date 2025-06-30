@@ -1,11 +1,11 @@
 [package]
-name = "crossvault"
+name = "crosstache"
 version = "0.1.0"
 edition = "2021"
-authors = ["Crossvault Team"]
+authors = ["crosstache Team"]
 description = "A comprehensive command-line tool for managing Azure Key Vaults"
 license = "MIT"
-repository = "https://github.com/crossvault/crossvault-rust"
+repository = "https://github.com/crosstache/crosstache-rust"
 keywords = ["azure", "keyvault", "cli", "secrets", "vault"]
 categories = ["command-line-utilities", "authentication"]
 

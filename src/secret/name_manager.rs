@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use chrono::{DateTime, Utc};
 use tabled::Tabled;
 
-use crate::error::{CrossvaultError, Result};
+use crate::error::{crosstacheError, Result};
 use crate::utils::sanitizer::{sanitize_secret_name, get_secret_name_info, SecretNameInfo};
 
 /// Name mapping entry for persistent storage
@@ -392,16 +392,16 @@ impl NameManager {
     pub async fn save(&self) -> Result<()> {
         let storage = self.storage.read().await;
         let json_data = serde_json::to_string_pretty(&*storage)
-            .map_err(|e| CrossvaultError::serialization(format!("Failed to serialize mappings: {}", e)))?;
+            .map_err(|e| crosstacheError::serialization(format!("Failed to serialize mappings: {}", e)))?;
         
         // Ensure parent directory exists
         if let Some(parent) = self.storage_path.parent() {
             tokio::fs::create_dir_all(parent).await
-                .map_err(|e| CrossvaultError::config(format!("Failed to create storage directory: {}", e)))?;
+                .map_err(|e| crosstacheError::config(format!("Failed to create storage directory: {}", e)))?;
         }
         
         tokio::fs::write(&self.storage_path, json_data).await
-            .map_err(|e| CrossvaultError::config(format!("Failed to save name mappings: {}", e)))?;
+            .map_err(|e| crosstacheError::config(format!("Failed to save name mappings: {}", e)))?;
         
         Ok(())
     }
@@ -433,7 +433,7 @@ impl NameManager {
     /// Get default storage path
     fn default_storage_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
-            .ok_or_else(|| CrossvaultError::config("Unable to determine config directory"))?;
+            .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
         
         Ok(config_dir.join("xv").join("name_mappings.json"))
     }
@@ -441,10 +441,10 @@ impl NameManager {
     /// Load storage from file
     fn load_storage(path: &Path) -> Result<NameMappingStorage> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| CrossvaultError::config(format!("Failed to read name mappings file: {}", e)))?;
+            .map_err(|e| crosstacheError::config(format!("Failed to read name mappings file: {}", e)))?;
         
         let storage: NameMappingStorage = serde_json::from_str(&content)
-            .map_err(|e| CrossvaultError::serialization(format!("Failed to parse name mappings: {}", e)))?;
+            .map_err(|e| crosstacheError::serialization(format!("Failed to parse name mappings: {}", e)))?;
         
         Ok(storage)
     }

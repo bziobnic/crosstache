@@ -1,12 +1,12 @@
 #!/usr/bin/env pwsh
 
-# Crossvault (xv) installer for Windows
+# crosstache (xv) installer for Windows
 # https://github.com/bziobnic/crosstache
 
 [CmdletBinding()]
 param(
     [string]$Version = "latest",
-    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\crossvault",
+    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\crosstache",
     [switch]$Help
 )
 
@@ -18,13 +18,13 @@ $ErrorActionPreference = 'Stop'
 # Show help
 if ($Help) {
     Write-Host @"
-Crossvault Installer for Windows
+crosstache Installer for Windows
 
 Usage: .\install.ps1 [OPTIONS]
 
 Options:
     -Version <string>     Specific version to install (default: latest)
-    -InstallDir <string>  Installation directory (default: $env:LOCALAPPDATA\Programs\crossvault)
+    -InstallDir <string>  Installation directory (default: $env:LOCALAPPDATA\Programs\crosstache)
     -Help                 Show this help message
 
 Examples:
@@ -128,7 +128,7 @@ function Add-ToPath {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     
     if ($userPath -notlike "*$Directory*") {
-        Write-Info "Adding Crossvault to your PATH..."
+        Write-Info "Adding crosstache to your PATH..."
         $newPath = if ($userPath) { "$userPath;$Directory" } else { $Directory }
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         $env:Path = "$env:Path;$Directory"
@@ -152,7 +152,7 @@ function Test-Installation {
         $versionOutput = & $BinaryPath --version 2>$null
         
         if ($LASTEXITCODE -eq 0) {
-            Write-Success "Crossvault installed successfully!"
+            Write-Success "crosstache installed successfully!"
             Write-Info "Installed version: $versionOutput"
             Write-Info "Binary location: $BinaryPath"
             Write-Info "You can now use 'xv' from any terminal."
@@ -190,8 +190,8 @@ function Show-Usage {
 }
 
 # Main installation function
-function Install-Crossvault {
-    Write-Info "Crossvault Installer for Windows"
+function Install-crosstache {
+    Write-Info "crosstache Installer for Windows"
     Write-Info "Repository: https://github.com/$GitHubRepo"
     Write-Host ""
     
@@ -212,7 +212,7 @@ function Install-Crossvault {
     $downloadUrl = "https://github.com/$GitHubRepo/releases/download/$targetVersion/$archiveName"
     $checksumUrl = "https://github.com/$GitHubRepo/releases/download/$targetVersion/$archiveName.sha256"
     
-    Write-Info "Installing Crossvault $targetVersion for Windows x64"
+    Write-Info "Installing crosstache $targetVersion for Windows x64"
     Write-Info "Download URL: $downloadUrl"
     
     # Create temporary directory
@@ -286,7 +286,7 @@ if ($isAdmin) {
 
 # Run installation
 try {
-    Install-Crossvault
+    Install-crosstache
 }
 catch {
     Write-Error "Installation failed: $_"

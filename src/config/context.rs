@@ -1,11 +1,11 @@
-//! Vault context management for CrossVault
+//! Vault context management for crosstache
 //! 
 //! This module provides smart vault context detection, allowing users to work
 //! with vaults without repeatedly specifying --vault flags.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use crate::error::{CrossvaultError, Result};
+use crate::error::{crosstacheError, Result};
 use tracing::{debug, info};
 
 /// Represents a vault context with associated metadata
@@ -92,7 +92,7 @@ impl ContextManager {
     async fn load_local_context() -> Result<Self> {
         let context_path = std::env::current_dir()?.join(".xv").join("context");
         if !context_path.exists() {
-            return Err(CrossvaultError::config("No local context found"));
+            return Err(crosstacheError::config("No local context found"));
         }
         
         let content = tokio::fs::read_to_string(&context_path).await?;
@@ -252,7 +252,7 @@ impl ContextManager {
     /// Get global context file path
     fn global_context_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
-            .ok_or_else(|| CrossvaultError::config("Could not determine config directory"))?;
+            .ok_or_else(|| crosstacheError::config("Could not determine config directory"))?;
         Ok(config_dir.join("xv").join("context"))
     }
     

@@ -10,7 +10,7 @@ use reqwest::{Client, header::HeaderMap};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::error::{CrossvaultError, Result};
+use crate::error::{crosstacheError, Result};
 
 /// Trait for Azure authentication providers
 #[async_trait]
@@ -45,7 +45,7 @@ impl DefaultAzureCredentialProvider {
     /// Create a new DefaultAzureCredentialProvider
     pub fn new() -> Result<Self> {
         let credential = Arc::new(DefaultAzureCredential::create(TokenCredentialOptions::default())
-            .map_err(|e| CrossvaultError::authentication(format!("Failed to create DefaultAzureCredential: {}", e)))?);
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create DefaultAzureCredential: {}", e)))?);
         let http_client = Client::new();
         
         Ok(Self {
@@ -59,7 +59,7 @@ impl DefaultAzureCredentialProvider {
     pub fn with_tenant(tenant_id: String) -> Result<Self> {
         // Note: Azure Identity v0.20 may have different API for setting tenant
         let credential = Arc::new(DefaultAzureCredential::create(TokenCredentialOptions::default())
-            .map_err(|e| CrossvaultError::authentication(format!("Failed to create DefaultAzureCredential: {}", e)))?);
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create DefaultAzureCredential: {}", e)))?);
         let http_client = Client::new();
         
         Ok(Self {
@@ -73,23 +73,23 @@ impl DefaultAzureCredentialProvider {
     async fn get_user_info(&self, access_token: &str) -> Result<Value> {
         let mut headers = HeaderMap::new();
         headers.insert("Authorization", format!("Bearer {}", access_token).parse()
-            .map_err(|e| CrossvaultError::authentication(format!("Invalid token format: {}", e)))?);
+            .map_err(|e| crosstacheError::authentication(format!("Invalid token format: {}", e)))?);
         
         let response = self.http_client
             .get("https://graph.microsoft.com/v1.0/me")
             .headers(headers)
             .send()
             .await
-            .map_err(|e| CrossvaultError::network(format!("Failed to call Graph API: {}", e)))?;
+            .map_err(|e| crosstacheError::network(format!("Failed to call Graph API: {}", e)))?;
         
         if !response.status().is_success() {
-            return Err(CrossvaultError::authentication(format!(
+            return Err(crosstacheError::authentication(format!(
                 "Graph API error: HTTP {}", response.status()
             )));
         }
         
         let user_info: Value = response.json().await
-            .map_err(|e| CrossvaultError::serialization(format!("Failed to parse user info: {}", e)))?;
+            .map_err(|e| crosstacheError::serialization(format!("Failed to parse user info: {}", e)))?;
         
         Ok(user_info)
     }
@@ -101,7 +101,7 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
         let token_response = self.credential
             .get_token(scopes)
             .await
-            .map_err(|e| CrossvaultError::authentication(format!("Failed to get token: {}", e)))?;
+            .map_err(|e| crosstacheError::authentication(format!("Failed to get token: {}", e)))?;
         
         Ok(token_response)
     }
@@ -118,7 +118,7 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
         user_info.get("tenantId")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| CrossvaultError::authentication("Unable to determine tenant ID".to_string()))
+            .ok_or_else(|| crosstacheError::authentication("Unable to determine tenant ID".to_string()))
     }
     
     async fn get_object_id(&self) -> Result<String> {
@@ -128,7 +128,7 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
         user_info.get("id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| CrossvaultError::authentication("Unable to determine object ID".to_string()))
+            .ok_or_else(|| crosstacheError::authentication("Unable to determine object ID".to_string()))
     }
     
     async fn get_client_id(&self) -> Result<Option<String>> {
@@ -163,7 +163,7 @@ impl ClientSecretProvider {
         let http_client = Client::new();
         let authority = format!("https://login.microsoftonline.com/{}", tenant_id);
         let authority_url = url::Url::parse(&authority)
-            .map_err(|e| CrossvaultError::config(format!("Invalid authority URL: {}", e)))?;
+            .map_err(|e| crosstacheError::config(format!("Invalid authority URL: {}", e)))?;
         
         let http_client_arc = Arc::new(reqwest::Client::new());
         let credential = Arc::new(ClientSecretCredential::new(
@@ -186,7 +186,7 @@ impl ClientSecretProvider {
     async fn get_service_principal_info(&self, access_token: &str) -> Result<Value> {
         let mut headers = HeaderMap::new();
         headers.insert("Authorization", format!("Bearer {}", access_token).parse()
-            .map_err(|e| CrossvaultError::authentication(format!("Invalid token format: {}", e)))?);
+            .map_err(|e| crosstacheError::authentication(format!("Invalid token format: {}", e)))?);
         
         let url = format!("https://graph.microsoft.com/v1.0/servicePrincipals?$filter=appId eq '{}'", self.client_id);
         let response = self.http_client
@@ -194,16 +194,16 @@ impl ClientSecretProvider {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| CrossvaultError::network(format!("Failed to call Graph API: {}", e)))?;
+            .map_err(|e| crosstacheError::network(format!("Failed to call Graph API: {}", e)))?;
         
         if !response.status().is_success() {
-            return Err(CrossvaultError::authentication(format!(
+            return Err(crosstacheError::authentication(format!(
                 "Graph API error: HTTP {}", response.status()
             )));
         }
         
         let sp_info: Value = response.json().await
-            .map_err(|e| CrossvaultError::serialization(format!("Failed to parse service principal info: {}", e)))?;
+            .map_err(|e| crosstacheError::serialization(format!("Failed to parse service principal info: {}", e)))?;
         
         Ok(sp_info)
     }
@@ -215,7 +215,7 @@ impl AzureAuthProvider for ClientSecretProvider {
         let token_response = self.credential
             .get_token(scopes)
             .await
-            .map_err(|e| CrossvaultError::authentication(format!("Failed to get token: {}", e)))?;
+            .map_err(|e| crosstacheError::authentication(format!("Failed to get token: {}", e)))?;
         
         Ok(token_response)
     }
@@ -234,7 +234,7 @@ impl AzureAuthProvider for ClientSecretProvider {
             .and_then(|sp| sp.get("id"))
             .and_then(|id| id.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| CrossvaultError::authentication("Unable to determine service principal object ID".to_string()))
+            .ok_or_else(|| crosstacheError::authentication("Unable to determine service principal object ID".to_string()))
     }
     
     async fn get_client_id(&self) -> Result<Option<String>> {
@@ -270,11 +270,11 @@ impl AuthProviderFactory {
             }
             "clientsecret" => {
                 let tenant_id = config.get("tenant_id")
-                    .ok_or_else(|| CrossvaultError::config("tenant_id is required for client secret authentication"))?;
+                    .ok_or_else(|| crosstacheError::config("tenant_id is required for client secret authentication"))?;
                 let client_id = config.get("client_id")
-                    .ok_or_else(|| CrossvaultError::config("client_id is required for client secret authentication"))?;
+                    .ok_or_else(|| crosstacheError::config("client_id is required for client secret authentication"))?;
                 let client_secret = config.get("client_secret")
-                    .ok_or_else(|| CrossvaultError::config("client_secret is required for client secret authentication"))?;
+                    .ok_or_else(|| crosstacheError::config("client_secret is required for client secret authentication"))?;
                 
                 Ok(Box::new(ClientSecretProvider::new(
                     tenant_id.clone(),
@@ -282,7 +282,7 @@ impl AuthProviderFactory {
                     client_secret.clone(),
                 )?))
             }
-            _ => Err(CrossvaultError::config(format!("Unsupported authentication provider: {}", provider_type)))
+            _ => Err(crosstacheError::config(format!("Unsupported authentication provider: {}", provider_type)))
         }
     }
 }

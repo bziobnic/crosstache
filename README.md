@@ -1,6 +1,6 @@
-# Crossvault - Azure Key Vault CLI
+# crosstache - Cross-platform Azure Key Vault CLI
 
-A comprehensive command-line tool for managing Azure Key Vaults, written in Rust. Crossvault provides simplified access to secrets, vault management capabilities, and advanced features like secret name sanitization and group-based organization.
+A comprehensive command-line tool for managing Azure Key Vaults, written in Rust. crosstache provides simplified access to secrets, vault management capabilities, and advanced features like secret name sanitization and group-based organization.
 
 ## Features
 
@@ -77,7 +77,7 @@ This only needs to be done once per binary.
 
 ## Configuration
 
-Crossvault uses a hierarchical configuration system:
+crosstache uses a hierarchical configuration system:
 
 1. Command-line flags (highest priority)
 2. Environment variables
@@ -104,12 +104,12 @@ xv config set subscription_id YOUR_SUBSCRIPTION_ID
 
 - `AZURE_SUBSCRIPTION_ID`: Default Azure subscription
 - `AZURE_TENANT_ID`: Azure tenant ID
-- `CROSSVAULT_DEFAULT_VAULT`: Default vault name
-- `CROSSVAULT_DEFAULT_RESOURCE_GROUP`: Default resource group
+- `crosstache_DEFAULT_VAULT`: Default vault name
+- `crosstache_DEFAULT_RESOURCE_GROUP`: Default resource group
 
 ## Authentication
 
-Crossvault uses Azure DefaultAzureCredential, supporting multiple authentication methods:
+crosstache uses Azure DefaultAzureCredential, supporting multiple authentication methods:
 
 1. Environment variables (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`)
 2. Managed Identity
@@ -210,7 +210,7 @@ xv vault share revoke my-vault user@example.com
 
 ## Secret Name Sanitization
 
-Crossvault automatically sanitizes secret names to comply with Azure Key Vault requirements:
+crosstache automatically sanitizes secret names to comply with Azure Key Vault requirements:
 
 - Replaces invalid characters with hyphens
 - Removes consecutive hyphens
@@ -246,7 +246,7 @@ xv secret list --group-by
 
 ## Output Formats
 
-Crossvault supports multiple output formats:
+crosstache supports multiple output formats:
 
 ```bash
 # Table format (default)
@@ -266,7 +266,7 @@ xv secret get "api-key" --raw
 
 ### Architecture
 
-Crossvault uses a hybrid approach for Azure integration:
+crosstache uses a hybrid approach for Azure integration:
 
 - **Authentication**: Azure SDK v0.20 for credential management
 - **Secret Operations**: Direct REST API calls to Azure Key Vault API v7.4
@@ -275,7 +275,7 @@ Crossvault uses a hybrid approach for Azure integration:
 
 ### Why REST API?
 
-Azure SDK v0.20 has limitations with tag support in secret operations. By using the REST API directly, Crossvault ensures:
+Azure SDK v0.20 has limitations with tag support in secret operations. By using the REST API directly, crosstache ensures:
 
 - Complete tag persistence (groups, original_name, created_by)
 - Full control over secret metadata

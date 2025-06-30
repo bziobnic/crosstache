@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 use tokio::time::sleep;
-use crate::error::{CrossvaultError, Result};
+use crate::error::{crosstacheError, Result};
 
 #[derive(Debug, Clone)]
 pub struct RetryOptions {
@@ -57,7 +57,7 @@ where
         }
     }
     
-    Err(last_error.unwrap_or_else(|| CrossvaultError::unknown("Retry failed with no error")))
+    Err(last_error.unwrap_or_else(|| crosstacheError::unknown("Retry failed with no error")))
 }
 
 // TODO: Add context-aware cancellation support

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tabled::Tabled;
 
 use crate::auth::provider::AzureAuthProvider;
-use crate::error::{CrossvaultError, Result};
+use crate::error::{crosstacheError, Result};
 use crate::utils::format::{TableFormatter, DisplayUtils, OutputFormat};
 use crate::utils::sanitizer::{sanitize_secret_name, get_secret_name_info, SecretNameInfo};
 use crate::utils::helpers::{parse_connection_string, generate_uuid, validate_folder_path};
@@ -252,7 +252,7 @@ impl AzureSecretOperations {
         
         // Create the secret client
         let client = SecretClient::new(&vault_url, credential)
-            .map_err(|e| CrossvaultError::azure_api(format!("Failed to create SecretClient: {}", e)))?;
+            .map_err(|e| crosstacheError::azure_api(format!("Failed to create SecretClient: {}", e)))?;
         
         Ok(client)
     }
@@ -264,7 +264,7 @@ impl AzureSecretOperations {
         
         // Store original name in tags for mapping
         tags.insert("original_name".to_string(), request.name.clone());
-        tags.insert("created_by".to_string(), "crossvault".to_string());
+        tags.insert("created_by".to_string(), "crosstache".to_string());
         
         // Handle groups from request
         if let Some(ref groups) = request.groups {
@@ -409,7 +409,7 @@ impl SecretOperations for AzureSecretOperations {
         headers.insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| CrossvaultError::azure_api(format!("Invalid token format: {}", e)))?
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
@@ -422,19 +422,19 @@ impl SecretOperations for AzureSecretOperations {
             .json(&body)
             .send()
             .await
-            .map_err(|e| CrossvaultError::network(format!("Failed to set secret: {}", e)))?;
+            .map_err(|e| crosstacheError::network(format!("Failed to set secret: {}", e)))?;
         
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(CrossvaultError::azure_api(format!(
+            return Err(crosstacheError::azure_api(format!(
                 "Failed to set secret: HTTP {} - {}", status, error_text
             )));
         }
         
         // Parse the response and convert to SecretProperties
         let json: serde_json::Value = response.json().await
-            .map_err(|e| CrossvaultError::serialization(format!("Failed to parse set secret response: {}", e)))?;
+            .map_err(|e| crosstacheError::serialization(format!("Failed to parse set secret response: {}", e)))?;
         
         // Return the created secret properties
         self.get_secret(vault_name, &sanitized_name, true).await
@@ -457,7 +457,7 @@ impl SecretOperations for AzureSecretOperations {
         headers.insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| CrossvaultError::azure_api(format!("Invalid token format: {}", e)))?
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
         );
         
         // Make the REST API call
@@ -468,26 +468,26 @@ impl SecretOperations for AzureSecretOperations {
             .map_err(|e| {
                 if is_dns_resolution_error(&e) {
                     let vault_name = extract_vault_name_from_url(&secret_url);
-                    CrossvaultError::dns_resolution(vault_name, e.to_string())
+                    crosstacheError::dns_resolution(vault_name, e.to_string())
                 } else {
-                    CrossvaultError::network(format!("Failed to get secret: {}", e))
+                    crosstacheError::network(format!("Failed to get secret: {}", e))
                 }
             })?;
         
         if !response.status().is_success() {
             let status = response.status();
             if status == 404 {
-                return Err(CrossvaultError::SecretNotFound { name: secret_name.to_string() });
+                return Err(crosstacheError::SecretNotFound { name: secret_name.to_string() });
             }
             let error_text = response.text().await.unwrap_or_default();
-            return Err(CrossvaultError::azure_api(format!(
+            return Err(crosstacheError::azure_api(format!(
                 "Failed to get secret: HTTP {} - {}", status, error_text
             )));
         }
         
         // Parse the response
         let json: serde_json::Value = response.json().await
-            .map_err(|e| CrossvaultError::serialization(format!("Failed to parse secret response: {}", e)))?;
+            .map_err(|e| crosstacheError::serialization(format!("Failed to parse secret response: {}", e)))?;
         
         // Extract secret properties from JSON response
         let value = if include_value {
@@ -560,7 +560,7 @@ impl SecretOperations for AzureSecretOperations {
         headers.insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| CrossvaultError::azure_api(format!("Invalid token format: {}", e)))?
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
         );
         
         // Make the REST API call
@@ -568,19 +568,19 @@ impl SecretOperations for AzureSecretOperations {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| CrossvaultError::network(format!("Failed to list secrets: {}", e)))?;
+            .map_err(|e| crosstacheError::network(format!("Failed to list secrets: {}", e)))?;
         
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(CrossvaultError::azure_api(format!(
+            return Err(crosstacheError::azure_api(format!(
                 "Failed to list secrets: HTTP {} - {}", status, error_text
             )));
         }
         
         // Parse the response
         let json: serde_json::Value = response.json().await
-            .map_err(|e| CrossvaultError::serialization(format!("Failed to parse list response: {}", e)))?;
+            .map_err(|e| crosstacheError::serialization(format!("Failed to parse list response: {}", e)))?;
         
         let mut secret_summaries = Vec::new();
         
@@ -681,7 +681,7 @@ impl SecretOperations for AzureSecretOperations {
         
         // Delete the secret from Azure Key Vault (soft delete)
         client.delete(&sanitized_name).await
-            .map_err(|e| CrossvaultError::azure_api(format!("Failed to delete secret '{}': {}", secret_name, e)))?;
+            .map_err(|e| crosstacheError::azure_api(format!("Failed to delete secret '{}': {}", secret_name, e)))?;
         
         Ok(())
     }
@@ -709,7 +709,7 @@ impl SecretOperations for AzureSecretOperations {
         headers.insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| CrossvaultError::azure_api(format!("Invalid token format: {}", e)))?
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
@@ -722,24 +722,24 @@ impl SecretOperations for AzureSecretOperations {
             .json(&serde_json::json!({}))  // Empty JSON body to satisfy Content-Length requirement
             .send()
             .await
-            .map_err(|e| CrossvaultError::network(format!("Failed to restore secret: {}", e)))?;
+            .map_err(|e| crosstacheError::network(format!("Failed to restore secret: {}", e)))?;
         
         if !response.status().is_success() {
             let status = response.status();
             if status == 404 {
-                return Err(CrossvaultError::azure_api(format!(
+                return Err(crosstacheError::azure_api(format!(
                     "Deleted secret '{}' not found or cannot be restored", secret_name
                 )));
             }
             let error_text = response.text().await.unwrap_or_default();
-            return Err(CrossvaultError::azure_api(format!(
+            return Err(crosstacheError::azure_api(format!(
                 "Failed to restore secret: HTTP {} - {}", status, error_text
             )));
         }
         
         // Parse the response to get the restored secret properties
         let json: serde_json::Value = response.json().await
-            .map_err(|e| CrossvaultError::serialization(format!("Failed to parse restore response: {}", e)))?;
+            .map_err(|e| crosstacheError::serialization(format!("Failed to parse restore response: {}", e)))?;
         
         // Extract secret properties from JSON response
         let version = json.get("id")
@@ -807,7 +807,7 @@ impl SecretOperations for AzureSecretOperations {
         headers.insert(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| CrossvaultError::azure_api(format!("Invalid token format: {}", e)))?
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
         );
         
         // Make the REST API call to permanently purge the secret
@@ -815,17 +815,17 @@ impl SecretOperations for AzureSecretOperations {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| CrossvaultError::network(format!("Failed to purge secret: {}", e)))?;
+            .map_err(|e| crosstacheError::network(format!("Failed to purge secret: {}", e)))?;
         
         if !response.status().is_success() {
             let status = response.status();
             if status == 404 {
-                return Err(CrossvaultError::azure_api(format!(
+                return Err(crosstacheError::azure_api(format!(
                     "Deleted secret '{}' not found or cannot be purged", secret_name
                 )));
             }
             let error_text = response.text().await.unwrap_or_default();
-            return Err(CrossvaultError::azure_api(format!(
+            return Err(crosstacheError::azure_api(format!(
                 "Failed to purge secret: HTTP {} - {}", status, error_text
             )));
         }
@@ -837,13 +837,13 @@ impl SecretOperations for AzureSecretOperations {
         let _client = self.create_secret_client(vault_name).await?;
         
         // Placeholder implementation
-        Err(CrossvaultError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
+        Err(crosstacheError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
     }
 
     async fn secret_exists(&self, vault_name: &str, secret_name: &str) -> Result<bool> {
         match self.get_secret(vault_name, secret_name, false).await {
             Ok(_) => Ok(true),
-            Err(CrossvaultError::SecretNotFound { .. }) => Ok(false),
+            Err(crosstacheError::SecretNotFound { .. }) => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -853,7 +853,7 @@ impl SecretOperations for AzureSecretOperations {
         let _sanitized_name = sanitize_secret_name(secret_name)?;
         
         // Placeholder implementation
-        Err(CrossvaultError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
+        Err(crosstacheError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
     }
 
     async fn backup_secret(&self, vault_name: &str, secret_name: &str) -> Result<Vec<u8>> {
@@ -861,14 +861,14 @@ impl SecretOperations for AzureSecretOperations {
         let _sanitized_name = sanitize_secret_name(secret_name)?;
         
         // Placeholder implementation
-        Err(CrossvaultError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
+        Err(crosstacheError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
     }
 
     async fn restore_secret_from_backup(&self, vault_name: &str, _backup_data: &[u8]) -> Result<SecretProperties> {
         let _client = self.create_secret_client(vault_name).await?;
         
         // Placeholder implementation
-        Err(CrossvaultError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
+        Err(crosstacheError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
     }
 }
 
@@ -1141,11 +1141,11 @@ impl SecretManager {
     /// Validate secret name
     fn validate_secret_name(&self, name: &str) -> Result<()> {
         if name.is_empty() {
-            return Err(CrossvaultError::invalid_secret_name("Secret name cannot be empty"));
+            return Err(crosstacheError::invalid_secret_name("Secret name cannot be empty"));
         }
 
         if name.len() > 127 {
-            return Err(CrossvaultError::invalid_secret_name("Secret name too long (max 127 characters)"));
+            return Err(crosstacheError::invalid_secret_name("Secret name too long (max 127 characters)"));
         }
 
         Ok(())
@@ -1267,7 +1267,7 @@ impl SecretManager {
             
             // Check if new name already exists
             if self.secret_ops.secret_exists(vault_name, new_name).await? {
-                return Err(CrossvaultError::invalid_argument(format!(
+                return Err(crosstacheError::invalid_argument(format!(
                     "Secret with name '{}' already exists", new_name
                 )));
             }
@@ -1286,7 +1286,7 @@ impl SecretManager {
                 // Always preserve original name and created_by tags
                 tags.insert("original_name".to_string(), 
                     update_request.new_name.as_ref().unwrap_or(&update_request.name).clone());
-                tags.insert("created_by".to_string(), "crossvault".to_string());
+                tags.insert("created_by".to_string(), "crosstache".to_string());
                 Some(tags)
             } else {
                 // Merge with existing tags
@@ -1404,7 +1404,7 @@ impl SecretManagerBuilder {
     /// Build the secret manager
     pub fn build(self) -> Result<SecretManager> {
         let auth_provider = self.auth_provider
-            .ok_or_else(|| CrossvaultError::config("Authentication provider is required"))?;
+            .ok_or_else(|| crosstacheError::config("Authentication provider is required"))?;
 
         Ok(SecretManager::new(auth_provider, self.no_color))
     }

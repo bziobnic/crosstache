@@ -1,4 +1,4 @@
-//! Crossvault - Azure Key Vault Management Tool
+//! crosstache - Azure Key Vault Management Tool
 //! 
 //! A comprehensive CLI tool for managing Azure Key Vault operations
 //! including vault management, secret operations, and access control.
@@ -12,4 +12,4 @@ pub mod utils;
 pub mod vault;
 
 // Re-export commonly used types
-pub use error::{CrossvaultError, Result};
+pub use error::{crosstacheError, Result};

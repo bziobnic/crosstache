@@ -1,12 +1,12 @@
-# Secret Groups in Crossvault
+# Secret Groups in crosstache
 
-This document describes the behavior and implementation of secret groups in Crossvault, which provide a way to organize and manage related secrets.
+This document describes the behavior and implementation of secret groups in crosstache, which provide a way to organize and manage related secrets.
 
 > **Implementation Note**: Due to limitations in Azure SDK v0.20 with tag support, the Rust implementation uses direct REST API calls for secret operations to ensure proper tag persistence. This enables full group functionality while maintaining compatibility with Azure Key Vault.
 
 ## Overview
 
-Secret groups in Crossvault are a logical organization mechanism that allows you to:
+Secret groups in crosstache are a logical organization mechanism that allows you to:
 - Organize related secrets together
 - Filter secrets by group when listing
 - Apply bulk operations to groups of secrets
@@ -51,7 +51,7 @@ For secrets with one group:
 {
   "groups": "myapp/database",
   "original_name": "myapp/database/connection",
-  "created_by": "crossvault"
+  "created_by": "crosstache"
 }
 ```
 
@@ -62,7 +62,7 @@ For secrets with multiple groups:
 {
   "groups": "auth,payments,shared",
   "original_name": "shared-api-key", 
-  "created_by": "crossvault"
+  "created_by": "crosstache"
 }
 ```
 
@@ -70,11 +70,11 @@ For secrets with multiple groups:
 
 - `groups`: Comma-separated list of all groups (always present when groups are assigned)
 - `original_name`: User-provided secret name before sanitization
-- `created_by`: Always set to "crossvault" to identify managed secrets
+- `created_by`: Always set to "crosstache" to identify managed secrets
 
 ## Group Resolution
 
-When determining a secret's group for display purposes, Crossvault uses the following logic:
+When determining a secret's group for display purposes, crosstache uses the following logic:
 
 1. **`groups` tag**: If present, the first group in the comma-separated list is used for display
 2. **No group**: If no groups are assigned, the secret appears without a group (shown as "(No Group)" in grouped views)
@@ -257,7 +257,7 @@ When updating groups, two strategies are available:
 - Group filtering is performed client-side after retrieval
 
 ### Compatibility
-- Groups are a Crossvault enhancement and may not be visible in native Azure tools
+- Groups are a crosstache enhancement and may not be visible in native Azure tools
 - Other tools accessing the same Key Vault will see group information as standard tags
 - Secret functionality remains fully compatible with standard Azure Key Vault operations
 

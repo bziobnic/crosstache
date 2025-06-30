@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Crossvault (xv) installer for Unix systems (Linux/macOS)
+# crosstache (xv) installer for Unix systems (Linux/macOS)
 # https://github.com/bziobnic/crosstache
 
 set -e
@@ -98,7 +98,7 @@ download_and_install() {
     download_url="https://github.com/$GITHUB_REPO/releases/download/$version/$archive_name"
     checksum_url="https://github.com/$GITHUB_REPO/releases/download/$version/$archive_name.sha256"
     
-    info "Installing Crossvault $version for $platform"
+    info "Installing crosstache $version for $platform"
     info "Download URL: $download_url"
     
     # Create temporary directory
@@ -217,7 +217,7 @@ verify_installation() {
     if [ -x "$INSTALL_DIR/$BINARY_NAME" ]; then
         # Test if binary runs and get version
         if installed_version=$("$INSTALL_DIR/$BINARY_NAME" --version 2>/dev/null); then
-            success "Crossvault installed successfully!"
+            success "crosstache installed successfully!"
             info "Installed version: $installed_version"
             info "Binary location: $INSTALL_DIR/$BINARY_NAME"
             
@@ -258,7 +258,7 @@ show_usage() {
 
 # Main installation flow
 main() {
-    info "Crossvault Installer"
+    info "crosstache Installer"
     info "Repository: https://github.com/$GITHUB_REPO"
     echo ""
     
@@ -282,7 +282,7 @@ case "${1:-}" in
     -h|--help)
         echo "Usage: $0 [VERSION]"
         echo ""
-        echo "Install Crossvault CLI tool"
+        echo "Install crosstache CLI tool"
         echo ""
         echo "Arguments:"
         echo "  VERSION    Specific version to install (default: latest)"

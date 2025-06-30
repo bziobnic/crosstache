@@ -1,4 +1,4 @@
-//! Crossvault - Azure Key Vault Management Tool
+//! crosstache - Azure Key Vault Management Tool
 //! 
 //! A comprehensive command-line tool for managing Azure Key Vaults,
 //! written in Rust for performance, safety, and reliability.
@@ -16,7 +16,7 @@ mod utils;
 mod error;
 
 use crate::cli::Cli;
-use crate::error::{CrossvaultError, Result};
+use crate::error::{crosstacheError, Result};
 
 #[tokio::main]
 async fn main() {
@@ -35,7 +35,7 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    info!("Starting Crossvault");
+    info!("Starting crosstache");
     
     // Load configuration differently based on command
     let config = match &cli.command {
@@ -121,7 +121,7 @@ fn init_logging() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "crossvault=info".into()),
+                .unwrap_or_else(|_| "crosstache=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();

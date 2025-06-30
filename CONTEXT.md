@@ -1,6 +1,6 @@
 # Smart Vault Context Detection Implementation Guide
 
-This document provides step-by-step instructions for implementing smart vault context detection in CrossVault, allowing users to work with vaults without repeatedly specifying `--vault` flags.
+This document provides step-by-step instructions for implementing smart vault context detection in crosstache, allowing users to work with vaults without repeatedly specifying `--vault` flags.
 
 ## Overview
 
@@ -67,7 +67,7 @@ impl ContextManager {
     async fn load_local_context() -> Result<Self> {
         let context_path = std::env::current_dir()?.join(".xv").join("context");
         if !context_path.exists() {
-            return Err(CrossvaultError::config("No local context found"));
+            return Err(crosstacheError::config("No local context found"));
         }
         
         let content = tokio::fs::read_to_string(&context_path).await?;
@@ -106,7 +106,7 @@ impl ContextManager {
     /// Get global context file path
     fn global_context_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
-            .ok_or_else(|| CrossvaultError::config("Could not determine config directory"))?;
+            .ok_or_else(|| crosstacheError::config("Could not determine config directory"))?;
         Ok(config_dir.join("xv").join("context"))
     }
 }
@@ -182,7 +182,7 @@ impl Config {
             return Ok(self.default_vault.clone());
         }
         
-        Err(CrossvaultError::config(
+        Err(crosstacheError::config(
             "No vault specified. Use --vault, set context with 'xv context use', or configure default_vault"
         ))
     }
@@ -205,7 +205,7 @@ impl Config {
             return Ok(self.default_resource_group.clone());
         }
         
-        Err(CrossvaultError::config("No resource group specified"))
+        Err(crosstacheError::config("No resource group specified"))
     }
 }
 ```
@@ -481,7 +481,7 @@ mod tests {
 ```markdown
 ## Vault Context Management
 
-CrossVault supports smart vault context detection to reduce typing:
+crosstache supports smart vault context detection to reduce typing:
 
 # Set vault context globally
 xv context use my-vault --global

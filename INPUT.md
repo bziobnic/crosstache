@@ -1,8 +1,8 @@
-# CrossVault Enhanced Secret Value Input - Implementation Plan
+# crosstache Enhanced Secret Value Input - Implementation Plan
 
 ## Overview
 
-This document provides a detailed, step-by-step implementation plan for **Recommendation 3** from `IMPROVE.md`: **Improved Secret Value Input**. The plan will transform CrossVault's basic password prompt/stdin input into a comprehensive secret value input system.
+This document provides a detailed, step-by-step implementation plan for **Recommendation 3** from `IMPROVE.md`: **Improved Secret Value Input**. The plan will transform crosstache's basic password prompt/stdin input into a comprehensive secret value input system.
 
 ## Current State Analysis
 
@@ -58,7 +58,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
-use crate::error::CrossvaultError;
+use crate::error::crosstacheError;
 
 pub struct InputValue {
     pub content: String,
@@ -77,7 +77,7 @@ pub enum InputSource {
 pub async fn get_secret_value(
     name: &str,
     options: &InputOptions,
-) -> Result<InputValue, CrossvaultError> {
+) -> Result<InputValue, crosstacheError> {
     // Implementation will be added in subsequent steps
 }
 ```
@@ -132,7 +132,7 @@ Update {
 pub fn launch_editor(
     secret_name: &str,
     initial_content: Option<&str>,
-) -> Result<String, CrossvaultError> {
+) -> Result<String, crosstacheError> {
     // Get editor from environment ($EDITOR, $VISUAL, or default)
     let editor = env::var("EDITOR")
         .or_else(|_| env::var("VISUAL"))
@@ -140,12 +140,12 @@ pub fn launch_editor(
 
     // Create secure temporary file
     let mut temp_file = NamedTempFile::new()
-        .map_err(|e| CrossvaultError::InputError(format!("Failed to create temp file: {}", e)))?;
+        .map_err(|e| crosstacheError::InputError(format!("Failed to create temp file: {}", e)))?;
 
     // Write initial content if provided
     if let Some(content) = initial_content {
         temp_file.write_all(content.as_bytes())
-            .map_err(|e| CrossvaultError::InputError(format!("Failed to write temp file: {}", e)))?;
+            .map_err(|e| crosstacheError::InputError(format!("Failed to write temp file: {}", e)))?;
     }
 
     // Add helpful comment header
@@ -159,15 +159,15 @@ pub fn launch_editor(
     let status = std::process::Command::new(&editor)
         .arg(temp_file.path())
         .status()
-        .map_err(|e| CrossvaultError::InputError(format!("Failed to launch editor '{}': {}", editor, e)))?;
+        .map_err(|e| crosstacheError::InputError(format!("Failed to launch editor '{}': {}", editor, e)))?;
 
     if !status.success() {
-        return Err(CrossvaultError::InputError("Editor exited with error".to_string()));
+        return Err(crosstacheError::InputError("Editor exited with error".to_string()));
     }
 
     // Read content back
     let content = fs::read_to_string(temp_file.path())
-        .map_err(|e| CrossvaultError::InputError(format!("Failed to read temp file: {}", e)))?;
+        .map_err(|e| crosstacheError::InputError(format!("Failed to read temp file: {}", e)))?;
 
     // Filter out comment lines and clean up
     let cleaned_content = content
@@ -187,9 +187,9 @@ pub fn launch_editor(
 **Action:** Add validation for editor input
 
 ```rust
-pub fn validate_editor_input(content: &str) -> Result<(), CrossvaultError> {
+pub fn validate_editor_input(content: &str) -> Result<(), crosstacheError> {
     if content.trim().is_empty() {
-        return Err(CrossvaultError::InputError(
+        return Err(crosstacheError::InputError(
             "Secret value cannot be empty".to_string()
         ));
     }
@@ -201,7 +201,7 @@ pub fn validate_editor_input(content: &str) -> Result<(), CrossvaultError> {
     }
 
     if content.contains('\0') {
-        return Err(CrossvaultError::InputError(
+        return Err(crosstacheError::InputError(
             "Secret value cannot contain null bytes".to_string()
         ));
     }
@@ -219,41 +219,41 @@ pub fn validate_editor_input(content: &str) -> Result<(), CrossvaultError> {
 ```rust
 pub async fn read_from_file<P: AsRef<Path>>(
     file_path: P,
-) -> Result<String, CrossvaultError> {
+) -> Result<String, crosstacheError> {
     let path = file_path.as_ref();
     
     // Validate file exists and is readable
     if !path.exists() {
-        return Err(CrossvaultError::InputError(
+        return Err(crosstacheError::InputError(
             format!("File not found: {}", path.display())
         ));
     }
 
     if !path.is_file() {
-        return Err(CrossvaultError::InputError(
+        return Err(crosstacheError::InputError(
             format!("Path is not a file: {}", path.display())
         ));
     }
 
     // Check file size (Azure Key Vault limit: 25KB)
     let metadata = fs::metadata(path)
-        .map_err(|e| CrossvaultError::InputError(format!("Cannot read file metadata: {}", e)))?;
+        .map_err(|e| crosstacheError::InputError(format!("Cannot read file metadata: {}", e)))?;
 
     if metadata.len() > 25000 {
-        return Err(CrossvaultError::InputError(
+        return Err(crosstacheError::InputError(
             format!("File too large: {} bytes (limit: 25KB)", metadata.len())
         ));
     }
 
     // Read file content
     let content = fs::read_to_string(path)
-        .map_err(|e| CrossvaultError::InputError(format!("Failed to read file: {}", e)))?;
+        .map_err(|e| crosstacheError::InputError(format!("Failed to read file: {}", e)))?;
 
     // Detect and handle binary content
     if content.contains('\0') {
         // For binary files, encode as base64
         let binary_content = fs::read(path)
-            .map_err(|e| CrossvaultError::InputError(format!("Failed to read binary file: {}", e)))?;
+            .map_err(|e| crosstacheError::InputError(format!("Failed to read binary file: {}", e)))?;
         
         return Ok(base64::encode(binary_content));
     }
@@ -267,12 +267,12 @@ pub async fn read_from_file<P: AsRef<Path>>(
 **Action:** Add file-specific validation
 
 ```rust
-pub fn validate_file_input(file_path: &str) -> Result<(), CrossvaultError> {
+pub fn validate_file_input(file_path: &str) -> Result<(), crosstacheError> {
     let path = Path::new(file_path);
     
     // Security check: prevent reading sensitive system files
     let canonical_path = path.canonicalize()
-        .map_err(|e| CrossvaultError::InputError(format!("Cannot resolve file path: {}", e)))?;
+        .map_err(|e| crosstacheError::InputError(format!("Cannot resolve file path: {}", e)))?;
 
     let sensitive_paths = [
         "/etc/passwd", "/etc/shadow", "/etc/hosts",
@@ -282,7 +282,7 @@ pub fn validate_file_input(file_path: &str) -> Result<(), CrossvaultError> {
     let path_str = canonical_path.to_string_lossy();
     for sensitive in &sensitive_paths {
         if path_str.starts_with(sensitive) {
-            return Err(CrossvaultError::InputError(
+            return Err(crosstacheError::InputError(
                 format!("Cannot read sensitive system file: {}", path_str)
             ));
         }
@@ -301,10 +301,10 @@ pub fn validate_file_input(file_path: &str) -> Result<(), CrossvaultError> {
 ```rust
 use regex::Regex;
 
-pub fn substitute_env_vars(input: &str) -> Result<String, CrossvaultError> {
+pub fn substitute_env_vars(input: &str) -> Result<String, crosstacheError> {
     // Support both ${VAR} and $VAR syntax
     let env_regex = Regex::new(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-        .map_err(|e| CrossvaultError::InputError(format!("Regex error: {}", e)))?;
+        .map_err(|e| crosstacheError::InputError(format!("Regex error: {}", e)))?;
 
     let mut result = input.to_string();
     let mut missing_vars = Vec::new();
@@ -328,7 +328,7 @@ pub fn substitute_env_vars(input: &str) -> Result<String, CrossvaultError> {
     }
 
     if !missing_vars.is_empty() {
-        return Err(CrossvaultError::InputError(
+        return Err(crosstacheError::InputError(
             format!("Missing environment variables: {}", missing_vars.join(", "))
         ));
     }
@@ -342,9 +342,9 @@ pub fn substitute_env_vars(input: &str) -> Result<String, CrossvaultError> {
 **Action:** Add interactive mode for missing variables
 
 ```rust
-pub fn substitute_env_vars_interactive(input: &str) -> Result<String, CrossvaultError> {
+pub fn substitute_env_vars_interactive(input: &str) -> Result<String, crosstacheError> {
     let env_regex = Regex::new(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-        .map_err(|e| CrossvaultError::InputError(format!("Regex error: {}", e)))?;
+        .map_err(|e| crosstacheError::InputError(format!("Regex error: {}", e)))?;
 
     let mut result = input.to_string();
 
@@ -380,7 +380,7 @@ pub fn substitute_env_vars_interactive(input: &str) -> Result<String, Crossvault
 ```rust
 pub fn validate_and_format_structured_data(
     content: &str,
-) -> Result<String, CrossvaultError> {
+) -> Result<String, crosstacheError> {
     let trimmed = content.trim();
     
     // Try to parse as JSON first
@@ -389,7 +389,7 @@ pub fn validate_and_format_structured_data(
             Ok(parsed) => {
                 // Re-serialize with consistent formatting
                 return Ok(serde_json::to_string_pretty(&parsed)
-                    .map_err(|e| CrossvaultError::InputError(format!("JSON serialization error: {}", e)))?);
+                    .map_err(|e| crosstacheError::InputError(format!("JSON serialization error: {}", e)))?);
             }
             Err(_) => {
                 // Not valid JSON, continue
@@ -403,10 +403,10 @@ pub fn validate_and_format_structured_data(
             Ok(parsed) => {
                 // Convert YAML to JSON for consistent storage
                 let json_value: serde_json::Value = serde_yaml::from_str(trimmed)
-                    .map_err(|e| CrossvaultError::InputError(format!("YAML conversion error: {}", e)))?;
+                    .map_err(|e| crosstacheError::InputError(format!("YAML conversion error: {}", e)))?;
                 
                 return Ok(serde_json::to_string_pretty(&json_value)
-                    .map_err(|e| CrossvaultError::InputError(format!("JSON serialization error: {}", e)))?);
+                    .map_err(|e| crosstacheError::InputError(format!("JSON serialization error: {}", e)))?);
             }
             Err(_) => {
                 // Not valid YAML, treat as plain text
@@ -476,13 +476,13 @@ async fn execute_secret_set(
     env_subst: bool,
     note: Option<String>,
     folder: Option<String>,
-) -> Result<(), CrossvaultError> {
+) -> Result<(), crosstacheError> {
     // Validate input method exclusivity
     let input_methods = [stdin, editor, from_file.is_some(), env_subst];
     let method_count = input_methods.iter().filter(|&&x| x).count();
     
     if method_count > 1 {
-        return Err(CrossvaultError::InputError(
+        return Err(crosstacheError::InputError(
             "Only one input method can be specified: --stdin, --editor, --from-file, or --env-subst".to_string()
         ));
     }
@@ -537,7 +537,7 @@ async fn execute_secret_update(
     from_file: Option<String>,
     env_subst: bool,
     // ... other parameters
-) -> Result<(), CrossvaultError> {
+) -> Result<(), crosstacheError> {
     // Validate input method exclusivity
     let input_methods = [
         value.is_some(),
@@ -549,7 +549,7 @@ async fn execute_secret_update(
     let method_count = input_methods.iter().filter(|&&x| x).count();
     
     if method_count > 1 {
-        return Err(CrossvaultError::InputError(
+        return Err(crosstacheError::InputError(
             "Only one input method can be specified".to_string()
         ));
     }
@@ -611,16 +611,16 @@ pub struct InputOptions {
 pub async fn get_secret_value(
     name: &str,
     options: &InputOptions,
-) -> Result<InputValue, CrossvaultError> {
+) -> Result<InputValue, crosstacheError> {
     match options {
         InputOptions { stdin: true, .. } => {
             let mut buffer = String::new();
             io::stdin().read_to_string(&mut buffer)
-                .map_err(|e| CrossvaultError::InputError(format!("Failed to read from stdin: {}", e)))?;
+                .map_err(|e| crosstacheError::InputError(format!("Failed to read from stdin: {}", e)))?;
             
             let content = buffer.trim().to_string();
             if content.is_empty() {
-                return Err(CrossvaultError::InputError("Empty input from stdin".to_string()));
+                return Err(crosstacheError::InputError("Empty input from stdin".to_string()));
             }
 
             Ok(InputValue {
@@ -674,7 +674,7 @@ pub async fn get_secret_value(
             )?;
             
             if content.trim().is_empty() {
-                return Err(CrossvaultError::InputError("Secret value cannot be empty".to_string()));
+                return Err(crosstacheError::InputError("Secret value cannot be empty".to_string()));
             }
 
             Ok(InputValue {
@@ -694,9 +694,9 @@ pub async fn get_secret_value(
 **Action:** Add input-specific error variants
 
 ```rust
-// Add to CrossvaultError enum
+// Add to crosstacheError enum
 #[derive(Debug, thiserror::Error)]
-pub enum CrossvaultError {
+pub enum crosstacheError {
     // ... existing variants
     
     #[error("Input error: {0}")]
@@ -749,7 +749,7 @@ Set {
 use std::env;
 use std::fs;
 use tempfile::NamedTempFile;
-use crossvault::utils::input::*;
+use crosstache::utils::input::*;
 
 #[tokio::test]
 async fn test_file_input() {
@@ -941,4 +941,4 @@ xv secret set app-config --from-file config.yaml
 - [ ] 100% test coverage for new features
 - [ ] Clean error handling with helpful messages
 
-This implementation plan provides a comprehensive roadmap for transforming CrossVault's secret input capabilities while maintaining security, usability, and backward compatibility.
+This implementation plan provides a comprehensive roadmap for transforming crosstache's secret input capabilities while maintaining security, usability, and backward compatibility.

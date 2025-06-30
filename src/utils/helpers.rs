@@ -6,7 +6,7 @@
 use regex::Regex;
 use uuid::Uuid;
 use std::collections::HashMap;
-use crate::error::{CrossvaultError, Result};
+use crate::error::{crosstacheError, Result};
 
 /// Check if a string is a valid GUID/UUID
 pub fn is_guid(s: &str) -> bool {
@@ -54,7 +54,7 @@ pub fn extract_vault_name_from_uri(vault_uri: &str) -> Result<String> {
         }
     }
     
-    Err(CrossvaultError::invalid_argument(format!(
+    Err(crosstacheError::invalid_argument(format!(
         "Invalid vault URI format: {}",
         vault_uri
     )))
@@ -83,16 +83,16 @@ pub fn normalize_name_for_matching(name: &str) -> String {
 /// Empty folder names (consecutive slashes) are not allowed
 pub fn validate_folder_path(folder_path: &str) -> Result<()> {
     if folder_path.is_empty() {
-        return Err(CrossvaultError::invalid_argument("Folder path cannot be empty"));
+        return Err(crosstacheError::invalid_argument("Folder path cannot be empty"));
     }
     
     // Check for invalid characters at start/end
     if folder_path.starts_with('/') {
-        return Err(CrossvaultError::invalid_argument("Folder path cannot start with '/'"));
+        return Err(crosstacheError::invalid_argument("Folder path cannot start with '/'"));
     }
     
     if folder_path.ends_with('/') {
-        return Err(CrossvaultError::invalid_argument("Folder path cannot end with '/'"));
+        return Err(crosstacheError::invalid_argument("Folder path cannot end with '/'"));
     }
     
     // Split by '/' and validate each folder name
@@ -100,29 +100,29 @@ pub fn validate_folder_path(folder_path: &str) -> Result<()> {
     
     for folder in &folders {
         if folder.is_empty() {
-            return Err(CrossvaultError::invalid_argument("Folder path cannot contain empty folder names (consecutive '/')"));
+            return Err(crosstacheError::invalid_argument("Folder path cannot contain empty folder names (consecutive '/')"));
         }
         
         // Folder names can contain alphanumeric characters, hyphens, underscores, spaces, and dots
         // but cannot contain '/' (which is the separator)
         if folder.contains('/') {
-            return Err(CrossvaultError::invalid_argument("Folder names cannot contain '/' character"));
+            return Err(crosstacheError::invalid_argument("Folder names cannot contain '/' character"));
         }
         
         // Additional validation for reasonable folder names
         if folder.len() > 50 {
-            return Err(CrossvaultError::invalid_argument("Folder names cannot exceed 50 characters"));
+            return Err(crosstacheError::invalid_argument("Folder names cannot exceed 50 characters"));
         }
         
         // Ensure folder name is not just whitespace
         if folder.trim().is_empty() {
-            return Err(CrossvaultError::invalid_argument("Folder names cannot be only whitespace"));
+            return Err(crosstacheError::invalid_argument("Folder names cannot be only whitespace"));
         }
     }
     
     // Limit the depth of folder structure
     if folders.len() > 10 {
-        return Err(CrossvaultError::invalid_argument("Folder path depth cannot exceed 10 levels"));
+        return Err(crosstacheError::invalid_argument("Folder path depth cannot exceed 10 levels"));
     }
     
     Ok(())

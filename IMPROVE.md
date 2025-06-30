@@ -1,6 +1,6 @@
-# CrossVault UX Improvement Suggestions
+# crosstache UX Improvement Suggestions
 
-This document outlines user experience improvements to make CrossVault more intuitive, efficient, and user-friendly.
+This document outlines user experience improvements to make crosstache more intuitive, efficient, and user-friendly.
 
 ## 🚀 High Priority Improvements
 
@@ -15,7 +15,7 @@ This document outlines user experience improvements to make CrossVault more intu
 ```bash
 # Proposed flow
 xv init
-> Welcome to CrossVault! Let's get you set up.
+> Welcome to crosstache! Let's get you set up.
 > ✓ Found Azure CLI credentials
 > ✓ Detected subscription: my-subscription (abc-123)
 > ? Set as default? (Y/n)

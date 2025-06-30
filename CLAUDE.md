@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Crossvault is a comprehensive Azure Key Vault CLI tool written in Rust. The binary is named `xv` and provides secret management, vault operations, and access control for Azure Key Vault.
+crosstache is a comprehensive Azure Key Vault CLI tool written in Rust. The binary is named `xv` and provides secret management, vault operations, and access control for Azure Key Vault.
 
 ## Key Architecture Details
 
@@ -26,7 +26,7 @@ Crossvault is a comprehensive Azure Key Vault CLI tool written in Rust. The bina
 ### Critical Implementation Details
 - **Group Management**: Groups stored as comma-separated values in single "groups" tag
 - **Name Sanitization**: Client-side sanitization with original names preserved in "original_name" tag
-- **Error Handling**: Custom `CrossvaultError` enum with `thiserror` for structured errors
+- **Error Handling**: Custom `crosstacheError` enum with `thiserror` for structured errors
 - **Async**: Full `tokio` async runtime throughout
 
 ## Development Commands
@@ -73,7 +73,7 @@ cargo check
 
 ## Configuration System
 
-Crossvault uses hierarchical configuration with this priority order:
+crosstache uses hierarchical configuration with this priority order:
 1. Command-line flags (highest)
 2. Environment variables  
 3. Config file (`~/.config/xv/xv.conf`)
@@ -96,7 +96,7 @@ The tool relies on Azure's DefaultAzureCredential which tries these methods in o
 5. Azure PowerShell
 
 ### Tag-Based Features
-Azure Key Vault secrets are limited to 15 tags total. Crossvault uses:
+Azure Key Vault secrets are limited to 15 tags total. crosstache uses:
 - `groups`: Comma-separated group names
 - `original_name`: Preserves user-friendly names before sanitization
 - `created_by`: Tracks creation metadata

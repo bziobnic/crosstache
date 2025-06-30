@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
-use crate::error::{CrossvaultError, Result};
+use crate::error::{crosstacheError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -46,11 +46,11 @@ impl Config {
     
     pub fn validate(&self) -> Result<()> {
         if self.subscription_id.is_empty() {
-            return Err(CrossvaultError::config("Subscription ID is required"));
+            return Err(crosstacheError::config("Subscription ID is required"));
         }
         
         if self.tenant_id.is_empty() {
-            return Err(CrossvaultError::config("Tenant ID is required"));
+            return Err(crosstacheError::config("Tenant ID is required"));
         }
         
         Ok(())
@@ -58,7 +58,7 @@ impl Config {
     
     pub fn get_config_path() -> Result<PathBuf> {
         let home_dir = dirs::home_dir()
-            .ok_or_else(|| CrossvaultError::config("Unable to determine home directory"))?;
+            .ok_or_else(|| crosstacheError::config("Unable to determine home directory"))?;
         
         Ok(home_dir.join(".config").join("xv").join("xv.conf"))
     }
@@ -92,7 +92,7 @@ impl Config {
             return Ok(self.default_vault.clone());
         }
         
-        Err(CrossvaultError::config(
+        Err(crosstacheError::config(
             "No vault specified. Use --vault, set context with 'xv context use', or configure default_vault"
         ))
     }
@@ -118,7 +118,7 @@ impl Config {
             return Ok(self.default_resource_group.clone());
         }
         
-        Err(CrossvaultError::config("No resource group specified"))
+        Err(crosstacheError::config("No resource group specified"))
     }
     
     /// Resolve subscription ID with context awareness
@@ -142,7 +142,7 @@ impl Config {
             return Ok(self.subscription_id.clone());
         }
         
-        Err(CrossvaultError::config("No subscription ID specified"))
+        Err(crosstacheError::config("No subscription ID specified"))
     }
 }
 
@@ -223,7 +223,7 @@ pub async fn save_config(config: &Config) -> Result<()> {
     
     // Serialize to TOML format
     let contents = toml::to_string_pretty(config)
-        .map_err(|e| CrossvaultError::serialization(e.to_string()))?;
+        .map_err(|e| crosstacheError::serialization(e.to_string()))?;
     
     tokio::fs::write(&config_path, contents).await?;
     
