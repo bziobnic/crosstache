@@ -1,0 +1,19 @@
+# Build output
+/target/
+
+# Build number tracking (local only)
+build_number.txt
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.tmp

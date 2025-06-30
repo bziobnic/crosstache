@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  pull-requests: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the latest two tags
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          # Generate changelog
+          if [ -n "$PREVIOUS_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s" $PREVIOUS_TAG..HEAD | head -20)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s" HEAD | head -20)
+          fi
+          
+          # Create multiline output
+          {
+            echo "changelog<<EOF"
+            echo "## What's Changed"
+            echo ""
+            echo "$CHANGELOG"
+            echo ""
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.changelog }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-and-upload:
+    name: Build and Upload (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive-name: xv-windows-x64.zip
+            binary-name: xv.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive-name: xv-macos-intel.tar.gz
+            binary-name: xv
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive-name: xv-macos-apple-silicon.tar.gz
+            binary-name: xv
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive-name: xv-linux-x64.tar.gz
+            binary-name: xv
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create archive (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          mkdir release
+          copy target\${{ matrix.target }}\release\${{ matrix.binary-name }} release\
+          copy README.md release\ 2>nul || echo "README.md not found"
+          cd release
+          7z a ..\${{ matrix.archive-name }} *
+
+      - name: Create archive (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir release
+          cp target/${{ matrix.target }}/release/${{ matrix.binary-name }} release/
+          cp README.md release/ 2>/dev/null || echo "README.md not found"
+          cd release
+          if [[ "${{ matrix.archive-name }}" == *.tar.gz ]]; then
+            tar czf ../${{ matrix.archive-name }} *
+          else
+            zip -r ../${{ matrix.archive-name }} *
+          fi
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            certutil -hashfile ${{ matrix.archive-name }} SHA256 | grep -v "hash" | grep -v "CertUtil" | tr -d '\r\n ' > ${{ matrix.archive-name }}.sha256
+          else
+            shasum -a 256 ${{ matrix.archive-name }} | cut -d ' ' -f 1 > ${{ matrix.archive-name }}.sha256
+          fi
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ matrix.archive-name }}
+            ${{ matrix.archive-name }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

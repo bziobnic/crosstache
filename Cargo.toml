@@ -1,0 +1,86 @@
+[package]
+name = "crossvault"
+version = "0.1.0"
+edition = "2021"
+authors = ["Crossvault Team"]
+description = "A comprehensive command-line tool for managing Azure Key Vaults"
+license = "MIT"
+repository = "https://github.com/crossvault/crossvault-rust"
+keywords = ["azure", "keyvault", "cli", "secrets", "vault"]
+categories = ["command-line-utilities", "authentication"]
+
+[[bin]]
+name = "xv"
+path = "src/main.rs"
+
+[dependencies]
+# CLI framework
+clap = { version = "4.0", features = ["derive", "env", "unicode", "wrap_help"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Azure SDK - Stable v0.20
+azure_identity = "0.20"
+azure_core = "0.20"
+azure_security_keyvault = "0.20"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+regex = "1.0"
+dirs = "5.0"
+config = "0.14"
+
+# UI components
+tabled = "0.15"
+rpassword = "7.0"
+crossterm = "0.27"
+clipboard = "0.5"
+
+# Security
+zeroize = { version = "1.0", features = ["serde"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Additional utilities
+url = "2.0"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+toml = "0.8"
+async-trait = "0.1"
+
+[build-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+mockall = "0.12"
+tempfile = "3.0"
+tokio-test = "0.4"
+time = { version = "0.3", features = ["macros"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+debug = true
