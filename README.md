@@ -292,6 +292,5 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- Original Go implementation: [bbv](https://github.com/your-org/bbv)
 - Built with Rust and the Azure SDK for Rust
 - Uses REST API for enhanced functionality
