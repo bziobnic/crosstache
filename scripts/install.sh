@@ -36,6 +36,94 @@ error() {
     exit 1
 }
 
+# Check if Azure CLI is installed
+check_azure_cli() {
+    if command -v az >/dev/null 2>&1; then
+        local version=$(az version --output tsv --query '"azure-cli"' 2>/dev/null || echo "unknown")
+        info "Azure CLI is already installed (version: $version)"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Install Azure CLI for different platforms
+install_azure_cli() {
+    local os arch install_method
+    
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    arch=$(uname -m)
+    
+    info "Installing Azure CLI..."
+    
+    case "$os" in
+        linux*)
+            # Check for package managers
+            if command -v apt-get >/dev/null 2>&1; then
+                install_method="apt"
+            elif command -v yum >/dev/null 2>&1; then
+                install_method="yum"
+            elif command -v dnf >/dev/null 2>&1; then
+                install_method="dnf"
+            elif command -v zypper >/dev/null 2>&1; then
+                install_method="zypper"
+            else
+                install_method="script"
+            fi
+            
+            case "$install_method" in
+                apt)
+                    info "Installing Azure CLI via apt..."
+                    curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+                    ;;
+                yum)
+                    info "Installing Azure CLI via yum..."
+                    sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+                    sudo sh -c 'echo -e "[azure-cli]\nname=Azure CLI\nbaseurl=https://packages.microsoft.com/yumrepos/azure-cli\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/azure-cli.repo'
+                    sudo yum install azure-cli
+                    ;;
+                dnf)
+                    info "Installing Azure CLI via dnf..."
+                    sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+                    sudo sh -c 'echo -e "[azure-cli]\nname=Azure CLI\nbaseurl=https://packages.microsoft.com/yumrepos/azure-cli\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/azure-cli.repo'
+                    sudo dnf install azure-cli
+                    ;;
+                zypper)
+                    info "Installing Azure CLI via zypper..."
+                    sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+                    sudo zypper addrepo --name 'Azure CLI' --check https://packages.microsoft.com/yumrepos/azure-cli azure-cli
+                    sudo zypper install --from azure-cli azure-cli
+                    ;;
+                script)
+                    info "Installing Azure CLI via install script..."
+                    curl -L https://aka.ms/InstallAzureCli | bash
+                    ;;
+            esac
+            ;;
+        darwin*)
+            # macOS
+            if command -v brew >/dev/null 2>&1; then
+                info "Installing Azure CLI via Homebrew..."
+                brew install azure-cli
+            else
+                info "Homebrew not found. Installing Azure CLI via install script..."
+                curl -L https://aka.ms/InstallAzureCli | bash
+            fi
+            ;;
+        *)
+            error "Unsupported operating system for automatic Azure CLI installation: $os"
+            ;;
+    esac
+    
+    # Verify installation
+    if command -v az >/dev/null 2>&1; then
+        local version=$(az version --output tsv --query '"azure-cli"' 2>/dev/null || echo "unknown")
+        success "Azure CLI installed successfully (version: $version)"
+    else
+        error "Azure CLI installation failed. Please install it manually from https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
+    fi
+}
+
 # Detect platform and architecture
 detect_platform() {
     local os arch
@@ -239,6 +327,9 @@ verify_installation() {
 show_usage() {
     echo ""
     info "Quick Start:"
+    echo "  First, authenticate with Azure:"
+    echo "  az login"
+    echo ""
     echo "  Initialize with your Azure Key Vault:"
     echo "  $BINARY_NAME init --vault-name my-vault"
     echo ""
@@ -250,6 +341,10 @@ show_usage() {
     echo ""
     echo "  List secrets:"
     echo "  $BINARY_NAME secret list"
+    echo ""
+    info "Requirements:"
+    echo "  - Azure CLI (az) must be installed and authenticated"
+    echo "  - Active Azure subscription with Key Vault access"
     echo ""
     info "For more information:"
     echo "  $BINARY_NAME --help"
@@ -269,6 +364,23 @@ main() {
     
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         error "Either curl or wget is required but neither is installed"
+    fi
+    
+    # Check and install Azure CLI if needed
+    if ! check_azure_cli; then
+        warning "Azure CLI is not installed. crosstache requires Azure CLI for authentication."
+        echo "Would you like to install Azure CLI now? (y/N)"
+        read -r response
+        case "$response" in
+            [yY][eE][sS]|[yY])
+                install_azure_cli
+                ;;
+            *)
+                warning "Skipping Azure CLI installation."
+                warning "Please install Azure CLI manually from: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
+                warning "crosstache will not work properly without Azure CLI."
+                ;;
+        esac
     fi
     
     # Perform installation

@@ -59,6 +59,80 @@ function Write-Error {
     exit 1
 }
 
+# Check if Azure CLI is installed
+function Test-AzureCLI {
+    try {
+        $azVersion = az version --output json | ConvertFrom-Json
+        if ($azVersion.'azure-cli') {
+            Write-Info "Azure CLI is already installed (version: $($azVersion.'azure-cli'))"
+            return $true
+        }
+    }
+    catch {
+        return $false
+    }
+    return $false
+}
+
+# Install Azure CLI for Windows
+function Install-AzureCLI {
+    Write-Info "Installing Azure CLI..."
+    
+    # Check if running with administrator privileges
+    $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    
+    try {
+        # Try to install via winget first (if available)
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            Write-Info "Installing Azure CLI via winget..."
+            winget install Microsoft.AzureCLI --accept-source-agreements --accept-package-agreements
+        }
+        # Try chocolatey if available
+        elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+            Write-Info "Installing Azure CLI via Chocolatey..."
+            choco install azure-cli -y
+        }
+        # Fall back to MSI installer
+        else {
+            Write-Info "Installing Azure CLI via MSI installer..."
+            $msiUrl = "https://aka.ms/installazurecliwindows"
+            $tempFile = "$env:TEMP\AzureCLI.msi"
+            
+            Write-Info "Downloading Azure CLI installer..."
+            Invoke-WebRequest -Uri $msiUrl -OutFile $tempFile
+            
+            if ($isAdmin) {
+                Write-Info "Installing Azure CLI (requires administrator privileges)..."
+                Start-Process msiexec.exe -ArgumentList "/i", $tempFile, "/quiet" -Wait
+            }
+            else {
+                Write-Warning "Administrator privileges required for installation."
+                Write-Warning "Please run as administrator or install Azure CLI manually."
+                Write-Warning "You can download it from: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli-windows"
+                return $false
+            }
+            
+            # Clean up temp file
+            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Verify installation
+        if (Test-AzureCLI) {
+            Write-Success "Azure CLI installed successfully"
+            return $true
+        }
+        else {
+            Write-Error "Azure CLI installation failed. Please install it manually from https://docs.microsoft.com/en-us/cli/azure/install-azure-cli-windows"
+            return $false
+        }
+    }
+    catch {
+        Write-Error "Failed to install Azure CLI: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 # Get latest version from GitHub API
 function Get-LatestVersion {
     try {
@@ -172,6 +246,9 @@ function Test-Installation {
 function Show-Usage {
     Write-Host ""
     Write-Info "Quick Start:"
+    Write-Host "  First, authenticate with Azure:"
+    Write-Host "  az login" -ForegroundColor White
+    Write-Host ""
     Write-Host "  Initialize with your Azure Key Vault:"
     Write-Host "  xv init --vault-name my-vault" -ForegroundColor White
     Write-Host ""
@@ -184,6 +261,10 @@ function Show-Usage {
     Write-Host "  List secrets:"
     Write-Host "  xv secret list" -ForegroundColor White
     Write-Host ""
+    Write-Info "Requirements:"
+    Write-Host "  - Azure CLI (az) must be installed and authenticated" -ForegroundColor White
+    Write-Host "  - Active Azure subscription with Key Vault access" -ForegroundColor White
+    Write-Host ""
     Write-Info "For more information:"
     Write-Host "  xv --help" -ForegroundColor White
     Write-Host "  https://github.com/$GitHubRepo" -ForegroundColor Cyan
@@ -194,6 +275,25 @@ function Install-crosstache {
     Write-Info "crosstache Installer for Windows"
     Write-Info "Repository: https://github.com/$GitHubRepo"
     Write-Host ""
+    
+    # Check and install Azure CLI if needed
+    if (-not (Test-AzureCLI)) {
+        Write-Warning "Azure CLI is not installed. crosstache requires Azure CLI for authentication."
+        $response = Read-Host "Would you like to install Azure CLI now? (y/N)"
+        if ($response -match '^[yY]([eE][sS])?$') {
+            $installResult = Install-AzureCLI
+            if (-not $installResult) {
+                Write-Warning "Azure CLI installation failed or was skipped."
+                Write-Warning "Please install Azure CLI manually from: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli-windows"
+                Write-Warning "crosstache will not work properly without Azure CLI."
+            }
+        }
+        else {
+            Write-Warning "Skipping Azure CLI installation."
+            Write-Warning "Please install Azure CLI manually from: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli-windows"
+            Write-Warning "crosstache will not work properly without Azure CLI."
+        }
+    }
     
     # Determine version to install
     if ($Version -eq "latest") {
