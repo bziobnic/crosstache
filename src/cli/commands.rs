@@ -17,12 +17,12 @@ fn get_version() -> &'static str {
 /// Get build information for display
 pub fn get_build_info() -> BuildInfo {
     BuildInfo {
-        version: env!("CARGO_PKG_VERSION"),
+        version: env!("FINAL_VERSION"),
         build_number: env!("BUILD_NUMBER"),
         git_hash: env!("GIT_HASH"),
         git_branch: env!("GIT_BRANCH"),
         build_time: env!("BUILD_TIME"),
-        full_version: env!("FULL_VERSION"),
+        full_version: env!("FINAL_VERSION"),
     }
 }
 
@@ -763,8 +763,6 @@ async fn execute_version_command() -> Result<()> {
     println!("crosstache Rust CLI");
     println!("===================");
     println!("Version:      {}", build_info.version);
-    println!("Build:        {}", build_info.build_number);
-    println!("Full Version: {}", build_info.full_version);
     println!("Git Hash:     {}", build_info.git_hash);
     println!("Git Branch:   {}", build_info.git_branch);
     println!("Built:        {}", build_info.build_time);
