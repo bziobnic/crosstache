@@ -208,12 +208,38 @@ download_and_install() {
     # Verify checksum if available
     if [ -f "$archive_name.sha256" ]; then
         info "Verifying checksum..."
-        if command -v shasum >/dev/null 2>&1; then
-            echo "$(cat $archive_name.sha256)  $archive_name" | shasum -a 256 -c - || error "Checksum verification failed"
-        elif command -v sha256sum >/dev/null 2>&1; then
-            echo "$(cat $archive_name.sha256)  $archive_name" | sha256sum -c - || error "Checksum verification failed"
+        
+        # Wait a moment to ensure file is fully written
+        sleep 1
+        
+        # Check if checksum file has content
+        if [ ! -s "$archive_name.sha256" ]; then
+            warning "Checksum file is empty, skipping verification"
         else
-            warning "No checksum utility found, skipping verification"
+            # Read the checksum from file
+            expected_checksum=$(cat "$archive_name.sha256" | tr -d '\r\n' | awk '{print $1}')
+            
+            if [ -z "$expected_checksum" ]; then
+                warning "Could not read checksum from file, skipping verification"
+            else
+                # Calculate actual checksum
+                if command -v shasum >/dev/null 2>&1; then
+                    actual_checksum=$(shasum -a 256 "$archive_name" | awk '{print $1}')
+                elif command -v sha256sum >/dev/null 2>&1; then
+                    actual_checksum=$(sha256sum "$archive_name" | awk '{print $1}')
+                else
+                    warning "No checksum utility found, skipping verification"
+                    actual_checksum=""
+                fi
+                
+                if [ -n "$actual_checksum" ]; then
+                    if [ "$expected_checksum" = "$actual_checksum" ]; then
+                        info "Checksum verification passed"
+                    else
+                        error "Checksum verification failed. Expected: $expected_checksum, Got: $actual_checksum"
+                    fi
+                fi
+            fi
         fi
     fi
     

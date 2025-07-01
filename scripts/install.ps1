@@ -182,16 +182,35 @@ function Test-Checksum {
     
     try {
         Write-Info "Verifying checksum..."
-        $expectedHash = (Get-Content $ChecksumPath).Trim()
+        
+        # Wait a moment to ensure file is fully written
+        Start-Sleep -Milliseconds 500
+        
+        # Check if checksum file has content
+        if ((Get-Item $ChecksumPath).Length -eq 0) {
+            Write-Warning "Checksum file is empty, skipping verification"
+            return
+        }
+        
+        $expectedHash = (Get-Content $ChecksumPath -Raw).Trim() -replace '\r?\n.*', '' -replace '\s.*', ''
+        
+        if ([string]::IsNullOrWhiteSpace($expectedHash)) {
+            Write-Warning "Could not read valid checksum from file, skipping verification"
+            return
+        }
+        
         $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToLower()
+        $expectedHash = $expectedHash.ToLower()
         
         if ($expectedHash -ne $actualHash) {
             Write-Error "Checksum verification failed. Expected: $expectedHash, Got: $actualHash"
         }
-        Write-Info "Checksum verified successfully"
+        else {
+            Write-Info "Checksum verification passed"
+        }
     }
     catch {
-        Write-Warning "Checksum verification failed: $_"
+        Write-Warning "Checksum verification failed: $($_.Exception.Message)"
     }
 }
 

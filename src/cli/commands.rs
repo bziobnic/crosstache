@@ -86,6 +86,59 @@ pub enum Commands {
     },
     /// Show detailed version and build information
     Version,
+    
+    // Aliases for common secret operations
+    /// Get a secret (alias for 'secret get')
+    Get {
+        /// Secret name
+        name: String,
+        /// Vault name
+        #[arg(short, long)]
+        vault: Option<String>,
+        /// Raw output (print value instead of copying to clipboard)
+        #[arg(short, long)]
+        raw: bool,
+    },
+    /// Set a secret (alias for 'secret set')
+    Set {
+        /// Secret name
+        name: String,
+        /// Vault name
+        #[arg(short, long)]
+        vault: Option<String>,
+        /// Read value from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Note to attach to the secret
+        #[arg(long)]
+        note: Option<String>,
+        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// List secrets (alias for 'secret list')
+    Ls {
+        /// Vault name
+        #[arg(short, long)]
+        vault: Option<String>,
+        /// Filter by group
+        #[arg(short, long)]
+        group: Option<String>,
+        /// Show all secrets including disabled ones
+        #[arg(long)]
+        all: bool,
+    },
+    /// Delete a secret (alias for 'secret delete')
+    Rm {
+        /// Secret name
+        name: String,
+        /// Vault name
+        #[arg(short, long)]
+        vault: Option<String>,
+        /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -468,6 +521,25 @@ impl Cli {
             }
             Commands::Version => {
                 execute_version_command().await
+            }
+            // Handle alias commands by delegating to secret commands
+            Commands::Get { name, vault, raw } => {
+                execute_secret_command(SecretCommands::Get { name, vault, raw }, config).await
+            }
+            Commands::Set { name, vault, stdin, note, folder } => {
+                execute_secret_command(SecretCommands::Set { 
+                    name, 
+                    vault, 
+                    stdin, 
+                    note, 
+                    folder 
+                }, config).await
+            }
+            Commands::Ls { vault, group, all } => {
+                execute_secret_command(SecretCommands::List { vault, group, all }, config).await
+            }
+            Commands::Rm { name, vault, force } => {
+                execute_secret_command(SecretCommands::Delete { name, vault, force }, config).await
             }
         }
     }
