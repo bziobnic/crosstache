@@ -17,12 +17,12 @@ fn get_version() -> &'static str {
 /// Get build information for display
 pub fn get_build_info() -> BuildInfo {
     BuildInfo {
-        version: env!("FINAL_VERSION"),
+        version: env!("CARGO_PKG_VERSION"),
         build_number: env!("BUILD_NUMBER"),
         git_hash: env!("GIT_HASH"),
         git_branch: env!("GIT_BRANCH"),
         build_time: env!("BUILD_TIME"),
-        full_version: env!("FINAL_VERSION"),
+        full_version: env!("FULL_VERSION"),
     }
 }
 
@@ -51,15 +51,108 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Set a secret in the current vault context
+    Set {
+        /// Secret name
+        name: String,
+        /// Read value from stdin instead of prompting
+        #[arg(long)]
+        stdin: bool,
+        /// Note to attach to the secret
+        #[arg(long)]
+        note: Option<String>,
+        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// Get a secret from the current vault context
+    Get {
+        /// Secret name
+        name: String,
+        /// Raw output (print value instead of copying to clipboard)
+        #[arg(short, long)]
+        raw: bool,
+    },
+    /// List secrets in the current vault context (alias: ls)
+    #[command(alias = "ls")]
+    List {
+        /// Filter by group
+        #[arg(short, long)]
+        group: Option<String>,
+        /// Show all secrets including disabled ones
+        #[arg(long)]
+        all: bool,
+    },
+    /// Delete a secret from the current vault context (alias: rm)
+    #[command(alias = "rm")]
+    Delete {
+        /// Secret name
+        name: String,
+        /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Update secret properties in the current vault context
+    Update {
+        /// Secret name
+        name: String,
+        /// New value (if not provided, will prompt)
+        value: Option<String>,
+        /// Read value from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Tags for the secret in key=value format
+        #[arg(short, long, value_parser = parse_key_val::<String, String>)]
+        tags: Vec<(String, String)>,
+        /// Groups for the secret (can be specified multiple times)
+        #[arg(short, long)]
+        group: Vec<String>,
+        /// New name for the secret (rename operation)
+        #[arg(long)]
+        rename: Option<String>,
+        /// Note to attach to the secret
+        #[arg(long)]
+        note: Option<String>,
+        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
+        #[arg(long)]
+        folder: Option<String>,
+        /// Replace existing tags instead of merging
+        #[arg(long)]
+        replace_tags: bool,
+        /// Replace existing groups instead of merging
+        #[arg(long)]
+        replace_groups: bool,
+    },
+    /// Permanently delete (purge) a secret from the current vault context
+    Purge {
+        /// Secret name
+        name: String,
+        /// Force purge without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Restore a deleted secret in the current vault context
+    Restore {
+        /// Secret name
+        name: String,
+    },
+    /// Parse connection strings (vault-independent utility)
+    Parse {
+        /// Connection string to parse
+        connection_string: String,
+        /// Output format
+        #[arg(short, long, default_value = "table")]
+        format: String,
+    },
+    /// Secret-level access management
+    Share {
+        #[command(subcommand)]
+        command: ShareCommands,
+    },
     /// Vault management commands
     Vault {
         #[command(subcommand)]
         command: VaultCommands,
-    },
-    /// Secret management commands
-    Secret {
-        #[command(subcommand)]
-        command: SecretCommands,
     },
     /// Configuration management commands
     Config {
@@ -86,59 +179,6 @@ pub enum Commands {
     },
     /// Show detailed version and build information
     Version,
-    
-    // Aliases for common secret operations
-    /// Get a secret (alias for 'secret get')
-    Get {
-        /// Secret name
-        name: String,
-        /// Vault name
-        #[arg(short, long)]
-        vault: Option<String>,
-        /// Raw output (print value instead of copying to clipboard)
-        #[arg(short, long)]
-        raw: bool,
-    },
-    /// Set a secret (alias for 'secret set')
-    Set {
-        /// Secret name
-        name: String,
-        /// Vault name
-        #[arg(short, long)]
-        vault: Option<String>,
-        /// Read value from stdin
-        #[arg(long)]
-        stdin: bool,
-        /// Note to attach to the secret
-        #[arg(long)]
-        note: Option<String>,
-        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
-        #[arg(long)]
-        folder: Option<String>,
-    },
-    /// List secrets (alias for 'secret list')
-    Ls {
-        /// Vault name
-        #[arg(short, long)]
-        vault: Option<String>,
-        /// Filter by group
-        #[arg(short, long)]
-        group: Option<String>,
-        /// Show all secrets including disabled ones
-        #[arg(long)]
-        all: bool,
-    },
-    /// Delete a secret (alias for 'secret delete')
-    Rm {
-        /// Secret name
-        name: String,
-        /// Vault name
-        #[arg(short, long)]
-        vault: Option<String>,
-        /// Force deletion without confirmation
-        #[arg(short, long)]
-        force: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -309,149 +349,30 @@ pub enum VaultShareCommands {
     },
 }
 
-#[derive(Subcommand)]
-pub enum SecretCommands {
-    /// Set a secret
-    Set {
-        /// Secret name
-        name: String,
-        /// Vault name
-        vault: Option<String>,
-        /// Read value from stdin
-        #[arg(long)]
-        stdin: bool,
-        /// Note to attach to the secret
-        #[arg(long)]
-        note: Option<String>,
-        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
-        #[arg(long)]
-        folder: Option<String>,
-    },
-    /// Get a secret
-    Get {
-        /// Secret name
-        name: String,
-        /// Vault name
-        vault: Option<String>,
-        /// Raw output (print value instead of copying to clipboard)
-        #[arg(short, long)]
-        raw: bool,
-    },
-    /// List secrets
-    List {
-        /// Vault name
-        vault: Option<String>,
-        /// Filter by group
-        #[arg(short, long)]
-        group: Option<String>,
-        /// Show all secrets including disabled ones
-        #[arg(long)]
-        all: bool,
-    },
-    /// Delete a secret
-    Delete {
-        /// Secret name
-        name: String,
-        /// Vault name
-        vault: Option<String>,
-        /// Force deletion without confirmation
-        #[arg(short, long)]
-        force: bool,
-    },
-    /// Update secret properties
-    Update {
-        /// Secret name
-        name: String,
-        /// Vault name
-        vault: Option<String>,
-        /// New value (if not provided, will prompt)
-        value: Option<String>,
-        /// Read value from stdin
-        #[arg(long)]
-        stdin: bool,
-        /// Tags for the secret in key=value format
-        #[arg(short, long, value_parser = parse_key_val::<String, String>)]
-        tags: Vec<(String, String)>,
-        /// Groups for the secret (can be specified multiple times)
-        #[arg(short, long)]
-        group: Vec<String>,
-        /// New name for the secret (rename operation)
-        #[arg(long)]
-        rename: Option<String>,
-        /// Note to attach to the secret
-        #[arg(long)]
-        note: Option<String>,
-        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
-        #[arg(long)]
-        folder: Option<String>,
-        /// Replace existing tags instead of merging
-        #[arg(long)]
-        replace_tags: bool,
-        /// Replace existing groups instead of merging
-        #[arg(long)]
-        replace_groups: bool,
-    },
-    /// Permanently delete (purge) a secret
-    Purge {
-        /// Secret name
-        name: String,
-        /// Vault name
-        vault: Option<String>,
-        /// Force purge without confirmation
-        #[arg(short, long)]
-        force: bool,
-    },
-    /// Restore a deleted secret
-    Restore {
-        /// Secret name
-        name: String,
-        /// Vault name
-        vault: Option<String>,
-    },
-    /// Parse connection strings
-    Parse {
-        /// Connection string to parse
-        connection_string: String,
-        /// Output format
-        #[arg(short, long, default_value = "table")]
-        format: String,
-    },
-    /// Secret-level access management
-    Share {
-        #[command(subcommand)]
-        command: ShareCommands,
-    }
-}
 
 #[derive(Subcommand)]
 pub enum ShareCommands {
-    /// Grant access to a secret
+    /// Grant access to a secret in the current vault context
     Grant {
         /// Secret name
         secret_name: String,
         /// User email or service principal ID
         user: String,
-        /// Vault name
-        vault: Option<String>,
         /// Access level (read, write, admin)
         #[arg(short, long, default_value = "read")]
         level: String,
     },
-    /// Revoke access to a secret
+    /// Revoke access to a secret in the current vault context
     Revoke {
         /// Secret name
         secret_name: String,
         /// User email or service principal ID
         user: String,
-        /// Vault name
-        vault: Option<String>,
     },
-    /// List access permissions for a secret
+    /// List access permissions for a secret in the current vault context
     List {
         /// Secret name
         secret_name: String,
-        /// Vault name
-        vault: Option<String>,
     },
 }
 
@@ -501,11 +422,46 @@ pub enum ContextCommands {
 impl Cli {
     pub async fn execute(self, config: Config) -> Result<()> {
         match self.command {
+            Commands::Set { name, stdin, note, folder } => {
+                execute_secret_set_direct(&name, stdin, note, folder, config).await
+            }
+            Commands::Get { name, raw } => {
+                execute_secret_get_direct(&name, raw, config).await
+            }
+            Commands::List { group, all } => {
+                execute_secret_list_direct(group, all, config).await
+            }
+            Commands::Delete { name, force } => {
+                execute_secret_delete_direct(&name, force, config).await
+            }
+            Commands::Update { 
+                name, 
+                value, 
+                stdin, 
+                tags, 
+                group, 
+                rename, 
+                note, 
+                folder,
+                replace_tags, 
+                replace_groups 
+            } => {
+                execute_secret_update_direct(&name, value, stdin, tags, group, rename, note, folder, replace_tags, replace_groups, config).await
+            }
+            Commands::Purge { name, force } => {
+                execute_secret_purge_direct(&name, force, config).await
+            }
+            Commands::Restore { name } => {
+                execute_secret_restore_direct(&name, config).await
+            }
+            Commands::Parse { connection_string, format } => {
+                execute_secret_parse_direct(&connection_string, &format, config).await
+            }
+            Commands::Share { command } => {
+                execute_secret_share_direct(command, config).await
+            }
             Commands::Vault { command } => {
                 execute_vault_command(command, config).await
-            }
-            Commands::Secret { command } => {
-                execute_secret_command(command, config).await
             }
             Commands::Config { command } => {
                 execute_config_command(command, config).await
@@ -521,25 +477,6 @@ impl Cli {
             }
             Commands::Version => {
                 execute_version_command().await
-            }
-            // Handle alias commands by delegating to secret commands
-            Commands::Get { name, vault, raw } => {
-                execute_secret_command(SecretCommands::Get { name, vault, raw }, config).await
-            }
-            Commands::Set { name, vault, stdin, note, folder } => {
-                execute_secret_command(SecretCommands::Set { 
-                    name, 
-                    vault, 
-                    stdin, 
-                    note, 
-                    folder 
-                }, config).await
-            }
-            Commands::Ls { vault, group, all } => {
-                execute_secret_command(SecretCommands::List { vault, group, all }, config).await
-            }
-            Commands::Rm { name, vault, force } => {
-                execute_secret_command(SecretCommands::Delete { name, vault, force }, config).await
             }
         }
     }
@@ -723,7 +660,15 @@ async fn execute_vault_info(
     Ok(())
 }
 
-async fn execute_secret_command(command: SecretCommands, config: Config) -> Result<()> {
+
+// Direct secret command execution functions (context-aware)
+async fn execute_secret_set_direct(
+    name: &str,
+    stdin: bool,
+    note: Option<String>,
+    folder: Option<String>,
+    config: Config,
+) -> Result<()> {
     use std::sync::Arc;
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
@@ -736,49 +681,182 @@ async fn execute_secret_command(command: SecretCommands, config: Config) -> Resu
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_set(&secret_manager, name, None, stdin, note, folder, &config).await
+}
 
-    match command {
-        SecretCommands::Set { name, vault, stdin, note, folder } => {
-            execute_secret_set(&secret_manager, &name, vault, stdin, note, folder, &config).await?;
-        }
-        SecretCommands::Get { name, vault, raw } => {
-            execute_secret_get(&secret_manager, &name, vault, raw, &config).await?;
-        }
-        SecretCommands::List { vault, group, all } => {
-            execute_secret_list(&secret_manager, vault, group, all, &config).await?;
-        }
-        SecretCommands::Delete { name, vault, force } => {
-            execute_secret_delete(&secret_manager, &name, vault, force, &config).await?;
-        }
-        SecretCommands::Update { 
-            name, 
-            vault, 
-            value, 
-            stdin, 
-            tags, 
-            group, 
-            rename, 
-            note, 
-            folder,
-            replace_tags, 
-            replace_groups 
-        } => {
-            execute_secret_update(&secret_manager, &name, vault, value, stdin, tags, group, rename, note, folder, replace_tags, replace_groups, &config).await?;
-        }
-        SecretCommands::Purge { name, vault, force } => {
-            execute_secret_purge(&secret_manager, &name, vault, force, &config).await?;
-        }
-        SecretCommands::Restore { name, vault } => {
-            execute_secret_restore(&secret_manager, &name, vault, &config).await?;
-        }
-        SecretCommands::Parse { connection_string, format } => {
-            execute_secret_parse(&secret_manager, &connection_string, &format, &config).await?;
-        }
-        SecretCommands::Share { command } => {
-            execute_secret_share(&secret_manager, command, &config).await?;
-        }
-    }
-    Ok(())
+async fn execute_secret_get_direct(
+    name: &str,
+    raw: bool,
+    config: Config,
+) -> Result<()> {
+    use std::sync::Arc;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::new()
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_get(&secret_manager, name, None, raw, &config).await
+}
+
+async fn execute_secret_list_direct(
+    group: Option<String>,
+    all: bool,
+    config: Config,
+) -> Result<()> {
+    use std::sync::Arc;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::new()
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_list(&secret_manager, None, group, all, &config).await
+}
+
+async fn execute_secret_delete_direct(
+    name: &str,
+    force: bool,
+    config: Config,
+) -> Result<()> {
+    use std::sync::Arc;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::new()
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_delete(&secret_manager, name, None, force, &config).await
+}
+
+async fn execute_secret_update_direct(
+    name: &str,
+    value: Option<String>,
+    stdin: bool,
+    tags: Vec<(String, String)>,
+    groups: Vec<String>,
+    rename: Option<String>,
+    note: Option<String>,
+    folder: Option<String>,
+    replace_tags: bool,
+    replace_groups: bool,
+    config: Config,
+) -> Result<()> {
+    use std::sync::Arc;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::new()
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_update(&secret_manager, name, None, value, stdin, tags, groups, rename, note, folder, replace_tags, replace_groups, &config).await
+}
+
+async fn execute_secret_purge_direct(
+    name: &str,
+    force: bool,
+    config: Config,
+) -> Result<()> {
+    use std::sync::Arc;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::new()
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_purge(&secret_manager, name, None, force, &config).await
+}
+
+async fn execute_secret_restore_direct(
+    name: &str,
+    config: Config,
+) -> Result<()> {
+    use std::sync::Arc;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::new()
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_restore(&secret_manager, name, None, &config).await
+}
+
+async fn execute_secret_parse_direct(
+    connection_string: &str,
+    format: &str,
+    config: Config,
+) -> Result<()> {
+    use std::sync::Arc;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::new()
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_parse(&secret_manager, connection_string, format, &config).await
+}
+
+async fn execute_secret_share_direct(
+    command: ShareCommands,
+    config: Config,
+) -> Result<()> {
+    use std::sync::Arc;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::new()
+            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    execute_secret_share(&secret_manager, command, &config).await
 }
 
 async fn execute_config_command(command: ConfigCommands, config: Config) -> Result<()> {
@@ -835,6 +913,8 @@ async fn execute_version_command() -> Result<()> {
     println!("crosstache Rust CLI");
     println!("===================");
     println!("Version:      {}", build_info.version);
+    println!("Build:        {}", build_info.build_number);
+    println!("Full Version: {}", build_info.full_version);
     println!("Git Hash:     {}", build_info.git_hash);
     println!("Git Branch:   {}", build_info.git_branch);
     println!("Built:        {}", build_info.build_time);
@@ -1401,31 +1481,19 @@ async fn execute_secret_share(
     command: ShareCommands,
     config: &Config,
 ) -> Result<()> {
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(None).await?;
+    
     match command {
-        ShareCommands::Grant { secret_name, user, vault, level } => {
-            let vault_name = vault.unwrap_or_else(|| config.default_vault.clone());
-            if vault_name.is_empty() {
-                return Err(crosstacheError::config("Vault name is required. Set default_vault in config or provide --vault"));
-            }
-            
+        ShareCommands::Grant { secret_name, user, level } => {
             println!("TODO: Grant {} access to secret '{}' for user '{}' in vault '{}'", 
                      level, secret_name, user, vault_name);
         }
-        ShareCommands::Revoke { secret_name, user, vault } => {
-            let vault_name = vault.unwrap_or_else(|| config.default_vault.clone());
-            if vault_name.is_empty() {
-                return Err(crosstacheError::config("Vault name is required. Set default_vault in config or provide --vault"));
-            }
-            
+        ShareCommands::Revoke { secret_name, user } => {
             println!("TODO: Revoke access to secret '{}' for user '{}' in vault '{}'", 
                      secret_name, user, vault_name);
         }
-        ShareCommands::List { secret_name, vault } => {
-            let vault_name = vault.unwrap_or_else(|| config.default_vault.clone());
-            if vault_name.is_empty() {
-                return Err(crosstacheError::config("Vault name is required. Set default_vault in config or provide --vault"));
-            }
-            
+        ShareCommands::List { secret_name } => {
             println!("TODO: List access permissions for secret '{}' in vault '{}'", 
                      secret_name, vault_name);
         }
