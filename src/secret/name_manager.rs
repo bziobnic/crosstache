@@ -1,19 +1,19 @@
 //! Secret name management and mapping
-//! 
+//!
 //! This module provides centralized secret name mapping services
 //! for handling user-friendly to sanitized name conversions.
 //! Supports persistent storage of name mappings and migration.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use chrono::{DateTime, Utc};
 use tabled::Tabled;
+use tokio::sync::RwLock;
 
 use crate::error::{crosstacheError, Result};
-use crate::utils::sanitizer::{sanitize_secret_name, get_secret_name_info, SecretNameInfo};
+use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name, SecretNameInfo};
 
 /// Name mapping entry for persistent storage
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
@@ -126,7 +126,7 @@ impl NameManager {
         let name_info = get_secret_name_info(original_name)?;
         let group = group.unwrap_or("").to_string();
         let key = format!("{}:{}", vault_name, name_info.sanitized_name);
-        
+
         let mapping = NameMapping {
             original_name: original_name.to_string(),
             sanitized_name: name_info.sanitized_name.clone(),
@@ -147,15 +147,15 @@ impl NameManager {
                 updated_mapping.group = mapping.group.clone();
                 storage.mappings.insert(key, updated_mapping.clone());
                 storage.updated_at = Utc::now();
-                
+
                 if self.auto_save {
                     drop(storage);
                     self.save().await?;
                 }
-                
+
                 return Ok(updated_mapping);
             }
-            
+
             storage.mappings.insert(key, mapping.clone());
             storage.updated_at = Utc::now();
         }
@@ -175,7 +175,7 @@ impl NameManager {
     ) -> Result<Option<NameMapping>> {
         let sanitized_name = sanitize_secret_name(original_name)?;
         let key = format!("{}:{}", vault_name, sanitized_name);
-        
+
         let storage = self.storage.read().await;
         Ok(storage.mappings.get(&key).cloned())
     }
@@ -187,7 +187,7 @@ impl NameManager {
         sanitized_name: &str,
     ) -> Result<Option<NameMapping>> {
         let key = format!("{}:{}", vault_name, sanitized_name);
-        
+
         let storage = self.storage.read().await;
         Ok(storage.mappings.get(&key).cloned())
     }
@@ -198,7 +198,10 @@ impl NameManager {
         vault_name: &str,
         sanitized_name: &str,
     ) -> Result<String> {
-        if let Some(mapping) = self.get_mapping_by_sanitized(vault_name, sanitized_name).await? {
+        if let Some(mapping) = self
+            .get_mapping_by_sanitized(vault_name, sanitized_name)
+            .await?
+        {
             Ok(mapping.original_name)
         } else {
             // If no mapping found, return the sanitized name as fallback
@@ -212,7 +215,10 @@ impl NameManager {
         vault_name: &str,
         original_name: &str,
     ) -> Result<String> {
-        if let Some(mapping) = self.get_mapping_by_original(vault_name, original_name).await? {
+        if let Some(mapping) = self
+            .get_mapping_by_original(vault_name, original_name)
+            .await?
+        {
             Ok(mapping.sanitized_name)
         } else {
             // Create new mapping if needed
@@ -225,13 +231,13 @@ impl NameManager {
     pub async fn list_mappings_for_vault(&self, vault_name: &str) -> Result<Vec<NameMapping>> {
         let storage = self.storage.read().await;
         let mut mappings = Vec::new();
-        
+
         for mapping in storage.mappings.values() {
             if mapping.vault_name == vault_name {
                 mappings.push(mapping.clone());
             }
         }
-        
+
         // Sort by original name
         mappings.sort_by(|a, b| a.original_name.cmp(&b.original_name));
         Ok(mappings)
@@ -245,13 +251,13 @@ impl NameManager {
     ) -> Result<Vec<NameMapping>> {
         let storage = self.storage.read().await;
         let mut mappings = Vec::new();
-        
+
         for mapping in storage.mappings.values() {
             if mapping.vault_name == vault_name && mapping.group == group {
                 mappings.push(mapping.clone());
             }
         }
-        
+
         // Sort by original name
         mappings.sort_by(|a, b| a.original_name.cmp(&b.original_name));
         Ok(mappings)
@@ -261,27 +267,23 @@ impl NameManager {
     pub async fn get_groups_for_vault(&self, vault_name: &str) -> Result<Vec<String>> {
         let storage = self.storage.read().await;
         let mut groups = std::collections::HashSet::new();
-        
+
         for mapping in storage.mappings.values() {
             if mapping.vault_name == vault_name {
                 groups.insert(mapping.group.clone());
             }
         }
-        
+
         let mut sorted_groups: Vec<String> = groups.into_iter().collect();
         sorted_groups.sort();
         Ok(sorted_groups)
     }
 
     /// Remove a mapping
-    pub async fn remove_mapping(
-        &self,
-        vault_name: &str,
-        original_name: &str,
-    ) -> Result<bool> {
+    pub async fn remove_mapping(&self, vault_name: &str, original_name: &str) -> Result<bool> {
         let sanitized_name = sanitize_secret_name(original_name)?;
         let key = format!("{}:{}", vault_name, sanitized_name);
-        
+
         let removed = {
             let mut storage = self.storage.write().await;
             let removed = storage.mappings.remove(&key).is_some();
@@ -304,7 +306,7 @@ impl NameManager {
         let mut vaults = std::collections::HashSet::new();
         let mut groups = std::collections::HashSet::new();
         let mut hashed_count = 0;
-        
+
         for mapping in storage.mappings.values() {
             vaults.insert(mapping.vault_name.clone());
             groups.insert(mapping.group.clone());
@@ -312,14 +314,17 @@ impl NameManager {
                 hashed_count += 1;
             }
         }
-        
+
         Ok(NameMappingStats {
             total_mappings: storage.mappings.len(),
             hashed_names: hashed_count,
             simple_names: storage.mappings.len() - hashed_count,
             unique_vaults: vaults.len(),
             unique_groups: groups.len(),
-            last_updated: storage.updated_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            last_updated: storage
+                .updated_at
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string(),
         })
     }
 
@@ -329,33 +334,35 @@ impl NameManager {
         vault_mappings: Vec<(String, String, HashMap<String, String>)>, // (vault, secret_name, tags)
     ) -> Result<usize> {
         let mut migrated_count = 0;
-        
+
         for (vault_name, sanitized_name, tags) in vault_mappings {
             if let Some(original_name) = tags.get("original_name") {
-                let group = tags.get("groups")
+                let group = tags
+                    .get("groups")
                     .and_then(|groups| groups.split(',').next())
                     .map(|g| g.trim().to_string())
                     .unwrap_or_else(|| "".to_string());
-                
+
                 // Check if mapping already exists
                 let key = format!("{}:{}", vault_name, sanitized_name);
                 let exists = {
                     let storage = self.storage.read().await;
                     storage.mappings.contains_key(&key)
                 };
-                
+
                 if !exists {
                     let mapping = NameMapping {
                         original_name: original_name.clone(),
                         sanitized_name: sanitized_name.clone(),
                         vault_name: vault_name.clone(),
                         group,
-                        is_hashed: sanitized_name.len() == 64 && sanitized_name.chars().all(|c| c.is_ascii_hexdigit()),
+                        is_hashed: sanitized_name.len() == 64
+                            && sanitized_name.chars().all(|c| c.is_ascii_hexdigit()),
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                         metadata: tags.clone(),
                     };
-                    
+
                     let mut storage = self.storage.write().await;
                     storage.mappings.insert(key, mapping);
                     storage.updated_at = Utc::now();
@@ -363,11 +370,11 @@ impl NameManager {
                 }
             }
         }
-        
+
         if migrated_count > 0 && self.auto_save {
             self.save().await?;
         }
-        
+
         Ok(migrated_count)
     }
 
@@ -380,29 +387,32 @@ impl NameManager {
             storage.updated_at = Utc::now();
             count
         };
-        
+
         if self.auto_save {
             self.save().await?;
         }
-        
+
         Ok(count)
     }
 
     /// Save mappings to storage
     pub async fn save(&self) -> Result<()> {
         let storage = self.storage.read().await;
-        let json_data = serde_json::to_string_pretty(&*storage)
-            .map_err(|e| crosstacheError::serialization(format!("Failed to serialize mappings: {}", e)))?;
-        
+        let json_data = serde_json::to_string_pretty(&*storage).map_err(|e| {
+            crosstacheError::serialization(format!("Failed to serialize mappings: {}", e))
+        })?;
+
         // Ensure parent directory exists
         if let Some(parent) = self.storage_path.parent() {
-            tokio::fs::create_dir_all(parent).await
-                .map_err(|e| crosstacheError::config(format!("Failed to create storage directory: {}", e)))?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                crosstacheError::config(format!("Failed to create storage directory: {}", e))
+            })?;
         }
-        
-        tokio::fs::write(&self.storage_path, json_data).await
+
+        tokio::fs::write(&self.storage_path, json_data)
+            .await
             .map_err(|e| crosstacheError::config(format!("Failed to save name mappings: {}", e)))?;
-        
+
         Ok(())
     }
 
@@ -429,23 +439,24 @@ impl NameManager {
         self.storage_path.exists()
     }
 
-
     /// Get default storage path
     fn default_storage_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
-        
+
         Ok(config_dir.join("xv").join("name_mappings.json"))
     }
 
     /// Load storage from file
     fn load_storage(path: &Path) -> Result<NameMappingStorage> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| crosstacheError::config(format!("Failed to read name mappings file: {}", e)))?;
-        
-        let storage: NameMappingStorage = serde_json::from_str(&content)
-            .map_err(|e| crosstacheError::serialization(format!("Failed to parse name mappings: {}", e)))?;
-        
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crosstacheError::config(format!("Failed to read name mappings file: {}", e))
+        })?;
+
+        let storage: NameMappingStorage = serde_json::from_str(&content).map_err(|e| {
+            crosstacheError::serialization(format!("Failed to parse name mappings: {}", e))
+        })?;
+
         Ok(storage)
     }
 }
@@ -516,17 +527,26 @@ mod tests {
     #[tokio::test]
     async fn test_name_manager_basic_operations() {
         let manager = NameManager::in_memory();
-        
+
         // Add a mapping
-        let mapping = manager.add_mapping("test-vault", "app/database/connection", None).await.unwrap();
+        let mapping = manager
+            .add_mapping("test-vault", "app/database/connection", None)
+            .await
+            .unwrap();
         assert_eq!(mapping.original_name, "app/database/connection");
         assert_eq!(mapping.group, "app/database");
-        
+
         // Resolve names
-        let original = manager.resolve_original_name("test-vault", &mapping.sanitized_name).await.unwrap();
+        let original = manager
+            .resolve_original_name("test-vault", &mapping.sanitized_name)
+            .await
+            .unwrap();
         assert_eq!(original, "app/database/connection");
-        
-        let sanitized = manager.resolve_sanitized_name("test-vault", "app/database/connection").await.unwrap();
+
+        let sanitized = manager
+            .resolve_sanitized_name("test-vault", "app/database/connection")
+            .await
+            .unwrap();
         assert_eq!(sanitized, mapping.sanitized_name);
     }
 
@@ -534,20 +554,25 @@ mod tests {
     async fn test_name_manager_persistence() {
         let temp_dir = tempdir().unwrap();
         let storage_path = temp_dir.path().join("test_mappings.json");
-        
+
         // Create manager and add mapping
         {
             let manager = NameManager::with_storage_path(&storage_path).unwrap();
-            manager.add_mapping("test-vault", "test-secret", Some("test-group")).await.unwrap();
+            manager
+                .add_mapping("test-vault", "test-secret", Some("test-group"))
+                .await
+                .unwrap();
         }
-        
+
         // Create new manager and verify persistence
         {
             let manager = NameManager::with_storage_path(&storage_path).unwrap();
-            let mapping = manager.get_mapping_by_original("test-vault", "test-secret").await.unwrap();
+            let mapping = manager
+                .get_mapping_by_original("test-vault", "test-secret")
+                .await
+                .unwrap();
             assert!(mapping.is_some());
             assert_eq!(mapping.unwrap().group, "test-group");
         }
     }
-
 }

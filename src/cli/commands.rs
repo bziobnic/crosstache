@@ -1,13 +1,13 @@
 //! CLI commands and argument parsing
-//! 
+//!
 //! This module defines the command-line interface structure using clap,
 //! including all commands, subcommands, and their arguments.
 
-use clap::{Parser, Subcommand};
 use crate::config::Config;
 use crate::error::{crosstacheError, Result};
-use crate::vault::{VaultManager, VaultCreateRequest};
 use crate::utils::format::OutputFormat;
+use crate::vault::{VaultCreateRequest, VaultManager};
+use clap::{Parser, Subcommand};
 
 /// Get the full version string with build information
 fn get_version() -> &'static str {
@@ -44,7 +44,7 @@ pub struct Cli {
     /// Enable debug logging
     #[arg(long, global = true)]
     pub debug: bool,
-    
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -308,7 +308,7 @@ pub enum VaultCommands {
     Share {
         #[command(subcommand)]
         command: VaultShareCommands,
-    }
+    },
 }
 
 #[derive(Subcommand)]
@@ -348,7 +348,6 @@ pub enum VaultShareCommands {
         format: String,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum ShareCommands {
@@ -422,133 +421,180 @@ pub enum ContextCommands {
 impl Cli {
     pub async fn execute(self, config: Config) -> Result<()> {
         match self.command {
-            Commands::Set { name, stdin, note, folder } => {
-                execute_secret_set_direct(&name, stdin, note, folder, config).await
-            }
-            Commands::Get { name, raw } => {
-                execute_secret_get_direct(&name, raw, config).await
-            }
-            Commands::List { group, all } => {
-                execute_secret_list_direct(group, all, config).await
-            }
+            Commands::Set {
+                name,
+                stdin,
+                note,
+                folder,
+            } => execute_secret_set_direct(&name, stdin, note, folder, config).await,
+            Commands::Get { name, raw } => execute_secret_get_direct(&name, raw, config).await,
+            Commands::List { group, all } => execute_secret_list_direct(group, all, config).await,
             Commands::Delete { name, force } => {
                 execute_secret_delete_direct(&name, force, config).await
             }
-            Commands::Update { 
-                name, 
-                value, 
-                stdin, 
-                tags, 
-                group, 
-                rename, 
-                note, 
+            Commands::Update {
+                name,
+                value,
+                stdin,
+                tags,
+                group,
+                rename,
+                note,
                 folder,
-                replace_tags, 
-                replace_groups 
+                replace_tags,
+                replace_groups,
             } => {
-                execute_secret_update_direct(&name, value, stdin, tags, group, rename, note, folder, replace_tags, replace_groups, config).await
+                execute_secret_update_direct(
+                    &name,
+                    value,
+                    stdin,
+                    tags,
+                    group,
+                    rename,
+                    note,
+                    folder,
+                    replace_tags,
+                    replace_groups,
+                    config,
+                )
+                .await
             }
             Commands::Purge { name, force } => {
                 execute_secret_purge_direct(&name, force, config).await
             }
-            Commands::Restore { name } => {
-                execute_secret_restore_direct(&name, config).await
-            }
-            Commands::Parse { connection_string, format } => {
-                execute_secret_parse_direct(&connection_string, &format, config).await
-            }
-            Commands::Share { command } => {
-                execute_secret_share_direct(command, config).await
-            }
-            Commands::Vault { command } => {
-                execute_vault_command(command, config).await
-            }
-            Commands::Config { command } => {
-                execute_config_command(command, config).await
-            }
-            Commands::Context { command } => {
-                execute_context_command(command, config).await
-            }
-            Commands::Init => {
-                execute_init_command(config).await
-            }
-            Commands::Info { vault_name, resource_group, subscription } => {
-                execute_info_command(vault_name, resource_group, subscription, config).await
-            }
-            Commands::Version => {
-                execute_version_command().await
-            }
+            Commands::Restore { name } => execute_secret_restore_direct(&name, config).await,
+            Commands::Parse {
+                connection_string,
+                format,
+            } => execute_secret_parse_direct(&connection_string, &format, config).await,
+            Commands::Share { command } => execute_secret_share_direct(command, config).await,
+            Commands::Vault { command } => execute_vault_command(command, config).await,
+            Commands::Config { command } => execute_config_command(command, config).await,
+            Commands::Context { command } => execute_context_command(command, config).await,
+            Commands::Init => execute_init_command(config).await,
+            Commands::Info {
+                vault_name,
+                resource_group,
+                subscription,
+            } => execute_info_command(vault_name, resource_group, subscription, config).await,
+            Commands::Version => execute_version_command().await,
         }
     }
 }
 
 async fn execute_vault_command(command: VaultCommands, config: Config) -> Result<()> {
-    use std::sync::Arc;
     use crate::auth::provider::DefaultAzureCredentialProvider;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create vault manager
     let vault_manager = VaultManager::new(
         auth_provider,
         config.subscription_id.clone(),
         config.no_color,
-    );
+    )?;
 
     match command {
-        VaultCommands::Create { name, resource_group, location } => {
+        VaultCommands::Create {
+            name,
+            resource_group,
+            location,
+        } => {
             execute_vault_create(&vault_manager, &name, resource_group, location, &config).await?;
         }
         VaultCommands::List { resource_group } => {
             execute_vault_list(&vault_manager, resource_group, &config).await?;
         }
-        VaultCommands::Delete { name, resource_group, force } => {
+        VaultCommands::Delete {
+            name,
+            resource_group,
+            force,
+        } => {
             execute_vault_delete(&vault_manager, &name, resource_group, force, &config).await?;
         }
-        VaultCommands::Info { name, resource_group } => {
+        VaultCommands::Info {
+            name,
+            resource_group,
+        } => {
             execute_vault_info(&vault_manager, &name, resource_group, &config).await?;
         }
         VaultCommands::Restore { name, location } => {
             execute_vault_restore(&vault_manager, &name, &location, &config).await?;
         }
-        VaultCommands::Purge { name, location, force } => {
+        VaultCommands::Purge {
+            name,
+            location,
+            force,
+        } => {
             execute_vault_purge(&vault_manager, &name, &location, force, &config).await?;
         }
-        VaultCommands::Export { 
-            name, 
-            resource_group, 
-            output, 
-            format, 
-            include_values, 
-            group 
+        VaultCommands::Export {
+            name,
+            resource_group,
+            output,
+            format,
+            include_values,
+            group,
         } => {
-            execute_vault_export(&vault_manager, &name, resource_group, output, &format, include_values, group, &config).await?;
+            execute_vault_export(
+                &vault_manager,
+                &name,
+                resource_group,
+                output,
+                &format,
+                include_values,
+                group,
+                &config,
+            )
+            .await?;
         }
-        VaultCommands::Import { 
-            name, 
-            resource_group, 
-            input, 
-            format, 
-            overwrite, 
-            dry_run 
+        VaultCommands::Import {
+            name,
+            resource_group,
+            input,
+            format,
+            overwrite,
+            dry_run,
         } => {
-            execute_vault_import(&vault_manager, &name, resource_group, input, &format, overwrite, dry_run, &config).await?;
+            execute_vault_import(
+                &vault_manager,
+                &name,
+                resource_group,
+                input,
+                &format,
+                overwrite,
+                dry_run,
+                &config,
+            )
+            .await?;
         }
-        VaultCommands::Update { 
-            name, 
-            resource_group, 
-            tag, 
+        VaultCommands::Update {
+            name,
+            resource_group,
+            tag,
             enable_deployment,
             enable_disk_encryption,
             enable_template_deployment,
             enable_purge_protection,
-            retention_days
+            retention_days,
         } => {
-            execute_vault_update(&vault_manager, &name, resource_group, tag, enable_deployment, enable_disk_encryption, enable_template_deployment, enable_purge_protection, retention_days, &config).await?;
+            execute_vault_update(
+                &vault_manager,
+                &name,
+                resource_group,
+                tag,
+                enable_deployment,
+                enable_disk_encryption,
+                enable_template_deployment,
+                enable_purge_protection,
+                retention_days,
+                &config,
+            )
+            .await?;
         }
         VaultCommands::Share { command } => {
             execute_vault_share(&vault_manager, command, &config).await?;
@@ -568,7 +614,10 @@ async fn execute_vault_create(
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
     let location = location.unwrap_or_else(|| config.default_location.clone());
 
-    println!("Creating vault '{}' in resource group '{}' at location '{}'...", name, resource_group, location);
+    println!(
+        "Creating vault '{}' in resource group '{}' at location '{}'...",
+        name, resource_group, location
+    );
 
     let create_request = VaultCreateRequest {
         name: name.to_string(),
@@ -583,23 +632,23 @@ async fn execute_vault_create(
         purge_protection: Some(false),
         tags: Some(std::collections::HashMap::from([
             ("created_by".to_string(), "crosstache".to_string()),
-            ("created_at".to_string(), chrono::Utc::now().format("%Y-%m-%d").to_string()),
+            (
+                "created_at".to_string(),
+                chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            ),
         ])),
         access_policies: None, // Will be set automatically by the manager
     };
 
-    let vault = vault_manager.create_vault_with_setup(
-        &name,
-        &location,
-        &resource_group,
-        Some(create_request),
-    ).await?;
-    
+    let vault = vault_manager
+        .create_vault_with_setup(&name, &location, &resource_group, Some(create_request))
+        .await?;
+
     println!("✅ Successfully created vault '{}'", vault.name);
     println!("   Resource Group: {}", vault.resource_group);
     println!("   Location: {}", vault.location);
     println!("   URI: {}", vault.uri);
-    
+
     Ok(())
 }
 
@@ -614,12 +663,14 @@ async fn execute_vault_list(
         OutputFormat::Table
     };
 
-    vault_manager.list_vaults_formatted(
-        Some(&config.subscription_id),
-        resource_group.as_deref(),
-        output_format,
-    ).await?;
-    
+    vault_manager
+        .list_vaults_formatted(
+            Some(&config.subscription_id),
+            resource_group.as_deref(),
+            output_format,
+        )
+        .await?;
+
     Ok(())
 }
 
@@ -632,9 +683,11 @@ async fn execute_vault_delete(
 ) -> Result<()> {
     // Use provided resource group or fall back to config default
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-    
-    vault_manager.delete_vault_safe(name, &resource_group, force).await?;
-    
+
+    vault_manager
+        .delete_vault_safe(name, &resource_group, force)
+        .await?;
+
     Ok(())
 }
 
@@ -646,20 +699,22 @@ async fn execute_vault_info(
 ) -> Result<()> {
     // Use provided resource group or fall back to config default
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-    
+
     if config.output_json {
-        let vault = vault_manager.get_vault_properties(name, &resource_group).await?;
-        let json_output = serde_json::to_string_pretty(&vault)
-            .map_err(|e| crosstacheError::serialization(format!("Failed to serialize vault info: {}", e)))?;
+        let vault = vault_manager
+            .get_vault_properties(name, &resource_group)
+            .await?;
+        let json_output = serde_json::to_string_pretty(&vault).map_err(|e| {
+            crosstacheError::serialization(format!("Failed to serialize vault info: {}", e))
+        })?;
         println!("{}", json_output);
     } else {
         let _vault = vault_manager.get_vault_info(name, &resource_group).await?;
         // Display will be handled by the vault manager
     }
-    
+
     Ok(())
 }
-
 
 // Direct secret command execution functions (context-aware)
 async fn execute_secret_set_direct(
@@ -669,40 +724,34 @@ async fn execute_secret_set_direct(
     folder: Option<String>,
     config: Config,
 ) -> Result<()> {
-    use std::sync::Arc;
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     execute_secret_set(&secret_manager, name, None, stdin, note, folder, &config).await
 }
 
-async fn execute_secret_get_direct(
-    name: &str,
-    raw: bool,
-    config: Config,
-) -> Result<()> {
-    use std::sync::Arc;
+async fn execute_secret_get_direct(name: &str, raw: bool, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     execute_secret_get(&secret_manager, name, None, raw, &config).await
 }
 
@@ -711,40 +760,34 @@ async fn execute_secret_list_direct(
     all: bool,
     config: Config,
 ) -> Result<()> {
-    use std::sync::Arc;
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     execute_secret_list(&secret_manager, None, group, all, &config).await
 }
 
-async fn execute_secret_delete_direct(
-    name: &str,
-    force: bool,
-    config: Config,
-) -> Result<()> {
-    use std::sync::Arc;
+async fn execute_secret_delete_direct(name: &str, force: bool, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     execute_secret_delete(&secret_manager, name, None, force, &config).await
 }
 
@@ -761,60 +804,65 @@ async fn execute_secret_update_direct(
     replace_groups: bool,
     config: Config,
 ) -> Result<()> {
-    use std::sync::Arc;
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
-    execute_secret_update(&secret_manager, name, None, value, stdin, tags, groups, rename, note, folder, replace_tags, replace_groups, &config).await
+
+    execute_secret_update(
+        &secret_manager,
+        name,
+        None,
+        value,
+        stdin,
+        tags,
+        groups,
+        rename,
+        note,
+        folder,
+        replace_tags,
+        replace_groups,
+        &config,
+    )
+    .await
 }
 
-async fn execute_secret_purge_direct(
-    name: &str,
-    force: bool,
-    config: Config,
-) -> Result<()> {
-    use std::sync::Arc;
+async fn execute_secret_purge_direct(name: &str, force: bool, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     execute_secret_purge(&secret_manager, name, None, force, &config).await
 }
 
-async fn execute_secret_restore_direct(
-    name: &str,
-    config: Config,
-) -> Result<()> {
-    use std::sync::Arc;
+async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     execute_secret_restore(&secret_manager, name, None, &config).await
 }
 
@@ -823,39 +871,34 @@ async fn execute_secret_parse_direct(
     format: &str,
     config: Config,
 ) -> Result<()> {
-    use std::sync::Arc;
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     execute_secret_parse(&secret_manager, connection_string, format, &config).await
 }
 
-async fn execute_secret_share_direct(
-    command: ShareCommands,
-    config: Config,
-) -> Result<()> {
-    use std::sync::Arc;
+async fn execute_secret_share_direct(command: ShareCommands, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     execute_secret_share(&secret_manager, command, &config).await
 }
 
@@ -879,7 +922,12 @@ async fn execute_context_command(command: ContextCommands, config: Config) -> Re
         ContextCommands::Show => {
             execute_context_show(&config).await?;
         }
-        ContextCommands::Use { vault_name, resource_group, global, local } => {
+        ContextCommands::Use {
+            vault_name,
+            resource_group,
+            global,
+            local,
+        } => {
             execute_context_use(&vault_name, resource_group, global, local, &config).await?;
         }
         ContextCommands::List => {
@@ -909,7 +957,7 @@ async fn execute_info_command(
 
 async fn execute_version_command() -> Result<()> {
     let build_info = get_build_info();
-    
+
     println!("crosstache Rust CLI");
     println!("===================");
     println!("Version:      {}", build_info.version);
@@ -918,14 +966,14 @@ async fn execute_version_command() -> Result<()> {
     println!("Git Hash:     {}", build_info.git_hash);
     println!("Git Branch:   {}", build_info.git_branch);
     println!("Built:        {}", build_info.build_time);
-    
+
     Ok(())
 }
 
 async fn execute_config_show(config: &Config) -> Result<()> {
     use crate::utils::format::format_table;
     use tabled::{Table, Tabled};
-    
+
     #[derive(Tabled)]
     struct ConfigItem {
         #[tabled(rename = "Setting")]
@@ -935,7 +983,7 @@ async fn execute_config_show(config: &Config) -> Result<()> {
         #[tabled(rename = "Source")]
         source: String,
     }
-    
+
     let items = vec![
         ConfigItem {
             key: "debug".to_string(),
@@ -944,19 +992,19 @@ async fn execute_config_show(config: &Config) -> Result<()> {
         },
         ConfigItem {
             key: "subscription_id".to_string(),
-            value: if config.subscription_id.is_empty() { 
-                "<not set>".to_string() 
-            } else { 
-                config.subscription_id.clone() 
+            value: if config.subscription_id.is_empty() {
+                "<not set>".to_string()
+            } else {
+                config.subscription_id.clone()
             },
             source: "config".to_string(),
         },
         ConfigItem {
             key: "default_vault".to_string(),
-            value: if config.default_vault.is_empty() { 
-                "<not set>".to_string() 
-            } else { 
-                config.default_vault.clone() 
+            value: if config.default_vault.is_empty() {
+                "<not set>".to_string()
+            } else {
+                config.default_vault.clone()
             },
             source: "config".to_string(),
         },
@@ -972,19 +1020,19 @@ async fn execute_config_show(config: &Config) -> Result<()> {
         },
         ConfigItem {
             key: "tenant_id".to_string(),
-            value: if config.tenant_id.is_empty() { 
-                "<not set>".to_string() 
-            } else { 
-                config.tenant_id.clone() 
+            value: if config.tenant_id.is_empty() {
+                "<not set>".to_string()
+            } else {
+                config.tenant_id.clone()
             },
             source: "config".to_string(),
         },
         ConfigItem {
             key: "function_app_url".to_string(),
-            value: if config.function_app_url.is_empty() { 
-                "<not set>".to_string() 
-            } else { 
-                config.function_app_url.clone() 
+            value: if config.function_app_url.is_empty() {
+                "<not set>".to_string()
+            } else {
+                config.function_app_url.clone()
             },
             source: "config".to_string(),
         },
@@ -1004,16 +1052,17 @@ async fn execute_config_show(config: &Config) -> Result<()> {
             source: "config".to_string(),
         },
     ];
-    
+
     if config.output_json {
-        let json_output = serde_json::to_string_pretty(config)
-            .map_err(|e| crosstacheError::serialization(format!("Failed to serialize config: {}", e)))?;
+        let json_output = serde_json::to_string_pretty(config).map_err(|e| {
+            crosstacheError::serialization(format!("Failed to serialize config: {}", e))
+        })?;
         println!("{}", json_output);
     } else {
         let table = Table::new(&items);
         println!("{}", format_table(table, config.no_color));
     }
-    
+
     Ok(())
 }
 
@@ -1024,7 +1073,6 @@ async fn execute_config_path() -> Result<()> {
 }
 
 async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Result<()> {
-    
     match key {
         "debug" => {
             config.debug = value.to_lowercase() == "true" || value == "1";
@@ -1048,8 +1096,9 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
             config.function_app_url = value.to_string();
         }
         "cache_ttl" => {
-            let seconds = value.parse::<u64>()
-                .map_err(|_| crosstacheError::config(format!("Invalid value for cache_ttl: {}", value)))?;
+            let seconds = value.parse::<u64>().map_err(|_| {
+                crosstacheError::config(format!("Invalid value for cache_ttl: {}", value))
+            })?;
             config.cache_ttl = std::time::Duration::from_secs(seconds);
         }
         "output_json" => {
@@ -1059,13 +1108,16 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
             config.no_color = value.to_lowercase() == "true" || value == "1";
         }
         _ => {
-            return Err(crosstacheError::config(format!("Unknown configuration key: {}", key)));
+            return Err(crosstacheError::config(format!(
+                "Unknown configuration key: {}",
+                key
+            )));
         }
     }
-    
+
     config.save().await?;
     println!("✅ Configuration updated: {} = {}", key, value);
-    
+
     Ok(())
 }
 
@@ -1078,12 +1130,12 @@ async fn execute_secret_set(
     folder: Option<String>,
     config: &Config,
 ) -> Result<()> {
-    use std::io::{self, Read};
     use crate::config::ContextManager;
-    
+    use std::io::{self, Read};
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
-    
+
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
@@ -1121,12 +1173,14 @@ async fn execute_secret_set(
     };
 
     // Set the secret
-    let secret = secret_manager.set_secret_safe(&vault_name, name, &value, secret_request).await?;
-    
+    let secret = secret_manager
+        .set_secret_safe(&vault_name, name, &value, secret_request)
+        .await?;
+
     println!("✅ Successfully set secret '{}'", secret.original_name);
     println!("   Vault: {}", vault_name);
     println!("   Version: {}", secret.version);
-    
+
     Ok(())
 }
 
@@ -1137,19 +1191,21 @@ async fn execute_secret_get(
     raw: bool,
     config: &Config,
 ) -> Result<()> {
-    use clipboard::{ClipboardProvider, ClipboardContext};
     use crate::config::ContextManager;
-    
+    use clipboard::{ClipboardContext, ClipboardProvider};
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
-    
+
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Get the secret
-    let secret = secret_manager.get_secret_safe(&vault_name, name, true, true).await?;
-    
+    let secret = secret_manager
+        .get_secret_safe(&vault_name, name, true, true)
+        .await?;
+
     if raw {
         // Raw output - print the value
         if let Some(value) = secret.value {
@@ -1159,17 +1215,15 @@ async fn execute_secret_get(
         // Default behavior - copy to clipboard
         if let Some(ref value) = secret.value {
             match ClipboardContext::new() {
-                Ok(mut ctx) => {
-                    match ctx.set_contents(value.clone()) {
-                        Ok(_) => {
-                            println!("✅ Secret '{}' copied to clipboard", name);
-                        }
-                        Err(e) => {
-                            eprintln!("⚠️  Failed to copy to clipboard: {}", e);
-                            eprintln!("Secret value: {}", value);
-                        }
+                Ok(mut ctx) => match ctx.set_contents(value.clone()) {
+                    Ok(_) => {
+                        println!("✅ Secret '{}' copied to clipboard", name);
                     }
-                }
+                    Err(e) => {
+                        eprintln!("⚠️  Failed to copy to clipboard: {}", e);
+                        eprintln!("Secret value: {}", value);
+                    }
+                },
                 Err(e) => {
                     eprintln!("⚠️  Failed to access clipboard: {}", e);
                     eprintln!("Secret value: {}", value);
@@ -1179,7 +1233,7 @@ async fn execute_secret_get(
             println!("⚠️  Secret '{}' has no value", name);
         }
     }
-    
+
     Ok(())
 }
 
@@ -1191,10 +1245,10 @@ async fn execute_secret_list(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
-    
+
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
@@ -1205,8 +1259,16 @@ async fn execute_secret_list(
         crate::utils::format::OutputFormat::Table
     };
 
-    secret_manager.list_secrets_formatted(&vault_name, group.as_deref(), output_format, false, show_all).await?;
-    
+    secret_manager
+        .list_secrets_formatted(
+            &vault_name,
+            group.as_deref(),
+            output_format,
+            false,
+            show_all,
+        )
+        .await?;
+
     Ok(())
 }
 
@@ -1218,10 +1280,10 @@ async fn execute_secret_delete(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
-    
+
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
@@ -1232,16 +1294,18 @@ async fn execute_secret_delete(
             "Are you sure you want to delete secret '{}' from vault '{}'? (y/N): ",
             name, vault_name
         ))?;
-        
+
         if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
             println!("Delete operation cancelled.");
             return Ok(());
         }
     }
 
-    secret_manager.delete_secret_safe(&vault_name, name, force).await?;
+    secret_manager
+        .delete_secret_safe(&vault_name, name, force)
+        .await?;
     println!("✅ Successfully deleted secret '{}'", name);
-    
+
     Ok(())
 }
 
@@ -1260,14 +1324,14 @@ async fn execute_secret_update(
     replace_groups: bool,
     config: &Config,
 ) -> Result<()> {
-    use std::io::{self, Read};
-    use std::collections::HashMap;
-    use crate::secret::manager::SecretUpdateRequest;
     use crate::config::ContextManager;
-    
+    use crate::secret::manager::SecretUpdateRequest;
+    use std::collections::HashMap;
+    use std::io::{self, Read};
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
-    
+
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
@@ -1292,7 +1356,13 @@ async fn execute_secret_update(
     };
 
     // Ensure at least one update is specified
-    if new_value.is_none() && tags.is_empty() && groups.is_empty() && rename.is_none() && note.is_none() && folder.is_none() {
+    if new_value.is_none()
+        && tags.is_empty()
+        && groups.is_empty()
+        && rename.is_none()
+        && note.is_none()
+        && folder.is_none()
+    {
         return Err(crosstacheError::invalid_argument(
             "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note) or rename secrets. Use 'secret set' to update secret values."
         ));
@@ -1315,10 +1385,14 @@ async fn execute_secret_update(
     // Validate rename if provided
     if let Some(ref new_name) = rename {
         if new_name.is_empty() {
-            return Err(crosstacheError::invalid_argument("New secret name cannot be empty"));
+            return Err(crosstacheError::invalid_argument(
+                "New secret name cannot be empty",
+            ));
         }
         if new_name == name {
-            return Err(crosstacheError::invalid_argument("New secret name must be different from current name"));
+            return Err(crosstacheError::invalid_argument(
+                "New secret name must be different from current name",
+            ));
         }
     }
 
@@ -1347,13 +1421,35 @@ async fn execute_secret_update(
     if new_value.is_some() {
         println!("  → Updating value");
     }
-    if !update_request.tags.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
+    if !update_request
+        .tags
+        .as_ref()
+        .map(|t| t.is_empty())
+        .unwrap_or(true)
+    {
         let action = if replace_tags { "Replacing" } else { "Merging" };
-        println!("  → {} tags: {}", action, update_request.tags.as_ref().unwrap().len());
+        println!(
+            "  → {} tags: {}",
+            action,
+            update_request.tags.as_ref().unwrap().len()
+        );
     }
-    if !update_request.groups.as_ref().map(|g| g.is_empty()).unwrap_or(true) {
-        let action = if replace_groups { "Replacing" } else { "Adding to" };
-        println!("  → {} groups: {:?}", action, update_request.groups.as_ref().unwrap());
+    if !update_request
+        .groups
+        .as_ref()
+        .map(|g| g.is_empty())
+        .unwrap_or(true)
+    {
+        let action = if replace_groups {
+            "Replacing"
+        } else {
+            "Adding to"
+        };
+        println!(
+            "  → {} groups: {:?}",
+            action,
+            update_request.groups.as_ref().unwrap()
+        );
     }
     if let Some(ref note_text) = note {
         println!("  → Adding note: {}", note_text);
@@ -1363,16 +1459,18 @@ async fn execute_secret_update(
     }
 
     // Perform enhanced secret update
-    let secret = secret_manager.update_secret_enhanced(&vault_name, &update_request).await?;
-    
+    let secret = secret_manager
+        .update_secret_enhanced(&vault_name, &update_request)
+        .await?;
+
     println!("✅ Successfully updated secret '{}'", secret.original_name);
     println!("   Vault: {}", vault_name);
     println!("   Version: {}", secret.version);
-    
+
     if let Some(ref new_name) = rename {
         println!("   New Name: {}", new_name);
     }
-    
+
     Ok(())
 }
 
@@ -1384,10 +1482,10 @@ async fn execute_secret_purge(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
-    
+
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
@@ -1398,7 +1496,7 @@ async fn execute_secret_purge(
             "Are you sure you want to PERMANENTLY DELETE secret '{}' from vault '{}'? This cannot be undone! (y/N): ",
             name, vault_name
         ))?;
-        
+
         if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
             println!("Purge operation cancelled.");
             return Ok(());
@@ -1406,9 +1504,11 @@ async fn execute_secret_purge(
     }
 
     // Permanently purge the secret using the secret manager
-    secret_manager.purge_secret_safe(&vault_name, name, force).await?;
+    secret_manager
+        .purge_secret_safe(&vault_name, name, force)
+        .await?;
     println!("✅ Successfully purged secret '{}'", name);
-    
+
     Ok(())
 }
 
@@ -1419,30 +1519,35 @@ async fn execute_secret_restore(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
-    
+
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
     println!("Restoring deleted secret '{}'...", name);
-    
+
     // Restore the secret using the secret manager
-    let restored_secret = secret_manager.restore_secret_safe(&vault_name, name).await?;
-    
-    println!("✅ Successfully restored secret '{}'", restored_secret.original_name);
+    let restored_secret = secret_manager
+        .restore_secret_safe(&vault_name, name)
+        .await?;
+
+    println!(
+        "✅ Successfully restored secret '{}'",
+        restored_secret.original_name
+    );
     println!("   Vault: {}", vault_name);
     println!("   Version: {}", restored_secret.version);
     println!("   Enabled: {}", restored_secret.enabled);
     println!("   Created: {}", restored_secret.created_on);
     println!("   Updated: {}", restored_secret.updated_on);
-    
+
     if !restored_secret.tags.is_empty() {
         println!("   Tags: {}", restored_secret.tags.len());
     }
-    
+
     Ok(())
 }
 
@@ -1452,12 +1557,15 @@ async fn execute_secret_parse(
     format: &str,
     config: &Config,
 ) -> Result<()> {
-    let components = secret_manager.parse_connection_string(connection_string).await?;
-    
+    let components = secret_manager
+        .parse_connection_string(connection_string)
+        .await?;
+
     match format.to_lowercase().as_str() {
         "json" => {
-            let json_output = serde_json::to_string_pretty(&components)
-                .map_err(|e| crosstacheError::serialization(format!("Failed to serialize components: {}", e)))?;
+            let json_output = serde_json::to_string_pretty(&components).map_err(|e| {
+                crosstacheError::serialization(format!("Failed to serialize components: {}", e))
+            })?;
             println!("{}", json_output);
         }
         "table" | _ => {
@@ -1466,13 +1574,13 @@ async fn execute_secret_parse(
             } else {
                 use crate::utils::format::format_table;
                 use tabled::Table;
-                
+
                 let table = Table::new(&components);
                 println!("{}", format_table(table, config.no_color));
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -1483,22 +1591,32 @@ async fn execute_secret_share(
 ) -> Result<()> {
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(None).await?;
-    
+
     match command {
-        ShareCommands::Grant { secret_name, user, level } => {
-            println!("TODO: Grant {} access to secret '{}' for user '{}' in vault '{}'", 
-                     level, secret_name, user, vault_name);
+        ShareCommands::Grant {
+            secret_name,
+            user,
+            level,
+        } => {
+            println!(
+                "TODO: Grant {} access to secret '{}' for user '{}' in vault '{}'",
+                level, secret_name, user, vault_name
+            );
         }
         ShareCommands::Revoke { secret_name, user } => {
-            println!("TODO: Revoke access to secret '{}' for user '{}' in vault '{}'", 
-                     secret_name, user, vault_name);
+            println!(
+                "TODO: Revoke access to secret '{}' for user '{}' in vault '{}'",
+                secret_name, user, vault_name
+            );
         }
         ShareCommands::List { secret_name } => {
-            println!("TODO: List access permissions for secret '{}' in vault '{}'", 
-                     secret_name, vault_name);
+            println!(
+                "TODO: List access permissions for secret '{}' in vault '{}'",
+                secret_name, vault_name
+            );
         }
     }
-    
+
     Ok(())
 }
 
@@ -1519,7 +1637,9 @@ async fn execute_vault_purge(
     force: bool,
     config: &Config,
 ) -> Result<()> {
-    vault_manager.purge_vault_permanent(name, location, force).await?;
+    vault_manager
+        .purge_vault_permanent(name, location, force)
+        .await?;
     Ok(())
 }
 
@@ -1533,88 +1653,133 @@ async fn execute_vault_export(
     group: Option<String>,
     config: &Config,
 ) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
     use std::fs::File;
     use std::io::Write;
-    use crate::secret::manager::SecretManager;
-    use crate::auth::provider::DefaultAzureCredentialProvider;
     use std::sync::Arc;
 
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-    
+
     // Create secret manager to get secrets from vault
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     // Get all secrets from vault (including disabled ones for export)
-    let secrets = secret_manager.list_secrets_formatted(
-        name,
-        group.as_deref(),
-        OutputFormat::Json,
-        false,
-        true, // show_all = true for export
-    ).await?;
-    
+    let secrets = secret_manager
+        .list_secrets_formatted(
+            name,
+            group.as_deref(),
+            OutputFormat::Json,
+            false,
+            true, // show_all = true for export
+        )
+        .await?;
+
     // Prepare export data based on format
     let export_data = match format.to_lowercase().as_str() {
         "json" => {
             let mut export_json = serde_json::Map::new();
-            export_json.insert("vault".to_string(), serde_json::Value::String(name.to_string()));
-            export_json.insert("exported_at".to_string(), serde_json::Value::String(chrono::Utc::now().to_rfc3339()));
-            
+            export_json.insert(
+                "vault".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
+            export_json.insert(
+                "exported_at".to_string(),
+                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+            );
+
             let mut secrets_json = Vec::new();
             for secret in &secrets {
                 let mut secret_data = serde_json::Map::new();
-                secret_data.insert("name".to_string(), serde_json::Value::String(secret.original_name.clone()));
-                secret_data.insert("enabled".to_string(), serde_json::Value::Bool(secret.enabled));
-                secret_data.insert("content_type".to_string(), serde_json::Value::String(secret.content_type.clone()));
-                
+                secret_data.insert(
+                    "name".to_string(),
+                    serde_json::Value::String(secret.original_name.clone()),
+                );
+                secret_data.insert(
+                    "enabled".to_string(),
+                    serde_json::Value::Bool(secret.enabled),
+                );
+                secret_data.insert(
+                    "content_type".to_string(),
+                    serde_json::Value::String(secret.content_type.clone()),
+                );
+
                 if include_values {
                     // Get actual secret value
-                    match secret_manager.get_secret_safe(name, &secret.original_name, true, true).await {
+                    match secret_manager
+                        .get_secret_safe(name, &secret.original_name, true, true)
+                        .await
+                    {
                         Ok(secret_props) => {
                             if let Some(value) = secret_props.value {
-                                secret_data.insert("value".to_string(), serde_json::Value::String(value));
+                                secret_data
+                                    .insert("value".to_string(), serde_json::Value::String(value));
                             }
                         }
                         Err(e) => {
-                            eprintln!("Warning: Failed to get value for secret '{}': {}", secret.original_name, e);
+                            eprintln!(
+                                "Warning: Failed to get value for secret '{}': {}",
+                                secret.original_name, e
+                            );
                         }
                     }
                 }
-                
+
                 secrets_json.push(serde_json::Value::Object(secret_data));
             }
-            export_json.insert("secrets".to_string(), serde_json::Value::Array(secrets_json));
-            
-            serde_json::to_string_pretty(&export_json)
-                .map_err(|e| crosstacheError::serialization(format!("Failed to serialize export data: {}", e)))?
+            export_json.insert(
+                "secrets".to_string(),
+                serde_json::Value::Array(secrets_json),
+            );
+
+            serde_json::to_string_pretty(&export_json).map_err(|e| {
+                crosstacheError::serialization(format!("Failed to serialize export data: {}", e))
+            })?
         }
         "env" => {
             let mut env_lines = Vec::new();
-            env_lines.push(format!("# Exported from vault '{}' on {}", name, chrono::Utc::now().to_rfc3339()));
-            
+            env_lines.push(format!(
+                "# Exported from vault '{}' on {}",
+                name,
+                chrono::Utc::now().to_rfc3339()
+            ));
+
             for secret in &secrets {
                 if include_values {
-                    match secret_manager.get_secret_safe(name, &secret.original_name, true, true).await {
+                    match secret_manager
+                        .get_secret_safe(name, &secret.original_name, true, true)
+                        .await
+                    {
                         Ok(secret_props) => {
                             if let Some(value) = secret_props.value {
-                                let env_name = secret.original_name.to_uppercase().replace("-", "_").replace(".", "_");
+                                let env_name = secret
+                                    .original_name
+                                    .to_uppercase()
+                                    .replace("-", "_")
+                                    .replace(".", "_");
                                 env_lines.push(format!("{}={}", env_name, value));
                             }
                         }
                         Err(e) => {
-                            eprintln!("Warning: Failed to get value for secret '{}': {}", secret.original_name, e);
+                            eprintln!(
+                                "Warning: Failed to get value for secret '{}': {}",
+                                secret.original_name, e
+                            );
                         }
                     }
                 } else {
-                    let env_name = secret.original_name.to_uppercase().replace("-", "_").replace(".", "_");
+                    let env_name = secret
+                        .original_name
+                        .to_uppercase()
+                        .replace("-", "_")
+                        .replace(".", "_");
                     env_lines.push(format!("# {}", env_name));
                 }
             }
-            
+
             env_lines.join("\n")
         }
         "txt" => {
@@ -1622,49 +1787,60 @@ async fn execute_vault_export(
             txt_lines.push(format!("Vault: {}", name));
             txt_lines.push(format!("Exported: {}", chrono::Utc::now().to_rfc3339()));
             txt_lines.push("".to_string());
-            
+
             for secret in &secrets {
                 txt_lines.push(format!("Secret: {}", secret.original_name));
                 txt_lines.push(format!("  Enabled: {}", secret.enabled));
                 txt_lines.push(format!("  Content Type: {}", secret.content_type));
                 txt_lines.push(format!("  Updated: {}", secret.updated_on));
-                
+
                 if include_values {
-                    match secret_manager.get_secret_safe(name, &secret.original_name, true, true).await {
+                    match secret_manager
+                        .get_secret_safe(name, &secret.original_name, true, true)
+                        .await
+                    {
                         Ok(secret_props) => {
                             if let Some(value) = secret_props.value {
                                 txt_lines.push(format!("  Value: {}", value));
                             }
                         }
                         Err(e) => {
-                            eprintln!("Warning: Failed to get value for secret '{}': {}", secret.original_name, e);
+                            eprintln!(
+                                "Warning: Failed to get value for secret '{}': {}",
+                                secret.original_name, e
+                            );
                         }
                     }
                 }
                 txt_lines.push("".to_string());
             }
-            
+
             txt_lines.join("\n")
         }
         _ => {
-            return Err(crosstacheError::invalid_argument(format!("Unsupported export format: {}", format)));
+            return Err(crosstacheError::invalid_argument(format!(
+                "Unsupported export format: {}",
+                format
+            )));
         }
     };
-    
+
     // Write to output
     match output {
         Some(file_path) => {
-            let mut file = File::create(&file_path)
-                .map_err(|e| crosstacheError::unknown(format!("Failed to create output file: {}", e)))?;
-            file.write_all(export_data.as_bytes())
-                .map_err(|e| crosstacheError::unknown(format!("Failed to write to output file: {}", e)))?;
+            let mut file = File::create(&file_path).map_err(|e| {
+                crosstacheError::unknown(format!("Failed to create output file: {}", e))
+            })?;
+            file.write_all(export_data.as_bytes()).map_err(|e| {
+                crosstacheError::unknown(format!("Failed to write to output file: {}", e))
+            })?;
             println!("Exported {} secrets to {}", secrets.len(), file_path);
         }
         None => {
             println!("{}", export_data);
         }
     }
-    
+
     Ok(())
 }
 
@@ -1678,58 +1854,62 @@ async fn execute_vault_import(
     dry_run: bool,
     config: &Config,
 ) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::{SecretManager, SecretRequest};
     use std::fs;
     use std::io::{self, Read};
-    use crate::secret::manager::{SecretManager, SecretRequest};
-    use crate::auth::provider::DefaultAzureCredentialProvider;
     use std::sync::Arc;
 
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-    
+
     // Read import data
     let import_data = match input {
-        Some(file_path) => {
-            fs::read_to_string(file_path)
-                .map_err(|e| crosstacheError::unknown(format!("Failed to read input file: {}", e)))?
-        }
+        Some(file_path) => fs::read_to_string(file_path)
+            .map_err(|e| crosstacheError::unknown(format!("Failed to read input file: {}", e)))?,
         None => {
             let mut buffer = String::new();
-            io::stdin().read_to_string(&mut buffer)
-                .map_err(|e| crosstacheError::unknown(format!("Failed to read from stdin: {}", e)))?;
+            io::stdin().read_to_string(&mut buffer).map_err(|e| {
+                crosstacheError::unknown(format!("Failed to read from stdin: {}", e))
+            })?;
             buffer
         }
     };
-    
+
     // Parse import data based on format
     let secrets_to_import = match format.to_lowercase().as_str() {
         "json" => {
-            let json_data: serde_json::Value = serde_json::from_str(&import_data)
-                .map_err(|e| crosstacheError::serialization(format!("Failed to parse JSON: {}", e)))?;
-            
-            let secrets_array = json_data.get("secrets")
+            let json_data: serde_json::Value = serde_json::from_str(&import_data).map_err(|e| {
+                crosstacheError::serialization(format!("Failed to parse JSON: {}", e))
+            })?;
+
+            let secrets_array = json_data
+                .get("secrets")
                 .and_then(|s| s.as_array())
                 .ok_or_else(|| crosstacheError::serialization("Missing 'secrets' array in JSON"))?;
-            
+
             let mut secrets = Vec::new();
             for secret_value in secrets_array {
-                let secret_obj = secret_value.as_object()
-                    .ok_or_else(|| crosstacheError::serialization("Invalid secret object in JSON"))?;
-                
-                let name = secret_obj.get("name")
+                let secret_obj = secret_value.as_object().ok_or_else(|| {
+                    crosstacheError::serialization("Invalid secret object in JSON")
+                })?;
+
+                let name = secret_obj
+                    .get("name")
                     .and_then(|n| n.as_str())
                     .ok_or_else(|| crosstacheError::serialization("Missing secret name"))?;
-                
-                let value = secret_obj.get("value")
+
+                let value = secret_obj
+                    .get("value")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| crosstacheError::serialization("Missing secret value"))?;
-                
-                let content_type = secret_obj.get("content_type")
+
+                let content_type = secret_obj
+                    .get("content_type")
                     .and_then(|ct| ct.as_str())
                     .map(|s| s.to_string());
-                
-                let enabled = secret_obj.get("enabled")
-                    .and_then(|e| e.as_bool());
-                
+
+                let enabled = secret_obj.get("enabled").and_then(|e| e.as_bool());
+
                 secrets.push(SecretRequest {
                     name: name.to_string(),
                     value: value.to_string(),
@@ -1743,7 +1923,7 @@ async fn execute_vault_import(
                     folder: None,
                 });
             }
-            
+
             secrets
         }
         "env" => {
@@ -1753,11 +1933,11 @@ async fn execute_vault_import(
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                
+
                 if let Some(pos) = line.find('=') {
                     let key = line[..pos].trim().to_lowercase().replace("_", "-");
                     let value = line[pos + 1..].trim();
-                    
+
                     secrets.push(SecretRequest {
                         name: key,
                         value: value.to_string(),
@@ -1772,39 +1952,48 @@ async fn execute_vault_import(
                     });
                 }
             }
-            
+
             secrets
         }
         _ => {
-            return Err(crosstacheError::invalid_argument(format!("Unsupported import format: {}", format)));
+            return Err(crosstacheError::invalid_argument(format!(
+                "Unsupported import format: {}",
+                format
+            )));
         }
     };
-    
+
     if dry_run {
-        println!("Dry run: Would import {} secrets to vault '{}':", secrets_to_import.len(), name);
+        println!(
+            "Dry run: Would import {} secrets to vault '{}':",
+            secrets_to_import.len(),
+            name
+        );
         for secret in &secrets_to_import {
             println!("  - {}", secret.name);
         }
         return Ok(());
     }
-    
+
     // Create secret manager to import secrets
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::new()
-            .map_err(|e| crosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
-    );
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
+        crosstacheError::authentication(format!("Failed to create auth provider: {}", e))
+    })?);
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    
+
     let mut imported_count = 0;
     let mut skipped_count = 0;
-    
+
     for secret_request in secrets_to_import {
         let secret_name = secret_request.name.clone();
         let secret_value = secret_request.value.clone();
-        
+
         // Check if secret exists if not overwriting
         if !overwrite {
-            match secret_manager.get_secret_safe(name, &secret_name, false, true).await {
+            match secret_manager
+                .get_secret_safe(name, &secret_name, false, true)
+                .await
+            {
                 Ok(_) => {
                     println!("Skipping existing secret: {}", secret_name);
                     skipped_count += 1;
@@ -1815,8 +2004,11 @@ async fn execute_vault_import(
                 }
             }
         }
-        
-        match secret_manager.set_secret_safe(name, &secret_name, &secret_value, Some(secret_request)).await {
+
+        match secret_manager
+            .set_secret_safe(name, &secret_name, &secret_value, Some(secret_request))
+            .await
+        {
             Ok(_) => {
                 println!("Imported secret: {}", secret_name);
                 imported_count += 1;
@@ -1826,9 +2018,12 @@ async fn execute_vault_import(
             }
         }
     }
-    
-    println!("Import completed: {} imported, {} skipped", imported_count, skipped_count);
-    
+
+    println!(
+        "Import completed: {} imported, {} skipped",
+        imported_count, skipped_count
+    );
+
     Ok(())
 }
 
@@ -1844,18 +2039,18 @@ async fn execute_vault_update(
     retention_days: Option<i32>,
     config: &Config,
 ) -> Result<()> {
-    use std::collections::HashMap;
     use crate::vault::models::VaultUpdateRequest;
+    use std::collections::HashMap;
 
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-    
+
     // Convert tags vector to HashMap
     let tags_map = if !tags.is_empty() {
         Some(tags.into_iter().collect::<HashMap<String, String>>())
     } else {
         None
     };
-    
+
     let update_request = VaultUpdateRequest {
         enabled_for_deployment: enable_deployment,
         enabled_for_disk_encryption: enable_disk_encryption,
@@ -1865,12 +2060,15 @@ async fn execute_vault_update(
         tags: tags_map,
         access_policies: None, // Don't modify access policies in update
     };
-    
+
     // Note: This would need proper implementation in vault manager
-    println!("Updating vault '{}' in resource group '{}'...", name, resource_group);
+    println!(
+        "Updating vault '{}' in resource group '{}'...",
+        name, resource_group
+    );
     println!("Update request: {:?}", update_request);
     println!("TODO: Implement vault update functionality");
-    
+
     Ok(())
 }
 
@@ -1882,43 +2080,76 @@ async fn execute_vault_share(
     use crate::vault::models::AccessLevel;
 
     match command {
-        VaultShareCommands::Grant { vault_name, user, resource_group, level } => {
-            let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-            
+        VaultShareCommands::Grant {
+            vault_name,
+            user,
+            resource_group,
+            level,
+        } => {
+            let resource_group =
+                resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+
             let access_level = match level.to_lowercase().as_str() {
                 "reader" | "read" => AccessLevel::Reader,
                 "contributor" | "write" => AccessLevel::Contributor,
                 "admin" | "administrator" => AccessLevel::Admin,
-                _ => return Err(crosstacheError::invalid_argument(format!("Invalid access level: {}", level))),
+                _ => {
+                    return Err(crosstacheError::invalid_argument(format!(
+                        "Invalid access level: {}",
+                        level
+                    )))
+                }
             };
-            
-            vault_manager.grant_vault_access(&vault_name, &resource_group, &user, access_level, Some(&user)).await?;
+
+            vault_manager
+                .grant_vault_access(
+                    &vault_name,
+                    &resource_group,
+                    &user,
+                    access_level,
+                    Some(&user),
+                )
+                .await?;
         }
-        VaultShareCommands::Revoke { vault_name, user, resource_group } => {
-            let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-            
-            vault_manager.revoke_vault_access(&vault_name, &resource_group, &user, Some(&user)).await?;
+        VaultShareCommands::Revoke {
+            vault_name,
+            user,
+            resource_group,
+        } => {
+            let resource_group =
+                resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+
+            vault_manager
+                .revoke_vault_access(&vault_name, &resource_group, &user, Some(&user))
+                .await?;
         }
-        VaultShareCommands::List { vault_name, resource_group, format } => {
-            let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-            
+        VaultShareCommands::List {
+            vault_name,
+            resource_group,
+            format,
+        } => {
+            let resource_group =
+                resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+
             let output_format = match format.to_lowercase().as_str() {
                 "json" => OutputFormat::Json,
                 "table" | _ => OutputFormat::Table,
             };
-            
-            vault_manager.list_vault_access(&vault_name, &resource_group, output_format).await?;
+
+            vault_manager
+                .list_vault_access(&vault_name, &resource_group, output_format)
+                .await?;
         }
     }
-    
+
     Ok(())
 }
 
 async fn execute_context_show(config: &Config) -> Result<()> {
     use crate::config::ContextManager;
-    
+
     let context_manager = ContextManager::load().await.unwrap_or_default();
-    
+
     if let Some(ref context) = context_manager.current {
         println!("Current Vault Context:");
         println!("  Vault: {}", context.vault_name);
@@ -1928,9 +2159,12 @@ async fn execute_context_show(config: &Config) -> Result<()> {
         if let Some(ref sub) = context.subscription_id {
             println!("  Subscription: {}", sub);
         }
-        println!("  Last Used: {}", context.last_used.format("%Y-%m-%d %H:%M:%S UTC"));
+        println!(
+            "  Last Used: {}",
+            context.last_used.format("%Y-%m-%d %H:%M:%S UTC")
+        );
         println!("  Usage Count: {}", context.usage_count);
-        
+
         // Show context source
         println!("  Scope: {}", context_manager.scope_description());
     } else {
@@ -1941,7 +2175,7 @@ async fn execute_context_show(config: &Config) -> Result<()> {
             println!("Hint: Use 'xv context use <vault-name>' to set a context");
         }
     }
-    
+
     Ok(())
 }
 
@@ -1953,7 +2187,7 @@ async fn execute_context_use(
     config: &Config,
 ) -> Result<()> {
     use crate::config::{ContextManager, VaultContext};
-    
+
     let mut context_manager = if local {
         // Create local context
         ContextManager::new_local()?
@@ -1962,11 +2196,11 @@ async fn execute_context_use(
         ContextManager::new_global()?
     } else {
         // Load existing or create new (defaults to global)
-        ContextManager::load().await.unwrap_or_else(|_| {
-            ContextManager::new_global().unwrap()
-        })
+        ContextManager::load()
+            .await
+            .unwrap_or_else(|_| ContextManager::new_global().unwrap())
     };
-    
+
     // Create new context
     let new_context = VaultContext::new(
         vault_name.to_string(),
@@ -1983,17 +2217,17 @@ async fn execute_context_use(
             None
         },
     );
-    
+
     // Update context manager
     context_manager.set_context(new_context).await?;
-    
+
     let scope = if local { "local" } else { "global" };
     println!("✅ Switched to vault '{}' ({} context)", vault_name, scope);
-    
+
     if let Some(ref rg) = context_manager.current_resource_group() {
         println!("   Resource Group: {}", rg);
     }
-    
+
     Ok(())
 }
 
@@ -2001,15 +2235,15 @@ async fn execute_context_list(_config: &Config) -> Result<()> {
     use crate::config::ContextManager;
     use crate::utils::format::format_table;
     use tabled::{Table, Tabled};
-    
+
     let context_manager = ContextManager::load().await.unwrap_or_default();
-    
+
     if context_manager.recent.is_empty() && context_manager.current.is_none() {
         println!("No vault contexts found");
         println!("Hint: Use 'xv context use <vault-name>' to create a context");
         return Ok(());
     }
-    
+
     #[derive(Tabled)]
     struct ContextItem {
         #[tabled(rename = "Status")]
@@ -2023,9 +2257,9 @@ async fn execute_context_list(_config: &Config) -> Result<()> {
         #[tabled(rename = "Usage Count")]
         usage_count: String,
     }
-    
+
     let mut items = Vec::new();
-    
+
     // Add current context
     if let Some(ref context) = context_manager.current {
         items.push(ContextItem {
@@ -2036,7 +2270,7 @@ async fn execute_context_list(_config: &Config) -> Result<()> {
             usage_count: context.usage_count.to_string(),
         });
     }
-    
+
     // Add recent contexts
     for context in context_manager.list_recent() {
         // Skip if it's the current context
@@ -2045,7 +2279,7 @@ async fn execute_context_list(_config: &Config) -> Result<()> {
                 continue;
             }
         }
-        
+
         items.push(ContextItem {
             status: "  Recent".to_string(),
             vault: context.vault_name.clone(),
@@ -2054,45 +2288,54 @@ async fn execute_context_list(_config: &Config) -> Result<()> {
             usage_count: context.usage_count.to_string(),
         });
     }
-    
+
     if !items.is_empty() {
         let table = Table::new(&items);
         println!("{}", format_table(table, false));
-        
+
         println!("\nScope: {}", context_manager.scope_description());
         if ContextManager::local_context_exists() {
             println!("Note: Local context file found in current directory (.xv/context)");
         }
     }
-    
+
     Ok(())
 }
 
 async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
     use crate::config::ContextManager;
-    
+
     let mut context_manager = if global {
         ContextManager::new_global()?
     } else {
         ContextManager::load().await.unwrap_or_default()
     };
-    
+
     if context_manager.current.is_none() {
         println!("No active context to clear");
         return Ok(());
     }
-    
+
     let vault_name = context_manager.current_vault().unwrap().to_string();
     context_manager.clear_context().await?;
-    
-    let scope = if global { "global" } else { context_manager.scope_description() };
-    println!("✅ Cleared vault context for '{}' ({} scope)", vault_name, scope);
-    
+
+    let scope = if global {
+        "global"
+    } else {
+        context_manager.scope_description()
+    };
+    println!(
+        "✅ Cleared vault context for '{}' ({} scope)",
+        vault_name, scope
+    );
+
     Ok(())
 }
 
 /// Parse a single key-value pair
-fn parse_key_val<T, U>(s: &str) -> std::result::Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+fn parse_key_val<T, U>(
+    s: &str,
+) -> std::result::Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
 where
     T: std::str::FromStr,
     T::Err: std::error::Error + Send + Sync + 'static,

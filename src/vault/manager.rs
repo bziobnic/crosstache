@@ -1,5 +1,5 @@
 //! Vault management facade
-//! 
+//!
 //! This module provides a high-level interface for vault operations,
 //! combining vault operations with RBAC management and providing
 //! a unified API for vault management tasks.
@@ -7,14 +7,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::models::{
+    AccessLevel, AccessPolicy, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary,
+    VaultUpdateRequest,
+};
+use super::operations::{AzureVaultOperations, VaultOperations};
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::{crosstacheError, Result};
-use crate::utils::format::{TableFormatter, DisplayUtils, OutputFormat};
-use super::models::{
-    VaultProperties, VaultCreateRequest, VaultUpdateRequest, VaultSummary,
-    AccessLevel, VaultRole, AccessPolicy
-};
-use super::operations::{VaultOperations, AzureVaultOperations};
+use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
 
 /// High-level vault manager
 pub struct VaultManager {
@@ -25,15 +25,19 @@ pub struct VaultManager {
 
 impl VaultManager {
     /// Create a new vault manager
-    pub fn new(auth_provider: Arc<dyn AzureAuthProvider>, subscription_id: String, no_color: bool) -> Self {
-        let vault_ops = Arc::new(AzureVaultOperations::new(auth_provider, subscription_id));
+    pub fn new(
+        auth_provider: Arc<dyn AzureAuthProvider>,
+        subscription_id: String,
+        no_color: bool,
+    ) -> Result<Self> {
+        let vault_ops = Arc::new(AzureVaultOperations::new(auth_provider, subscription_id)?);
         let display_utils = DisplayUtils::new(no_color);
 
-        Self {
+        Ok(Self {
             vault_ops,
             display_utils,
             no_color,
-        }
+        })
     }
 
     /// Create a new vault with automatic access policy setup
@@ -44,7 +48,8 @@ impl VaultManager {
         resource_group: &str,
         additional_options: Option<VaultCreateRequest>,
     ) -> Result<VaultProperties> {
-        self.display_utils.print_info(&format!("Creating vault '{}'...", name))?;
+        self.display_utils
+            .print_info(&format!("Creating vault '{}'...", name))?;
 
         let mut request = additional_options.unwrap_or_default();
         request.name = name.to_string();
@@ -73,12 +78,20 @@ impl VaultManager {
     }
 
     /// Get vault properties without displaying them
-    pub async fn get_vault_properties(&self, vault_name: &str, resource_group: &str) -> Result<VaultProperties> {
+    pub async fn get_vault_properties(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+    ) -> Result<VaultProperties> {
         self.vault_ops.get_vault(vault_name, resource_group).await
     }
 
     /// Get vault information and display it
-    pub async fn get_vault_info(&self, vault_name: &str, resource_group: &str) -> Result<VaultProperties> {
+    pub async fn get_vault_info(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+    ) -> Result<VaultProperties> {
         let vault = self.vault_ops.get_vault(vault_name, resource_group).await?;
 
         // Display vault information
@@ -94,7 +107,10 @@ impl VaultManager {
         resource_group: Option<&str>,
         output_format: OutputFormat,
     ) -> Result<Vec<VaultSummary>> {
-        let vaults = self.vault_ops.list_vaults(subscription_id, resource_group).await?;
+        let vaults = self
+            .vault_ops
+            .list_vaults(subscription_id, resource_group)
+            .await?;
 
         if vaults.is_empty() {
             self.display_utils.print_info("No vaults found.")?;
@@ -126,7 +142,9 @@ impl VaultManager {
             ))?;
 
             if vault.has_purge_protection() {
-                self.display_utils.print_warning("This vault has purge protection enabled - it cannot be permanently deleted.")?;
+                self.display_utils.print_warning(
+                    "This vault has purge protection enabled - it cannot be permanently deleted.",
+                )?;
             } else {
                 self.display_utils.print_warning(&format!(
                     "The vault will be recoverable for {} days after deletion.",
@@ -135,7 +153,9 @@ impl VaultManager {
             }
         }
 
-        self.vault_ops.delete_vault(vault_name, resource_group).await?;
+        self.vault_ops
+            .delete_vault(vault_name, resource_group)
+            .await?;
 
         self.display_utils.print_success(&format!(
             "Successfully deleted vault '{}' (soft delete)",
@@ -147,17 +167,13 @@ impl VaultManager {
 
     /// Restore a soft-deleted vault
     pub async fn restore_vault(&self, vault_name: &str, location: &str) -> Result<VaultProperties> {
-        self.display_utils.print_info(&format!(
-            "Restoring soft-deleted vault '{}'...",
-            vault_name
-        ))?;
+        self.display_utils
+            .print_info(&format!("Restoring soft-deleted vault '{}'...", vault_name))?;
 
         let vault = self.vault_ops.restore_vault(vault_name, location).await?;
 
-        self.display_utils.print_success(&format!(
-            "Successfully restored vault '{}'",
-            vault_name
-        ))?;
+        self.display_utils
+            .print_success(&format!("Successfully restored vault '{}'", vault_name))?;
 
         Ok(vault)
     }
@@ -174,7 +190,8 @@ impl VaultManager {
                 "This will PERMANENTLY delete vault '{}' and all its contents!",
                 vault_name
             ))?;
-            self.display_utils.print_warning("This action cannot be undone.")?;
+            self.display_utils
+                .print_warning("This action cannot be undone.")?;
         }
 
         self.vault_ops.purge_vault(vault_name, location).await?;
@@ -209,7 +226,9 @@ impl VaultManager {
             access_level_str, vault_name, user_display
         ))?;
 
-        self.vault_ops.grant_access(vault_name, resource_group, user_object_id, access_level).await?;
+        self.vault_ops
+            .grant_access(vault_name, resource_group, user_object_id, access_level)
+            .await?;
 
         self.display_utils.print_success(&format!(
             "Successfully granted {} access to vault '{}' for user '{}'",
@@ -234,7 +253,9 @@ impl VaultManager {
             vault_name, user_display
         ))?;
 
-        self.vault_ops.revoke_access(vault_name, resource_group, user_object_id).await?;
+        self.vault_ops
+            .revoke_access(vault_name, resource_group, user_object_id)
+            .await?;
 
         self.display_utils.print_success(&format!(
             "Successfully revoked access to vault '{}' for user '{}'",
@@ -251,14 +272,19 @@ impl VaultManager {
         resource_group: &str,
         output_format: OutputFormat,
     ) -> Result<Vec<VaultRole>> {
-        let roles = self.vault_ops.list_access(vault_name, resource_group).await?;
+        let roles = self
+            .vault_ops
+            .list_access(vault_name, resource_group)
+            .await?;
 
         if roles.is_empty() {
-            self.display_utils.print_info("No access policies found for this vault.")?;
+            self.display_utils
+                .print_info("No access policies found for this vault.")?;
             return Ok(roles);
         }
 
-        self.display_utils.print_header(&format!("Access Policies for Vault '{}'", vault_name))?;
+        self.display_utils
+            .print_header(&format!("Access Policies for Vault '{}'", vault_name))?;
 
         // Format and display results
         let formatter = TableFormatter::new(output_format, self.no_color);
@@ -277,14 +303,19 @@ impl VaultManager {
         merge_with_existing: bool,
     ) -> Result<()> {
         let final_tags = if merge_with_existing {
-            let mut existing_tags = self.vault_ops.get_vault_tags(vault_name, resource_group).await?;
+            let mut existing_tags = self
+                .vault_ops
+                .get_vault_tags(vault_name, resource_group)
+                .await?;
             existing_tags.extend(tags);
             existing_tags
         } else {
             tags
         };
 
-        self.vault_ops.update_vault_tags(vault_name, resource_group, final_tags).await?;
+        self.vault_ops
+            .update_vault_tags(vault_name, resource_group, final_tags)
+            .await?;
 
         self.display_utils.print_success(&format!(
             "Successfully updated tags for vault '{}'",
@@ -295,7 +326,11 @@ impl VaultManager {
     }
 
     /// Check vault health and connectivity
-    pub async fn check_vault_health(&self, vault_name: &str, resource_group: &str) -> Result<VaultHealthStatus> {
+    pub async fn check_vault_health(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+    ) -> Result<VaultHealthStatus> {
         let vault = match self.vault_ops.get_vault(vault_name, resource_group).await {
             Ok(v) => v,
             Err(_) => {
@@ -337,11 +372,12 @@ impl VaultManager {
 
     /// Display detailed vault information
     fn display_vault_details(&self, vault: &VaultProperties) -> Result<()> {
-        self.display_utils.print_header(&format!("Vault: {}", vault.name))?;
+        self.display_utils
+            .print_header(&format!("Vault: {}", vault.name))?;
 
         let vault_uri = vault.get_vault_uri();
         let retention_days = format!("{} days", vault.soft_delete_retention_in_days);
-        
+
         let details = vec![
             ("Resource ID", vault.id.as_str()),
             ("Location", vault.location.as_str()),
@@ -350,10 +386,38 @@ impl VaultManager {
             ("Vault URI", vault_uri.as_str()),
             ("SKU", vault.sku.as_str()),
             ("Soft Delete Retention", retention_days.as_str()),
-            ("Purge Protection", if vault.purge_protection { "Enabled" } else { "Disabled" }),
-            ("Deployment Access", if vault.enabled_for_deployment { "Enabled" } else { "Disabled" }),
-            ("Disk Encryption Access", if vault.enabled_for_disk_encryption { "Enabled" } else { "Disabled" }),
-            ("Template Access", if vault.enabled_for_template_deployment { "Enabled" } else { "Disabled" }),
+            (
+                "Purge Protection",
+                if vault.purge_protection {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                },
+            ),
+            (
+                "Deployment Access",
+                if vault.enabled_for_deployment {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                },
+            ),
+            (
+                "Disk Encryption Access",
+                if vault.enabled_for_disk_encryption {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                },
+            ),
+            (
+                "Template Access",
+                if vault.enabled_for_template_deployment {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                },
+            ),
         ];
 
         let formatted_details = self.display_utils.format_key_value_pairs(&details);
@@ -362,7 +426,7 @@ impl VaultManager {
         if !vault.access_policies.is_empty() {
             self.display_utils.print_separator()?;
             self.display_utils.print_header("Access Policies")?;
-            
+
             let formatter = TableFormatter::new(OutputFormat::Table, self.no_color);
             let table_output = formatter.format_table(&vault.access_policies)?;
             println!("{}", table_output);
@@ -371,8 +435,10 @@ impl VaultManager {
         if !vault.tags.is_empty() {
             self.display_utils.print_separator()?;
             self.display_utils.print_header("Tags")?;
-            
-            let tag_pairs: Vec<(&str, &str)> = vault.tags.iter()
+
+            let tag_pairs: Vec<(&str, &str)> = vault
+                .tags
+                .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             let formatted_tags = self.display_utils.format_key_value_pairs(&tag_pairs);
@@ -383,11 +449,16 @@ impl VaultManager {
     }
 
     /// Export vault configuration to JSON
-    pub async fn export_vault_config(&self, vault_name: &str, resource_group: &str) -> Result<String> {
+    pub async fn export_vault_config(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+    ) -> Result<String> {
         let vault = self.vault_ops.get_vault(vault_name, resource_group).await?;
-        
-        let config = serde_json::to_string_pretty(&vault)
-            .map_err(|e| crosstacheError::serialization(format!("Failed to serialize vault config: {}", e)))?;
+
+        let config = serde_json::to_string_pretty(&vault).map_err(|e| {
+            crosstacheError::serialization(format!("Failed to serialize vault config: {}", e))
+        })?;
 
         Ok(config)
     }
@@ -395,30 +466,32 @@ impl VaultManager {
     /// Validate vault name according to Azure requirements
     pub fn validate_vault_name(name: &str) -> Result<()> {
         if name.is_empty() {
-            return Err(crosstacheError::invalid_argument("Vault name cannot be empty"));
+            return Err(crosstacheError::invalid_argument(
+                "Vault name cannot be empty",
+            ));
         }
 
         if name.len() < 3 || name.len() > 24 {
             return Err(crosstacheError::invalid_argument(
-                "Vault name must be between 3 and 24 characters"
+                "Vault name must be between 3 and 24 characters",
             ));
         }
 
         if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err(crosstacheError::invalid_argument(
-                "Vault name can only contain alphanumeric characters and hyphens"
+                "Vault name can only contain alphanumeric characters and hyphens",
             ));
         }
 
         if name.starts_with('-') || name.ends_with('-') {
             return Err(crosstacheError::invalid_argument(
-                "Vault name cannot start or end with a hyphen"
+                "Vault name cannot start or end with a hyphen",
             ));
         }
 
         if name.contains("--") {
             return Err(crosstacheError::invalid_argument(
-                "Vault name cannot contain consecutive hyphens"
+                "Vault name cannot contain consecutive hyphens",
             ));
         }
 
@@ -493,12 +566,14 @@ impl VaultManagerBuilder {
 
     /// Build the vault manager
     pub fn build(self) -> Result<VaultManager> {
-        let auth_provider = self.auth_provider
+        let auth_provider = self
+            .auth_provider
             .ok_or_else(|| crosstacheError::config("Authentication provider is required"))?;
-        let subscription_id = self.subscription_id
+        let subscription_id = self
+            .subscription_id
             .ok_or_else(|| crosstacheError::config("Subscription ID is required"))?;
 
-        Ok(VaultManager::new(auth_provider, subscription_id, self.no_color))
+        VaultManager::new(auth_provider, subscription_id, self.no_color)
     }
 }
 

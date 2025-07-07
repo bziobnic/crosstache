@@ -1,68 +1,97 @@
 //! Vault operations implementation
-//! 
+//!
 //! This module provides core vault management operations including
 //! creation, deletion, access control, and metadata management.
 
 use async_trait::async_trait;
-use reqwest::{Client, header::HeaderMap};
+use reqwest::{header::HeaderMap, Client};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::models::{
+    AccessLevel, AccessPolicy, BuiltInRoles, RoleAssignmentRequest, VaultCreateRequest,
+    VaultProperties, VaultRole, VaultStatus, VaultSummary, VaultUpdateRequest,
+};
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::{crosstacheError, Result};
+use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
 use crate::utils::retry::retry_with_backoff;
-use super::models::{
-    VaultProperties, VaultCreateRequest, VaultUpdateRequest, VaultSummary,
-    AccessPolicy, AccessLevel, VaultRole, RoleAssignmentRequest, BuiltInRoles,
-    VaultStatus
-};
 
 /// Trait for vault operations
 #[async_trait]
 pub trait VaultOperations: Send + Sync {
     /// Create a new vault
     async fn create_vault(&self, request: &VaultCreateRequest) -> Result<VaultProperties>;
-    
+
     /// Get vault details
     async fn get_vault(&self, vault_name: &str, resource_group: &str) -> Result<VaultProperties>;
-    
+
     /// List vaults in subscription
-    async fn list_vaults(&self, subscription_id: Option<&str>, resource_group: Option<&str>) -> Result<Vec<VaultSummary>>;
-    
+    async fn list_vaults(
+        &self,
+        subscription_id: Option<&str>,
+        resource_group: Option<&str>,
+    ) -> Result<Vec<VaultSummary>>;
+
     /// Update vault properties
-    async fn update_vault(&self, vault_name: &str, resource_group: &str, request: &VaultUpdateRequest) -> Result<VaultProperties>;
-    
+    async fn update_vault(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        request: &VaultUpdateRequest,
+    ) -> Result<VaultProperties>;
+
     /// Delete vault (soft delete)
     async fn delete_vault(&self, vault_name: &str, resource_group: &str) -> Result<()>;
-    
+
     /// Restore soft-deleted vault
     async fn restore_vault(&self, vault_name: &str, location: &str) -> Result<VaultProperties>;
-    
+
     /// Permanently purge vault
     async fn purge_vault(&self, vault_name: &str, location: &str) -> Result<()>;
-    
+
     /// List deleted vaults
     async fn list_deleted_vaults(&self, subscription_id: &str) -> Result<Vec<VaultSummary>>;
-    
+
     /// Grant access to vault
-    async fn grant_access(&self, vault_name: &str, resource_group: &str, user_object_id: &str, access_level: AccessLevel) -> Result<()>;
-    
+    async fn grant_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        user_object_id: &str,
+        access_level: AccessLevel,
+    ) -> Result<()>;
+
     /// Revoke access from vault
-    async fn revoke_access(&self, vault_name: &str, resource_group: &str, user_object_id: &str) -> Result<()>;
-    
+    async fn revoke_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        user_object_id: &str,
+    ) -> Result<()>;
+
     /// List vault access assignments
     async fn list_access(&self, vault_name: &str, resource_group: &str) -> Result<Vec<VaultRole>>;
-    
+
     /// Check vault existence
     async fn vault_exists(&self, vault_name: &str, resource_group: &str) -> Result<bool>;
-    
+
     /// Get vault tags
-    async fn get_vault_tags(&self, vault_name: &str, resource_group: &str) -> Result<HashMap<String, String>>;
-    
+    async fn get_vault_tags(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+    ) -> Result<HashMap<String, String>>;
+
     /// Update vault tags
-    async fn update_vault_tags(&self, vault_name: &str, resource_group: &str, tags: HashMap<String, String>) -> Result<()>;
+    async fn update_vault_tags(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        tags: HashMap<String, String>,
+    ) -> Result<()>;
 }
 
 /// Azure vault operations implementation
@@ -74,17 +103,21 @@ pub struct AzureVaultOperations {
 
 impl AzureVaultOperations {
     /// Create a new Azure vault operations instance
-    pub fn new(auth_provider: Arc<dyn AzureAuthProvider>, subscription_id: String) -> Self {
-        Self {
+    pub fn new(auth_provider: Arc<dyn AzureAuthProvider>, subscription_id: String) -> Result<Self> {
+        let network_config = NetworkConfig::default();
+        let http_client = create_http_client(&network_config)?;
+
+        Ok(Self {
             auth_provider,
-            http_client: Client::new(),
+            http_client,
             subscription_id,
-        }
+        })
     }
 
     /// Get access token for Azure Resource Manager
     async fn get_management_token(&self) -> Result<String> {
-        let token = self.auth_provider
+        let token = self
+            .auth_provider
             .get_token(&["https://management.azure.com/.default"])
             .await?;
         Ok(token.token.secret().to_string())
@@ -94,8 +127,12 @@ impl AzureVaultOperations {
     async fn create_headers(&self) -> Result<HeaderMap> {
         let token = self.get_management_token().await?;
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", format!("Bearer {}", token).parse()
-            .map_err(|e| crosstacheError::authentication(format!("Invalid token format: {}", e)))?);
+        headers.insert(
+            "Authorization",
+            format!("Bearer {}", token).parse().map_err(|e| {
+                crosstacheError::authentication(format!("Invalid token format: {}", e))
+            })?,
+        );
         headers.insert("Content-Type", "application/json".parse().unwrap());
         Ok(headers)
     }
@@ -154,7 +191,10 @@ impl VaultOperations for AzureVaultOperations {
 
             // Build access policies including current user as admin
             let mut access_policies = request.access_policies.clone().unwrap_or_default();
-            if !access_policies.iter().any(|p| p.object_id == current_user_object_id) {
+            if !access_policies
+                .iter()
+                .any(|p| p.object_id == current_user_object_id)
+            {
                 access_policies.push(AccessPolicy::new(
                     tenant_id.clone(),
                     current_user_object_id,
@@ -183,13 +223,14 @@ impl VaultOperations for AzureVaultOperations {
                 "tags": request.tags.as_ref().unwrap_or(&HashMap::new())
             });
 
-            let response = self.http_client
+            let response = self
+                .http_client
                 .put(&url)
                 .headers(headers)
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to create vault: {}", e)))?;
+                .map_err(|e| classify_network_error(&e, &url))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -197,8 +238,9 @@ impl VaultOperations for AzureVaultOperations {
                 return Err(self.parse_azure_error(status_code, &error_body));
             }
 
-            let vault_data: Value = response.json().await
-                .map_err(|e| crosstacheError::serialization(format!("Failed to parse vault response: {}", e)))?;
+            let vault_data: Value = response.json().await.map_err(|e| {
+                crosstacheError::serialization(format!("Failed to parse vault response: {}", e))
+            })?;
 
             self.parse_vault_properties(&vault_data)
         };
@@ -212,12 +254,13 @@ impl VaultOperations for AzureVaultOperations {
             let resource_id = self.get_vault_resource_id(vault_name, resource_group);
             let url = self.build_arm_url(&format!("{}?api-version=2023-07-01", resource_id));
 
-            let response = self.http_client
+            let response = self
+                .http_client
                 .get(&url)
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to get vault: {}", e)))?;
+                .map_err(|e| classify_network_error(&e, &url))?;
 
             if response.status().as_u16() == 404 {
                 return Err(crosstacheError::vault_not_found(vault_name));
@@ -229,8 +272,9 @@ impl VaultOperations for AzureVaultOperations {
                 return Err(self.parse_azure_error(status_code, &error_body));
             }
 
-            let vault_data: Value = response.json().await
-                .map_err(|e| crosstacheError::serialization(format!("Failed to parse vault response: {}", e)))?;
+            let vault_data: Value = response.json().await.map_err(|e| {
+                crosstacheError::serialization(format!("Failed to parse vault response: {}", e))
+            })?;
 
             self.parse_vault_properties(&vault_data)
         };
@@ -238,11 +282,15 @@ impl VaultOperations for AzureVaultOperations {
         self.execute_with_retry(operation).await
     }
 
-    async fn list_vaults(&self, subscription_id: Option<&str>, resource_group: Option<&str>) -> Result<Vec<VaultSummary>> {
+    async fn list_vaults(
+        &self,
+        subscription_id: Option<&str>,
+        resource_group: Option<&str>,
+    ) -> Result<Vec<VaultSummary>> {
         let operation = || async {
             let headers = self.create_headers().await?;
             let sub_id = subscription_id.unwrap_or(&self.subscription_id);
-            
+
             let url = if let Some(rg) = resource_group {
                 self.build_arm_url(&format!(
                     "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01",
@@ -255,7 +303,8 @@ impl VaultOperations for AzureVaultOperations {
                 ))
             };
 
-            let response = self.http_client
+            let response = self
+                .http_client
                 .get(&url)
                 .headers(headers)
                 .send()
@@ -268,8 +317,9 @@ impl VaultOperations for AzureVaultOperations {
                 return Err(self.parse_azure_error(status_code, &error_body));
             }
 
-            let response_data: Value = response.json().await
-                .map_err(|e| crosstacheError::serialization(format!("Failed to parse vaults response: {}", e)))?;
+            let response_data: Value = response.json().await.map_err(|e| {
+                crosstacheError::serialization(format!("Failed to parse vaults response: {}", e))
+            })?;
 
             let mut vaults = Vec::new();
             if let Some(vault_array) = response_data.get("value").and_then(|v| v.as_array()) {
@@ -286,11 +336,16 @@ impl VaultOperations for AzureVaultOperations {
         self.execute_with_retry(operation).await
     }
 
-    async fn update_vault(&self, vault_name: &str, resource_group: &str, request: &VaultUpdateRequest) -> Result<VaultProperties> {
+    async fn update_vault(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        request: &VaultUpdateRequest,
+    ) -> Result<VaultProperties> {
         let operation = || async {
             // First get the current vault to merge properties
             let current_vault = self.get_vault(vault_name, resource_group).await?;
-            
+
             let headers = self.create_headers().await?;
             let resource_id = self.get_vault_resource_id(vault_name, resource_group);
             let url = self.build_arm_url(&format!("{}?api-version=2023-07-01", resource_id));
@@ -316,7 +371,8 @@ impl VaultOperations for AzureVaultOperations {
                 "tags": request.tags.as_ref().unwrap_or(&current_vault.tags)
             });
 
-            let response = self.http_client
+            let response = self
+                .http_client
                 .put(&url)
                 .headers(headers)
                 .json(&body)
@@ -330,8 +386,9 @@ impl VaultOperations for AzureVaultOperations {
                 return Err(self.parse_azure_error(status_code, &error_body));
             }
 
-            let vault_data: Value = response.json().await
-                .map_err(|e| crosstacheError::serialization(format!("Failed to parse vault response: {}", e)))?;
+            let vault_data: Value = response.json().await.map_err(|e| {
+                crosstacheError::serialization(format!("Failed to parse vault response: {}", e))
+            })?;
 
             self.parse_vault_properties(&vault_data)
         };
@@ -345,7 +402,8 @@ impl VaultOperations for AzureVaultOperations {
             let resource_id = self.get_vault_resource_id(vault_name, resource_group);
             let url = self.build_arm_url(&format!("{}?api-version=2023-07-01", resource_id));
 
-            let response = self.http_client
+            let response = self
+                .http_client
                 .delete(&url)
                 .headers(headers)
                 .send()
@@ -376,7 +434,8 @@ impl VaultOperations for AzureVaultOperations {
                 self.subscription_id, location, vault_name
             ));
 
-            let response = self.http_client
+            let response = self
+                .http_client
                 .post(&url)
                 .headers(headers)
                 .send()
@@ -391,11 +450,14 @@ impl VaultOperations for AzureVaultOperations {
 
             // After restore, wait a bit and then get the vault details
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            
+
             // We need to find the resource group - this is a limitation of the restore API
             // For now, we'll return a basic vault properties structure
             Ok(VaultProperties {
-                id: format!("/subscriptions/{}/providers/Microsoft.KeyVault/vaults/{}", self.subscription_id, vault_name),
+                id: format!(
+                    "/subscriptions/{}/providers/Microsoft.KeyVault/vaults/{}",
+                    self.subscription_id, vault_name
+                ),
                 name: vault_name.to_string(),
                 location: location.to_string(),
                 resource_group: "restored".to_string(), // Placeholder
@@ -425,7 +487,8 @@ impl VaultOperations for AzureVaultOperations {
                 self.subscription_id, location, vault_name
             ));
 
-            let response = self.http_client
+            let response = self
+                .http_client
                 .post(&url)
                 .headers(headers)
                 .send()
@@ -452,12 +515,15 @@ impl VaultOperations for AzureVaultOperations {
                 subscription_id
             ));
 
-            let response = self.http_client
+            let response = self
+                .http_client
                 .get(&url)
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to list deleted vaults: {}", e)))?;
+                .map_err(|e| {
+                    crosstacheError::network(format!("Failed to list deleted vaults: {}", e))
+                })?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -465,17 +531,30 @@ impl VaultOperations for AzureVaultOperations {
                 return Err(self.parse_azure_error(status_code, &error_body));
             }
 
-            let response_data: Value = response.json().await
-                .map_err(|e| crosstacheError::serialization(format!("Failed to parse deleted vaults response: {}", e)))?;
+            let response_data: Value = response.json().await.map_err(|e| {
+                crosstacheError::serialization(format!(
+                    "Failed to parse deleted vaults response: {}",
+                    e
+                ))
+            })?;
 
             let mut vaults = Vec::new();
             if let Some(vault_array) = response_data.get("value").and_then(|v| v.as_array()) {
                 for vault_value in vault_array {
                     if let Some(properties) = vault_value.get("properties") {
-                        let name = vault_value.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                        let location = properties.get("location").and_then(|l| l.as_str()).unwrap_or("unknown");
-                        let deletion_date = properties.get("deletionDate").and_then(|d| d.as_str()).unwrap_or("unknown");
-                        
+                        let name = vault_value
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
+                        let location = properties
+                            .get("location")
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("unknown");
+                        let deletion_date = properties
+                            .get("deletionDate")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("unknown");
+
                         vaults.push(VaultSummary {
                             name: name.to_string(),
                             location: location.to_string(),
@@ -494,13 +573,21 @@ impl VaultOperations for AzureVaultOperations {
         self.execute_with_retry(operation).await
     }
 
-    async fn grant_access(&self, vault_name: &str, resource_group: &str, user_object_id: &str, access_level: AccessLevel) -> Result<()> {
+    async fn grant_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        user_object_id: &str,
+        access_level: AccessLevel,
+    ) -> Result<()> {
         // Get current vault to update access policies
         let mut current_vault = self.get_vault(vault_name, resource_group).await?;
-        
+
         // Remove existing policy for this user if any
-        current_vault.access_policies.retain(|p| p.object_id != user_object_id);
-        
+        current_vault
+            .access_policies
+            .retain(|p| p.object_id != user_object_id);
+
         // Add new policy
         let tenant_id = self.auth_provider.get_tenant_id().await?;
         let new_policy = AccessPolicy::new(
@@ -523,20 +610,30 @@ impl VaultOperations for AzureVaultOperations {
             access_policies: Some(current_vault.access_policies),
         };
 
-        self.update_vault(vault_name, resource_group, &update_request).await?;
+        self.update_vault(vault_name, resource_group, &update_request)
+            .await?;
         Ok(())
     }
 
-    async fn revoke_access(&self, vault_name: &str, resource_group: &str, user_object_id: &str) -> Result<()> {
+    async fn revoke_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        user_object_id: &str,
+    ) -> Result<()> {
         // Get current vault to update access policies
         let mut current_vault = self.get_vault(vault_name, resource_group).await?;
-        
+
         // Remove policy for this user
         let original_count = current_vault.access_policies.len();
-        current_vault.access_policies.retain(|p| p.object_id != user_object_id);
-        
+        current_vault
+            .access_policies
+            .retain(|p| p.object_id != user_object_id);
+
         if current_vault.access_policies.len() == original_count {
-            return Err(crosstacheError::permission_denied("User does not have access to this vault"));
+            return Err(crosstacheError::permission_denied(
+                "User does not have access to this vault",
+            ));
         }
 
         // Update vault with new access policies
@@ -550,7 +647,8 @@ impl VaultOperations for AzureVaultOperations {
             access_policies: Some(current_vault.access_policies),
         };
 
-        self.update_vault(vault_name, resource_group, &update_request).await?;
+        self.update_vault(vault_name, resource_group, &update_request)
+            .await?;
         Ok(())
     }
 
@@ -567,8 +665,16 @@ impl VaultOperations for AzureVaultOperations {
                     role_name: self.determine_access_level_from_permissions(&policy.permissions),
                     role_description: "Access Policy".to_string(),
                     principal_id: policy.object_id.clone(),
-                    principal_name: policy.user_email.clone().unwrap_or_else(|| policy.object_id.clone()),
-                    principal_type: if policy.application_id.is_some() { "ServicePrincipal" } else { "User" }.to_string(),
+                    principal_name: policy
+                        .user_email
+                        .clone()
+                        .unwrap_or_else(|| policy.object_id.clone()),
+                    principal_type: if policy.application_id.is_some() {
+                        "ServicePrincipal"
+                    } else {
+                        "User"
+                    }
+                    .to_string(),
                     scope: vault.id.clone(),
                     created_on: vault.created_at,
                     updated_on: vault.created_at,
@@ -590,12 +696,21 @@ impl VaultOperations for AzureVaultOperations {
         }
     }
 
-    async fn get_vault_tags(&self, vault_name: &str, resource_group: &str) -> Result<HashMap<String, String>> {
+    async fn get_vault_tags(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+    ) -> Result<HashMap<String, String>> {
         let vault = self.get_vault(vault_name, resource_group).await?;
         Ok(vault.tags)
     }
 
-    async fn update_vault_tags(&self, vault_name: &str, resource_group: &str, tags: HashMap<String, String>) -> Result<()> {
+    async fn update_vault_tags(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        tags: HashMap<String, String>,
+    ) -> Result<()> {
         let update_request = VaultUpdateRequest {
             enabled_for_deployment: None,
             enabled_for_disk_encryption: None,
@@ -606,7 +721,8 @@ impl VaultOperations for AzureVaultOperations {
             access_policies: None,
         };
 
-        self.update_vault(vault_name, resource_group, &update_request).await?;
+        self.update_vault(vault_name, resource_group, &update_request)
+            .await?;
         Ok(())
     }
 }
@@ -614,46 +730,51 @@ impl VaultOperations for AzureVaultOperations {
 impl AzureVaultOperations {
     /// Parse Azure ARM vault response into VaultProperties
     fn parse_vault_properties(&self, vault_data: &Value) -> Result<VaultProperties> {
-        let properties = vault_data.get("properties")
-            .ok_or_else(|| crosstacheError::serialization("Missing properties in vault response"))?;
+        let properties = vault_data.get("properties").ok_or_else(|| {
+            crosstacheError::serialization("Missing properties in vault response")
+        })?;
 
-        let id = vault_data.get("id")
+        let id = vault_data
+            .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let name = vault_data.get("name")
+        let name = vault_data
+            .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let location = vault_data.get("location")
+        let location = vault_data
+            .get("location")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
         // Extract resource group from ID
-        let resource_group = id.split('/')
-            .nth(4)
-            .unwrap_or_default()
-            .to_string();
+        let resource_group = id.split('/').nth(4).unwrap_or_default().to_string();
 
-        let subscription_id = id.split('/')
+        let subscription_id = id
+            .split('/')
             .nth(2)
             .unwrap_or(&self.subscription_id)
             .to_string();
 
-        let tenant_id = properties.get("tenantId")
+        let tenant_id = properties
+            .get("tenantId")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let uri = properties.get("vaultUri")
+        let uri = properties
+            .get("vaultUri")
             .and_then(|v| v.as_str())
             .unwrap_or(&format!("https://{}.vault.azure.net/", name))
             .to_string();
 
-        let sku = properties.get("sku")
+        let sku = properties
+            .get("sku")
             .and_then(|s| s.get("name"))
             .and_then(|n| n.as_str())
             .unwrap_or("standard")
@@ -687,11 +808,26 @@ impl AzureVaultOperations {
             subscription_id,
             tenant_id,
             uri,
-            enabled_for_deployment: properties.get("enabledForDeployment").and_then(|v| v.as_bool()).unwrap_or(false),
-            enabled_for_disk_encryption: properties.get("enabledForDiskEncryption").and_then(|v| v.as_bool()).unwrap_or(false),
-            enabled_for_template_deployment: properties.get("enabledForTemplateDeployment").and_then(|v| v.as_bool()).unwrap_or(false),
-            soft_delete_retention_in_days: properties.get("softDeleteRetentionInDays").and_then(|v| v.as_i64()).unwrap_or(90) as i32,
-            purge_protection: properties.get("enablePurgeProtection").and_then(|v| v.as_bool()).unwrap_or(false),
+            enabled_for_deployment: properties
+                .get("enabledForDeployment")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            enabled_for_disk_encryption: properties
+                .get("enabledForDiskEncryption")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            enabled_for_template_deployment: properties
+                .get("enabledForTemplateDeployment")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            soft_delete_retention_in_days: properties
+                .get("softDeleteRetentionInDays")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(90) as i32,
+            purge_protection: properties
+                .get("enablePurgeProtection")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             sku,
             access_policies,
             created_at: chrono::Utc::now(), // Azure doesn't provide creation time in ARM response
@@ -701,41 +837,65 @@ impl AzureVaultOperations {
 
     /// Parse access policy from Azure ARM response
     fn parse_access_policy(&self, policy_value: &Value) -> Result<AccessPolicy> {
-        let tenant_id = policy_value.get("tenantId")
+        let tenant_id = policy_value
+            .get("tenantId")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let object_id = policy_value.get("objectId")
+        let object_id = policy_value
+            .get("objectId")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let application_id = policy_value.get("applicationId")
+        let application_id = policy_value
+            .get("applicationId")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let permissions = policy_value.get("permissions")
-            .ok_or_else(|| crosstacheError::serialization("Missing permissions in access policy"))?;
+        let permissions = policy_value.get("permissions").ok_or_else(|| {
+            crosstacheError::serialization("Missing permissions in access policy")
+        })?;
 
-        let keys = permissions.get("keys")
+        let keys = permissions
+            .get("keys")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let secrets = permissions.get("secrets")
+        let secrets = permissions
+            .get("secrets")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let certificates = permissions.get("certificates")
+        let certificates = permissions
+            .get("certificates")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let storage = permissions.get("storage")
+        let storage = permissions
+            .get("storage")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         Ok(AccessPolicy {
@@ -753,7 +913,10 @@ impl AzureVaultOperations {
     }
 
     /// Determine access level from permissions
-    fn determine_access_level_from_permissions(&self, permissions: &super::models::AccessPolicyPermissions) -> String {
+    fn determine_access_level_from_permissions(
+        &self,
+        permissions: &super::models::AccessPolicyPermissions,
+    ) -> String {
         if permissions.secrets.contains(&"purge".to_string()) {
             "Admin".to_string()
         } else if permissions.secrets.contains(&"set".to_string()) {
@@ -776,10 +939,9 @@ mod tests {
         // This is a basic test to ensure the structure compiles
         // Real tests would require Azure credentials and resources
         let auth_provider = DefaultAzureCredentialProvider::new().unwrap();
-        let vault_ops = AzureVaultOperations::new(
-            Arc::new(auth_provider),
-            "test-subscription-id".to_string(),
-        );
+        let vault_ops =
+            AzureVaultOperations::new(Arc::new(auth_provider), "test-subscription-id".to_string())
+                .unwrap();
 
         // Test resource ID generation
         let resource_id = vault_ops.get_vault_resource_id("test-vault", "test-rg");

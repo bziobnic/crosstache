@@ -1,11 +1,11 @@
 //! Vault data models and types
-//! 
+//!
 //! This module defines the data structures used for vault management
 //! including vault properties, access policies, and role definitions.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 use tabled::Tabled;
 /// Display function for Option<String> in tables
 fn display_option(opt: &Option<String>) -> String {
@@ -374,13 +374,13 @@ pub struct BuiltInRoles;
 impl BuiltInRoles {
     /// Key Vault Administrator role ID
     pub const KEY_VAULT_ADMINISTRATOR: &'static str = "00482a5a-887f-4fb3-b363-3b7fe8e74483";
-    
+
     /// Key Vault Secrets Officer role ID
     pub const KEY_VAULT_SECRETS_OFFICER: &'static str = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7";
-    
+
     /// Key Vault Secrets User role ID
     pub const KEY_VAULT_SECRETS_USER: &'static str = "4633458b-17de-408a-b874-0445c86b69e6";
-    
+
     /// Key Vault Reader role ID
     pub const KEY_VAULT_READER: &'static str = "21090545-7ca7-4776-b22c-e363652d74d2";
 

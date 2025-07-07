@@ -1,5 +1,5 @@
 //! Microsoft Graph API client
-//! 
+//!
 //! This module provides functionality for interacting with Microsoft Graph API
 //! for user and service principal resolution.
 

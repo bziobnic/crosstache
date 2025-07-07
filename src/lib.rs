@@ -1,5 +1,5 @@
 //! crosstache - Azure Key Vault Management Tool
-//! 
+//!
 //! A comprehensive CLI tool for managing Azure Key Vault operations
 //! including vault management, secret operations, and access control.
 

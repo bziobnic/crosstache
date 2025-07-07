@@ -1,11 +1,11 @@
 //! Secret management implementation
-//! 
+//!
 //! This module provides comprehensive secret management functionality
 //! including name sanitization, group management, and advanced operations.
 
 use async_trait::async_trait;
-use azure_security_keyvault::{SecretClient, prelude::*};
 use azure_core::auth::TokenCredential;
+use azure_security_keyvault::{prelude::*, SecretClient};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -16,76 +16,10 @@ use tabled::Tabled;
 
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::{crosstacheError, Result};
-use crate::utils::format::{TableFormatter, DisplayUtils, OutputFormat};
-use crate::utils::sanitizer::{sanitize_secret_name, get_secret_name_info, SecretNameInfo};
-use crate::utils::helpers::{parse_connection_string, generate_uuid, validate_folder_path};
-
-/// DNS error detection utilities
-
-/// Checks if a reqwest error is specifically related to DNS resolution failure
-fn is_dns_resolution_error(error: &reqwest::Error) -> bool {
-    // Check if it's a connection error (DNS failures typically manifest as connection errors)
-    if error.is_connect() {
-        return true;
-    }
-    
-    // Check error message for DNS-related keywords
-    let error_msg = error.to_string().to_lowercase();
-    let dns_indicators = [
-        "dns",
-        "name resolution",
-        "resolve",
-        "lookup",
-        "name or service not known",
-        "nodename nor servname provided",
-        "temporary failure in name resolution",
-        "no such host",
-        "host not found",
-        "getaddrinfo failed",
-    ];
-    
-    for indicator in &dns_indicators {
-        if error_msg.contains(indicator) {
-            return true;
-        }
-    }
-    
-    // Check the error chain for IO errors that might indicate DNS issues
-    if let Some(source) = error.source() {
-        if let Some(io_error) = source.downcast_ref::<std::io::Error>() {
-            // DNS resolution failures often manifest as "Name or service not known" IO errors
-            return matches!(io_error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::Other);
-        }
-    }
-    
-    false
-}
-
-/// Extracts vault name from Azure Key Vault URL for error reporting
-fn extract_vault_name_from_url(url: &str) -> String {
-    // Parse URL to extract vault name from format: https://{vault}.vault.azure.net/...
-    if let Ok(parsed_url) = url::Url::parse(url) {
-        if let Some(host) = parsed_url.host_str() {
-            if host.ends_with(".vault.azure.net") {
-                // Extract vault name (everything before .vault.azure.net)
-                let vault_name = host.replace(".vault.azure.net", "");
-                return vault_name;
-            }
-        }
-    }
-    
-    // Fallback: try to extract from string pattern
-    if url.contains(".vault.azure.net") {
-        if let Some(start) = url.find("://") {
-            if let Some(end) = url[start + 3..].find(".vault.azure.net") {
-                return url[start + 3..start + 3 + end].to_string();
-            }
-        }
-    }
-    
-    // Last resort: return a generic placeholder
-    "unknown-vault".to_string()
-}
+use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
+use crate::utils::helpers::{generate_uuid, parse_connection_string, validate_folder_path};
+use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
+use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name, SecretNameInfo};
 
 /// Secret properties and metadata
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
@@ -149,7 +83,11 @@ pub struct SecretUpdateRequest {
 
 /// Display function for optional group
 fn display_optional_group(option: &Option<String>) -> String {
-    option.as_ref().map(|s| s.as_str()).unwrap_or("").to_string()
+    option
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Secret summary for list operations
@@ -196,40 +134,67 @@ pub struct SecretGroup {
 #[async_trait]
 pub trait SecretOperations: Send + Sync {
     /// Set a secret value
-    async fn set_secret(&self, vault_name: &str, request: &SecretRequest) -> Result<SecretProperties>;
-    
+    async fn set_secret(
+        &self,
+        vault_name: &str,
+        request: &SecretRequest,
+    ) -> Result<SecretProperties>;
+
     /// Get a secret value
-    async fn get_secret(&self, vault_name: &str, secret_name: &str, include_value: bool) -> Result<SecretProperties>;
-    
+    async fn get_secret(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        include_value: bool,
+    ) -> Result<SecretProperties>;
+
     /// List secrets in a vault
-    async fn list_secrets(&self, vault_name: &str, group_filter: Option<&str>) -> Result<Vec<SecretSummary>>;
-    
+    async fn list_secrets(
+        &self,
+        vault_name: &str,
+        group_filter: Option<&str>,
+    ) -> Result<Vec<SecretSummary>>;
+
     /// Delete a secret (soft delete)
     async fn delete_secret(&self, vault_name: &str, secret_name: &str) -> Result<()>;
-    
+
     /// Update secret properties
-    async fn update_secret(&self, vault_name: &str, secret_name: &str, request: &SecretRequest) -> Result<SecretProperties>;
-    
+    async fn update_secret(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        request: &SecretRequest,
+    ) -> Result<SecretProperties>;
+
     /// Restore a deleted secret
-    async fn restore_secret(&self, vault_name: &str, secret_name: &str) -> Result<SecretProperties>;
-    
+    async fn restore_secret(&self, vault_name: &str, secret_name: &str)
+        -> Result<SecretProperties>;
+
     /// Permanently purge a deleted secret
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()>;
-    
+
     /// List deleted secrets
     async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<SecretSummary>>;
-    
+
     /// Check if secret exists
     async fn secret_exists(&self, vault_name: &str, secret_name: &str) -> Result<bool>;
-    
+
     /// Get secret versions
-    async fn get_secret_versions(&self, vault_name: &str, secret_name: &str) -> Result<Vec<SecretProperties>>;
-    
+    async fn get_secret_versions(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+    ) -> Result<Vec<SecretProperties>>;
+
     /// Backup secret
     async fn backup_secret(&self, vault_name: &str, secret_name: &str) -> Result<Vec<u8>>;
-    
+
     /// Restore secret from backup
-    async fn restore_secret_from_backup(&self, vault_name: &str, backup_data: &[u8]) -> Result<SecretProperties>;
+    async fn restore_secret_from_backup(
+        &self,
+        vault_name: &str,
+        backup_data: &[u8],
+    ) -> Result<SecretProperties>;
 }
 
 /// Azure Key Vault secret operations implementation
@@ -246,26 +211,30 @@ impl AzureSecretOperations {
     /// Create a secret client for the specified vault
     async fn create_secret_client(&self, vault_name: &str) -> Result<SecretClient> {
         let vault_url = format!("https://{}.vault.azure.net/", vault_name);
-        
+
         // Get the credential from auth provider
         let credential = self.auth_provider.get_token_credential();
-        
+
         // Create the secret client
-        let client = SecretClient::new(&vault_url, credential)
-            .map_err(|e| crosstacheError::azure_api(format!("Failed to create SecretClient: {}", e)))?;
-        
+        let client = SecretClient::new(&vault_url, credential).map_err(|e| {
+            crosstacheError::azure_api(format!("Failed to create SecretClient: {}", e))
+        })?;
+
         Ok(client)
     }
 
     /// Sanitize secret name and preserve original in tags
-    fn prepare_secret_request(&self, request: &SecretRequest) -> Result<(String, HashMap<String, String>)> {
+    fn prepare_secret_request(
+        &self,
+        request: &SecretRequest,
+    ) -> Result<(String, HashMap<String, String>)> {
         let sanitized_name = sanitize_secret_name(&request.name)?;
         let mut tags = request.tags.clone().unwrap_or_default();
-        
+
         // Store original name in tags for mapping
         tags.insert("original_name".to_string(), request.name.clone());
         tags.insert("created_by".to_string(), "crosstache".to_string());
-        
+
         // Handle groups from request
         if let Some(ref groups) = request.groups {
             if !groups.is_empty() {
@@ -273,21 +242,20 @@ impl AzureSecretOperations {
                 tags.insert("groups".to_string(), groups.join(","));
             }
         }
-        
+
         // Handle note if provided
         if let Some(ref note) = request.note {
             tags.insert("note".to_string(), note.clone());
         }
-        
+
         // Handle folder if provided (validate first)
         if let Some(ref folder) = request.folder {
             validate_folder_path(folder)?;
             tags.insert("folder".to_string(), folder.clone());
         }
-        
+
         Ok((sanitized_name, tags))
     }
-
 
     /// Get original name from tags or use sanitized name
     fn get_original_name(&self, sanitized_name: &str, tags: &HashMap<String, String>) -> String {
@@ -295,12 +263,12 @@ impl AzureSecretOperations {
         if let Some(original_name) = tags.get("original_name") {
             return original_name.clone();
         }
-        
+
         // Fall back to name tag (legacy format)
         if let Some(name) = tags.get("name") {
             return name.clone();
         }
-        
+
         // If no tags, use the sanitized name
         sanitized_name.to_string()
     }
@@ -314,7 +282,7 @@ impl AzureSecretOperations {
                 return Some(trimmed_groups.to_string());
             }
         }
-        
+
         // No groups assigned
         None
     }
@@ -338,10 +306,10 @@ impl AzureSecretOperations {
     ) -> Result<SecretProperties> {
         // Extract version from the response ID if available
         let version = response.id.clone();
-        
+
         // Get the original name from tags or use provided name
         let original_name = self.get_original_name(sanitized_name, tags);
-        
+
         Ok(SecretProperties {
             name: sanitized_name.to_string(),
             original_name,
@@ -363,31 +331,38 @@ impl AzureSecretOperations {
 
 #[async_trait]
 impl SecretOperations for AzureSecretOperations {
-    async fn set_secret(&self, vault_name: &str, request: &SecretRequest) -> Result<SecretProperties> {
+    async fn set_secret(
+        &self,
+        vault_name: &str,
+        request: &SecretRequest,
+    ) -> Result<SecretProperties> {
         let (sanitized_name, tags) = self.prepare_secret_request(request)?;
-        
+
         // Since Azure SDK v0.20 doesn't properly support tags, we'll use the REST API directly
         let vault_url = format!("https://{}.vault.azure.net", vault_name);
         let secret_url = format!("{}/secrets/{}?api-version=7.4", vault_url, sanitized_name);
-        
+
         // Get an access token for Key Vault
-        let token = self.auth_provider.get_token(&["https://vault.azure.net/.default"]).await?;
-        
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
         // Create the request body
         let mut body = serde_json::json!({
             "value": request.value,
         });
-        
+
         // Add tags if any
         if !tags.is_empty() {
             body["tags"] = serde_json::json!(tags);
         }
-        
+
         // Add content type if specified
         if let Some(content_type) = &request.content_type {
             body["contentType"] = serde_json::json!(content_type);
         }
-        
+
         // Add attributes
         let mut attributes = serde_json::json!({});
         if let Some(enabled) = request.enabled {
@@ -402,118 +377,145 @@ impl SecretOperations for AzureSecretOperations {
         if !attributes.as_object().unwrap().is_empty() {
             body["attributes"] = attributes;
         }
-        
-        // Create HTTP client and request
-        let client = reqwest::Client::new();
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap()
+            "application/json".parse().unwrap(),
         );
-        
+
         // Make the REST API call
-        let response = client.put(&secret_url)
+        let response = client
+            .put(&secret_url)
             .headers(headers)
             .json(&body)
             .send()
             .await
-            .map_err(|e| crosstacheError::network(format!("Failed to set secret: {}", e)))?;
-        
+            .map_err(|e| classify_network_error(&e, &secret_url))?;
+
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             return Err(crosstacheError::azure_api(format!(
-                "Failed to set secret: HTTP {} - {}", status, error_text
+                "Failed to set secret: HTTP {} - {}",
+                status, error_text
             )));
         }
-        
+
         // Parse the response and convert to SecretProperties
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| crosstacheError::serialization(format!("Failed to parse set secret response: {}", e)))?;
-        
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            crosstacheError::serialization(format!("Failed to parse set secret response: {}", e))
+        })?;
+
         // Return the created secret properties
         self.get_secret(vault_name, &sanitized_name, true).await
     }
 
-    async fn get_secret(&self, vault_name: &str, secret_name: &str, include_value: bool) -> Result<SecretProperties> {
+    async fn get_secret(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        include_value: bool,
+    ) -> Result<SecretProperties> {
         let sanitized_name = sanitize_secret_name(secret_name)?;
-        
+
         // Since Azure SDK v0.20 doesn't properly return tags with get_secret,
         // we'll use the REST API directly to get full secret details including tags
         let vault_url = format!("https://{}.vault.azure.net", vault_name);
         let secret_url = format!("{}/secrets/{}?api-version=7.4", vault_url, sanitized_name);
-        
+
         // Get an access token for Key Vault
-        let token = self.auth_provider.get_token(&["https://vault.azure.net/.default"]).await?;
-        
-        // Create HTTP client and request
-        let client = reqwest::Client::new();
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
         );
-        
+
         // Make the REST API call
-        let response = client.get(&secret_url)
+        let response = client
+            .get(&secret_url)
             .headers(headers)
             .send()
             .await
-            .map_err(|e| {
-                if is_dns_resolution_error(&e) {
-                    let vault_name = extract_vault_name_from_url(&secret_url);
-                    crosstacheError::dns_resolution(vault_name, e.to_string())
-                } else {
-                    crosstacheError::network(format!("Failed to get secret: {}", e))
-                }
-            })?;
-        
+            .map_err(|e| classify_network_error(&e, &secret_url))?;
+
         if !response.status().is_success() {
             let status = response.status();
             if status == 404 {
-                return Err(crosstacheError::SecretNotFound { name: secret_name.to_string() });
+                return Err(crosstacheError::SecretNotFound {
+                    name: secret_name.to_string(),
+                });
             }
             let error_text = response.text().await.unwrap_or_default();
             return Err(crosstacheError::azure_api(format!(
-                "Failed to get secret: HTTP {} - {}", status, error_text
+                "Failed to get secret: HTTP {} - {}",
+                status, error_text
             )));
         }
-        
+
         // Parse the response
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| crosstacheError::serialization(format!("Failed to parse secret response: {}", e)))?;
-        
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            crosstacheError::serialization(format!("Failed to parse secret response: {}", e))
+        })?;
+
         // Extract secret properties from JSON response
         let value = if include_value {
-            json.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+            json.get("value")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
         } else {
             None
         };
-        
-        let version = json.get("id")
+
+        let version = json
+            .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        
+
         let attributes = json.get("attributes").unwrap_or(&serde_json::Value::Null);
-        let enabled = attributes.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-        let created_on = attributes.get("created").and_then(|v| v.as_i64())
-            .map(|ts| chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.to_string())
-                .unwrap_or_else(|| "Unknown".to_string()))
+        let enabled = attributes
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let created_on = attributes
+            .get("created")
+            .and_then(|v| v.as_i64())
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string())
+            })
             .unwrap_or_else(|| "Unknown".to_string());
-        let updated_on = attributes.get("updated").and_then(|v| v.as_i64())
-            .map(|ts| chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.to_string())
-                .unwrap_or_else(|| "Unknown".to_string()))
+        let updated_on = attributes
+            .get("updated")
+            .and_then(|v| v.as_i64())
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string())
+            })
             .unwrap_or_else(|| "Unknown".to_string());
-        
+
         // Extract tags
         let mut tags = HashMap::new();
         if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
@@ -523,10 +525,10 @@ impl SecretOperations for AzureSecretOperations {
                 }
             }
         }
-        
+
         // Get original name from tags
         let original_name = self.get_original_name(&sanitized_name, &tags);
-        
+
         Ok(SecretProperties {
             name: sanitized_name,
             original_name,
@@ -538,68 +540,90 @@ impl SecretOperations for AzureSecretOperations {
             expires_on: None, // Not extracted from this API
             not_before: None, // Not extracted from this API
             tags,
-            content_type: json.get("contentType")
+            content_type: json
+                .get("contentType")
                 .and_then(|v| v.as_str())
                 .unwrap_or("text/plain")
                 .to_string(),
         })
     }
 
-    async fn list_secrets(&self, vault_name: &str, group_filter: Option<&str>) -> Result<Vec<SecretSummary>> {
+    async fn list_secrets(
+        &self,
+        vault_name: &str,
+        group_filter: Option<&str>,
+    ) -> Result<Vec<SecretSummary>> {
         // Since Azure SDK v0.20 doesn't properly support list operations,
         // we'll use the REST API directly
         let vault_url = format!("https://{}.vault.azure.net", vault_name);
         let list_url = format!("{}/secrets?api-version=7.4", vault_url);
-        
+
         // Get an access token for Key Vault
-        let token = self.auth_provider.get_token(&["https://vault.azure.net/.default"]).await?;
-        
-        // Create HTTP client and request
-        let client = reqwest::Client::new();
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
         );
-        
+
         // Make the REST API call
-        let response = client.get(&list_url)
+        let response = client
+            .get(&list_url)
             .headers(headers)
             .send()
             .await
-            .map_err(|e| crosstacheError::network(format!("Failed to list secrets: {}", e)))?;
-        
+            .map_err(|e| classify_network_error(&e, &list_url))?;
+
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             return Err(crosstacheError::azure_api(format!(
-                "Failed to list secrets: HTTP {} - {}", status, error_text
+                "Failed to list secrets: HTTP {} - {}",
+                status, error_text
             )));
         }
-        
+
         // Parse the response
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| crosstacheError::serialization(format!("Failed to parse list response: {}", e)))?;
-        
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            crosstacheError::serialization(format!("Failed to parse list response: {}", e))
+        })?;
+
         let mut secret_summaries = Vec::new();
-        
+
         // Process the secrets from the response
         if let Some(values) = json.get("value").and_then(|v| v.as_array()) {
             for secret_value in values {
                 if let Some(id) = secret_value.get("id").and_then(|v| v.as_str()) {
                     // Extract name from ID
                     let name = id.rsplit('/').next().unwrap_or(id).to_string();
-                    
+
                     // Extract attributes
-                    let attributes = secret_value.get("attributes").unwrap_or(&serde_json::Value::Null);
-                    let enabled = attributes.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-                    let updated = attributes.get("updated").and_then(|v| v.as_i64())
-                        .map(|ts| chrono::DateTime::from_timestamp(ts, 0)
-                            .map(|dt| dt.to_string())
-                            .unwrap_or_else(|| "Unknown".to_string()))
+                    let attributes = secret_value
+                        .get("attributes")
+                        .unwrap_or(&serde_json::Value::Null);
+                    let enabled = attributes
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    let updated = attributes
+                        .get("updated")
+                        .and_then(|v| v.as_i64())
+                        .map(|ts| {
+                            chrono::DateTime::from_timestamp(ts, 0)
+                                .map(|dt| dt.to_string())
+                                .unwrap_or_else(|| "Unknown".to_string())
+                        })
                         .unwrap_or_else(|| "Unknown".to_string());
-                    
+
                     // For tags and groups, we need to get the full secret details
                     // Make an individual get call to extract tags and original name
                     match self.get_secret(vault_name, &name, false).await {
@@ -609,7 +633,7 @@ impl SecretOperations for AzureSecretOperations {
                             let folder = self.get_folder(&secret_details.tags);
                             let group = self.get_group_name(&original_name, &secret_details.tags);
                             let note = self.get_note(&secret_details.tags);
-                            
+
                             let summary = SecretSummary {
                                 name: original_name.clone(),
                                 original_name,
@@ -620,12 +644,15 @@ impl SecretOperations for AzureSecretOperations {
                                 enabled,
                                 content_type: secret_details.content_type,
                             };
-                            
+
                             secret_summaries.push(summary);
                         }
                         Err(e) => {
                             // If we can't get details, add with basic info
-                            eprintln!("Warning: Failed to get details for secret '{}': {}", name, e);
+                            eprintln!(
+                                "Warning: Failed to get details for secret '{}': {}",
+                                name, e
+                            );
                             let summary = SecretSummary {
                                 name: name.clone(),
                                 original_name: name,
@@ -636,29 +663,30 @@ impl SecretOperations for AzureSecretOperations {
                                 enabled,
                                 content_type: "text/plain".to_string(),
                             };
-                            
+
                             secret_summaries.push(summary);
                         }
                     }
                 }
             }
         }
-        
+
         // Handle pagination if there's a nextLink
         if let Some(next_link) = json.get("nextLink").and_then(|v| v.as_str()) {
             // TODO: Implement pagination support
             eprintln!("Warning: Pagination not yet implemented, showing first page only");
         }
-        
+
         // Apply group filter if specified
         let filtered_summaries: Vec<SecretSummary> = if let Some(filter) = group_filter {
-            secret_summaries.into_iter()
+            secret_summaries
+                .into_iter()
                 .filter(|secret| {
                     match &secret.groups {
                         Some(groups) => {
                             // Check if the filter matches any of the groups in the comma-separated list
                             groups.split(',').any(|g| g.trim() == filter)
-                        },
+                        }
                         None if filter.is_empty() => true,
                         _ => false,
                     }
@@ -667,99 +695,133 @@ impl SecretOperations for AzureSecretOperations {
         } else {
             secret_summaries
         };
-        
+
         // Sort by name for consistent output
         let mut result = filtered_summaries;
         result.sort_by(|a, b| a.original_name.cmp(&b.original_name));
-        
+
         Ok(result)
     }
 
     async fn delete_secret(&self, vault_name: &str, secret_name: &str) -> Result<()> {
         let client = self.create_secret_client(vault_name).await?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
-        
+
         // Delete the secret from Azure Key Vault (soft delete)
-        client.delete(&sanitized_name).await
-            .map_err(|e| crosstacheError::azure_api(format!("Failed to delete secret '{}': {}", secret_name, e)))?;
-        
+        client.delete(&sanitized_name).await.map_err(|e| {
+            crosstacheError::azure_api(format!("Failed to delete secret '{}': {}", secret_name, e))
+        })?;
+
         Ok(())
     }
 
-    async fn update_secret(&self, vault_name: &str, secret_name: &str, request: &SecretRequest) -> Result<SecretProperties> {
+    async fn update_secret(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        request: &SecretRequest,
+    ) -> Result<SecretProperties> {
         // For update operations, Azure Key Vault doesn't have a separate update operation
         // Setting a secret with the same name creates a new version
         // We'll use the same implementation as set_secret
         self.set_secret(vault_name, request).await
     }
 
-    async fn restore_secret(&self, vault_name: &str, secret_name: &str) -> Result<SecretProperties> {
+    async fn restore_secret(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+    ) -> Result<SecretProperties> {
         let sanitized_name = sanitize_secret_name(secret_name)?;
-        
+
         // Use REST API to restore a deleted secret
         let vault_url = format!("https://{}.vault.azure.net", vault_name);
-        let restore_url = format!("{}/deletedsecrets/{}/recover?api-version=7.4", vault_url, sanitized_name);
-        
+        let restore_url = format!(
+            "{}/deletedsecrets/{}/recover?api-version=7.4",
+            vault_url, sanitized_name
+        );
+
         // Get an access token for Key Vault
-        let token = self.auth_provider.get_token(&["https://vault.azure.net/.default"]).await?;
-        
-        // Create HTTP client and request
-        let client = reqwest::Client::new();
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap()
+            "application/json".parse().unwrap(),
         );
-        
+
         // Make the REST API call to restore the secret
-        let response = client.post(&restore_url)
+        let response = client
+            .post(&restore_url)
             .headers(headers)
-            .json(&serde_json::json!({}))  // Empty JSON body to satisfy Content-Length requirement
+            .json(&serde_json::json!({})) // Empty JSON body to satisfy Content-Length requirement
             .send()
             .await
-            .map_err(|e| crosstacheError::network(format!("Failed to restore secret: {}", e)))?;
-        
+            .map_err(|e| classify_network_error(&e, &restore_url))?;
+
         if !response.status().is_success() {
             let status = response.status();
             if status == 404 {
                 return Err(crosstacheError::azure_api(format!(
-                    "Deleted secret '{}' not found or cannot be restored", secret_name
+                    "Deleted secret '{}' not found or cannot be restored",
+                    secret_name
                 )));
             }
             let error_text = response.text().await.unwrap_or_default();
             return Err(crosstacheError::azure_api(format!(
-                "Failed to restore secret: HTTP {} - {}", status, error_text
+                "Failed to restore secret: HTTP {} - {}",
+                status, error_text
             )));
         }
-        
+
         // Parse the response to get the restored secret properties
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| crosstacheError::serialization(format!("Failed to parse restore response: {}", e)))?;
-        
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            crosstacheError::serialization(format!("Failed to parse restore response: {}", e))
+        })?;
+
         // Extract secret properties from JSON response
-        let version = json.get("id")
+        let version = json
+            .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        
+
         let attributes = json.get("attributes").unwrap_or(&serde_json::Value::Null);
-        let enabled = attributes.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-        let created_on = attributes.get("created").and_then(|v| v.as_i64())
-            .map(|ts| chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.to_string())
-                .unwrap_or_else(|| "Unknown".to_string()))
+        let enabled = attributes
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let created_on = attributes
+            .get("created")
+            .and_then(|v| v.as_i64())
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string())
+            })
             .unwrap_or_else(|| "Unknown".to_string());
-        let updated_on = attributes.get("updated").and_then(|v| v.as_i64())
-            .map(|ts| chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.to_string())
-                .unwrap_or_else(|| "Unknown".to_string()))
+        let updated_on = attributes
+            .get("updated")
+            .and_then(|v| v.as_i64())
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string())
+            })
             .unwrap_or_else(|| "Unknown".to_string());
-        
+
         // Extract tags
         let mut tags = HashMap::new();
         if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
@@ -769,10 +831,10 @@ impl SecretOperations for AzureSecretOperations {
                 }
             }
         }
-        
+
         // Get original name from tags
         let original_name = self.get_original_name(&sanitized_name, &tags);
-        
+
         Ok(SecretProperties {
             name: sanitized_name,
             original_name,
@@ -784,7 +846,8 @@ impl SecretOperations for AzureSecretOperations {
             expires_on: None, // Not extracted from this API
             not_before: None, // Not extracted from this API
             tags,
-            content_type: json.get("contentType")
+            content_type: json
+                .get("contentType")
                 .and_then(|v| v.as_str())
                 .unwrap_or("text/plain")
                 .to_string(),
@@ -793,51 +856,64 @@ impl SecretOperations for AzureSecretOperations {
 
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()> {
         let sanitized_name = sanitize_secret_name(secret_name)?;
-        
+
         // Use REST API to permanently purge a deleted secret
         let vault_url = format!("https://{}.vault.azure.net", vault_name);
-        let purge_url = format!("{}/deletedsecrets/{}/purge?api-version=7.4", vault_url, sanitized_name);
-        
+        let purge_url = format!(
+            "{}/deletedsecrets/{}/purge?api-version=7.4",
+            vault_url, sanitized_name
+        );
+
         // Get an access token for Key Vault
-        let token = self.auth_provider.get_token(&["https://vault.azure.net/.default"]).await?;
-        
-        // Create HTTP client and request
-        let client = reqwest::Client::new();
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token.token.secret()).parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
         );
-        
+
         // Make the REST API call to permanently purge the secret
-        let response = client.delete(&purge_url)
+        let response = client
+            .delete(&purge_url)
             .headers(headers)
             .send()
             .await
-            .map_err(|e| crosstacheError::network(format!("Failed to purge secret: {}", e)))?;
-        
+            .map_err(|e| classify_network_error(&e, &purge_url))?;
+
         if !response.status().is_success() {
             let status = response.status();
             if status == 404 {
                 return Err(crosstacheError::azure_api(format!(
-                    "Deleted secret '{}' not found or cannot be purged", secret_name
+                    "Deleted secret '{}' not found or cannot be purged",
+                    secret_name
                 )));
             }
             let error_text = response.text().await.unwrap_or_default();
             return Err(crosstacheError::azure_api(format!(
-                "Failed to purge secret: HTTP {} - {}", status, error_text
+                "Failed to purge secret: HTTP {} - {}",
+                status, error_text
             )));
         }
-        
+
         Ok(())
     }
 
     async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<SecretSummary>> {
         let _client = self.create_secret_client(vault_name).await?;
-        
+
         // Placeholder implementation
-        Err(crosstacheError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
+        Err(crosstacheError::azure_api(
+            "Secret operations not yet fully implemented for Azure SDK v0.20",
+        ))
     }
 
     async fn secret_exists(&self, vault_name: &str, secret_name: &str) -> Result<bool> {
@@ -848,27 +924,41 @@ impl SecretOperations for AzureSecretOperations {
         }
     }
 
-    async fn get_secret_versions(&self, vault_name: &str, secret_name: &str) -> Result<Vec<SecretProperties>> {
+    async fn get_secret_versions(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+    ) -> Result<Vec<SecretProperties>> {
         let _client = self.create_secret_client(vault_name).await?;
         let _sanitized_name = sanitize_secret_name(secret_name)?;
-        
+
         // Placeholder implementation
-        Err(crosstacheError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
+        Err(crosstacheError::azure_api(
+            "Secret operations not yet fully implemented for Azure SDK v0.20",
+        ))
     }
 
     async fn backup_secret(&self, vault_name: &str, secret_name: &str) -> Result<Vec<u8>> {
         let _client = self.create_secret_client(vault_name).await?;
         let _sanitized_name = sanitize_secret_name(secret_name)?;
-        
+
         // Placeholder implementation
-        Err(crosstacheError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
+        Err(crosstacheError::azure_api(
+            "Secret operations not yet fully implemented for Azure SDK v0.20",
+        ))
     }
 
-    async fn restore_secret_from_backup(&self, vault_name: &str, _backup_data: &[u8]) -> Result<SecretProperties> {
+    async fn restore_secret_from_backup(
+        &self,
+        vault_name: &str,
+        _backup_data: &[u8],
+    ) -> Result<SecretProperties> {
         let _client = self.create_secret_client(vault_name).await?;
-        
+
         // Placeholder implementation
-        Err(crosstacheError::azure_api("Secret operations not yet fully implemented for Azure SDK v0.20"))
+        Err(crosstacheError::azure_api(
+            "Secret operations not yet fully implemented for Azure SDK v0.20",
+        ))
     }
 }
 
@@ -926,13 +1016,16 @@ impl SecretManager {
                 "Secret name '{}' will be sanitized to '{}'",
                 name_info.original_name, name_info.sanitized_name
             ))?;
-            
+
             if name_info.is_hashed {
-                self.display_utils.print_info("Long or complex name was hashed - original name preserved in tags")?;
+                self.display_utils.print_info(
+                    "Long or complex name was hashed - original name preserved in tags",
+                )?;
             }
         }
 
-        self.display_utils.print_info(&format!("Setting secret '{}'...", name))?;
+        self.display_utils
+            .print_info(&format!("Setting secret '{}'...", name))?;
 
         let secret = self.secret_ops.set_secret(vault_name, &request).await?;
 
@@ -952,7 +1045,10 @@ impl SecretManager {
         show_value: bool,
         raw_output: bool,
     ) -> Result<SecretProperties> {
-        let mut secret = self.secret_ops.get_secret(vault_name, secret_name, show_value).await?;
+        let mut secret = self
+            .secret_ops
+            .get_secret(vault_name, secret_name, show_value)
+            .await?;
 
         if !raw_output {
             self.display_secret_details(&secret, show_value)?;
@@ -975,7 +1071,10 @@ impl SecretManager {
         group_by: bool,
         show_all: bool,
     ) -> Result<Vec<SecretSummary>> {
-        let mut secrets = self.secret_ops.list_secrets(vault_name, group_filter).await?;
+        let mut secrets = self
+            .secret_ops
+            .list_secrets(vault_name, group_filter)
+            .await?;
 
         // Filter out disabled secrets by default
         if !show_all {
@@ -1013,15 +1112,16 @@ impl SecretManager {
                 "This will delete secret '{}' from vault '{}'",
                 secret_name, vault_name
             ))?;
-            self.display_utils.print_info("The secret will be recoverable for the vault's retention period.")?;
+            self.display_utils
+                .print_info("The secret will be recoverable for the vault's retention period.")?;
         }
 
-        self.secret_ops.delete_secret(vault_name, secret_name).await?;
+        self.secret_ops
+            .delete_secret(vault_name, secret_name)
+            .await?;
 
-        self.display_utils.print_success(&format!(
-            "Successfully deleted secret '{}'",
-            secret_name
-        ))?;
+        self.display_utils
+            .print_success(&format!("Successfully deleted secret '{}'", secret_name))?;
 
         Ok(())
     }
@@ -1037,7 +1137,10 @@ impl SecretManager {
             secret_name, vault_name
         ))?;
 
-        let restored_secret = self.secret_ops.restore_secret(vault_name, secret_name).await?;
+        let restored_secret = self
+            .secret_ops
+            .restore_secret(vault_name, secret_name)
+            .await?;
 
         self.display_utils.print_success(&format!(
             "Successfully restored secret '{}'",
@@ -1059,8 +1162,10 @@ impl SecretManager {
                 "This will PERMANENTLY DELETE secret '{}' from vault '{}'",
                 secret_name, vault_name
             ))?;
-            self.display_utils.print_warning("This operation cannot be undone!")?;
-            self.display_utils.print_info("The secret must be in a deleted state before it can be purged.")?;
+            self.display_utils
+                .print_warning("This operation cannot be undone!")?;
+            self.display_utils
+                .print_info("The secret must be in a deleted state before it can be purged.")?;
         }
 
         self.display_utils.print_info(&format!(
@@ -1068,18 +1173,21 @@ impl SecretManager {
             secret_name, vault_name
         ))?;
 
-        self.secret_ops.purge_secret(vault_name, secret_name).await?;
+        self.secret_ops
+            .purge_secret(vault_name, secret_name)
+            .await?;
 
-        self.display_utils.print_success(&format!(
-            "Successfully purged secret '{}'",
-            secret_name
-        ))?;
+        self.display_utils
+            .print_success(&format!("Successfully purged secret '{}'", secret_name))?;
 
         Ok(())
     }
 
     /// Parse and display connection string components
-    pub async fn parse_connection_string(&self, connection_string: &str) -> Result<Vec<ConnectionComponent>> {
+    pub async fn parse_connection_string(
+        &self,
+        connection_string: &str,
+    ) -> Result<Vec<ConnectionComponent>> {
         let components = parse_connection_string(connection_string);
         let mut result = Vec::new();
 
@@ -1118,7 +1226,10 @@ impl SecretManager {
                     }
                 }
                 None => {
-                    groups.entry("(No Groups)".to_string()).or_default().push(secret);
+                    groups
+                        .entry("(No Groups)".to_string())
+                        .or_default()
+                        .push(secret);
                 }
             }
         }
@@ -1141,11 +1252,15 @@ impl SecretManager {
     /// Validate secret name
     fn validate_secret_name(&self, name: &str) -> Result<()> {
         if name.is_empty() {
-            return Err(crosstacheError::invalid_secret_name("Secret name cannot be empty"));
+            return Err(crosstacheError::invalid_secret_name(
+                "Secret name cannot be empty",
+            ));
         }
 
         if name.len() > 127 {
-            return Err(crosstacheError::invalid_secret_name("Secret name too long (max 127 characters)"));
+            return Err(crosstacheError::invalid_secret_name(
+                "Secret name too long (max 127 characters)",
+            ));
         }
 
         Ok(())
@@ -1153,7 +1268,8 @@ impl SecretManager {
 
     /// Display secret details
     fn display_secret_details(&self, secret: &SecretProperties, show_value: bool) -> Result<()> {
-        self.display_utils.print_header(&format!("Secret: {}", secret.original_name))?;
+        self.display_utils
+            .print_header(&format!("Secret: {}", secret.original_name))?;
 
         let mut details = vec![
             ("Name", secret.name.as_str()),
@@ -1177,8 +1293,10 @@ impl SecretManager {
         if !secret.tags.is_empty() {
             self.display_utils.print_separator()?;
             self.display_utils.print_header("Tags")?;
-            
-            let tag_pairs: Vec<(&str, &str)> = secret.tags.iter()
+
+            let tag_pairs: Vec<(&str, &str)> = secret
+                .tags
+                .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             let formatted_tags = self.display_utils.format_key_value_pairs(&tag_pairs);
@@ -1189,7 +1307,11 @@ impl SecretManager {
     }
 
     /// Display secrets in a table
-    fn display_secrets_table(&self, secrets: &[SecretSummary], output_format: OutputFormat) -> Result<()> {
+    fn display_secrets_table(
+        &self,
+        secrets: &[SecretSummary],
+        output_format: OutputFormat,
+    ) -> Result<()> {
         let formatter = TableFormatter::new(output_format, self.no_color);
         let table_output = formatter.format_table(secrets)?;
         println!("{}", table_output);
@@ -1197,7 +1319,11 @@ impl SecretManager {
     }
 
     /// Display secrets grouped by group name
-    fn display_secrets_by_group(&self, secrets: &[SecretSummary], output_format: OutputFormat) -> Result<()> {
+    fn display_secrets_by_group(
+        &self,
+        secrets: &[SecretSummary],
+        output_format: OutputFormat,
+    ) -> Result<()> {
         let mut groups: HashMap<String, Vec<&SecretSummary>> = HashMap::new();
 
         // Group secrets by each individual group (since groups can contain multiple comma-separated values)
@@ -1213,19 +1339,26 @@ impl SecretManager {
                     }
                 }
                 None => {
-                    groups.entry("(No Groups)".to_string()).or_default().push(secret);
+                    groups
+                        .entry("(No Groups)".to_string())
+                        .or_default()
+                        .push(secret);
                 }
             }
         }
 
         // Display each group
         for (group_name, group_secrets) in groups {
-            self.display_utils.print_header(&format!("Group: {} ({} secrets)", group_name, group_secrets.len()))?;
-            
+            self.display_utils.print_header(&format!(
+                "Group: {} ({} secrets)",
+                group_name,
+                group_secrets.len()
+            ))?;
+
             let formatter = TableFormatter::new(output_format.clone(), self.no_color);
             let table_output = formatter.format_table(&group_secrets)?;
             println!("{}", table_output);
-            
+
             self.display_utils.print_separator()?;
         }
 
@@ -1259,21 +1392,25 @@ impl SecretManager {
         self.validate_secret_name(&update_request.name)?;
 
         // Check if secret exists first
-        let current_secret = self.secret_ops.get_secret(vault_name, &update_request.name, false).await?;
+        let current_secret = self
+            .secret_ops
+            .get_secret(vault_name, &update_request.name, false)
+            .await?;
 
         // Handle secret renaming if requested
         if let Some(ref new_name) = update_request.new_name {
             self.validate_secret_name(new_name)?;
-            
+
             // Check if new name already exists
             if self.secret_ops.secret_exists(vault_name, new_name).await? {
                 return Err(crosstacheError::invalid_argument(format!(
-                    "Secret with name '{}' already exists", new_name
+                    "Secret with name '{}' already exists",
+                    new_name
                 )));
             }
-            
+
             self.display_utils.print_info(&format!(
-                "Renaming secret '{}' to '{}'...", 
+                "Renaming secret '{}' to '{}'...",
                 update_request.name, new_name
             ))?;
         }
@@ -1284,8 +1421,14 @@ impl SecretManager {
                 // Replace all tags
                 let mut tags = new_tags.clone();
                 // Always preserve original name and created_by tags
-                tags.insert("original_name".to_string(), 
-                    update_request.new_name.as_ref().unwrap_or(&update_request.name).clone());
+                tags.insert(
+                    "original_name".to_string(),
+                    update_request
+                        .new_name
+                        .as_ref()
+                        .unwrap_or(&update_request.name)
+                        .clone(),
+                );
                 tags.insert("created_by".to_string(), "crosstache".to_string());
                 Some(tags)
             } else {
@@ -1315,24 +1458,37 @@ impl SecretManager {
         } else {
             // Preserve existing groups if none specified in update
             current_secret.tags.get("groups").map(|groups_str| {
-                groups_str.split(',').map(|g| g.trim().to_string()).collect()
+                groups_str
+                    .split(',')
+                    .map(|g| g.trim().to_string())
+                    .collect()
             })
         };
 
         // Handle folder - preserve existing if not specified in update
-        let final_folder = update_request.folder.clone().or_else(|| {
-            current_secret.tags.get("folder").map(|f| f.clone())
-        });
+        let final_folder = update_request
+            .folder
+            .clone()
+            .or_else(|| current_secret.tags.get("folder").map(|f| f.clone()));
 
         // Handle note - preserve existing if not specified in update
-        let final_note = update_request.note.clone().or_else(|| {
-            current_secret.tags.get("note").map(|n| n.clone())
-        });
+        let final_note = update_request
+            .note
+            .clone()
+            .or_else(|| current_secret.tags.get("note").map(|n| n.clone()));
 
         // Create the enhanced secret request
         let secret_request = SecretRequest {
-            name: update_request.new_name.as_ref().unwrap_or(&update_request.name).clone(),
-            value: update_request.value.as_ref().unwrap_or(&current_secret.value.unwrap_or_default()).clone(),
+            name: update_request
+                .new_name
+                .as_ref()
+                .unwrap_or(&update_request.name)
+                .clone(),
+            value: update_request
+                .value
+                .as_ref()
+                .unwrap_or(&current_secret.value.unwrap_or_default())
+                .clone(),
             content_type: update_request.content_type.clone(),
             enabled: update_request.enabled,
             expires_on: update_request.expires_on,
@@ -1344,31 +1500,40 @@ impl SecretManager {
         };
 
         // Show update progress
-        self.display_utils.print_info(&format!("Updating secret '{}'...", update_request.name))?;
+        self.display_utils
+            .print_info(&format!("Updating secret '{}'...", update_request.name))?;
 
         // If renaming, we need to create a new secret and delete the old one
         if update_request.new_name.is_some() {
             // Create new secret with new name
-            let new_secret = self.secret_ops.set_secret(vault_name, &secret_request).await?;
-            
+            let new_secret = self
+                .secret_ops
+                .set_secret(vault_name, &secret_request)
+                .await?;
+
             // Delete old secret
-            self.secret_ops.delete_secret(vault_name, &update_request.name).await?;
-            
+            self.secret_ops
+                .delete_secret(vault_name, &update_request.name)
+                .await?;
+
             self.display_utils.print_info(&format!(
                 "Successfully renamed secret '{}' to '{}'",
                 update_request.name, secret_request.name
             ))?;
-            
+
             Ok(new_secret)
         } else {
             // Regular update
-            let updated_secret = self.secret_ops.update_secret(vault_name, &update_request.name, &secret_request).await?;
-            
+            let updated_secret = self
+                .secret_ops
+                .update_secret(vault_name, &update_request.name, &secret_request)
+                .await?;
+
             self.display_utils.print_info(&format!(
                 "Successfully updated secret '{}'",
                 update_request.name
             ))?;
-            
+
             Ok(updated_secret)
         }
     }
@@ -1403,7 +1568,8 @@ impl SecretManagerBuilder {
 
     /// Build the secret manager
     pub fn build(self) -> Result<SecretManager> {
-        let auth_provider = self.auth_provider
+        let auth_provider = self
+            .auth_provider
             .ok_or_else(|| crosstacheError::config("Authentication provider is required"))?;
 
         Ok(SecretManager::new(auth_provider, self.no_color))
@@ -1424,17 +1590,18 @@ mod tests {
     fn test_secret_name_validation() {
         let manager = SecretManager::new(
             Arc::new(crate::auth::provider::DefaultAzureCredentialProvider::new().unwrap()),
-            true
+            true,
         );
 
         // Valid names
         assert!(manager.validate_secret_name("valid-secret").is_ok());
         assert!(manager.validate_secret_name("secret123").is_ok());
-        assert!(manager.validate_secret_name("app/database/connection").is_ok());
+        assert!(manager
+            .validate_secret_name("app/database/connection")
+            .is_ok());
 
         // Invalid names
         assert!(manager.validate_secret_name("").is_err());
         assert!(manager.validate_secret_name(&"a".repeat(128)).is_err());
     }
-
 }

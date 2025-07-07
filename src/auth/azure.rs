@@ -1,5 +1,5 @@
 //! Azure authentication implementations
-//! 
+//!
 //! This module contains concrete implementations of authentication providers
 //! for Azure services.
 
