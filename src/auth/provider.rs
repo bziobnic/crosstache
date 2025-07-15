@@ -14,6 +14,99 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Creates a user-friendly error message for credential creation failures
+fn create_user_friendly_credential_error(error: azure_core::Error) -> crosstacheError {
+    let error_str = error.to_string().to_lowercase();
+
+    let help_message = if error_str.contains("no credentials")
+        || error_str.contains("authentication failed")
+    {
+        "Azure authentication failed. Please try one of the following:
+
+1. Sign in to Azure CLI:
+   az login
+
+2. Set environment variables for service principal:
+   export AZURE_CLIENT_ID=your-client-id
+   export AZURE_CLIENT_SECRET=your-client-secret
+   export AZURE_TENANT_ID=your-tenant-id
+
+3. Use managed identity if running on Azure resources
+
+4. Sign in to Visual Studio Code with Azure account
+
+For more details, see: https://docs.microsoft.com/en-us/azure/developer/rust/authentication"
+    } else if error_str.contains("network") || error_str.contains("connection") {
+        "Network connection failed while attempting to authenticate. Please check:
+
+1. Your internet connection
+2. Corporate firewall settings
+3. Proxy configuration
+
+If behind a corporate firewall, you may need to configure proxy settings."
+    } else if error_str.contains("tenant") {
+        "Tenant-related authentication error. Please verify:
+
+1. Your tenant ID is correct
+2. Your account has access to the specified tenant
+3. The tenant allows the authentication method you're using
+
+You can find your tenant ID in the Azure portal or with: az account show"
+    } else {
+        "Azure authentication failed. Common solutions:
+
+1. Run 'az login' to authenticate with Azure CLI
+2. Verify your Azure account permissions
+3. Check your network connection
+4. Ensure you have access to the Azure subscription
+
+For detailed troubleshooting, see: https://docs.microsoft.com/en-us/azure/developer/rust/authentication"
+    };
+
+    crosstacheError::authentication(format!("{}\n\n{}", error, help_message))
+}
+
+/// Creates a user-friendly error message for token acquisition failures
+fn create_user_friendly_token_error(error: azure_core::Error) -> crosstacheError {
+    let error_str = error.to_string().to_lowercase();
+
+    let help_message = if error_str.contains("403") || error_str.contains("forbidden") {
+        "Access denied. Please verify:
+
+1. Your account has the necessary permissions
+2. You have access to the Azure subscription
+3. The resource you're trying to access exists
+4. Your authentication hasn't expired (try 'az login' again)"
+    } else if error_str.contains("401") || error_str.contains("unauthorized") {
+        "Authentication expired or invalid. Please try:
+
+1. Re-authenticate with Azure CLI: az login
+2. Check if your credentials are still valid
+3. Verify your tenant ID and subscription access"
+    } else if error_str.contains("timeout") || error_str.contains("network") {
+        "Network timeout or connection issue. Please check:
+
+1. Your internet connection
+2. Corporate firewall or proxy settings
+3. Azure service availability"
+    } else if error_str.contains("scope") {
+        "Invalid scope or permission issue. This may indicate:
+
+1. Your account doesn't have the required permissions
+2. The requested resource or service is not available
+3. Your authentication method doesn't support the requested operation"
+    } else {
+        "Token acquisition failed. Common solutions:
+
+1. Re-authenticate: az login
+2. Check your permissions and subscription access
+3. Verify your network connection
+4. Ensure the Azure service is available"
+    };
+
+    crosstacheError::authentication(format!("{}\n\n{}", error, help_message))
+}
+
 /// Trait for Azure authentication providers
 #[async_trait]
 pub trait AzureAuthProvider: Send + Sync {
@@ -63,12 +156,8 @@ impl DefaultAzureCredentialProvider {
         };
 
         let credential = Arc::new(
-            DefaultAzureCredential::create(TokenCredentialOptions::default()).map_err(|e| {
-                crosstacheError::authentication(format!(
-                    "Failed to create DefaultAzureCredential: {}",
-                    e
-                ))
-            })?,
+            DefaultAzureCredential::create(TokenCredentialOptions::default())
+                .map_err(|e| create_user_friendly_credential_error(e))?,
         );
         let network_config = NetworkConfig::default();
         let http_client = create_http_client(&network_config)?;
@@ -84,12 +173,8 @@ impl DefaultAzureCredentialProvider {
     pub fn with_tenant(tenant_id: String) -> Result<Self> {
         // Note: Azure Identity v0.20 may have different API for setting tenant
         let credential = Arc::new(
-            DefaultAzureCredential::create(TokenCredentialOptions::default()).map_err(|e| {
-                crosstacheError::authentication(format!(
-                    "Failed to create DefaultAzureCredential: {}",
-                    e
-                ))
-            })?,
+            DefaultAzureCredential::create(TokenCredentialOptions::default())
+                .map_err(|e| create_user_friendly_credential_error(e))?,
         );
         let network_config = NetworkConfig::default();
         let http_client = create_http_client(&network_config)?;
@@ -187,10 +272,11 @@ impl DefaultAzureCredentialProvider {
 #[async_trait]
 impl AzureAuthProvider for DefaultAzureCredentialProvider {
     async fn get_token(&self, scopes: &[&str]) -> Result<AccessToken> {
-        let token_response =
-            self.credential.get_token(scopes).await.map_err(|e| {
-                crosstacheError::authentication(format!("Failed to get token: {}", e))
-            })?;
+        let token_response = self
+            .credential
+            .get_token(scopes)
+            .await
+            .map_err(|e| create_user_friendly_token_error(e))?;
 
         Ok(token_response)
     }
@@ -339,10 +425,11 @@ impl ClientSecretProvider {
 #[async_trait]
 impl AzureAuthProvider for ClientSecretProvider {
     async fn get_token(&self, scopes: &[&str]) -> Result<AccessToken> {
-        let token_response =
-            self.credential.get_token(scopes).await.map_err(|e| {
-                crosstacheError::authentication(format!("Failed to get token: {}", e))
-            })?;
+        let token_response = self
+            .credential
+            .get_token(scopes)
+            .await
+            .map_err(|e| create_user_friendly_token_error(e))?;
 
         Ok(token_response)
     }

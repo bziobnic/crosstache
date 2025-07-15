@@ -29,7 +29,7 @@ async fn main() {
     // Execute the command
     if let Err(e) = run(cli).await {
         error!("Error: {}", e);
-        eprintln!("Error: {}", e);
+        print_user_friendly_error(&e);
         std::process::exit(1);
     }
 }
@@ -70,4 +70,55 @@ fn init_logging() {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+}
+
+fn print_user_friendly_error(error: &crosstacheError) {
+    use crosstacheError::*;
+
+    match error {
+        AuthenticationError(msg) => {
+            eprintln!("🔐 Authentication Error");
+            eprintln!("{}", msg);
+        }
+        AzureApiError(msg) => {
+            eprintln!("☁️  Azure API Error");
+            eprintln!("{}", msg);
+        }
+        NetworkError(msg) => {
+            eprintln!("🌐 Network Error");
+            eprintln!("{}", msg);
+        }
+        ConfigError(msg) => {
+            eprintln!("⚙️  Configuration Error");
+            eprintln!("{}", msg);
+        }
+        VaultNotFound { name } => {
+            eprintln!("🔒 Vault Not Found");
+            eprintln!("The Azure Key Vault '{}' was not found.", name);
+            eprintln!("\nPlease verify:");
+            eprintln!("1. The vault name is correct");
+            eprintln!("2. The vault exists in your subscription");
+            eprintln!("3. You have access to the vault");
+            eprintln!("4. You're using the correct subscription");
+        }
+        SecretNotFound { name } => {
+            eprintln!("🔑 Secret Not Found");
+            eprintln!("The secret '{}' was not found in the vault.", name);
+            eprintln!("\nPlease verify:");
+            eprintln!("1. The secret name is correct");
+            eprintln!("2. The secret exists in the vault");
+            eprintln!("3. You have 'Get' permissions for secrets");
+        }
+        PermissionDenied(msg) => {
+            eprintln!("🚫 Permission Denied");
+            eprintln!("{}", msg);
+            eprintln!("\nPlease verify:");
+            eprintln!("1. Your account has the necessary permissions");
+            eprintln!("2. You have access to the Azure subscription");
+            eprintln!("3. The resource you're trying to access exists");
+        }
+        _ => {
+            eprintln!("❌ Error: {}", error);
+        }
+    }
 }
