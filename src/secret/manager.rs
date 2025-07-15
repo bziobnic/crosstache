@@ -1081,6 +1081,11 @@ impl SecretManager {
             secrets.retain(|secret| secret.enabled);
         }
 
+        // Display vault name header for table output
+        if output_format == OutputFormat::Table {
+            self.display_vault_header(vault_name)?;
+        }
+
         if secrets.is_empty() {
             let message = if show_all {
                 "No secrets found in vault."
@@ -1092,7 +1097,7 @@ impl SecretManager {
         }
 
         if group_by {
-            self.display_secrets_by_group(&secrets, output_format)?;
+            self.display_secrets_by_group(&secrets, output_format, vault_name)?;
         } else {
             self.display_secrets_table(&secrets, output_format)?;
         }
@@ -1306,6 +1311,17 @@ impl SecretManager {
         Ok(())
     }
 
+    /// Display vault name header
+    fn display_vault_header(&self, vault_name: &str) -> Result<()> {
+        if self.no_color {
+            println!("Vault: {}", vault_name);
+        } else {
+            println!("\x1b[1m\x1b[36mVault: {}\x1b[0m", vault_name);
+        }
+        println!();
+        Ok(())
+    }
+
     /// Display secrets in a table
     fn display_secrets_table(
         &self,
@@ -1323,7 +1339,13 @@ impl SecretManager {
         &self,
         secrets: &[SecretSummary],
         output_format: OutputFormat,
+        vault_name: &str,
     ) -> Result<()> {
+        // Display vault name header first
+        if output_format == OutputFormat::Table {
+            self.display_vault_header(vault_name)?;
+        }
+
         let mut groups: HashMap<String, Vec<&SecretSummary>> = HashMap::new();
 
         // Group secrets by each individual group (since groups can contain multiple comma-separated values)

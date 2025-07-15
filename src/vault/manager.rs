@@ -64,7 +64,7 @@ impl VaultManager {
             request.soft_delete_retention_in_days = Some(90);
         }
         if request.purge_protection.is_none() {
-            request.purge_protection = Some(false);
+            request.purge_protection = Some(true);
         }
 
         let vault = self.vault_ops.create_vault(&request).await?;

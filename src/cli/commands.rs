@@ -159,7 +159,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Vault context management
+    /// Vault context management (alias: cx)
+    #[command(alias = "cx")]
     Context {
         #[command(subcommand)]
         command: ContextCommands,
@@ -629,7 +630,7 @@ async fn execute_vault_create(
         enabled_for_disk_encryption: Some(false),
         enabled_for_template_deployment: Some(false),
         soft_delete_retention_in_days: Some(90),
-        purge_protection: Some(false),
+        purge_protection: None, // Let the manager set safe defaults
         tags: Some(std::collections::HashMap::from([
             ("created_by".to_string(), "crosstache".to_string()),
             (
@@ -940,8 +941,16 @@ async fn execute_context_command(command: ContextCommands, config: Config) -> Re
     Ok(())
 }
 
-async fn execute_init_command(config: Config) -> Result<()> {
-    println!("TODO: Initialize default configuration");
+async fn execute_init_command(_config: Config) -> Result<()> {
+    use crate::config::init::ConfigInitializer;
+
+    // Create the initializer and run the interactive setup
+    let initializer = ConfigInitializer::new();
+    let new_config = initializer.run_interactive_setup().await?;
+    
+    // Show setup summary
+    initializer.show_setup_summary(&new_config)?;
+    
     Ok(())
 }
 

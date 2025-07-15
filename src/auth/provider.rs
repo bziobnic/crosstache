@@ -8,6 +8,7 @@ use crate::utils::network::{classify_network_error, create_http_client, NetworkC
 use async_trait::async_trait;
 use azure_core::auth::{AccessToken, TokenCredential};
 use azure_identity::{ClientSecretCredential, DefaultAzureCredential, TokenCredentialOptions};
+use base64::Engine;
 use reqwest::{header::HeaderMap, Client};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -45,6 +46,22 @@ pub struct DefaultAzureCredentialProvider {
 impl DefaultAzureCredentialProvider {
     /// Create a new DefaultAzureCredentialProvider
     pub fn new() -> Result<Self> {
+        // Try to get tenant ID from Azure CLI to configure the credential
+        let tenant_id = match std::process::Command::new("az")
+            .args(&["account", "show", "--query", "tenantId", "-o", "tsv"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let tid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !tid.is_empty() && tid != "00000000-0000-0000-0000-000000000000" {
+                    Some(tid)
+                } else {
+                    None
+                }
+            },
+            _ => None
+        };
+
         let credential = Arc::new(
             DefaultAzureCredential::create(TokenCredentialOptions::default()).map_err(|e| {
                 crosstacheError::authentication(format!(
@@ -59,7 +76,7 @@ impl DefaultAzureCredentialProvider {
         Ok(Self {
             credential,
             http_client,
-            tenant_id: None,
+            tenant_id,
         })
     }
 
@@ -116,6 +133,55 @@ impl DefaultAzureCredentialProvider {
 
         Ok(user_info)
     }
+
+    /// Extract tenant ID from JWT token
+    fn extract_tenant_from_token(&self, token: &str) -> Result<String> {
+        // JWT tokens have three parts separated by dots: header.payload.signature
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() != 3 {
+            return Err(crosstacheError::authentication(
+                "Invalid JWT token format".to_string(),
+            ));
+        }
+
+        // Decode the payload (second part)
+        let payload = parts[1];
+        
+        // For base64url decoding, add padding if needed
+        let mut payload_padded = payload.to_string();
+        while payload_padded.len() % 4 != 0 {
+            payload_padded.push('=');
+        }
+        
+        let decoded_bytes = base64::engine::general_purpose::URL_SAFE
+            .decode(payload_padded)
+            .map_err(|e| {
+                crosstacheError::authentication(format!("Failed to decode JWT payload: {}", e))
+            })?;
+
+        // Parse JSON
+        let claims: Value = serde_json::from_slice(&decoded_bytes).map_err(|e| {
+            crosstacheError::authentication(format!("Failed to parse JWT claims: {}", e))
+        })?;
+
+        // Extract tenant ID from 'tid' claim
+        let tenant_id = claims
+            .get("tid")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                crosstacheError::authentication("Unable to find tenant ID in token".to_string())
+            })?;
+
+        // Validate the tenant ID is a proper GUID and not nil
+        if tenant_id == "00000000-0000-0000-0000-000000000000" || tenant_id.is_empty() {
+            return Err(crosstacheError::authentication(
+                "Invalid or empty tenant ID in token".to_string(),
+            ));
+        }
+
+        Ok(tenant_id)
+    }
 }
 
 #[async_trait]
@@ -134,19 +200,37 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
             return Ok(tenant_id.clone());
         }
 
-        // Get tenant ID from token or Graph API
+        // First try to get tenant ID from environment variable
+        if let Ok(env_tenant_id) = std::env::var("AZURE_TENANT_ID") {
+            if !env_tenant_id.is_empty() && env_tenant_id != "00000000-0000-0000-0000-000000000000" {
+                return Ok(env_tenant_id);
+            }
+        }
+
+        // Use Azure CLI as the primary method since it's most reliable
+        match std::process::Command::new("az")
+            .args(&["account", "show", "--query", "tenantId", "-o", "tsv"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let tenant_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !tenant_id.is_empty() && tenant_id != "00000000-0000-0000-0000-000000000000" {
+                    return Ok(tenant_id);
+                }
+            },
+            _ => {}
+        }
+
+        // Fallback: try to get tenant ID from token claims
         let token = self
             .get_token(&["https://graph.microsoft.com/.default"])
             .await?;
-        let user_info = self.get_user_info(&token.token.secret()).await?;
-
-        user_info
-            .get("tenantId")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                crosstacheError::authentication("Unable to determine tenant ID".to_string())
-            })
+        
+        // Extract tenant ID from JWT token
+        match self.extract_tenant_from_token(&token.token.secret()) {
+            Ok(tenant_id) => Ok(tenant_id),
+            Err(_) => Err(crosstacheError::authentication("Unable to determine tenant ID from any source".to_string()))
+        }
     }
 
     async fn get_object_id(&self) -> Result<String> {

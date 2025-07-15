@@ -39,8 +39,8 @@ async fn run(cli: Cli) -> Result<()> {
 
     // Load configuration differently based on command
     let config = match &cli.command {
-        crate::cli::Commands::Config { .. } => {
-            // For config commands, load without validation
+        crate::cli::Commands::Config { .. } | crate::cli::Commands::Init => {
+            // For config and init commands, load without validation
             load_config_without_validation().await?
         }
         _ => {
@@ -56,65 +56,10 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn load_config_without_validation() -> Result<crate::config::Config> {
-    use crate::config::Config;
-
-    let mut config = Config::default();
-
-    // Load from configuration file if it exists
-    let config_path = Config::get_config_path()?;
-    if config_path.exists() {
-        config = load_from_file(&config_path).await?;
-    }
-
-    // Override with environment variables
-    load_from_env(&mut config);
-
-    // Don't validate for config commands
-    Ok(config)
-}
-
-async fn load_from_file(path: &std::path::PathBuf) -> Result<crate::config::Config> {
-    let contents = tokio::fs::read_to_string(path).await?;
-
-    // Try to parse as TOML first, then JSON as fallback
-    if let Ok(config) = toml::from_str::<crate::config::Config>(&contents) {
-        return Ok(config);
-    }
-
-    let config = serde_json::from_str::<crate::config::Config>(&contents)?;
-    Ok(config)
-}
-
-fn load_from_env(config: &mut crate::config::Config) {
-    if let Ok(value) = std::env::var("DEBUG") {
-        config.debug = value.to_lowercase() == "true" || value == "1";
-    }
-
-    if let Ok(value) = std::env::var("AZURE_SUBSCRIPTION_ID") {
-        config.subscription_id = value;
-    }
-
-    if let Ok(value) = std::env::var("DEFAULT_VAULT") {
-        config.default_vault = value;
-    }
-
-    if let Ok(value) = std::env::var("DEFAULT_RESOURCE_GROUP") {
-        config.default_resource_group = value;
-    }
-
-    if let Ok(value) = std::env::var("AZURE_TENANT_ID") {
-        config.tenant_id = value;
-    }
-
-    if let Ok(value) = std::env::var("FUNCTION_APP_URL") {
-        config.function_app_url = value;
-    }
-
-    if let Ok(value) = std::env::var("CACHE_TTL") {
-        if let Ok(seconds) = value.parse::<u64>() {
-            config.cache_ttl = std::time::Duration::from_secs(seconds);
-        }
-    }
+    use crate::config::{Config, load_config_no_validation};
+    
+    // Use the config module's function but without validation
+    load_config_no_validation().await
 }
 
 fn init_logging() {

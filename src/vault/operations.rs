@@ -204,6 +204,24 @@ impl VaultOperations for AzureVaultOperations {
                 ));
             }
 
+            // Convert access policies to Azure API format
+            let access_policies_json: Vec<Value> = access_policies
+                .iter()
+                .map(|policy| {
+                    json!({
+                        "tenantId": policy.tenant_id,
+                        "objectId": policy.object_id,
+                        "applicationId": policy.application_id,
+                        "permissions": {
+                            "keys": policy.permissions.keys,
+                            "secrets": policy.permissions.secrets,
+                            "certificates": policy.permissions.certificates,
+                            "storage": policy.permissions.storage
+                        }
+                    })
+                })
+                .collect();
+
             let body = json!({
                 "location": request.location,
                 "properties": {
@@ -212,13 +230,13 @@ impl VaultOperations for AzureVaultOperations {
                         "family": "A",
                         "name": request.sku.as_ref().unwrap_or(&"standard".to_string())
                     },
-                    "accessPolicies": access_policies,
+                    "accessPolicies": access_policies_json,
                     "enabledForDeployment": request.enabled_for_deployment.unwrap_or(false),
                     "enabledForDiskEncryption": request.enabled_for_disk_encryption.unwrap_or(false),
                     "enabledForTemplateDeployment": request.enabled_for_template_deployment.unwrap_or(false),
                     "enableSoftDelete": true,
                     "softDeleteRetentionInDays": request.soft_delete_retention_in_days.unwrap_or(90),
-                    "enablePurgeProtection": request.purge_protection.unwrap_or(false)
+                    "enablePurgeProtection": request.purge_protection.unwrap_or(true)
                 },
                 "tags": request.tags.as_ref().unwrap_or(&HashMap::new())
             });

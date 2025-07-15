@@ -57,10 +57,11 @@ impl Config {
     }
 
     pub fn get_config_path() -> Result<PathBuf> {
-        let home_dir = dirs::home_dir()
-            .ok_or_else(|| crosstacheError::config("Unable to determine home directory"))?;
+        // Use platform-appropriate config directory
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
 
-        Ok(home_dir.join(".config").join("xv").join("xv.conf"))
+        Ok(config_dir.join("xv").join("xv.conf"))
     }
 
     pub async fn load() -> Result<Self> {
@@ -152,6 +153,16 @@ impl Config {
 /// 3. Configuration file
 /// 4. Default values
 pub async fn load_config() -> Result<Config> {
+    let config = load_config_no_validation().await?;
+    
+    // Validate configuration
+    config.validate()?;
+    
+    Ok(config)
+}
+
+/// Load configuration without validation (for init and config commands)
+pub async fn load_config_no_validation() -> Result<Config> {
     let mut config = Config::default();
 
     // Load from configuration file if it exists
@@ -162,9 +173,6 @@ pub async fn load_config() -> Result<Config> {
 
     // Override with environment variables
     load_from_env(&mut config);
-
-    // Validate configuration
-    config.validate()?;
 
     Ok(config)
 }
