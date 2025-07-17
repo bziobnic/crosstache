@@ -9,6 +9,7 @@ use crossterm::{
     style::{Color as CrosstermColor, Stylize},
     terminal::{size, Clear, ClearType},
 };
+use serde::Serialize;
 use std::io::{stdout, Write};
 use tabled::{
     settings::{object::Rows, Alignment, Color, Modify, Padding, Style, Width},
@@ -16,13 +17,75 @@ use tabled::{
 };
 
 /// Output format options
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
 pub enum OutputFormat {
+    /// Human-readable table format
     Table,
+    /// Machine-readable JSON output
     Json,
+    /// YAML format for configuration files
     Yaml,
+    /// Comma-separated values format
     Csv,
+    /// Simple text output
+    Plain,
+    /// Custom template-based output
+    Template,
+    /// Raw text without formatting
     Raw,
+}
+
+/// Template error for formatting operations
+#[derive(Debug, thiserror::Error)]
+pub enum TemplateError {
+    #[error("Template compilation error: {0}")]
+    CompilationError(String),
+    #[error("Template rendering error: {0}")]
+    RenderingError(String),
+    #[error("Template not found: {0}")]
+    NotFound(String),
+}
+
+/// Trait for objects that can be formatted in different output formats
+pub trait FormattableOutput: Serialize + Tabled + Sized {
+    /// Convert to JSON format
+    fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(self).map_err(|e| {
+            crate::error::crosstacheError::SerializationError(format!("JSON serialization failed: {}", e))
+        })
+    }
+
+    /// Convert to table format
+    fn to_table(&self) -> String {
+        let table = Table::new([self]);
+        table.to_string()
+    }
+
+    /// Convert to plain text format
+    fn to_plain(&self) -> String {
+        let mut table = Table::new([self]);
+        table.with(Style::ascii()).with(Padding::new(1, 1, 0, 0));
+        table.to_string()
+    }
+
+    /// Convert using a template
+    fn to_template(&self, _template: &str) -> std::result::Result<String, TemplateError> {
+        // Placeholder implementation - will be fully implemented in Phase 2
+        Err(TemplateError::NotFound("Template engine not yet implemented".to_string()))
+    }
+
+    /// Convert to YAML format
+    fn to_yaml(&self) -> Result<String> {
+        serde_yaml::to_string(self).map_err(|e| {
+            crate::error::crosstacheError::SerializationError(format!("YAML serialization failed: {}", e))
+        })
+    }
+
+    /// Convert to CSV format
+    fn to_csv(&self) -> Result<String> {
+        // Placeholder implementation - will be enhanced later
+        Ok("CSV output not yet implemented".to_string())
+    }
 }
 
 /// Color theme for console output
@@ -77,6 +140,8 @@ impl TableFormatter {
             OutputFormat::Json => self.format_as_json(data),
             OutputFormat::Yaml => self.format_as_yaml(data),
             OutputFormat::Csv => self.format_as_csv(data),
+            OutputFormat::Plain => self.format_as_plain(data),
+            OutputFormat::Template => self.format_as_template(data, ""),
             OutputFormat::Raw => self.format_as_raw(data),
         }
     }
@@ -121,6 +186,20 @@ impl TableFormatter {
     fn format_as_csv<T: Tabled>(&self, _data: &[T]) -> Result<String> {
         // Note: This is a simplified implementation
         Ok("CSV output not yet implemented".to_string())
+    }
+
+    /// Format data as plain text
+    fn format_as_plain<T: Tabled>(&self, data: &[T]) -> Result<String> {
+        let mut table = Table::new(data);
+        table.with(Style::ascii()).with(Padding::new(1, 1, 0, 0));
+        Ok(table.to_string())
+    }
+
+    /// Format data using a template
+    fn format_as_template<T: Tabled>(&self, _data: &[T], _template: &str) -> Result<String> {
+        // Note: This is a placeholder implementation
+        // Full template implementation will be added in Phase 2
+        Ok("Template output not yet implemented".to_string())
     }
 
     /// Format data as raw text
@@ -331,14 +410,20 @@ impl ProgressIndicator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Serialize;
     use tabled::Tabled;
 
-    #[derive(Tabled)]
+    #[derive(Debug, Clone, Serialize, Tabled)]
     struct TestData {
+        #[tabled(rename = "Name")]
         name: String,
+        #[tabled(rename = "Value")]
         value: String,
+        #[tabled(rename = "Status")]
         status: String,
     }
+
+    impl FormattableOutput for TestData {}
 
     #[test]
     fn test_table_formatting() {
@@ -372,6 +457,77 @@ mod tests {
         let result = display.format_key_value_pairs(&pairs);
         assert!(result.contains("Name"));
         assert!(result.contains("Test Vault"));
+    }
+
+    #[test]
+    fn test_formattable_output_json() {
+        let test_data = TestData {
+            name: "test-secret".to_string(),
+            value: "test-value".to_string(),
+            status: "active".to_string(),
+        };
+
+        let json_result = test_data.to_json();
+        assert!(json_result.is_ok());
+        
+        let json_str = json_result.unwrap();
+        assert!(json_str.contains("test-secret"));
+        assert!(json_str.contains("test-value"));
+        assert!(json_str.contains("active"));
+    }
+
+    #[test]
+    fn test_formattable_output_table() {
+        let test_data = TestData {
+            name: "test-secret".to_string(),
+            value: "test-value".to_string(),
+            status: "active".to_string(),
+        };
+
+        let table_result = test_data.to_table();
+        assert!(table_result.contains("Name"));
+        assert!(table_result.contains("test-secret"));
+    }
+
+    #[test]
+    fn test_formattable_output_yaml() {
+        let test_data = TestData {
+            name: "test-secret".to_string(),
+            value: "test-value".to_string(),
+            status: "active".to_string(),
+        };
+
+        let yaml_result = test_data.to_yaml();
+        assert!(yaml_result.is_ok());
+        
+        let yaml_str = yaml_result.unwrap();
+        assert!(yaml_str.contains("test-secret"));
+        assert!(yaml_str.contains("test-value"));
+    }
+
+    #[test]
+    fn test_formattable_output_plain() {
+        let test_data = TestData {
+            name: "test-secret".to_string(),
+            value: "test-value".to_string(),
+            status: "active".to_string(),
+        };
+
+        let plain_result = test_data.to_plain();
+        assert!(plain_result.contains("test-secret"));
+        assert!(plain_result.contains("Name"));
+    }
+
+    #[test]
+    fn test_formattable_output_template_placeholder() {
+        let test_data = TestData {
+            name: "test-secret".to_string(),
+            value: "test-value".to_string(),
+            status: "active".to_string(),
+        };
+
+        let template_result = test_data.to_template("{{name}}: {{status}}");
+        assert!(template_result.is_err()); // Should fail as template engine not implemented yet
     }
 }
 

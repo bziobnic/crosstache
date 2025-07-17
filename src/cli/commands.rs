@@ -38,12 +38,24 @@ pub struct BuildInfo {
 
 #[derive(Parser)]
 #[command(name = "xv")]
-#[command(about = "A comprehensive tool for managing Azure Key Vaults")]
+#[command(about = "A comprehensive tool for managing Azure Key Vault")]
 #[command(version = get_version(), author)]
 pub struct Cli {
     /// Enable debug logging
     #[arg(long, global = true)]
     pub debug: bool,
+
+    /// Output format
+    #[arg(long, global = true, value_enum, default_value = "table")]
+    pub format: OutputFormat,
+
+    /// Custom template string for template format
+    #[arg(long, global = true)]
+    pub template: Option<String>,
+
+    /// Select specific columns for table output (comma-separated)
+    #[arg(long, global = true)]
+    pub columns: Option<String>,
 
     #[command(subcommand)]
     pub command: Commands,

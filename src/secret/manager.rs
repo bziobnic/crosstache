@@ -16,7 +16,7 @@ use tabled::Tabled;
 
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::{crosstacheError, Result};
-use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
+use crate::utils::format::{DisplayUtils, FormattableOutput, OutputFormat, TableFormatter};
 use crate::utils::helpers::{generate_uuid, parse_connection_string, validate_folder_path};
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
 use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name, SecretNameInfo};
@@ -47,6 +47,8 @@ pub struct SecretProperties {
     #[tabled(rename = "Content Type")]
     pub content_type: String,
 }
+
+impl FormattableOutput for SecretProperties {}
 
 /// Secret creation/update request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +112,8 @@ pub struct SecretSummary {
     #[tabled(skip)]
     pub content_type: String,
 }
+
+impl FormattableOutput for SecretSummary {}
 
 /// Connection string component
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]

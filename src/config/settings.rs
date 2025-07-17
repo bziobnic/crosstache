@@ -7,20 +7,34 @@ use crate::error::{crosstacheError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
+use tabled::Tabled;
+use crate::utils::format::FormattableOutput;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct Config {
+    #[tabled(rename = "Debug")]
     pub debug: bool,
+    #[tabled(rename = "Subscription ID")]
     pub subscription_id: String,
+    #[tabled(rename = "Default Vault")]
     pub default_vault: String,
+    #[tabled(rename = "Default Resource Group")]
     pub default_resource_group: String,
+    #[tabled(rename = "Default Location")]
     pub default_location: String,
+    #[tabled(skip)]
     pub tenant_id: String,
+    #[tabled(skip)]
     pub function_app_url: String,
+    #[tabled(skip)]
     pub cache_ttl: Duration,
+    #[tabled(rename = "JSON Output")]
     pub output_json: bool,
+    #[tabled(rename = "No Color")]
     pub no_color: bool,
 }
+
+impl FormattableOutput for Config {}
 
 impl Default for Config {
     fn default() -> Self {

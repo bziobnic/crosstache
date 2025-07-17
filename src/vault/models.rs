@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tabled::Tabled;
+use crate::utils::format::FormattableOutput;
 /// Display function for Option<String> in tables
 fn display_option(opt: &Option<String>) -> String {
     match opt {
@@ -59,6 +60,8 @@ pub struct VaultProperties {
     #[tabled(skip)]
     pub tags: HashMap<String, String>,
 }
+
+impl FormattableOutput for VaultProperties {}
 
 /// Access policy for a Key Vault
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
@@ -300,6 +303,8 @@ pub struct VaultSummary {
     #[tabled(rename = "Created")]
     pub created_at: String,
 }
+
+impl FormattableOutput for VaultSummary {}
 
 impl VaultProperties {
     /// Convert to vault summary
