@@ -26,6 +26,9 @@ pub struct InitConfig {
     pub default_location: String,
     pub default_vault: Option<String>,
     pub create_test_vault: bool,
+    pub storage_account_name: String,
+    pub blob_container_name: String,
+    pub create_storage_account: bool,
 }
 
 impl ConfigInitializer {
@@ -41,23 +44,27 @@ impl ConfigInitializer {
         self.prompt.welcome()?;
 
         // Step 1: Detect Azure environment
-        self.prompt.step(1, 5, "Detecting Azure Environment")?;
+        self.prompt.step(1, 6, "Detecting Azure Environment")?;
         let azure_env = self.detect_azure_environment().await?;
 
         // Step 2: Configure subscription
-        self.prompt.step(2, 5, "Configuring Subscription")?;
+        self.prompt.step(2, 6, "Configuring Subscription")?;
         let subscription = self.configure_subscription(&azure_env).await?;
 
         // Step 3: Configure resource group
-        self.prompt.step(3, 5, "Configuring Resource Group")?;
+        self.prompt.step(3, 6, "Configuring Resource Group")?;
         let resource_group = self.configure_resource_group(&subscription).await?;
 
         // Step 4: Configure location
-        self.prompt.step(4, 5, "Configuring Default Location")?;
+        self.prompt.step(4, 6, "Configuring Default Location")?;
         let location = self.configure_location(&subscription).await?;
 
-        // Step 5: Optional vault creation
-        self.prompt.step(5, 5, "Optional Test Vault Creation")?;
+        // Step 5: Configure blob storage
+        self.prompt.step(5, 6, "Configuring Blob Storage")?;
+        let (storage_account, container_name, blob_storage_configured) = self.configure_blob_storage(&subscription, &resource_group, &location).await?;
+
+        // Step 6: Optional vault creation
+        self.prompt.step(6, 6, "Optional Test Vault Creation")?;
         let vault_config = self.configure_vault_creation(&subscription, &resource_group, &location).await?;
 
         // Build the final configuration
@@ -68,6 +75,9 @@ impl ConfigInitializer {
             default_location: location,
             default_vault: vault_config.clone(),
             create_test_vault: vault_config.is_some(),
+            storage_account_name: storage_account,
+            blob_container_name: container_name,
+            create_storage_account: blob_storage_configured,
         };
 
         // Create and save the configuration
@@ -256,6 +266,293 @@ impl ConfigInitializer {
         Ok(locations[selected_index].clone())
     }
 
+    /// Configure blob storage during initialization
+    async fn configure_blob_storage(
+        &self,
+        subscription: &AzureSubscription,
+        resource_group: &str,
+        location: &str,
+    ) -> Result<(String, String, bool)> {
+        let create_storage = self.prompt.confirm(
+            "Configure blob storage for file operations?",
+            true,
+        )?;
+
+        if !create_storage {
+            return Ok((String::new(), String::new(), false));
+        }
+
+        let progress = ProgressIndicator::new("Loading existing storage accounts...");
+        
+        // Try to get existing storage accounts in the resource group
+        let existing_accounts = AzureDetector::get_storage_accounts(&subscription.id, resource_group).await
+            .unwrap_or_default();
+        
+        progress.finish_clear();
+
+        let (storage_name, create_new_storage) = if !existing_accounts.is_empty() {
+            self.prompt.info(&format!("Found {} existing storage account(s) in resource group '{}'", existing_accounts.len(), resource_group))?;
+            
+            let use_existing = self.prompt.confirm(
+                "Use an existing storage account?",
+                true,
+            )?;
+
+            if use_existing {
+                let selected_index = self.prompt.select(
+                    "Select a storage account",
+                    &existing_accounts,
+                    None,
+                )?;
+                (existing_accounts[selected_index].clone(), false)
+            } else {
+                // Create new storage account
+                let default_storage_name = SetupHelper::generate_storage_account_name();
+                let storage_name = self.prompt.input_text_validated(
+                    "Enter new storage account name",
+                    Some(&default_storage_name),
+                    SetupHelper::validate_storage_account_name,
+                )?;
+                (storage_name, true)
+            }
+        } else {
+            // No existing accounts, create new one
+            let default_storage_name = SetupHelper::generate_storage_account_name();
+            let storage_name = self.prompt.input_text_validated(
+                "Enter storage account name",
+                Some(&default_storage_name),
+                SetupHelper::validate_storage_account_name,
+            )?;
+            (storage_name, true)
+        };
+
+        let container_name = self.prompt.input_text_validated(
+            "Enter container name for files",
+            Some("crosstache-files"),
+            SetupHelper::validate_container_name,
+        )?;
+
+        // Create storage account if needed
+        if create_new_storage {
+            self.create_storage_account(&storage_name, subscription, resource_group, location).await?;
+        } else {
+            // If using existing storage account, just create the container
+            self.create_blob_container(&storage_name, &container_name, subscription).await?;
+        }
+
+        Ok((storage_name, container_name, true))
+    }
+
+    /// Create storage account and container
+    async fn create_storage_account(
+        &self,
+        storage_name: &str,
+        subscription: &AzureSubscription,
+        resource_group: &str,
+        location: &str,
+    ) -> Result<()> {
+        let progress = ProgressIndicator::new("Creating storage account...");
+
+        // For now, we'll use Azure CLI to create the storage account
+        // TODO: Implement proper Azure Management API integration
+        progress.set_message("Creating storage account...");
+        
+        // Create storage account using Azure CLI with timeout
+        let create_storage_cmd = tokio::time::timeout(
+            std::time::Duration::from_secs(180), // 3 minute timeout for storage account creation
+            tokio::process::Command::new("az")
+                .args([
+                    "storage", "account", "create",
+                    "--name", storage_name,
+                    "--resource-group", resource_group,
+                    "--location", location,
+                    "--sku", "Standard_LRS",
+                    "--kind", "StorageV2",
+                    "--access-tier", "Hot",
+                    "--allow-blob-public-access", "false",
+                    "--min-tls-version", "TLS1_2",
+                    "--subscription", &subscription.id,
+                ])
+                .output()
+        ).await;
+
+        let create_storage_cmd = match create_storage_cmd {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(crosstacheError::azure_api(
+                    "Storage account creation timed out after 3 minutes. Please check your Azure CLI authentication and network connection.".to_string()
+                ));
+            }
+        };
+
+        if !create_storage_cmd.status.success() {
+            let error_msg = String::from_utf8_lossy(&create_storage_cmd.stderr);
+            return Err(crosstacheError::azure_api(format!(
+                "Failed to create storage account: {}", error_msg
+            )));
+        }
+
+        progress.set_message("Waiting for storage account to be ready...");
+        
+        // Wait for storage account to propagate before creating container
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        progress.set_message("Creating blob container...");
+
+        // Create blob container with timeout to prevent hanging
+        let create_container_cmd = tokio::time::timeout(
+            std::time::Duration::from_secs(120), // 2 minute timeout
+            tokio::process::Command::new("az")
+                .args([
+                    "storage", "container", "create",
+                    "--name", "crosstache-files",
+                    "--account-name", storage_name,
+                    "--subscription", &subscription.id,
+                ])
+                .output()
+        ).await;
+
+        // Check if container creation command completed
+        let command_succeeded = match &create_container_cmd {
+            Ok(result) => {
+                match result {
+                    Ok(output) => output.status.success(),
+                    Err(_) => false,
+                }
+            }
+            Err(_) => {
+                // Command timed out, but container might still have been created
+                progress.set_message("Container creation timed out, verifying...");
+                false
+            }
+        };
+
+        // Always verify if the container actually exists, regardless of command result
+        progress.set_message("Verifying container creation...");
+        let container_exists = AzureDetector::container_exists(&subscription.id, storage_name, "crosstache-files").await
+            .unwrap_or(false);
+
+        if !container_exists {
+            // Container doesn't exist, check for specific errors only if command failed
+            if !command_succeeded {
+                if let Ok(Ok(output)) = create_container_cmd {
+                    let error_msg = String::from_utf8_lossy(&output.stderr);
+                    
+                    // Check for specific authentication errors
+                    if error_msg.contains("authentication") || error_msg.contains("login") || error_msg.contains("Please run 'az login'") {
+                        return Err(crosstacheError::authentication(
+                            "Failed to authenticate with Azure Storage. Please ensure you're logged in with 'az login' and have proper permissions.".to_string()
+                        ));
+                    }
+                    
+                    // Check for permission errors
+                    if error_msg.contains("authorization") || error_msg.contains("permission") || error_msg.contains("forbidden") {
+                        return Err(crosstacheError::permission_denied(
+                            "Insufficient permissions to create blob container. Please ensure you have Storage Blob Data Contributor role.".to_string()
+                        ));
+                    }
+                    
+                    return Err(crosstacheError::azure_api(format!(
+                        "Failed to create blob container: {}", error_msg
+                    )));
+                }
+            }
+            
+            return Err(crosstacheError::azure_api(
+                "Container creation failed or timed out and container does not exist. Please check your Azure CLI authentication and network connection.".to_string()
+            ));
+        }
+
+        progress.finish_success(&format!("Created storage account '{}'", storage_name));
+        Ok(())
+    }
+
+    /// Create blob container in existing storage account
+    async fn create_blob_container(
+        &self,
+        storage_name: &str,
+        container_name: &str,
+        subscription: &AzureSubscription,
+    ) -> Result<()> {
+        let progress = ProgressIndicator::new("Creating blob container...");
+
+        // Check if container already exists
+        let container_exists = AzureDetector::container_exists(&subscription.id, storage_name, container_name).await
+            .unwrap_or(false);
+
+        if container_exists {
+            progress.finish_success(&format!("Container '{}' already exists in storage account '{}'", container_name, storage_name));
+            return Ok(());
+        }
+
+        // Create blob container with timeout
+        let create_container_cmd = tokio::time::timeout(
+            std::time::Duration::from_secs(120), // 2 minute timeout
+            tokio::process::Command::new("az")
+                .args([
+                    "storage", "container", "create",
+                    "--name", container_name,
+                    "--account-name", storage_name,
+                    "--subscription", &subscription.id,
+                ])
+                .output()
+        ).await;
+
+        // Check if container creation command completed
+        let command_succeeded = match &create_container_cmd {
+            Ok(result) => {
+                match result {
+                    Ok(output) => output.status.success(),
+                    Err(_) => false,
+                }
+            }
+            Err(_) => {
+                // Command timed out, but container might still have been created
+                progress.set_message("Container creation timed out, verifying...");
+                false
+            }
+        };
+
+        // Always verify if the container actually exists, regardless of command result
+        progress.set_message("Verifying container creation...");
+        let container_exists = AzureDetector::container_exists(&subscription.id, storage_name, container_name).await
+            .unwrap_or(false);
+
+        if !container_exists {
+            // Container doesn't exist, check for specific errors only if command failed
+            if !command_succeeded {
+                if let Ok(Ok(output)) = create_container_cmd {
+                    let error_msg = String::from_utf8_lossy(&output.stderr);
+                    
+                    // Check for specific authentication errors
+                    if error_msg.contains("authentication") || error_msg.contains("login") || error_msg.contains("Please run 'az login'") {
+                        return Err(crosstacheError::authentication(
+                            "Failed to authenticate with Azure Storage. Please ensure you're logged in with 'az login' and have proper permissions.".to_string()
+                        ));
+                    }
+                    
+                    // Check for permission errors
+                    if error_msg.contains("authorization") || error_msg.contains("permission") || error_msg.contains("forbidden") {
+                        return Err(crosstacheError::permission_denied(
+                            "Insufficient permissions to create blob container. Please ensure you have Storage Blob Data Contributor role.".to_string()
+                        ));
+                    }
+                    
+                    return Err(crosstacheError::azure_api(format!(
+                        "Failed to create blob container: {}", error_msg
+                    )));
+                }
+            }
+            
+            return Err(crosstacheError::azure_api(
+                "Container creation failed or timed out and container does not exist. Please check your Azure CLI authentication and network connection.".to_string()
+            ));
+        }
+
+        progress.finish_success(&format!("Created container '{}' in storage account '{}'", container_name, storage_name));
+        Ok(())
+    }
+
     /// Configure optional vault creation
     async fn configure_vault_creation(
         &self,
@@ -349,7 +646,22 @@ impl ConfigInitializer {
     /// Build the final configuration
     async fn build_config(&self, init_config: InitConfig) -> Result<Config> {
         use std::time::Duration;
+        use crate::config::settings::BlobConfig;
         
+        // Create blob config if storage account was configured
+        let blob_config = if !init_config.storage_account_name.is_empty() {
+            Some(BlobConfig {
+                storage_account: init_config.storage_account_name,
+                container_name: init_config.blob_container_name,
+                endpoint: None, // Will be auto-generated
+                enable_large_file_support: true,
+                chunk_size_mb: 4,
+                max_concurrent_uploads: 3,
+            })
+        } else {
+            None
+        };
+
         Ok(Config {
             subscription_id: init_config.subscription_id,
             tenant_id: init_config.tenant_id,
@@ -361,6 +673,7 @@ impl ConfigInitializer {
             debug: false,
             cache_ttl: Duration::from_secs(300),
             function_app_url: String::new(),
+            blob_config,
         })
     }
 
@@ -373,7 +686,7 @@ impl ConfigInitializer {
         
         // Create parent directories if they don't exist
         if let Some(parent) = config_file.parent() {
-            std::fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent).await
                 .map_err(|e| crosstacheError::config(format!(
                     "Failed to create config directory: {}", e
                 )))?;
@@ -385,7 +698,7 @@ impl ConfigInitializer {
                 "Failed to serialize config: {}", e
             )))?;
 
-        std::fs::write(&config_file, config_content)
+        tokio::fs::write(&config_file, config_content).await
             .map_err(|e| crosstacheError::config(format!(
                 "Failed to write config file: {}", e
             )))?;
@@ -407,6 +720,14 @@ impl ConfigInitializer {
         
         if !config.default_vault.is_empty() {
             println!("│ Default Vault:   {:<40} │", config.default_vault);
+        }
+        
+        // Show blob storage configuration if present
+        if let Some(blob_config) = &config.blob_config {
+            if !blob_config.storage_account.is_empty() {
+                println!("│ Storage Account: {:<40} │", blob_config.storage_account);
+                println!("│ Blob Container:  {:<40} │", blob_config.container_name);
+            }
         }
         
         println!("└─────────────────────────────────────────────────────────────┘");
@@ -447,6 +768,9 @@ mod tests {
             default_location: "eastus".to_string(),
             default_vault: Some("test-vault".to_string()),
             create_test_vault: true,
+            storage_account_name: "teststorage".to_string(),
+            blob_container_name: "test-container".to_string(),
+            create_storage_account: true,
         };
 
         assert_eq!(init_config.subscription_id, "test-sub");

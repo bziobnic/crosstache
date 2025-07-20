@@ -282,6 +282,81 @@ impl SetupHelper {
         
         format!("rg-{}-keyvaults", username)
     }
+
+    /// Generate a default storage account name
+    pub fn generate_storage_account_name() -> String {
+        let username = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".to_string())
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>();
+        
+        let timestamp = chrono::Utc::now().format("%m%d%H%M").to_string();
+        let generated_name = format!("st{}{}", username, timestamp);
+        
+        // Ensure it's not too long (max 24 characters)
+        if generated_name.len() > 24 {
+            format!("st{}{}", &username[..std::cmp::min(username.len(), 12)], timestamp)
+        } else {
+            generated_name
+        }
+    }
+
+    /// Validate storage account name according to Azure Storage requirements
+    pub fn validate_storage_account_name(name: &String) -> std::result::Result<(), String> {
+        let name = name.trim();
+        
+        if name.is_empty() {
+            return Err("Storage account name cannot be empty".to_string());
+        }
+        
+        if name.len() < 3 || name.len() > 24 {
+            return Err("Storage account name must be between 3 and 24 characters".to_string());
+        }
+        
+        if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            return Err("Storage account name can only contain lowercase letters and numbers".to_string());
+        }
+        
+        if !name.chars().next().unwrap_or(' ').is_ascii_alphabetic() {
+            return Err("Storage account name must start with a letter".to_string());
+        }
+        
+        Ok(())
+    }
+
+    /// Validate container name according to Azure Storage requirements
+    pub fn validate_container_name(name: &String) -> std::result::Result<(), String> {
+        let name = name.trim();
+        
+        if name.is_empty() {
+            return Err("Container name cannot be empty".to_string());
+        }
+        
+        if name.len() < 3 || name.len() > 63 {
+            return Err("Container name must be between 3 and 63 characters".to_string());
+        }
+        
+        if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err("Container name can only contain lowercase letters, numbers, and hyphens".to_string());
+        }
+        
+        if name.starts_with('-') || name.ends_with('-') {
+            return Err("Container name cannot start or end with a hyphen".to_string());
+        }
+        
+        if name.contains("--") {
+            return Err("Container name cannot contain consecutive hyphens".to_string());
+        }
+        
+        if !name.chars().next().unwrap_or(' ').is_ascii_alphabetic() {
+            return Err("Container name must start with a letter".to_string());
+        }
+        
+        Ok(())
+    }
 }
 
 #[cfg(test)]

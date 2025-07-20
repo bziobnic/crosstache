@@ -81,7 +81,7 @@ crosstache uses a hierarchical configuration system:
 
 1. Command-line flags (highest priority)
 2. Environment variables
-3. Configuration file (`~/.config/xv/xv.conf`)
+3. Configuration file (`$XDG_CONFIG_HOME/xv/xv.conf` or `$HOME/.config/xv/xv.conf`)
 4. Default values
 
 ### Initial Setup
