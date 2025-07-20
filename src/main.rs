@@ -8,6 +8,7 @@ use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod auth;
+mod blob;
 mod cli;
 mod config;
 mod error;

@@ -388,6 +388,89 @@ impl AzureDetector {
 
         Ok(())
     }
+
+    /// Get storage accounts in a resource group
+    pub async fn get_storage_accounts(subscription_id: &str, resource_group: &str) -> Result<Vec<String>> {
+        let output = Command::new("az")
+            .args(&[
+                "storage", "account", "list",
+                "--subscription", subscription_id,
+                "--resource-group", resource_group,
+                "--query", "[].name",
+                "--output", "json"
+            ])
+            .output()
+            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {}", e)))?;
+
+        if !output.status.success() {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            return Err(crosstacheError::config(format!(
+                "Failed to list storage accounts: {}", error_msg
+            )));
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let accounts_json: Value = serde_json::from_str(&output_str)
+            .map_err(|e| crosstacheError::serialization(format!(
+                "Failed to parse storage accounts: {}", e
+            )))?;
+
+        let mut storage_accounts = Vec::new();
+        if let Some(accounts_array) = accounts_json.as_array() {
+            for account in accounts_array {
+                if let Some(name) = account.as_str() {
+                    storage_accounts.push(name.to_string());
+                }
+            }
+        }
+
+        storage_accounts.sort();
+        Ok(storage_accounts)
+    }
+
+    /// Check if a storage account exists
+    pub async fn storage_account_exists(subscription_id: &str, storage_account: &str) -> Result<bool> {
+        let output = Command::new("az")
+            .args(&[
+                "storage", "account", "show",
+                "--subscription", subscription_id,
+                "--name", storage_account,
+                "--query", "name",
+                "--output", "json"
+            ])
+            .output()
+            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {}", e)))?;
+
+        Ok(output.status.success())
+    }
+
+    /// Check if a container exists in a storage account
+    pub async fn container_exists(subscription_id: &str, storage_account: &str, container_name: &str) -> Result<bool> {
+        let output = Command::new("az")
+            .args(&[
+                "storage", "container", "exists",
+                "--subscription", subscription_id,
+                "--account-name", storage_account,
+                "--name", container_name,
+                "--output", "json"
+            ])
+            .output()
+            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {}", e)))?;
+
+        if !output.status.success() {
+            return Ok(false);
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let exists_json: Value = serde_json::from_str(&output_str)
+            .map_err(|e| crosstacheError::serialization(format!(
+                "Failed to parse container existence check: {}", e
+            )))?;
+
+        Ok(exists_json.get("exists")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    }
 }
 
 impl AzureEnvironment {

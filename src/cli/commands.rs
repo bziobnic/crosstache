@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::error::{crosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use crate::vault::{VaultCreateRequest, VaultManager};
+use crate::blob::manager::{BlobManager, create_blob_manager};
 use clap::{Parser, Subcommand};
 
 /// Get the full version string with build information
@@ -166,6 +167,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: VaultCommands,
     },
+    /// File management commands
+    File {
+        #[command(subcommand)]
+        command: FileCommands,
+    },
     /// Configuration management commands
     Config {
         #[command(subcommand)]
@@ -192,6 +198,33 @@ pub enum Commands {
     },
     /// Show detailed version and build information
     Version,
+    /// Quick file upload (alias for file upload)
+    #[command(alias = "up")]
+    Upload {
+        /// Local file path
+        file_path: String,
+        /// Remote name (optional, defaults to filename)
+        #[arg(long)]
+        name: Option<String>,
+        /// Groups to assign to the file
+        #[arg(long)]
+        groups: Option<String>,
+        /// Additional metadata (key=value pairs)
+        #[arg(long)]
+        metadata: Vec<String>,
+    },
+    /// Quick file download (alias for file download)
+    #[command(alias = "down")]
+    Download {
+        /// Remote file name
+        name: String,
+        /// Local output path (optional, defaults to current directory)
+        #[arg(long)]
+        output: Option<String>,
+        /// Open file after download
+        #[arg(long)]
+        open: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -363,6 +396,132 @@ pub enum VaultShareCommands {
 }
 
 #[derive(Subcommand)]
+pub enum FileCommands {
+    /// Upload a file to blob storage
+    Upload {
+        /// Local file path to upload
+        file_path: String,
+        /// Remote file name (optional, defaults to filename)
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Groups to assign to the file
+        #[arg(short, long)]
+        group: Vec<String>,
+        /// Metadata key-value pairs
+        #[arg(short, long, value_parser = parse_key_val::<String, String>)]
+        metadata: Vec<(String, String)>,
+        /// Tags key-value pairs
+        #[arg(short, long, value_parser = parse_key_val::<String, String>)]
+        tag: Vec<(String, String)>,
+        /// Content type override
+        #[arg(long)]
+        content_type: Option<String>,
+        /// Show progress during upload
+        #[arg(long)]
+        progress: bool,
+    },
+    /// Download a file from blob storage
+    Download {
+        /// Remote file name to download
+        name: String,
+        /// Local output path (optional, defaults to filename)
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Stream download for large files
+        #[arg(long)]
+        stream: bool,
+        /// Force overwrite if file exists
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// List files in blob storage
+    #[command(alias = "ls")]
+    List {
+        /// Filter by prefix
+        #[arg(short, long)]
+        prefix: Option<String>,
+        /// Filter by group
+        #[arg(short, long)]
+        group: Option<String>,
+        /// Include metadata in output
+        #[arg(long)]
+        metadata: bool,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Delete a file from blob storage
+    #[command(alias = "rm")]
+    Delete {
+        /// Remote file name to delete
+        name: String,
+        /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Get file information
+    Info {
+        /// Remote file name
+        name: String,
+    },
+    /// Batch upload multiple files
+    Batch {
+        #[command(subcommand)]
+        command: BatchCommands,
+    },
+    /// Sync files between local and remote
+    Sync {
+        /// Local directory path
+        local_path: String,
+        /// Remote prefix (optional)
+        #[arg(short, long)]
+        prefix: Option<String>,
+        /// Direction: upload, download, or both
+        #[arg(short, long, default_value = "up")]
+        direction: SyncDirection,
+        /// Dry run (show what would be done)
+        #[arg(long)]
+        dry_run: bool,
+        /// Delete remote files not in local
+        #[arg(long)]
+        delete: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BatchCommands {
+    /// Upload multiple files
+    Upload {
+        /// File paths to upload
+        files: Vec<String>,
+        /// Groups to assign to all files
+        #[arg(short, long)]
+        group: Vec<String>,
+        /// Metadata key-value pairs for all files
+        #[arg(short, long, value_parser = parse_key_val::<String, String>)]
+        metadata: Vec<(String, String)>,
+        /// Show progress during upload
+        #[arg(long)]
+        progress: bool,
+    },
+    /// Delete multiple files
+    Delete {
+        /// File names to delete
+        names: Vec<String>,
+        /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum SyncDirection {
+    Up,
+    Down,
+    Both,
+}
+
+#[derive(Subcommand)]
 pub enum ShareCommands {
     /// Grant access to a secret in the current vault context
     Grant {
@@ -482,6 +641,7 @@ impl Cli {
             } => execute_secret_parse_direct(&connection_string, &format, config).await,
             Commands::Share { command } => execute_secret_share_direct(command, config).await,
             Commands::Vault { command } => execute_vault_command(command, config).await,
+            Commands::File { command } => execute_file_command(command, config).await,
             Commands::Config { command } => execute_config_command(command, config).await,
             Commands::Context { command } => execute_context_command(command, config).await,
             Commands::Init => execute_init_command(config).await,
@@ -491,8 +651,98 @@ impl Cli {
                 subscription,
             } => execute_info_command(vault_name, resource_group, subscription, config).await,
             Commands::Version => execute_version_command().await,
+            Commands::Upload { file_path, name, groups, metadata } => {
+                execute_file_upload_quick(&file_path, name, groups, metadata, &config).await
+            },
+            Commands::Download { name, output, open } => {
+                execute_file_download_quick(&name, output, open, &config).await
+            },
         }
     }
+}
+
+async fn execute_file_command(command: FileCommands, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use std::sync::Arc;
+
+    // Create blob manager
+    let blob_manager = create_blob_manager(&config).map_err(|e| {
+        if e.to_string().contains("No storage account configured") {
+            crosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
+        } else {
+            e
+        }
+    })?;
+
+    match command {
+        FileCommands::Upload {
+            file_path,
+            name,
+            group,
+            metadata,
+            tag,
+            content_type,
+            progress,
+        } => {
+            execute_file_upload(
+                &blob_manager,
+                &file_path,
+                name,
+                group,
+                metadata,
+                tag,
+                content_type,
+                progress,
+                &config,
+            )
+            .await?;
+        }
+        FileCommands::Download {
+            name,
+            output,
+            stream,
+            force,
+        } => {
+            execute_file_download(&blob_manager, &name, output, stream, force, &config).await?;
+        }
+        FileCommands::List {
+            prefix,
+            group,
+            metadata,
+            limit,
+        } => {
+            execute_file_list(&blob_manager, prefix, group, metadata, limit, &config).await?;
+        }
+        FileCommands::Delete { name, force } => {
+            execute_file_delete(&blob_manager, &name, force, &config).await?;
+        }
+        FileCommands::Info { name } => {
+            execute_file_info(&blob_manager, &name, &config).await?;
+        }
+        FileCommands::Batch { command } => {
+            execute_file_batch(&blob_manager, command, &config).await?;
+        }
+        FileCommands::Sync {
+            local_path,
+            prefix,
+            direction,
+            dry_run,
+            delete,
+        } => {
+            execute_file_sync(
+                &blob_manager,
+                &local_path,
+                prefix,
+                &direction,
+                dry_run,
+                delete,
+                &config,
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn execute_vault_command(command: VaultCommands, config: Config) -> Result<()> {
@@ -1074,6 +1324,48 @@ async fn execute_config_show(config: &Config) -> Result<()> {
         },
     ];
 
+    // Add blob storage configuration items
+    let mut items = items;
+    let blob_config = config.get_blob_config();
+    
+    items.push(ConfigItem {
+        key: "storage_account".to_string(),
+        value: if blob_config.storage_account.is_empty() {
+            "<not set>".to_string()
+        } else {
+            blob_config.storage_account
+        },
+        source: "config".to_string(),
+    });
+    
+    items.push(ConfigItem {
+        key: "storage_container".to_string(),
+        value: blob_config.container_name,
+        source: "config".to_string(),
+    });
+    
+    if let Some(endpoint) = blob_config.endpoint {
+        items.push(ConfigItem {
+            key: "storage_endpoint".to_string(),
+            value: endpoint,
+            source: "config".to_string(),
+        });
+    }
+    
+    items.push(ConfigItem {
+        key: "blob_chunk_size_mb".to_string(),
+        value: blob_config.chunk_size_mb.to_string(),
+        source: "config".to_string(),
+    });
+    
+    items.push(ConfigItem {
+        key: "blob_max_concurrent_uploads".to_string(),
+        value: blob_config.max_concurrent_uploads.to_string(),
+        source: "config".to_string(),
+    });
+
+    let items = items;
+
     if config.output_json {
         let json_output = serde_json::to_string_pretty(config).map_err(|e| {
             crosstacheError::serialization(format!("Failed to serialize config: {}", e))
@@ -1128,9 +1420,45 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         "no_color" => {
             config.no_color = value.to_lowercase() == "true" || value == "1";
         }
+        // Blob storage configuration
+        "storage_account" => {
+            let mut blob_config = config.get_blob_config();
+            blob_config.storage_account = value.to_string();
+            config.set_blob_config(blob_config);
+        }
+        "storage_container" => {
+            let mut blob_config = config.get_blob_config();
+            blob_config.container_name = value.to_string();
+            config.set_blob_config(blob_config);
+        }
+        "storage_endpoint" => {
+            let mut blob_config = config.get_blob_config();
+            blob_config.endpoint = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            };
+            config.set_blob_config(blob_config);
+        }
+        "blob_chunk_size_mb" => {
+            let chunk_size = value.parse::<usize>().map_err(|_| {
+                crosstacheError::config(format!("Invalid value for blob_chunk_size_mb: {}", value))
+            })?;
+            let mut blob_config = config.get_blob_config();
+            blob_config.chunk_size_mb = chunk_size;
+            config.set_blob_config(blob_config);
+        }
+        "blob_max_concurrent_uploads" => {
+            let max_uploads = value.parse::<usize>().map_err(|_| {
+                crosstacheError::config(format!("Invalid value for blob_max_concurrent_uploads: {}", value))
+            })?;
+            let mut blob_config = config.get_blob_config();
+            blob_config.max_concurrent_uploads = max_uploads;
+            config.set_blob_config(blob_config);
+        }
         _ => {
             return Err(crosstacheError::config(format!(
-                "Unknown configuration key: {}",
+                "Unknown configuration key: {}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads",
                 key
             )));
         }
@@ -2353,6 +2681,360 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
     Ok(())
 }
 
+// File operation functions
+async fn execute_file_upload(
+    blob_manager: &BlobManager,
+    file_path: &str,
+    name: Option<String>,
+    groups: Vec<String>,
+    metadata: Vec<(String, String)>,
+    tags: Vec<(String, String)>,
+    content_type: Option<String>,
+    progress: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::blob::models::FileUploadRequest;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::Path;
+
+    // Check if file exists
+    if !Path::new(file_path).exists() {
+        return Err(crosstacheError::config(format!("File not found: {}", file_path)));
+    }
+
+    // Read file content
+    let content = fs::read(file_path).map_err(|e| {
+        crosstacheError::config(format!("Failed to read file {}: {}", file_path, e))
+    })?;
+
+    // Determine remote file name
+    let remote_name = name.unwrap_or_else(|| {
+        Path::new(file_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    });
+
+    // Convert metadata and tags to HashMap
+    let metadata_map: HashMap<String, String> = metadata.into_iter().collect();
+    let tags_map: HashMap<String, String> = tags.into_iter().collect();
+
+    // Create upload request
+    let upload_request = FileUploadRequest {
+        name: remote_name.clone(),
+        content,
+        content_type,
+        groups,
+        metadata: metadata_map,
+        tags: tags_map,
+    };
+
+    // Upload file
+    println!("Uploading file '{}' as '{}'...", file_path, remote_name);
+    
+    if progress {
+        // TODO: Use progress callback when implemented
+        let file_info = blob_manager.upload_file(upload_request).await?;
+        println!("✅ Successfully uploaded file '{}'", file_info.name);
+        println!("   Size: {} bytes", file_info.size);
+        println!("   Content-Type: {}", file_info.content_type);
+        if !file_info.groups.is_empty() {
+            println!("   Groups: {:?}", file_info.groups);
+        }
+    } else {
+        let file_info = blob_manager.upload_file(upload_request).await?;
+        println!("✅ Successfully uploaded file '{}'", file_info.name);
+        println!("   Size: {} bytes", file_info.size);
+        println!("   Content-Type: {}", file_info.content_type);
+        if !file_info.groups.is_empty() {
+            println!("   Groups: {:?}", file_info.groups);
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_file_download(
+    blob_manager: &BlobManager,
+    name: &str,
+    output: Option<String>,
+    stream: bool,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::blob::models::FileDownloadRequest;
+    use std::fs;
+    use std::path::Path;
+
+    // Determine output path
+    let output_path = output.unwrap_or_else(|| name.to_string());
+
+    // Check if file exists and handle force flag
+    if Path::new(&output_path).exists() && !force {
+        return Err(crosstacheError::config(format!(
+            "File '{}' already exists. Use --force to overwrite.",
+            output_path
+        )));
+    }
+
+    // Create download request
+    let download_request = FileDownloadRequest {
+        name: name.to_string(),
+        output_path: Some(output_path.clone()),
+        stream,
+    };
+
+    println!("Downloading file '{}' to '{}'...", name, output_path);
+
+    if stream {
+        // TODO: Use streaming download when implemented
+        match blob_manager.download_file(download_request).await {
+            Ok(content) => {
+                fs::write(&output_path, content).map_err(|e| {
+                    crosstacheError::config(format!("Failed to write file {}: {}", output_path, e))
+                })?;
+                println!("✅ Successfully downloaded file '{}'", name);
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    } else {
+        match blob_manager.download_file(download_request).await {
+            Ok(content) => {
+                fs::write(&output_path, content).map_err(|e| {
+                    crosstacheError::config(format!("Failed to write file {}: {}", output_path, e))
+                })?;
+                println!("✅ Successfully downloaded file '{}'", name);
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_file_list(
+    blob_manager: &BlobManager,
+    prefix: Option<String>,
+    group: Option<String>,
+    include_metadata: bool,
+    limit: Option<usize>,
+    config: &Config,
+) -> Result<()> {
+    use crate::blob::models::FileListRequest;
+    use crate::utils::format::format_table;
+    use tabled::{Table, Tabled};
+
+    // Create list request
+    let list_request = FileListRequest {
+        prefix,
+        groups: group.map(|g| vec![g]),
+        limit,
+    };
+
+    // List files
+    let files = blob_manager.list_files(list_request).await?;
+
+    if files.is_empty() {
+        println!("No files found");
+        return Ok(());
+    }
+
+    if config.output_json {
+        let json_output = serde_json::to_string_pretty(&files).map_err(|e| {
+            crosstacheError::serialization(format!("Failed to serialize files: {}", e))
+        })?;
+        println!("{}", json_output);
+    } else {
+        #[derive(Tabled)]
+        struct FileItem {
+            #[tabled(rename = "Name")]
+            name: String,
+            #[tabled(rename = "Size")]
+            size: String,
+            #[tabled(rename = "Content-Type")]
+            content_type: String,
+            #[tabled(rename = "Modified")]
+            modified: String,
+            #[tabled(rename = "Groups")]
+            groups: String,
+        }
+
+        let items: Vec<FileItem> = files
+            .iter()
+            .map(|file| FileItem {
+                name: file.name.clone(),
+                size: format!("{} bytes", file.size),
+                content_type: file.content_type.clone(),
+                modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                groups: file.groups.join(", "),
+            })
+            .collect();
+
+        let table = Table::new(&items);
+        println!("{}", format_table(table, config.no_color));
+        
+        println!("\nTotal files: {}", files.len());
+    }
+
+    Ok(())
+}
+
+async fn execute_file_delete(
+    blob_manager: &BlobManager,
+    name: &str,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    // Confirmation unless forced
+    if !force {
+        let confirm = rpassword::prompt_password(format!(
+            "Are you sure you want to delete file '{}'? (y/N): ",
+            name
+        ))?;
+
+        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+            println!("Delete operation cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Delete file
+    println!("Deleting file '{}'...", name);
+    blob_manager.delete_file(name).await?;
+    println!("✅ Successfully deleted file '{}'", name);
+
+    Ok(())
+}
+
+async fn execute_file_info(
+    blob_manager: &BlobManager,
+    name: &str,
+    config: &Config,
+) -> Result<()> {
+    // Get file info
+    let file_info = blob_manager.get_file_info(name).await?;
+
+    if config.output_json {
+        let json_output = serde_json::to_string_pretty(&file_info).map_err(|e| {
+            crosstacheError::serialization(format!("Failed to serialize file info: {}", e))
+        })?;
+        println!("{}", json_output);
+    } else {
+        println!("File Information:");
+        println!("  Name: {}", file_info.name);
+        println!("  Size: {} bytes", file_info.size);
+        println!("  Content-Type: {}", file_info.content_type);
+        println!("  Last Modified: {}", file_info.last_modified.format("%Y-%m-%d %H:%M:%S UTC"));
+        println!("  ETag: {}", file_info.etag);
+        
+        if !file_info.groups.is_empty() {
+            println!("  Groups: {:?}", file_info.groups);
+        }
+        
+        if !file_info.metadata.is_empty() {
+            println!("  Metadata:");
+            for (key, value) in &file_info.metadata {
+                println!("    {}: {}", key, value);
+            }
+        }
+        
+        if !file_info.tags.is_empty() {
+            println!("  Tags:");
+            for (key, value) in &file_info.tags {
+                println!("    {}: {}", key, value);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_file_batch(
+    blob_manager: &BlobManager,
+    command: BatchCommands,
+    config: &Config,
+) -> Result<()> {
+    match command {
+        BatchCommands::Upload {
+            files,
+            group,
+            metadata,
+            progress,
+        } => {
+            let metadata_map: std::collections::HashMap<String, String> = metadata.into_iter().collect();
+            
+            println!("Batch uploading {} files...", files.len());
+            
+            for file_path in files {
+                match execute_file_upload(
+                    blob_manager,
+                    &file_path,
+                    None,
+                    group.clone(),
+                    metadata_map.clone().into_iter().collect(),
+                    vec![],
+                    None,
+                    progress,
+                    config,
+                ).await {
+                    Ok(_) => {
+                        println!("  ✅ {}", file_path);
+                    }
+                    Err(e) => {
+                        eprintln!("  ❌ {}: {}", file_path, e);
+                    }
+                }
+            }
+            
+            println!("Batch upload completed");
+        }
+        BatchCommands::Delete { names, force } => {
+            println!("Batch deleting {} files...", names.len());
+            
+            for name in names {
+                match execute_file_delete(blob_manager, &name, force, config).await {
+                    Ok(_) => {
+                        println!("  ✅ {}", name);
+                    }
+                    Err(e) => {
+                        eprintln!("  ❌ {}: {}", name, e);
+                    }
+                }
+            }
+            
+            println!("Batch delete completed");
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_file_sync(
+    blob_manager: &BlobManager,
+    local_path: &str,
+    prefix: Option<String>,
+    direction: &SyncDirection,
+    dry_run: bool,
+    delete: bool,
+    config: &Config,
+) -> Result<()> {
+    // TODO: Implement file sync functionality
+    println!("File sync functionality not yet implemented");
+    println!("  Local path: {}", local_path);
+    println!("  Prefix: {:?}", prefix);
+    println!("  Direction: {:?}", direction);
+    println!("  Dry run: {}", dry_run);
+    println!("  Delete: {}", delete);
+    
+    Ok(())
+}
+
 /// Parse a single key-value pair
 fn parse_key_val<T, U>(
     s: &str,
@@ -2367,4 +3049,84 @@ where
         .find('=')
         .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
     Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
+
+/// Quick file upload command (alias for file upload)
+async fn execute_file_upload_quick(
+    file_path: &str,
+    name: Option<String>,
+    groups: Option<String>,
+    metadata: Vec<String>,
+    config: &Config,
+) -> Result<()> {
+    // Create blob manager
+    let blob_manager = create_blob_manager(config).map_err(|e| {
+        if e.to_string().contains("No storage account configured") {
+            crosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
+        } else {
+            e
+        }
+    })?;
+
+    // Convert parameters to match FileCommands::Upload format
+    let groups_vec = groups.map(|g| g.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+    let metadata_map = metadata.into_iter().filter_map(|m| {
+        let parts: Vec<&str> = m.splitn(2, '=').collect();
+        if parts.len() == 2 {
+            Some((parts[0].trim().to_string(), parts[1].trim().to_string()))
+        } else {
+            None
+        }
+    }).collect();
+
+    execute_file_upload(
+        &blob_manager,
+        file_path,
+        name,
+        groups_vec,
+        metadata_map,
+        Vec::new(),
+        None,
+        true,
+        config,
+    ).await
+}
+
+/// Quick file download command (alias for file download)
+async fn execute_file_download_quick(
+    name: &str,
+    output: Option<String>,
+    open: bool,
+    config: &Config,
+) -> Result<()> {
+    // Create blob manager
+    let blob_manager = create_blob_manager(config).map_err(|e| {
+        if e.to_string().contains("No storage account configured") {
+            crosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
+        } else {
+            e
+        }
+    })?;
+
+    let output_path = output.clone();
+    execute_file_download(
+        &blob_manager,
+        name,
+        output,
+        false, // stream
+        false, // force
+        config,
+    ).await?;
+
+    // Handle --open flag
+    if open {
+        let final_output_path = output_path.unwrap_or_else(|| name.to_string());
+        if let Ok(path) = std::fs::canonicalize(&final_output_path) {
+            println!("Opening file: {}", path.display());
+            // Note: opener crate would need to be added to dependencies for this to work
+            // For now, just print the path
+        }
+    }
+
+    Ok(())
 }

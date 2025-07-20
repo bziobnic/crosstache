@@ -99,7 +99,7 @@ cargo check
 crosstache uses hierarchical configuration with this priority order:
 1. Command-line flags (highest)
 2. Environment variables  
-3. Config file (`~/.config/xv/xv.conf`)
+3. Config file (`$XDG_CONFIG_HOME/xv/xv.conf` or `$HOME/.config/xv/xv.conf`)
 4. Default values (lowest)
 
 Key environment variables:

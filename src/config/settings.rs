@@ -10,6 +10,29 @@ use std::time::Duration;
 use tabled::Tabled;
 use crate::utils::format::FormattableOutput;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobConfig {
+    pub storage_account: String,
+    pub container_name: String,
+    pub endpoint: Option<String>,
+    pub enable_large_file_support: bool,
+    pub chunk_size_mb: usize,
+    pub max_concurrent_uploads: usize,
+}
+
+impl Default for BlobConfig {
+    fn default() -> Self {
+        Self {
+            storage_account: String::new(),
+            container_name: "crosstache-files".to_string(),
+            endpoint: None,
+            enable_large_file_support: true,
+            chunk_size_mb: 4,
+            max_concurrent_uploads: 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct Config {
     #[tabled(rename = "Debug")]
@@ -32,6 +55,8 @@ pub struct Config {
     pub output_json: bool,
     #[tabled(rename = "No Color")]
     pub no_color: bool,
+    #[tabled(skip)]
+    pub blob_config: Option<BlobConfig>,
 }
 
 impl FormattableOutput for Config {}
@@ -49,6 +74,7 @@ impl Default for Config {
             cache_ttl: Duration::from_secs(300), // 5 minutes
             output_json: false,
             no_color: false,
+            blob_config: None,
         }
     }
 }
@@ -71,11 +97,28 @@ impl Config {
     }
 
     pub fn get_config_path() -> Result<PathBuf> {
-        // Use platform-appropriate config directory
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
-
-        Ok(config_dir.join("xv").join("xv.conf"))
+        // Use XDG Base Directory specification on Linux and macOS
+        // On Windows, use the platform-appropriate config directory
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::env;
+            let config_dir = if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
+                PathBuf::from(xdg_config_home)
+            } else {
+                let home_dir = env::var("HOME")
+                    .map_err(|_| crosstacheError::config("HOME environment variable not set"))?;
+                PathBuf::from(home_dir).join(".config")
+            };
+            Ok(config_dir.join("xv").join("xv.conf"))
+        }
+        
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            // Use platform-appropriate config directory for other platforms
+            let config_dir = dirs::config_dir()
+                .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
+            Ok(config_dir.join("xv").join("xv.conf"))
+        }
     }
 
     pub async fn load() -> Result<Self> {
@@ -159,6 +202,37 @@ impl Config {
 
         Err(crosstacheError::config("No subscription ID specified"))
     }
+
+    /// Get blob storage configuration, creating default if not present
+    pub fn get_blob_config(&self) -> BlobConfig {
+        self.blob_config.clone().unwrap_or_default()
+    }
+
+    /// Set blob storage configuration
+    pub fn set_blob_config(&mut self, blob_config: BlobConfig) {
+        self.blob_config = Some(blob_config);
+    }
+
+    /// Check if blob storage is configured
+    pub fn is_blob_storage_configured(&self) -> bool {
+        self.blob_config.as_ref()
+            .map(|config| !config.storage_account.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Get storage account endpoint URL
+    pub fn get_storage_endpoint(&self) -> Option<String> {
+        self.blob_config.as_ref()
+            .and_then(|config| {
+                config.endpoint.clone().or_else(|| {
+                    if !config.storage_account.is_empty() {
+                        Some(format!("https://{}.blob.core.windows.net", config.storage_account))
+                    } else {
+                        None
+                    }
+                })
+            })
+    }
 }
 
 /// Load configuration from multiple sources with priority order:
@@ -232,6 +306,47 @@ fn load_from_env(config: &mut Config) {
         if let Ok(seconds) = value.parse::<u64>() {
             config.cache_ttl = Duration::from_secs(seconds);
         }
+    }
+
+    // Load blob storage configuration from environment variables
+    let mut blob_config = config.blob_config.clone().unwrap_or_default();
+    let mut blob_config_updated = false;
+
+    // Check if we have existing config from file
+    let had_existing_config = config.blob_config.is_some();
+
+    if let Ok(value) = std::env::var("AZURE_STORAGE_ACCOUNT") {
+        blob_config.storage_account = value;
+        blob_config_updated = true;
+    }
+
+    if let Ok(value) = std::env::var("AZURE_STORAGE_CONTAINER") {
+        blob_config.container_name = value;
+        blob_config_updated = true;
+    }
+
+    if let Ok(value) = std::env::var("AZURE_STORAGE_ENDPOINT") {
+        blob_config.endpoint = Some(value);
+        blob_config_updated = true;
+    }
+
+    if let Ok(value) = std::env::var("BLOB_CHUNK_SIZE_MB") {
+        if let Ok(chunk_size) = value.parse::<usize>() {
+            blob_config.chunk_size_mb = chunk_size;
+            blob_config_updated = true;
+        }
+    }
+
+    if let Ok(value) = std::env::var("BLOB_MAX_CONCURRENT_UPLOADS") {
+        if let Ok(max_uploads) = value.parse::<usize>() {
+            blob_config.max_concurrent_uploads = max_uploads;
+            blob_config_updated = true;
+        }
+    }
+
+    // Set blob_config if we have existing config OR if updated by env vars
+    if had_existing_config || blob_config_updated {
+        config.blob_config = Some(blob_config);
     }
 }
 

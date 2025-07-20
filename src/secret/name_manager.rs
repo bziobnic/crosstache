@@ -124,7 +124,17 @@ impl NameManager {
         group: Option<&str>,
     ) -> Result<NameMapping> {
         let name_info = get_secret_name_info(original_name)?;
-        let group = group.unwrap_or("").to_string();
+        let group = match group {
+            Some(g) => g.to_string(),
+            None => {
+                // Derive group from path structure if no explicit group provided
+                if let Some(slash_pos) = original_name.rfind('/') {
+                    original_name[..slash_pos].to_string()
+                } else {
+                    String::new()
+                }
+            }
+        };
         let key = format!("{}:{}", vault_name, name_info.sanitized_name);
 
         let mapping = NameMapping {
@@ -441,10 +451,28 @@ impl NameManager {
 
     /// Get default storage path
     fn default_storage_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
-
-        Ok(config_dir.join("xv").join("name_mappings.json"))
+        // Use XDG Base Directory specification on Linux and macOS
+        // On Windows, use the platform-appropriate config directory
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::env;
+            let config_dir = if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
+                PathBuf::from(xdg_config_home)
+            } else {
+                let home_dir = env::var("HOME")
+                    .map_err(|_| crosstacheError::config("HOME environment variable not set"))?;
+                PathBuf::from(home_dir).join(".config")
+            };
+            Ok(config_dir.join("xv").join("name_mappings.json"))
+        }
+        
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            // Use platform-appropriate config directory for other platforms
+            let config_dir = dirs::config_dir()
+                .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
+            Ok(config_dir.join("xv").join("name_mappings.json"))
+        }
     }
 
     /// Load storage from file
