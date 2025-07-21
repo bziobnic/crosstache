@@ -1,0 +1,15 @@
+azure-functions>=1.14.0,<2.0.0
+azure-identity>=1.12.0
+azure-keyvault-administration
+azure-mgmt-keyvault>=10.1.0
+azure-mgmt-authorization>=4.0.0
+azure-mgmt-resource>=22.0.0
+azure-mgmt-storage>=21.0.0
+msgraph-sdk>=1.0.0
+requests>=2.28.0
+PyJWT>=2.6.0
+
+# Testing dependencies
+msal>=1.20.0
+# unittest-mock is actually part of the standard library
+# Use unittest.mock instead
