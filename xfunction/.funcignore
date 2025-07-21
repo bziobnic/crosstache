@@ -1,0 +1,11 @@
+.git*
+.venv
+.vscode
+local.settings.json
+test
+.python_packages
+__pycache__
+setup-managed-identity.*
+deploy-function.*
+test-function.*
+README*

@@ -1,0 +1,1 @@
+# StorageRoleManager module for Azure Storage RBAC operations
