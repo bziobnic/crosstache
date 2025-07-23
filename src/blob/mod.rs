@@ -6,8 +6,7 @@
 pub mod manager;
 pub mod models;
 pub mod operations;
-pub mod storage;
 
 // Re-export commonly used types
-pub use manager::{BlobManager, create_blob_manager};
+pub use manager::{BlobManager, create_blob_manager, create_context_aware_blob_manager};
 pub use models::*;

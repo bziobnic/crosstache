@@ -17,6 +17,8 @@ pub struct VaultContext {
     pub resource_group: Option<String>,
     /// Subscription ID (optional override)
     pub subscription_id: Option<String>,
+    /// Storage container name for blob operations (optional override)
+    pub storage_container: Option<String>,
     /// Last used timestamp
     pub last_used: chrono::DateTime<chrono::Utc>,
     /// Usage count for prioritization
@@ -35,6 +37,24 @@ impl VaultContext {
             vault_name,
             resource_group,
             subscription_id,
+            storage_container: None,
+            last_used: chrono::Utc::now(),
+            usage_count: 1,
+        }
+    }
+
+    /// Create a new vault context with storage container
+    pub fn with_storage_container(
+        vault_name: String,
+        resource_group: Option<String>,
+        subscription_id: Option<String>,
+        storage_container: Option<String>,
+    ) -> Self {
+        Self {
+            vault_name,
+            resource_group,
+            subscription_id,
+            storage_container,
             last_used: chrono::Utc::now(),
             usage_count: 1,
         }
@@ -247,6 +267,13 @@ impl ContextManager {
             .and_then(|c| c.subscription_id.as_deref())
     }
 
+    /// Get current storage container from context
+    pub fn current_storage_container(&self) -> Option<&str> {
+        self.current
+            .as_ref()
+            .and_then(|c| c.storage_container.as_deref())
+    }
+
     /// List recent contexts sorted by usage
     pub fn list_recent(&self) -> Vec<&VaultContext> {
         let mut recent = self.recent.iter().collect::<Vec<_>>();
@@ -436,5 +463,50 @@ mod tests {
 
         assert!(context.matches_vault("my-vault"));
         assert!(!context.matches_vault("other-vault"));
+    }
+
+    #[tokio::test]
+    async fn test_vault_context_with_storage_container() {
+        let context = VaultContext::with_storage_container(
+            "test-vault".to_string(),
+            Some("test-rg".to_string()),
+            Some("test-sub".to_string()),
+            Some("my-container".to_string()),
+        );
+
+        assert_eq!(context.vault_name, "test-vault");
+        assert_eq!(context.resource_group, Some("test-rg".to_string()));
+        assert_eq!(context.subscription_id, Some("test-sub".to_string()));
+        assert_eq!(context.storage_container, Some("my-container".to_string()));
+        assert_eq!(context.usage_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_current_storage_container() {
+        let temp_dir = TempDir::new().unwrap();
+        let context_path = temp_dir.path().join("context");
+
+        let mut manager = ContextManager {
+            context_file: Some(context_path),
+            ..Default::default()
+        };
+
+        // Test with no context
+        assert_eq!(manager.current_storage_container(), None);
+
+        // Test with context without storage container
+        let context1 = VaultContext::new("test-vault".to_string(), None, None);
+        manager.set_context(context1).await.unwrap();
+        assert_eq!(manager.current_storage_container(), None);
+
+        // Test with context with storage container
+        let context2 = VaultContext::with_storage_container(
+            "test-vault-2".to_string(),
+            None,
+            None,
+            Some("my-container".to_string()),
+        );
+        manager.set_context(context2).await.unwrap();
+        assert_eq!(manager.current_storage_container(), Some("my-container"));
     }
 }

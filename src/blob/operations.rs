@@ -6,12 +6,6 @@
 use crate::blob::manager::BlobManager;
 use crate::blob::models::*;
 use crate::error::{crosstacheError, Result};
-use crate::utils::interactive::ProgressIndicator;
-use azure_storage_blobs::prelude::*;
-use chrono::Utc;
-use futures::StreamExt;
-use std::collections::HashMap;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
 impl BlobManager {
     /// Batch upload multiple files
