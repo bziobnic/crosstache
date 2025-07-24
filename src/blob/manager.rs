@@ -455,3 +455,36 @@ pub fn create_blob_manager(config: &crate::config::Config) -> Result<BlobManager
         blob_config.container_name,
     )
 }
+
+/// Create a blob manager with context-aware container selection
+/// 
+/// This function uses the storage_container from the current vault context if available,
+/// otherwise falls back to the global blob configuration container.
+pub fn create_context_aware_blob_manager(
+    config: &crate::config::Config, 
+    context_manager: &crate::config::context::ContextManager
+) -> Result<BlobManager> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    
+    let blob_config = config.get_blob_config();
+    
+    if blob_config.storage_account.is_empty() {
+        return Err(crosstacheError::config(
+            "No blob storage configured. Run 'xv init' to set up blob storage."
+        ));
+    }
+
+    // Use context storage container if available, otherwise use config default
+    let container_name = context_manager
+        .current_storage_container()
+        .unwrap_or(&blob_config.container_name)
+        .to_string();
+
+    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new()?) as Arc<dyn AzureAuthProvider>;
+    
+    BlobManager::new(
+        auth_provider,
+        blob_config.storage_account,
+        container_name,
+    )
+}
