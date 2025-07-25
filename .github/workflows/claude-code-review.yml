@@ -68,8 +68,8 @@ jobs:
           #   'Welcome! Please review this PR from a first-time contributor. Be encouraging and provide detailed explanations for any suggestions.' ||
           #   'Please provide a thorough code review focusing on our coding standards and best practices.' }}
           
-          # Optional: Add specific tools for running tests or linting
-          # allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run typecheck)"
+          # Allow Claude to use expanded command set for comprehensive code operations
+          allowed_tools: "bash,git,read,write,edit,glob,grep,task,ls,multi_edit"
           
           # Optional: Skip review for certain conditions
           # if: |
