@@ -449,7 +449,7 @@ mod tests {
 
         // Add 12 contexts (more than the limit of 10)
         for i in 0..12 {
-            let context = VaultContext::new(format!("vault-{}", i), None, None);
+            let context = VaultContext::new(format!("vault-{i}"), None, None);
             manager.set_context(context).await.unwrap();
         }
 

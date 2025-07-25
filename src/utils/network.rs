@@ -26,7 +26,7 @@ pub fn create_http_client(config: &NetworkConfig) -> Result<Client> {
         .timeout(config.request_timeout)
         .user_agent(&config.user_agent)
         .build()
-        .map_err(|e| crosstacheError::network(format!("Failed to create HTTP client: {}", e)))
+        .map_err(|e| crosstacheError::network(format!("Failed to create HTTP client: {e}")))
 }
 
 /// Enhanced network error classification and user-friendly error messages
@@ -37,8 +37,7 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
     // Check for timeout errors
     if error.is_timeout() {
         return crosstacheError::connection_timeout(format!(
-            "Connection to Azure Key Vault '{}' timed out. This might be due to network issues or the vault being unreachable.",
-            vault_name
+            "Connection to Azure Key Vault '{vault_name}' timed out. This might be due to network issues or the vault being unreachable."
         ));
     }
 
@@ -48,7 +47,7 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
         if is_dns_resolution_error(error) {
             return crosstacheError::dns_resolution(
                 vault_name.clone(),
-                format!("Unable to resolve vault hostname. Please check if the vault name '{}' is correct and the vault exists.", vault_name)
+                format!("Unable to resolve vault hostname. Please check if the vault name '{vault_name}' is correct and the vault exists.")
             );
         }
 
@@ -59,14 +58,12 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
             .contains("connection refused")
         {
             return crosstacheError::connection_refused(format!(
-                "Connection to Azure Key Vault '{}' was refused. The service may be temporarily unavailable.", 
-                vault_name
+                "Connection to Azure Key Vault '{vault_name}' was refused. The service may be temporarily unavailable."
             ));
         }
 
         return crosstacheError::network(format!(
-            "Failed to connect to Azure Key Vault '{}'. Please check your network connection and verify the vault name.", 
-            vault_name
+            "Failed to connect to Azure Key Vault '{vault_name}'. Please check your network connection and verify the vault name."
         ));
     }
 
@@ -76,16 +73,14 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
         || error.to_string().to_lowercase().contains("certificate")
     {
         return crosstacheError::ssl_error(format!(
-            "SSL/TLS connection error when accessing vault '{}'. This may be due to certificate issues or network security policies.", 
-            vault_name
+            "SSL/TLS connection error when accessing vault '{vault_name}'. This may be due to certificate issues or network security policies."
         ));
     }
 
     // Check for invalid URL errors
     if error.is_request() {
         return crosstacheError::invalid_url(format!(
-            "Invalid request to vault '{}'. Please check the vault name and URL format.",
-            vault_name
+            "Invalid request to vault '{vault_name}'. Please check the vault name and URL format."
         ));
     }
 
@@ -93,12 +88,10 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
     if let Some(status) = error.status() {
         match status.as_u16() {
             503 => return crosstacheError::network(format!(
-                "Azure Key Vault '{}' service is temporarily unavailable. Please try again later.", 
-                vault_name
+                "Azure Key Vault '{vault_name}' service is temporarily unavailable. Please try again later."
             )),
             502 | 504 => return crosstacheError::network(format!(
-                "Gateway error when accessing vault '{}'. The Azure service may be experiencing issues.", 
-                vault_name
+                "Gateway error when accessing vault '{vault_name}'. The Azure service may be experiencing issues."
             )),
             _ => {}
         }
@@ -106,8 +99,7 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
 
     // Default network error with helpful message
     crosstacheError::network(format!(
-        "Network error when accessing vault '{}': {}. Please check your internet connection and try again.", 
-        vault_name, error
+        "Network error when accessing vault '{vault_name}': {error}. Please check your internet connection and try again."
     ))
 }
 

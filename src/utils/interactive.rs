@@ -35,7 +35,7 @@ impl InteractivePrompt {
             .with_prompt(message)
             .default(default)
             .interact()
-            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {}", e)))?;
+            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {e}")))?;
         Ok(result)
     }
 
@@ -49,7 +49,7 @@ impl InteractivePrompt {
 
         let result = input
             .interact_text()
-            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {}", e)))?;
+            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {e}")))?;
         
         Ok(result)
     }
@@ -69,7 +69,7 @@ impl InteractivePrompt {
 
         let result = input
             .interact_text()
-            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {}", e)))?;
+            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {e}")))?;
         
         Ok(result)
     }
@@ -86,7 +86,7 @@ impl InteractivePrompt {
 
         let result = select
             .interact()
-            .map_err(|e| crosstacheError::config(format!("Failed to get user selection: {}", e)))?;
+            .map_err(|e| crosstacheError::config(format!("Failed to get user selection: {e}")))?;
         
         Ok(result)
     }
@@ -158,12 +158,12 @@ impl ProgressIndicator {
 
     /// Finish with success message
     pub fn finish_success(&self, message: &str) {
-        self.bar.finish_with_message(format!("✅ {}", message));
+        self.bar.finish_with_message(format!("✅ {message}"));
     }
 
     /// Finish with error message
     pub fn finish_error(&self, message: &str) {
-        self.bar.finish_with_message(format!("❌ {}", message));
+        self.bar.finish_with_message(format!("❌ {message}"));
     }
 
     /// Finish and clear the progress indicator
@@ -267,7 +267,7 @@ impl SetupHelper {
             .collect::<String>();
         
         let timestamp = chrono::Utc::now().format("%m%d").to_string();
-        format!("kv-{}-{}", username, timestamp)
+        format!("kv-{username}-{timestamp}")
     }
 
     /// Generate a default resource group name
@@ -294,11 +294,11 @@ impl SetupHelper {
             .collect::<String>();
         
         let timestamp = chrono::Utc::now().format("%m%d%H%M").to_string();
-        let generated_name = format!("st{}{}", username, timestamp);
+        let generated_name = format!("st{username}{timestamp}");
         
         // Ensure it's not too long (max 24 characters)
         if generated_name.len() > 24 {
-            format!("st{}{}", &username[..std::cmp::min(username.len(), 12)], timestamp)
+            format!("st{}{timestamp}", &username[..std::cmp::min(username.len(), 12)])
         } else {
             generated_name
         }
