@@ -26,7 +26,7 @@ fn main() {
 
     // Get git commit hash if available
     let git_hash = std::process::Command::new("git")
-        .args(&["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
         .and_then(|output| {
@@ -46,7 +46,7 @@ fn main() {
 
     // Get current branch if available
     let git_branch = std::process::Command::new("git")
-        .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
         .and_then(|output| {
@@ -60,10 +60,10 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     // Make build information available to the program
-    println!("cargo:rustc-env=BUILD_NUMBER={}", new_build_number);
-    println!("cargo:rustc-env=GIT_HASH={}", git_hash);
-    println!("cargo:rustc-env=BUILD_TIME={}", build_time);
-    println!("cargo:rustc-env=GIT_BRANCH={}", git_branch);
+    println!("cargo:rustc-env=BUILD_NUMBER={new_build_number}");
+    println!("cargo:rustc-env=GIT_HASH={git_hash}");
+    println!("cargo:rustc-env=BUILD_TIME={build_time}");
+    println!("cargo:rustc-env=GIT_BRANCH={git_branch}");
 
     // Tell cargo to rerun this script if git changes
     println!("cargo:rerun-if-changed=.git/HEAD");
@@ -71,11 +71,8 @@ fn main() {
 
     // Create version string with build metadata
     let package_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".to_string());
-    let full_version = format!("{}.{}", package_version, new_build_number);
+    let full_version = format!("{package_version}.{new_build_number}");
 
-    println!("cargo:rustc-env=FULL_VERSION={}", full_version);
-    println!(
-        "cargo:rustc-env=VERSION_WITH_GIT={}+{}",
-        full_version, git_hash
-    );
+    println!("cargo:rustc-env=FULL_VERSION={full_version}");
+    println!("cargo:rustc-env=VERSION_WITH_GIT={full_version}+{git_hash}");
 }
