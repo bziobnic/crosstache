@@ -221,7 +221,7 @@ impl AzureSecretOperations {
 
         // Create the secret client
         let client = SecretClient::new(&vault_url, credential).map_err(|e| {
-            crosstacheError::azure_api(format!("Failed to create SecretClient: {}", e))
+            crosstacheError::azure_api(format!("Failed to create SecretClient: {e}"))
         })?;
 
         Ok(client)
@@ -390,7 +390,7 @@ impl SecretOperations for AzureSecretOperations {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret())
                 .parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
@@ -417,7 +417,7 @@ impl SecretOperations for AzureSecretOperations {
 
         // Parse the response and convert to SecretProperties
         let json: serde_json::Value = response.json().await.map_err(|e| {
-            crosstacheError::serialization(format!("Failed to parse set secret response: {}", e))
+            crosstacheError::serialization(format!("Failed to parse set secret response: {e}"))
         })?;
 
         // Return the created secret properties
@@ -451,7 +451,7 @@ impl SecretOperations for AzureSecretOperations {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret())
                 .parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
 
         // Make the REST API call
@@ -576,7 +576,7 @@ impl SecretOperations for AzureSecretOperations {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret())
                 .parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
 
         // Make the REST API call
@@ -759,7 +759,7 @@ impl SecretOperations for AzureSecretOperations {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret())
                 .parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
@@ -882,7 +882,7 @@ impl SecretOperations for AzureSecretOperations {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", token.token.secret())
                 .parse()
-                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {}", e)))?,
+                .map_err(|e| crosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
 
         // Make the REST API call to permanently purge the secret

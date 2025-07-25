@@ -135,7 +135,7 @@ impl NameManager {
                 }
             }
         };
-        let key = format!("{}:{}", vault_name, name_info.sanitized_name);
+        let key = format!("{vault_name}:{}", name_info.sanitized_name);
 
         let mapping = NameMapping {
             original_name: original_name.to_string(),
@@ -184,7 +184,7 @@ impl NameManager {
         original_name: &str,
     ) -> Result<Option<NameMapping>> {
         let sanitized_name = sanitize_secret_name(original_name)?;
-        let key = format!("{}:{}", vault_name, sanitized_name);
+        let key = format!("{vault_name}:{sanitized_name}");
 
         let storage = self.storage.read().await;
         Ok(storage.mappings.get(&key).cloned())
@@ -196,7 +196,7 @@ impl NameManager {
         vault_name: &str,
         sanitized_name: &str,
     ) -> Result<Option<NameMapping>> {
-        let key = format!("{}:{}", vault_name, sanitized_name);
+        let key = format!("{vault_name}:{sanitized_name}");
 
         let storage = self.storage.read().await;
         Ok(storage.mappings.get(&key).cloned())
@@ -292,7 +292,7 @@ impl NameManager {
     /// Remove a mapping
     pub async fn remove_mapping(&self, vault_name: &str, original_name: &str) -> Result<bool> {
         let sanitized_name = sanitize_secret_name(original_name)?;
-        let key = format!("{}:{}", vault_name, sanitized_name);
+        let key = format!("{vault_name}:{sanitized_name}");
 
         let removed = {
             let mut storage = self.storage.write().await;
@@ -354,7 +354,7 @@ impl NameManager {
                     .unwrap_or_else(|| "".to_string());
 
                 // Check if mapping already exists
-                let key = format!("{}:{}", vault_name, sanitized_name);
+                let key = format!("{vault_name}:{sanitized_name}");
                 let exists = {
                     let storage = self.storage.read().await;
                     storage.mappings.contains_key(&key)
@@ -409,19 +409,19 @@ impl NameManager {
     pub async fn save(&self) -> Result<()> {
         let storage = self.storage.read().await;
         let json_data = serde_json::to_string_pretty(&*storage).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to serialize mappings: {}", e))
+            crosstacheError::serialization(format!("Failed to serialize mappings: {e}"))
         })?;
 
         // Ensure parent directory exists
         if let Some(parent) = self.storage_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                crosstacheError::config(format!("Failed to create storage directory: {}", e))
+                crosstacheError::config(format!("Failed to create storage directory: {e}"))
             })?;
         }
 
         tokio::fs::write(&self.storage_path, json_data)
             .await
-            .map_err(|e| crosstacheError::config(format!("Failed to save name mappings: {}", e)))?;
+            .map_err(|e| crosstacheError::config(format!("Failed to save name mappings: {e}")))?;
 
         Ok(())
     }
@@ -478,11 +478,11 @@ impl NameManager {
     /// Load storage from file
     fn load_storage(path: &Path) -> Result<NameMappingStorage> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            crosstacheError::config(format!("Failed to read name mappings file: {}", e))
+            crosstacheError::config(format!("Failed to read name mappings file: {e}"))
         })?;
 
         let storage: NameMappingStorage = serde_json::from_str(&content).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to parse name mappings: {}", e))
+            crosstacheError::serialization(format!("Failed to parse name mappings: {e}"))
         })?;
 
         Ok(storage)

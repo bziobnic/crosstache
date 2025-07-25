@@ -129,8 +129,8 @@ impl AzureVaultOperations {
         let mut headers = HeaderMap::new();
         headers.insert(
             "Authorization",
-            format!("Bearer {}", token).parse().map_err(|e| {
-                crosstacheError::authentication(format!("Invalid token format: {}", e))
+            format!("Bearer {token}").parse().map_err(|e| {
+                crosstacheError::authentication(format!("Invalid token format: {e}"))
             })?,
         );
         headers.insert("Content-Type", "application/json".parse().unwrap());
@@ -139,7 +139,7 @@ impl AzureVaultOperations {
 
     /// Build Azure Resource Manager URL
     fn build_arm_url(&self, path: &str) -> String {
-        format!("https://management.azure.com{}", path)
+        format!("https://management.azure.com{path}")
     }
 
     /// Get vault ARM resource ID
@@ -155,11 +155,11 @@ impl AzureVaultOperations {
         if let Ok(error_json) = serde_json::from_str::<Value>(body) {
             if let Some(error) = error_json.get("error") {
                 if let Some(message) = error.get("message").and_then(|m| m.as_str()) {
-                    return crosstacheError::azure_api(format!("HTTP {}: {}", status, message));
+                    return crosstacheError::azure_api(format!("HTTP {status}: {message}"));
                 }
             }
         }
-        crosstacheError::azure_api(format!("HTTP {}: {}", status, body))
+        crosstacheError::azure_api(format!("HTTP {status}: {body}"))
     }
 
     /// Retry wrapper for Azure operations
@@ -184,7 +184,7 @@ impl VaultOperations for AzureVaultOperations {
         let operation = || async {
             let headers = self.create_headers().await?;
             let resource_id = self.get_vault_resource_id(&request.name, &request.resource_group);
-            let url = self.build_arm_url(&format!("{}?api-version=2023-07-01", resource_id));
+            let url = self.build_arm_url(&format!("{resource_id}?api-version=2023-07-01"));
 
             let tenant_id = self.auth_provider.get_tenant_id().await?;
             let current_user_object_id = self.auth_provider.get_object_id().await?;
@@ -257,7 +257,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let vault_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse vault response: {}", e))
+                crosstacheError::serialization(format!("Failed to parse vault response: {e}"))
             })?;
 
             self.parse_vault_properties(&vault_data)
@@ -270,7 +270,7 @@ impl VaultOperations for AzureVaultOperations {
         let operation = || async {
             let headers = self.create_headers().await?;
             let resource_id = self.get_vault_resource_id(vault_name, resource_group);
-            let url = self.build_arm_url(&format!("{}?api-version=2023-07-01", resource_id));
+            let url = self.build_arm_url(&format!("{resource_id}?api-version=2023-07-01"));
 
             let response = self
                 .http_client
@@ -291,7 +291,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let vault_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse vault response: {}", e))
+                crosstacheError::serialization(format!("Failed to parse vault response: {e}"))
             })?;
 
             self.parse_vault_properties(&vault_data)
@@ -327,7 +327,7 @@ impl VaultOperations for AzureVaultOperations {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to list vaults: {}", e)))?;
+                .map_err(|e| crosstacheError::network(format!("Failed to list vaults: {e}")))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -336,7 +336,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let response_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse vaults response: {}", e))
+                crosstacheError::serialization(format!("Failed to parse vaults response: {e}"))
             })?;
 
             let mut vaults = Vec::new();
@@ -366,7 +366,7 @@ impl VaultOperations for AzureVaultOperations {
 
             let headers = self.create_headers().await?;
             let resource_id = self.get_vault_resource_id(vault_name, resource_group);
-            let url = self.build_arm_url(&format!("{}?api-version=2023-07-01", resource_id));
+            let url = self.build_arm_url(&format!("{resource_id}?api-version=2023-07-01"));
 
             let properties = json!({
                 "tenantId": current_vault.tenant_id,
@@ -396,7 +396,7 @@ impl VaultOperations for AzureVaultOperations {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to update vault: {}", e)))?;
+                .map_err(|e| crosstacheError::network(format!("Failed to update vault: {e}")))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -405,7 +405,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let vault_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse vault response: {}", e))
+                crosstacheError::serialization(format!("Failed to parse vault response: {e}"))
             })?;
 
             self.parse_vault_properties(&vault_data)
@@ -418,7 +418,7 @@ impl VaultOperations for AzureVaultOperations {
         let operation = || async {
             let headers = self.create_headers().await?;
             let resource_id = self.get_vault_resource_id(vault_name, resource_group);
-            let url = self.build_arm_url(&format!("{}?api-version=2023-07-01", resource_id));
+            let url = self.build_arm_url(&format!("{resource_id}?api-version=2023-07-01"));
 
             let response = self
                 .http_client
@@ -426,7 +426,7 @@ impl VaultOperations for AzureVaultOperations {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to delete vault: {}", e)))?;
+                .map_err(|e| crosstacheError::network(format!("Failed to delete vault: {e}")))?;
 
             if response.status().as_u16() == 404 {
                 return Err(crosstacheError::vault_not_found(vault_name));
@@ -458,7 +458,7 @@ impl VaultOperations for AzureVaultOperations {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to restore vault: {}", e)))?;
+                .map_err(|e| crosstacheError::network(format!("Failed to restore vault: {e}")))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -481,7 +481,7 @@ impl VaultOperations for AzureVaultOperations {
                 resource_group: "restored".to_string(), // Placeholder
                 subscription_id: self.subscription_id.clone(),
                 tenant_id: self.auth_provider.get_tenant_id().await?,
-                uri: format!("https://{}.vault.azure.net/", vault_name),
+                uri: format!("https://{vault_name}.vault.azure.net/"),
                 enabled_for_deployment: false,
                 enabled_for_disk_encryption: false,
                 enabled_for_template_deployment: false,
@@ -511,7 +511,7 @@ impl VaultOperations for AzureVaultOperations {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to purge vault: {}", e)))?;
+                .map_err(|e| crosstacheError::network(format!("Failed to purge vault: {e}")))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -540,7 +540,7 @@ impl VaultOperations for AzureVaultOperations {
                 .send()
                 .await
                 .map_err(|e| {
-                    crosstacheError::network(format!("Failed to list deleted vaults: {}", e))
+                    crosstacheError::network(format!("Failed to list deleted vaults: {e}"))
                 })?;
 
             if !response.status().is_success() {
@@ -788,7 +788,7 @@ impl AzureVaultOperations {
         let uri = properties
             .get("vaultUri")
             .and_then(|v| v.as_str())
-            .unwrap_or(&format!("https://{}.vault.azure.net/", name))
+            .unwrap_or(&format!("https://{name}.vault.azure.net/"))
             .to_string();
 
         let sku = properties

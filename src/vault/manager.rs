@@ -49,7 +49,7 @@ impl VaultManager {
         additional_options: Option<VaultCreateRequest>,
     ) -> Result<VaultProperties> {
         self.display_utils
-            .print_info(&format!("Creating vault '{}'...", name))?;
+            .print_info(&format!("Creating vault '{name}'..."))?;
 
         let mut request = additional_options.unwrap_or_default();
         request.name = name.to_string();
@@ -168,12 +168,12 @@ impl VaultManager {
     /// Restore a soft-deleted vault
     pub async fn restore_vault(&self, vault_name: &str, location: &str) -> Result<VaultProperties> {
         self.display_utils
-            .print_info(&format!("Restoring soft-deleted vault '{}'...", vault_name))?;
+            .print_info(&format!("Restoring soft-deleted vault '{vault_name}'..."))?;
 
         let vault = self.vault_ops.restore_vault(vault_name, location).await?;
 
         self.display_utils
-            .print_success(&format!("Successfully restored vault '{}'", vault_name))?;
+            .print_success(&format!("Successfully restored vault '{vault_name}'"))?;
 
         Ok(vault)
     }
@@ -284,7 +284,7 @@ impl VaultManager {
         }
 
         self.display_utils
-            .print_header(&format!("Access Policies for Vault '{}'", vault_name))?;
+            .print_header(&format!("Access Policies for Vault '{vault_name}'"))?;
 
         // Format and display results
         let formatter = TableFormatter::new(output_format, self.no_color);
@@ -457,7 +457,7 @@ impl VaultManager {
         let vault = self.vault_ops.get_vault(vault_name, resource_group).await?;
 
         let config = serde_json::to_string_pretty(&vault).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to serialize vault config: {}", e))
+            crosstacheError::serialization(format!("Failed to serialize vault config: {e}"))
         })?;
 
         Ok(config)
