@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tabled::Tabled;
 use tokio::sync::RwLock;
 
-use crate::error::{crosstacheError, Result};
-use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name, SecretNameInfo};
+use crate::error::{CrosstacheError, Result};
+use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name};
 
 /// Name mapping entry for persistent storage
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
@@ -409,19 +409,19 @@ impl NameManager {
     pub async fn save(&self) -> Result<()> {
         let storage = self.storage.read().await;
         let json_data = serde_json::to_string_pretty(&*storage).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to serialize mappings: {e}"))
+            CrosstacheError::serialization(format!("Failed to serialize mappings: {e}"))
         })?;
 
         // Ensure parent directory exists
         if let Some(parent) = self.storage_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                crosstacheError::config(format!("Failed to create storage directory: {e}"))
+                CrosstacheError::config(format!("Failed to create storage directory: {e}"))
             })?;
         }
 
         tokio::fs::write(&self.storage_path, json_data)
             .await
-            .map_err(|e| crosstacheError::config(format!("Failed to save name mappings: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to save name mappings: {e}")))?;
 
         Ok(())
     }
@@ -460,7 +460,7 @@ impl NameManager {
                 PathBuf::from(xdg_config_home)
             } else {
                 let home_dir = env::var("HOME")
-                    .map_err(|_| crosstacheError::config("HOME environment variable not set"))?;
+                    .map_err(|_| CrosstacheError::config("HOME environment variable not set"))?;
                 PathBuf::from(home_dir).join(".config")
             };
             Ok(config_dir.join("xv").join("name_mappings.json"))
@@ -470,7 +470,7 @@ impl NameManager {
         {
             // Use platform-appropriate config directory for other platforms
             let config_dir = dirs::config_dir()
-                .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
+                .ok_or_else(|| CrosstacheError::config("Unable to determine config directory"))?;
             Ok(config_dir.join("xv").join("name_mappings.json"))
         }
     }
@@ -478,11 +478,11 @@ impl NameManager {
     /// Load storage from file
     fn load_storage(path: &Path) -> Result<NameMappingStorage> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            crosstacheError::config(format!("Failed to read name mappings file: {e}"))
+            CrosstacheError::config(format!("Failed to read name mappings file: {e}"))
         })?;
 
         let storage: NameMappingStorage = serde_json::from_str(&content).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to parse name mappings: {e}"))
+            CrosstacheError::serialization(format!("Failed to parse name mappings: {e}"))
         })?;
 
         Ok(storage)

@@ -5,7 +5,7 @@
 
 use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
 use crate::config::settings::Config;
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use crate::utils::azure_detect::{AzureDetector, AzureEnvironment, AzureSubscription};
 use crate::utils::interactive::{InteractivePrompt, ProgressIndicator, SetupHelper};
 use crate::vault::manager::VaultManager;
@@ -106,7 +106,7 @@ impl ConfigInitializer {
                 for instruction in instructions {
                     println!("  • {}", instruction);
                 }
-                return Err(crosstacheError::config(
+                return Err(CrosstacheError::config(
                     "Azure environment not ready. Please complete the setup steps above and run 'xv init' again."
                 ));
             }
@@ -379,7 +379,7 @@ impl ConfigInitializer {
         let create_storage_cmd = match create_storage_cmd {
             Ok(result) => result?,
             Err(_) => {
-                return Err(crosstacheError::azure_api(
+                return Err(CrosstacheError::azure_api(
                     "Storage account creation timed out after 3 minutes. Please check your Azure CLI authentication and network connection.".to_string()
                 ));
             }
@@ -387,7 +387,7 @@ impl ConfigInitializer {
 
         if !create_storage_cmd.status.success() {
             let error_msg = String::from_utf8_lossy(&create_storage_cmd.stderr);
-            return Err(crosstacheError::azure_api(format!(
+            return Err(CrosstacheError::azure_api(format!(
                 "Failed to create storage account: {}", error_msg
             )));
         }
@@ -440,25 +440,25 @@ impl ConfigInitializer {
                     
                     // Check for specific authentication errors
                     if error_msg.contains("authentication") || error_msg.contains("login") || error_msg.contains("Please run 'az login'") {
-                        return Err(crosstacheError::authentication(
+                        return Err(CrosstacheError::authentication(
                             "Failed to authenticate with Azure Storage. Please ensure you're logged in with 'az login' and have proper permissions.".to_string()
                         ));
                     }
                     
                     // Check for permission errors
                     if error_msg.contains("authorization") || error_msg.contains("permission") || error_msg.contains("forbidden") {
-                        return Err(crosstacheError::permission_denied(
+                        return Err(CrosstacheError::permission_denied(
                             "Insufficient permissions to create blob container. Please ensure you have Storage Blob Data Contributor role.".to_string()
                         ));
                     }
                     
-                    return Err(crosstacheError::azure_api(format!(
+                    return Err(CrosstacheError::azure_api(format!(
                         "Failed to create blob container: {}", error_msg
                     )));
                 }
             }
             
-            return Err(crosstacheError::azure_api(
+            return Err(CrosstacheError::azure_api(
                 "Container creation failed or timed out and container does not exist. Please check your Azure CLI authentication and network connection.".to_string()
             ));
         }
@@ -526,25 +526,25 @@ impl ConfigInitializer {
                     
                     // Check for specific authentication errors
                     if error_msg.contains("authentication") || error_msg.contains("login") || error_msg.contains("Please run 'az login'") {
-                        return Err(crosstacheError::authentication(
+                        return Err(CrosstacheError::authentication(
                             "Failed to authenticate with Azure Storage. Please ensure you're logged in with 'az login' and have proper permissions.".to_string()
                         ));
                     }
                     
                     // Check for permission errors
                     if error_msg.contains("authorization") || error_msg.contains("permission") || error_msg.contains("forbidden") {
-                        return Err(crosstacheError::permission_denied(
+                        return Err(CrosstacheError::permission_denied(
                             "Insufficient permissions to create blob container. Please ensure you have Storage Blob Data Contributor role.".to_string()
                         ));
                     }
                     
-                    return Err(crosstacheError::azure_api(format!(
+                    return Err(CrosstacheError::azure_api(format!(
                         "Failed to create blob container: {}", error_msg
                     )));
                 }
             }
             
-            return Err(crosstacheError::azure_api(
+            return Err(CrosstacheError::azure_api(
                 "Container creation failed or timed out and container does not exist. Please check your Azure CLI authentication and network connection.".to_string()
             ));
         }
@@ -687,19 +687,19 @@ impl ConfigInitializer {
         // Create parent directories if they don't exist
         if let Some(parent) = config_file.parent() {
             tokio::fs::create_dir_all(parent).await
-                .map_err(|e| crosstacheError::config(format!(
+                .map_err(|e| CrosstacheError::config(format!(
                     "Failed to create config directory: {}", e
                 )))?;
         }
 
         // Save configuration file
         let config_content = toml::to_string_pretty(config)
-            .map_err(|e| crosstacheError::serialization(format!(
+            .map_err(|e| CrosstacheError::serialization(format!(
                 "Failed to serialize config: {}", e
             )))?;
 
         tokio::fs::write(&config_file, config_content).await
-            .map_err(|e| crosstacheError::config(format!(
+            .map_err(|e| CrosstacheError::config(format!(
                 "Failed to write config file: {}", e
             )))?;
 

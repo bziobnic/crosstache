@@ -11,11 +11,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::models::{
-    AccessLevel, AccessPolicy, BuiltInRoles, RoleAssignmentRequest, VaultCreateRequest,
-    VaultProperties, VaultRole, VaultStatus, VaultSummary, VaultUpdateRequest,
+    AccessLevel, AccessPolicy, VaultCreateRequest,
+    VaultProperties, VaultRole, VaultSummary, VaultUpdateRequest,
 };
 use crate::auth::provider::AzureAuthProvider;
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
 use crate::utils::retry::retry_with_backoff;
 
@@ -130,7 +130,7 @@ impl AzureVaultOperations {
         headers.insert(
             "Authorization",
             format!("Bearer {token}").parse().map_err(|e| {
-                crosstacheError::authentication(format!("Invalid token format: {e}"))
+                CrosstacheError::authentication(format!("Invalid token format: {e}"))
             })?,
         );
         headers.insert("Content-Type", "application/json".parse().unwrap());
@@ -151,15 +151,15 @@ impl AzureVaultOperations {
     }
 
     /// Parse Azure error response
-    fn parse_azure_error(&self, status: u16, body: &str) -> crosstacheError {
+    fn parse_azure_error(&self, status: u16, body: &str) -> CrosstacheError {
         if let Ok(error_json) = serde_json::from_str::<Value>(body) {
             if let Some(error) = error_json.get("error") {
                 if let Some(message) = error.get("message").and_then(|m| m.as_str()) {
-                    return crosstacheError::azure_api(format!("HTTP {status}: {message}"));
+                    return CrosstacheError::azure_api(format!("HTTP {status}: {message}"));
                 }
             }
         }
-        crosstacheError::azure_api(format!("HTTP {status}: {body}"))
+        CrosstacheError::azure_api(format!("HTTP {status}: {body}"))
     }
 
     /// Retry wrapper for Azure operations
@@ -257,7 +257,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let vault_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse vault response: {e}"))
+                CrosstacheError::serialization(format!("Failed to parse vault response: {e}"))
             })?;
 
             self.parse_vault_properties(&vault_data)
@@ -281,7 +281,7 @@ impl VaultOperations for AzureVaultOperations {
                 .map_err(|e| classify_network_error(&e, &url))?;
 
             if response.status().as_u16() == 404 {
-                return Err(crosstacheError::vault_not_found(vault_name));
+                return Err(CrosstacheError::vault_not_found(vault_name));
             }
 
             if !response.status().is_success() {
@@ -291,7 +291,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let vault_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse vault response: {e}"))
+                CrosstacheError::serialization(format!("Failed to parse vault response: {e}"))
             })?;
 
             self.parse_vault_properties(&vault_data)
@@ -327,7 +327,7 @@ impl VaultOperations for AzureVaultOperations {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to list vaults: {e}")))?;
+                .map_err(|e| CrosstacheError::network(format!("Failed to list vaults: {e}")))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -336,7 +336,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let response_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse vaults response: {e}"))
+                CrosstacheError::serialization(format!("Failed to parse vaults response: {e}"))
             })?;
 
             let mut vaults = Vec::new();
@@ -396,7 +396,7 @@ impl VaultOperations for AzureVaultOperations {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to update vault: {e}")))?;
+                .map_err(|e| CrosstacheError::network(format!("Failed to update vault: {e}")))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -405,7 +405,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let vault_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse vault response: {e}"))
+                CrosstacheError::serialization(format!("Failed to parse vault response: {e}"))
             })?;
 
             self.parse_vault_properties(&vault_data)
@@ -426,10 +426,10 @@ impl VaultOperations for AzureVaultOperations {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to delete vault: {e}")))?;
+                .map_err(|e| CrosstacheError::network(format!("Failed to delete vault: {e}")))?;
 
             if response.status().as_u16() == 404 {
-                return Err(crosstacheError::vault_not_found(vault_name));
+                return Err(CrosstacheError::vault_not_found(vault_name));
             }
 
             if !response.status().is_success() {
@@ -458,7 +458,7 @@ impl VaultOperations for AzureVaultOperations {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to restore vault: {e}")))?;
+                .map_err(|e| CrosstacheError::network(format!("Failed to restore vault: {e}")))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -511,7 +511,7 @@ impl VaultOperations for AzureVaultOperations {
                 .headers(headers)
                 .send()
                 .await
-                .map_err(|e| crosstacheError::network(format!("Failed to purge vault: {e}")))?;
+                .map_err(|e| CrosstacheError::network(format!("Failed to purge vault: {e}")))?;
 
             if !response.status().is_success() {
                 let status_code = response.status().as_u16();
@@ -540,7 +540,7 @@ impl VaultOperations for AzureVaultOperations {
                 .send()
                 .await
                 .map_err(|e| {
-                    crosstacheError::network(format!("Failed to list deleted vaults: {e}"))
+                    CrosstacheError::network(format!("Failed to list deleted vaults: {e}"))
                 })?;
 
             if !response.status().is_success() {
@@ -550,7 +550,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let response_data: Value = response.json().await.map_err(|e| {
-                crosstacheError::serialization(format!(
+                CrosstacheError::serialization(format!(
                     "Failed to parse deleted vaults response: {}",
                     e
                 ))
@@ -649,7 +649,7 @@ impl VaultOperations for AzureVaultOperations {
             .retain(|p| p.object_id != user_object_id);
 
         if current_vault.access_policies.len() == original_count {
-            return Err(crosstacheError::permission_denied(
+            return Err(CrosstacheError::permission_denied(
                 "User does not have access to this vault",
             ));
         }
@@ -709,7 +709,7 @@ impl VaultOperations for AzureVaultOperations {
     async fn vault_exists(&self, vault_name: &str, resource_group: &str) -> Result<bool> {
         match self.get_vault(vault_name, resource_group).await {
             Ok(_) => Ok(true),
-            Err(crosstacheError::VaultNotFound { .. }) => Ok(false),
+            Err(CrosstacheError::VaultNotFound { .. }) => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -749,7 +749,7 @@ impl AzureVaultOperations {
     /// Parse Azure ARM vault response into VaultProperties
     fn parse_vault_properties(&self, vault_data: &Value) -> Result<VaultProperties> {
         let properties = vault_data.get("properties").ok_or_else(|| {
-            crosstacheError::serialization("Missing properties in vault response")
+            CrosstacheError::serialization("Missing properties in vault response")
         })?;
 
         let id = vault_data
@@ -873,7 +873,7 @@ impl AzureVaultOperations {
             .map(|s| s.to_string());
 
         let permissions = policy_value.get("permissions").ok_or_else(|| {
-            crosstacheError::serialization("Missing permissions in access policy")
+            CrosstacheError::serialization("Missing permissions in access policy")
         })?;
 
         let keys = permissions

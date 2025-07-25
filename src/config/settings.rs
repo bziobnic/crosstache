@@ -3,7 +3,7 @@
 //! This module handles loading configuration from multiple sources,
 //! validation, and persistence.
 
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -86,11 +86,11 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         if self.subscription_id.is_empty() {
-            return Err(crosstacheError::config("Subscription ID is required"));
+            return Err(CrosstacheError::config("Subscription ID is required"));
         }
 
         if self.tenant_id.is_empty() {
-            return Err(crosstacheError::config("Tenant ID is required"));
+            return Err(CrosstacheError::config("Tenant ID is required"));
         }
 
         Ok(())
@@ -106,7 +106,7 @@ impl Config {
                 PathBuf::from(xdg_config_home)
             } else {
                 let home_dir = env::var("HOME")
-                    .map_err(|_| crosstacheError::config("HOME environment variable not set"))?;
+                    .map_err(|_| CrosstacheError::config("HOME environment variable not set"))?;
                 PathBuf::from(home_dir).join(".config")
             };
             Ok(config_dir.join("xv").join("xv.conf"))
@@ -116,7 +116,7 @@ impl Config {
         {
             // Use platform-appropriate config directory for other platforms
             let config_dir = dirs::config_dir()
-                .ok_or_else(|| crosstacheError::config("Unable to determine config directory"))?;
+                .ok_or_else(|| CrosstacheError::config("Unable to determine config directory"))?;
             Ok(config_dir.join("xv").join("xv.conf"))
         }
     }
@@ -150,7 +150,7 @@ impl Config {
             return Ok(self.default_vault.clone());
         }
 
-        Err(crosstacheError::config(
+        Err(CrosstacheError::config(
             "No vault specified. Use --vault, set context with 'xv context use', or configure default_vault"
         ))
     }
@@ -176,7 +176,7 @@ impl Config {
             return Ok(self.default_resource_group.clone());
         }
 
-        Err(crosstacheError::config("No resource group specified"))
+        Err(CrosstacheError::config("No resource group specified"))
     }
 
     /// Resolve subscription ID with context awareness
@@ -200,7 +200,7 @@ impl Config {
             return Ok(self.subscription_id.clone());
         }
 
-        Err(crosstacheError::config("No subscription ID specified"))
+        Err(CrosstacheError::config("No subscription ID specified"))
     }
 
     /// Get blob storage configuration, creating default if not present
@@ -360,7 +360,7 @@ pub async fn save_config(config: &Config) -> Result<()> {
 
     // Serialize to TOML format
     let contents = toml::to_string_pretty(config)
-        .map_err(|e| crosstacheError::serialization(e.to_string()))?;
+        .map_err(|e| CrosstacheError::serialization(e.to_string()))?;
 
     tokio::fs::write(&config_path, contents).await?;
 

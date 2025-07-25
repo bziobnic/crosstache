@@ -12,9 +12,9 @@ pub mod retry;
 pub mod sanitizer;
 
 pub use azure_detect::*;
-pub use format::*;
+pub use format::{DisplayUtils, FormattableOutput, OutputFormat, TableFormatter, TemplateError, ColorTheme};
 pub use helpers::*;
-pub use interactive::*;
+pub use interactive::{InteractivePrompt, ProgressIndicator, SetupHelper};
 pub use network::*;
 pub use retry::*;
 pub use sanitizer::*;

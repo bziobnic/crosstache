@@ -5,7 +5,7 @@
 
 use crate::blob::manager::BlobManager;
 use crate::blob::models::*;
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 
 impl BlobManager {
     /// Batch upload multiple files
@@ -60,7 +60,7 @@ impl BlobManager {
     pub async fn file_exists(&self, name: &str) -> Result<bool> {
         match self.get_file_info(name).await {
             Ok(_) => Ok(true),
-            Err(crosstacheError::VaultNotFound { .. }) => Ok(false),
+            Err(CrosstacheError::VaultNotFound { .. }) => Ok(false),
             Err(e) => Err(e),
         }
     }

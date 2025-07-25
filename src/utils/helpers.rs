@@ -3,7 +3,7 @@
 //! This module contains various helper functions for common operations
 //! including GUID validation, connection string handling, and URI manipulation.
 
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -54,7 +54,7 @@ pub fn extract_vault_name_from_uri(vault_uri: &str) -> Result<String> {
         }
     }
 
-    Err(crosstacheError::invalid_argument(format!(
+    Err(CrosstacheError::invalid_argument(format!(
         "Invalid vault URI format: {}",
         vault_uri
     )))
@@ -83,20 +83,20 @@ pub fn normalize_name_for_matching(name: &str) -> String {
 /// Empty folder names (consecutive slashes) are not allowed
 pub fn validate_folder_path(folder_path: &str) -> Result<()> {
     if folder_path.is_empty() {
-        return Err(crosstacheError::invalid_argument(
+        return Err(CrosstacheError::invalid_argument(
             "Folder path cannot be empty",
         ));
     }
 
     // Check for invalid characters at start/end
     if folder_path.starts_with('/') {
-        return Err(crosstacheError::invalid_argument(
+        return Err(CrosstacheError::invalid_argument(
             "Folder path cannot start with '/'",
         ));
     }
 
     if folder_path.ends_with('/') {
-        return Err(crosstacheError::invalid_argument(
+        return Err(CrosstacheError::invalid_argument(
             "Folder path cannot end with '/'",
         ));
     }
@@ -106,7 +106,7 @@ pub fn validate_folder_path(folder_path: &str) -> Result<()> {
 
     for folder in &folders {
         if folder.is_empty() {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Folder path cannot contain empty folder names (consecutive '/')",
             ));
         }
@@ -114,21 +114,21 @@ pub fn validate_folder_path(folder_path: &str) -> Result<()> {
         // Folder names can contain alphanumeric characters, hyphens, underscores, spaces, and dots
         // but cannot contain '/' (which is the separator)
         if folder.contains('/') {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Folder names cannot contain '/' character",
             ));
         }
 
         // Additional validation for reasonable folder names
         if folder.len() > 50 {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Folder names cannot exceed 50 characters",
             ));
         }
 
         // Ensure folder name is not just whitespace
         if folder.trim().is_empty() {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Folder names cannot be only whitespace",
             ));
         }
@@ -136,7 +136,7 @@ pub fn validate_folder_path(folder_path: &str) -> Result<()> {
 
     // Limit the depth of folder structure
     if folders.len() > 10 {
-        return Err(crosstacheError::invalid_argument(
+        return Err(CrosstacheError::invalid_argument(
             "Folder path depth cannot exceed 10 levels",
         ));
     }

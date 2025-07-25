@@ -8,12 +8,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::models::{
-    AccessLevel, AccessPolicy, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary,
-    VaultUpdateRequest,
+    AccessLevel, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary,
 };
 use super::operations::{AzureVaultOperations, VaultOperations};
 use crate::auth::provider::AzureAuthProvider;
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
 
 /// High-level vault manager
@@ -457,7 +456,7 @@ impl VaultManager {
         let vault = self.vault_ops.get_vault(vault_name, resource_group).await?;
 
         let config = serde_json::to_string_pretty(&vault).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to serialize vault config: {e}"))
+            CrosstacheError::serialization(format!("Failed to serialize vault config: {e}"))
         })?;
 
         Ok(config)
@@ -466,31 +465,31 @@ impl VaultManager {
     /// Validate vault name according to Azure requirements
     pub fn validate_vault_name(name: &str) -> Result<()> {
         if name.is_empty() {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Vault name cannot be empty",
             ));
         }
 
         if name.len() < 3 || name.len() > 24 {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Vault name must be between 3 and 24 characters",
             ));
         }
 
         if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Vault name can only contain alphanumeric characters and hyphens",
             ));
         }
 
         if name.starts_with('-') || name.ends_with('-') {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Vault name cannot start or end with a hyphen",
             ));
         }
 
         if name.contains("--") {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "Vault name cannot contain consecutive hyphens",
             ));
         }
@@ -568,10 +567,10 @@ impl VaultManagerBuilder {
     pub fn build(self) -> Result<VaultManager> {
         let auth_provider = self
             .auth_provider
-            .ok_or_else(|| crosstacheError::config("Authentication provider is required"))?;
+            .ok_or_else(|| CrosstacheError::config("Authentication provider is required"))?;
         let subscription_id = self
             .subscription_id
-            .ok_or_else(|| crosstacheError::config("Subscription ID is required"))?;
+            .ok_or_else(|| CrosstacheError::config("Subscription ID is required"))?;
 
         VaultManager::new(auth_provider, subscription_id, self.no_color)
     }
