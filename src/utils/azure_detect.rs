@@ -3,7 +3,7 @@
 //! This module provides utilities for detecting Azure CLI installation,
 //! available subscriptions, and environment configuration.
 
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use serde_json::Value;
 use std::process::Command;
 
@@ -143,18 +143,18 @@ impl AzureDetector {
         let output = Command::new("az")
             .args(&["account", "list", "--output", "json"])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
-            return Err(crosstacheError::config(format!(
+            return Err(CrosstacheError::config(format!(
                 "Azure CLI command failed: {error_msg}"
             )));
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         let subscriptions_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| crosstacheError::serialization(format!(
+            .map_err(|e| CrosstacheError::serialization(format!(
                 "Failed to parse Azure CLI output: {e}"
             )))?;
 
@@ -193,7 +193,7 @@ impl AzureDetector {
         let output = Command::new("az")
             .args(&["account", "show", "--output", "json"])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         if !output.status.success() {
             return Ok(None);
@@ -201,7 +201,7 @@ impl AzureDetector {
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         let account_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| crosstacheError::serialization(format!(
+            .map_err(|e| CrosstacheError::serialization(format!(
                 "Failed to parse Azure CLI output: {e}"
             )))?;
 
@@ -277,18 +277,18 @@ impl AzureDetector {
                 "--output", "json"
             ])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
-            return Err(crosstacheError::config(format!(
+            return Err(CrosstacheError::config(format!(
                 "Failed to list resource groups: {error_msg}"
             )));
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         let groups_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| crosstacheError::serialization(format!(
+            .map_err(|e| CrosstacheError::serialization(format!(
                 "Failed to parse resource groups: {e}"
             )))?;
 
@@ -315,18 +315,18 @@ impl AzureDetector {
                 "--output", "json"
             ])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
-            return Err(crosstacheError::config(format!(
+            return Err(CrosstacheError::config(format!(
                 "Failed to list locations: {error_msg}"
             )));
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         let locations_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| crosstacheError::serialization(format!(
+            .map_err(|e| CrosstacheError::serialization(format!(
                 "Failed to parse locations: {e}"
             )))?;
 
@@ -352,7 +352,7 @@ impl AzureDetector {
                 "--name", resource_group
             ])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         if !output.status.success() {
             return Ok(false);
@@ -377,11 +377,11 @@ impl AzureDetector {
                 "--location", location
             ])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
-            return Err(crosstacheError::config(format!(
+            return Err(CrosstacheError::config(format!(
                 "Failed to create resource group: {error_msg}"
             )));
         }
@@ -400,18 +400,18 @@ impl AzureDetector {
                 "--output", "json"
             ])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         if !output.status.success() {
             let error_msg = String::from_utf8_lossy(&output.stderr);
-            return Err(crosstacheError::config(format!(
+            return Err(CrosstacheError::config(format!(
                 "Failed to list storage accounts: {error_msg}"
             )));
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         let accounts_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| crosstacheError::serialization(format!(
+            .map_err(|e| CrosstacheError::serialization(format!(
                 "Failed to parse storage accounts: {e}"
             )))?;
 
@@ -439,7 +439,7 @@ impl AzureDetector {
                 "--output", "json"
             ])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         Ok(output.status.success())
     }
@@ -455,7 +455,7 @@ impl AzureDetector {
                 "--output", "json"
             ])
             .output()
-            .map_err(|e| crosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
         if !output.status.success() {
             return Ok(false);
@@ -463,7 +463,7 @@ impl AzureDetector {
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         let exists_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| crosstacheError::serialization(format!(
+            .map_err(|e| CrosstacheError::serialization(format!(
                 "Failed to parse container existence check: {e}"
             )))?;
 

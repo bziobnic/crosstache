@@ -4,7 +4,7 @@
 //! including all commands, subcommands, and their arguments.
 
 use crate::config::Config;
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use crate::vault::{VaultCreateRequest, VaultManager};
 use crate::blob::manager::{BlobManager, create_blob_manager};
@@ -662,13 +662,11 @@ impl Cli {
 }
 
 async fn execute_file_command(command: FileCommands, config: Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
-    use std::sync::Arc;
 
     // Create blob manager
     let blob_manager = create_blob_manager(&config).map_err(|e| {
         if e.to_string().contains("No storage account configured") {
-            crosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
+            CrosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
         } else {
             e
         }
@@ -751,7 +749,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create vault manager
@@ -968,7 +966,7 @@ async fn execute_vault_info(
             .get_vault_properties(name, &resource_group)
             .await?;
         let json_output = serde_json::to_string_pretty(&vault).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to serialize vault info: {e}"))
+            CrosstacheError::serialization(format!("Failed to serialize vault info: {e}"))
         })?;
         println!("{}", json_output);
     } else {
@@ -993,7 +991,7 @@ async fn execute_secret_set_direct(
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1009,7 +1007,7 @@ async fn execute_secret_get_direct(name: &str, raw: bool, config: Config) -> Res
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1029,7 +1027,7 @@ async fn execute_secret_list_direct(
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1045,7 +1043,7 @@ async fn execute_secret_delete_direct(name: &str, force: bool, config: Config) -
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1073,7 +1071,7 @@ async fn execute_secret_update_direct(
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1104,7 +1102,7 @@ async fn execute_secret_purge_direct(name: &str, force: bool, config: Config) ->
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1120,7 +1118,7 @@ async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()>
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1140,7 +1138,7 @@ async fn execute_secret_parse_direct(
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1156,7 +1154,7 @@ async fn execute_secret_share_direct(command: ShareCommands, config: Config) -> 
 
     // Create authentication provider
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
 
     // Create secret manager
@@ -1368,7 +1366,7 @@ async fn execute_config_show(config: &Config) -> Result<()> {
 
     if config.output_json {
         let json_output = serde_json::to_string_pretty(config).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to serialize config: {e}"))
+            CrosstacheError::serialization(format!("Failed to serialize config: {e}"))
         })?;
         println!("{}", json_output);
     } else {
@@ -1410,7 +1408,7 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         }
         "cache_ttl" => {
             let seconds = value.parse::<u64>().map_err(|_| {
-                crosstacheError::config(format!("Invalid value for cache_ttl: {value}"))
+                CrosstacheError::config(format!("Invalid value for cache_ttl: {value}"))
             })?;
             config.cache_ttl = std::time::Duration::from_secs(seconds);
         }
@@ -1442,7 +1440,7 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         }
         "blob_chunk_size_mb" => {
             let chunk_size = value.parse::<usize>().map_err(|_| {
-                crosstacheError::config(format!("Invalid value for blob_chunk_size_mb: {value}"))
+                CrosstacheError::config(format!("Invalid value for blob_chunk_size_mb: {value}"))
             })?;
             let mut blob_config = config.get_blob_config();
             blob_config.chunk_size_mb = chunk_size;
@@ -1450,14 +1448,14 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         }
         "blob_max_concurrent_uploads" => {
             let max_uploads = value.parse::<usize>().map_err(|_| {
-                crosstacheError::config(format!("Invalid value for blob_max_concurrent_uploads: {value}"))
+                CrosstacheError::config(format!("Invalid value for blob_max_concurrent_uploads: {value}"))
             })?;
             let mut blob_config = config.get_blob_config();
             blob_config.max_concurrent_uploads = max_uploads;
             config.set_blob_config(blob_config);
         }
         _ => {
-            return Err(crosstacheError::config(format!(
+            return Err(CrosstacheError::config(format!(
                 "Unknown configuration key: {}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads",
                 key
             )));
@@ -1500,7 +1498,7 @@ async fn execute_secret_set(
     };
 
     if value.is_empty() {
-        return Err(crosstacheError::config("Secret value cannot be empty"));
+        return Err(CrosstacheError::config("Secret value cannot be empty"));
     }
 
     // Create secret request with note and/or folder if provided
@@ -1689,7 +1687,7 @@ async fn execute_secret_update(
     let new_value = if let Some(v) = value {
         // Validate provided value
         if v.is_empty() {
-            return Err(crosstacheError::config("Secret value cannot be empty"));
+            return Err(CrosstacheError::config("Secret value cannot be empty"));
         }
         Some(v)
     } else if stdin {
@@ -1697,7 +1695,7 @@ async fn execute_secret_update(
         io::stdin().read_to_string(&mut buffer)?;
         let trimmed = buffer.trim().to_string();
         if trimmed.is_empty() {
-            return Err(crosstacheError::config("Secret value cannot be empty"));
+            return Err(CrosstacheError::config("Secret value cannot be empty"));
         }
         Some(trimmed)
     } else {
@@ -1712,7 +1710,7 @@ async fn execute_secret_update(
         && note.is_none()
         && folder.is_none()
     {
-        return Err(crosstacheError::invalid_argument(
+        return Err(CrosstacheError::invalid_argument(
             "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note) or rename secrets. Use 'secret set' to update secret values."
         ));
     }
@@ -1734,12 +1732,12 @@ async fn execute_secret_update(
     // Validate rename if provided
     if let Some(ref new_name) = rename {
         if new_name.is_empty() {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "New secret name cannot be empty",
             ));
         }
         if new_name == name {
-            return Err(crosstacheError::invalid_argument(
+            return Err(CrosstacheError::invalid_argument(
                 "New secret name must be different from current name",
             ));
         }
@@ -1913,7 +1911,7 @@ async fn execute_secret_parse(
     match format.to_lowercase().as_str() {
         "json" => {
             let json_output = serde_json::to_string_pretty(&components).map_err(|e| {
-                crosstacheError::serialization(format!("Failed to serialize components: {e}"))
+                CrosstacheError::serialization(format!("Failed to serialize components: {e}"))
             })?;
             println!("{}", json_output);
         }
@@ -2012,7 +2010,7 @@ async fn execute_vault_export(
 
     // Create secret manager to get secrets from vault
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
@@ -2085,7 +2083,7 @@ async fn execute_vault_export(
             );
 
             serde_json::to_string_pretty(&export_json).map_err(|e| {
-                crosstacheError::serialization(format!("Failed to serialize export data: {e}"))
+                CrosstacheError::serialization(format!("Failed to serialize export data: {e}"))
             })?
         }
         "env" => {
@@ -2167,7 +2165,7 @@ async fn execute_vault_export(
             txt_lines.join("\n")
         }
         _ => {
-            return Err(crosstacheError::invalid_argument(format!(
+            return Err(CrosstacheError::invalid_argument(format!(
                 "Unsupported export format: {}",
                 format
             )));
@@ -2178,10 +2176,10 @@ async fn execute_vault_export(
     match output {
         Some(file_path) => {
             let mut file = File::create(&file_path).map_err(|e| {
-                crosstacheError::unknown(format!("Failed to create output file: {e}"))
+                CrosstacheError::unknown(format!("Failed to create output file: {e}"))
             })?;
             file.write_all(export_data.as_bytes()).map_err(|e| {
-                crosstacheError::unknown(format!("Failed to write to output file: {e}"))
+                CrosstacheError::unknown(format!("Failed to write to output file: {e}"))
             })?;
             println!("Exported {} secrets to {}", secrets.len(), file_path);
         }
@@ -2214,11 +2212,11 @@ async fn execute_vault_import(
     // Read import data
     let import_data = match input {
         Some(file_path) => fs::read_to_string(file_path)
-            .map_err(|e| crosstacheError::unknown(format!("Failed to read input file: {e}")))?,
+            .map_err(|e| CrosstacheError::unknown(format!("Failed to read input file: {e}")))?,
         None => {
             let mut buffer = String::new();
             io::stdin().read_to_string(&mut buffer).map_err(|e| {
-                crosstacheError::unknown(format!("Failed to read from stdin: {e}"))
+                CrosstacheError::unknown(format!("Failed to read from stdin: {e}"))
             })?;
             buffer
         }
@@ -2228,29 +2226,29 @@ async fn execute_vault_import(
     let secrets_to_import = match format.to_lowercase().as_str() {
         "json" => {
             let json_data: serde_json::Value = serde_json::from_str(&import_data).map_err(|e| {
-                crosstacheError::serialization(format!("Failed to parse JSON: {e}"))
+                CrosstacheError::serialization(format!("Failed to parse JSON: {e}"))
             })?;
 
             let secrets_array = json_data
                 .get("secrets")
                 .and_then(|s| s.as_array())
-                .ok_or_else(|| crosstacheError::serialization("Missing 'secrets' array in JSON"))?;
+                .ok_or_else(|| CrosstacheError::serialization("Missing 'secrets' array in JSON"))?;
 
             let mut secrets = Vec::new();
             for secret_value in secrets_array {
                 let secret_obj = secret_value.as_object().ok_or_else(|| {
-                    crosstacheError::serialization("Invalid secret object in JSON")
+                    CrosstacheError::serialization("Invalid secret object in JSON")
                 })?;
 
                 let name = secret_obj
                     .get("name")
                     .and_then(|n| n.as_str())
-                    .ok_or_else(|| crosstacheError::serialization("Missing secret name"))?;
+                    .ok_or_else(|| CrosstacheError::serialization("Missing secret name"))?;
 
                 let value = secret_obj
                     .get("value")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| crosstacheError::serialization("Missing secret value"))?;
+                    .ok_or_else(|| CrosstacheError::serialization("Missing secret value"))?;
 
                 let content_type = secret_obj
                     .get("content_type")
@@ -2305,7 +2303,7 @@ async fn execute_vault_import(
             secrets
         }
         _ => {
-            return Err(crosstacheError::invalid_argument(format!(
+            return Err(CrosstacheError::invalid_argument(format!(
                 "Unsupported import format: {}",
                 format
             )));
@@ -2326,7 +2324,7 @@ async fn execute_vault_import(
 
     // Create secret manager to import secrets
     let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        crosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
     })?);
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
@@ -2443,7 +2441,7 @@ async fn execute_vault_share(
                 "contributor" | "write" => AccessLevel::Contributor,
                 "admin" | "administrator" => AccessLevel::Admin,
                 _ => {
-                    return Err(crosstacheError::invalid_argument(format!(
+                    return Err(CrosstacheError::invalid_argument(format!(
                         "Invalid access level: {}",
                         level
                     )))
@@ -2700,12 +2698,12 @@ async fn execute_file_upload(
 
     // Check if file exists
     if !Path::new(file_path).exists() {
-        return Err(crosstacheError::config(format!("File not found: {file_path}")));
+        return Err(CrosstacheError::config(format!("File not found: {file_path}")));
     }
 
     // Read file content
     let content = fs::read(file_path).map_err(|e| {
-        crosstacheError::config(format!("Failed to read file {file_path}: {e}"))
+        CrosstacheError::config(format!("Failed to read file {file_path}: {e}"))
     })?;
 
     // Determine remote file name
@@ -2773,7 +2771,7 @@ async fn execute_file_download(
 
     // Check if file exists and handle force flag
     if Path::new(&output_path).exists() && !force {
-        return Err(crosstacheError::config(format!(
+        return Err(CrosstacheError::config(format!(
             "File '{}' already exists. Use --force to overwrite.",
             output_path
         )));
@@ -2793,7 +2791,7 @@ async fn execute_file_download(
         match blob_manager.download_file(download_request).await {
             Ok(content) => {
                 fs::write(&output_path, content).map_err(|e| {
-                    crosstacheError::config(format!("Failed to write file {output_path}: {e}"))
+                    CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
                 })?;
                 println!("✅ Successfully downloaded file '{}'", name);
             }
@@ -2805,7 +2803,7 @@ async fn execute_file_download(
         match blob_manager.download_file(download_request).await {
             Ok(content) => {
                 fs::write(&output_path, content).map_err(|e| {
-                    crosstacheError::config(format!("Failed to write file {output_path}: {e}"))
+                    CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
                 })?;
                 println!("✅ Successfully downloaded file '{}'", name);
             }
@@ -2847,7 +2845,7 @@ async fn execute_file_list(
 
     if config.output_json {
         let json_output = serde_json::to_string_pretty(&files).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to serialize files: {e}"))
+            CrosstacheError::serialization(format!("Failed to serialize files: {e}"))
         })?;
         println!("{}", json_output);
     } else {
@@ -2922,7 +2920,7 @@ async fn execute_file_info(
 
     if config.output_json {
         let json_output = serde_json::to_string_pretty(&file_info).map_err(|e| {
-            crosstacheError::serialization(format!("Failed to serialize file info: {e}"))
+            CrosstacheError::serialization(format!("Failed to serialize file info: {e}"))
         })?;
         println!("{}", json_output);
     } else {
@@ -3062,7 +3060,7 @@ async fn execute_file_upload_quick(
     // Create blob manager
     let blob_manager = create_blob_manager(config).map_err(|e| {
         if e.to_string().contains("No storage account configured") {
-            crosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
+            CrosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
         } else {
             e
         }
@@ -3102,7 +3100,7 @@ async fn execute_file_download_quick(
     // Create blob manager
     let blob_manager = create_blob_manager(config).map_err(|e| {
         if e.to_string().contains("No storage account configured") {
-            crosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
+            CrosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
         } else {
             e
         }

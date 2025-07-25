@@ -3,7 +3,7 @@
 //! This module provides utilities for creating interactive command-line experiences
 //! including prompts, confirmations, and progress indicators.
 
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
@@ -35,7 +35,7 @@ impl InteractivePrompt {
             .with_prompt(message)
             .default(default)
             .interact()
-            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to get user input: {e}")))?;
         Ok(result)
     }
 
@@ -49,7 +49,7 @@ impl InteractivePrompt {
 
         let result = input
             .interact_text()
-            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to get user input: {e}")))?;
         
         Ok(result)
     }
@@ -69,7 +69,7 @@ impl InteractivePrompt {
 
         let result = input
             .interact_text()
-            .map_err(|e| crosstacheError::config(format!("Failed to get user input: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to get user input: {e}")))?;
         
         Ok(result)
     }
@@ -86,7 +86,7 @@ impl InteractivePrompt {
 
         let result = select
             .interact()
-            .map_err(|e| crosstacheError::config(format!("Failed to get user selection: {e}")))?;
+            .map_err(|e| CrosstacheError::config(format!("Failed to get user selection: {e}")))?;
         
         Ok(result)
     }

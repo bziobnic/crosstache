@@ -13,4 +13,4 @@ pub mod utils;
 pub mod vault;
 
 // Re-export commonly used types
-pub use error::{crosstacheError, Result};
+pub use error::{CrosstacheError, Result};

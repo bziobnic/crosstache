@@ -1,4 +1,4 @@
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use reqwest::Client;
 use std::time::Duration;
 
@@ -26,17 +26,17 @@ pub fn create_http_client(config: &NetworkConfig) -> Result<Client> {
         .timeout(config.request_timeout)
         .user_agent(&config.user_agent)
         .build()
-        .map_err(|e| crosstacheError::network(format!("Failed to create HTTP client: {e}")))
+        .map_err(|e| CrosstacheError::network(format!("Failed to create HTTP client: {e}")))
 }
 
 /// Enhanced network error classification and user-friendly error messages
-pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheError {
+pub fn classify_network_error(error: &reqwest::Error, url: &str) -> CrosstacheError {
     // Extract vault name from URL for better error messages
     let vault_name = extract_vault_name_from_url(url);
 
     // Check for timeout errors
     if error.is_timeout() {
-        return crosstacheError::connection_timeout(format!(
+        return CrosstacheError::connection_timeout(format!(
             "Connection to Azure Key Vault '{vault_name}' timed out. This might be due to network issues or the vault being unreachable."
         ));
     }
@@ -45,7 +45,7 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
     if error.is_connect() {
         // Try to determine if it's a DNS issue
         if is_dns_resolution_error(error) {
-            return crosstacheError::dns_resolution(
+            return CrosstacheError::dns_resolution(
                 vault_name.clone(),
                 format!("Unable to resolve vault hostname. Please check if the vault name '{vault_name}' is correct and the vault exists.")
             );
@@ -57,12 +57,12 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
             .to_lowercase()
             .contains("connection refused")
         {
-            return crosstacheError::connection_refused(format!(
+            return CrosstacheError::connection_refused(format!(
                 "Connection to Azure Key Vault '{vault_name}' was refused. The service may be temporarily unavailable."
             ));
         }
 
-        return crosstacheError::network(format!(
+        return CrosstacheError::network(format!(
             "Failed to connect to Azure Key Vault '{vault_name}'. Please check your network connection and verify the vault name."
         ));
     }
@@ -72,14 +72,14 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
         || error.to_string().to_lowercase().contains("tls")
         || error.to_string().to_lowercase().contains("certificate")
     {
-        return crosstacheError::ssl_error(format!(
+        return CrosstacheError::ssl_error(format!(
             "SSL/TLS connection error when accessing vault '{vault_name}'. This may be due to certificate issues or network security policies."
         ));
     }
 
     // Check for invalid URL errors
     if error.is_request() {
-        return crosstacheError::invalid_url(format!(
+        return CrosstacheError::invalid_url(format!(
             "Invalid request to vault '{vault_name}'. Please check the vault name and URL format."
         ));
     }
@@ -87,10 +87,10 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
     // Check for specific HTTP status codes that indicate network issues
     if let Some(status) = error.status() {
         match status.as_u16() {
-            503 => return crosstacheError::network(format!(
+            503 => return CrosstacheError::network(format!(
                 "Azure Key Vault '{vault_name}' service is temporarily unavailable. Please try again later."
             )),
-            502 | 504 => return crosstacheError::network(format!(
+            502 | 504 => return CrosstacheError::network(format!(
                 "Gateway error when accessing vault '{vault_name}'. The Azure service may be experiencing issues."
             )),
             _ => {}
@@ -98,7 +98,7 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> crosstacheEr
     }
 
     // Default network error with helpful message
-    crosstacheError::network(format!(
+    CrosstacheError::network(format!(
         "Network error when accessing vault '{vault_name}': {error}. Please check your internet connection and try again."
     ))
 }
@@ -152,10 +152,10 @@ fn extract_vault_name_from_url(url: &str) -> String {
 }
 
 /// Check if a network error is retryable
-pub fn is_retryable_error(error: &crosstacheError) -> bool {
+pub fn is_retryable_error(error: &CrosstacheError) -> bool {
     match error {
-        crosstacheError::ConnectionTimeout(_) => true,
-        crosstacheError::NetworkError(msg) => {
+        CrosstacheError::ConnectionTimeout(_) => true,
+        CrosstacheError::NetworkError(msg) => {
             // Retry on temporary network issues
             let msg_lower = msg.to_lowercase();
             msg_lower.contains("timeout")
@@ -164,7 +164,7 @@ pub fn is_retryable_error(error: &crosstacheError) -> bool {
                 || msg_lower.contains("502")
                 || msg_lower.contains("504")
         }
-        crosstacheError::AzureApiError(msg) => {
+        CrosstacheError::AzureApiError(msg) => {
             // Retry on specific Azure API errors
             let msg_lower = msg.to_lowercase();
             msg_lower.contains("503")
@@ -172,10 +172,10 @@ pub fn is_retryable_error(error: &crosstacheError) -> bool {
                 || msg_lower.contains("504")
                 || msg_lower.contains("throttled")
         }
-        crosstacheError::DnsResolutionError { .. } => false, // DNS errors are usually not transient
-        crosstacheError::ConnectionRefused(_) => false, // Connection refused is usually persistent
-        crosstacheError::SslError(_) => false, // SSL errors are usually configuration issues
-        crosstacheError::InvalidUrl(_) => false, // URL errors are not retryable
+        CrosstacheError::DnsResolutionError { .. } => false, // DNS errors are usually not transient
+        CrosstacheError::ConnectionRefused(_) => false, // Connection refused is usually persistent
+        CrosstacheError::SslError(_) => false, // SSL errors are usually configuration issues
+        CrosstacheError::InvalidUrl(_) => false, // URL errors are not retryable
         _ => false,
     }
 }
@@ -192,10 +192,10 @@ mod tests {
 
     #[test]
     fn test_is_retryable_error() {
-        let timeout_error = crosstacheError::connection_timeout("timeout");
+        let timeout_error = CrosstacheError::connection_timeout("timeout");
         assert!(is_retryable_error(&timeout_error));
 
-        let dns_error = crosstacheError::dns_resolution("vault", "DNS failed");
+        let dns_error = CrosstacheError::dns_resolution("vault", "DNS failed");
         assert!(!is_retryable_error(&dns_error));
     }
 }

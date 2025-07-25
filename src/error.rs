@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Main error type for crosstache operations
 #[derive(Debug, Error)]
-pub enum crosstacheError {
+pub enum CrosstacheError {
     #[error("Authentication failed: {0}")]
     AuthenticationError(String),
 
@@ -79,7 +79,7 @@ pub enum crosstacheError {
     Unknown(String),
 }
 
-impl crosstacheError {
+impl CrosstacheError {
     pub fn authentication<S: Into<String>>(msg: S) -> Self {
         Self::AuthenticationError(msg.into())
     }
@@ -153,15 +153,15 @@ impl crosstacheError {
 }
 
 /// Result type alias for crosstache operations
-pub type Result<T> = std::result::Result<T, crosstacheError>;
+pub type Result<T> = std::result::Result<T, CrosstacheError>;
 
-/// Convert Azure Core errors to crosstacheError
-impl From<azure_core::Error> for crosstacheError {
+/// Convert Azure Core errors to CrosstacheError
+impl From<azure_core::Error> for CrosstacheError {
     fn from(error: azure_core::Error) -> Self {
         Self::AzureApiError(error.to_string())
     }
 }
 
-// TODO: Convert Azure Identity errors to crosstacheError
+// TODO: Convert Azure Identity errors to CrosstacheError
 // Note: Azure Identity crate doesn't expose a specific Error type in v0.20
 // We'll implement this when we integrate with actual Azure Identity APIs

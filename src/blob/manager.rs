@@ -9,7 +9,7 @@
 
 use crate::auth::provider::AzureAuthProvider;
 use crate::blob::models::*;
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use azure_storage_blobs::prelude::*;
 // use azure_core::auth::TokenCredential; // Not needed for current implementation
 use chrono::Utc;
@@ -75,7 +75,7 @@ impl BlobManager {
             .put_block_blob(request.content)
             .content_type(&content_type)
             .await
-            .map_err(|e| crosstacheError::azure_api(format!("Failed to upload blob: {}", e)))?;
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to upload blob: {}", e)))?;
         
         // TODO: Set metadata (requires separate API call)
         // Azure SDK v0.21 API for metadata is not yet stable
@@ -141,7 +141,7 @@ impl BlobManager {
         
         // Process each page of results
         while let Some(page) = stream.try_next().await
-            .map_err(|e| crosstacheError::azure_api(format!("Failed to list blobs: {}", e)))? {
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to list blobs: {}", e)))? {
             
             // Process each blob in this page
             for blob_item in page.blobs.blobs() {
@@ -203,7 +203,7 @@ impl BlobManager {
     pub async fn download_file(&self, request: FileDownloadRequest) -> Result<Vec<u8>> {
         // Validate download request parameters
         if request.name.trim().is_empty() {
-            return Err(crosstacheError::config("File name cannot be empty".to_string()));
+            return Err(CrosstacheError::config("File name cannot be empty".to_string()));
         }
 
         // Create BlobServiceClient using token credential
@@ -221,9 +221,9 @@ impl BlobManager {
             .map_err(|e| {
                 let error_msg = e.to_string().to_lowercase();
                 if error_msg.contains("404") || error_msg.contains("not found") {
-                    crosstacheError::vault_not_found(format!("File '{}' not found", request.name))
+                    CrosstacheError::vault_not_found(format!("File '{}' not found", request.name))
                 } else {
-                    crosstacheError::azure_api(format!("Failed to check if blob exists: {}", e))
+                    CrosstacheError::azure_api(format!("Failed to check if blob exists: {}", e))
                 }
             })?;
         
@@ -231,7 +231,7 @@ impl BlobManager {
         let blob_content = blob_client
             .get_content()
             .await
-            .map_err(|e| crosstacheError::azure_api(format!("Failed to download blob: {}", e)))?;
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {}", e)))?;
         
         Ok(blob_content)
     }
@@ -240,7 +240,7 @@ impl BlobManager {
     pub async fn delete_file(&self, name: &str) -> Result<()> {
         // Validate file name parameter
         if name.trim().is_empty() {
-            return Err(crosstacheError::config("File name cannot be empty".to_string()));
+            return Err(CrosstacheError::config("File name cannot be empty".to_string()));
         }
 
         // Create BlobServiceClient using token credential
@@ -254,7 +254,7 @@ impl BlobManager {
         // Check if blob exists before deletion (optional - Azure will return error if not found)
         let exists = blob_client.get_properties().await.is_ok();
         if !exists {
-            return Err(crosstacheError::vault_not_found(format!("File '{}' not found", name)));
+            return Err(CrosstacheError::vault_not_found(format!("File '{}' not found", name)));
         }
         
         // Implement blob deletion
@@ -264,9 +264,9 @@ impl BlobManager {
             .map_err(|e| {
                 let error_msg = e.to_string().to_lowercase();
                 if error_msg.contains("404") || error_msg.contains("not found") {
-                    crosstacheError::vault_not_found(format!("File '{}' not found", name))
+                    CrosstacheError::vault_not_found(format!("File '{}' not found", name))
                 } else {
-                    crosstacheError::azure_api(format!("Failed to delete blob: {}", e))
+                    CrosstacheError::azure_api(format!("Failed to delete blob: {}", e))
                 }
             })?;
         
@@ -278,7 +278,7 @@ impl BlobManager {
     pub async fn get_file_info(&self, name: &str) -> Result<FileInfo> {
         // Validate file name parameter
         if name.trim().is_empty() {
-            return Err(crosstacheError::config("File name cannot be empty".to_string()));
+            return Err(CrosstacheError::config("File name cannot be empty".to_string()));
         }
 
         // Create BlobServiceClient using token credential
@@ -296,9 +296,9 @@ impl BlobManager {
             .map_err(|e| {
                 let error_msg = e.to_string().to_lowercase();
                 if error_msg.contains("404") || error_msg.contains("not found") {
-                    crosstacheError::vault_not_found(format!("File '{}' not found", name))
+                    CrosstacheError::vault_not_found(format!("File '{}' not found", name))
                 } else {
-                    crosstacheError::azure_api(format!("Failed to get blob properties: {}", e))
+                    CrosstacheError::azure_api(format!("Failed to get blob properties: {}", e))
                 }
             })?;
         
@@ -346,7 +346,7 @@ impl BlobManager {
     ) -> Result<()> {
         // Validate file name
         if name.trim().is_empty() {
-            return Err(crosstacheError::config("File name cannot be empty".to_string()));
+            return Err(CrosstacheError::config("File name cannot be empty".to_string()));
         }
 
         // Create BlobServiceClient using token credential
@@ -364,9 +364,9 @@ impl BlobManager {
             .map_err(|e| {
                 let error_msg = e.to_string().to_lowercase();
                 if error_msg.contains("404") || error_msg.contains("not found") {
-                    crosstacheError::vault_not_found(format!("File '{}' not found", name))
+                    CrosstacheError::vault_not_found(format!("File '{}' not found", name))
                 } else {
-                    crosstacheError::azure_api(format!("Failed to check if blob exists: {}", e))
+                    CrosstacheError::azure_api(format!("Failed to check if blob exists: {}", e))
                 }
             })?;
 
@@ -375,18 +375,18 @@ impl BlobManager {
         let blob_content = blob_client
             .get_content()
             .await
-            .map_err(|e| crosstacheError::azure_api(format!("Failed to download blob: {}", e)))?;
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {}", e)))?;
 
         // Stream the data and write to the provided writer
         use tokio::io::AsyncWriteExt;
         
         // Write all content at once (Azure SDK already optimized the download)
         writer.write_all(&blob_content).await
-            .map_err(|e| crosstacheError::unknown(format!("Failed to write blob data: {}", e)))?;
+            .map_err(|e| CrosstacheError::unknown(format!("Failed to write blob data: {}", e)))?;
         
         // Ensure all data is flushed
         writer.flush().await
-            .map_err(|e| crosstacheError::unknown(format!("Failed to flush data: {}", e)))?;
+            .map_err(|e| CrosstacheError::unknown(format!("Failed to flush data: {}", e)))?;
         
         Ok(())
     }
@@ -442,7 +442,7 @@ pub fn create_blob_manager(config: &crate::config::Config) -> Result<BlobManager
     let blob_config = config.get_blob_config();
     
     if blob_config.storage_account.is_empty() {
-        return Err(crosstacheError::config(
+        return Err(CrosstacheError::config(
             "No blob storage configured. Run 'xv init' to set up blob storage."
         ));
     }
@@ -469,7 +469,7 @@ pub fn create_context_aware_blob_manager(
     let blob_config = config.get_blob_config();
     
     if blob_config.storage_account.is_empty() {
-        return Err(crosstacheError::config(
+        return Err(CrosstacheError::config(
             "No blob storage configured. Run 'xv init' to set up blob storage."
         ));
     }

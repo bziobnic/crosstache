@@ -17,7 +17,7 @@ mod utils;
 mod vault;
 
 use crate::cli::Cli;
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 
 #[tokio::main]
 async fn main() {
@@ -73,8 +73,8 @@ fn init_logging() {
         .init();
 }
 
-fn print_user_friendly_error(error: &crosstacheError) {
-    use crosstacheError::*;
+fn print_user_friendly_error(error: &CrosstacheError) {
+    use CrosstacheError::*;
 
     match error {
         AuthenticationError(msg) => {

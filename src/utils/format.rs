@@ -51,7 +51,7 @@ pub trait FormattableOutput: Serialize + Tabled + Sized {
     /// Convert to JSON format
     fn to_json(&self) -> Result<String> {
         serde_json::to_string_pretty(self).map_err(|e| {
-            crate::error::crosstacheError::SerializationError(format!("JSON serialization failed: {e}"))
+            crate::error::CrosstacheError::SerializationError(format!("JSON serialization failed: {e}"))
         })
     }
 
@@ -77,7 +77,7 @@ pub trait FormattableOutput: Serialize + Tabled + Sized {
     /// Convert to YAML format
     fn to_yaml(&self) -> Result<String> {
         serde_yaml::to_string(self).map_err(|e| {
-            crate::error::crosstacheError::SerializationError(format!("YAML serialization failed: {e}"))
+            crate::error::CrosstacheError::SerializationError(format!("YAML serialization failed: {e}"))
         })
     }
 

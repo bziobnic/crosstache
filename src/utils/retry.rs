@@ -3,7 +3,7 @@
 //! This module provides configurable retry functionality with
 //! exponential backoff for handling transient failures.
 
-use crate::error::{crosstacheError, Result};
+use crate::error::{CrosstacheError, Result};
 use crate::utils::network::is_retryable_error;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -60,7 +60,7 @@ where
         }
     }
 
-    Err(last_error.unwrap_or_else(|| crosstacheError::unknown("Retry failed with no error")))
+    Err(last_error.unwrap_or_else(|| CrosstacheError::unknown("Retry failed with no error")))
 }
 
 // TODO: Add context-aware cancellation support
