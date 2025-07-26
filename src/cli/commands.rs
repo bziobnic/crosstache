@@ -876,8 +876,7 @@ async fn execute_vault_create(
     let location = location.unwrap_or_else(|| config.default_location.clone());
 
     println!(
-        "Creating vault '{}' in resource group '{}' at location '{}'...",
-        name, resource_group, location
+        "Creating vault '{name}' in resource group '{resource_group}' at location '{location}'..."
     );
 
     let create_request = VaultCreateRequest {
@@ -902,7 +901,7 @@ async fn execute_vault_create(
     };
 
     let vault = vault_manager
-        .create_vault_with_setup(&name, &location, &resource_group, Some(create_request))
+        .create_vault_with_setup(name, &location, &resource_group, Some(create_request))
         .await?;
 
     println!("✅ Successfully created vault '{}'", vault.name);
@@ -968,7 +967,7 @@ async fn execute_vault_info(
         let json_output = serde_json::to_string_pretty(&vault).map_err(|e| {
             CrosstacheError::serialization(format!("Failed to serialize vault info: {e}"))
         })?;
-        println!("{}", json_output);
+        println!("{json_output}");
     } else {
         let _vault = vault_manager.get_vault_info(name, &resource_group).await?;
         // Display will be handled by the vault manager
@@ -1220,7 +1219,7 @@ async fn execute_info_command(
     subscription: Option<String>,
     config: Config,
 ) -> Result<()> {
-    println!("TODO: Show info for vault {:?}", vault_name);
+    println!("TODO: Show info for vault {vault_name:?}");
     Ok(())
 }
 
@@ -1368,7 +1367,7 @@ async fn execute_config_show(config: &Config) -> Result<()> {
         let json_output = serde_json::to_string_pretty(config).map_err(|e| {
             CrosstacheError::serialization(format!("Failed to serialize config: {e}"))
         })?;
-        println!("{}", json_output);
+        println!("{json_output}");
     } else {
         let table = Table::new(&items);
         println!("{}", format_table(table, config.no_color));
@@ -1456,14 +1455,13 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         }
         _ => {
             return Err(CrosstacheError::config(format!(
-                "Unknown configuration key: {}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads",
-                key
+                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads"
             )));
         }
     }
 
     config.save().await?;
-    println!("✅ Configuration updated: {} = {}", key, value);
+    println!("✅ Configuration updated: {key} = {value}");
 
     Ok(())
 }
@@ -1494,7 +1492,7 @@ async fn execute_secret_set(
         buffer.trim().to_string()
     } else {
         // Use rpassword for secure input
-        rpassword::prompt_password(format!("Enter value for secret '{}': ", name))?
+        rpassword::prompt_password(format!("Enter value for secret '{name}': "))?
     };
 
     if value.is_empty() {
@@ -1525,7 +1523,7 @@ async fn execute_secret_set(
         .await?;
 
     println!("✅ Successfully set secret '{}'", secret.original_name);
-    println!("   Vault: {}", vault_name);
+    println!("   Vault: {vault_name}");
     println!("   Version: {}", secret.version);
 
     Ok(())
@@ -1556,7 +1554,7 @@ async fn execute_secret_get(
     if raw {
         // Raw output - print the value
         if let Some(value) = secret.value {
-            print!("{}", value);
+            print!("{value}");
         }
     } else {
         // Default behavior - copy to clipboard
@@ -1564,20 +1562,20 @@ async fn execute_secret_get(
             match ClipboardContext::new() {
                 Ok(mut ctx) => match ctx.set_contents(value.clone()) {
                     Ok(_) => {
-                        println!("✅ Secret '{}' copied to clipboard", name);
+                        println!("✅ Secret '{name}' copied to clipboard");
                     }
                     Err(e) => {
-                        eprintln!("⚠️  Failed to copy to clipboard: {}", e);
-                        eprintln!("Secret value: {}", value);
+                        eprintln!("⚠️  Failed to copy to clipboard: {e}");
+                        eprintln!("Secret value: {value}");
                     }
                 },
                 Err(e) => {
-                    eprintln!("⚠️  Failed to access clipboard: {}", e);
-                    eprintln!("Secret value: {}", value);
+                    eprintln!("⚠️  Failed to access clipboard: {e}");
+                    eprintln!("Secret value: {value}");
                 }
             }
         } else {
-            println!("⚠️  Secret '{}' has no value", name);
+            println!("⚠️  Secret '{name}' has no value");
         }
     }
 
@@ -1638,8 +1636,7 @@ async fn execute_secret_delete(
     // Confirmation unless forced
     if !force {
         let confirm = rpassword::prompt_password(format!(
-            "Are you sure you want to delete secret '{}' from vault '{}'? (y/N): ",
-            name, vault_name
+            "Are you sure you want to delete secret '{name}' from vault '{vault_name}'? (y/N): "
         ))?;
 
         if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
@@ -1651,7 +1648,7 @@ async fn execute_secret_delete(
     secret_manager
         .delete_secret_safe(&vault_name, name, force)
         .await?;
-    println!("✅ Successfully deleted secret '{}'", name);
+    println!("✅ Successfully deleted secret '{name}'");
 
     Ok(())
 }
@@ -1761,9 +1758,9 @@ async fn execute_secret_update(
     };
 
     // Show update summary
-    println!("Updating secret '{}'...", name);
+    println!("Updating secret '{name}'...");
     if let Some(ref new_name) = rename {
-        println!("  → Renaming to: {}", new_name);
+        println!("  → Renaming to: {new_name}");
     }
     if new_value.is_some() {
         println!("  → Updating value");
@@ -1799,10 +1796,10 @@ async fn execute_secret_update(
         );
     }
     if let Some(ref note_text) = note {
-        println!("  → Adding note: {}", note_text);
+        println!("  → Adding note: {note_text}");
     }
     if let Some(ref folder_path) = folder {
-        println!("  → Setting folder: {}", folder_path);
+        println!("  → Setting folder: {folder_path}");
     }
 
     // Perform enhanced secret update
@@ -1811,11 +1808,11 @@ async fn execute_secret_update(
         .await?;
 
     println!("✅ Successfully updated secret '{}'", secret.original_name);
-    println!("   Vault: {}", vault_name);
+    println!("   Vault: {vault_name}");
     println!("   Version: {}", secret.version);
 
     if let Some(ref new_name) = rename {
-        println!("   New Name: {}", new_name);
+        println!("   New Name: {new_name}");
     }
 
     Ok(())
@@ -1840,8 +1837,7 @@ async fn execute_secret_purge(
     // Confirmation unless forced
     if !force {
         let confirm = rpassword::prompt_password(format!(
-            "Are you sure you want to PERMANENTLY DELETE secret '{}' from vault '{}'? This cannot be undone! (y/N): ",
-            name, vault_name
+            "Are you sure you want to PERMANENTLY DELETE secret '{name}' from vault '{vault_name}'? This cannot be undone! (y/N): "
         ))?;
 
         if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
@@ -1854,7 +1850,7 @@ async fn execute_secret_purge(
     secret_manager
         .purge_secret_safe(&vault_name, name, force)
         .await?;
-    println!("✅ Successfully purged secret '{}'", name);
+    println!("✅ Successfully purged secret '{name}'");
 
     Ok(())
 }
@@ -1874,7 +1870,7 @@ async fn execute_secret_restore(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
-    println!("Restoring deleted secret '{}'...", name);
+    println!("Restoring deleted secret '{name}'...");
 
     // Restore the secret using the secret manager
     let restored_secret = secret_manager
@@ -1885,7 +1881,7 @@ async fn execute_secret_restore(
         "✅ Successfully restored secret '{}'",
         restored_secret.original_name
     );
-    println!("   Vault: {}", vault_name);
+    println!("   Vault: {vault_name}");
     println!("   Version: {}", restored_secret.version);
     println!("   Enabled: {}", restored_secret.enabled);
     println!("   Created: {}", restored_secret.created_on);
@@ -1913,7 +1909,7 @@ async fn execute_secret_parse(
             let json_output = serde_json::to_string_pretty(&components).map_err(|e| {
                 CrosstacheError::serialization(format!("Failed to serialize components: {e}"))
             })?;
-            println!("{}", json_output);
+            println!("{json_output}");
         }
         "table" | _ => {
             if components.is_empty() {
@@ -1946,20 +1942,17 @@ async fn execute_secret_share(
             level,
         } => {
             println!(
-                "TODO: Grant {} access to secret '{}' for user '{}' in vault '{}'",
-                level, secret_name, user, vault_name
+                "TODO: Grant {level} access to secret '{secret_name}' for user '{user}' in vault '{vault_name}'"
             );
         }
         ShareCommands::Revoke { secret_name, user } => {
             println!(
-                "TODO: Revoke access to secret '{}' for user '{}' in vault '{}'",
-                secret_name, user, vault_name
+                "TODO: Revoke access to secret '{secret_name}' for user '{user}' in vault '{vault_name}'"
             );
         }
         ShareCommands::List { secret_name } => {
             println!(
-                "TODO: List access permissions for secret '{}' in vault '{}'",
-                secret_name, vault_name
+                "TODO: List access permissions for secret '{secret_name}' in vault '{vault_name}'"
             );
         }
     }
@@ -2166,8 +2159,7 @@ async fn execute_vault_export(
         }
         _ => {
             return Err(CrosstacheError::invalid_argument(format!(
-                "Unsupported export format: {}",
-                format
+                "Unsupported export format: {format}"
             )));
         }
     };
@@ -2184,7 +2176,7 @@ async fn execute_vault_export(
             println!("Exported {} secrets to {}", secrets.len(), file_path);
         }
         None => {
-            println!("{}", export_data);
+            println!("{export_data}");
         }
     }
 
@@ -2304,8 +2296,7 @@ async fn execute_vault_import(
         }
         _ => {
             return Err(CrosstacheError::invalid_argument(format!(
-                "Unsupported import format: {}",
-                format
+                "Unsupported import format: {format}"
             )));
         }
     };
@@ -2342,7 +2333,7 @@ async fn execute_vault_import(
                 .await
             {
                 Ok(_) => {
-                    println!("Skipping existing secret: {}", secret_name);
+                    println!("Skipping existing secret: {secret_name}");
                     skipped_count += 1;
                     continue;
                 }
@@ -2357,18 +2348,17 @@ async fn execute_vault_import(
             .await
         {
             Ok(_) => {
-                println!("Imported secret: {}", secret_name);
+                println!("Imported secret: {secret_name}");
                 imported_count += 1;
             }
             Err(e) => {
-                eprintln!("Failed to import secret '{}': {}", secret_name, e);
+                eprintln!("Failed to import secret '{secret_name}': {e}");
             }
         }
     }
 
     println!(
-        "Import completed: {} imported, {} skipped",
-        imported_count, skipped_count
+        "Import completed: {imported_count} imported, {skipped_count} skipped"
     );
 
     Ok(())
@@ -2410,10 +2400,9 @@ async fn execute_vault_update(
 
     // Note: This would need proper implementation in vault manager
     println!(
-        "Updating vault '{}' in resource group '{}'...",
-        name, resource_group
+        "Updating vault '{name}' in resource group '{resource_group}'..."
     );
-    println!("Update request: {:?}", update_request);
+    println!("Update request: {update_request:?}");
     println!("TODO: Implement vault update functionality");
 
     Ok(())
@@ -2442,8 +2431,7 @@ async fn execute_vault_share(
                 "admin" | "administrator" => AccessLevel::Admin,
                 _ => {
                     return Err(CrosstacheError::invalid_argument(format!(
-                        "Invalid access level: {}",
-                        level
+                        "Invalid access level: {level}"
                     )))
                 }
             };
@@ -2501,10 +2489,10 @@ async fn execute_context_show(config: &Config) -> Result<()> {
         println!("Current Vault Context:");
         println!("  Vault: {}", context.vault_name);
         if let Some(ref rg) = context.resource_group {
-            println!("  Resource Group: {}", rg);
+            println!("  Resource Group: {rg}");
         }
         if let Some(ref sub) = context.subscription_id {
-            println!("  Subscription: {}", sub);
+            println!("  Subscription: {sub}");
         }
         println!(
             "  Last Used: {}",
@@ -2569,10 +2557,10 @@ async fn execute_context_use(
     context_manager.set_context(new_context).await?;
 
     let scope = if local { "local" } else { "global" };
-    println!("✅ Switched to vault '{}' ({} context)", vault_name, scope);
+    println!("✅ Switched to vault '{vault_name}' ({scope} context)");
 
     if let Some(ref rg) = context_manager.current_resource_group() {
-        println!("   Resource Group: {}", rg);
+        println!("   Resource Group: {rg}");
     }
 
     Ok(())
@@ -2672,8 +2660,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
         context_manager.scope_description()
     };
     println!(
-        "✅ Cleared vault context for '{}' ({} scope)",
-        vault_name, scope
+        "✅ Cleared vault context for '{vault_name}' ({scope} scope)"
     );
 
     Ok(())
@@ -2730,7 +2717,7 @@ async fn execute_file_upload(
     };
 
     // Upload file
-    println!("Uploading file '{}' as '{}'...", file_path, remote_name);
+    println!("Uploading file '{file_path}' as '{remote_name}'...");
     
     if progress {
         // TODO: Use progress callback when implemented
@@ -2772,8 +2759,7 @@ async fn execute_file_download(
     // Check if file exists and handle force flag
     if Path::new(&output_path).exists() && !force {
         return Err(CrosstacheError::config(format!(
-            "File '{}' already exists. Use --force to overwrite.",
-            output_path
+            "File '{output_path}' already exists. Use --force to overwrite."
         )));
     }
 
@@ -2784,7 +2770,7 @@ async fn execute_file_download(
         stream,
     };
 
-    println!("Downloading file '{}' to '{}'...", name, output_path);
+    println!("Downloading file '{name}' to '{output_path}'...");
 
     if stream {
         // TODO: Use streaming download when implemented
@@ -2793,7 +2779,7 @@ async fn execute_file_download(
                 fs::write(&output_path, content).map_err(|e| {
                     CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
                 })?;
-                println!("✅ Successfully downloaded file '{}'", name);
+                println!("✅ Successfully downloaded file '{name}'");
             }
             Err(e) => {
                 return Err(e);
@@ -2805,7 +2791,7 @@ async fn execute_file_download(
                 fs::write(&output_path, content).map_err(|e| {
                     CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
                 })?;
-                println!("✅ Successfully downloaded file '{}'", name);
+                println!("✅ Successfully downloaded file '{name}'");
             }
             Err(e) => {
                 return Err(e);
@@ -2847,7 +2833,7 @@ async fn execute_file_list(
         let json_output = serde_json::to_string_pretty(&files).map_err(|e| {
             CrosstacheError::serialization(format!("Failed to serialize files: {e}"))
         })?;
-        println!("{}", json_output);
+        println!("{json_output}");
     } else {
         #[derive(Tabled)]
         struct FileItem {
@@ -2892,8 +2878,7 @@ async fn execute_file_delete(
     // Confirmation unless forced
     if !force {
         let confirm = rpassword::prompt_password(format!(
-            "Are you sure you want to delete file '{}'? (y/N): ",
-            name
+            "Are you sure you want to delete file '{name}'? (y/N): "
         ))?;
 
         if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
@@ -2903,9 +2888,9 @@ async fn execute_file_delete(
     }
 
     // Delete file
-    println!("Deleting file '{}'...", name);
+    println!("Deleting file '{name}'...");
     blob_manager.delete_file(name).await?;
-    println!("✅ Successfully deleted file '{}'", name);
+    println!("✅ Successfully deleted file '{name}'");
 
     Ok(())
 }
@@ -2922,7 +2907,7 @@ async fn execute_file_info(
         let json_output = serde_json::to_string_pretty(&file_info).map_err(|e| {
             CrosstacheError::serialization(format!("Failed to serialize file info: {e}"))
         })?;
-        println!("{}", json_output);
+        println!("{json_output}");
     } else {
         println!("File Information:");
         println!("  Name: {}", file_info.name);
@@ -2938,14 +2923,14 @@ async fn execute_file_info(
         if !file_info.metadata.is_empty() {
             println!("  Metadata:");
             for (key, value) in &file_info.metadata {
-                println!("    {}: {}", key, value);
+                println!("    {key}: {value}");
             }
         }
         
         if !file_info.tags.is_empty() {
             println!("  Tags:");
             for (key, value) in &file_info.tags {
-                println!("    {}: {}", key, value);
+                println!("    {key}: {value}");
             }
         }
     }
@@ -2982,10 +2967,10 @@ async fn execute_file_batch(
                     config,
                 ).await {
                     Ok(_) => {
-                        println!("  ✅ {}", file_path);
+                        println!("  ✅ {file_path}");
                     }
                     Err(e) => {
-                        eprintln!("  ❌ {}: {}", file_path, e);
+                        eprintln!("  ❌ {file_path}: {e}");
                     }
                 }
             }
@@ -2998,10 +2983,10 @@ async fn execute_file_batch(
             for name in names {
                 match execute_file_delete(blob_manager, &name, force, config).await {
                     Ok(_) => {
-                        println!("  ✅ {}", name);
+                        println!("  ✅ {name}");
                     }
                     Err(e) => {
-                        eprintln!("  ❌ {}: {}", name, e);
+                        eprintln!("  ❌ {name}: {e}");
                     }
                 }
             }
@@ -3024,11 +3009,11 @@ async fn execute_file_sync(
 ) -> Result<()> {
     // TODO: Implement file sync functionality
     println!("File sync functionality not yet implemented");
-    println!("  Local path: {}", local_path);
-    println!("  Prefix: {:?}", prefix);
-    println!("  Direction: {:?}", direction);
-    println!("  Dry run: {}", dry_run);
-    println!("  Delete: {}", delete);
+    println!("  Local path: {local_path}");
+    println!("  Prefix: {prefix:?}");
+    println!("  Direction: {direction:?}");
+    println!("  Dry run: {dry_run}");
+    println!("  Delete: {delete}");
     
     Ok(())
 }

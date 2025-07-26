@@ -75,7 +75,7 @@ impl BlobManager {
             .put_block_blob(request.content)
             .content_type(&content_type)
             .await
-            .map_err(|e| CrosstacheError::azure_api(format!("Failed to upload blob: {}", e)))?;
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to upload blob: {e}")))?;
         
         // TODO: Set metadata (requires separate API call)
         // Azure SDK v0.21 API for metadata is not yet stable
@@ -100,7 +100,7 @@ impl BlobManager {
         let last_modified = {
             let timestamp = response.last_modified.unix_timestamp();
             chrono::DateTime::from_timestamp(timestamp, 0)
-                .unwrap_or_else(|| Utc::now())
+                .unwrap_or_else(Utc::now)
         };
         
         Ok(FileInfo {
@@ -141,7 +141,7 @@ impl BlobManager {
         
         // Process each page of results
         while let Some(page) = stream.try_next().await
-            .map_err(|e| CrosstacheError::azure_api(format!("Failed to list blobs: {}", e)))? {
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to list blobs: {e}")))? {
             
             // Process each blob in this page
             for blob_item in page.blobs.blobs() {
@@ -154,7 +154,7 @@ impl BlobManager {
                 let last_modified = {
                     let timestamp = blob_item.properties.last_modified.unix_timestamp();
                     chrono::DateTime::from_timestamp(timestamp, 0)
-                        .unwrap_or_else(|| Utc::now())
+                        .unwrap_or_else(Utc::now)
                 };
                 
                 let etag = blob_item.properties.etag.to_string();
@@ -223,7 +223,7 @@ impl BlobManager {
                 if error_msg.contains("404") || error_msg.contains("not found") {
                     CrosstacheError::vault_not_found(format!("File '{}' not found", request.name))
                 } else {
-                    CrosstacheError::azure_api(format!("Failed to check if blob exists: {}", e))
+                    CrosstacheError::azure_api(format!("Failed to check if blob exists: {e}"))
                 }
             })?;
         
@@ -231,7 +231,7 @@ impl BlobManager {
         let blob_content = blob_client
             .get_content()
             .await
-            .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {}", e)))?;
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {e}")))?;
         
         Ok(blob_content)
     }
@@ -254,7 +254,7 @@ impl BlobManager {
         // Check if blob exists before deletion (optional - Azure will return error if not found)
         let exists = blob_client.get_properties().await.is_ok();
         if !exists {
-            return Err(CrosstacheError::vault_not_found(format!("File '{}' not found", name)));
+            return Err(CrosstacheError::vault_not_found(format!("File '{name}' not found")));
         }
         
         // Implement blob deletion
@@ -264,9 +264,9 @@ impl BlobManager {
             .map_err(|e| {
                 let error_msg = e.to_string().to_lowercase();
                 if error_msg.contains("404") || error_msg.contains("not found") {
-                    CrosstacheError::vault_not_found(format!("File '{}' not found", name))
+                    CrosstacheError::vault_not_found(format!("File '{name}' not found"))
                 } else {
-                    CrosstacheError::azure_api(format!("Failed to delete blob: {}", e))
+                    CrosstacheError::azure_api(format!("Failed to delete blob: {e}"))
                 }
             })?;
         
@@ -296,9 +296,9 @@ impl BlobManager {
             .map_err(|e| {
                 let error_msg = e.to_string().to_lowercase();
                 if error_msg.contains("404") || error_msg.contains("not found") {
-                    CrosstacheError::vault_not_found(format!("File '{}' not found", name))
+                    CrosstacheError::vault_not_found(format!("File '{name}' not found"))
                 } else {
-                    CrosstacheError::azure_api(format!("Failed to get blob properties: {}", e))
+                    CrosstacheError::azure_api(format!("Failed to get blob properties: {e}"))
                 }
             })?;
         
@@ -308,7 +308,7 @@ impl BlobManager {
         let last_modified = {
             let timestamp = properties.blob.properties.last_modified.unix_timestamp();
             chrono::DateTime::from_timestamp(timestamp, 0)
-                .unwrap_or_else(|| Utc::now())
+                .unwrap_or_else(Utc::now)
         };
         let etag = properties.blob.properties.etag.to_string();
         
@@ -364,9 +364,9 @@ impl BlobManager {
             .map_err(|e| {
                 let error_msg = e.to_string().to_lowercase();
                 if error_msg.contains("404") || error_msg.contains("not found") {
-                    CrosstacheError::vault_not_found(format!("File '{}' not found", name))
+                    CrosstacheError::vault_not_found(format!("File '{name}' not found"))
                 } else {
-                    CrosstacheError::azure_api(format!("Failed to check if blob exists: {}", e))
+                    CrosstacheError::azure_api(format!("Failed to check if blob exists: {e}"))
                 }
             })?;
 
@@ -375,18 +375,18 @@ impl BlobManager {
         let blob_content = blob_client
             .get_content()
             .await
-            .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {}", e)))?;
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {e}")))?;
 
         // Stream the data and write to the provided writer
         use tokio::io::AsyncWriteExt;
         
         // Write all content at once (Azure SDK already optimized the download)
         writer.write_all(&blob_content).await
-            .map_err(|e| CrosstacheError::unknown(format!("Failed to write blob data: {}", e)))?;
+            .map_err(|e| CrosstacheError::unknown(format!("Failed to write blob data: {e}")))?;
         
         // Ensure all data is flushed
         writer.flush().await
-            .map_err(|e| CrosstacheError::unknown(format!("Failed to flush data: {}", e)))?;
+            .map_err(|e| CrosstacheError::unknown(format!("Failed to flush data: {e}")))?;
         
         Ok(())
     }

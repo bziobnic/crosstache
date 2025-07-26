@@ -9,5 +9,4 @@ pub mod init;
 pub mod settings;
 
 pub use context::*;
-pub use init::*;
 pub use settings::*;

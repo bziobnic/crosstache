@@ -27,6 +27,12 @@ impl AzureKeyVaultNameRules {
     }
 }
 
+impl Default for AzureKeyVaultNameRules {
+    fn default() -> Self {
+        AzureKeyVaultNameRules::new()
+    }
+}
+
 /// Check if a name is valid for Azure Key Vault
 pub fn is_valid_keyvault_name(name: &str) -> bool {
     if name.is_empty() || name.len() > MAX_NAME_LENGTH {
@@ -84,7 +90,7 @@ pub fn generate_unique_secret_name(base_name: &str, existing_names: &[String]) -
     }
 
     for i in 2..=100 {
-        let candidate = format!("{}-{}", base_name, i);
+        let candidate = format!("{base_name}-{i}");
         if !existing_names.contains(&candidate) {
             return candidate;
         }
@@ -95,7 +101,7 @@ pub fn generate_unique_secret_name(base_name: &str, existing_names: &[String]) -
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    hash_secret_name(&format!("{}-{}", base_name, timestamp))
+    hash_secret_name(&format!("{base_name}-{timestamp}"))
 }
 
 /// Get detailed information about secret name sanitization
@@ -390,7 +396,7 @@ mod tests {
                 if i == 1 {
                     "test".to_string()
                 } else {
-                    format!("test-{}", i)
+                    format!("test-{i}")
                 }
             })
             .collect();
@@ -501,13 +507,12 @@ mod tests {
         for case in test_cases {
             let result1 = sanitize_secret_name(case).unwrap();
             let result2 = sanitize_secret_name(case).unwrap();
-            assert_eq!(result1, result2, "Inconsistent result for input: {}", case);
+            assert_eq!(result1, result2, "Inconsistent result for input: {case}");
 
             // Result should always be valid
             assert!(
                 is_valid_keyvault_name(&result1),
-                "Invalid result for input: {}",
-                case
+                "Invalid result for input: {case}"
             );
         }
     }

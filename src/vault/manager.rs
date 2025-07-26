@@ -119,7 +119,7 @@ impl VaultManager {
         // Format and display results
         let formatter = TableFormatter::new(output_format, self.no_color);
         let table_output = formatter.format_table(&vaults)?;
-        println!("{}", table_output);
+        println!("{table_output}");
 
         Ok(vaults)
     }
@@ -136,8 +136,7 @@ impl VaultManager {
 
         if !force {
             self.display_utils.print_warning(&format!(
-                "This will soft-delete vault '{}' in resource group '{}'",
-                vault_name, resource_group
+                "This will soft-delete vault '{vault_name}' in resource group '{resource_group}'"
             ))?;
 
             if vault.has_purge_protection() {
@@ -157,8 +156,7 @@ impl VaultManager {
             .await?;
 
         self.display_utils.print_success(&format!(
-            "Successfully deleted vault '{}' (soft delete)",
-            vault_name
+            "Successfully deleted vault '{vault_name}' (soft delete)"
         ))?;
 
         Ok(())
@@ -186,8 +184,7 @@ impl VaultManager {
     ) -> Result<()> {
         if !force {
             self.display_utils.print_warning(&format!(
-                "This will PERMANENTLY delete vault '{}' and all its contents!",
-                vault_name
+                "This will PERMANENTLY delete vault '{vault_name}' and all its contents!"
             ))?;
             self.display_utils
                 .print_warning("This action cannot be undone.")?;
@@ -196,8 +193,7 @@ impl VaultManager {
         self.vault_ops.purge_vault(vault_name, location).await?;
 
         self.display_utils.print_success(&format!(
-            "Successfully purged vault '{}' (permanent deletion)",
-            vault_name
+            "Successfully purged vault '{vault_name}' (permanent deletion)"
         ))?;
 
         Ok(())
@@ -221,8 +217,7 @@ impl VaultManager {
         let user_display = user_email.unwrap_or(user_object_id);
 
         self.display_utils.print_info(&format!(
-            "Granting {} access to vault '{}' for user '{}'...",
-            access_level_str, vault_name, user_display
+            "Granting {access_level_str} access to vault '{vault_name}' for user '{user_display}'..."
         ))?;
 
         self.vault_ops
@@ -230,8 +225,7 @@ impl VaultManager {
             .await?;
 
         self.display_utils.print_success(&format!(
-            "Successfully granted {} access to vault '{}' for user '{}'",
-            access_level_str, vault_name, user_display
+            "Successfully granted {access_level_str} access to vault '{vault_name}' for user '{user_display}'"
         ))?;
 
         Ok(())
@@ -248,8 +242,7 @@ impl VaultManager {
         let user_display = user_email.unwrap_or(user_object_id);
 
         self.display_utils.print_info(&format!(
-            "Revoking access to vault '{}' for user '{}'...",
-            vault_name, user_display
+            "Revoking access to vault '{vault_name}' for user '{user_display}'..."
         ))?;
 
         self.vault_ops
@@ -257,8 +250,7 @@ impl VaultManager {
             .await?;
 
         self.display_utils.print_success(&format!(
-            "Successfully revoked access to vault '{}' for user '{}'",
-            vault_name, user_display
+            "Successfully revoked access to vault '{vault_name}' for user '{user_display}'"
         ))?;
 
         Ok(())
@@ -288,7 +280,7 @@ impl VaultManager {
         // Format and display results
         let formatter = TableFormatter::new(output_format, self.no_color);
         let table_output = formatter.format_table(&roles)?;
-        println!("{}", table_output);
+        println!("{table_output}");
 
         Ok(roles)
     }
@@ -317,8 +309,7 @@ impl VaultManager {
             .await?;
 
         self.display_utils.print_success(&format!(
-            "Successfully updated tags for vault '{}'",
-            vault_name
+            "Successfully updated tags for vault '{vault_name}'"
         ))?;
 
         Ok(())
@@ -420,7 +411,7 @@ impl VaultManager {
         ];
 
         let formatted_details = self.display_utils.format_key_value_pairs(&details);
-        println!("{}", formatted_details);
+        println!("{formatted_details}");
 
         if !vault.access_policies.is_empty() {
             self.display_utils.print_separator()?;
@@ -428,7 +419,7 @@ impl VaultManager {
 
             let formatter = TableFormatter::new(OutputFormat::Table, self.no_color);
             let table_output = formatter.format_table(&vault.access_policies)?;
-            println!("{}", table_output);
+            println!("{table_output}");
         }
 
         if !vault.tags.is_empty() {
@@ -441,7 +432,7 @@ impl VaultManager {
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             let formatted_tags = self.display_utils.format_key_value_pairs(&tag_pairs);
-            println!("{}", formatted_tags);
+            println!("{formatted_tags}");
         }
 
         Ok(())

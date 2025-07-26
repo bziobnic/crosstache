@@ -57,7 +57,7 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn load_config_without_validation() -> Result<crate::config::Config> {
-    use crate::config::{Config, load_config_no_validation};
+    use crate::config::load_config_no_validation;
     
     // Use the config module's function but without validation
     load_config_no_validation().await
@@ -79,23 +79,23 @@ fn print_user_friendly_error(error: &CrosstacheError) {
     match error {
         AuthenticationError(msg) => {
             eprintln!("🔐 Authentication Error");
-            eprintln!("{}", msg);
+            eprintln!("{msg}");
         }
         AzureApiError(msg) => {
             eprintln!("☁️  Azure API Error");
-            eprintln!("{}", msg);
+            eprintln!("{msg}");
         }
         NetworkError(msg) => {
             eprintln!("🌐 Network Error");
-            eprintln!("{}", msg);
+            eprintln!("{msg}");
         }
         ConfigError(msg) => {
             eprintln!("⚙️  Configuration Error");
-            eprintln!("{}", msg);
+            eprintln!("{msg}");
         }
         VaultNotFound { name } => {
             eprintln!("🔒 Vault Not Found");
-            eprintln!("The Azure Key Vault '{}' was not found.", name);
+            eprintln!("The Azure Key Vault '{name}' was not found.");
             eprintln!("\nPlease verify:");
             eprintln!("1. The vault name is correct");
             eprintln!("2. The vault exists in your subscription");
@@ -104,7 +104,7 @@ fn print_user_friendly_error(error: &CrosstacheError) {
         }
         SecretNotFound { name } => {
             eprintln!("🔑 Secret Not Found");
-            eprintln!("The secret '{}' was not found in the vault.", name);
+            eprintln!("The secret '{name}' was not found in the vault.");
             eprintln!("\nPlease verify:");
             eprintln!("1. The secret name is correct");
             eprintln!("2. The secret exists in the vault");
@@ -112,14 +112,14 @@ fn print_user_friendly_error(error: &CrosstacheError) {
         }
         PermissionDenied(msg) => {
             eprintln!("🚫 Permission Denied");
-            eprintln!("{}", msg);
+            eprintln!("{msg}");
             eprintln!("\nPlease verify:");
             eprintln!("1. Your account has the necessary permissions");
             eprintln!("2. You have access to the Azure subscription");
             eprintln!("3. The resource you're trying to access exists");
         }
         _ => {
-            eprintln!("❌ Error: {}", error);
+            eprintln!("❌ Error: {error}");
         }
     }
 }

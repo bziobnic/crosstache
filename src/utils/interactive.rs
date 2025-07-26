@@ -57,11 +57,11 @@ impl InteractivePrompt {
     /// Prompt for text input with validation function
     pub fn input_text_validated<F>(&self, message: &str, default: Option<&str>, validator: F) -> Result<String>
     where
-        F: Fn(&String) -> std::result::Result<(), String> + 'static,
+        F: Fn(&str) -> std::result::Result<(), String> + 'static,
     {
         let mut input = Input::with_theme(&self.theme)
             .with_prompt(message)
-            .validate_with(validator);
+            .validate_with(|input: &String| validator(input.as_str()));
         
         if let Some(default_value) = default {
             input = input.default(default_value.to_string());
@@ -93,32 +93,32 @@ impl InteractivePrompt {
 
     /// Display an informational message
     pub fn info(&self, message: &str) -> Result<()> {
-        println!("ℹ️  {}", message);
+        println!("ℹ️  {message}");
         Ok(())
     }
 
     /// Display a success message
     pub fn success(&self, message: &str) -> Result<()> {
-        println!("✅ {}", message);
+        println!("✅ {message}");
         Ok(())
     }
 
     /// Display a warning message
     pub fn warning(&self, message: &str) -> Result<()> {
-        println!("⚠️  {}", message);
+        println!("⚠️  {message}");
         Ok(())
     }
 
     /// Display an error message
     pub fn error(&self, message: &str) -> Result<()> {
-        println!("❌ {}", message);
+        println!("❌ {message}");
         Ok(())
     }
 
     /// Display a step header during setup
     pub fn step(&self, step_number: u8, total_steps: u8, title: &str) -> Result<()> {
         println!();
-        println!("📋 Step {}/{}: {}", step_number, total_steps, title);
+        println!("📋 Step {step_number}/{total_steps}: {title}");
         println!();
         Ok(())
     }
@@ -177,7 +177,7 @@ pub struct SetupHelper;
 
 impl SetupHelper {
     /// Validate Azure subscription ID format
-    pub fn validate_subscription_id(subscription_id: &String) -> std::result::Result<(), String> {
+    pub fn validate_subscription_id(subscription_id: &str) -> std::result::Result<(), String> {
         if subscription_id.trim().is_empty() {
             return Err("Subscription ID cannot be empty".to_string());
         }
@@ -194,7 +194,7 @@ impl SetupHelper {
     }
 
     /// Validate resource group name
-    pub fn validate_resource_group_name(name: &String) -> std::result::Result<(), String> {
+    pub fn validate_resource_group_name(name: &str) -> std::result::Result<(), String> {
         let name = name.trim();
         
         if name.is_empty() {
@@ -225,7 +225,7 @@ impl SetupHelper {
     }
 
     /// Validate vault name according to Azure Key Vault requirements
-    pub fn validate_vault_name(name: &String) -> std::result::Result<(), String> {
+    pub fn validate_vault_name(name: &str) -> std::result::Result<(), String> {
         let name = name.trim();
         
         if name.is_empty() {
@@ -280,7 +280,7 @@ impl SetupHelper {
             .filter(|c| c.is_ascii_alphanumeric())
             .collect::<String>();
         
-        format!("rg-{}-keyvaults", username)
+        format!("rg-{username}-keyvaults")
     }
 
     /// Generate a default storage account name
@@ -298,14 +298,14 @@ impl SetupHelper {
         
         // Ensure it's not too long (max 24 characters)
         if generated_name.len() > 24 {
-            format!("st{}{timestamp}", &username[..std::cmp::min(username.len(), 12)])
+            format!("st{username}{timestamp}")
         } else {
             generated_name
         }
     }
 
     /// Validate storage account name according to Azure Storage requirements
-    pub fn validate_storage_account_name(name: &String) -> std::result::Result<(), String> {
+    pub fn validate_storage_account_name(name: &str) -> std::result::Result<(), String> {
         let name = name.trim();
         
         if name.is_empty() {
@@ -328,7 +328,7 @@ impl SetupHelper {
     }
 
     /// Validate container name according to Azure Storage requirements
-    pub fn validate_container_name(name: &String) -> std::result::Result<(), String> {
+    pub fn validate_container_name(name: &str) -> std::result::Result<(), String> {
         let name = name.trim();
         
         if name.is_empty() {
@@ -366,42 +366,42 @@ mod tests {
     #[test]
     fn test_validate_subscription_id() {
         // Valid GUID
-        assert!(SetupHelper::validate_subscription_id(&"12345678-1234-1234-1234-123456789012".to_string()).is_ok());
+        assert!(SetupHelper::validate_subscription_id("12345678-1234-1234-1234-123456789012").is_ok());
         
         // Invalid format
-        assert!(SetupHelper::validate_subscription_id(&"not-a-guid".to_string()).is_err());
-        assert!(SetupHelper::validate_subscription_id(&"".to_string()).is_err());
-        assert!(SetupHelper::validate_subscription_id(&"12345678-1234-1234-1234-12345678901".to_string()).is_err());
+        assert!(SetupHelper::validate_subscription_id("not-a-guid").is_err());
+        assert!(SetupHelper::validate_subscription_id("").is_err());
+        assert!(SetupHelper::validate_subscription_id("12345678-1234-1234-1234-12345678901").is_err());
     }
 
     #[test]
     fn test_validate_resource_group_name() {
         // Valid names
-        assert!(SetupHelper::validate_resource_group_name(&"my-resource-group".to_string()).is_ok());
-        assert!(SetupHelper::validate_resource_group_name(&"rg_test_123".to_string()).is_ok());
+        assert!(SetupHelper::validate_resource_group_name("my-resource-group").is_ok());
+        assert!(SetupHelper::validate_resource_group_name("rg_test_123").is_ok());
         
         // Invalid names
-        assert!(SetupHelper::validate_resource_group_name(&"".to_string()).is_err());
-        assert!(SetupHelper::validate_resource_group_name(&".invalid".to_string()).is_err());
-        assert!(SetupHelper::validate_resource_group_name(&"invalid.".to_string()).is_err());
-        assert!(SetupHelper::validate_resource_group_name(&"invalid--name".to_string()).is_err());
+        assert!(SetupHelper::validate_resource_group_name("").is_err());
+        assert!(SetupHelper::validate_resource_group_name(".invalid").is_err());
+        assert!(SetupHelper::validate_resource_group_name("invalid.").is_err());
+        assert!(SetupHelper::validate_resource_group_name("invalid--name").is_err());
         assert!(SetupHelper::validate_resource_group_name(&"a".repeat(91)).is_err());
     }
 
     #[test]
     fn test_validate_vault_name() {
         // Valid names
-        assert!(SetupHelper::validate_vault_name(&"myvault123".to_string()).is_ok());
-        assert!(SetupHelper::validate_vault_name(&"my-vault".to_string()).is_ok());
+        assert!(SetupHelper::validate_vault_name("myvault123").is_ok());
+        assert!(SetupHelper::validate_vault_name("my-vault").is_ok());
         
         // Invalid names
-        assert!(SetupHelper::validate_vault_name(&"".to_string()).is_err());
-        assert!(SetupHelper::validate_vault_name(&"ab".to_string()).is_err());
+        assert!(SetupHelper::validate_vault_name("").is_err());
+        assert!(SetupHelper::validate_vault_name("ab").is_err());
         assert!(SetupHelper::validate_vault_name(&"a".repeat(25)).is_err());
-        assert!(SetupHelper::validate_vault_name(&"-invalid".to_string()).is_err());
-        assert!(SetupHelper::validate_vault_name(&"invalid-".to_string()).is_err());
-        assert!(SetupHelper::validate_vault_name(&"invalid--name".to_string()).is_err());
-        assert!(SetupHelper::validate_vault_name(&"123vault".to_string()).is_err());
+        assert!(SetupHelper::validate_vault_name("-invalid").is_err());
+        assert!(SetupHelper::validate_vault_name("invalid-").is_err());
+        assert!(SetupHelper::validate_vault_name("invalid--name").is_err());
+        assert!(SetupHelper::validate_vault_name("123vault").is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! including name sanitization, group management, and advanced operations.
 
 use async_trait::async_trait;
+#[allow(unused_imports)]
 use azure_core::auth::TokenCredential;
 use azure_security_keyvault::{prelude::*, SecretClient};
 use chrono::{DateTime, Utc};
@@ -213,7 +214,7 @@ impl AzureSecretOperations {
 
     /// Create a secret client for the specified vault
     async fn create_secret_client(&self, vault_name: &str) -> Result<SecretClient> {
-        let vault_url = format!("https://{}.vault.azure.net/", vault_name);
+        let vault_url = format!("https://{vault_name}.vault.azure.net/");
 
         // Get the credential from auth provider
         let credential = self.auth_provider.get_token_credential();
@@ -292,12 +293,12 @@ impl AzureSecretOperations {
 
     /// Get note from tags (returns None if no note assigned)
     fn get_note(&self, tags: &HashMap<String, String>) -> Option<String> {
-        tags.get("note").map(|s| s.clone())
+        tags.get("note").cloned()
     }
 
     /// Get folder from tags (returns None if no folder assigned)
     fn get_folder(&self, tags: &HashMap<String, String>) -> Option<String> {
-        tags.get("folder").map(|s| s.clone())
+        tags.get("folder").cloned()
     }
 
     /// Map Azure SDK response to SecretProperties
@@ -323,7 +324,7 @@ impl AzureSecretOperations {
             enabled: response.attributes.enabled,
             expires_on: response.attributes.expires_on.map(|dt| {
                 chrono::DateTime::from_timestamp(dt.unix_timestamp(), 0)
-                    .unwrap_or_else(|| chrono::Utc::now())
+                    .unwrap_or_else(chrono::Utc::now)
             }),
             not_before: None, // not_before field not available in v0.20 response
             tags: tags.clone(),
@@ -342,8 +343,8 @@ impl SecretOperations for AzureSecretOperations {
         let (sanitized_name, tags) = self.prepare_secret_request(request)?;
 
         // Since Azure SDK v0.20 doesn't properly support tags, we'll use the REST API directly
-        let vault_url = format!("https://{}.vault.azure.net", vault_name);
-        let secret_url = format!("{}/secrets/{}?api-version=7.4", vault_url, sanitized_name);
+        let vault_url = format!("https://{vault_name}.vault.azure.net");
+        let secret_url = format!("{vault_url}/secrets/{sanitized_name}?api-version=7.4");
 
         // Get an access token for Key Vault
         let token = self
@@ -409,8 +410,7 @@ impl SecretOperations for AzureSecretOperations {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             return Err(CrosstacheError::azure_api(format!(
-                "Failed to set secret: HTTP {} - {}",
-                status, error_text
+                "Failed to set secret: HTTP {status} - {error_text}"
             )));
         }
 
@@ -433,8 +433,8 @@ impl SecretOperations for AzureSecretOperations {
 
         // Since Azure SDK v0.20 doesn't properly return tags with get_secret,
         // we'll use the REST API directly to get full secret details including tags
-        let vault_url = format!("https://{}.vault.azure.net", vault_name);
-        let secret_url = format!("{}/secrets/{}?api-version=7.4", vault_url, sanitized_name);
+        let vault_url = format!("https://{vault_name}.vault.azure.net");
+        let secret_url = format!("{vault_url}/secrets/{sanitized_name}?api-version=7.4");
 
         // Get an access token for Key Vault
         let token = self
@@ -470,14 +470,13 @@ impl SecretOperations for AzureSecretOperations {
             }
             let error_text = response.text().await.unwrap_or_default();
             return Err(CrosstacheError::azure_api(format!(
-                "Failed to get secret: HTTP {} - {}",
-                status, error_text
+                "Failed to get secret: HTTP {status} - {error_text}"
             )));
         }
 
         // Parse the response
         let json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to parse secret response: {}", e))
+            CrosstacheError::serialization(format!("Failed to parse secret response: {e}"))
         })?;
 
         // Extract secret properties from JSON response
@@ -558,8 +557,8 @@ impl SecretOperations for AzureSecretOperations {
     ) -> Result<Vec<SecretSummary>> {
         // Since Azure SDK v0.20 doesn't properly support list operations,
         // we'll use the REST API directly
-        let vault_url = format!("https://{}.vault.azure.net", vault_name);
-        let list_url = format!("{}/secrets?api-version=7.4", vault_url);
+        let vault_url = format!("https://{vault_name}.vault.azure.net");
+        let list_url = format!("{vault_url}/secrets?api-version=7.4");
 
         // Get an access token for Key Vault
         let token = self
@@ -590,14 +589,13 @@ impl SecretOperations for AzureSecretOperations {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             return Err(CrosstacheError::azure_api(format!(
-                "Failed to list secrets: HTTP {} - {}",
-                status, error_text
+                "Failed to list secrets: HTTP {status} - {error_text}"
             )));
         }
 
         // Parse the response
         let json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to parse list response: {}", e))
+            CrosstacheError::serialization(format!("Failed to parse list response: {e}"))
         })?;
 
         let mut secret_summaries = Vec::new();
@@ -653,8 +651,7 @@ impl SecretOperations for AzureSecretOperations {
                         Err(e) => {
                             // If we can't get details, add with basic info
                             eprintln!(
-                                "Warning: Failed to get details for secret '{}': {}",
-                                name, e
+                                "Warning: Failed to get details for secret '{name}': {e}"
                             );
                             let summary = SecretSummary {
                                 name: name.clone(),
@@ -712,7 +709,7 @@ impl SecretOperations for AzureSecretOperations {
 
         // Delete the secret from Azure Key Vault (soft delete)
         client.delete(&sanitized_name).await.map_err(|e| {
-            CrosstacheError::azure_api(format!("Failed to delete secret '{}': {}", secret_name, e))
+            CrosstacheError::azure_api(format!("Failed to delete secret '{secret_name}': {e}"))
         })?;
 
         Ok(())
@@ -738,10 +735,9 @@ impl SecretOperations for AzureSecretOperations {
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
         // Use REST API to restore a deleted secret
-        let vault_url = format!("https://{}.vault.azure.net", vault_name);
+        let vault_url = format!("https://{vault_name}.vault.azure.net");
         let restore_url = format!(
-            "{}/deletedsecrets/{}/recover?api-version=7.4",
-            vault_url, sanitized_name
+            "{vault_url}/deletedsecrets/{sanitized_name}/recover?api-version=7.4"
         );
 
         // Get an access token for Key Vault
@@ -778,20 +774,18 @@ impl SecretOperations for AzureSecretOperations {
             let status = response.status();
             if status == 404 {
                 return Err(CrosstacheError::azure_api(format!(
-                    "Deleted secret '{}' not found or cannot be restored",
-                    secret_name
+                    "Deleted secret '{secret_name}' not found or cannot be restored"
                 )));
             }
             let error_text = response.text().await.unwrap_or_default();
             return Err(CrosstacheError::azure_api(format!(
-                "Failed to restore secret: HTTP {} - {}",
-                status, error_text
+                "Failed to restore secret: HTTP {status} - {error_text}"
             )));
         }
 
         // Parse the response to get the restored secret properties
         let json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to parse restore response: {}", e))
+            CrosstacheError::serialization(format!("Failed to parse restore response: {e}"))
         })?;
 
         // Extract secret properties from JSON response
@@ -861,10 +855,9 @@ impl SecretOperations for AzureSecretOperations {
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
         // Use REST API to permanently purge a deleted secret
-        let vault_url = format!("https://{}.vault.azure.net", vault_name);
+        let vault_url = format!("https://{vault_name}.vault.azure.net");
         let purge_url = format!(
-            "{}/deletedsecrets/{}/purge?api-version=7.4",
-            vault_url, sanitized_name
+            "{vault_url}/deletedsecrets/{sanitized_name}/purge?api-version=7.4"
         );
 
         // Get an access token for Key Vault
@@ -896,14 +889,12 @@ impl SecretOperations for AzureSecretOperations {
             let status = response.status();
             if status == 404 {
                 return Err(CrosstacheError::azure_api(format!(
-                    "Deleted secret '{}' not found or cannot be purged",
-                    secret_name
+                    "Deleted secret '{secret_name}' not found or cannot be purged"
                 )));
             }
             let error_text = response.text().await.unwrap_or_default();
             return Err(CrosstacheError::azure_api(format!(
-                "Failed to purge secret: HTTP {} - {}",
-                status, error_text
+                "Failed to purge secret: HTTP {status} - {error_text}"
             )));
         }
 
@@ -1028,7 +1019,7 @@ impl SecretManager {
         }
 
         self.display_utils
-            .print_info(&format!("Setting secret '{}'...", name))?;
+            .print_info(&format!("Setting secret '{name}'..."))?;
 
         let secret = self.secret_ops.set_secret(vault_name, &request).await?;
 
@@ -1117,8 +1108,7 @@ impl SecretManager {
     ) -> Result<()> {
         if !force {
             self.display_utils.print_warning(&format!(
-                "This will delete secret '{}' from vault '{}'",
-                secret_name, vault_name
+                "This will delete secret '{secret_name}' from vault '{vault_name}'"
             ))?;
             self.display_utils
                 .print_info("The secret will be recoverable for the vault's retention period.")?;
@@ -1129,7 +1119,7 @@ impl SecretManager {
             .await?;
 
         self.display_utils
-            .print_success(&format!("Successfully deleted secret '{}'", secret_name))?;
+            .print_success(&format!("Successfully deleted secret '{secret_name}'"))?;
 
         Ok(())
     }
@@ -1141,8 +1131,7 @@ impl SecretManager {
         secret_name: &str,
     ) -> Result<SecretProperties> {
         self.display_utils.print_info(&format!(
-            "Restoring deleted secret '{}' from vault '{}'...",
-            secret_name, vault_name
+            "Restoring deleted secret '{secret_name}' from vault '{vault_name}'..."
         ))?;
 
         let restored_secret = self
@@ -1167,8 +1156,7 @@ impl SecretManager {
     ) -> Result<()> {
         if !force {
             self.display_utils.print_warning(&format!(
-                "This will PERMANENTLY DELETE secret '{}' from vault '{}'",
-                secret_name, vault_name
+                "This will PERMANENTLY DELETE secret '{secret_name}' from vault '{vault_name}'"
             ))?;
             self.display_utils
                 .print_warning("This operation cannot be undone!")?;
@@ -1177,8 +1165,7 @@ impl SecretManager {
         }
 
         self.display_utils.print_info(&format!(
-            "Permanently purging deleted secret '{}' from vault '{}'...",
-            secret_name, vault_name
+            "Permanently purging deleted secret '{secret_name}' from vault '{vault_name}'..."
         ))?;
 
         self.secret_ops
@@ -1186,7 +1173,7 @@ impl SecretManager {
             .await?;
 
         self.display_utils
-            .print_success(&format!("Successfully purged secret '{}'", secret_name))?;
+            .print_success(&format!("Successfully purged secret '{secret_name}'"))?;
 
         Ok(())
     }
@@ -1211,7 +1198,7 @@ impl SecretManager {
         // Display formatted table
         let formatter = TableFormatter::new(OutputFormat::Table, self.no_color);
         let table_output = formatter.format_table(&result)?;
-        println!("{}", table_output);
+        println!("{table_output}");
 
         Ok(result)
     }
@@ -1296,7 +1283,7 @@ impl SecretManager {
         }
 
         let formatted_details = self.display_utils.format_key_value_pairs(&details);
-        println!("{}", formatted_details);
+        println!("{formatted_details}");
 
         if !secret.tags.is_empty() {
             self.display_utils.print_separator()?;
@@ -1308,7 +1295,7 @@ impl SecretManager {
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             let formatted_tags = self.display_utils.format_key_value_pairs(&tag_pairs);
-            println!("{}", formatted_tags);
+            println!("{formatted_tags}");
         }
 
         Ok(())
@@ -1317,9 +1304,9 @@ impl SecretManager {
     /// Display vault name header
     fn display_vault_header(&self, vault_name: &str) -> Result<()> {
         if self.no_color {
-            println!("Vault: {}", vault_name);
+            println!("Vault: {vault_name}");
         } else {
-            println!("\x1b[1m\x1b[36mVault: {}\x1b[0m", vault_name);
+            println!("\x1b[1m\x1b[36mVault: {vault_name}\x1b[0m");
         }
         println!();
         Ok(())
@@ -1333,7 +1320,7 @@ impl SecretManager {
     ) -> Result<()> {
         let formatter = TableFormatter::new(output_format, self.no_color);
         let table_output = formatter.format_table(secrets)?;
-        println!("{}", table_output);
+        println!("{table_output}");
         Ok(())
     }
 
@@ -1382,7 +1369,7 @@ impl SecretManager {
 
             let formatter = TableFormatter::new(output_format.clone(), self.no_color);
             let table_output = formatter.format_table(&group_secrets)?;
-            println!("{}", table_output);
+            println!("{table_output}");
 
             self.display_utils.print_separator()?;
         }
@@ -1429,8 +1416,7 @@ impl SecretManager {
             // Check if new name already exists
             if self.secret_ops.secret_exists(vault_name, new_name).await? {
                 return Err(CrosstacheError::invalid_argument(format!(
-                    "Secret with name '{}' already exists",
-                    new_name
+                    "Secret with name '{new_name}' already exists"
                 )));
             }
 
@@ -1494,13 +1480,13 @@ impl SecretManager {
         let final_folder = update_request
             .folder
             .clone()
-            .or_else(|| current_secret.tags.get("folder").map(|f| f.clone()));
+            .or_else(|| current_secret.tags.get("folder").cloned());
 
         // Handle note - preserve existing if not specified in update
         let final_note = update_request
             .note
             .clone()
-            .or_else(|| current_secret.tags.get("note").map(|n| n.clone()));
+            .or_else(|| current_secret.tags.get("note").cloned());
 
         // Create the enhanced secret request
         let secret_request = SecretRequest {
