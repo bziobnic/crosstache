@@ -47,15 +47,15 @@ pub struct Cli {
     pub debug: bool,
 
     /// Output format
-    #[arg(long, global = true, value_enum, default_value = "table")]
+    #[arg(long, value_enum, default_value = "table")]
     pub format: OutputFormat,
 
     /// Custom template string for template format
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub template: Option<String>,
 
     /// Select specific columns for table output (comma-separated)
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub columns: Option<String>,
 
     #[command(subcommand)]
@@ -245,6 +245,9 @@ pub enum VaultCommands {
         /// Resource group
         #[arg(short, long)]
         resource_group: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "table")]
+        format: OutputFormat,
     },
     /// Delete a vault
     Delete {
@@ -767,8 +770,8 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
         } => {
             execute_vault_create(&vault_manager, &name, resource_group, location, &config).await?;
         }
-        VaultCommands::List { resource_group } => {
-            execute_vault_list(&vault_manager, resource_group, &config).await?;
+        VaultCommands::List { resource_group, format } => {
+            execute_vault_list(&vault_manager, resource_group, format, &config).await?;
         }
         VaultCommands::Delete {
             name,
@@ -915,19 +918,15 @@ async fn execute_vault_create(
 async fn execute_vault_list(
     vault_manager: &VaultManager,
     resource_group: Option<String>,
+    format: OutputFormat,
     config: &Config,
 ) -> Result<()> {
-    let output_format = if config.output_json {
-        OutputFormat::Json
-    } else {
-        OutputFormat::Table
-    };
 
     vault_manager
         .list_vaults_formatted(
             Some(&config.subscription_id),
             resource_group.as_deref(),
-            output_format,
+            format,
         )
         .await?;
 
@@ -1911,7 +1910,7 @@ async fn execute_secret_parse(
             })?;
             println!("{json_output}");
         }
-        "table" | _ => {
+        "table" => {
             if components.is_empty() {
                 println!("No components found in connection string");
             } else {
@@ -1921,6 +1920,9 @@ async fn execute_secret_parse(
                 let table = Table::new(&components);
                 println!("{}", format_table(table, config.no_color));
             }
+        }
+        _ => {
+            println!("Unimnplemented format selected: {format}");
         }
     }
 
