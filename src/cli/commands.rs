@@ -87,6 +87,17 @@ pub struct Cli {
     #[arg(long, global = true, hide = should_hide_options())]
     pub columns: Option<String>,
 
+    /// Azure credential type to use first (cli, managed_identity, environment, default)
+    #[arg(
+        long,
+        global = true,
+        value_name = "TYPE",
+        help = "Azure credential type to use first (cli, managed_identity, environment, default)",
+        env = "AZURE_CREDENTIAL_PRIORITY",
+        hide = should_hide_options()
+    )]
+    pub credential_type: Option<String>,
+
     /// Show global options in help output
     #[arg(long)]
     pub show_options: bool,
@@ -627,7 +638,16 @@ pub enum ContextCommands {
 }
 
 impl Cli {
-    pub async fn execute(self, config: Config) -> Result<()> {
+    pub async fn execute(self, mut config: Config) -> Result<()> {
+        // Apply CLI credential type if specified (CLI flag overrides config/env)
+        if let Some(cred_type) = self.credential_type {
+            use crate::config::settings::AzureCredentialType;
+            use std::str::FromStr;
+            
+            config.azure_credential_priority = AzureCredentialType::from_str(&cred_type)
+                .map_err(|e| CrosstacheError::config(e))?;
+        }
+        
         match self.command {
             Commands::Set {
                 name,
@@ -783,10 +803,11 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use std::sync::Arc;
 
-    // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    // Create authentication provider with credential priority from config
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
 
     // Create vault manager
     let vault_manager = VaultManager::new(
@@ -1021,9 +1042,9 @@ async fn execute_secret_set_direct(
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -1037,9 +1058,9 @@ async fn execute_secret_get_direct(name: &str, raw: bool, config: Config) -> Res
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -1057,9 +1078,9 @@ async fn execute_secret_list_direct(
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -1073,9 +1094,9 @@ async fn execute_secret_delete_direct(name: &str, force: bool, config: Config) -
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -1101,9 +1122,9 @@ async fn execute_secret_update_direct(
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -1132,9 +1153,9 @@ async fn execute_secret_purge_direct(name: &str, force: bool, config: Config) ->
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -1148,9 +1169,9 @@ async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()>
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -1168,9 +1189,9 @@ async fn execute_secret_parse_direct(
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -1184,9 +1205,9 @@ async fn execute_secret_share_direct(command: ShareCommands, config: Config) -> 
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -2037,9 +2058,9 @@ async fn execute_vault_export(
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
     // Create secret manager to get secrets from vault
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     // Get all secrets from vault (including disabled ones for export)
@@ -2349,9 +2370,9 @@ async fn execute_vault_import(
     }
 
     // Create secret manager to import secrets
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new().map_err(|e| {
-        CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-    })?);
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     let mut imported_count = 0;

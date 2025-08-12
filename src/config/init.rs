@@ -674,6 +674,7 @@ impl ConfigInitializer {
             cache_ttl: Duration::from_secs(300),
             function_app_url: String::new(),
             blob_config,
+            azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
         })
     }
 

@@ -7,7 +7,10 @@ use crate::error::{CrosstacheError, Result};
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
 use async_trait::async_trait;
 use azure_core::auth::{AccessToken, TokenCredential};
-use azure_identity::{ClientSecretCredential, DefaultAzureCredential, TokenCredentialOptions};
+use azure_identity::{
+    AzureCliCredential, ClientSecretCredential, DefaultAzureCredential, 
+    EnvironmentCredential, TokenCredentialOptions
+};
 use base64::Engine;
 use reqwest::{header::HeaderMap, Client};
 use serde_json::Value;
@@ -131,7 +134,7 @@ pub trait AzureAuthProvider: Send + Sync {
 
 /// Default Azure Credential Provider using DefaultAzureCredential
 pub struct DefaultAzureCredentialProvider {
-    credential: Arc<DefaultAzureCredential>,
+    credential: Arc<dyn TokenCredential>,
     http_client: Client,
     tenant_id: Option<String>,
 }
@@ -139,6 +142,11 @@ pub struct DefaultAzureCredentialProvider {
 impl DefaultAzureCredentialProvider {
     /// Create a new DefaultAzureCredentialProvider
     pub fn new() -> Result<Self> {
+        Self::with_credential_priority(crate::config::settings::AzureCredentialType::Default)
+    }
+
+    /// Create a new DefaultAzureCredentialProvider with specific credential priority
+    pub fn with_credential_priority(priority: crate::config::settings::AzureCredentialType) -> Result<Self> {
         // Try to get tenant ID from Azure CLI to configure the credential
         let tenant_id = match std::process::Command::new("az")
             .args(["account", "show", "--query", "tenantId", "-o", "tsv"])
@@ -155,10 +163,7 @@ impl DefaultAzureCredentialProvider {
             _ => None
         };
 
-        let credential = Arc::new(
-            DefaultAzureCredential::create(TokenCredentialOptions::default())
-                .map_err(create_user_friendly_credential_error)?,
-        );
+        let credential = Self::create_prioritized_credential(priority)?;
         let network_config = NetworkConfig::default();
         let http_client = create_http_client(&network_config)?;
 
@@ -167,6 +172,47 @@ impl DefaultAzureCredentialProvider {
             http_client,
             tenant_id,
         })
+    }
+
+    /// Create a credential chain based on the specified priority
+    fn create_prioritized_credential(priority: crate::config::settings::AzureCredentialType) -> Result<Arc<dyn TokenCredential>> {
+        use crate::config::settings::AzureCredentialType;
+        
+        match priority {
+            AzureCredentialType::Cli => {
+                // AzureCliCredential doesn't have a fallback constructor, just use it directly
+                Ok(Arc::new(AzureCliCredential::new()) as Arc<dyn TokenCredential>)
+            },
+            AzureCredentialType::ManagedIdentity => {
+                // For managed identity, we use DefaultAzureCredential which will prioritize 
+                // managed identity when running in Azure
+                // Note: The Azure SDK for Rust doesn't expose individual managed identity credentials publicly
+                Ok(Arc::new(
+                    DefaultAzureCredential::create(TokenCredentialOptions::default())
+                        .map_err(create_user_friendly_credential_error)?
+                ) as Arc<dyn TokenCredential>)
+            },
+            AzureCredentialType::Environment => {
+                // Try Environment credentials with proper create method
+                match EnvironmentCredential::create(TokenCredentialOptions::default()) {
+                    Ok(cred) => Ok(Arc::new(cred) as Arc<dyn TokenCredential>),
+                    Err(_) => {
+                        // Fall back to default if environment vars are not set
+                        Ok(Arc::new(
+                            DefaultAzureCredential::create(TokenCredentialOptions::default())
+                                .map_err(create_user_friendly_credential_error)?
+                        ) as Arc<dyn TokenCredential>)
+                    }
+                }
+            },
+            AzureCredentialType::Default => {
+                // Use the default credential chain
+                Ok(Arc::new(
+                    DefaultAzureCredential::create(TokenCredentialOptions::default())
+                        .map_err(create_user_friendly_credential_error)?
+                ) as Arc<dyn TokenCredential>)
+            }
+        }
     }
 
     /// Create a new DefaultAzureCredentialProvider with specific tenant

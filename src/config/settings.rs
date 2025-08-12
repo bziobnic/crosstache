@@ -9,6 +9,52 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tabled::Tabled;
 use crate::utils::format::FormattableOutput;
+use std::fmt;
+
+/// Azure credential type priority for authentication
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AzureCredentialType {
+    /// Use Azure CLI credentials first
+    Cli,
+    /// Use Managed Identity credentials first
+    ManagedIdentity,
+    /// Use environment variable credentials first
+    Environment,
+    /// Use the default credential chain order
+    Default,
+}
+
+impl Default for AzureCredentialType {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl fmt::Display for AzureCredentialType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cli => write!(f, "cli"),
+            Self::ManagedIdentity => write!(f, "managed_identity"),
+            Self::Environment => write!(f, "environment"),
+            Self::Default => write!(f, "default"),
+        }
+    }
+}
+
+impl std::str::FromStr for AzureCredentialType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cli" | "azure-cli" | "az" => Ok(Self::Cli),
+            "managed_identity" | "managed-identity" | "msi" => Ok(Self::ManagedIdentity),
+            "environment" | "env" => Ok(Self::Environment),
+            "default" => Ok(Self::Default),
+            _ => Err(format!("Invalid credential type: {}. Valid options: cli, managed_identity, environment, default", s)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobConfig {
@@ -57,6 +103,11 @@ pub struct Config {
     pub no_color: bool,
     #[tabled(skip)]
     pub blob_config: Option<BlobConfig>,
+    /// Azure credential type to use first for authentication
+    /// Controls the order in which credentials are attempted
+    #[tabled(rename = "Credential Priority")]
+    #[serde(default)]
+    pub azure_credential_priority: AzureCredentialType,
 }
 
 impl FormattableOutput for Config {}
@@ -75,6 +126,7 @@ impl Default for Config {
             output_json: false,
             no_color: false,
             blob_config: None,
+            azure_credential_priority: AzureCredentialType::Default,
         }
     }
 }
@@ -305,6 +357,13 @@ fn load_from_env(config: &mut Config) {
     if let Ok(value) = std::env::var("CACHE_TTL") {
         if let Ok(seconds) = value.parse::<u64>() {
             config.cache_ttl = Duration::from_secs(seconds);
+        }
+    }
+
+    // Load Azure credential priority from environment variable
+    if let Ok(value) = std::env::var("AZURE_CREDENTIAL_PRIORITY") {
+        if let Ok(cred_type) = value.parse::<AzureCredentialType>() {
+            config.azure_credential_priority = cred_type;
         }
     }
 

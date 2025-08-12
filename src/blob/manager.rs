@@ -447,7 +447,9 @@ pub fn create_blob_manager(config: &crate::config::Config) -> Result<BlobManager
         ));
     }
 
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new()?) as Arc<dyn AzureAuthProvider>;
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())?
+    ) as Arc<dyn AzureAuthProvider>;
     
     BlobManager::new(
         auth_provider,
@@ -480,7 +482,9 @@ pub fn create_context_aware_blob_manager(
         .unwrap_or(&blob_config.container_name)
         .to_string();
 
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::new()?) as Arc<dyn AzureAuthProvider>;
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())?
+    ) as Arc<dyn AzureAuthProvider>;
     
     BlobManager::new(
         auth_provider,
