@@ -6,5 +6,3 @@
 pub mod manager;
 pub mod name_manager;
 
-pub use manager::*;
-pub use name_manager::*;

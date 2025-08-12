@@ -311,13 +311,11 @@ impl VaultOperations for AzureVaultOperations {
 
             let url = if let Some(rg) = resource_group {
                 self.build_arm_url(&format!(
-                    "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01",
-                    sub_id, rg
+                    "/subscriptions/{sub_id}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01"
                 ))
             } else {
                 self.build_arm_url(&format!(
-                    "/subscriptions/{}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01",
-                    sub_id
+                    "/subscriptions/{sub_id}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01"
                 ))
             };
 
@@ -529,8 +527,7 @@ impl VaultOperations for AzureVaultOperations {
         let operation = || async {
             let headers = self.create_headers().await?;
             let url = self.build_arm_url(&format!(
-                "/subscriptions/{}/providers/Microsoft.KeyVault/deletedVaults?api-version=2023-07-01",
-                subscription_id
+                "/subscriptions/{subscription_id}/providers/Microsoft.KeyVault/deletedVaults?api-version=2023-07-01"
             ));
 
             let response = self
@@ -550,10 +547,7 @@ impl VaultOperations for AzureVaultOperations {
             }
 
             let response_data: Value = response.json().await.map_err(|e| {
-                CrosstacheError::serialization(format!(
-                    "Failed to parse deleted vaults response: {}",
-                    e
-                ))
+                CrosstacheError::serialization(format!("Failed to parse deleted vaults response: {e}"))
             })?;
 
             let mut vaults = Vec::new();

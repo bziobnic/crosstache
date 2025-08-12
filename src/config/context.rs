@@ -74,6 +74,7 @@ impl VaultContext {
 
 /// Manages vault contexts with local and global persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct ContextManager {
     /// Current active context
     pub current: Option<VaultContext>,
@@ -87,16 +88,6 @@ pub struct ContextManager {
     pub is_local: bool,
 }
 
-impl Default for ContextManager {
-    fn default() -> Self {
-        Self {
-            current: None,
-            recent: Vec::new(),
-            context_file: None,
-            is_local: false,
-        }
-    }
-}
 
 impl ContextManager {
     /// Load context from local directory or global config
@@ -348,7 +339,7 @@ impl ContextManager {
         subscription_id: Option<&str>,
     ) -> Result<Self> {
         if default_vault.is_empty() {
-            return Ok(Self::new_global()?);
+            return Self::new_global();
         }
 
         let context = VaultContext::new(

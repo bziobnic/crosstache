@@ -21,7 +21,7 @@ pub fn build_connection_string(params: &HashMap<String, String>) -> String {
 
     params
         .iter()
-        .map(|(key, value)| format!("{}={}", key, value))
+        .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -41,7 +41,7 @@ pub fn parse_connection_string(connection_string: &str) -> HashMap<String, Strin
 
 /// Get vault URI from vault name
 pub fn get_vault_uri(vault_name: &str) -> String {
-    format!("https://{}.vault.azure.net/", vault_name)
+    format!("https://{vault_name}.vault.azure.net/")
 }
 
 /// Extract vault name from vault URI
@@ -55,8 +55,7 @@ pub fn extract_vault_name_from_uri(vault_uri: &str) -> Result<String> {
     }
 
     Err(CrosstacheError::invalid_argument(format!(
-        "Invalid vault URI format: {}",
-        vault_uri
+        "Invalid vault URI format: {vault_uri}"
     )))
 }
 
@@ -206,7 +205,7 @@ mod tests {
 
         // Test depth limit
         let deep_path = (0..11)
-            .map(|i| format!("folder{}", i))
+            .map(|i| format!("folder{i}"))
             .collect::<Vec<_>>()
             .join("/");
         assert!(validate_folder_path(&deep_path).is_err()); // Too deep

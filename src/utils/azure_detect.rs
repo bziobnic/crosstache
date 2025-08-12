@@ -132,7 +132,7 @@ impl AzureDetector {
     /// Check if user is logged into Azure CLI
     fn check_cli_logged_in() -> bool {
         Command::new("az")
-            .args(&["account", "show"])
+            .args(["account", "show"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -141,7 +141,7 @@ impl AzureDetector {
     /// Get available Azure subscriptions
     async fn get_subscriptions() -> Result<Vec<AzureSubscription>> {
         let output = Command::new("az")
-            .args(&["account", "list", "--output", "json"])
+            .args(["account", "list", "--output", "json"])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
@@ -191,7 +191,7 @@ impl AzureDetector {
     /// Get current tenant information
     async fn get_tenant_info() -> Result<Option<AzureTenant>> {
         let output = Command::new("az")
-            .args(&["account", "show", "--output", "json"])
+            .args(["account", "show", "--output", "json"])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
 
@@ -227,8 +227,8 @@ impl AzureDetector {
     /// Get detailed tenant information
     async fn get_tenant_details(tenant_id: &str) -> Option<AzureTenant> {
         let output = Command::new("az")
-            .args(&["rest", "--method", "GET", "--url", 
-                   &format!("https://graph.microsoft.com/v1.0/organization?$filter=id eq '{}'", tenant_id)])
+            .args(["rest", "--method", "GET", "--url", 
+                   &format!("https://graph.microsoft.com/v1.0/organization?$filter=id eq '{tenant_id}'")])
             .output()
             .ok()?;
 
@@ -270,7 +270,7 @@ impl AzureDetector {
     /// Get available resource groups for a subscription
     pub async fn get_resource_groups(subscription_id: &str) -> Result<Vec<String>> {
         let output = Command::new("az")
-            .args(&[
+            .args([
                 "group", "list",
                 "--subscription", subscription_id,
                 "--query", "[].name",
@@ -308,7 +308,7 @@ impl AzureDetector {
     /// Get available locations for a subscription
     pub async fn get_locations(subscription_id: &str) -> Result<Vec<String>> {
         let output = Command::new("az")
-            .args(&[
+            .args([
                 "account", "list-locations",
                 "--subscription", subscription_id,
                 "--query", "[].name",
@@ -346,7 +346,7 @@ impl AzureDetector {
     /// Check if a resource group exists
     pub async fn resource_group_exists(subscription_id: &str, resource_group: &str) -> Result<bool> {
         let output = Command::new("az")
-            .args(&[
+            .args([
                 "group", "exists",
                 "--subscription", subscription_id,
                 "--name", resource_group
@@ -370,7 +370,7 @@ impl AzureDetector {
         location: &str
     ) -> Result<()> {
         let output = Command::new("az")
-            .args(&[
+            .args([
                 "group", "create",
                 "--subscription", subscription_id,
                 "--name", resource_group,
@@ -392,7 +392,7 @@ impl AzureDetector {
     /// Get storage accounts in a resource group
     pub async fn get_storage_accounts(subscription_id: &str, resource_group: &str) -> Result<Vec<String>> {
         let output = Command::new("az")
-            .args(&[
+            .args([
                 "storage", "account", "list",
                 "--subscription", subscription_id,
                 "--resource-group", resource_group,
@@ -431,7 +431,7 @@ impl AzureDetector {
     /// Check if a storage account exists
     pub async fn storage_account_exists(subscription_id: &str, storage_account: &str) -> Result<bool> {
         let output = Command::new("az")
-            .args(&[
+            .args([
                 "storage", "account", "show",
                 "--subscription", subscription_id,
                 "--name", storage_account,
@@ -447,7 +447,7 @@ impl AzureDetector {
     /// Check if a container exists in a storage account
     pub async fn container_exists(subscription_id: &str, storage_account: &str, container_name: &str) -> Result<bool> {
         let output = Command::new("az")
-            .args(&[
+            .args([
                 "storage", "container", "exists",
                 "--subscription", subscription_id,
                 "--account-name", storage_account,

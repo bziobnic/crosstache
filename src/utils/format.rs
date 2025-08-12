@@ -228,60 +228,60 @@ impl DisplayUtils {
     /// Print a section header
     pub fn print_header(&self, title: &str) -> Result<()> {
         let styled_title = if self.no_color {
-            format!("=== {} ===", title)
+            format!("=== {title} ===")
         } else {
             format!("=== {} ===", title.with(self.theme.header).bold())
         };
 
-        println!("{}", styled_title);
+        println!("{styled_title}");
         Ok(())
     }
 
     /// Print a success message
     pub fn print_success(&self, message: &str) -> Result<()> {
         let styled_message = if self.no_color {
-            format!("✓ {}", message)
+            format!("✓ {message}")
         } else {
             format!("✓ {}", message.with(self.theme.success))
         };
 
-        println!("{}", styled_message);
+        println!("{styled_message}");
         Ok(())
     }
 
     /// Print a warning message
     pub fn print_warning(&self, message: &str) -> Result<()> {
         let styled_message = if self.no_color {
-            format!("⚠ {}", message)
+            format!("⚠ {message}")
         } else {
             format!("⚠ {}", message.with(self.theme.warning))
         };
 
-        println!("{}", styled_message);
+        println!("{styled_message}");
         Ok(())
     }
 
     /// Print an error message
     pub fn print_error(&self, message: &str) -> Result<()> {
         let styled_message = if self.no_color {
-            format!("✗ {}", message)
+            format!("✗ {message}")
         } else {
             format!("✗ {}", message.with(self.theme.error))
         };
 
-        eprintln!("{}", styled_message);
+        eprintln!("{styled_message}");
         Ok(())
     }
 
     /// Print an info message
     pub fn print_info(&self, message: &str) -> Result<()> {
         let styled_message = if self.no_color {
-            format!("ℹ {}", message)
+            format!("ℹ {message}")
         } else {
             format!("ℹ {}", message.with(self.theme.info))
         };
 
-        println!("{}", styled_message);
+        println!("{styled_message}");
         Ok(())
     }
 
@@ -293,7 +293,7 @@ impl DisplayUtils {
             .iter()
             .map(|(key, value)| {
                 let formatted_key = if self.no_color {
-                    format!("{:width$}", key, width = max_key_length)
+                    format!("{key:max_key_length$}")
                 } else {
                     format!(
                         "{:width$}",
@@ -301,7 +301,7 @@ impl DisplayUtils {
                         width = max_key_length
                     )
                 };
-                format!("{}: {}", formatted_key, value)
+                format!("{formatted_key}: {value}")
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -312,7 +312,7 @@ impl DisplayUtils {
         if let Ok((width, _)) = size() {
             let line = "─".repeat(width as usize);
             if self.no_color {
-                println!("{}", line);
+                println!("{line}");
             } else {
                 println!("{}", line.with(self.theme.info));
             }
@@ -340,13 +340,13 @@ impl DisplayUtils {
         let title_line = format!("║ {:^width$} ║", title, width = width - 4);
 
         if self.no_color {
-            println!("╔{}╗", border);
-            println!("{}", title_line);
+            println!("╔{border}╗");
+            println!("{title_line}");
             if let Some(sub) = subtitle {
                 let subtitle_line = format!("║ {:^width$} ║", sub, width = width - 4);
-                println!("{}", subtitle_line);
+                println!("{subtitle_line}");
             }
-            println!("╚{}╝", border);
+            println!("╚{border}╝");
         } else {
             println!("╔{}╗", border.clone().with(self.theme.accent));
             println!("{}", title_line.with(self.theme.header).bold());
@@ -388,7 +388,7 @@ impl ProgressIndicator {
     pub fn finish_success(&self, result_message: Option<&str>) -> Result<()> {
         let message = result_message.unwrap_or("Done");
         if self.no_color {
-            println!("✓ {}", message);
+            println!("✓ {message}");
         } else {
             println!("✓ {}", message.with(CrosstermColor::Green));
         }
@@ -399,12 +399,26 @@ impl ProgressIndicator {
     pub fn finish_error(&self, error_message: Option<&str>) -> Result<()> {
         let message = error_message.unwrap_or("Failed");
         if self.no_color {
-            println!("✗ {}", message);
+            println!("✗ {message}");
         } else {
             println!("✗ {}", message.with(CrosstermColor::Red));
         }
         Ok(())
     }
+}
+
+/// Convenience function for formatting a table with default settings
+pub fn format_table(mut table: Table, no_color: bool) -> String {
+    table
+        .with(Style::rounded())
+        .with(Modify::new(Rows::first()).with(Alignment::center()))
+        .with(Padding::new(1, 1, 0, 0));
+
+    if !no_color {
+        table.with(Modify::new(Rows::first()).with(Color::FG_BLUE));
+    }
+
+    table.to_string()
 }
 
 #[cfg(test)]
@@ -529,18 +543,4 @@ mod tests {
         let template_result = test_data.to_template("{{name}}: {{status}}");
         assert!(template_result.is_err()); // Should fail as template engine not implemented yet
     }
-}
-
-/// Convenience function for formatting a table with default settings
-pub fn format_table(mut table: Table, no_color: bool) -> String {
-    table
-        .with(Style::rounded())
-        .with(Modify::new(Rows::first()).with(Alignment::center()))
-        .with(Padding::new(1, 1, 0, 0));
-
-    if !no_color {
-        table.with(Modify::new(Rows::first()).with(Color::FG_BLUE));
-    }
-
-    table.to_string()
 }

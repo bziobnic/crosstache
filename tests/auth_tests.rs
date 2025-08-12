@@ -116,7 +116,7 @@ mod graph_api_tests {
 
 #[cfg(test)]
 mod authentication_flow_tests {
-    use super::*;
+    
 
     #[test]
     fn test_azure_scope_validation() {
@@ -152,7 +152,7 @@ mod authentication_flow_tests {
 
 #[cfg(test)]
 mod error_handling_tests {
-    use super::*;
+    
 
     #[test]
     fn test_error_message_formatting() {
@@ -190,12 +190,12 @@ mod error_handling_tests {
 
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
+    
 
     #[test]
     fn test_authentication_configuration() {
         // Test authentication configuration validation
-        let required_env_vars = vec!["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"];
+        let required_env_vars = ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"];
 
         // Test that we know what environment variables are needed
         assert_eq!(required_env_vars.len(), 3);

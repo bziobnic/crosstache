@@ -19,7 +19,7 @@ mod vault_validation_tests {
         ];
 
         for name in valid_names {
-            assert!(is_valid_vault_name(name), "Name '{}' should be valid", name);
+            assert!(is_valid_vault_name(name), "Name '{name}' should be valid");
         }
 
         // Invalid vault names
@@ -39,8 +39,7 @@ mod vault_validation_tests {
         for name in invalid_names {
             assert!(
                 !is_valid_vault_name(name),
-                "Name '{}' should be invalid",
-                name
+                "Name '{name}' should be invalid"
             );
         }
     }
@@ -61,8 +60,7 @@ mod vault_validation_tests {
         for location in valid_locations {
             assert!(
                 is_valid_azure_location(location),
-                "Location '{}' should be valid",
-                location
+                "Location '{location}' should be valid"
             );
         }
 
@@ -78,8 +76,7 @@ mod vault_validation_tests {
         for location in invalid_locations {
             assert!(
                 !is_valid_azure_location(location),
-                "Location '{}' should be invalid",
-                location
+                "Location '{location}' should be invalid"
             );
         }
     }
@@ -90,14 +87,14 @@ mod vault_validation_tests {
         let valid_skus = vec!["standard", "premium"];
 
         for sku in valid_skus {
-            assert!(is_valid_sku(sku), "SKU '{}' should be valid", sku);
+            assert!(is_valid_sku(sku), "SKU '{sku}' should be valid");
         }
 
         // Invalid SKUs
         let invalid_skus = vec!["", "basic", "Standard", "PREMIUM", "invalid"];
 
         for sku in invalid_skus {
-            assert!(!is_valid_sku(sku), "SKU '{}' should be invalid", sku);
+            assert!(!is_valid_sku(sku), "SKU '{sku}' should be invalid");
         }
     }
 
@@ -109,8 +106,7 @@ mod vault_validation_tests {
         for days in valid_days {
             assert!(
                 is_valid_retention_days(days),
-                "Retention days {} should be valid",
-                days
+                "Retention days {days} should be valid"
             );
         }
 
@@ -120,8 +116,7 @@ mod vault_validation_tests {
         for days in invalid_days {
             assert!(
                 !is_valid_retention_days(days),
-                "Retention days {} should be invalid",
-                days
+                "Retention days {days} should be invalid"
             );
         }
     }
@@ -165,8 +160,7 @@ mod vault_uri_tests {
         for uri in invalid_uris {
             assert!(
                 extract_vault_name_from_uri(uri).is_err(),
-                "URI '{}' should be invalid",
-                uri
+                "URI '{uri}' should be invalid"
             );
         }
     }
@@ -190,8 +184,7 @@ mod vault_resource_tests {
         for name in valid_names {
             assert!(
                 is_valid_resource_group_name(name),
-                "Resource group '{}' should be valid",
-                name
+                "Resource group '{name}' should be valid"
             );
         }
 
@@ -216,8 +209,7 @@ mod vault_resource_tests {
         for name in invalid_names {
             assert!(
                 !is_valid_resource_group_name(name),
-                "Resource group '{}' should be invalid",
-                name
+                "Resource group '{name}' should be invalid"
             );
         }
 
@@ -241,8 +233,7 @@ mod vault_resource_tests {
         for id in valid_ids {
             assert!(
                 is_valid_subscription_id(id),
-                "Subscription ID '{}' should be valid",
-                id
+                "Subscription ID '{id}' should be valid"
             );
         }
 
@@ -259,8 +250,7 @@ mod vault_resource_tests {
         for id in invalid_ids {
             assert!(
                 !is_valid_subscription_id(id),
-                "Subscription ID '{}' should be invalid",
-                id
+                "Subscription ID '{id}' should be invalid"
             );
         }
     }
@@ -339,11 +329,11 @@ fn is_valid_sku(sku: &str) -> bool {
 }
 
 fn is_valid_retention_days(days: i32) -> bool {
-    days >= 7 && days <= 90
+    (7..=90).contains(&days)
 }
 
 fn generate_vault_uri(vault_name: &str) -> String {
-    format!("https://{}.vault.azure.net/", vault_name)
+    format!("https://{vault_name}.vault.azure.net/")
 }
 
 fn extract_vault_name_from_uri(uri: &str) -> Result<String, String> {

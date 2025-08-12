@@ -104,7 +104,7 @@ impl ConfigInitializer {
             if !instructions.is_empty() {
                 self.prompt.info("Please complete the following steps:")?;
                 for instruction in instructions {
-                    println!("  • {}", instruction);
+                    println!("  • {instruction}");
                 }
                 return Err(CrosstacheError::config(
                     "Azure environment not ready. Please complete the setup steps above and run 'xv init' again."
@@ -222,7 +222,7 @@ impl ConfigInitializer {
 
         if !exists {
             let create_rg = self.prompt.confirm(
-                &format!("Resource group '{}' doesn't exist. Create it?", resource_group_name),
+                &format!("Resource group '{resource_group_name}' doesn't exist. Create it?"),
                 true,
             )?;
 
@@ -388,7 +388,7 @@ impl ConfigInitializer {
         if !create_storage_cmd.status.success() {
             let error_msg = String::from_utf8_lossy(&create_storage_cmd.stderr);
             return Err(CrosstacheError::azure_api(format!(
-                "Failed to create storage account: {}", error_msg
+                "Failed to create storage account: {error_msg}"
             )));
         }
 
@@ -453,7 +453,7 @@ impl ConfigInitializer {
                     }
                     
                     return Err(CrosstacheError::azure_api(format!(
-                        "Failed to create blob container: {}", error_msg
+                        "Failed to create blob container: {error_msg}"
                     )));
                 }
             }
@@ -463,7 +463,7 @@ impl ConfigInitializer {
             ));
         }
 
-        progress.finish_success(&format!("Created storage account '{}'", storage_name));
+        progress.finish_success(&format!("Created storage account '{storage_name}'"));
         Ok(())
     }
 
@@ -481,7 +481,7 @@ impl ConfigInitializer {
             .unwrap_or(false);
 
         if container_exists {
-            progress.finish_success(&format!("Container '{}' already exists in storage account '{}'", container_name, storage_name));
+            progress.finish_success(&format!("Container '{container_name}' already exists in storage account '{storage_name}'"));
             return Ok(());
         }
 
@@ -539,7 +539,7 @@ impl ConfigInitializer {
                     }
                     
                     return Err(CrosstacheError::azure_api(format!(
-                        "Failed to create blob container: {}", error_msg
+                        "Failed to create blob container: {error_msg}"
                     )));
                 }
             }
@@ -549,7 +549,7 @@ impl ConfigInitializer {
             ));
         }
 
-        progress.finish_success(&format!("Created container '{}' in storage account '{}'", container_name, storage_name));
+        progress.finish_success(&format!("Created container '{container_name}' in storage account '{storage_name}'"));
         Ok(())
     }
 
@@ -639,7 +639,7 @@ impl ConfigInitializer {
             Some(vault_request),
         ).await?;
 
-        progress.finish_success(&format!("Created vault '{}'", vault_name));
+        progress.finish_success(&format!("Created vault '{vault_name}'"));
         Ok(())
     }
 
@@ -674,6 +674,7 @@ impl ConfigInitializer {
             cache_ttl: Duration::from_secs(300),
             function_app_url: String::new(),
             blob_config,
+            azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
         })
     }
 
@@ -688,19 +689,19 @@ impl ConfigInitializer {
         if let Some(parent) = config_file.parent() {
             tokio::fs::create_dir_all(parent).await
                 .map_err(|e| CrosstacheError::config(format!(
-                    "Failed to create config directory: {}", e
+                    "Failed to create config directory: {e}"
                 )))?;
         }
 
         // Save configuration file
         let config_content = toml::to_string_pretty(config)
             .map_err(|e| CrosstacheError::serialization(format!(
-                "Failed to serialize config: {}", e
+                "Failed to serialize config: {e}"
             )))?;
 
         tokio::fs::write(&config_file, config_content).await
             .map_err(|e| CrosstacheError::config(format!(
-                "Failed to write config file: {}", e
+                "Failed to write config file: {e}"
             )))?;
 
         progress.finish_success(&format!("Configuration saved to {}", config_file.display()));
