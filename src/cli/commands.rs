@@ -15,6 +15,34 @@ fn get_version() -> &'static str {
     env!("VERSION_WITH_GIT")
 }
 
+/// Determine if options should be hidden based on environment or command line
+fn should_hide_options() -> bool {
+    // Check if --show-options is present in command line args
+    !std::env::args().any(|arg| arg == "--show-options")
+}
+
+/// Get the help template based on whether options should be shown
+fn get_help_template() -> &'static str {
+    if std::env::args().any(|arg| arg == "--show-options") {
+        // Full template with options
+        "{about-with-newline}\
+Usage: {usage}\n\n\
+Commands:\n{subcommands}\n\
+Options:\n{options}\n\
+Use 'xv help <command>' for more information about a specific command.\n"
+    } else {
+        // Minimal template without options
+        "{about-with-newline}\
+Usage: {usage}\n\n\
+Commands:\n{subcommands}\n\
+Options:\n\
+  -h, --help       Print help (see more with '--show-options')\n\
+  -V, --version    Print version\n\n\
+Use 'xv help <command>' for more information about a specific command.\n\
+Use 'xv --help --show-options' to see all global options.\n"
+    }
+}
+
 /// Get build information for display
 pub fn get_build_info() -> BuildInfo {
     BuildInfo {
@@ -41,22 +69,27 @@ pub struct BuildInfo {
 #[command(name = "xv")]
 #[command(about = "A comprehensive tool for managing Azure Key Vault")]
 #[command(version = get_version(), author)]
+#[command(help_template = get_help_template())]
 pub struct Cli {
     /// Enable debug logging
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = should_hide_options())]
     pub debug: bool,
 
     /// Output format
-    #[arg(long, value_enum, default_value = "table")]
+    #[arg(long, global = true, value_enum, default_value = "table", hide = should_hide_options())]
     pub format: OutputFormat,
 
     /// Custom template string for template format
-    #[arg(long)]
+    #[arg(long, global = true, hide = should_hide_options())]
     pub template: Option<String>,
 
     /// Select specific columns for table output (comma-separated)
-    #[arg(long)]
+    #[arg(long, global = true, hide = should_hide_options())]
     pub columns: Option<String>,
+
+    /// Show global options in help output
+    #[arg(long)]
+    pub show_options: bool,
 
     #[command(subcommand)]
     pub command: Commands,
