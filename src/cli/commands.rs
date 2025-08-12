@@ -1378,6 +1378,13 @@ async fn execute_config_show(config: &Config) -> Result<()> {
     let mut items = items;
     let blob_config = config.get_blob_config();
     
+    // Add credential priority
+    items.push(ConfigItem {
+        key: "azure_credential_priority".to_string(),
+        value: config.azure_credential_priority.to_string(),
+        source: "config".to_string(),
+    });
+    
     items.push(ConfigItem {
         key: "storage_account".to_string(),
         value: if blob_config.storage_account.is_empty() {

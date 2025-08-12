@@ -439,3 +439,55 @@ pub async fn init_default_config() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_azure_credential_type_from_str() {
+        use std::str::FromStr;
+
+        // Test valid credential types
+        assert_eq!(AzureCredentialType::from_str("cli").unwrap(), AzureCredentialType::Cli);
+        assert_eq!(AzureCredentialType::from_str("CLI").unwrap(), AzureCredentialType::Cli);
+        assert_eq!(AzureCredentialType::from_str("azure-cli").unwrap(), AzureCredentialType::Cli);
+        assert_eq!(AzureCredentialType::from_str("az").unwrap(), AzureCredentialType::Cli);
+        
+        assert_eq!(AzureCredentialType::from_str("managed_identity").unwrap(), AzureCredentialType::ManagedIdentity);
+        assert_eq!(AzureCredentialType::from_str("managed-identity").unwrap(), AzureCredentialType::ManagedIdentity);
+        assert_eq!(AzureCredentialType::from_str("msi").unwrap(), AzureCredentialType::ManagedIdentity);
+        
+        assert_eq!(AzureCredentialType::from_str("environment").unwrap(), AzureCredentialType::Environment);
+        assert_eq!(AzureCredentialType::from_str("env").unwrap(), AzureCredentialType::Environment);
+        
+        assert_eq!(AzureCredentialType::from_str("default").unwrap(), AzureCredentialType::Default);
+
+        // Test invalid credential types
+        assert!(AzureCredentialType::from_str("invalid").is_err());
+        assert!(AzureCredentialType::from_str("unknown").is_err());
+        assert!(AzureCredentialType::from_str("").is_err());
+    }
+
+    #[test]
+    fn test_azure_credential_type_display() {
+        assert_eq!(AzureCredentialType::Cli.to_string(), "cli");
+        assert_eq!(AzureCredentialType::ManagedIdentity.to_string(), "managed_identity");
+        assert_eq!(AzureCredentialType::Environment.to_string(), "environment");
+        assert_eq!(AzureCredentialType::Default.to_string(), "default");
+    }
+
+    #[test]
+    fn test_azure_credential_type_default() {
+        assert_eq!(AzureCredentialType::default(), AzureCredentialType::Default);
+    }
+
+    #[test]
+    fn test_config_with_credential_priority() {
+        let mut config = Config::default();
+        assert_eq!(config.azure_credential_priority, AzureCredentialType::Default);
+        
+        config.azure_credential_priority = AzureCredentialType::Cli;
+        assert_eq!(config.azure_credential_priority, AzureCredentialType::Cli);
+    }
+}

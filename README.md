@@ -104,6 +104,7 @@ xv config set subscription_id YOUR_SUBSCRIPTION_ID
 
 - `AZURE_SUBSCRIPTION_ID`: Default Azure subscription
 - `AZURE_TENANT_ID`: Azure tenant ID
+- `AZURE_CREDENTIAL_PRIORITY`: Azure credential type to use first (cli, managed_identity, environment, default)
 - `DEFAULT_VAULT`: Default vault name
 - `DEFAULT_RESOURCE_GROUP`: Default resource group
 - `FUNCTION_APP_URL`: Function app URL for extended functionality
@@ -119,6 +120,36 @@ crosstache uses Azure DefaultAzureCredential, supporting multiple authentication
 3. Azure CLI
 4. Visual Studio Code
 5. Azure PowerShell
+
+### Credential Priority Configuration
+
+You can control which authentication method is tried first using the credential priority setting. This is useful when you want to prioritize Azure CLI over Managed Identity or vice versa.
+
+**Configuration methods (in order of precedence):**
+
+1. **CLI flag**: `--credential-type cli`
+2. **Environment variable**: `export AZURE_CREDENTIAL_PRIORITY=cli`
+3. **Config file**: Add `azure_credential_priority = "cli"` to your config file
+
+**Available credential types:**
+- `cli` or `azure-cli` or `az`: Use Azure CLI credentials first
+- `managed_identity` or `managed-identity` or `msi`: Use Managed Identity first
+- `environment` or `env`: Use environment variable credentials first
+- `default`: Use the default Azure SDK credential chain order
+
+**Examples:**
+
+```bash
+# Use Azure CLI credentials first
+xv secret list --credential-type cli
+
+# Set environment variable for all commands
+export AZURE_CREDENTIAL_PRIORITY=cli
+xv secret list
+
+# Configure in config file for persistent setting
+xv config set azure_credential_priority cli
+```
 
 ## Usage Examples
 

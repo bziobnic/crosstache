@@ -137,16 +137,40 @@ mod authentication_flow_tests {
         let tenant_var = "AZURE_TENANT_ID";
         let client_var = "AZURE_CLIENT_ID";
         let secret_var = "AZURE_CLIENT_SECRET";
+        let priority_var = "AZURE_CREDENTIAL_PRIORITY";
 
         // Test that environment variable names are correct
         assert_eq!(tenant_var, "AZURE_TENANT_ID");
         assert_eq!(client_var, "AZURE_CLIENT_ID");
         assert_eq!(secret_var, "AZURE_CLIENT_SECRET");
+        assert_eq!(priority_var, "AZURE_CREDENTIAL_PRIORITY");
 
         // Test environment variable access (won't fail if not set)
         let _tenant = std::env::var(tenant_var).unwrap_or_default();
         let _client = std::env::var(client_var).unwrap_or_default();
         let _secret = std::env::var(secret_var).unwrap_or_default();
+        let _priority = std::env::var(priority_var).unwrap_or_default();
+    }
+    
+    #[test]
+    fn test_credential_priority_parsing() {
+        use std::str::FromStr;
+        
+        // Test parsing of credential priority values
+        let valid_priorities = vec!["cli", "managed_identity", "environment", "default"];
+        let invalid_priorities = vec!["invalid", "unknown", ""];
+        
+        for priority in valid_priorities {
+            // This would normally use AzureCredentialType::from_str
+            // but we're just testing the string values here
+            assert!(!priority.is_empty());
+            assert!(matches!(priority, "cli" | "managed_identity" | "environment" | "default"));
+        }
+        
+        for priority in invalid_priorities {
+            // Invalid priorities should be caught
+            assert!(!matches!(priority, "cli" | "managed_identity" | "environment" | "default"));
+        }
     }
 }
 

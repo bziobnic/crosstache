@@ -121,6 +121,13 @@ The tool relies on Azure's DefaultAzureCredential which tries these methods in o
 4. Visual Studio Code
 5. Azure PowerShell
 
+**Credential Priority Configuration**: The authentication order can be customized using the `azure_credential_priority` setting:
+- CLI flag: `--credential-type cli` (highest priority)
+- Environment variable: `AZURE_CREDENTIAL_PRIORITY=cli`
+- Config file: `azure_credential_priority = "cli"`
+- Supported values: `cli`, `managed_identity`, `environment`, `default`
+- Implementation: `DefaultAzureCredentialProvider::with_credential_priority()` in `src/auth/provider.rs`
+
 ### Tag-Based Features
 Azure Key Vault secrets are limited to 15 tags total. crosstache uses:
 - `groups`: Comma-separated group names
