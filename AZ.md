@@ -6,79 +6,77 @@ This checklist guides the implementation of a configuration setting to control w
 ## Implementation Checklist
 
 ### 1. Configuration Definition
-- [ ] Add new field to `Config` struct in `src/config/settings.rs`
-  - [ ] Field name: `azure_credential_priority` or `preferred_credential_type`
-  - [ ] Type: `Option<String>` or enum like `AzureCredentialType`
-  - [ ] Default value: `None` (use SDK default order)
-  - [ ] Supported values: "cli", "managed_identity", "environment", "default"
+- [x] Add new field to `Config` struct in `src/config/settings.rs`
+  - [x] Field name: `azure_credential_priority`
+  - [x] Type: enum `AzureCredentialType`
+  - [x] Default value: `AzureCredentialType::Default`
+  - [x] Supported values: "cli", "managed_identity", "environment", "default"
 
 ### 2. Environment Variable Support
-- [ ] Define environment variable in `src/config/settings.rs`
-  - [ ] Variable name: `AZURE_CREDENTIAL_PRIORITY` or `XV_CREDENTIAL_TYPE`
-  - [ ] Add to `Config::from_env()` method
-  - [ ] Document in config loading hierarchy
+- [x] Define environment variable in `src/config/settings.rs`
+  - [x] Variable name: `AZURE_CREDENTIAL_PRIORITY`
+  - [x] Add to `load_from_env()` method (line 364-368)
+  - [x] Document in config loading hierarchy
 
 ### 3. Configuration File Support
-- [ ] Update config file parser in `src/config/settings.rs`
-  - [ ] Add field to TOML/JSON config structure
-  - [ ] Example config entry: `azure_credential_priority = "cli"`
-  - [ ] Update `Config::load_from_file()` method
+- [x] Update config file parser in `src/config/settings.rs`
+  - [x] Add field to TOML/JSON config structure
+  - [x] Example config entry: `azure_credential_priority = "cli"`
+  - [x] Automatic serialization/deserialization support via serde
 
 ### 4. CLI Flag Support
-- [ ] Add global flag to `src/cli/commands.rs`
-  - [ ] Flag: `--credential-type` or `--azure-auth-method`
-  - [ ] Short flag: `-c` (if available)
-  - [ ] Add to `Cli` struct with `#[arg(global = true)]`
-  - [ ] Include help text explaining available options
+- [x] Add global flag to `src/cli/commands.rs`
+  - [x] Flag: `--credential-type`
+  - [x] Add to `Cli` struct with `#[arg(global = true)]` (line 90-99)
+  - [x] Include help text explaining available options
+  - [x] Integration in execute method (line 643-649)
 
 ### 5. Authentication Module Updates
-- [ ] Modify `src/auth/azure.rs`
-  - [ ] Update `AzureAuth::new()` to accept credential priority parameter
-  - [ ] Implement custom credential chain builder based on priority
-  - [ ] Create method like `build_credential_chain(priority: Option<String>)`
+- [x] Modify `src/auth/provider.rs`
+  - [x] Update `DefaultAzureCredentialProvider::new()` to use default priority
+  - [x] Implement `with_credential_priority()` method (line 149)
+  - [x] Create method `create_prioritized_credential()` (line 178-216)
   
 ### 6. Custom Credential Chain Implementation
-- [ ] Create new function in `src/auth/azure.rs`
+- [x] Create new function in `src/auth/provider.rs`
   ```rust
-  fn create_prioritized_credential(priority: Option<String>) -> Result<Arc<dyn TokenCredential>>
+  fn create_prioritized_credential(priority: AzureCredentialType) -> Result<Arc<dyn TokenCredential>>
   ```
-  - [ ] If priority == "cli": Try AzureCliCredential first, then fall back to others
-  - [ ] If priority == "managed_identity": Try ManagedIdentityCredential first
-  - [ ] If priority == "environment": Try EnvironmentCredential first
-  - [ ] If priority == "default" or None: Use DefaultAzureCredential as-is
+  - [x] If priority == Cli: Use AzureCliCredential
+  - [x] If priority == ManagedIdentity: Use DefaultAzureCredential (SDK limitation)
+  - [x] If priority == Environment: Try EnvironmentCredential first
+  - [x] If priority == Default: Use DefaultAzureCredential as-is
 
 ### 7. Context Integration
-- [ ] Update `src/config/context.rs`
-  - [ ] Pass credential priority from config to AzureAuth initialization
-  - [ ] Ensure priority is available in `Context` struct if needed
+- [x] Update credential provider creation throughout codebase
+  - [x] All `DefaultAzureCredentialProvider::new()` calls updated to use `with_credential_priority()`
+  - [x] Priority passed from config to all authentication operations
 
 ### 8. Error Handling
-- [ ] Add new error variant if needed in `src/error.rs`
-  - [ ] `InvalidCredentialType(String)` for unsupported credential types
-  - [ ] Clear error messages for credential priority issues
+- [x] Error handling in `AzureCredentialType::from_str()`
+  - [x] Returns error with clear message for invalid credential types
+  - [x] Lists valid options in error message
 
 ### 9. Testing
-- [ ] Unit tests in `src/auth/azure.rs`
-  - [ ] Test credential chain with "cli" priority
-  - [ ] Test credential chain with "managed_identity" priority
-  - [ ] Test fallback behavior when preferred credential fails
-  - [ ] Test invalid credential type handling
+- [x] Unit tests in `src/config/settings.rs`
+  - [x] Test `AzureCredentialType::from_str()` with valid values
+  - [x] Test `AzureCredentialType::from_str()` with invalid values
+  - [x] Test `AzureCredentialType::Display` implementation
+  - [x] Test default value
 
-- [ ] Integration tests in `tests/auth_tests.rs`
-  - [ ] Test with environment variable set
-  - [ ] Test with config file setting
-  - [ ] Test with CLI flag
-  - [ ] Test priority order (CLI > env > config > default)
+- [x] Integration tests in `tests/auth_tests.rs`
+  - [x] Test environment variable name
+  - [x] Test credential priority parsing
 
 ### 10. Documentation Updates
-- [ ] Update README.md
-  - [ ] Add new configuration option to configuration section
-  - [ ] Provide example usage with Azure CLI priority
-  - [ ] Document use case for overriding managed identity
+- [x] Update README.md
+  - [x] Add new configuration option to environment variables section
+  - [x] Add "Credential Priority Configuration" section with examples
+  - [x] Document use case for overriding managed identity
 
-- [ ] Update CLAUDE.md
-  - [ ] Document new authentication flow with priority support
-  - [ ] Update "Authentication Flow" section with custom priority
+- [x] Update CLAUDE.md
+  - [x] Document new authentication flow with priority support
+  - [x] Update "Authentication Flow" section with custom priority
 
 - [ ] Update inline documentation
   - [ ] Document new config field with doc comments

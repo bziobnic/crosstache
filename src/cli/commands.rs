@@ -1477,6 +1477,13 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         "no_color" => {
             config.no_color = value.to_lowercase() == "true" || value == "1";
         }
+        "azure_credential_priority" => {
+            use std::str::FromStr;
+            use crate::config::settings::AzureCredentialType;
+            config.azure_credential_priority = AzureCredentialType::from_str(value).map_err(|e| {
+                CrosstacheError::config(e)
+            })?;
+        }
         // Blob storage configuration
         "storage_account" => {
             let mut blob_config = config.get_blob_config();
@@ -1515,7 +1522,7 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         }
         _ => {
             return Err(CrosstacheError::config(format!(
-                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads"
+                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads"
             )));
         }
     }
