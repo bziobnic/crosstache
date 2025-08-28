@@ -92,3 +92,11 @@ panic = "abort"
 
 [profile.dev]
 debug = true
+
+# cargo-release configuration for GitHub-only releases
+[package.metadata.release]
+publish = false           # Don't publish to crates.io
+push = true              # Push tags and commits to GitHub
+tag = true               # Create git tags
+sign-commit = false      # Don't sign commits (optional)
+sign-tag = false         # Don't sign tags (optional)
