@@ -55,8 +55,6 @@ pub fn get_build_info() -> BuildInfo {
         version: built_info::PKG_VERSION,
         git_hash: built_info::GIT_COMMIT_HASH_SHORT.unwrap_or("unknown"),
         git_branch: built_info::GIT_HEAD_REF.map(|r| r.strip_prefix("refs/heads/").unwrap_or(r)).unwrap_or("unknown"),
-        build_time: "compile time", // Note: BUILT_TIME_UTC not available in built v0.7
-        full_version: built_info::PKG_VERSION,
     }
 }
 
@@ -65,8 +63,6 @@ pub struct BuildInfo {
     pub version: &'static str,
     pub git_hash: &'static str,
     pub git_branch: &'static str,
-    pub build_time: &'static str,
-    pub full_version: &'static str,
 }
 
 #[derive(Parser)]
@@ -1346,10 +1342,8 @@ async fn execute_version_command() -> Result<()> {
     println!("crosstache Rust CLI");
     println!("===================");
     println!("Version:      {}", build_info.version);
-    println!("Full Version: {}", build_info.full_version);
     println!("Git Hash:     {}", build_info.git_hash);
     println!("Git Branch:   {}", build_info.git_branch);
-    println!("Built:        {}", build_info.build_time);
 
     Ok(())
 }
