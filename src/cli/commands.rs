@@ -9,6 +9,7 @@ use crate::utils::format::OutputFormat;
 use crate::vault::{VaultCreateRequest, VaultManager};
 use crate::blob::manager::{BlobManager, create_blob_manager};
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 /// Get the full version string with build information
 fn get_version() -> &'static str {
@@ -444,14 +445,18 @@ pub enum VaultShareCommands {
 
 #[derive(Subcommand)]
 pub enum FileCommands {
-    /// Upload a file to blob storage
+    /// Upload one or more files to blob storage
     Upload {
-        /// Local file path to upload
-        file_path: String,
-        /// Remote file name (optional, defaults to filename)
+        /// Local file path(s) to upload
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<String>,
+        /// Remote name (only valid when uploading single file)
         #[arg(short, long)]
         name: Option<String>,
-        /// Groups to assign to the file
+        /// Upload directory recursively
+        #[arg(short = 'r', long)]
+        recursive: bool,
+        /// Groups to assign to the file(s)
         #[arg(short, long)]
         group: Vec<String>,
         /// Metadata key-value pairs
@@ -460,26 +465,36 @@ pub enum FileCommands {
         /// Tags key-value pairs
         #[arg(short, long, value_parser = parse_key_val::<String, String>)]
         tag: Vec<(String, String)>,
-        /// Content type override
+        /// Content type override (only valid for single file)
         #[arg(long)]
         content_type: Option<String>,
         /// Show progress during upload
         #[arg(long)]
         progress: bool,
+        /// Continue on error when uploading multiple files
+        #[arg(long)]
+        continue_on_error: bool,
     },
-    /// Download a file from blob storage
+    /// Download one or more files from blob storage
     Download {
-        /// Remote file name to download
-        name: String,
-        /// Local output path (optional, defaults to filename)
+        /// Remote file name(s) to download
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<String>,
+        /// Local output path (optional, defaults to current directory)
         #[arg(short, long)]
         output: Option<String>,
+        /// Rename file (only valid for single file download)
+        #[arg(long)]
+        rename: Option<String>,
         /// Stream download for large files
         #[arg(long)]
         stream: bool,
         /// Force overwrite if file exists
         #[arg(short, long)]
         force: bool,
+        /// Continue on error when downloading multiple files
+        #[arg(long)]
+        continue_on_error: bool,
     },
     /// List files in blob storage
     #[command(alias = "ls")]
@@ -497,24 +512,23 @@ pub enum FileCommands {
         #[arg(long)]
         limit: Option<usize>,
     },
-    /// Delete a file from blob storage
+    /// Delete one or more files from blob storage
     #[command(alias = "rm")]
     Delete {
-        /// Remote file name to delete
-        name: String,
+        /// Remote file name(s) to delete
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<String>,
         /// Force deletion without confirmation
         #[arg(short, long)]
         force: bool,
+        /// Continue on error when deleting multiple files
+        #[arg(long)]
+        continue_on_error: bool,
     },
     /// Get file information
     Info {
         /// Remote file name
         name: String,
-    },
-    /// Batch upload multiple files
-    Batch {
-        #[command(subcommand)]
-        command: BatchCommands,
     },
     /// Sync files between local and remote
     Sync {
@@ -532,32 +546,6 @@ pub enum FileCommands {
         /// Delete remote files not in local
         #[arg(long)]
         delete: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum BatchCommands {
-    /// Upload multiple files
-    Upload {
-        /// File paths to upload
-        files: Vec<String>,
-        /// Groups to assign to all files
-        #[arg(short, long)]
-        group: Vec<String>,
-        /// Metadata key-value pairs for all files
-        #[arg(short, long, value_parser = parse_key_val::<String, String>)]
-        metadata: Vec<(String, String)>,
-        /// Show progress during upload
-        #[arg(long)]
-        progress: bool,
-    },
-    /// Delete multiple files
-    Delete {
-        /// File names to delete
-        names: Vec<String>,
-        /// Force deletion without confirmation
-        #[arg(short, long)]
-        force: bool,
     },
 }
 
@@ -730,34 +718,105 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
 
     match command {
         FileCommands::Upload {
-            file_path,
+            files,
             name,
+            recursive,
             group,
             metadata,
             tag,
             content_type,
             progress,
+            continue_on_error,
         } => {
-            execute_file_upload(
-                &blob_manager,
-                &file_path,
-                name,
-                group,
-                metadata,
-                tag,
-                content_type,
-                progress,
-                &config,
-            )
-            .await?;
+            // Handle recursive directory upload
+            if recursive {
+                // Validate that --name and --content-type are not used with --recursive
+                if name.is_some() || content_type.is_some() {
+                    return Err(CrosstacheError::invalid_argument(
+                        "--name and --content-type cannot be used with --recursive"
+                    ));
+                }
+                execute_file_upload_recursive(
+                    &blob_manager,
+                    files,
+                    group,
+                    metadata,
+                    tag,
+                    progress,
+                    continue_on_error,
+                    &config,
+                )
+                .await?;
+            } else if files.len() == 1 {
+                // Single file upload - use existing function
+                execute_file_upload(
+                    &blob_manager,
+                    &files[0],
+                    name,
+                    group,
+                    metadata,
+                    tag,
+                    content_type,
+                    progress,
+                    &config,
+                )
+                .await?;
+            } else {
+                // Multiple file upload
+                if name.is_some() || content_type.is_some() {
+                    return Err(CrosstacheError::invalid_argument(
+                        "--name and --content-type can only be used when uploading a single file"
+                    ));
+                }
+                execute_file_upload_multiple(
+                    &blob_manager,
+                    files,
+                    group,
+                    metadata,
+                    tag,
+                    progress,
+                    continue_on_error,
+                    &config,
+                )
+                .await?;
+            }
         }
         FileCommands::Download {
-            name,
+            files,
             output,
+            rename,
             stream,
             force,
+            continue_on_error,
         } => {
-            execute_file_download(&blob_manager, &name, output, stream, force, &config).await?;
+            // Validate --rename only works with single file
+            if rename.is_some() && files.len() > 1 {
+                return Err(CrosstacheError::invalid_argument(
+                    "--rename can only be used when downloading a single file"
+                ));
+            }
+            
+            // Handle single vs multiple file download
+            if files.len() == 1 {
+                // For single file, use rename if provided, otherwise use output as directory
+                let output_path = if let Some(new_name) = rename {
+                    Some(new_name)
+                } else {
+                    output
+                };
+                execute_file_download(&blob_manager, &files[0], output_path, stream, force, &config).await?;
+            } else {
+                execute_file_download_multiple(
+                    &blob_manager,
+                    files,
+                    output,
+                    stream,
+                    force,
+                    continue_on_error,
+                    &config,
+                )
+                .await?;
+            }
         }
         FileCommands::List {
             prefix,
@@ -767,14 +826,16 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
         } => {
             execute_file_list(&blob_manager, prefix, group, metadata, limit, &config).await?;
         }
-        FileCommands::Delete { name, force } => {
-            execute_file_delete(&blob_manager, &name, force, &config).await?;
+        FileCommands::Delete { files, force, continue_on_error } => {
+            // Handle single vs multiple file delete
+            if files.len() == 1 {
+                execute_file_delete(&blob_manager, &files[0], force, &config).await?;
+            } else {
+                execute_file_delete_multiple(&blob_manager, files, force, continue_on_error, &config).await?;
+            }
         }
         FileCommands::Info { name } => {
             execute_file_info(&blob_manager, &name, &config).await?;
-        }
-        FileCommands::Batch { command } => {
-            execute_file_batch(&blob_manager, command, &config).await?;
         }
         FileCommands::Sync {
             local_path,
@@ -3008,63 +3069,289 @@ async fn execute_file_info(
     Ok(())
 }
 
-async fn execute_file_batch(
+/// Recursively collect all files from a directory
+fn collect_files_recursive(path: &Path) -> Result<Vec<PathBuf>> {
+    use std::fs;
+    
+    let mut files = Vec::new();
+    
+    if path.is_file() {
+        files.push(path.to_path_buf());
+    } else if path.is_dir() {
+        let entries = fs::read_dir(path).map_err(|e| {
+            CrosstacheError::config(format!("Failed to read directory {}: {}", path.display(), e))
+        })?;
+        
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                CrosstacheError::config(format!("Failed to read directory entry: {e}"))
+            })?;
+            
+            let entry_path = entry.path();
+            if entry_path.is_file() {
+                files.push(entry_path);
+            } else if entry_path.is_dir() {
+                // Recursively collect files from subdirectory
+                files.extend(collect_files_recursive(&entry_path)?);
+            }
+        }
+    } else {
+        return Err(CrosstacheError::config(format!(
+            "Path {} is neither a file nor a directory",
+            path.display()
+        )));
+    }
+    
+    Ok(files)
+}
+
+async fn execute_file_upload_recursive(
     blob_manager: &BlobManager,
-    command: BatchCommands,
+    paths: Vec<String>,
+    group: Vec<String>,
+    metadata: Vec<(String, String)>,
+    tag: Vec<(String, String)>,
+    progress: bool,
+    continue_on_error: bool,
     config: &Config,
 ) -> Result<()> {
-    match command {
-        BatchCommands::Upload {
-            files,
-            group,
-            metadata,
-            progress,
-        } => {
-            let metadata_map: std::collections::HashMap<String, String> = metadata.into_iter().collect();
-            
-            println!("Batch uploading {} files...", files.len());
-            
-            for file_path in files {
-                match execute_file_upload(
-                    blob_manager,
-                    &file_path,
-                    None,
-                    group.clone(),
-                    metadata_map.clone().into_iter().collect(),
-                    vec![],
-                    None,
-                    progress,
-                    config,
-                ).await {
-                    Ok(_) => {
-                        println!("  ✅ {file_path}");
-                    }
-                    Err(e) => {
-                        eprintln!("  ❌ {file_path}: {e}");
-                    }
-                }
+    use std::path::Path;
+    
+    let mut all_files = Vec::new();
+    
+    // Collect all files recursively from all provided paths
+    for path_str in &paths {
+        let path = Path::new(path_str);
+        if !path.exists() {
+            if continue_on_error {
+                eprintln!("❌ Path not found: {}", path_str);
+                continue;
+            } else {
+                return Err(CrosstacheError::config(format!("Path not found: {}", path_str)));
             }
-            
-            println!("Batch upload completed");
         }
-        BatchCommands::Delete { names, force } => {
-            println!("Batch deleting {} files...", names.len());
-            
-            for name in names {
-                match execute_file_delete(blob_manager, &name, force, config).await {
-                    Ok(_) => {
-                        println!("  ✅ {name}");
-                    }
-                    Err(e) => {
-                        eprintln!("  ❌ {name}: {e}");
-                    }
+        
+        let files = collect_files_recursive(path)?;
+        all_files.extend(files);
+    }
+    
+    if all_files.is_empty() {
+        println!("No files found to upload");
+        return Ok(());
+    }
+    
+    println!("Found {} file(s) to upload", all_files.len());
+    
+    let mut success_count = 0;
+    let mut failure_count = 0;
+    
+    for file_path in &all_files {
+        let file_path_str = file_path.to_string_lossy().to_string();
+        
+        println!("Uploading: {}", file_path_str);
+        
+        let result = execute_file_upload(
+            blob_manager,
+            &file_path_str,
+            None, // No rename for batch uploads
+            group.clone(),
+            metadata.clone(),
+            tag.clone(),
+            None, // No content type override for batch uploads
+            progress,
+            config,
+        ).await;
+        
+        match result {
+            Ok(_) => {
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to upload '{}': {}", file_path_str, e);
+                failure_count += 1;
+                if !continue_on_error {
+                    return Err(e);
                 }
             }
-            
-            println!("Batch delete completed");
         }
     }
+    
+    // Print summary
+    println!("\n📊 Upload Summary:");
+    println!("  ✅ Successful: {}", success_count);
+    if failure_count > 0 {
+        println!("  ❌ Failed: {}", failure_count);
+    }
+    
+    if failure_count > 0 && continue_on_error {
+        return Err(CrosstacheError::azure_api(format!(
+            "{} file(s) failed to upload",
+            failure_count
+        )));
+    }
+    
+    Ok(())
+}
 
+async fn execute_file_upload_multiple(
+    blob_manager: &BlobManager,
+    files: Vec<String>,
+    group: Vec<String>,
+    metadata: Vec<(String, String)>,
+    tag: Vec<(String, String)>,
+    progress: bool,
+    continue_on_error: bool,
+    config: &Config,
+) -> Result<()> {
+    println!("Uploading {} file(s)...", files.len());
+    
+    let mut success_count = 0;
+    let mut error_count = 0;
+    
+    for file_path in files {
+        match execute_file_upload(
+            blob_manager,
+            &file_path,
+            None, // name is not allowed for multiple files
+            group.clone(),
+            metadata.clone(),
+            tag.clone(),
+            None, // content_type is not allowed for multiple files
+            progress,
+            config,
+        ).await {
+            Ok(_) => {
+                println!("  ✅ {file_path}");
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ {file_path}: {e}");
+                error_count += 1;
+                if !continue_on_error {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    
+    println!("\nUpload completed: {} succeeded, {} failed", success_count, error_count);
+    
+    if error_count > 0 && !continue_on_error {
+        return Err(CrosstacheError::azure_api(
+            format!("{} file(s) failed to upload", error_count)
+        ));
+    }
+    
+    Ok(())
+}
+
+async fn execute_file_download_multiple(
+    blob_manager: &BlobManager,
+    files: Vec<String>,
+    output: Option<String>,
+    stream: bool,
+    force: bool,
+    continue_on_error: bool,
+    config: &Config,
+) -> Result<()> {
+    println!("Downloading {} file(s)...", files.len());
+    
+    let mut success_count = 0;
+    let mut error_count = 0;
+    
+    for file_name in files {
+        match execute_file_download(
+            blob_manager,
+            &file_name,
+            output.clone(),
+            stream,
+            force,
+            config,
+        ).await {
+            Ok(_) => {
+                println!("  ✅ {file_name}");
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ {file_name}: {e}");
+                error_count += 1;
+                if !continue_on_error {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    
+    println!("\nDownload completed: {} succeeded, {} failed", success_count, error_count);
+    
+    if error_count > 0 && !continue_on_error {
+        return Err(CrosstacheError::azure_api(
+            format!("{} file(s) failed to download", error_count)
+        ));
+    }
+    
+    Ok(())
+}
+
+async fn execute_file_delete_multiple(
+    blob_manager: &BlobManager,
+    files: Vec<String>,
+    force: bool,
+    continue_on_error: bool,
+    config: &Config,
+) -> Result<()> {
+    // Confirmation prompt for multiple files without --force
+    if !force && files.len() > 1 {
+        println!("You are about to delete {} files:", files.len());
+        for (i, file) in files.iter().enumerate() {
+            if i < 5 {
+                println!("  - {}", file);
+            } else if i == 5 {
+                println!("  ... and {} more", files.len() - 5);
+                break;
+            }
+        }
+        
+        // Use rpassword for confirmation like other commands do
+        let confirm = rpassword::prompt_password(
+            "Are you sure you want to delete these files? (y/N): "
+        )?;
+        
+        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+            println!("Delete operation cancelled");
+            return Ok(());
+        }
+    }
+    
+    println!("Deleting {} file(s)...", files.len());
+    
+    let mut success_count = 0;
+    let mut error_count = 0;
+    
+    for file_name in files {
+        match execute_file_delete(blob_manager, &file_name, force, config).await {
+            Ok(_) => {
+                println!("  ✅ {file_name}");
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ {file_name}: {e}");
+                error_count += 1;
+                if !continue_on_error {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    
+    println!("\nDelete completed: {} succeeded, {} failed", success_count, error_count);
+    
+    if error_count > 0 && !continue_on_error {
+        return Err(CrosstacheError::azure_api(
+            format!("{} file(s) failed to delete", error_count)
+        ));
+    }
+    
     Ok(())
 }
 

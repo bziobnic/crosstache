@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-crosstache is a comprehensive Azure Key Vault CLI tool written in Rust. The binary is named `xv` and provides secret management, vault operations, and access control for Azure Key Vault.
+crosstache is a comprehensive Azure Key Vault CLI tool written in Rust. The binary is named `xv` and provides secret management, vault operations, blob file storage, and access control for Azure Key Vault.
 
 ## Key Architecture Details
 
 ### Hybrid Azure SDK + REST API Approach
-- Uses Azure SDK v0.20 for authentication and credential management
+- Uses Azure SDK v0.21 for authentication and credential management
 - Uses direct REST API calls to Azure Key Vault API v7.4 for secret operations
 - This hybrid approach works around SDK limitations with tag support which is essential for group management
 - Authentication: `azure_identity` crate with DefaultAzureCredential
@@ -17,9 +17,7 @@ crosstache is a comprehensive Azure Key Vault CLI tool written in Rust. The bina
 
 ### Module Structure
 - `auth/`: Azure authentication using DefaultAzureCredential pattern
-  - `azure.rs`: Core Azure authentication implementation
-  - `graph.rs`: Microsoft Graph API integration
-  - `provider.rs`: Authentication provider abstractions
+  - `provider.rs`: Core Azure authentication implementation with Graph API integration
 - `vault/`: Vault management operations (create, delete, list, restore)
   - `manager.rs`: Core vault operations and lifecycle management
   - `models.rs`: Vault-related data structures
@@ -27,22 +25,28 @@ crosstache is a comprehensive Azure Key Vault CLI tool written in Rust. The bina
 - `secret/`: Secret CRUD operations with group and metadata support
   - `manager.rs`: Core secret operations with REST API integration
   - `name_manager.rs`: Name sanitization and validation logic
+- `blob/`: Azure Blob Storage operations for file management
+  - `manager.rs`: Core blob operations (upload, download, list, delete)
+  - `models.rs`: File-related data structures
+  - `operations.rs`: Batch and sync operations
 - `config/`: Configuration management with hierarchy (CLI → env vars → config file → defaults)
   - `settings.rs`: Configuration structure and loading
   - `context.rs`: Runtime context management
+  - `init.rs`: Interactive setup and storage account creation
 - `utils/`: Sanitization, formatting, retry logic, and helper functions
   - `sanitizer.rs`: Azure Key Vault name sanitization with hashing for long names
   - `network.rs`: HTTP client configuration with proper timeouts and error classification
   - `retry.rs`: Retry logic for Azure API calls
   - `format.rs`: Output formatting (JSON, table, plain text)
-  - `helpers.rs`: General utility functions
+  - `azure_detect.rs`: Azure environment detection
+  - `interactive.rs`: Interactive prompting utilities
 - `cli/`: Command parsing using `clap` with derive macros
-  - `commands.rs`: All CLI command definitions and execution logic
+  - `commands.rs`: All CLI command definitions and execution logic (3000+ lines)
 
 ### Critical Implementation Details
 - **Group Management**: Groups stored as comma-separated values in single "groups" tag
 - **Name Sanitization**: Client-side sanitization with original names preserved in "original_name" tag; names >127 chars are SHA256 hashed
-- **Error Handling**: Custom `crosstacheError` enum with `thiserror` for structured errors with network error classification
+- **Error Handling**: Custom `CrosstacheError` enum with `thiserror` for structured errors with network error classification
 - **Async**: Full `tokio` async runtime throughout
 - **REST API Integration**: Uses `reqwest` with bearer tokens from Azure SDK for secret operations
 
@@ -74,12 +78,16 @@ cargo test -- --nocapture
 # Run specific test file
 cargo test --test auth_tests
 cargo test --test vault_tests
+cargo test --test file_commands_tests
 
 # Run tests in single thread (useful for Azure API tests)
 cargo test -- --test-threads=1
 
 # Run unit tests only (exclude integration tests)
 cargo test --lib
+
+# Run a specific test function
+cargo test test_function_name
 ```
 
 ### Code Quality
@@ -90,8 +98,23 @@ cargo fmt
 # Run clippy linter
 cargo clippy
 
+# Run clippy with all targets (including tests)
+cargo clippy --all-targets
+
 # Check without building
 cargo check
+```
+
+### Linting and Type Checking
+```bash
+# Run clippy with stricter checks
+cargo clippy -- -W clippy::all -W clippy::pedantic
+
+# Check for unsafe code
+cargo geiger
+
+# Check dependencies for vulnerabilities
+cargo audit
 ```
 
 ## Configuration System
@@ -105,6 +128,7 @@ crosstache uses hierarchical configuration with this priority order:
 Key environment variables:
 - `AZURE_SUBSCRIPTION_ID`: Default Azure subscription
 - `AZURE_TENANT_ID`: Azure tenant ID
+- `AZURE_CREDENTIAL_PRIORITY`: Credential type priority (cli, managed_identity, environment, default)
 - `DEFAULT_VAULT`: Default vault name
 - `DEFAULT_RESOURCE_GROUP`: Default resource group
 - `FUNCTION_APP_URL`: Function app URL for extended functionality
@@ -133,10 +157,12 @@ Azure Key Vault secrets are limited to 15 tags total. crosstache uses:
 - `groups`: Comma-separated group names
 - `original_name`: Preserves user-friendly names before sanitization
 - `created_by`: Tracks creation metadata
+- `note`: Optional note/description
+- `folder`: Folder-based organization
 - User can add additional tags up to the 15-tag limit
 
 ### Build System
-- Uses custom `build.rs` that auto-increments build numbers
+- Uses custom `build.rs` that auto-increments build numbers stored in `build_number.txt`
 - Embeds git commit hash, branch, and build timestamp
 - Creates version strings like `0.1.0.123+abc1234`
 - Build metadata available via environment variables: `BUILD_NUMBER`, `GIT_HASH`, `BUILD_TIME`, `GIT_BRANCH`
@@ -148,7 +174,7 @@ Azure Key Vault secrets are limited to 15 tags total. crosstache uses:
 - User-agent header includes version information
 
 ### Error Handling Architecture
-- Structured error types in `crosstacheError` enum with specific variants for:
+- Structured error types in `CrosstacheError` enum with specific variants for:
   - Authentication failures
   - Azure API errors
   - Network issues (DNS, timeout, SSL)
@@ -159,7 +185,18 @@ Azure Key Vault secrets are limited to 15 tags total. crosstache uses:
 - All errors implement `thiserror::Error` for consistent error formatting
 
 ### Testing Strategy
-- Integration tests in `tests/` directory for auth and vault operations
+- Integration tests in `tests/` directory for auth, vault, and file operations
 - Unit tests embedded in modules using `#[cfg(test)]`
 - Mock support via `mockall` crate for Azure API testing
 - Tests require Azure credentials for integration testing
+
+### Current Implementation Status
+Major features partially implemented or TODO:
+- **File Sync** (`xv file sync`): Command structure exists but not implemented (see `execute_file_sync` at line 3071 in commands.rs)
+- **Vault Sharing**: Commands defined but not implemented (grant/revoke/list)
+- **Secret Backup/Restore**: Methods stubbed in `secret/manager.rs`
+- **Advanced Secret Operations**: List deleted secrets, get versions, backup/restore
+- **Pagination**: Not implemented for large result sets
+- **Template Output**: Format option exists but not implemented
+
+For detailed task list, see TODO.md
