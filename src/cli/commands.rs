@@ -11,9 +11,14 @@ use crate::blob::manager::{BlobManager, create_blob_manager};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
+// Include the built information generated at compile time
+pub mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
 /// Get the full version string with build information
 fn get_version() -> &'static str {
-    env!("VERSION_WITH_GIT")
+    built_info::PKG_VERSION
 }
 
 /// Determine if options should be hidden based on environment or command line
@@ -47,23 +52,17 @@ Use 'xv --help --show-options' to see all global options.\n"
 /// Get build information for display
 pub fn get_build_info() -> BuildInfo {
     BuildInfo {
-        version: env!("CARGO_PKG_VERSION"),
-        build_number: env!("BUILD_NUMBER"),
-        git_hash: env!("GIT_HASH"),
-        git_branch: env!("GIT_BRANCH"),
-        build_time: env!("BUILD_TIME"),
-        full_version: env!("FULL_VERSION"),
+        version: built_info::PKG_VERSION,
+        git_hash: built_info::GIT_COMMIT_HASH_SHORT.unwrap_or("unknown"),
+        git_branch: built_info::GIT_HEAD_REF.map(|r| r.strip_prefix("refs/heads/").unwrap_or(r)).unwrap_or("unknown"),
     }
 }
 
 #[derive(Debug)]
 pub struct BuildInfo {
     pub version: &'static str,
-    pub build_number: &'static str,
     pub git_hash: &'static str,
     pub git_branch: &'static str,
-    pub build_time: &'static str,
-    pub full_version: &'static str,
 }
 
 #[derive(Parser)]
@@ -1343,11 +1342,8 @@ async fn execute_version_command() -> Result<()> {
     println!("crosstache Rust CLI");
     println!("===================");
     println!("Version:      {}", build_info.version);
-    println!("Build:        {}", build_info.build_number);
-    println!("Full Version: {}", build_info.full_version);
     println!("Git Hash:     {}", build_info.git_hash);
     println!("Git Branch:   {}", build_info.git_branch);
-    println!("Built:        {}", build_info.build_time);
 
     Ok(())
 }

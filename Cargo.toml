@@ -76,7 +76,7 @@ tempfile = "3.0"
 mime_guess = "2.0"
 
 [build-dependencies]
-chrono = { version = "0.4", features = ["serde"] }
+built = { version = "0.7", features = ["git2", "chrono"] }
 
 [dev-dependencies]
 mockall = "0.12"
