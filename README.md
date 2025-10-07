@@ -416,11 +416,29 @@ cargo check
 
 ### Build System
 
-The tool uses a custom `build.rs` that:
-- Auto-increments build numbers
-- Embeds git commit hash, branch, and build timestamp
-- Creates version strings like `0.1.0.123+abc1234`
-- Build metadata available via environment variables: `BUILD_NUMBER`, `GIT_HASH`, `BUILD_TIME`, `GIT_BRANCH`
+The project uses modern Rust tooling for version management and releases:
+
+- **Versioning**: Uses `cargo-release` for semantic version bumping and automated releases
+- **Build Metadata**: Uses the `built` crate to embed git commit hash, branch, target, and compiler information
+- **GitHub Releases**: Automated binary building and publishing via GitHub Actions
+- **Cross-platform**: Builds for Windows (x64), macOS (Intel + Apple Silicon), and Linux (x64)
+
+#### Release Process
+
+```bash
+# Bump version and create release
+cargo release patch    # 0.1.0 → 0.1.1
+cargo release minor    # 0.1.0 → 0.2.0  
+cargo release major    # 0.1.0 → 1.0.0
+
+# Preview what would happen
+cargo release patch --dry-run
+
+# View changes since last release
+cargo release changes
+```
+
+GitHub Actions automatically builds and publishes binaries when tags are pushed.
 
 ## Contributing
 
