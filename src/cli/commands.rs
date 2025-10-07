@@ -8,7 +8,7 @@ use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use crate::vault::{VaultCreateRequest, VaultManager};
 use crate::blob::manager::{BlobManager, create_blob_manager};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 // Include the built information generated at compile time
@@ -104,6 +104,27 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// Resource type for the info command
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ResourceType {
+    /// Azure Key Vault
+    Vault,
+    /// Key Vault Secret
+    Secret,
+    /// Blob Storage File
+    File,
+}
+
+impl std::fmt::Display for ResourceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResourceType::Vault => write!(f, "vault"),
+            ResourceType::Secret => write!(f, "secret"),
+            ResourceType::File => write!(f, "file"),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -229,14 +250,17 @@ pub enum Commands {
     },
     /// Initialize default configuration
     Init,
-    /// Show vault information (alias for vault info)
+    /// Show information about a resource (vault, secret, or file)
     Info {
-        /// Vault name
-        vault_name: Option<String>,
-        /// Resource group
+        /// Resource identifier (vault name, secret name, or file name)
+        resource: String,
+        /// Explicitly specify resource type (auto-detects if not specified)
+        #[arg(short = 't', long = "type", value_enum)]
+        resource_type: Option<ResourceType>,
+        /// Resource group (required for vaults)
         #[arg(short, long)]
         resource_group: Option<String>,
-        /// Subscription ID
+        /// Subscription ID (optional for vaults)
         #[arg(short, long)]
         subscription: Option<String>,
     },
@@ -689,10 +713,11 @@ impl Cli {
             Commands::Context { command } => execute_context_command(command, config).await,
             Commands::Init => execute_init_command(config).await,
             Commands::Info {
-                vault_name,
+                resource,
+                resource_type,
                 resource_group,
                 subscription,
-            } => execute_info_command(vault_name, resource_group, subscription, config).await,
+            } => execute_info_command(resource, resource_type, resource_group, subscription, config).await,
             Commands::Version => execute_version_command().await,
             Commands::Upload { file_path, name, groups, metadata } => {
                 execute_file_upload_quick(&file_path, name, groups, metadata, &config).await
@@ -1327,13 +1352,134 @@ async fn execute_init_command(_config: Config) -> Result<()> {
 }
 
 async fn execute_info_command(
-    vault_name: Option<String>,
+    resource: String,
+    resource_type: Option<ResourceType>,
     resource_group: Option<String>,
     subscription: Option<String>,
     config: Config,
 ) -> Result<()> {
-    println!("TODO: Show info for vault {vault_name:?}");
+    use crate::utils::resource_detector::ResourceDetector;
+    
+    // Detect the resource type
+    let detected_type = ResourceDetector::detect_resource_type(
+        &resource,
+        resource_type,
+        resource_group.is_some(),
+    );
+    
+    // If auto-detected and verbose, show why we detected it
+    if resource_type.is_none() && config.debug {
+        let reason = ResourceDetector::get_detection_reason(
+            &resource,
+            detected_type,
+            resource_group.is_some(),
+        );
+        eprintln!("Auto-detected resource type: {} ({})", detected_type, reason);
+    }
+    
+    // Route to the appropriate handler
+    match detected_type {
+        ResourceType::Vault => {
+            execute_vault_info_from_root(&resource, resource_group, subscription, &config).await
+        }
+        ResourceType::Secret => {
+            execute_secret_info_from_root(&resource, &config).await
+        }
+        ResourceType::File => {
+            execute_file_info_from_root(&resource, &config).await
+        }
+    }
+}
+
+/// Execute vault info from root info command
+async fn execute_vault_info_from_root(
+    vault_name: &str,
+    resource_group: Option<String>,
+    subscription: Option<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use std::sync::Arc;
+    
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone()
+        )?
+    );
+    
+    // Create vault manager
+    let vault_manager = VaultManager::new(
+        auth_provider,
+        config.subscription_id.clone(),
+        config.no_color,
+    )?;
+    
+    // Use provided resource group or fall back to config default
+    let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+    
+    // Call the existing vault info function
+    execute_vault_info(&vault_manager, vault_name, Some(resource_group), config).await
+}
+
+/// Execute secret info from root info command
+async fn execute_secret_info_from_root(
+    secret_name: &str,
+    config: &Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+    
+    // Check if we have a vault context
+    let vault_name = if !config.default_vault.is_empty() {
+        &config.default_vault
+    } else {
+        return Err(CrosstacheError::config("No vault context set. Use 'xv context set <vault>' to set a default vault"));
+    };
+    
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone()
+        )?
+    );
+    
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    
+    // Get secret info
+    let secret_info = secret_manager.get_secret_info(vault_name, secret_name).await?;
+    
+    // Display based on output format
+    if config.output_json {
+        let json_output = serde_json::to_string_pretty(&secret_info).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to serialize secret info: {e}"))
+        })?;
+        println!("{json_output}");
+    } else {
+        println!("{}", secret_info);
+    }
+    
     Ok(())
+}
+
+/// Execute file info from root info command
+async fn execute_file_info_from_root(
+    file_name: &str,
+    config: &Config,
+) -> Result<()> {
+    // Create blob manager
+    let blob_manager = create_blob_manager(config).map_err(|e| {
+        if e.to_string().contains("No storage account configured") {
+            CrosstacheError::config("No blob storage configured. Run 'xv init' to set up blob storage.")
+        } else {
+            e
+        }
+    })?;
+    
+    // Call the existing file info function
+    execute_file_info(&blob_manager, file_name, config).await
 }
 
 async fn execute_version_command() -> Result<()> {

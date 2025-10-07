@@ -16,6 +16,7 @@ use tabled::Tabled;
 
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::{CrosstacheError, Result};
+use crate::secret::models::SecretInfo;
 use crate::utils::format::{DisplayUtils, FormattableOutput, OutputFormat, TableFormatter};
 use crate::utils::helpers::{parse_connection_string, validate_folder_path};
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
@@ -1054,6 +1055,76 @@ impl SecretManager {
         }
 
         Ok(secret)
+    }
+
+    /// Get detailed secret information without the secret value
+    pub async fn get_secret_info(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+    ) -> Result<SecretInfo> {
+        // Use the existing get_secret method to fetch properties
+        let secret_props = self.secret_ops
+            .get_secret(vault_name, secret_name, false)
+            .await?;
+        
+        // Build the vault URI
+        let vault_uri = format!("https://{}.vault.azure.net", vault_name);
+        
+        // Build the secret ID (simulated since we don't have it from SecretProperties)
+        let id = format!("{}/secrets/{}/{}", vault_uri, secret_props.name, secret_props.version);
+        
+        // Extract metadata from tags
+        let tags = secret_props.tags.clone();
+        let groups = SecretInfo::extract_groups(&tags);
+        let folder = SecretInfo::extract_folder(&tags);
+        let note = SecretInfo::extract_note(&tags);
+        let original_name = SecretInfo::extract_original_name(&tags)
+            .or_else(|| Some(secret_props.original_name.clone()));
+        
+        // Parse timestamps from the string formats
+        let created = if !secret_props.created_on.is_empty() {
+            DateTime::parse_from_rfc3339(&secret_props.created_on)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        } else {
+            None
+        };
+        
+        let updated = if !secret_props.updated_on.is_empty() {
+            DateTime::parse_from_rfc3339(&secret_props.updated_on)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        } else {
+            None
+        };
+        
+        // Build SecretInfo
+        let info = SecretInfo {
+            name: secret_props.name.clone(),
+            original_name,
+            id,
+            version: Some(secret_props.version.clone()),
+            enabled: secret_props.enabled,
+            created,
+            updated,
+            expires: secret_props.expires_on,
+            not_before: secret_props.not_before,
+            recovery_level: None, // Not available in SecretProperties
+            content_type: if secret_props.content_type.is_empty() {
+                None
+            } else {
+                Some(secret_props.content_type.clone())
+            },
+            tags,
+            groups,
+            folder,
+            note,
+            vault_uri,
+            version_count: None, // Could be populated by calling list versions endpoint
+        };
+        
+        Ok(info)
     }
 
     /// List secrets with optional grouping and filtering
