@@ -21,9 +21,6 @@ pub enum CrosstacheError {
     #[error("Invalid secret name: {name}")]
     InvalidSecretName { name: String },
 
-    #[error("Name sanitization failed: {0}")]
-    NameSanitizationError(String),
-
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
 
@@ -69,12 +66,6 @@ pub enum CrosstacheError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
-    #[error("Operation timeout")]
-    Timeout,
-
-    #[error("Operation cancelled")]
-    Cancelled,
-
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -92,20 +83,12 @@ impl CrosstacheError {
         Self::ConfigError(msg.into())
     }
 
-    pub fn secret_not_found<S: Into<String>>(name: S) -> Self {
-        Self::SecretNotFound { name: name.into() }
-    }
-
     pub fn vault_not_found<S: Into<String>>(name: S) -> Self {
         Self::VaultNotFound { name: name.into() }
     }
 
     pub fn invalid_secret_name<S: Into<String>>(name: S) -> Self {
         Self::InvalidSecretName { name: name.into() }
-    }
-
-    pub fn name_sanitization<S: Into<String>>(msg: S) -> Self {
-        Self::NameSanitizationError(msg.into())
     }
 
     pub fn permission_denied<S: Into<String>>(msg: S) -> Self {

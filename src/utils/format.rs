@@ -9,8 +9,7 @@ use crossterm::{
     style::{Color as CrosstermColor, Stylize},
     terminal::{size, Clear, ClearType},
 };
-use serde::Serialize;
-use std::io::{stdout, Write};
+use std::io::stdout;
 use tabled::{
     settings::{object::Rows, Alignment, Color, Modify, Padding, Style, Width},
     Table, Tabled,
@@ -33,59 +32,6 @@ pub enum OutputFormat {
     Template,
     /// Raw text without formatting
     Raw,
-}
-
-/// Template error for formatting operations
-#[derive(Debug, thiserror::Error)]
-pub enum TemplateError {
-    #[error("Template compilation error: {0}")]
-    CompilationError(String),
-    #[error("Template rendering error: {0}")]
-    RenderingError(String),
-    #[error("Template not found: {0}")]
-    NotFound(String),
-}
-
-/// Trait for objects that can be formatted in different output formats
-pub trait FormattableOutput: Serialize + Tabled + Sized {
-    /// Convert to JSON format
-    fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self).map_err(|e| {
-            crate::error::CrosstacheError::SerializationError(format!("JSON serialization failed: {e}"))
-        })
-    }
-
-    /// Convert to table format
-    fn to_table(&self) -> String {
-        let table = Table::new([self]);
-        table.to_string()
-    }
-
-    /// Convert to plain text format
-    fn to_plain(&self) -> String {
-        let mut table = Table::new([self]);
-        table.with(Style::ascii()).with(Padding::new(1, 1, 0, 0));
-        table.to_string()
-    }
-
-    /// Convert using a template
-    fn to_template(&self, _template: &str) -> std::result::Result<String, TemplateError> {
-        // Placeholder implementation - will be fully implemented in Phase 2
-        Err(TemplateError::NotFound("Template engine not yet implemented".to_string()))
-    }
-
-    /// Convert to YAML format
-    fn to_yaml(&self) -> Result<String> {
-        serde_yaml::to_string(self).map_err(|e| {
-            crate::error::CrosstacheError::SerializationError(format!("YAML serialization failed: {e}"))
-        })
-    }
-
-    /// Convert to CSV format
-    fn to_csv(&self) -> Result<String> {
-        // Placeholder implementation - will be enhanced later
-        Ok("CSV output not yet implemented".to_string())
-    }
 }
 
 /// Color theme for console output
@@ -114,7 +60,7 @@ impl Default for ColorTheme {
 
 /// Table formatter with color support
 pub struct TableFormatter {
-    theme: ColorTheme,
+    _theme: ColorTheme,
     format: OutputFormat,
     no_color: bool,
 }
@@ -123,7 +69,7 @@ impl TableFormatter {
     /// Create a new table formatter
     pub fn new(format: OutputFormat, no_color: bool) -> Self {
         Self {
-            theme: ColorTheme::default(),
+            _theme: ColorTheme::default(),
             format,
             no_color,
         }
@@ -361,52 +307,6 @@ impl DisplayUtils {
     }
 }
 
-/// Progress indicator for long-running operations
-pub struct ProgressIndicator {
-    message: String,
-    no_color: bool,
-}
-
-impl ProgressIndicator {
-    /// Create a new progress indicator
-    pub fn new(message: String, no_color: bool) -> Self {
-        Self { message, no_color }
-    }
-
-    /// Start the progress indicator
-    pub fn start(&self) -> Result<()> {
-        if self.no_color {
-            print!("{} ... ", self.message);
-        } else {
-            print!("{} ... ", self.message.clone().with(CrosstermColor::Cyan));
-        }
-        stdout().flush()?;
-        Ok(())
-    }
-
-    /// Finish the progress indicator with success
-    pub fn finish_success(&self, result_message: Option<&str>) -> Result<()> {
-        let message = result_message.unwrap_or("Done");
-        if self.no_color {
-            println!("✓ {message}");
-        } else {
-            println!("✓ {}", message.with(CrosstermColor::Green));
-        }
-        Ok(())
-    }
-
-    /// Finish the progress indicator with error
-    pub fn finish_error(&self, error_message: Option<&str>) -> Result<()> {
-        let message = error_message.unwrap_or("Failed");
-        if self.no_color {
-            println!("✗ {message}");
-        } else {
-            println!("✗ {}", message.with(CrosstermColor::Red));
-        }
-        Ok(())
-    }
-}
-
 /// Convenience function for formatting a table with default settings
 pub fn format_table(mut table: Table, no_color: bool) -> String {
     table
@@ -436,8 +336,6 @@ mod tests {
         #[tabled(rename = "Status")]
         status: String,
     }
-
-    impl FormattableOutput for TestData {}
 
     #[test]
     fn test_table_formatting() {
@@ -473,74 +371,4 @@ mod tests {
         assert!(result.contains("Test Vault"));
     }
 
-    #[test]
-    fn test_formattable_output_json() {
-        let test_data = TestData {
-            name: "test-secret".to_string(),
-            value: "test-value".to_string(),
-            status: "active".to_string(),
-        };
-
-        let json_result = test_data.to_json();
-        assert!(json_result.is_ok());
-        
-        let json_str = json_result.unwrap();
-        assert!(json_str.contains("test-secret"));
-        assert!(json_str.contains("test-value"));
-        assert!(json_str.contains("active"));
-    }
-
-    #[test]
-    fn test_formattable_output_table() {
-        let test_data = TestData {
-            name: "test-secret".to_string(),
-            value: "test-value".to_string(),
-            status: "active".to_string(),
-        };
-
-        let table_result = test_data.to_table();
-        assert!(table_result.contains("Name"));
-        assert!(table_result.contains("test-secret"));
-    }
-
-    #[test]
-    fn test_formattable_output_yaml() {
-        let test_data = TestData {
-            name: "test-secret".to_string(),
-            value: "test-value".to_string(),
-            status: "active".to_string(),
-        };
-
-        let yaml_result = test_data.to_yaml();
-        assert!(yaml_result.is_ok());
-        
-        let yaml_str = yaml_result.unwrap();
-        assert!(yaml_str.contains("test-secret"));
-        assert!(yaml_str.contains("test-value"));
-    }
-
-    #[test]
-    fn test_formattable_output_plain() {
-        let test_data = TestData {
-            name: "test-secret".to_string(),
-            value: "test-value".to_string(),
-            status: "active".to_string(),
-        };
-
-        let plain_result = test_data.to_plain();
-        assert!(plain_result.contains("test-secret"));
-        assert!(plain_result.contains("Name"));
-    }
-
-    #[test]
-    fn test_formattable_output_template_placeholder() {
-        let test_data = TestData {
-            name: "test-secret".to_string(),
-            value: "test-value".to_string(),
-            status: "active".to_string(),
-        };
-
-        let template_result = test_data.to_template("{{name}}: {{status}}");
-        assert!(template_result.is_err()); // Should fail as template engine not implemented yet
-    }
 }

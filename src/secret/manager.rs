@@ -4,9 +4,7 @@
 //! including name sanitization, group management, and advanced operations.
 
 use async_trait::async_trait;
-#[allow(unused_imports)]
-use azure_core::auth::TokenCredential;
-use azure_security_keyvault::{prelude::*, SecretClient};
+use azure_security_keyvault::SecretClient;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -17,7 +15,7 @@ use tabled::Tabled;
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::models::SecretInfo;
-use crate::utils::format::{DisplayUtils, FormattableOutput, OutputFormat, TableFormatter};
+use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
 use crate::utils::helpers::{parse_connection_string, validate_folder_path};
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
 use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name};
@@ -48,8 +46,6 @@ pub struct SecretProperties {
     #[tabled(rename = "Content Type")]
     pub content_type: String,
 }
-
-impl FormattableOutput for SecretProperties {}
 
 /// Secret creation/update request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,8 +110,6 @@ pub struct SecretSummary {
     pub content_type: String,
 }
 
-impl FormattableOutput for SecretSummary {}
-
 /// Connection string component
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct ConnectionComponent {
@@ -167,7 +161,7 @@ pub trait SecretOperations: Send + Sync {
     async fn update_secret(
         &self,
         vault_name: &str,
-        secret_name: &str,
+        _secret_name: &str,
         request: &SecretRequest,
     ) -> Result<SecretProperties>;
 
@@ -302,36 +296,6 @@ impl AzureSecretOperations {
         tags.get("folder").cloned()
     }
 
-    /// Map Azure SDK response to SecretProperties
-    fn map_azure_response_to_properties(
-        &self,
-        response: KeyVaultGetSecretResponse,
-        sanitized_name: &str,
-        tags: &HashMap<String, String>,
-    ) -> Result<SecretProperties> {
-        // Extract version from the response ID if available
-        let version = response.id.clone();
-
-        // Get the original name from tags or use provided name
-        let original_name = self.get_original_name(sanitized_name, tags);
-
-        Ok(SecretProperties {
-            name: sanitized_name.to_string(),
-            original_name,
-            value: Some(response.value), // Set operation always includes the value
-            version,
-            created_on: response.attributes.created_on.to_string(),
-            updated_on: response.attributes.updated_on.to_string(),
-            enabled: response.attributes.enabled,
-            expires_on: response.attributes.expires_on.map(|dt| {
-                chrono::DateTime::from_timestamp(dt.unix_timestamp(), 0)
-                    .unwrap_or_else(chrono::Utc::now)
-            }),
-            not_before: None, // not_before field not available in v0.20 response
-            tags: tags.clone(),
-            content_type: "text/plain".to_string(), // content_type not available in v0.20 response
-        })
-    }
 }
 
 #[async_trait]
@@ -416,7 +380,7 @@ impl SecretOperations for AzureSecretOperations {
         }
 
         // Parse the response and convert to SecretProperties
-        let json: serde_json::Value = response.json().await.map_err(|e| {
+        let _json: serde_json::Value = response.json().await.map_err(|e| {
             CrosstacheError::serialization(format!("Failed to parse set secret response: {e}"))
         })?;
 
@@ -673,7 +637,7 @@ impl SecretOperations for AzureSecretOperations {
         }
 
         // Handle pagination if there's a nextLink
-        if let Some(next_link) = json.get("nextLink").and_then(|v| v.as_str()) {
+        if let Some(_next_link) = json.get("nextLink").and_then(|v| v.as_str()) {
             // TODO: Implement pagination support
             eprintln!("Warning: Pagination not yet implemented, showing first page only");
         }
@@ -719,7 +683,7 @@ impl SecretOperations for AzureSecretOperations {
     async fn update_secret(
         &self,
         vault_name: &str,
-        secret_name: &str,
+        _secret_name: &str,
         request: &SecretRequest,
     ) -> Result<SecretProperties> {
         // For update operations, Azure Key Vault doesn't have a separate update operation
@@ -1069,7 +1033,7 @@ impl SecretManager {
             .await?;
         
         // Build the vault URI
-        let vault_uri = format!("https://{}.vault.azure.net", vault_name);
+        let vault_uri = format!("https://{vault_name}.vault.azure.net");
         
         // Build the secret ID (simulated since we don't have it from SecretProperties)
         let id = format!("{}/secrets/{}/{}", vault_uri, secret_props.name, secret_props.version);

@@ -60,7 +60,7 @@ impl ResourceDetector {
                 "key", "crt", "cer", "pfx", "p12", "jks", "keystore",
             ];
             
-            if let Some(extension) = name.split('.').last() {
+            if let Some(extension) = name.split('.').next_back() {
                 let ext_lower = extension.to_lowercase();
                 if common_extensions.contains(&ext_lower.as_str()) {
                     return true;
@@ -86,17 +86,17 @@ impl ResourceDetector {
         // - No consecutive hyphens
         
         let len = name.len();
-        if len < 3 || len > 24 {
+        if !(3..=24).contains(&len) {
             return false;
         }
-        
+
         // Check if it starts with a letter
-        if !name.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+        if !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
             return false;
         }
-        
+
         // Check if it ends with a letter or digit
-        if !name.chars().last().map_or(false, |c| c.is_ascii_alphanumeric()) {
+        if !name.chars().last().is_some_and(|c| c.is_ascii_alphanumeric()) {
             return false;
         }
         
@@ -139,7 +139,7 @@ impl ResourceDetector {
     pub fn is_valid_vault_name(name: &str) -> bool {
         // More strict validation for vault names
         let len = name.len();
-        if len < 3 || len > 24 {
+        if !(3..=24).contains(&len) {
             return false;
         }
         
@@ -235,7 +235,7 @@ impl ResourceDetector {
             }
             ResourceType::File => {
                 if resource.contains('.') {
-                    format!("Has file extension: .{}", resource.split('.').last().unwrap_or(""))
+                    format!("Has file extension: .{}", resource.split('.').next_back().unwrap_or(""))
                 } else if resource.contains('/') || resource.contains('\\') {
                     "Contains path separators".to_string()
                 } else {

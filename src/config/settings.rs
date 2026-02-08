@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 use tabled::Tabled;
-use crate::utils::format::FormattableOutput;
 use std::fmt;
 
 /// Azure credential type priority for authentication
@@ -51,7 +50,7 @@ impl std::str::FromStr for AzureCredentialType {
             "managed_identity" | "managed-identity" | "msi" => Ok(Self::ManagedIdentity),
             "environment" | "env" => Ok(Self::Environment),
             "default" => Ok(Self::Default),
-            _ => Err(format!("Invalid credential type: {}. Valid options: cli, managed_identity, environment, default", s)),
+            _ => Err(format!("Invalid credential type: {s}. Valid options: cli, managed_identity, environment, default")),
         }
     }
 }
@@ -109,8 +108,6 @@ pub struct Config {
     #[serde(default)]
     pub azure_credential_priority: AzureCredentialType,
 }
-
-impl FormattableOutput for Config {}
 
 impl Default for Config {
     fn default() -> Self {

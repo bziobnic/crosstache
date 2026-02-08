@@ -95,7 +95,7 @@ impl std::fmt::Display for SecretInfo {
         
         if let Some(original) = &self.original_name {
             if original != &self.name {
-                writeln!(f, "  Original Name: {}", original)?;
+                writeln!(f, "  Original Name: {original}")?;
             }
         }
         
@@ -103,7 +103,7 @@ impl std::fmt::Display for SecretInfo {
         writeln!(f, "  Enabled: {}", if self.enabled { "Yes" } else { "No" })?;
         
         if let Some(version) = &self.version {
-            writeln!(f, "  Current Version: {}", version)?;
+            writeln!(f, "  Current Version: {version}")?;
         }
         
         if let Some(created) = self.created {
@@ -123,11 +123,11 @@ impl std::fmt::Display for SecretInfo {
         }
         
         if let Some(content_type) = &self.content_type {
-            writeln!(f, "  Content Type: {}", content_type)?;
+            writeln!(f, "  Content Type: {content_type}")?;
         }
         
         if let Some(recovery_level) = &self.recovery_level {
-            writeln!(f, "  Recovery Level: {}", recovery_level)?;
+            writeln!(f, "  Recovery Level: {recovery_level}")?;
         }
         
         if !self.groups.is_empty() {
@@ -135,15 +135,15 @@ impl std::fmt::Display for SecretInfo {
         }
         
         if let Some(folder) = &self.folder {
-            writeln!(f, "  Folder: {}", folder)?;
+            writeln!(f, "  Folder: {folder}")?;
         }
         
         if let Some(note) = &self.note {
-            writeln!(f, "  Note: {}", note)?;
+            writeln!(f, "  Note: {note}")?;
         }
         
         if let Some(count) = self.version_count {
-            writeln!(f, "  Total Versions: {}", count)?;
+            writeln!(f, "  Total Versions: {count}")?;
         }
         
         // Display other tags (excluding system tags)
@@ -156,7 +156,7 @@ impl std::fmt::Display for SecretInfo {
         if !other_tags.is_empty() {
             writeln!(f, "  Additional Tags:")?;
             for (key, value) in other_tags {
-                writeln!(f, "    {}: {}", key, value)?;
+                writeln!(f, "    {key}: {value}")?;
             }
         }
         

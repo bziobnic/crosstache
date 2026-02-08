@@ -52,9 +52,6 @@ pub trait VaultOperations: Send + Sync {
     /// Permanently purge vault
     async fn purge_vault(&self, vault_name: &str, location: &str) -> Result<()>;
 
-    /// List deleted vaults
-    async fn list_deleted_vaults(&self, subscription_id: &str) -> Result<Vec<VaultSummary>>;
-
     /// Grant access to vault
     async fn grant_access(
         &self,
@@ -75,23 +72,6 @@ pub trait VaultOperations: Send + Sync {
     /// List vault access assignments
     async fn list_access(&self, vault_name: &str, resource_group: &str) -> Result<Vec<VaultRole>>;
 
-    /// Check vault existence
-    async fn vault_exists(&self, vault_name: &str, resource_group: &str) -> Result<bool>;
-
-    /// Get vault tags
-    async fn get_vault_tags(
-        &self,
-        vault_name: &str,
-        resource_group: &str,
-    ) -> Result<HashMap<String, String>>;
-
-    /// Update vault tags
-    async fn update_vault_tags(
-        &self,
-        vault_name: &str,
-        resource_group: &str,
-        tags: HashMap<String, String>,
-    ) -> Result<()>;
 }
 
 /// Azure vault operations implementation
@@ -523,68 +503,6 @@ impl VaultOperations for AzureVaultOperations {
         self.execute_with_retry(operation).await
     }
 
-    async fn list_deleted_vaults(&self, subscription_id: &str) -> Result<Vec<VaultSummary>> {
-        let operation = || async {
-            let headers = self.create_headers().await?;
-            let url = self.build_arm_url(&format!(
-                "/subscriptions/{subscription_id}/providers/Microsoft.KeyVault/deletedVaults?api-version=2023-07-01"
-            ));
-
-            let response = self
-                .http_client
-                .get(&url)
-                .headers(headers)
-                .send()
-                .await
-                .map_err(|e| {
-                    CrosstacheError::network(format!("Failed to list deleted vaults: {e}"))
-                })?;
-
-            if !response.status().is_success() {
-                let status_code = response.status().as_u16();
-                let error_body = response.text().await.unwrap_or_default();
-                return Err(self.parse_azure_error(status_code, &error_body));
-            }
-
-            let response_data: Value = response.json().await.map_err(|e| {
-                CrosstacheError::serialization(format!("Failed to parse deleted vaults response: {e}"))
-            })?;
-
-            let mut vaults = Vec::new();
-            if let Some(vault_array) = response_data.get("value").and_then(|v| v.as_array()) {
-                for vault_value in vault_array {
-                    if let Some(properties) = vault_value.get("properties") {
-                        let name = vault_value
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("unknown");
-                        let location = properties
-                            .get("location")
-                            .and_then(|l| l.as_str())
-                            .unwrap_or("unknown");
-                        let deletion_date = properties
-                            .get("deletionDate")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("unknown");
-
-                        vaults.push(VaultSummary {
-                            name: name.to_string(),
-                            location: location.to_string(),
-                            resource_group: "deleted".to_string(),
-                            status: "Soft Deleted".to_string(),
-                            secret_count: None,
-                            created_at: deletion_date.to_string(),
-                        });
-                    }
-                }
-            }
-
-            Ok(vaults)
-        };
-
-        self.execute_with_retry(operation).await
-    }
-
     async fn grant_access(
         &self,
         vault_name: &str,
@@ -700,43 +618,6 @@ impl VaultOperations for AzureVaultOperations {
         self.execute_with_retry(operation).await
     }
 
-    async fn vault_exists(&self, vault_name: &str, resource_group: &str) -> Result<bool> {
-        match self.get_vault(vault_name, resource_group).await {
-            Ok(_) => Ok(true),
-            Err(CrosstacheError::VaultNotFound { .. }) => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn get_vault_tags(
-        &self,
-        vault_name: &str,
-        resource_group: &str,
-    ) -> Result<HashMap<String, String>> {
-        let vault = self.get_vault(vault_name, resource_group).await?;
-        Ok(vault.tags)
-    }
-
-    async fn update_vault_tags(
-        &self,
-        vault_name: &str,
-        resource_group: &str,
-        tags: HashMap<String, String>,
-    ) -> Result<()> {
-        let update_request = VaultUpdateRequest {
-            enabled_for_deployment: None,
-            enabled_for_disk_encryption: None,
-            enabled_for_template_deployment: None,
-            soft_delete_retention_in_days: None,
-            purge_protection: None,
-            tags: Some(tags),
-            access_policies: None,
-        };
-
-        self.update_vault(vault_name, resource_group, &update_request)
-            .await?;
-        Ok(())
-    }
 }
 
 impl AzureVaultOperations {

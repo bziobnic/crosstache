@@ -7,7 +7,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tabled::Tabled;
-use crate::utils::format::FormattableOutput;
 /// Display function for Option<String> in tables
 fn display_option(opt: &Option<String>) -> String {
     match opt {
@@ -60,8 +59,6 @@ pub struct VaultProperties {
     #[tabled(skip)]
     pub tags: HashMap<String, String>,
 }
-
-impl FormattableOutput for VaultProperties {}
 
 /// Access policy for a Key Vault
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
@@ -304,8 +301,6 @@ pub struct VaultSummary {
     pub created_at: String,
 }
 
-impl FormattableOutput for VaultSummary {}
-
 impl VaultProperties {
     /// Convert to vault summary
     pub fn to_summary(&self, secret_count: Option<u32>) -> VaultSummary {
@@ -362,50 +357,5 @@ impl AccessPolicy {
         }
     }
 
-    /// Check if policy has specific permission
-    pub fn has_secret_permission(&self, permission: &str) -> bool {
-        self.permissions.secrets.contains(&permission.to_string())
-    }
-
-    /// Check if policy has specific key permission
-    pub fn has_key_permission(&self, permission: &str) -> bool {
-        self.permissions.keys.contains(&permission.to_string())
-    }
 }
 
-/// Built-in Azure role definitions for Key Vault
-pub struct BuiltInRoles;
-
-impl BuiltInRoles {
-    /// Key Vault Administrator role ID
-    pub const KEY_VAULT_ADMINISTRATOR: &'static str = "00482a5a-887f-4fb3-b363-3b7fe8e74483";
-
-    /// Key Vault Secrets Officer role ID
-    pub const KEY_VAULT_SECRETS_OFFICER: &'static str = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7";
-
-    /// Key Vault Secrets User role ID
-    pub const KEY_VAULT_SECRETS_USER: &'static str = "4633458b-17de-408a-b874-0445c86b69e6";
-
-    /// Key Vault Reader role ID
-    pub const KEY_VAULT_READER: &'static str = "21090545-7ca7-4776-b22c-e363652d74d2";
-
-    /// Get role name from role ID
-    pub fn get_role_name(role_id: &str) -> Option<&'static str> {
-        match role_id {
-            Self::KEY_VAULT_ADMINISTRATOR => Some("Key Vault Administrator"),
-            Self::KEY_VAULT_SECRETS_OFFICER => Some("Key Vault Secrets Officer"),
-            Self::KEY_VAULT_SECRETS_USER => Some("Key Vault Secrets User"),
-            Self::KEY_VAULT_READER => Some("Key Vault Reader"),
-            _ => None,
-        }
-    }
-
-    /// Get role ID from access level
-    pub fn get_role_id_for_access_level(access_level: &AccessLevel) -> &'static str {
-        match access_level {
-            AccessLevel::Reader => Self::KEY_VAULT_READER,
-            AccessLevel::Contributor => Self::KEY_VAULT_SECRETS_OFFICER,
-            AccessLevel::Admin => Self::KEY_VAULT_ADMINISTRATOR,
-        }
-    }
-}
