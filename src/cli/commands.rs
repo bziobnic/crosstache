@@ -107,7 +107,7 @@ pub struct Cli {
 }
 
 /// Resource type for the info command
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
 pub enum ResourceType {
     /// Azure Key Vault
     Vault,
@@ -656,7 +656,7 @@ impl Cli {
             use std::str::FromStr;
             
             config.azure_credential_priority = AzureCredentialType::from_str(&cred_type)
-                .map_err(|e| CrosstacheError::config(e))?;
+                .map_err(CrosstacheError::config)?;
         }
         
         match self.command {
@@ -1374,7 +1374,7 @@ async fn execute_info_command(
             detected_type,
             resource_group.is_some(),
         );
-        eprintln!("Auto-detected resource type: {} ({})", detected_type, reason);
+        eprintln!("Auto-detected resource type: {detected_type} ({reason})");
     }
     
     // Route to the appropriate handler
@@ -1395,12 +1395,12 @@ async fn execute_info_command(
 async fn execute_vault_info_from_root(
     vault_name: &str,
     resource_group: Option<String>,
-    subscription: Option<String>,
+    _subscription: Option<String>,
     config: &Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use std::sync::Arc;
-    
+
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -1458,7 +1458,7 @@ async fn execute_secret_info_from_root(
         })?;
         println!("{json_output}");
     } else {
-        println!("{}", secret_info);
+        println!("{secret_info}");
     }
     
     Ok(())
@@ -2205,6 +2205,7 @@ async fn execute_secret_share(
     command: ShareCommands,
     config: &Config,
 ) -> Result<()> {
+    let _ = secret_manager;
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(None).await?;
 
@@ -2214,18 +2215,18 @@ async fn execute_secret_share(
             user,
             level,
         } => {
-            println!(
-                "TODO: Grant {level} access to secret '{secret_name}' for user '{user}' in vault '{vault_name}'"
+            eprintln!(
+                "Secret sharing (grant {level} access to '{secret_name}' for '{user}' in vault '{vault_name}') is not yet implemented."
             );
         }
         ShareCommands::Revoke { secret_name, user } => {
-            println!(
-                "TODO: Revoke access to secret '{secret_name}' for user '{user}' in vault '{vault_name}'"
+            eprintln!(
+                "Secret sharing (revoke access to '{secret_name}' for '{user}' in vault '{vault_name}') is not yet implemented."
             );
         }
         ShareCommands::List { secret_name } => {
-            println!(
-                "TODO: List access permissions for secret '{secret_name}' in vault '{vault_name}'"
+            eprintln!(
+                "Secret sharing (list permissions for '{secret_name}' in vault '{vault_name}') is not yet implemented."
             );
         }
     }
@@ -2237,7 +2238,7 @@ async fn execute_vault_restore(
     vault_manager: &VaultManager,
     name: &str,
     location: &str,
-    config: &Config,
+    _config: &Config,
 ) -> Result<()> {
     vault_manager.restore_vault(name, location).await?;
     Ok(())
@@ -2248,7 +2249,7 @@ async fn execute_vault_purge(
     name: &str,
     location: &str,
     force: bool,
-    config: &Config,
+    _config: &Config,
 ) -> Result<()> {
     vault_manager
         .purge_vault_permanent(name, location, force)
@@ -2257,7 +2258,7 @@ async fn execute_vault_purge(
 }
 
 async fn execute_vault_export(
-    vault_manager: &VaultManager,
+    _vault_manager: &VaultManager,
     name: &str,
     resource_group: Option<String>,
     output: Option<String>,
@@ -2272,7 +2273,7 @@ async fn execute_vault_export(
     use std::io::Write;
     use std::sync::Arc;
 
-    let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+    let _resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
     // Create secret manager to get secrets from vault
     let auth_provider = Arc::new(
@@ -2457,7 +2458,7 @@ async fn execute_vault_export(
 }
 
 async fn execute_vault_import(
-    vault_manager: &VaultManager,
+    _vault_manager: &VaultManager,
     name: &str,
     resource_group: Option<String>,
     input: Option<String>,
@@ -2472,7 +2473,7 @@ async fn execute_vault_import(
     use std::io::{self, Read};
     use std::sync::Arc;
 
-    let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+    let _resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
     // Read import data
     let import_data = match input {
@@ -2671,12 +2672,9 @@ async fn execute_vault_update(
         access_policies: None, // Don't modify access policies in update
     };
 
-    // Note: This would need proper implementation in vault manager
-    println!(
-        "Updating vault '{name}' in resource group '{resource_group}'..."
-    );
-    println!("Update request: {update_request:?}");
-    println!("TODO: Implement vault update functionality");
+    // Vault update requires proper implementation in vault manager
+    let _ = (vault_manager, update_request);
+    eprintln!("Vault update for '{name}' in resource group '{resource_group}' is not yet implemented.");
 
     Ok(())
 }
@@ -2741,7 +2739,7 @@ async fn execute_vault_share(
 
             let output_format = match format.to_lowercase().as_str() {
                 "json" => OutputFormat::Json,
-                "table" | _ => OutputFormat::Table,
+                _ => OutputFormat::Table,
             };
 
             vault_manager
@@ -2949,7 +2947,7 @@ async fn execute_file_upload(
     tags: Vec<(String, String)>,
     content_type: Option<String>,
     progress: bool,
-    config: &Config,
+    _config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileUploadRequest;
     use std::collections::HashMap;
@@ -3020,7 +3018,7 @@ async fn execute_file_download(
     output: Option<String>,
     stream: bool,
     force: bool,
-    config: &Config,
+    _config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileDownloadRequest;
     use std::fs;
@@ -3079,7 +3077,7 @@ async fn execute_file_list(
     blob_manager: &BlobManager,
     prefix: Option<String>,
     group: Option<String>,
-    include_metadata: bool,
+    _include_metadata: bool,
     limit: Option<usize>,
     config: &Config,
 ) -> Result<()> {
@@ -3146,7 +3144,7 @@ async fn execute_file_delete(
     blob_manager: &BlobManager,
     name: &str,
     force: bool,
-    config: &Config,
+    _config: &Config,
 ) -> Result<()> {
     // Confirmation unless forced
     if !force {
@@ -3266,32 +3264,32 @@ async fn execute_file_upload_recursive(
         let path = Path::new(path_str);
         if !path.exists() {
             if continue_on_error {
-                eprintln!("❌ Path not found: {}", path_str);
+                eprintln!("❌ Path not found: {path_str}");
                 continue;
             } else {
-                return Err(CrosstacheError::config(format!("Path not found: {}", path_str)));
+                return Err(CrosstacheError::config(format!("Path not found: {path_str}")));
             }
         }
-        
+
         let files = collect_files_recursive(path)?;
         all_files.extend(files);
     }
-    
+
     if all_files.is_empty() {
         println!("No files found to upload");
         return Ok(());
     }
-    
+
     println!("Found {} file(s) to upload", all_files.len());
-    
+
     let mut success_count = 0;
     let mut failure_count = 0;
-    
+
     for file_path in &all_files {
         let file_path_str = file_path.to_string_lossy().to_string();
-        
-        println!("Uploading: {}", file_path_str);
-        
+
+        println!("Uploading: {file_path_str}");
+
         let result = execute_file_upload(
             blob_manager,
             &file_path_str,
@@ -3303,13 +3301,13 @@ async fn execute_file_upload_recursive(
             progress,
             config,
         ).await;
-        
+
         match result {
             Ok(_) => {
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("❌ Failed to upload '{}': {}", file_path_str, e);
+                eprintln!("❌ Failed to upload '{file_path_str}': {e}");
                 failure_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -3317,18 +3315,17 @@ async fn execute_file_upload_recursive(
             }
         }
     }
-    
+
     // Print summary
     println!("\n📊 Upload Summary:");
-    println!("  ✅ Successful: {}", success_count);
+    println!("  ✅ Successful: {success_count}");
     if failure_count > 0 {
-        println!("  ❌ Failed: {}", failure_count);
+        println!("  ❌ Failed: {failure_count}");
     }
-    
+
     if failure_count > 0 && continue_on_error {
         return Err(CrosstacheError::azure_api(format!(
-            "{} file(s) failed to upload",
-            failure_count
+            "{failure_count} file(s) failed to upload"
         )));
     }
     
@@ -3376,11 +3373,11 @@ async fn execute_file_upload_multiple(
         }
     }
     
-    println!("\nUpload completed: {} succeeded, {} failed", success_count, error_count);
-    
+    println!("\nUpload completed: {success_count} succeeded, {error_count} failed");
+
     if error_count > 0 && !continue_on_error {
         return Err(CrosstacheError::azure_api(
-            format!("{} file(s) failed to upload", error_count)
+            format!("{error_count} file(s) failed to upload")
         ));
     }
     
@@ -3424,11 +3421,11 @@ async fn execute_file_download_multiple(
         }
     }
     
-    println!("\nDownload completed: {} succeeded, {} failed", success_count, error_count);
-    
+    println!("\nDownload completed: {success_count} succeeded, {error_count} failed");
+
     if error_count > 0 && !continue_on_error {
         return Err(CrosstacheError::azure_api(
-            format!("{} file(s) failed to download", error_count)
+            format!("{error_count} file(s) failed to download")
         ));
     }
     
@@ -3447,7 +3444,7 @@ async fn execute_file_delete_multiple(
         println!("You are about to delete {} files:", files.len());
         for (i, file) in files.iter().enumerate() {
             if i < 5 {
-                println!("  - {}", file);
+                println!("  - {file}");
             } else if i == 5 {
                 println!("  ... and {} more", files.len() - 5);
                 break;
@@ -3486,11 +3483,11 @@ async fn execute_file_delete_multiple(
         }
     }
     
-    println!("\nDelete completed: {} succeeded, {} failed", success_count, error_count);
-    
+    println!("\nDelete completed: {success_count} succeeded, {error_count} failed");
+
     if error_count > 0 && !continue_on_error {
         return Err(CrosstacheError::azure_api(
-            format!("{} file(s) failed to delete", error_count)
+            format!("{error_count} file(s) failed to delete")
         ));
     }
     
@@ -3506,13 +3503,8 @@ async fn execute_file_sync(
     delete: bool,
     config: &Config,
 ) -> Result<()> {
-    // TODO: Implement file sync functionality
-    println!("File sync functionality not yet implemented");
-    println!("  Local path: {local_path}");
-    println!("  Prefix: {prefix:?}");
-    println!("  Direction: {direction:?}");
-    println!("  Dry run: {dry_run}");
-    println!("  Delete: {delete}");
+    let _ = (blob_manager, local_path, prefix, direction, dry_run, delete, config);
+    eprintln!("File sync is not yet implemented.");
     
     Ok(())
 }
