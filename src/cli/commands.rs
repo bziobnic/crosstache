@@ -3497,12 +3497,9 @@ async fn execute_file_upload_recursive(
                 return Err(CrosstacheError::config(format!("Path not found: {path_str}")));
             }
         }
-        // Canonicalize the base path for consistent relative path calculation
-        let base_path = if path.is_file() {
-            path.parent().unwrap_or(path)
-        } else {
-            path
-        };
+        // Use the parent directory as base path so the top-level folder name
+        // is preserved in blob paths (e.g., docs/api/users.md, not api/users.md)
+        let base_path = path.parent().unwrap_or(path);
 
         let files = collect_files_with_structure(
             path,
