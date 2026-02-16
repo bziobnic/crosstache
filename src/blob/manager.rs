@@ -199,6 +199,124 @@ impl BlobManager {
         Ok(file_infos)
     }
 
+    /// List files and directories hierarchically at a specific prefix level
+    pub async fn list_files_hierarchical(&self, request: FileListRequest) -> Result<Vec<BlobListItem>> {
+        use crate::blob::models::BlobListItem;
+
+        // Create BlobServiceClient using token credential
+        let token_credential = self.auth_provider.get_token_credential();
+        let blob_service = BlobServiceClient::new(&self.storage_account, token_credential);
+
+        // Get container client
+        let container_client = blob_service.container_client(&self.container_name);
+
+        // Create list blobs request with delimiter for hierarchical listing
+        let mut list_builder = container_client.list_blobs();
+
+        // Apply prefix filter if provided (normalize it first)
+        let normalized_prefix = normalize_prefix(request.prefix.clone());
+        if let Some(prefix) = normalized_prefix.clone() {
+            list_builder = list_builder.prefix(prefix);
+        }
+
+        // Apply delimiter for hierarchical listing
+        if let Some(delimiter) = request.delimiter {
+            list_builder = list_builder.delimiter(delimiter);
+        }
+
+        // Enable metadata inclusion for files
+        list_builder = list_builder.include_metadata(true);
+
+        // Execute the list request - collect all pages
+        let mut stream = list_builder.into_stream();
+        let mut items = Vec::new();
+
+        // Process each page of results
+        while let Some(page) = stream.try_next().await
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to list blobs: {e}")))? {
+
+            // Process blob prefixes (directories) first
+            for prefix_item in page.blobs.prefixes() {
+                let full_path = prefix_item.name.clone();
+
+                // Extract just the directory name (after the current prefix)
+                let dir_name = if let Some(ref current_prefix) = normalized_prefix {
+                    full_path.strip_prefix(current_prefix)
+                        .unwrap_or(&full_path)
+                        .to_string()
+                } else {
+                    full_path.clone()
+                };
+
+                items.push(BlobListItem::Directory {
+                    name: dir_name,
+                    full_path,
+                });
+            }
+
+            // Process blobs (files)
+            for blob_item in page.blobs.blobs() {
+                // Extract blob information
+                let name = blob_item.name.clone();
+                let size = blob_item.properties.content_length;
+                let content_type = blob_item.properties.content_type.clone();
+
+                // Convert time::OffsetDateTime to chrono::DateTime<Utc>
+                let last_modified = {
+                    let timestamp = blob_item.properties.last_modified.unix_timestamp();
+                    chrono::DateTime::from_timestamp(timestamp, 0)
+                        .unwrap_or_else(Utc::now)
+                };
+
+                let etag = blob_item.properties.etag.to_string();
+
+                // Process metadata - handle Option<HashMap<String, String>>
+                let metadata = blob_item.metadata.clone().unwrap_or_default();
+
+                // Extract groups from metadata
+                let groups: Vec<String> = metadata
+                    .get("groups")
+                    .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_default();
+
+                // Apply group-based filtering if requested
+                if let Some(filter_groups) = &request.groups {
+                    let matches_group = filter_groups.iter().any(|fg| groups.contains(fg));
+                    if !matches_group {
+                        continue; // Skip this blob
+                    }
+                }
+
+                // For now, skip tags retrieval (requires separate API call)
+                let tags = HashMap::new();
+
+                // Build FileInfo struct
+                let file_info = FileInfo {
+                    name,
+                    size,
+                    content_type,
+                    last_modified,
+                    etag,
+                    groups,
+                    metadata,
+                    tags,
+                };
+
+                items.push(BlobListItem::File(file_info));
+            }
+        }
+
+        // Sort items: directories first, then files (both alphabetically)
+        sort_blob_items(&mut items);
+
+        // Apply limit if specified
+        if let Some(limit) = request.limit {
+            items.truncate(limit);
+        }
+
+        Ok(items)
+    }
+
     /// Download a file from blob storage
     pub async fn download_file(&self, request: FileDownloadRequest) -> Result<Vec<u8>> {
         // Validate download request parameters
@@ -209,13 +327,13 @@ impl BlobManager {
         // Create BlobServiceClient using token credential
         let token_credential = self.auth_provider.get_token_credential();
         let blob_service = BlobServiceClient::new(&self.storage_account, token_credential);
-        
+
         // Get container and blob clients
         let container_client = blob_service.container_client(&self.container_name);
         let blob_client = container_client.blob_client(&request.name);
-        
-        // Check if blob exists before attempting download
-        let _properties = blob_client
+
+        // Check if blob exists and get its size before attempting download
+        let properties = blob_client
             .get_properties()
             .await
             .map_err(|e| {
@@ -226,13 +344,21 @@ impl BlobManager {
                     CrosstacheError::azure_api(format!("Failed to check if blob exists: {e}"))
                 }
             })?;
-        
+
+        // Handle empty files specially to avoid HTTP 416 error
+        // Azure's get_content() fails with 416 Range Not Satisfiable for 0-byte blobs
+        let content_length = properties.blob.properties.content_length;
+        if content_length == 0 {
+            // Return empty vec for 0-byte files
+            return Ok(Vec::new());
+        }
+
         // Download the entire blob at once (recommended for smaller files)
         let blob_content = blob_client
             .get_content()
             .await
             .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {e}")))?;
-        
+
         Ok(blob_content)
     }
 
@@ -352,13 +478,13 @@ impl BlobManager {
         // Create BlobServiceClient using token credential
         let token_credential = self.auth_provider.get_token_credential();
         let blob_service = BlobServiceClient::new(&self.storage_account, token_credential);
-        
+
         // Get container and blob clients
         let container_client = blob_service.container_client(&self.container_name);
         let blob_client = container_client.blob_client(name);
-        
-        // Check if blob exists before attempting download
-        let _properties = blob_client
+
+        // Check if blob exists and get its size before attempting download
+        let properties = blob_client
             .get_properties()
             .await
             .map_err(|e| {
@@ -370,6 +496,17 @@ impl BlobManager {
                 }
             })?;
 
+        // Handle empty files specially to avoid HTTP 416 error
+        // Azure's get_content() fails with 416 Range Not Satisfiable for 0-byte blobs
+        let content_length = properties.blob.properties.content_length;
+        if content_length == 0 {
+            // For empty files, just flush the writer and return
+            use tokio::io::AsyncWriteExt;
+            writer.flush().await
+                .map_err(|e| CrosstacheError::unknown(format!("Failed to flush data: {e}")))?;
+            return Ok(());
+        }
+
         // For streaming large files, we'll use the get_content method for now
         // The Azure SDK v0.21 handles chunking internally for better reliability
         let blob_content = blob_client
@@ -379,15 +516,15 @@ impl BlobManager {
 
         // Stream the data and write to the provided writer
         use tokio::io::AsyncWriteExt;
-        
+
         // Write all content at once (Azure SDK already optimized the download)
         writer.write_all(&blob_content).await
             .map_err(|e| CrosstacheError::unknown(format!("Failed to write blob data: {e}")))?;
-        
+
         // Ensure all data is flushed
         writer.flush().await
             .map_err(|e| CrosstacheError::unknown(format!("Failed to flush data: {e}")))?;
-        
+
         Ok(())
     }
 
@@ -432,6 +569,66 @@ impl BlobManager {
     /// Get the storage account name
     pub fn storage_account(&self) -> &str {
         &self.storage_account
+    }
+}
+
+/// Normalize a prefix by ensuring it ends with '/' if non-empty
+fn normalize_prefix(prefix: Option<String>) -> Option<String> {
+    prefix.and_then(|p| {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            None
+        } else if trimmed.ends_with('/') {
+            Some(trimmed.to_string())
+        } else {
+            Some(format!("{}/", trimmed))
+        }
+    })
+}
+
+/// Sort blob items: directories first, then files (both alphabetically)
+fn sort_blob_items(items: &mut Vec<BlobListItem>) {
+    use crate::blob::models::BlobListItem;
+
+    items.sort_by(|a, b| {
+        match (a, b) {
+            // Directories before files
+            (BlobListItem::Directory { .. }, BlobListItem::File(_)) => std::cmp::Ordering::Less,
+            (BlobListItem::File(_), BlobListItem::Directory { .. }) => std::cmp::Ordering::Greater,
+
+            // Both directories: alphabetical by name
+            (BlobListItem::Directory { name: n1, .. }, BlobListItem::Directory { name: n2, .. }) => {
+                n1.to_lowercase().cmp(&n2.to_lowercase())
+            },
+
+            // Both files: alphabetical by name
+            (BlobListItem::File(f1), BlobListItem::File(f2)) => {
+                f1.name.to_lowercase().cmp(&f2.name.to_lowercase())
+            },
+        }
+    });
+}
+
+/// Format file size in human-readable format
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{} {}", size as u64, UNITS[unit_idx])
+    } else {
+        format!("{:.2} {}", size, UNITS[unit_idx])
     }
 }
 

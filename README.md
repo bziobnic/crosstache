@@ -231,7 +231,7 @@ xv context show
 
 ### File Operations
 
-crosstache includes basic file management capabilities using Azure Blob Storage:
+crosstache includes comprehensive file management capabilities using Azure Blob Storage:
 
 ```bash
 # Quick file upload
@@ -249,6 +249,78 @@ xv file delete config.json
 # File editing (download, edit, upload)
 xv file edit config.json
 ```
+
+#### Recursive Upload with Directory Structure Preservation
+
+Upload entire directory trees while preserving folder structure:
+
+```bash
+# Upload directory preserving structure (default behavior)
+xv file upload ./docs --recursive
+
+# Result in blob storage:
+# docs/README.md
+# docs/api/v1/users.md
+# docs/api/v1/auth.md
+# docs/guides/quickstart.md
+
+# Upload with custom prefix
+xv file upload ./src --recursive --prefix "backup/2024-01-15"
+
+# Result in blob storage:
+# backup/2024-01-15/src/main.rs
+# backup/2024-01-15/src/lib.rs
+
+# Flatten structure (upload all files to root)
+xv file upload ./docs --recursive --flatten
+
+# Result in blob storage:
+# README.md
+# users.md
+# auth.md
+# quickstart.md
+```
+
+**Directory Upload Features:**
+- ✅ **Structure preservation**: Maintains folder hierarchy using Azure blob name prefixes
+- ✅ **Custom prefixes**: Add prefixes like `backup/2024-01-15/` to organize uploads
+- ✅ **Flatten option**: Upload all files to container root (backward compatibility)
+- ✅ **Security**: Hidden files (`.git`, `.env`) are automatically skipped
+- ✅ **Safety**: Symbolic links are skipped to prevent loops
+- ✅ **Validation**: Checks blob name length limits (1024 chars max)
+
+#### Recursive Download with Directory Structure Recreation
+
+Download entire directory trees from blob storage while recreating folder structure:
+
+```bash
+# Download directory preserving structure (default behavior)
+xv file download "backup/2024-01-15" --recursive
+
+# Result locally:
+# ./backup/2024-01-15/api/users.md
+# ./backup/2024-01-15/api/auth.md
+# ./backup/2024-01-15/docs/guide.md
+
+# Flatten structure (download all files to current directory)
+xv file download "backup/2024-01-15" --recursive --flatten
+
+# Result locally:
+# ./users.md
+# ./auth.md
+# ./guide.md
+
+# Download to custom output directory
+xv file download "backup/2024-01-15" --recursive --output ./restored
+```
+
+**Directory Download Features:**
+- ✅ **Structure recreation**: Recreates local directory hierarchy from blob names
+- ✅ **Flatten option**: Download all files to a single directory
+- ✅ **Custom output**: Specify custom local directory for downloads
+- ✅ **Empty file support**: Handles 0-byte files correctly
+- ✅ **Force overwrite**: Use `--force` to overwrite existing files
+- ✅ **Error handling**: Continue on error with `--continue-on-error` flag
 
 **Note**: File operations require blob storage configuration during `xv init`.
 

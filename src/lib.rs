@@ -4,6 +4,7 @@
 //! including vault management, secret operations, and access control.
 
 pub mod auth;
+#[cfg(feature = "file-ops")]
 pub mod blob;
 pub mod cli;
 pub mod config;

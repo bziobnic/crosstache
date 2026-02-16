@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use crate::vault::{VaultCreateRequest, VaultManager};
+#[cfg(feature = "file-ops")]
 use crate::blob::manager::{BlobManager, create_blob_manager};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
@@ -114,6 +115,7 @@ pub enum ResourceType {
     /// Key Vault Secret
     Secret,
     /// Blob Storage File
+    #[cfg(feature = "file-ops")]
     File,
 }
 
@@ -122,6 +124,7 @@ impl std::fmt::Display for ResourceType {
         match self {
             ResourceType::Vault => write!(f, "vault"),
             ResourceType::Secret => write!(f, "secret"),
+            #[cfg(feature = "file-ops")]
             ResourceType::File => write!(f, "file"),
         }
     }
@@ -233,6 +236,7 @@ pub enum Commands {
         command: VaultCommands,
     },
     /// File management commands
+    #[cfg(feature = "file-ops")]
     File {
         #[command(subcommand)]
         command: FileCommands,
@@ -267,6 +271,7 @@ pub enum Commands {
     /// Show detailed version and build information
     Version,
     /// Quick file upload (alias for file upload)
+    #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
     Upload {
         /// Local file path
@@ -282,6 +287,7 @@ pub enum Commands {
         metadata: Vec<String>,
     },
     /// Quick file download (alias for file download)
+    #[cfg(feature = "file-ops")]
     #[command(alias = "down")]
     Download {
         /// Remote file name
@@ -466,6 +472,7 @@ pub enum VaultShareCommands {
     },
 }
 
+#[cfg(feature = "file-ops")]
 #[derive(Subcommand)]
 pub enum FileCommands {
     /// Upload one or more files to blob storage
@@ -479,6 +486,12 @@ pub enum FileCommands {
         /// Upload directory recursively
         #[arg(short = 'r', long)]
         recursive: bool,
+        /// Flatten directory structure (upload all files to container root)
+        #[arg(long, requires = "recursive")]
+        flatten: bool,
+        /// Prefix to add to all uploaded blob names
+        #[arg(long)]
+        prefix: Option<String>,
         /// Groups to assign to the file(s)
         #[arg(short, long)]
         group: Vec<String>,
@@ -500,7 +513,7 @@ pub enum FileCommands {
     },
     /// Download one or more files from blob storage
     Download {
-        /// Remote file name(s) to download
+        /// Remote file name(s) or prefix patterns to download
         #[arg(required = true, num_args = 1..)]
         files: Vec<String>,
         /// Local output path (optional, defaults to current directory)
@@ -509,6 +522,12 @@ pub enum FileCommands {
         /// Rename file (only valid for single file download)
         #[arg(long)]
         rename: Option<String>,
+        /// Download all files matching prefix recursively
+        #[arg(short = 'r', long)]
+        recursive: bool,
+        /// Flatten directory structure (download all files to output root)
+        #[arg(long, requires = "recursive")]
+        flatten: bool,
         /// Stream download for large files
         #[arg(long)]
         stream: bool,
@@ -520,6 +539,11 @@ pub enum FileCommands {
         continue_on_error: bool,
     },
     /// List files in blob storage
+    ///
+    /// By default, lists only immediate children (files and directories) at the
+    /// current prefix level. Use --recursive to list all files recursively.
+    ///
+    /// Directories are shown with a trailing '/' character and listed first.
     #[command(alias = "ls")]
     List {
         /// Filter by prefix
@@ -534,6 +558,9 @@ pub enum FileCommands {
         /// Maximum number of results
         #[arg(long)]
         limit: Option<usize>,
+        /// List all files recursively (show all nested files instead of directory structure)
+        #[arg(short, long)]
+        recursive: bool,
     },
     /// Delete one or more files from blob storage
     #[command(alias = "rm")]
@@ -572,6 +599,7 @@ pub enum FileCommands {
     },
 }
 
+#[cfg(feature = "file-ops")]
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum SyncDirection {
     Up,
@@ -708,6 +736,7 @@ impl Cli {
             } => execute_secret_parse_direct(&connection_string, &format, config).await,
             Commands::Share { command } => execute_secret_share_direct(command, config).await,
             Commands::Vault { command } => execute_vault_command(command, config).await,
+            #[cfg(feature = "file-ops")]
             Commands::File { command } => execute_file_command(command, config).await,
             Commands::Config { command } => execute_config_command(command, config).await,
             Commands::Context { command } => execute_context_command(command, config).await,
@@ -719,9 +748,11 @@ impl Cli {
                 subscription,
             } => execute_info_command(resource, resource_type, resource_group, subscription, config).await,
             Commands::Version => execute_version_command().await,
+            #[cfg(feature = "file-ops")]
             Commands::Upload { file_path, name, groups, metadata } => {
                 execute_file_upload_quick(&file_path, name, groups, metadata, &config).await
             },
+            #[cfg(feature = "file-ops")]
             Commands::Download { name, output, open } => {
                 execute_file_download_quick(&name, output, open, &config).await
             },
@@ -729,6 +760,7 @@ impl Cli {
     }
 }
 
+#[cfg(feature = "file-ops")]
 async fn execute_file_command(command: FileCommands, config: Config) -> Result<()> {
 
     // Create blob manager
@@ -745,6 +777,8 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
             files,
             name,
             recursive,
+            flatten,
+            prefix,
             group,
             metadata,
             tag,
@@ -760,6 +794,12 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                         "--name and --content-type cannot be used with --recursive"
                     ));
                 }
+                // Validate that --prefix is not used with --name
+                if prefix.is_some() && name.is_some() {
+                    return Err(CrosstacheError::invalid_argument(
+                        "--prefix cannot be used with --name"
+                    ));
+                }
                 execute_file_upload_recursive(
                     &blob_manager,
                     files,
@@ -768,6 +808,8 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                     tag,
                     progress,
                     continue_on_error,
+                    flatten,
+                    prefix,
                     &config,
                 )
                 .await?;
@@ -809,37 +851,59 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
             files,
             output,
             rename,
+            recursive,
+            flatten,
             stream,
             force,
             continue_on_error,
         } => {
-            // Validate --rename only works with single file
-            if rename.is_some() && files.len() > 1 {
-                return Err(CrosstacheError::invalid_argument(
-                    "--rename can only be used when downloading a single file"
-                ));
-            }
-            
-            // Handle single vs multiple file download
-            if files.len() == 1 {
-                // For single file, use rename if provided, otherwise use output as directory
-                let output_path = if let Some(new_name) = rename {
-                    Some(new_name)
-                } else {
-                    output
-                };
-                execute_file_download(&blob_manager, &files[0], output_path, stream, force, &config).await?;
-            } else {
-                execute_file_download_multiple(
+            // Handle recursive download
+            if recursive {
+                // Validate that --rename and --stream are not used with --recursive
+                if rename.is_some() || stream {
+                    return Err(CrosstacheError::invalid_argument(
+                        "--rename and --stream cannot be used with --recursive"
+                    ));
+                }
+                execute_file_download_recursive(
                     &blob_manager,
                     files,
                     output,
-                    stream,
                     force,
+                    flatten,
                     continue_on_error,
                     &config,
                 )
                 .await?;
+            } else {
+                // Validate --rename only works with single file
+                if rename.is_some() && files.len() > 1 {
+                    return Err(CrosstacheError::invalid_argument(
+                        "--rename can only be used when downloading a single file"
+                    ));
+                }
+
+                // Handle single vs multiple file download
+                if files.len() == 1 {
+                    // For single file, use rename if provided, otherwise use output as directory
+                    let output_path = if let Some(new_name) = rename {
+                        Some(new_name)
+                    } else {
+                        output
+                    };
+                    execute_file_download(&blob_manager, &files[0], output_path, stream, force, &config).await?;
+                } else {
+                    execute_file_download_multiple(
+                        &blob_manager,
+                        files,
+                        output,
+                        stream,
+                        force,
+                        continue_on_error,
+                        &config,
+                    )
+                    .await?;
+                }
             }
         }
         FileCommands::List {
@@ -847,8 +911,9 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
             group,
             metadata,
             limit,
+            recursive,
         } => {
-            execute_file_list(&blob_manager, prefix, group, metadata, limit, &config).await?;
+            execute_file_list(&blob_manager, prefix, group, metadata, limit, recursive, &config).await?;
         }
         FileCommands::Delete { files, force, continue_on_error } => {
             // Handle single vs multiple file delete
@@ -1385,6 +1450,7 @@ async fn execute_info_command(
         ResourceType::Secret => {
             execute_secret_info_from_root(&resource, &config).await
         }
+        #[cfg(feature = "file-ops")]
         ResourceType::File => {
             execute_file_info_from_root(&resource, &config).await
         }
@@ -1464,6 +1530,7 @@ async fn execute_secret_info_from_root(
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
 /// Execute file info from root info command
 async fn execute_file_info_from_root(
     file_name: &str,
@@ -2938,6 +3005,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
 }
 
 // File operation functions
+#[cfg(feature = "file-ops")]
 async fn execute_file_upload(
     blob_manager: &BlobManager,
     file_path: &str,
@@ -3012,6 +3080,7 @@ async fn execute_file_upload(
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
 async fn execute_file_download(
     blob_manager: &BlobManager,
     name: &str,
@@ -3073,41 +3142,53 @@ async fn execute_file_download(
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
 async fn execute_file_list(
     blob_manager: &BlobManager,
     prefix: Option<String>,
     group: Option<String>,
     _include_metadata: bool,
     limit: Option<usize>,
+    recursive: bool,
     config: &Config,
 ) -> Result<()> {
-    use crate::blob::models::FileListRequest;
+    use crate::blob::models::{BlobListItem, FileListRequest};
+    use crate::blob::manager::format_size;
     use crate::utils::format::format_table;
     use tabled::{Table, Tabled};
 
     // Create list request
     let list_request = FileListRequest {
-        prefix,
+        prefix: prefix.clone(),
         groups: group.map(|g| vec![g]),
         limit,
+        delimiter: if recursive { None } else { Some("/".to_string()) },
+        recursive,
     };
 
-    // List files
-    let files = blob_manager.list_files(list_request).await?;
+    // Get items based on recursive flag
+    let items = if recursive {
+        // Old behavior: flat list of all files
+        let files = blob_manager.list_files(list_request).await?;
+        files.into_iter().map(BlobListItem::File).collect::<Vec<_>>()
+    } else {
+        // New behavior: hierarchical listing
+        blob_manager.list_files_hierarchical(list_request).await?
+    };
 
-    if files.is_empty() {
+    if items.is_empty() {
         println!("No files found");
         return Ok(());
     }
 
     if config.output_json {
-        let json_output = serde_json::to_string_pretty(&files).map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to serialize files: {e}"))
+        let json_output = serde_json::to_string_pretty(&items).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to serialize items: {e}"))
         })?;
         println!("{json_output}");
     } else {
         #[derive(Tabled)]
-        struct FileItem {
+        struct ListItem {
             #[tabled(rename = "Name")]
             name: String,
             #[tabled(rename = "Size")]
@@ -3120,26 +3201,46 @@ async fn execute_file_list(
             groups: String,
         }
 
-        let items: Vec<FileItem> = files
+        let display_items: Vec<ListItem> = items
             .iter()
-            .map(|file| FileItem {
-                name: file.name.clone(),
-                size: format!("{} bytes", file.size),
-                content_type: file.content_type.clone(),
-                modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
-                groups: file.groups.join(", "),
+            .map(|item| match item {
+                BlobListItem::Directory { name, .. } => ListItem {
+                    name: name.clone(),
+                    size: "<DIR>".to_string(),
+                    content_type: "-".to_string(),
+                    modified: "-".to_string(),
+                    groups: "-".to_string(),
+                },
+                BlobListItem::File(file) => ListItem {
+                    name: file.name.clone(),
+                    size: format_size(file.size),
+                    content_type: file.content_type.clone(),
+                    modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    groups: file.groups.join(", "),
+                },
             })
             .collect();
 
-        let table = Table::new(&items);
+        let table = Table::new(&display_items);
         println!("{}", format_table(table, config.no_color));
-        
-        println!("\nTotal files: {}", files.len());
+
+        // Count files and directories separately
+        let file_count = items.iter().filter(|i| matches!(i, BlobListItem::File(_))).count();
+        let dir_count = items.iter().filter(|i| matches!(i, BlobListItem::Directory { .. })).count();
+
+        if recursive {
+            println!("\nTotal files: {}", file_count);
+        } else if dir_count > 0 {
+            println!("\nTotal: {} directories, {} files", dir_count, file_count);
+        } else {
+            println!("\nTotal files: {}", file_count);
+        }
     }
 
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
 async fn execute_file_delete(
     blob_manager: &BlobManager,
     name: &str,
@@ -3166,6 +3267,7 @@ async fn execute_file_delete(
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
 async fn execute_file_info(
     blob_manager: &BlobManager,
     name: &str,
@@ -3209,7 +3311,49 @@ async fn execute_file_info(
     Ok(())
 }
 
+/// Information about a file to upload with path tracking
+#[cfg(feature = "file-ops")]
+#[derive(Debug, Clone)]
+struct FileUploadInfo {
+    /// Full local file path
+    local_path: PathBuf,
+    /// Relative path from base directory (for blob name calculation)
+    relative_path: String,
+    /// Final blob name (includes prefix and converted path separators)
+    blob_name: String,
+}
+
+/// Convert a path to blob name format (forward slashes, no leading slash)
+#[cfg(feature = "file-ops")]
+fn path_to_blob_name(path: &Path, prefix: Option<&str>) -> String {
+    // Convert path components to forward-slash separated string
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|c| {
+            match c {
+                std::path::Component::Normal(s) => Some(s.to_string_lossy().to_string()),
+                _ => None, // Skip prefix, root, current dir, parent dir components
+            }
+        })
+        .collect();
+
+    let relative_path = components.join("/");
+
+    // Add prefix if provided
+    if let Some(p) = prefix {
+        let p = p.trim_matches('/');
+        if p.is_empty() {
+            relative_path
+        } else {
+            format!("{}/{}", p, relative_path)
+        }
+    } else {
+        relative_path
+    }
+}
+
 /// Recursively collect all files from a directory
+#[cfg(feature = "file-ops")]
 fn collect_files_recursive(path: &Path) -> Result<Vec<PathBuf>> {
     use std::fs;
     
@@ -3245,6 +3389,87 @@ fn collect_files_recursive(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Recursively collect files with path structure information
+///
+/// # Arguments
+/// * `path` - The path to traverse (file or directory)
+/// * `base_path` - The base directory to calculate relative paths from
+/// * `prefix` - Optional prefix to add to blob names
+/// * `flatten` - If true, use only filename (no directory structure)
+///
+/// # Returns
+/// Vector of FileUploadInfo with path mappings for blob storage
+#[cfg(feature = "file-ops")]
+fn collect_files_with_structure(
+    path: &Path,
+    base_path: &Path,
+    prefix: Option<&str>,
+    flatten: bool,
+) -> Result<Vec<FileUploadInfo>> {
+    use std::fs;
+
+    let mut files = Vec::new();
+
+    // Skip symlinks to avoid loops
+    if path.is_symlink() {
+        return Ok(files);
+    }
+
+    if path.is_file() {
+        // Calculate relative path from base
+        let relative = path.strip_prefix(base_path)
+            .unwrap_or(path);
+
+        let blob_name = if flatten {
+            // Use only filename
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        } else {
+            // Preserve structure with forward slashes
+            path_to_blob_name(relative, prefix)
+        };
+
+        files.push(FileUploadInfo {
+            local_path: path.to_path_buf(),
+            relative_path: relative.to_string_lossy().to_string(),
+            blob_name,
+        });
+    } else if path.is_dir() {
+        let entries = fs::read_dir(path).map_err(|e| {
+            CrosstacheError::config(format!("Failed to read directory {}: {}", path.display(), e))
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                CrosstacheError::config(format!("Failed to read directory entry: {e}"))
+            })?;
+
+            let entry_path = entry.path();
+
+            // Skip hidden files and directories by default
+            if let Some(name) = entry_path.file_name() {
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with('.') {
+                    continue; // Skip hidden files
+                }
+            }
+
+            // Recursively collect files
+            files.extend(collect_files_with_structure(&entry_path, base_path, prefix, flatten)?);
+        }
+    } else {
+        return Err(CrosstacheError::config(format!(
+            "Path {} is neither a file nor a directory",
+            path.display()
+        )));
+    }
+
+    Ok(files)
+}
+
+#[cfg(feature = "file-ops")]
 async fn execute_file_upload_recursive(
     blob_manager: &BlobManager,
     paths: Vec<String>,
@@ -3253,12 +3478,14 @@ async fn execute_file_upload_recursive(
     tag: Vec<(String, String)>,
     progress: bool,
     continue_on_error: bool,
+    flatten: bool,
+    prefix: Option<String>,
     config: &Config,
 ) -> Result<()> {
     use std::path::Path;
-    
+
     let mut all_files = Vec::new();
-    
+
     // Collect all files recursively from all provided paths
     for path_str in &paths {
         let path = Path::new(path_str);
@@ -3270,8 +3497,16 @@ async fn execute_file_upload_recursive(
                 return Err(CrosstacheError::config(format!("Path not found: {path_str}")));
             }
         }
+        // Use the parent directory as base path so the top-level folder name
+        // is preserved in blob paths (e.g., docs/api/users.md, not api/users.md)
+        let base_path = path.parent().unwrap_or(path);
 
-        let files = collect_files_recursive(path)?;
+        let files = collect_files_with_structure(
+            path,
+            base_path,
+            prefix.as_deref(),
+            flatten,
+        )?;
         all_files.extend(files);
     }
 
@@ -3285,15 +3520,36 @@ async fn execute_file_upload_recursive(
     let mut success_count = 0;
     let mut failure_count = 0;
 
-    for file_path in &all_files {
-        let file_path_str = file_path.to_string_lossy().to_string();
+    // Validate blob name lengths
+    for file_info in &all_files {
+        if file_info.blob_name.len() > 1024 {
+            let error_msg = format!(
+                "Blob name too long ({} chars, max 1024): {}",
+                file_info.blob_name.len(),
+                file_info.blob_name
+            );
+            if continue_on_error {
+                eprintln!("❌ {}", error_msg);
+                failure_count += 1;
+                continue;
+            } else {
+                return Err(CrosstacheError::invalid_argument(error_msg));
+            }
+        }
+    }
 
-        println!("Uploading: {file_path_str}");
+    for file_info in &all_files {
+        let local_path_str = file_info.local_path.to_string_lossy();
 
+        if !flatten {
+            println!("Uploading: {} → {}", local_path_str, file_info.blob_name);
+        } else {
+            println!("Uploading: {}", local_path_str);
+        }
         let result = execute_file_upload(
             blob_manager,
-            &file_path_str,
-            None, // No rename for batch uploads
+            &local_path_str.to_string(),
+            Some(file_info.blob_name.clone()), // Use the calculated blob name
             group.clone(),
             metadata.clone(),
             tag.clone(),
@@ -3307,7 +3563,7 @@ async fn execute_file_upload_recursive(
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("❌ Failed to upload '{file_path_str}': {e}");
+                eprintln!("❌ Failed to upload '{}': {}", local_path_str, e);
                 failure_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -3332,6 +3588,7 @@ async fn execute_file_upload_recursive(
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
 async fn execute_file_upload_multiple(
     blob_manager: &BlobManager,
     files: Vec<String>,
@@ -3384,6 +3641,7 @@ async fn execute_file_upload_multiple(
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
 async fn execute_file_download_multiple(
     blob_manager: &BlobManager,
     files: Vec<String>,
@@ -3432,6 +3690,158 @@ async fn execute_file_download_multiple(
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
+async fn execute_file_download_recursive(
+    blob_manager: &BlobManager,
+    prefixes: Vec<String>,
+    output: Option<String>,
+    force: bool,
+    flatten: bool,
+    continue_on_error: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::blob::models::FileListRequest;
+    use std::path::Path;
+    use std::fs;
+
+    // Determine output directory (default to current directory)
+    let output_dir = output.unwrap_or_else(|| ".".to_string());
+    let output_path = Path::new(&output_dir);
+
+    // Create output directory if it doesn't exist
+    if !output_path.exists() {
+        fs::create_dir_all(output_path).map_err(|e| {
+            CrosstacheError::config(format!("Failed to create output directory {}: {}", output_dir, e))
+        })?;
+    }
+
+    let mut all_files_to_download = Vec::new();
+
+    // List all blobs matching each prefix
+    for prefix in &prefixes {
+        let list_request = FileListRequest {
+            prefix: Some(prefix.clone()),
+            groups: None,
+            limit: None,
+            delimiter: None,
+            recursive: true,
+        };
+
+        let files = blob_manager.list_files(list_request).await?;
+
+        if files.is_empty() {
+            eprintln!("⚠️  No files found matching prefix: {}", prefix);
+            continue;
+        }
+
+        all_files_to_download.extend(files);
+    }
+
+    if all_files_to_download.is_empty() {
+        println!("No files found to download");
+        return Ok(());
+    }
+
+    println!("Found {} file(s) to download", all_files_to_download.len());
+
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
+    for file_info in &all_files_to_download {
+        let blob_name = &file_info.name;
+
+        // Determine local file path
+        let local_path = if flatten {
+            // Flatten: use only filename
+            let filename = Path::new(blob_name)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            output_path.join(filename.as_ref())
+        } else {
+            // Preserve structure: use full blob path
+            output_path.join(blob_name)
+        };
+
+        let local_path_str = local_path.to_string_lossy().to_string();
+
+        // Create parent directories if needed (for structure preservation)
+        if !flatten {
+            if let Some(parent) = local_path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        CrosstacheError::config(format!(
+                            "Failed to create directory {}: {}",
+                            parent.display(),
+                            e
+                        ))
+                    })?;
+                }
+            }
+        }
+
+        // Check if file exists and handle force flag
+        if local_path.exists() && !force {
+            eprintln!("⚠️  File already exists: {} (use --force to overwrite)", local_path_str);
+            failure_count += 1;
+            if !continue_on_error {
+                return Err(CrosstacheError::config(format!(
+                    "File already exists: {}",
+                    local_path_str
+                )));
+            }
+            continue;
+        }
+
+        if !flatten {
+            println!("Downloading: {} → {}", blob_name, local_path_str);
+        } else {
+            println!("Downloading: {}", blob_name);
+        }
+
+        // Download the file
+        let result = execute_file_download(
+            blob_manager,
+            blob_name,
+            Some(local_path_str.clone()),
+            false, // stream
+            force,
+            config,
+        )
+        .await;
+
+        match result {
+            Ok(_) => {
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to download '{}': {}", blob_name, e);
+                failure_count += 1;
+                if !continue_on_error {
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    // Print summary
+    println!("\n📊 Download Summary:");
+    println!("  ✅ Successful: {}", success_count);
+    if failure_count > 0 {
+        println!("  ❌ Failed: {}", failure_count);
+    }
+
+    if failure_count > 0 && continue_on_error {
+        return Err(CrosstacheError::azure_api(format!(
+            "{} file(s) failed to download",
+            failure_count
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "file-ops")]
 async fn execute_file_delete_multiple(
     blob_manager: &BlobManager,
     files: Vec<String>,
@@ -3494,6 +3904,7 @@ async fn execute_file_delete_multiple(
     Ok(())
 }
 
+#[cfg(feature = "file-ops")]
 async fn execute_file_sync(
     blob_manager: &BlobManager,
     local_path: &str,
@@ -3526,6 +3937,7 @@ where
 }
 
 /// Quick file upload command (alias for file upload)
+#[cfg(feature = "file-ops")]
 async fn execute_file_upload_quick(
     file_path: &str,
     name: Option<String>,
@@ -3567,6 +3979,7 @@ async fn execute_file_upload_quick(
 }
 
 /// Quick file download command (alias for file download)
+#[cfg(feature = "file-ops")]
 async fn execute_file_download_quick(
     name: &str,
     output: Option<String>,
