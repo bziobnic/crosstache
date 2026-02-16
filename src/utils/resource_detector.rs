@@ -34,6 +34,7 @@ impl ResourceDetector {
         // Priority 3: Pattern matching
         
         // Check for file patterns (has extension)
+        #[cfg(feature = "file-ops")]
         if Self::looks_like_file(resource) {
             return ResourceType::File;
         }
@@ -233,6 +234,7 @@ impl ResourceDetector {
                     "Name matches secret patterns or is the default type".to_string()
                 }
             }
+            #[cfg(feature = "file-ops")]
             ResourceType::File => {
                 if resource.contains('.') {
                     format!("Has file extension: .{}", resource.split('.').next_back().unwrap_or(""))
@@ -286,6 +288,7 @@ mod tests {
         );
         
         // File detection by extension
+        #[cfg(feature = "file-ops")]
         assert_eq!(
             ResourceDetector::detect_resource_type("data.json", None, false),
             ResourceType::File

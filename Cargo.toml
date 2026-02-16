@@ -75,6 +75,10 @@ async-trait = "0.1"
 tempfile = "3.0"
 mime_guess = "2.0"
 
+[features]
+default = ["file-ops"]
+file-ops = []
+
 [build-dependencies]
 built = { version = "0.7", features = ["git2", "chrono"] }
 

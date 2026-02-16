@@ -218,4 +218,15 @@ This document consolidates all outstanding development tasks for crosstache from
 4. Storage account delete/list operations (basic create already works)
 5. Interactive setup system enhancements (`xv init` command has basic functionality)
 
-Last Updated: 2024-07-23
+## Completed: file-ops Compilation Flag (2026-02-16)
+
+All file-based operations are now fully gated behind the `file-ops` Cargo feature flag.
+Building with `cargo build --no-default-features` produces a binary without any file/blob
+commands (`file`, `upload`, `download`), the `File` resource type variant, or any of the
+underlying helper functions. The default build (`cargo build`) still includes everything.
+
+### Files Modified
+- `src/cli/commands.rs` – added `#[cfg(feature = "file-ops")]` to 14 ungated functions/structs
+- `src/utils/resource_detector.rs` – gated `ResourceType::File` usage in detection and display logic
+
+Last Updated: 2026-02-16

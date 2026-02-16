@@ -71,6 +71,8 @@ impl BlobManager {
             prefix: None,
             groups: None,
             limit: None,
+            delimiter: None,
+            recursive: true,
         };
         
         let files = self.list_files(list_request).await?;

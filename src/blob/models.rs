@@ -20,6 +20,19 @@ pub struct FileInfo {
     pub tags: HashMap<String, String>,
 }
 
+/// Represents either a file or a directory prefix in blob listing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum BlobListItem {
+    #[serde(rename = "file")]
+    File(FileInfo),
+    #[serde(rename = "directory")]
+    Directory {
+        name: String,
+        full_path: String,
+    },
+}
+
 /// Request for uploading a file
 #[derive(Debug, Clone)]
 pub struct FileUploadRequest {
@@ -45,5 +58,7 @@ pub struct FileListRequest {
     pub prefix: Option<String>,
     pub groups: Option<Vec<String>>,
     pub limit: Option<usize>,
+    pub delimiter: Option<String>,
+    pub recursive: bool,
 }
 
