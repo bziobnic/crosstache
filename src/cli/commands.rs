@@ -193,6 +193,18 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Run a command with secrets injected as environment variables
+    Run {
+        /// Filter secrets by group (can be specified multiple times)
+        #[arg(short, long)]
+        group: Vec<String>,
+        /// Disable masking of secret values in output
+        #[arg(long)]
+        no_masking: bool,
+        /// Command and arguments to run
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Update secret properties in the current vault context
     Update {
         /// Secret name
@@ -730,6 +742,9 @@ impl Cli {
             }
             Commands::Rollback { name, version, force } => {
                 execute_secret_rollback_direct(&name, &version, force, config).await
+            }
+            Commands::Run { group, no_masking, command } => {
+                execute_secret_run_direct(group, no_masking, command, config).await
             }
             Commands::Update {
                 name,
@@ -1319,6 +1334,23 @@ async fn execute_secret_rollback_direct(name: &str, version: &str, force: bool, 
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     execute_secret_rollback(&secret_manager, name, None, version, force, &config).await
+}
+
+async fn execute_secret_run_direct(group: Vec<String>, no_masking: bool, command: Vec<String>, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_run(&secret_manager, None, group, no_masking, command, &config).await
 }
 
 async fn execute_secret_update_direct(
@@ -2101,6 +2133,153 @@ async fn execute_secret_rollback(
     println!("New version: {}", result.version);
 
     Ok(())
+}
+
+async fn execute_secret_run(
+    secret_manager: &crate::secret::manager::SecretManager,
+    vault: Option<String>,
+    groups: Vec<String>,
+    no_masking: bool,
+    command: Vec<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use crate::utils::helpers::to_env_var_name;
+    use std::collections::HashMap;
+    use std::process::{Command, Stdio};
+
+    if command.is_empty() {
+        return Err(CrosstacheError::config("No command specified"));
+    }
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Get all secrets from the vault
+    let secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
+        .await?;
+
+    // Filter secrets by groups if specified
+    let filtered_secrets = if !groups.is_empty() {
+        secrets
+            .into_iter()
+            .filter(|secret| {
+                if let Some(secret_groups) = &secret.groups {
+                    // Secret can have multiple groups (comma-separated)
+                    let secret_group_list: Vec<&str> = secret_groups.split(',').map(|g| g.trim()).collect();
+                    groups.iter().any(|filter_group| {
+                        secret_group_list.contains(&filter_group.as_str())
+                    })
+                } else {
+                    false
+                }
+            })
+            .collect()
+    } else {
+        secrets
+    };
+
+    if filtered_secrets.is_empty() {
+        println!("No secrets found to inject");
+        return Ok(());
+    }
+
+    println!(
+        "🔐 Injecting {} secret(s) as environment variables...",
+        filtered_secrets.len()
+    );
+
+    // Fetch secret values and build environment map
+    let mut env_vars: HashMap<String, String> = HashMap::new();
+    let mut secret_values: Vec<String> = Vec::new(); // For masking
+
+    for secret in filtered_secrets {
+        // Get the secret value
+        match secret_manager
+            .secret_ops()
+            .get_secret(&vault_name, &secret.name, true)
+            .await
+        {
+            Ok(secret_props) => {
+                if let Some(value) = secret_props.value {
+                    let env_name = to_env_var_name(&secret.name);
+                    env_vars.insert(env_name, value.clone());
+                    
+                    // Store for masking (if enabled)
+                    if !no_masking && !value.is_empty() {
+                        secret_values.push(value);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to get value for secret '{}': {}", secret.name, e);
+            }
+        }
+    }
+
+    // Set up the command
+    let mut cmd = Command::new(&command[0]);
+    if command.len() > 1 {
+        cmd.args(&command[1..]);
+    }
+
+    // Set environment variables
+    cmd.envs(&env_vars);
+
+    // Set up stdio for output capture and masking
+    if no_masking {
+        // Direct passthrough
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        // Capture output for masking
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+
+    println!("🚀 Executing: {}", command.join(" "));
+
+    // Execute the command
+    let output = cmd.output().map_err(|e| {
+        CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
+    })?;
+
+    // Handle output with masking if needed
+    if no_masking {
+        // Exit with the same code as the child process
+        std::process::exit(output.status.code().unwrap_or(1));
+    } else {
+        // Mask secret values in output
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let masked_stdout = mask_secrets(&stdout, &secret_values);
+        let masked_stderr = mask_secrets(&stderr, &secret_values);
+
+        print!("{}", masked_stdout);
+        eprint!("{}", masked_stderr);
+
+        // Exit with the same code as the child process
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+}
+
+/// Mask secret values in text output
+fn mask_secrets(text: &str, secrets: &[String]) -> String {
+    let mut result = text.to_string();
+    
+    for secret in secrets {
+        if secret.len() >= 4 {  // Only mask secrets that are at least 4 characters
+            // Replace with [MASKED] to indicate redaction
+            result = result.replace(secret, "[MASKED]");
+        }
+    }
+    
+    result
 }
 
 async fn execute_secret_list(
