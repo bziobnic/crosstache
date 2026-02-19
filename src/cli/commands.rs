@@ -320,6 +320,8 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Show authenticated identity and context information
+    Whoami,
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
@@ -811,6 +813,7 @@ impl Cli {
             } => execute_info_command(resource, resource_type, resource_group, subscription, config).await,
             Commands::Version => execute_version_command().await,
             Commands::Completion { shell } => execute_completion_command(shell).await,
+            Commands::Whoami => execute_whoami_command(config).await,
             #[cfg(feature = "file-ops")]
             Commands::Upload { file_path, name, groups, metadata } => {
                 execute_file_upload_quick(&file_path, name, groups, metadata, &config).await
@@ -1702,6 +1705,155 @@ async fn execute_completion_command(shell: Shell) -> Result<()> {
     generate(shell, &mut cmd, name, &mut io::stdout());
     
     Ok(())
+}
+
+async fn execute_whoami_command(config: Config) -> Result<()> {
+    use crate::auth::provider::{DefaultAzureCredentialProvider, AzureAuthProvider};
+    use crate::config::ContextManager;
+    
+    println!("🔍 Checking authentication and context...\n");
+
+    // Create authentication provider
+    let auth_provider = DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+        .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?;
+
+    // Get access token to validate authentication
+    let token = match auth_provider.get_token(&["https://vault.azure.net/.default"]).await {
+        Ok(token) => token,
+        Err(e) => {
+            println!("❌ Authentication failed: {}", e);
+            return Ok(());
+        }
+    };
+
+    println!("✅ Authentication successful\n");
+
+    // Try to get tenant and subscription information
+    let management_token = auth_provider.get_token(&["https://management.azure.com/.default"]).await
+        .map_err(|e| CrosstacheError::authentication(format!("Failed to get management token: {e}")))?;
+
+    // Parse token to get tenant ID (from JWT)
+    let tenant_id = extract_tenant_from_token(&token.token.secret())?;
+    
+    println!("👤 Identity Information:");
+    println!("   Tenant ID: {}", tenant_id);
+    
+    // Get subscription information
+    if let Ok(subscription_id) = get_current_subscription(&management_token.token.secret()).await {
+        println!("   Subscription ID: {}", subscription_id);
+    } else {
+        println!("   Subscription ID: Unable to determine");
+    }
+
+    // Show current context information
+    println!("\n📊 Context Information:");
+    
+    let context_manager = ContextManager::load().await.unwrap_or_default();
+    
+    if let Some(current_vault) = context_manager.current_vault() {
+        println!("   Default Vault: {}", current_vault);
+    } else {
+        println!("   Default Vault: None set");
+    }
+
+    if let Some(current_sub) = context_manager.current_subscription_id() {
+        println!("   Current Subscription: {}", current_sub);
+    } else {
+        println!("   Current Subscription: None set");
+    }
+
+    // Show recent vaults
+    let recent_contexts = context_manager.list_recent();
+    if !recent_contexts.is_empty() {
+        println!("\n📝 Recent Vaults:");
+        for context in recent_contexts.iter().take(5) {
+            println!("   {} (last used: {})", context.vault_name, 
+                context.last_used.format("%Y-%m-%d %H:%M:%S"));
+        }
+    }
+
+    println!("\n🔧 Configuration:");
+    println!("   Default vault: {}", config.default_vault);
+    println!("   Default subscription: {}", config.subscription_id);
+    println!("   No color mode: {}", config.no_color);
+    println!("   Credential priority: {:?}", config.azure_credential_priority);
+
+    Ok(())
+}
+
+/// Extract tenant ID from JWT token
+fn extract_tenant_from_token(token: &str) -> Result<String> {
+    // JWT tokens have 3 parts separated by dots: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(CrosstacheError::authentication("Invalid JWT token format"));
+    }
+
+    // Decode the payload (second part)
+    let payload = parts[1];
+    
+    // Add padding if needed for base64 decoding
+    let padded = match payload.len() % 4 {
+        0 => payload.to_string(),
+        n => format!("{}{}", payload, "=".repeat(4 - n)),
+    };
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let decoded = STANDARD.decode(&padded)
+        .map_err(|_| CrosstacheError::authentication("Failed to decode token payload"))?;
+    
+    let payload_str = String::from_utf8(decoded)
+        .map_err(|_| CrosstacheError::authentication("Invalid UTF-8 in token payload"))?;
+    
+    let payload_json: serde_json::Value = serde_json::from_str(&payload_str)
+        .map_err(|_| CrosstacheError::authentication("Invalid JSON in token payload"))?;
+    
+    payload_json["tid"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| CrosstacheError::authentication("Tenant ID not found in token"))
+}
+
+/// Get current subscription ID from Azure management API
+async fn get_current_subscription(token: &str) -> Result<String> {
+    use crate::utils::network::{create_http_client, NetworkConfig};
+    
+    let network_config = NetworkConfig::default();
+    let http_client = create_http_client(&network_config)?;
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {}", token)
+            .parse()
+            .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+    );
+
+    let response = http_client
+        .get("https://management.azure.com/subscriptions?api-version=2020-01-01")
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to get subscriptions: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(CrosstacheError::azure_api(
+            "Failed to get subscription information"
+        ));
+    }
+
+    let json: serde_json::Value = response.json().await
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to parse response: {e}")))?;
+
+    if let Some(subscriptions) = json["value"].as_array() {
+        if let Some(first_sub) = subscriptions.first() {
+            if let Some(sub_id) = first_sub["subscriptionId"].as_str() {
+                return Ok(sub_id.to_string());
+            }
+        }
+    }
+
+    Err(CrosstacheError::azure_api("No subscriptions found"))
 }
 
 async fn execute_config_show(config: &Config) -> Result<()> {
