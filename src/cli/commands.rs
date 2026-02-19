@@ -205,6 +205,18 @@ pub enum Commands {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Inject secrets into a template file using {{ secret:name }} syntax
+    Inject {
+        /// Template file path (reads from stdin if not specified)
+        #[arg(short, long)]
+        template: Option<String>,
+        /// Output file path (writes to stdout if not specified)
+        #[arg(short, long)]
+        out: Option<String>,
+        /// Filter secrets by group (can be specified multiple times)
+        #[arg(short, long)]
+        group: Vec<String>,
+    },
     /// Update secret properties in the current vault context
     Update {
         /// Secret name
@@ -745,6 +757,9 @@ impl Cli {
             }
             Commands::Run { group, no_masking, command } => {
                 execute_secret_run_direct(group, no_masking, command, config).await
+            }
+            Commands::Inject { template, out, group } => {
+                execute_secret_inject_direct(template, out, group, config).await
             }
             Commands::Update {
                 name,
@@ -1351,6 +1366,23 @@ async fn execute_secret_run_direct(group: Vec<String>, no_masking: bool, command
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     execute_secret_run(&secret_manager, None, group, no_masking, command, &config).await
+}
+
+async fn execute_secret_inject_direct(template: Option<String>, out: Option<String>, group: Vec<String>, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_inject(&secret_manager, None, template, out, group, &config).await
 }
 
 async fn execute_secret_update_direct(
@@ -2280,6 +2312,166 @@ fn mask_secrets(text: &str, secrets: &[String]) -> String {
     }
     
     result
+}
+
+async fn execute_secret_inject(
+    secret_manager: &crate::secret::manager::SecretManager,
+    vault: Option<String>,
+    template_file: Option<String>,
+    output_file: Option<String>,
+    groups: Vec<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::io::{self, Read};
+    use regex::Regex;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Read template content
+    let template_content = match template_file {
+        Some(path) => {
+            fs::read_to_string(&path).map_err(|e| {
+                CrosstacheError::config(format!("Failed to read template file '{}': {}", path, e))
+            })?
+        }
+        None => {
+            // Read from stdin
+            let mut buffer = String::new();
+            io::stdin().read_to_string(&mut buffer).map_err(|e| {
+                CrosstacheError::config(format!("Failed to read from stdin: {}", e))
+            })?;
+            buffer
+        }
+    };
+
+    // Parse template for secret references ({{ secret:name }})
+    let secret_regex = Regex::new(r"\{\{\s*secret:([^}\s]+)\s*\}\}").unwrap();
+    let mut required_secrets: Vec<String> = Vec::new();
+    
+    for captures in secret_regex.captures_iter(&template_content) {
+        if let Some(secret_name) = captures.get(1) {
+            let name = secret_name.as_str().to_string();
+            if !required_secrets.contains(&name) {
+                required_secrets.push(name);
+            }
+        }
+    }
+
+    if required_secrets.is_empty() {
+        println!("⚠️  No secret references found in template (use {{ secret:name }} syntax)");
+        
+        // Still write the template content as-is to output
+        match output_file {
+            Some(path) => {
+                fs::write(&path, &template_content).map_err(|e| {
+                    CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
+                })?;
+                println!("Template written to '{}'", path);
+            }
+            None => {
+                print!("{}", template_content);
+            }
+        }
+        return Ok(());
+    }
+
+    println!("📋 Found {} secret reference(s) in template", required_secrets.len());
+
+    // Get all secrets from the vault
+    let secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
+        .await?;
+
+    // Filter secrets by groups if specified
+    let available_secrets = if !groups.is_empty() {
+        secrets
+            .into_iter()
+            .filter(|secret| {
+                if let Some(secret_groups) = &secret.groups {
+                    let secret_group_list: Vec<&str> = secret_groups.split(',').map(|g| g.trim()).collect();
+                    groups.iter().any(|filter_group| {
+                        secret_group_list.contains(&filter_group.as_str())
+                    })
+                } else {
+                    false
+                }
+            })
+            .collect()
+    } else {
+        secrets
+    };
+
+    // Build a map of secret names to values
+    let mut secret_values: HashMap<String, String> = HashMap::new();
+    let mut missing_secrets: Vec<String> = Vec::new();
+
+    for secret_name in &required_secrets {
+        // Check if the secret exists in the available secrets
+        if let Some(secret_summary) = available_secrets.iter().find(|s| s.name == *secret_name) {
+            // Get the secret value
+            match secret_manager
+                .secret_ops()
+                .get_secret(&vault_name, &secret_summary.name, true)
+                .await
+            {
+                Ok(secret_props) => {
+                    if let Some(value) = secret_props.value {
+                        secret_values.insert(secret_name.clone(), value);
+                    } else {
+                        missing_secrets.push(secret_name.clone());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to get value for secret '{}': {}", secret_name, e);
+                    missing_secrets.push(secret_name.clone());
+                }
+            }
+        } else {
+            missing_secrets.push(secret_name.clone());
+        }
+    }
+
+    if !missing_secrets.is_empty() {
+        return Err(CrosstacheError::config(format!(
+            "Missing secrets: {}. Available in vault: {}",
+            missing_secrets.join(", "),
+            available_secrets.iter().map(|s| s.name.clone()).collect::<Vec<String>>().join(", ")
+        )));
+    }
+
+    println!("🔐 Injecting {} secret(s) into template...", secret_values.len());
+
+    // Replace secret references with actual values
+    let mut result_content = template_content;
+    for (secret_name, secret_value) in &secret_values {
+        let pattern = format!(r"\{{\{{\s*secret:{}\s*\}}\}}", regex::escape(secret_name));
+        let regex_pattern = Regex::new(&pattern).unwrap();
+        result_content = regex_pattern.replace_all(&result_content, secret_value).to_string();
+    }
+
+    // Write result
+    match output_file {
+        Some(path) => {
+            fs::write(&path, &result_content).map_err(|e| {
+                CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
+            })?;
+            println!("✅ Template resolved and written to '{}'", path);
+        }
+        None => {
+            print!("{}", result_content);
+        }
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_list(
