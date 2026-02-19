@@ -78,7 +78,8 @@ impl InteractivePrompt {
     pub fn select(&self, message: &str, options: &[String], default: Option<usize>) -> Result<usize> {
         let mut select = Select::with_theme(&self.theme)
             .with_prompt(message)
-            .items(options);
+            .items(options)
+            .max_length(20);
 
         if let Some(default_index) = default {
             select = select.default(default_index);
