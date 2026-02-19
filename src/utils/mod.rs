@@ -4,6 +4,7 @@
 //! retry logic, connection string parsing, table formatting, and other helpers.
 
 pub mod azure_detect;
+pub mod datetime;
 pub mod format;
 pub mod helpers;
 pub mod interactive;

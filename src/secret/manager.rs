@@ -510,6 +510,17 @@ impl SecretOperations for AzureSecretOperations {
             }
         }
 
+        // Extract expiry dates from attributes
+        let expires_on = attributes
+            .get("exp")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+        
+        let not_before = attributes
+            .get("nbf")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+
         // Get original name from tags
         let original_name = self.get_original_name(&sanitized_name, &tags);
 
@@ -521,8 +532,8 @@ impl SecretOperations for AzureSecretOperations {
             created_on,
             updated_on,
             enabled,
-            expires_on: None, // Not extracted from this API
-            not_before: None, // Not extracted from this API
+            expires_on,
+            not_before,
             tags,
             content_type: json
                 .get("contentType")
@@ -624,6 +635,17 @@ impl SecretOperations for AzureSecretOperations {
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
+        // Extract expiry dates from attributes
+        let expires_on = attributes
+            .get("exp")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+        
+        let not_before = attributes
+            .get("nbf")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+
         // Extract tags
         let mut tags = HashMap::new();
         if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
@@ -642,8 +664,8 @@ impl SecretOperations for AzureSecretOperations {
             created_on,
             updated_on,
             enabled,
-            expires_on: None,
-            not_before: None,
+            expires_on,
+            not_before,
             tags,
             content_type: json
                 .get("contentType")

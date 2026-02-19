@@ -1434,12 +1434,17 @@ async fn execute_secret_set_direct(
     if args.len() == 1 && !args[0].contains('=') {
         // Single secret operation (original behavior)
         let name = &args[0];
-        execute_secret_set(&secret_manager, name, None, stdin, note, folder, &config).await
+        execute_secret_set(&secret_manager, name, None, stdin, note, folder, expires, not_before, &config).await
     } else {
         // Bulk set operation
         if stdin {
             return Err(CrosstacheError::invalid_argument(
                 "--stdin cannot be used with bulk set operation"
+            ));
+        }
+        if expires.is_some() || not_before.is_some() {
+            return Err(CrosstacheError::invalid_argument(
+                "--expires and --not-before cannot be used with bulk set operation"
             ));
         }
         execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await
@@ -1465,6 +1470,8 @@ async fn execute_secret_get_direct(name: &str, raw: bool, version: Option<String
 async fn execute_secret_list_direct(
     group: Option<String>,
     all: bool,
+    expiring: Option<String>,
+    expired: bool,
     config: Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
@@ -1479,7 +1486,7 @@ async fn execute_secret_list_direct(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_list(&secret_manager, None, group, all, &config).await
+    execute_secret_list(&secret_manager, None, group, all, expiring, expired, &config).await
 }
 
 async fn execute_secret_delete_direct(name: Option<String>, group: Option<String>, force: bool, config: Config) -> Result<()> {
@@ -1611,6 +1618,10 @@ async fn execute_secret_update_direct(
     folder: Option<String>,
     replace_tags: bool,
     replace_groups: bool,
+    expires: Option<String>,
+    not_before: Option<String>,
+    clear_expires: bool,
+    clear_not_before: bool,
     config: Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
@@ -1638,6 +1649,10 @@ async fn execute_secret_update_direct(
         folder,
         replace_tags,
         replace_groups,
+        expires,
+        not_before,
+        clear_expires,
+        clear_not_before,
         &config,
     )
     .await
@@ -3003,6 +3018,8 @@ async fn execute_secret_set(
     stdin: bool,
     note: Option<String>,
     folder: Option<String>,
+    expires: Option<String>,
+    not_before: Option<String>,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -3029,15 +3046,30 @@ async fn execute_secret_set(
         return Err(CrosstacheError::config("Secret value cannot be empty"));
     }
 
-    // Create secret request with note and/or folder if provided
-    let secret_request = if note.is_some() || folder.is_some() {
+    // Parse expiry dates if provided
+    let expires_on = if let Some(expires_str) = expires.as_deref() {
+        use crate::utils::datetime::parse_datetime_or_duration;
+        Some(parse_datetime_or_duration(expires_str)?)
+    } else {
+        None
+    };
+
+    let not_before_on = if let Some(not_before_str) = not_before.as_deref() {
+        use crate::utils::datetime::parse_datetime_or_duration;
+        Some(parse_datetime_or_duration(not_before_str)?)
+    } else {
+        None
+    };
+
+    // Create secret request with note, folder, and/or expiry dates if provided
+    let secret_request = if note.is_some() || folder.is_some() || expires_on.is_some() || not_before_on.is_some() {
         Some(crate::secret::manager::SecretRequest {
             name: name.to_string(),
             value: value.clone(),
             content_type: None,
             enabled: Some(true),
-            expires_on: None,
-            not_before: None,
+            expires_on,
+            not_before: not_before_on,
             tags: None,
             groups: None,
             note,
@@ -3843,6 +3875,8 @@ async fn execute_secret_list(
     vault: Option<String>,
     group: Option<String>,
     show_all: bool,
+    expiring: Option<String>,
+    expired: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -3860,15 +3894,90 @@ async fn execute_secret_list(
         crate::utils::format::OutputFormat::Table
     };
 
-    secret_manager
+    // Get the basic secret list first
+    let mut secrets = secret_manager
         .list_secrets_formatted(
             &vault_name,
             group.as_deref(),
-            output_format,
+            output_format.clone(),
             false,
             show_all,
         )
         .await?;
+
+    // Apply expiry filtering if requested
+    if expired || expiring.is_some() {
+        use crate::utils::datetime::{is_expired, is_expiring_within};
+        
+        // We need to get full secret details to check expiry dates
+        let mut filtered_secrets = Vec::new();
+        
+        for secret_summary in secrets {
+            // Get full secret details to access expiry dates
+            match secret_manager.get_secret_safe(&vault_name, &secret_summary.name, false, true).await {
+                Ok(secret_props) => {
+                    let should_include = if expired {
+                        // Show only expired secrets
+                        is_expired(secret_props.expires_on)
+                    } else if let Some(ref duration) = expiring {
+                        // Show secrets expiring within the specified duration
+                        match is_expiring_within(secret_props.expires_on, duration) {
+                            Ok(is_exp) => is_exp,
+                            Err(e) => {
+                                eprintln!("Warning: Invalid duration '{}': {}", duration, e);
+                                false
+                            }
+                        }
+                    } else {
+                        true // Include all if no expiry filter
+                    };
+                    
+                    if should_include {
+                        filtered_secrets.push(secret_summary);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to get details for secret '{}': {}", secret_summary.name, e);
+                }
+            }
+        }
+        
+        secrets = filtered_secrets;
+        
+        // Display the filtered results
+        if secrets.is_empty() {
+            let filter_desc = if expired {
+                "expired"
+            } else if expiring.is_some() {
+                "expiring"
+            } else {
+                "matching"
+            };
+            println!("No {} secrets found in vault '{}'.", filter_desc, vault_name);
+        } else {
+            // Re-display with the filtered list
+            if output_format == crate::utils::format::OutputFormat::Table {
+                use crate::utils::format::format_table;
+                use tabled::Table;
+                
+                let table = Table::new(&secrets);
+                println!("{}", format_table(table, config.no_color));
+                
+                let filter_desc = if expired {
+                    "expired".to_string()
+                } else if let Some(ref duration) = expiring {
+                    format!("expiring within {}", duration)
+                } else {
+                    "matching".to_string()
+                };
+                println!("\nShowing {} {} secret(s) in vault '{}'", secrets.len(), filter_desc, vault_name);
+            } else {
+                let json_output = serde_json::to_string_pretty(&secrets)
+                    .map_err(|e| CrosstacheError::serialization(format!("Failed to serialize secrets: {e}")))?;
+                println!("{}", json_output);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -3922,6 +4031,10 @@ async fn execute_secret_update(
     folder: Option<String>,
     replace_tags: bool,
     replace_groups: bool,
+    expires: Option<String>,
+    not_before: Option<String>,
+    clear_expires: bool,
+    clear_not_before: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -3962,9 +4075,13 @@ async fn execute_secret_update(
         && rename.is_none()
         && note.is_none()
         && folder.is_none()
+        && expires.is_none()
+        && not_before.is_none()
+        && !clear_expires
+        && !clear_not_before
     {
         return Err(CrosstacheError::invalid_argument(
-            "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note) or rename secrets. Use 'secret set' to update secret values."
+            "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note, expiry) or rename secrets. Use 'secret set' to update secret values."
         ));
     }
 
@@ -3996,6 +4113,25 @@ async fn execute_secret_update(
         }
     }
 
+    // Parse expiry dates if provided
+    let expires_on = if clear_expires {
+        None // Explicitly clear the expiry date
+    } else if let Some(expires_str) = expires.as_deref() {
+        use crate::utils::datetime::parse_datetime_or_duration;
+        Some(parse_datetime_or_duration(expires_str)?)
+    } else {
+        None // No change to expiry
+    };
+
+    let not_before_on = if clear_not_before {
+        None // Explicitly clear the not-before date
+    } else if let Some(not_before_str) = not_before.as_deref() {
+        use crate::utils::datetime::parse_datetime_or_duration;
+        Some(parse_datetime_or_duration(not_before_str)?)
+    } else {
+        None // No change to not-before
+    };
+
     // Create update request with enhanced parameters
     let update_request = SecretUpdateRequest {
         name: name.to_string(),
@@ -4003,8 +4139,8 @@ async fn execute_secret_update(
         value: new_value.clone(),
         content_type: None,
         enabled: None,
-        expires_on: None,
-        not_before: None,
+        expires_on,
+        not_before: not_before_on,
         tags: tags_map,
         groups: groups_vec,
         note: note.clone(),
@@ -4056,6 +4192,16 @@ async fn execute_secret_update(
     }
     if let Some(ref folder_path) = folder {
         println!("  → Setting folder: {folder_path}");
+    }
+    if clear_expires {
+        println!("  → Clearing expiry date");
+    } else if let Some(ref expires_str) = expires {
+        println!("  → Setting expiry: {expires_str}");
+    }
+    if clear_not_before {
+        println!("  → Clearing not-before date");
+    } else if let Some(ref not_before_str) = not_before {
+        println!("  → Setting not-before: {not_before_str}");
     }
 
     // Perform enhanced secret update
