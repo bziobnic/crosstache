@@ -3,7 +3,7 @@
 //! This module provides functionality to parse various date/time formats
 //! including ISO dates, relative durations, and Azure Key Vault timestamps.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use regex::Regex;
 use crate::error::{CrosstacheError, Result};
 
