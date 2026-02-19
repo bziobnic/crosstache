@@ -147,6 +147,15 @@ pub trait SecretOperations: Send + Sync {
         include_value: bool,
     ) -> Result<SecretProperties>;
 
+    /// Get a specific version of a secret
+    async fn get_secret_version(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        version: &str,
+        include_value: bool,
+    ) -> Result<SecretProperties>;
+
     /// List secrets in a vault
     async fn list_secrets(
         &self,
@@ -184,6 +193,14 @@ pub trait SecretOperations: Send + Sync {
         vault_name: &str,
         secret_name: &str,
     ) -> Result<Vec<SecretProperties>>;
+
+    /// Rollback secret to a specific version
+    async fn rollback_secret(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        version: &str,
+    ) -> Result<SecretProperties>;
 
     /// Backup secret
     async fn backup_secret(&self, vault_name: &str, secret_name: &str) -> Result<Vec<u8>>;
@@ -506,6 +523,127 @@ impl SecretOperations for AzureSecretOperations {
             enabled,
             expires_on: None, // Not extracted from this API
             not_before: None, // Not extracted from this API
+            tags,
+            content_type: json
+                .get("contentType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("text/plain")
+                .to_string(),
+        })
+    }
+
+    async fn get_secret_version(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        version: &str,
+        include_value: bool,
+    ) -> Result<SecretProperties> {
+        let sanitized_name = sanitize_secret_name(secret_name)?;
+        let vault_url = format!("https://{vault_name}.vault.azure.net");
+        let secret_url = format!("{vault_url}/secrets/{sanitized_name}/{version}?api-version=7.4");
+
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let http_client = create_http_client(&network_config)?;
+
+        // Make the REST API call
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+
+        let response = http_client
+            .get(&secret_url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| classify_network_error(&e, &secret_url))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            if status == 404 {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Secret version '{version}' not found for secret '{secret_name}'"
+                )));
+            }
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(CrosstacheError::azure_api(format!(
+                "Failed to get secret version: HTTP {} - {}",
+                status, error_text
+            )));
+        }
+
+        // Parse the JSON response
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            CrosstacheError::azure_api(format!("Failed to parse response JSON: {e}"))
+        })?;
+
+        // Extract the secret value if requested
+        let value = if include_value {
+            json.get("value").and_then(|v| v.as_str()).map(String::from)
+        } else {
+            None
+        };
+
+        // Extract the version from the id
+        let version = json
+            .get("id")
+            .and_then(|id| id.as_str())
+            .and_then(|id| id.split('/').last())
+            .unwrap_or(version)
+            .to_string();
+
+        let attributes = &json["attributes"];
+        let enabled = attributes["enabled"].as_bool().unwrap_or(true);
+
+        let created_on = attributes
+            .get("created")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| {
+                DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let updated_on = attributes
+            .get("updated")
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| {
+                DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        // Extract tags
+        let mut tags = HashMap::new();
+        if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
+            for (key, value) in tags_obj {
+                if let Some(tag_value) = value.as_str() {
+                    tags.insert(key.clone(), tag_value.to_string());
+                }
+            }
+        }
+
+        Ok(SecretProperties {
+            name: secret_name.to_string(),
+            original_name: secret_name.to_string(),
+            value,
+            version,
+            created_on,
+            updated_on,
+            enabled,
+            expires_on: None,
+            not_before: None,
             tags,
             content_type: json
                 .get("contentType")
@@ -888,13 +1026,128 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         secret_name: &str,
     ) -> Result<Vec<SecretProperties>> {
-        let _client = self.create_secret_client(vault_name).await?;
-        let _sanitized_name = sanitize_secret_name(secret_name)?;
+        let sanitized_name = sanitize_secret_name(secret_name)?;
+        let vault_url = format!("https://{vault_name}.vault.azure.net");
+        let versions_url = format!("{vault_url}/secrets/{sanitized_name}/versions?api-version=7.4");
 
-        // Placeholder implementation
-        Err(CrosstacheError::azure_api(
-            "Secret operations not yet fully implemented for Azure SDK v0.20",
-        ))
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let http_client = create_http_client(&network_config)?;
+
+        // Make the REST API call to list versions
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+
+        let response = http_client
+            .get(&versions_url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| classify_network_error(&e, &versions_url))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(CrosstacheError::azure_api(format!(
+                "Failed to list secret versions: HTTP {} - {}",
+                status, error_text
+            )));
+        }
+
+        // Parse the JSON response
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            CrosstacheError::azure_api(format!("Failed to parse response JSON: {e}"))
+        })?;
+
+        // Extract versions from the response
+        let mut versions = Vec::new();
+        if let Some(value_array) = json["value"].as_array() {
+            for version_json in value_array {
+                let attributes = &version_json["attributes"];
+                
+                let version = version_json["kid"]
+                    .as_str()
+                    .and_then(|kid| kid.split('/').last())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let enabled = attributes["enabled"].as_bool().unwrap_or(true);
+                let created_timestamp = attributes["created"].as_i64().unwrap_or(0);
+                let updated_timestamp = attributes["updated"].as_i64().unwrap_or(0);
+
+                let created_on = DateTime::from_timestamp(created_timestamp, 0)
+                    .unwrap_or_else(Utc::now)
+                    .format("%Y-%m-%d %H:%M:%S UTC")
+                    .to_string();
+
+                let updated_on = DateTime::from_timestamp(updated_timestamp, 0)
+                    .unwrap_or_else(Utc::now)
+                    .format("%Y-%m-%d %H:%M:%S UTC")
+                    .to_string();
+
+                versions.push(SecretProperties {
+                    name: secret_name.to_string(),
+                    original_name: secret_name.to_string(),
+                    value: None, // Don't include values in version list
+                    version,
+                    created_on,
+                    updated_on,
+                    enabled,
+                    expires_on: None,
+                    not_before: None,
+                    tags: HashMap::new(),
+                    content_type: String::new(),
+                });
+            }
+        }
+
+        // Sort by creation time, newest first
+        versions.sort_by(|a, b| b.created_on.cmp(&a.created_on));
+        Ok(versions)
+    }
+
+    async fn rollback_secret(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        version: &str,
+    ) -> Result<SecretProperties> {
+        // First, get the specific version with its value
+        let old_version = self
+            .get_secret_version(vault_name, secret_name, version, true)
+            .await?;
+
+        // Extract the value - we need it to create the new version
+        let value = old_version.value.ok_or_else(|| {
+            CrosstacheError::azure_api("Failed to retrieve value from old version")
+        })?;
+
+        // Create a new secret version with the old value (this is how "rollback" works in Key Vault)
+        let request = SecretRequest {
+            name: secret_name.to_string(),
+            value,
+            content_type: Some(old_version.content_type.clone()),
+            enabled: Some(old_version.enabled),
+            expires_on: old_version.expires_on,
+            not_before: old_version.not_before,
+            tags: Some(old_version.tags.clone()),
+            groups: None, // Will be extracted from tags by the set_secret method
+            note: None,   // Will be extracted from tags by the set_secret method
+            folder: None, // Will be extracted from tags by the set_secret method
+        };
+
+        self.set_secret(vault_name, &request).await
     }
 
     async fn backup_secret(&self, vault_name: &str, secret_name: &str) -> Result<Vec<u8>> {
@@ -939,6 +1192,11 @@ impl SecretManager {
             display_utils,
             no_color,
         }
+    }
+
+    /// Access to secret operations (for advanced use cases)
+    pub fn secret_ops(&self) -> &Arc<dyn SecretOperations> {
+        &self.secret_ops
     }
 
     /// Set a secret with name sanitization and validation
@@ -1008,6 +1266,40 @@ impl SecretManager {
             .secret_ops
             .get_secret(vault_name, secret_name, show_value)
             .await?;
+
+        if !raw_output {
+            self.display_secret_details(&secret, show_value)?;
+        }
+
+        // Clear sensitive data if not showing value
+        if !show_value {
+            secret.value = None;
+        }
+
+        Ok(secret)
+    }
+
+    /// Get a secret with optional version support
+    pub async fn get_secret_with_version(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        version: Option<&str>,
+        show_value: bool,
+        raw_output: bool,
+    ) -> Result<SecretProperties> {
+        let mut secret = match version {
+            Some(ver) => {
+                self.secret_ops
+                    .get_secret_version(vault_name, secret_name, ver, show_value)
+                    .await?
+            }
+            None => {
+                self.secret_ops
+                    .get_secret(vault_name, secret_name, show_value)
+                    .await?
+            }
+        };
 
         if !raw_output {
             self.display_secret_details(&secret, show_value)?;

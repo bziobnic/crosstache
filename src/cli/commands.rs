@@ -154,6 +154,9 @@ pub enum Commands {
         /// Raw output (print value instead of copying to clipboard)
         #[arg(short, long)]
         raw: bool,
+        /// Get a specific version of the secret
+        #[arg(long)]
+        version: Option<String>,
     },
     /// List secrets in the current vault context (alias: ls)
     #[command(alias = "ls")]
@@ -171,6 +174,22 @@ pub enum Commands {
         /// Secret name
         name: String,
         /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Show version history of a secret
+    History {
+        /// Secret name
+        name: String,
+    },
+    /// Rollback a secret to a previous version
+    Rollback {
+        /// Secret name
+        name: String,
+        /// Version ID to rollback to
+        #[arg(long)]
+        version: String,
+        /// Force rollback without confirmation
         #[arg(short, long)]
         force: bool,
     },
@@ -701,10 +720,16 @@ impl Cli {
                 note,
                 folder,
             } => execute_secret_set_direct(&name, stdin, note, folder, config).await,
-            Commands::Get { name, raw } => execute_secret_get_direct(&name, raw, config).await,
+            Commands::Get { name, raw, version } => execute_secret_get_direct(&name, raw, version, config).await,
             Commands::List { group, all } => execute_secret_list_direct(group, all, config).await,
             Commands::Delete { name, force } => {
                 execute_secret_delete_direct(&name, force, config).await
+            }
+            Commands::History { name } => {
+                execute_secret_history_direct(&name, config).await
+            }
+            Commands::Rollback { name, version, force } => {
+                execute_secret_rollback_direct(&name, &version, force, config).await
             }
             Commands::Update {
                 name,
@@ -1210,7 +1235,7 @@ async fn execute_secret_set_direct(
     execute_secret_set(&secret_manager, name, None, stdin, note, folder, &config).await
 }
 
-async fn execute_secret_get_direct(name: &str, raw: bool, config: Config) -> Result<()> {
+async fn execute_secret_get_direct(name: &str, raw: bool, version: Option<String>, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
     use std::sync::Arc;
@@ -1223,7 +1248,7 @@ async fn execute_secret_get_direct(name: &str, raw: bool, config: Config) -> Res
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_get(&secret_manager, name, None, raw, &config).await
+    execute_secret_get(&secret_manager, name, None, raw, version, &config).await
 }
 
 async fn execute_secret_list_direct(
@@ -1260,6 +1285,40 @@ async fn execute_secret_delete_direct(name: &str, force: bool, config: Config) -
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     execute_secret_delete(&secret_manager, name, None, force, &config).await
+}
+
+async fn execute_secret_history_direct(name: &str, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_history(&secret_manager, name, None, &config).await
+}
+
+async fn execute_secret_rollback_direct(name: &str, version: &str, force: bool, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_rollback(&secret_manager, name, None, version, force, &config).await
 }
 
 async fn execute_secret_update_direct(
@@ -1891,6 +1950,7 @@ async fn execute_secret_get(
     name: &str,
     vault: Option<String>,
     raw: bool,
+    version: Option<String>,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -1903,9 +1963,9 @@ async fn execute_secret_get(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
-    // Get the secret
+    // Get the secret (specific version or current)
     let secret = secret_manager
-        .get_secret_safe(&vault_name, name, true, true)
+        .get_secret_with_version(&vault_name, name, version.as_deref(), true, true)
         .await?;
 
     if raw {
@@ -1935,6 +1995,110 @@ async fn execute_secret_get(
             println!("⚠️  Secret '{name}' has no value");
         }
     }
+
+    Ok(())
+}
+
+async fn execute_secret_history(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    vault: Option<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use tabled::{Table, Tabled};
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Get secret versions using the secret operations
+    let versions = secret_manager
+        .secret_ops()
+        .get_secret_versions(&vault_name, name)
+        .await?;
+
+    if versions.is_empty() {
+        println!("No versions found for secret '{name}'");
+        return Ok(());
+    }
+
+    // Display versions in a table
+    #[derive(Tabled)]
+    struct VersionInfo {
+        #[tabled(rename = "Version")]
+        version: String,
+        #[tabled(rename = "Created")]
+        created: String,
+        #[tabled(rename = "Updated")]  
+        updated: String,
+        #[tabled(rename = "Enabled")]
+        enabled: String,
+    }
+
+    let version_infos: Vec<VersionInfo> = versions
+        .into_iter()
+        .map(|v| VersionInfo {
+            version: v.version,
+            created: v.created_on,
+            updated: v.updated_on,
+            enabled: if v.enabled { "Yes" } else { "No" }.to_string(),
+        })
+        .collect();
+
+    let table = Table::new(&version_infos).to_string();
+    println!("Version history for secret '{name}' in vault '{vault_name}':");
+    println!();
+    println!("{table}");
+
+    Ok(())
+}
+
+async fn execute_secret_rollback(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    vault: Option<String>,
+    version: &str,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use crate::utils::interactive::InteractivePrompt;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Confirm rollback unless force flag is used
+    if !force {
+        let prompt = InteractivePrompt::new();
+        let confirm = prompt.confirm(
+            &format!(
+                "Are you sure you want to rollback secret '{name}' to version '{version}'?"
+            ),
+            false,
+        )?;
+
+        if !confirm {
+            println!("Rollback cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Perform rollback using the secret operations
+    let result = secret_manager
+        .secret_ops()
+        .rollback_secret(&vault_name, name, version)
+        .await?;
+
+    println!("✅ Successfully rolled back secret '{name}' to version '{version}'");
+    println!("New version: {}", result.version);
 
     Ok(())
 }
