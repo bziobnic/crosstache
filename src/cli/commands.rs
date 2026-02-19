@@ -9,7 +9,8 @@ use crate::utils::format::OutputFormat;
 use crate::vault::{VaultCreateRequest, VaultManager};
 #[cfg(feature = "file-ops")]
 use crate::blob::manager::{BlobManager, create_blob_manager};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use std::path::{Path, PathBuf};
 
 // Include the built information generated at compile time
@@ -270,6 +271,12 @@ pub enum Commands {
     },
     /// Show detailed version and build information
     Version,
+    /// Generate shell completion scripts
+    Completion {
+        /// Shell type
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
@@ -748,6 +755,7 @@ impl Cli {
                 subscription,
             } => execute_info_command(resource, resource_type, resource_group, subscription, config).await,
             Commands::Version => execute_version_command().await,
+            Commands::Completion { shell } => execute_completion_command(shell).await,
             #[cfg(feature = "file-ops")]
             Commands::Upload { file_path, name, groups, metadata } => {
                 execute_file_upload_quick(&file_path, name, groups, metadata, &config).await
@@ -1558,6 +1566,18 @@ async fn execute_version_command() -> Result<()> {
     println!("Git Hash:     {}", build_info.git_hash);
     println!("Git Branch:   {}", build_info.git_branch);
 
+    Ok(())
+}
+
+async fn execute_completion_command(shell: Shell) -> Result<()> {
+    use clap_complete::generate;
+    use std::io;
+    
+    let mut cmd = Cli::command();
+    let name = "xv";
+    
+    generate(shell, &mut cmd, name, &mut io::stdout());
+    
     Ok(())
 }
 
