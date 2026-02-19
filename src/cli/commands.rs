@@ -135,15 +135,17 @@ impl std::fmt::Display for ResourceType {
 pub enum Commands {
     /// Set a secret in the current vault context
     Set {
-        /// Secret name
-        name: String,
-        /// Read value from stdin instead of prompting
+        /// Secret name (for single secret) or multiple KEY=value pairs (for bulk set)
+        /// Supports @/path/to/file to load value from file (e.g., KEY=@/path/to/file)
+        #[arg(required = true, num_args = 1..)]
+        args: Vec<String>,
+        /// Read value from stdin instead of prompting (only for single secret)
         #[arg(long)]
         stdin: bool,
-        /// Note to attach to the secret
+        /// Note to attach to the secret(s)
         #[arg(long)]
         note: Option<String>,
-        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
+        /// Folder path for the secret(s) (e.g., 'app/database', 'config/dev')
         #[arg(long)]
         folder: Option<String>,
     },
@@ -171,8 +173,11 @@ pub enum Commands {
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
     Delete {
-        /// Secret name
-        name: String,
+        /// Secret name (mutually exclusive with --group)
+        name: Option<String>,
+        /// Delete all secrets in the specified group (mutually exclusive with name)
+        #[arg(long, conflicts_with = "name")]
+        group: Option<String>,
         /// Force deletion without confirmation
         #[arg(short, long)]
         force: bool,
@@ -741,15 +746,15 @@ impl Cli {
         
         match self.command {
             Commands::Set {
-                name,
+                args,
                 stdin,
                 note,
                 folder,
-            } => execute_secret_set_direct(&name, stdin, note, folder, config).await,
+            } => execute_secret_set_direct(args, stdin, note, folder, config).await,
             Commands::Get { name, raw, version } => execute_secret_get_direct(&name, raw, version, config).await,
             Commands::List { group, all } => execute_secret_list_direct(group, all, config).await,
-            Commands::Delete { name, force } => {
-                execute_secret_delete_direct(&name, force, config).await
+            Commands::Delete { name, group, force } => {
+                execute_secret_delete_direct(name, group, force, config).await
             }
             Commands::History { name } => {
                 execute_secret_history_direct(&name, config).await
@@ -1247,7 +1252,7 @@ async fn execute_vault_info(
 
 // Direct secret command execution functions (context-aware)
 async fn execute_secret_set_direct(
-    name: &str,
+    args: Vec<String>,
     stdin: bool,
     note: Option<String>,
     folder: Option<String>,
@@ -1265,7 +1270,20 @@ async fn execute_secret_set_direct(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_set(&secret_manager, name, None, stdin, note, folder, &config).await
+    // Check if this is a bulk set operation (multiple KEY=value pairs)
+    if args.len() == 1 && !args[0].contains('=') {
+        // Single secret operation (original behavior)
+        let name = &args[0];
+        execute_secret_set(&secret_manager, name, None, stdin, note, folder, &config).await
+    } else {
+        // Bulk set operation
+        if stdin {
+            return Err(CrosstacheError::invalid_argument(
+                "--stdin cannot be used with bulk set operation"
+            ));
+        }
+        execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await
+    }
 }
 
 async fn execute_secret_get_direct(name: &str, raw: bool, version: Option<String>, config: Config) -> Result<()> {
@@ -1304,7 +1322,7 @@ async fn execute_secret_list_direct(
     execute_secret_list(&secret_manager, None, group, all, &config).await
 }
 
-async fn execute_secret_delete_direct(name: &str, force: bool, config: Config) -> Result<()> {
+async fn execute_secret_delete_direct(name: Option<String>, group: Option<String>, force: bool, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
     use std::sync::Arc;
@@ -1317,7 +1335,16 @@ async fn execute_secret_delete_direct(name: &str, force: bool, config: Config) -
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_delete(&secret_manager, name, None, force, &config).await
+    // Check if this is a group delete operation
+    if let Some(group_name) = group {
+        execute_secret_delete_group(&secret_manager, &group_name, force, &config).await
+    } else if let Some(secret_name) = name {
+        execute_secret_delete(&secret_manager, &secret_name, None, force, &config).await
+    } else {
+        Err(CrosstacheError::invalid_argument(
+            "Either secret name or --group must be specified"
+        ))
+    }
 }
 
 async fn execute_secret_history_direct(name: &str, config: Config) -> Result<()> {
@@ -4625,6 +4652,220 @@ async fn execute_file_sync(
     eprintln!("File sync is not yet implemented.");
     
     Ok(())
+}
+
+/// Execute bulk secret set operation
+async fn execute_secret_set_bulk(
+    secret_manager: &crate::secret::manager::SecretManager,
+    args: Vec<String>,
+    note: Option<String>,
+    folder: Option<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use std::fs;
+    use std::path::Path;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Parse KEY=value pairs
+    let mut secrets_to_set = Vec::new();
+    
+    for arg in args {
+        if let Some(pos) = arg.find('=') {
+            let key = arg[..pos].trim();
+            let value_part = arg[pos + 1..].trim();
+            
+            if key.is_empty() {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "Invalid KEY=value pair: empty key in '{}'", arg
+                )));
+            }
+            
+            // Handle @file syntax for value
+            let value = if value_part.starts_with('@') {
+                let file_path = &value_part[1..];
+                
+                if !Path::new(file_path).exists() {
+                    return Err(CrosstacheError::config(format!(
+                        "File not found: {}", file_path
+                    )));
+                }
+                
+                fs::read_to_string(file_path).map_err(|e| {
+                    CrosstacheError::config(format!(
+                        "Failed to read file '{}': {}", file_path, e
+                    ))
+                })?
+            } else {
+                value_part.to_string()
+            };
+            
+            if value.is_empty() {
+                return Err(CrosstacheError::config(format!(
+                    "Secret value cannot be empty for key '{}'", key
+                )));
+            }
+            
+            secrets_to_set.push((key.to_string(), value));
+        } else {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "Invalid format: '{}'. Expected KEY=value or KEY=@/path/to/file", arg
+            )));
+        }
+    }
+    
+    if secrets_to_set.is_empty() {
+        return Err(CrosstacheError::invalid_argument(
+            "No valid KEY=value pairs provided"
+        ));
+    }
+    
+    println!("🔐 Setting {} secret(s) in vault '{}'...", secrets_to_set.len(), vault_name);
+    
+    let mut success_count = 0;
+    let mut error_count = 0;
+    
+    for (key, value) in secrets_to_set {
+        // Create secret request with note and/or folder if provided
+        let secret_request = if note.is_some() || folder.is_some() {
+            Some(crate::secret::manager::SecretRequest {
+                name: key.clone(),
+                value: value.clone(),
+                content_type: None,
+                enabled: Some(true),
+                expires_on: None,
+                not_before: None,
+                tags: None,
+                groups: None,
+                note: note.clone(),
+                folder: folder.clone(),
+            })
+        } else {
+            None
+        };
+
+        match secret_manager
+            .set_secret_safe(&vault_name, &key, &value, secret_request)
+            .await
+        {
+            Ok(secret) => {
+                println!("  ✅ {}: {} (version {})", key, secret.original_name, secret.version);
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ {}: {}", key, e);
+                error_count += 1;
+            }
+        }
+    }
+    
+    println!("\n📊 Bulk Set Summary:");
+    println!("  ✅ Successful: {}", success_count);
+    if error_count > 0 {
+        println!("  ❌ Failed: {}", error_count);
+    }
+    
+    if error_count > 0 {
+        Err(CrosstacheError::config(format!(
+            "{} secret(s) failed to set", error_count
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Execute group delete operation
+async fn execute_secret_delete_group(
+    secret_manager: &crate::secret::manager::SecretManager,
+    group_name: &str,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Get all secrets from the vault
+    let secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, Some(group_name))
+        .await?;
+
+    if secrets.is_empty() {
+        println!("No secrets found in group '{}'", group_name);
+        return Ok(());
+    }
+
+    println!(
+        "Found {} secret(s) in group '{}' to delete:",
+        secrets.len(),
+        group_name
+    );
+    
+    for secret in &secrets {
+        println!("  - {}", secret.name);
+    }
+
+    // Confirmation unless forced
+    if !force {
+        let confirm = rpassword::prompt_password(format!(
+            "Are you sure you want to delete ALL {} secret(s) in group '{}'? (y/N): ",
+            secrets.len(),
+            group_name
+        ))?;
+
+        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+            println!("Group delete operation cancelled.");
+            return Ok(());
+        }
+    }
+
+    println!("🗑️  Deleting {} secret(s) from group '{}'...", secrets.len(), group_name);
+
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for secret in secrets {
+        match secret_manager
+            .delete_secret_safe(&vault_name, &secret.name, true) // force=true to avoid individual prompts
+            .await
+        {
+            Ok(_) => {
+                println!("  ✅ Deleted: {}", secret.name);
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ Failed to delete '{}': {}", secret.name, e);
+                error_count += 1;
+            }
+        }
+    }
+
+    println!("\n📊 Group Delete Summary:");
+    println!("  ✅ Successful: {}", success_count);
+    if error_count > 0 {
+        println!("  ❌ Failed: {}", error_count);
+    }
+
+    if error_count > 0 {
+        Err(CrosstacheError::config(format!(
+            "{} secret(s) failed to delete from group '{}'", error_count, group_name
+        )))
+    } else {
+        println!("✅ Successfully deleted all secrets from group '{}'", group_name);
+        Ok(())
+    }
 }
 
 /// Parse a single key-value pair
