@@ -30,18 +30,18 @@ fn create_test_config() -> Config {
 
 #[tokio::test]
 async fn test_file_upload_command_basic() -> Result<()> {
-    // Create a temporary file for testing
     let temp_file = NamedTempFile::new().unwrap();
     let test_content = b"Hello, World! This is a test file.";
     fs::write(temp_file.path(), test_content).unwrap();
 
     let _config = create_test_config();
 
-    // Test the FileCommands::Upload variant
     let upload_command = FileCommands::Upload {
         files: vec![temp_file.path().to_string_lossy().to_string()],
         name: Some("test-file.txt".to_string()),
         recursive: false,
+        flatten: false,
+        prefix: None,
         group: vec!["test-group".to_string()],
         metadata: vec![
             ("author".to_string(), "test-user".to_string()),
@@ -55,12 +55,13 @@ async fn test_file_upload_command_basic() -> Result<()> {
         continue_on_error: false,
     };
 
-    // Test that the command was created successfully
     match upload_command {
         FileCommands::Upload {
             files,
             name,
             recursive,
+            flatten: _,
+            prefix: _,
             group,
             metadata,
             tag,
@@ -92,8 +93,10 @@ async fn test_file_upload_command_with_multiple_groups() -> Result<()> {
 
     let upload_command = FileCommands::Upload {
         files: vec![temp_file.path().to_string_lossy().to_string()],
-        name: None, // Should default to filename
+        name: None,
         recursive: false,
+        flatten: false,
+        prefix: None,
         group: vec![
             "production".to_string(),
             "config".to_string(),
@@ -107,17 +110,18 @@ async fn test_file_upload_command_with_multiple_groups() -> Result<()> {
             ("team".to_string(), "devops".to_string()),
             ("project".to_string(), "crosstache".to_string()),
         ],
-        content_type: None, // Should be auto-detected
+        content_type: None,
         progress: false,
         continue_on_error: false,
     };
 
-    // Verify the command structure using pattern matching
     match upload_command {
         FileCommands::Upload {
             files,
             name,
             recursive: _,
+            flatten: _,
+            prefix: _,
             group,
             metadata,
             tag,
@@ -151,14 +155,15 @@ async fn test_file_download_command_basic() -> Result<()> {
         files: vec!["test-file.txt".to_string()],
         output: Some(output_path.to_string_lossy().to_string()),
         rename: None,
+        recursive: false,
+        flatten: false,
         stream: false,
         force: false,
         continue_on_error: false,
     };
 
-    // Verify the command structure using pattern matching
     match download_command {
-        FileCommands::Download { files, output, rename, stream, force, continue_on_error: _ } => {
+        FileCommands::Download { files, output, rename, recursive: _, flatten: _, stream, force, continue_on_error: _ } => {
             assert_eq!(files, vec!["test-file.txt"]);
             assert_eq!(output, Some(output_path.to_string_lossy().to_string()));
             assert!(rename.is_none());
@@ -175,16 +180,17 @@ async fn test_file_download_command_basic() -> Result<()> {
 async fn test_file_download_command_with_streaming() -> Result<()> {
     let download_command = FileCommands::Download {
         files: vec!["large-file.bin".to_string()],
-        output: None, // Should default to current directory
+        output: None,
         rename: None,
+        recursive: false,
+        flatten: false,
         stream: true,
         force: true,
         continue_on_error: false,
     };
 
-    // Verify the command structure using pattern matching
     match download_command {
-        FileCommands::Download { files, output, rename: _, stream, force, continue_on_error: _ } => {
+        FileCommands::Download { files, output, rename: _, recursive: _, flatten: _, stream, force, continue_on_error: _ } => {
             assert_eq!(files, vec!["large-file.bin"]);
             assert!(output.is_none());
             assert!(stream);
@@ -212,7 +218,6 @@ async fn test_quick_upload_command() -> Result<()> {
         ],
     };
 
-    // Verify the command structure
     match quick_upload_command {
         Commands::Upload { file_path, name, groups, metadata } => {
             assert_eq!(file_path, temp_file.path().to_string_lossy().to_string());
@@ -239,7 +244,6 @@ async fn test_quick_download_command() -> Result<()> {
         open: true,
     };
 
-    // Verify the command structure
     match quick_download_command {
         Commands::Download { name, output, open } => {
             assert_eq!(name, "quick-file.txt");
@@ -256,11 +260,10 @@ async fn test_quick_download_command() -> Result<()> {
 async fn test_quick_download_command_with_open() -> Result<()> {
     let quick_download_command = Commands::Download {
         name: "document.pdf".to_string(),
-        output: None, // Should default to current directory
+        output: None,
         open: true,
     };
 
-    // Verify the command structure
     match quick_download_command {
         Commands::Download { name, output, open } => {
             assert_eq!(name, "document.pdf");
@@ -275,13 +278,14 @@ async fn test_quick_download_command_with_open() -> Result<()> {
 
 #[tokio::test]
 async fn test_file_upload_validation() -> Result<()> {
-    // Test with non-existent file
     let non_existent_file = "/tmp/non-existent-file-12345.txt";
 
     let upload_command = FileCommands::Upload {
         files: vec![non_existent_file.to_string()],
         name: None,
         recursive: false,
+        flatten: false,
+        prefix: None,
         group: vec![],
         metadata: vec![],
         tag: vec![],
@@ -290,12 +294,13 @@ async fn test_file_upload_validation() -> Result<()> {
         continue_on_error: false,
     };
 
-    // Verify that the command structure is valid even with non-existent file
     match upload_command {
         FileCommands::Upload {
             files,
             name,
             recursive,
+            flatten: _,
+            prefix: _,
             group,
             metadata,
             tag,
@@ -328,6 +333,8 @@ async fn test_metadata_and_tag_parsing() -> Result<()> {
         files: vec![temp_file.path().to_string_lossy().to_string()],
         name: Some("test-file.txt".to_string()),
         recursive: false,
+        flatten: false,
+        prefix: None,
         group: vec!["test".to_string()],
         metadata: vec![
             ("author".to_string(), "John Doe".to_string()),
@@ -342,12 +349,13 @@ async fn test_metadata_and_tag_parsing() -> Result<()> {
         continue_on_error: false,
     };
 
-    // Verify the command structure
     match upload_command {
         FileCommands::Upload {
             files: _,
             name: _,
             recursive: _,
+            flatten: _,
+            prefix: _,
             group: _,
             metadata,
             tag,
@@ -376,11 +384,11 @@ async fn test_file_list_command() -> Result<()> {
         group: Some("production".to_string()),
         metadata: true,
         limit: Some(50),
+        recursive: false,
     };
 
-    // Verify the command structure
     match list_command {
-        FileCommands::List { prefix, group, metadata, limit } => {
+        FileCommands::List { prefix, group, metadata, limit, recursive: _ } => {
             assert_eq!(prefix, Some("config/".to_string()));
             assert_eq!(group, Some("production".to_string()));
             assert!(metadata);
@@ -400,7 +408,6 @@ async fn test_file_delete_command() -> Result<()> {
         continue_on_error: false,
     };
 
-    // Verify the command structure
     match delete_command {
         FileCommands::Delete { files, force, continue_on_error: _ } => {
             assert_eq!(files, vec!["old-file.txt"]);
@@ -418,7 +425,6 @@ async fn test_file_info_command() -> Result<()> {
         name: "info-file.txt".to_string(),
     };
 
-    // Verify the command structure
     match info_command {
         FileCommands::Info { name } => {
             assert_eq!(name, "info-file.txt");
@@ -433,12 +439,10 @@ async fn test_file_info_command() -> Result<()> {
 async fn test_configuration_creation() -> Result<()> {
     let config = create_test_config();
 
-    // Verify the test configuration
     assert_eq!(config.default_vault, "test-vault");
     assert_eq!(config.default_resource_group, "test-rg");
     assert_eq!(config.subscription_id, "test-subscription");
 
-    // Check blob configuration
     assert!(config.blob_config.is_some());
     let blob_config = config.blob_config.unwrap();
     assert_eq!(blob_config.storage_account, "teststorage");
