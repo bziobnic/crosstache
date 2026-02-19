@@ -11,6 +11,7 @@ use crate::vault::{VaultCreateRequest, VaultManager};
 use crate::blob::manager::{BlobManager, create_blob_manager};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 // Include the built information generated at compile time
@@ -300,6 +301,11 @@ pub enum Commands {
     Context {
         #[command(subcommand)]
         command: ContextCommands,
+    },
+    /// Environment profile management
+    Env {
+        #[command(subcommand)]
+        command: EnvCommands,
     },
     /// Initialize default configuration
     Init,
@@ -733,6 +739,44 @@ pub enum ContextCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum EnvCommands {
+    /// List available environment profiles
+    List,
+    /// Use an environment profile (sets vault and group context)
+    Use {
+        /// Profile name
+        name: String,
+    },
+    /// Create a new environment profile
+    Create {
+        /// Profile name
+        name: String,
+        /// Vault name for this profile
+        #[arg(long)]
+        vault: String,
+        /// Resource group for the vault
+        #[arg(long)]
+        group: String,
+        /// Subscription ID (optional)
+        #[arg(long)]
+        subscription: Option<String>,
+        /// Set this profile as global default
+        #[arg(long)]
+        global: bool,
+    },
+    /// Delete an environment profile
+    Delete {
+        /// Profile name
+        name: String,
+        /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Show current environment profile
+    Show,
+}
+
 impl Cli {
     pub async fn execute(self, mut config: Config) -> Result<()> {
         // Apply CLI credential type if specified (CLI flag overrides config/env)
@@ -809,6 +853,7 @@ impl Cli {
             Commands::File { command } => execute_file_command(command, config).await,
             Commands::Config { command } => execute_config_command(command, config).await,
             Commands::Context { command } => execute_context_command(command, config).await,
+            Commands::Env { command } => execute_env_command(command, config).await,
             Commands::Init => execute_init_command(config).await,
             Commands::Info {
                 resource,
@@ -1561,6 +1606,340 @@ async fn execute_context_command(command: ContextCommands, config: Config) -> Re
             execute_context_clear(global, &config).await?;
         }
     }
+    Ok(())
+}
+
+/// Environment profile structure  
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentProfile {
+    pub name: String,
+    pub vault_name: String,
+    pub resource_group: String,
+    pub subscription_id: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_used: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl EnvironmentProfile {
+    pub fn new(name: String, vault_name: String, resource_group: String, subscription_id: Option<String>) -> Self {
+        Self {
+            name,
+            vault_name,
+            resource_group,
+            subscription_id,
+            created_at: chrono::Utc::now(),
+            last_used: None,
+        }
+    }
+
+    pub fn update_usage(&mut self) {
+        self.last_used = Some(chrono::Utc::now());
+    }
+}
+
+/// Environment profile manager
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnvironmentProfileManager {
+    pub profiles: std::collections::HashMap<String, EnvironmentProfile>,
+    pub current_profile: Option<String>,
+}
+
+impl EnvironmentProfileManager {
+    /// Load profiles from configuration file
+    pub async fn load() -> Result<Self> {
+        let profile_path = Self::get_profile_path()?;
+        
+        if !profile_path.exists() {
+            return Ok(Self::default());
+        }
+        
+        let content = tokio::fs::read_to_string(&profile_path).await?;
+        let manager = serde_json::from_str(&content)?;
+        Ok(manager)
+    }
+
+    /// Save profiles to configuration file
+    pub async fn save(&self) -> Result<()> {
+        let profile_path = Self::get_profile_path()?;
+        
+        // Create parent directories if they don't exist
+        if let Some(parent) = profile_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        let content = serde_json::to_string_pretty(self)?;
+        tokio::fs::write(&profile_path, content).await?;
+        Ok(())
+    }
+
+    /// Get the profile configuration file path
+    fn get_profile_path() -> Result<PathBuf> {
+        // Check for local .xv.json file first
+        let local_path = std::env::current_dir()?.join(".xv.json");
+        if local_path.exists() {
+            return Ok(local_path);
+        }
+
+        // Use global profile path
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::env;
+            let config_dir = if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
+                PathBuf::from(xdg_config_home)
+            } else {
+                let home_dir = env::var("HOME")
+                    .map_err(|_| CrosstacheError::config("HOME environment variable not set"))?;
+                PathBuf::from(home_dir).join(".config")
+            };
+            Ok(config_dir.join("xv").join("profiles.json"))
+        }
+        
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let config_dir = dirs::config_dir()
+                .ok_or_else(|| CrosstacheError::config("Unable to determine config directory"))?;
+            Ok(config_dir.join("xv").join("profiles.json"))
+        }
+    }
+
+    /// Add a new environment profile
+    pub fn create_profile(&mut self, profile: EnvironmentProfile) -> Result<()> {
+        if self.profiles.contains_key(&profile.name) {
+            return Err(CrosstacheError::config(format!(
+                "Environment profile '{}' already exists", profile.name
+            )));
+        }
+        
+        self.profiles.insert(profile.name.clone(), profile);
+        Ok(())
+    }
+
+    /// Delete an environment profile
+    pub fn delete_profile(&mut self, name: &str) -> Result<()> {
+        if !self.profiles.contains_key(name) {
+            return Err(CrosstacheError::config(format!(
+                "Environment profile '{}' not found", name
+            )));
+        }
+
+        // Clear current profile if it's the one being deleted
+        if self.current_profile.as_ref() == Some(&name.to_string()) {
+            self.current_profile = None;
+        }
+
+        self.profiles.remove(name);
+        Ok(())
+    }
+
+    /// Use an environment profile (set it as current)
+    pub fn use_profile(&mut self, name: &str) -> Result<&EnvironmentProfile> {
+        let profile = self.profiles.get_mut(name)
+            .ok_or_else(|| CrosstacheError::config(format!(
+                "Environment profile '{}' not found", name
+            )))?;
+
+        profile.update_usage();
+        self.current_profile = Some(name.to_string());
+        Ok(profile)
+    }
+
+    /// Get the current environment profile
+    pub fn current_profile(&self) -> Option<&EnvironmentProfile> {
+        self.current_profile.as_ref()
+            .and_then(|name| self.profiles.get(name))
+    }
+}
+
+async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()> {
+    match command {
+        EnvCommands::List => execute_env_list(&config).await,
+        EnvCommands::Use { name } => execute_env_use(&name, &config).await,
+        EnvCommands::Create { name, vault, group, subscription, global } => {
+            execute_env_create(&name, &vault, &group, subscription, global, &config).await
+        },
+        EnvCommands::Delete { name, force } => execute_env_delete(&name, force, &config).await,
+        EnvCommands::Show => execute_env_show(&config).await,
+    }
+}
+
+async fn execute_env_list(_config: &Config) -> Result<()> {
+    let manager = EnvironmentProfileManager::load().await?;
+    
+    if manager.profiles.is_empty() {
+        println!("No environment profiles found.");
+        println!("Create one with: xv env create <name> --vault <vault> --group <group>");
+        return Ok(());
+    }
+
+    println!("Environment Profiles:");
+    println!("────────────────────");
+    
+    for (name, profile) in &manager.profiles {
+        let current_marker = if manager.current_profile.as_ref() == Some(name) {
+            "* " 
+        } else { 
+            "  " 
+        };
+        
+        println!("{}{} → {} ({})", 
+            current_marker, 
+            name, 
+            profile.vault_name, 
+            profile.resource_group
+        );
+        
+        if let Some(last_used) = profile.last_used {
+            println!("    Last used: {}", last_used.format("%Y-%m-%d %H:%M:%S UTC"));
+        }
+    }
+    
+    if let Some(current_name) = &manager.current_profile {
+        println!("\nCurrent profile: {}", current_name);
+    } else {
+        println!("\nNo profile currently active");
+    }
+    
+    Ok(())
+}
+
+async fn execute_env_use(name: &str, _config: &Config) -> Result<()> {
+    let mut manager = EnvironmentProfileManager::load().await?;
+    
+    // Get profile data before using (to avoid borrow checker issues)
+    let (vault_name, resource_group, subscription_id) = {
+        let profile = manager.use_profile(name)?;
+        (
+            profile.vault_name.clone(),
+            profile.resource_group.clone(),
+            profile.subscription_id.clone(),
+        )
+    };
+    
+    // Update the vault context using the profile
+    use crate::config::ContextManager;
+    use crate::config::context::VaultContext;
+    
+    let vault_context = VaultContext::new(
+        vault_name.clone(),
+        Some(resource_group.clone()),
+        subscription_id.clone(),
+    );
+    
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    context_manager.set_context(vault_context).await?;
+    
+    // Save the profile manager
+    manager.save().await?;
+    
+    println!("✓ Using environment profile: {}", name);
+    println!("  Vault: {}", vault_name);
+    println!("  Resource Group: {}", resource_group);
+    if let Some(subscription) = &subscription_id {
+        println!("  Subscription: {}", subscription);
+    }
+    
+    Ok(())
+}
+
+async fn execute_env_create(name: &str, vault: &str, group: &str, subscription: Option<String>, global: bool, _config: &Config) -> Result<()> {
+    let mut manager = EnvironmentProfileManager::load().await?;
+    
+    let profile = EnvironmentProfile::new(
+        name.to_string(),
+        vault.to_string(),
+        group.to_string(),
+        subscription.clone(),
+    );
+    
+    manager.create_profile(profile.clone())?;
+    
+    if global {
+        // Set as current profile
+        manager.use_profile(name)?;
+        
+        // Update the vault context
+        use crate::config::ContextManager;
+        use crate::config::context::VaultContext;
+        
+        let vault_context = VaultContext::new(
+            vault.to_string(),
+            Some(group.to_string()),
+            subscription.clone(),
+        );
+        
+        let mut context_manager = ContextManager::load().await.unwrap_or_default();
+        context_manager.set_context(vault_context).await?;
+    }
+    
+    manager.save().await?;
+    
+    println!("✓ Created environment profile: {}", name);
+    println!("  Vault: {}", vault);
+    println!("  Resource Group: {}", group);
+    if let Some(subscription) = &subscription {
+        println!("  Subscription: {}", subscription);
+    }
+    
+    if global {
+        println!("  Set as current profile");
+    }
+    
+    Ok(())
+}
+
+async fn execute_env_delete(name: &str, force: bool, _config: &Config) -> Result<()> {
+    let mut manager = EnvironmentProfileManager::load().await?;
+    
+    if !manager.profiles.contains_key(name) {
+        return Err(CrosstacheError::config(format!(
+            "Environment profile '{}' not found", name
+        )));
+    }
+    
+    if !force {
+        use crate::utils::interactive::InteractivePrompt;
+        
+        let prompt = InteractivePrompt::new();
+        let confirmation_message = format!("Delete environment profile '{}'?", name);
+        if !prompt.confirm(&confirmation_message, false)? {
+            println!("Delete cancelled");
+            return Ok(());
+        }
+    }
+    
+    manager.delete_profile(name)?;
+    manager.save().await?;
+    
+    println!("✓ Deleted environment profile: {}", name);
+    
+    Ok(())
+}
+
+async fn execute_env_show(_config: &Config) -> Result<()> {
+    let manager = EnvironmentProfileManager::load().await?;
+    
+    if let Some(current_name) = &manager.current_profile {
+        if let Some(profile) = manager.profiles.get(current_name) {
+            println!("Current Environment Profile: {}", current_name);
+            println!("──────────────────────────");
+            println!("Vault: {}", profile.vault_name);
+            println!("Resource Group: {}", profile.resource_group);
+            if let Some(subscription) = &profile.subscription_id {
+                println!("Subscription: {}", subscription);
+            }
+            println!("Created: {}", profile.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            if let Some(last_used) = profile.last_used {
+                println!("Last Used: {}", last_used.format("%Y-%m-%d %H:%M:%S UTC"));
+            }
+        } else {
+            println!("Current profile '{}' not found (corrupted state)", current_name);
+        }
+    } else {
+        println!("No environment profile is currently active");
+        println!("Use 'xv env list' to see available profiles");
+        println!("Use 'xv env use <name>' to activate a profile");
+    }
+    
     Ok(())
 }
 
@@ -2358,6 +2737,7 @@ async fn execute_secret_run(
     use crate::utils::helpers::to_env_var_name;
     use std::collections::HashMap;
     use std::process::{Command, Stdio};
+    use regex::Regex;
 
     if command.is_empty() {
         return Err(CrosstacheError::config("No command specified"));
@@ -2369,6 +2749,25 @@ async fn execute_secret_run(
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
+
+    // Parse current environment for xv:// URI references
+    let mut uri_secrets: Vec<(String, String)> = Vec::new(); // (vault, secret) pairs
+    let uri_regex = Regex::new(r"xv://([^/]+)/([^/\s]+)").unwrap();
+    
+    for (_env_name, env_value) in std::env::vars() {
+        for captures in uri_regex.captures_iter(&env_value) {
+            if let Some(vault_match) = captures.get(1) {
+                if let Some(secret_match) = captures.get(2) {
+                    let target_vault = vault_match.as_str().to_string();
+                    let secret_name = secret_match.as_str().to_string();
+                    let pair = (target_vault, secret_name);
+                    if !uri_secrets.contains(&pair) {
+                        uri_secrets.push(pair);
+                    }
+                }
+            }
+        }
+    }
 
     // Get all secrets from the vault
     let secrets = secret_manager
@@ -2409,7 +2808,9 @@ async fn execute_secret_run(
     // Fetch secret values and build environment map
     let mut env_vars: HashMap<String, String> = HashMap::new();
     let mut secret_values: Vec<String> = Vec::new(); // For masking
+    let mut uri_values: HashMap<String, String> = HashMap::new(); // URI -> value mapping
 
+    // Fetch secrets from current vault (group-filtered)
     for secret in filtered_secrets {
         // Get the secret value
         match secret_manager
@@ -2424,12 +2825,43 @@ async fn execute_secret_run(
                     
                     // Store for masking (if enabled)
                     if !no_masking && !value.is_empty() {
-                        secret_values.push(value);
+                        secret_values.push(value.clone());
                     }
                 }
             }
             Err(e) => {
                 eprintln!("⚠️  Failed to get value for secret '{}': {}", secret.name, e);
+            }
+        }
+    }
+
+    // Fetch cross-vault secrets referenced by URIs in environment
+    if !uri_secrets.is_empty() {
+        println!("🔗 Found {} cross-vault URI reference(s) in environment", uri_secrets.len());
+        
+        for (target_vault, secret_name) in &uri_secrets {
+            let uri = format!("xv://{}/{}", target_vault, secret_name);
+            
+            match secret_manager
+                .secret_ops()
+                .get_secret(target_vault, secret_name, true)
+                .await
+            {
+                Ok(secret_props) => {
+                    if let Some(value) = secret_props.value {
+                        uri_values.insert(uri.clone(), value.clone());
+                        
+                        // Store for masking (if enabled)
+                        if !no_masking && !value.is_empty() {
+                            secret_values.push(value);
+                        }
+                    } else {
+                        eprintln!("⚠️  Secret '{}' in vault '{}' has no value", secret_name, target_vault);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to get secret '{}' from vault '{}': {}", secret_name, target_vault, e);
+                }
             }
         }
     }
@@ -2440,8 +2872,25 @@ async fn execute_secret_run(
         cmd.args(&command[1..]);
     }
 
-    // Set environment variables
+    // Set environment variables from vault secrets
     cmd.envs(&env_vars);
+    
+    // Resolve URI references in existing environment variables
+    if !uri_values.is_empty() {
+        for (env_name, env_value) in std::env::vars() {
+            let mut resolved_value = env_value.clone();
+            
+            // Replace any xv:// URIs with actual secret values
+            for (uri, secret_value) in &uri_values {
+                resolved_value = resolved_value.replace(uri, secret_value);
+            }
+            
+            // Only set if the value changed (had URI references)
+            if resolved_value != env_value {
+                cmd.env(env_name, resolved_value);
+            }
+        }
+    }
 
     // Set up stdio for output capture and masking
     if no_masking {
@@ -2531,10 +2980,15 @@ async fn execute_secret_inject(
         }
     };
 
-    // Parse template for secret references ({{ secret:name }})
+    // Parse template for secret references
+    // Supports: {{ secret:name }} and xv://vault-name/secret-name
     let secret_regex = Regex::new(r"\{\{\s*secret:([^}\s]+)\s*\}\}").unwrap();
-    let mut required_secrets: Vec<String> = Vec::new();
+    let uri_regex = Regex::new(r"xv://([^/]+)/([^/\s]+)").unwrap();
     
+    let mut required_secrets: Vec<String> = Vec::new();
+    let mut cross_vault_secrets: Vec<(String, String)> = Vec::new(); // (vault, secret) pairs
+    
+    // Find {{ secret:name }} references (current vault)
     for captures in secret_regex.captures_iter(&template_content) {
         if let Some(secret_name) = captures.get(1) {
             let name = secret_name.as_str().to_string();
@@ -2543,9 +2997,24 @@ async fn execute_secret_inject(
             }
         }
     }
+    
+    // Find xv://vault/secret URI references
+    for captures in uri_regex.captures_iter(&template_content) {
+        if let Some(vault_match) = captures.get(1) {
+            if let Some(secret_match) = captures.get(2) {
+                let vault = vault_match.as_str().to_string();
+                let secret = secret_match.as_str().to_string();
+                let pair = (vault, secret);
+                if !cross_vault_secrets.contains(&pair) {
+                    cross_vault_secrets.push(pair);
+                }
+            }
+        }
+    }
 
-    if required_secrets.is_empty() {
-        println!("⚠️  No secret references found in template (use {{ secret:name }} syntax)");
+    if required_secrets.is_empty() && cross_vault_secrets.is_empty() {
+        println!("⚠️  No secret references found in template");
+        println!("    Use {{ secret:name }} syntax or xv://vault-name/secret-name URIs");
         
         // Still write the template content as-is to output
         match output_file {
@@ -2562,7 +3031,15 @@ async fn execute_secret_inject(
         return Ok(());
     }
 
-    println!("📋 Found {} secret reference(s) in template", required_secrets.len());
+    let total_references = required_secrets.len() + cross_vault_secrets.len();
+    println!("📋 Found {} secret reference(s) in template", total_references);
+    
+    if !required_secrets.is_empty() {
+        println!("  Current vault ({}): {} secret(s)", vault_name, required_secrets.len());
+    }
+    if !cross_vault_secrets.is_empty() {
+        println!("  Cross-vault: {} secret(s)", cross_vault_secrets.len());
+    }
 
     // Get all secrets from the vault
     let secrets = secret_manager
@@ -2589,10 +3066,12 @@ async fn execute_secret_inject(
         secrets
     };
 
-    // Build a map of secret names to values
+    // Build a map of secret names/URIs to values
     let mut secret_values: HashMap<String, String> = HashMap::new();
+    let mut cross_vault_values: HashMap<String, String> = HashMap::new(); // URI -> value
     let mut missing_secrets: Vec<String> = Vec::new();
 
+    // Fetch secrets from current vault
     for secret_name in &required_secrets {
         // Check if the secret exists in the available secrets
         if let Some(secret_summary) = available_secrets.iter().find(|s| s.name == *secret_name) {
@@ -2610,7 +3089,7 @@ async fn execute_secret_inject(
                     }
                 }
                 Err(e) => {
-                    eprintln!("⚠️  Failed to get value for secret '{}': {}", secret_name, e);
+                    eprintln!("⚠️  Failed to get value for secret '{}' from vault '{}': {}", secret_name, vault_name, e);
                     missing_secrets.push(secret_name.clone());
                 }
             }
@@ -2619,22 +3098,53 @@ async fn execute_secret_inject(
         }
     }
 
+    // Fetch cross-vault secrets
+    for (target_vault, secret_name) in &cross_vault_secrets {
+        let uri = format!("xv://{}/{}", target_vault, secret_name);
+        
+        match secret_manager
+            .secret_ops()
+            .get_secret(target_vault, secret_name, true)
+            .await
+        {
+            Ok(secret_props) => {
+                if let Some(value) = secret_props.value {
+                    cross_vault_values.insert(uri.clone(), value);
+                } else {
+                    eprintln!("⚠️  Secret '{}' in vault '{}' has no value", secret_name, target_vault);
+                    missing_secrets.push(uri);
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to get secret '{}' from vault '{}': {}", secret_name, target_vault, e);
+                missing_secrets.push(uri);
+            }
+        }
+    }
+
     if !missing_secrets.is_empty() {
         return Err(CrosstacheError::config(format!(
-            "Missing secrets: {}. Available in vault: {}",
-            missing_secrets.join(", "),
-            available_secrets.iter().map(|s| s.name.clone()).collect::<Vec<String>>().join(", ")
+            "Missing secrets: {}",
+            missing_secrets.join(", ")
         )));
     }
 
-    println!("🔐 Injecting {} secret(s) into template...", secret_values.len());
+    let total_injected = secret_values.len() + cross_vault_values.len();
+    println!("🔐 Injecting {} secret(s) into template...", total_injected);
 
     // Replace secret references with actual values
     let mut result_content = template_content;
+    
+    // Replace {{ secret:name }} references (current vault)
     for (secret_name, secret_value) in &secret_values {
         let pattern = format!(r"\{{\{{\s*secret:{}\s*\}}\}}", regex::escape(secret_name));
         let regex_pattern = Regex::new(&pattern).unwrap();
         result_content = regex_pattern.replace_all(&result_content, secret_value).to_string();
+    }
+    
+    // Replace xv://vault/secret URI references
+    for (uri, secret_value) in &cross_vault_values {
+        result_content = result_content.replace(uri, secret_value);
     }
 
     // Write result
