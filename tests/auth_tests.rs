@@ -28,7 +28,8 @@ mod auth_provider_tests {
         assert!(!valid_secret.is_empty());
 
         // Invalid parameters should be caught
-        assert!("".is_empty());
+        let empty_tenant = "";
+        assert!(empty_tenant.is_empty());
         assert!("   ".trim().is_empty());
     }
 }
@@ -153,9 +154,7 @@ mod authentication_flow_tests {
     }
     
     #[test]
-    fn test_credential_priority_parsing() {
-        use std::str::FromStr;
-        
+    fn test_credential_priority_parsing() {        
         // Test parsing of credential priority values
         let valid_priorities = vec!["cli", "managed_identity", "environment", "default"];
         let invalid_priorities = vec!["invalid", "unknown", ""];

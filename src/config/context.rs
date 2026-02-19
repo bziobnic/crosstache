@@ -44,6 +44,7 @@ impl VaultContext {
     }
 
     /// Create a new vault context with storage container
+    #[allow(dead_code)]
     pub fn with_storage_container(
         vault_name: String,
         resource_group: Option<String>,
@@ -67,6 +68,7 @@ impl VaultContext {
     }
 
     /// Check if this context matches the given vault name
+    #[allow(dead_code)]
     pub fn matches_vault(&self, vault_name: &str) -> bool {
         self.vault_name == vault_name
     }
@@ -259,6 +261,7 @@ impl ContextManager {
     }
 
     /// Get current storage container from context
+    #[allow(dead_code)]
     pub fn current_storage_container(&self) -> Option<&str> {
         self.current
             .as_ref()
@@ -278,6 +281,7 @@ impl ContextManager {
     }
 
     /// Find context by vault name in recent list
+    #[allow(dead_code)]
     pub fn find_recent_context(&self, vault_name: &str) -> Option<&VaultContext> {
         self.recent.iter().find(|c| c.vault_name == vault_name)
     }
@@ -316,6 +320,7 @@ impl ContextManager {
     }
 
     /// Initialize local context directory
+    #[allow(dead_code)]
     pub async fn init_local_context() -> Result<PathBuf> {
         let context_dir = std::env::current_dir()?.join(".xv");
         tokio::fs::create_dir_all(&context_dir).await?;
@@ -333,6 +338,7 @@ impl ContextManager {
     }
 
     /// Migrate from old configuration format
+    #[allow(dead_code)]
     pub async fn migrate_from_config(
         default_vault: &str,
         default_resource_group: Option<&str>,

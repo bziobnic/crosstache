@@ -48,7 +48,9 @@ pub struct FileUploadRequest {
 #[derive(Debug, Clone)]
 pub struct FileDownloadRequest {
     pub name: String,
+    #[allow(dead_code)]
     pub output_path: Option<String>,
+    #[allow(dead_code)]
     pub stream: bool,
 }
 
@@ -59,6 +61,7 @@ pub struct FileListRequest {
     pub groups: Option<Vec<String>>,
     pub limit: Option<usize>,
     pub delimiter: Option<String>,
+    #[allow(dead_code)]
     pub recursive: bool,
 }
 

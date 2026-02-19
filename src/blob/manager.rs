@@ -465,6 +465,7 @@ impl BlobManager {
     }
 
     /// Stream download a large file
+    #[allow(dead_code)]
     pub async fn download_file_stream<W: AsyncWrite + Unpin>(
         &self,
         name: &str,
@@ -529,6 +530,7 @@ impl BlobManager {
     }
 
     /// Upload large file with block-based chunking
+    #[allow(dead_code)]
     pub async fn upload_large_file<R: tokio::io::AsyncRead + Unpin>(
         &self,
         name: &str,
@@ -562,11 +564,13 @@ impl BlobManager {
     }
 
     /// Get the container name
+    #[allow(dead_code)]
     pub fn container_name(&self) -> &str {
         &self.container_name
     }
 
     /// Get the storage account name
+    #[allow(dead_code)]
     pub fn storage_account(&self) -> &str {
         &self.storage_account
     }
@@ -587,7 +591,7 @@ fn normalize_prefix(prefix: Option<String>) -> Option<String> {
 }
 
 /// Sort blob items: directories first, then files (both alphabetically)
-fn sort_blob_items(items: &mut Vec<BlobListItem>) {
+fn sort_blob_items(items: &mut [BlobListItem]) {
     use crate::blob::models::BlobListItem;
 
     items.sort_by(|a, b| {
@@ -659,6 +663,7 @@ pub fn create_blob_manager(config: &crate::config::Config) -> Result<BlobManager
 /// 
 /// This function uses the storage_container from the current vault context if available,
 /// otherwise falls back to the global blob configuration container.
+#[allow(dead_code)]
 pub fn create_context_aware_blob_manager(
     config: &crate::config::Config, 
     context_manager: &crate::config::context::ContextManager

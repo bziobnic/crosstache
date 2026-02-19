@@ -11,7 +11,7 @@ use tabled::Tabled;
 use std::fmt;
 
 /// Azure credential type priority for authentication
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AzureCredentialType {
     /// Use Azure CLI credentials first
@@ -21,13 +21,8 @@ pub enum AzureCredentialType {
     /// Use environment variable credentials first
     Environment,
     /// Use the default credential chain order
+    #[default]
     Default,
-}
-
-impl Default for AzureCredentialType {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl fmt::Display for AzureCredentialType {
@@ -129,6 +124,7 @@ impl Default for Config {
 }
 
 impl Config {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -170,6 +166,7 @@ impl Config {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn load() -> Result<Self> {
         load_config().await
     }
@@ -206,6 +203,7 @@ impl Config {
 
     /// Resolve resource group with context awareness
     /// Priority: CLI argument > context > config default
+    #[allow(dead_code)]
     pub async fn resolve_resource_group(&self, rg_arg: Option<String>) -> Result<String> {
         use crate::config::ContextManager;
 
@@ -230,6 +228,7 @@ impl Config {
 
     /// Resolve subscription ID with context awareness
     /// Priority: CLI argument > context > config default
+    #[allow(dead_code)]
     pub async fn resolve_subscription_id(&self, sub_arg: Option<String>) -> Result<String> {
         use crate::config::ContextManager;
 
@@ -263,6 +262,7 @@ impl Config {
     }
 
     /// Check if blob storage is configured
+    #[allow(dead_code)]
     pub fn is_blob_storage_configured(&self) -> bool {
         self.blob_config.as_ref()
             .map(|config| !config.storage_account.is_empty())
@@ -270,6 +270,7 @@ impl Config {
     }
 
     /// Get storage account endpoint URL
+    #[allow(dead_code)]
     pub fn get_storage_endpoint(&self) -> Option<String> {
         self.blob_config.as_ref()
             .and_then(|config| {
@@ -423,6 +424,7 @@ pub async fn save_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn init_default_config() -> Result<()> {
     let config_path = Config::get_config_path()?;
 

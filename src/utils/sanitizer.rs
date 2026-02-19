@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 const MAX_NAME_LENGTH: usize = 127;
 
 /// Azure Key Vault naming rules
+#[allow(dead_code)]
 pub struct AzureKeyVaultNameRules {
     pub max_length: usize,
     pub allowed_pattern: &'static str,
@@ -18,6 +19,7 @@ pub struct AzureKeyVaultNameRules {
 }
 
 impl AzureKeyVaultNameRules {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             max_length: MAX_NAME_LENGTH,
@@ -84,6 +86,7 @@ pub fn hash_secret_name(name: &str) -> String {
 }
 
 /// Generate a unique secret name by appending a suffix if needed
+#[allow(dead_code)]
 pub fn generate_unique_secret_name(base_name: &str, existing_names: &[String]) -> String {
     if !existing_names.contains(&base_name.to_string()) {
         return base_name.to_string();
@@ -123,10 +126,13 @@ pub fn get_secret_name_info(name: &str) -> Result<SecretNameInfo> {
 pub struct SecretNameInfo {
     pub original_name: String,
     pub sanitized_name: String,
+    #[allow(dead_code)]
     pub original_length: usize,
+    #[allow(dead_code)]
     pub sanitized_length: usize,
     pub was_modified: bool,
     pub is_hashed: bool,
+    #[allow(dead_code)]
     pub is_valid_keyvault_name: bool,
 }
 

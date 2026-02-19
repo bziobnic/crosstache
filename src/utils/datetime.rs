@@ -3,7 +3,10 @@
 //! This module provides functionality to parse various date/time formats
 //! including ISO dates, relative durations, and Azure Key Vault timestamps.
 
-use chrono::{DateTime, Datelike, Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
+
+#[cfg(test)]
+use chrono::Datelike;
 use regex::Regex;
 use crate::error::{CrosstacheError, Result};
 
@@ -116,6 +119,7 @@ pub fn is_expiring_within(expires_on: Option<DateTime<Utc>>, duration_str: &str)
 }
 
 /// Check if a secret is not yet active based on its not-before date
+#[allow(dead_code)]
 pub fn is_not_yet_active(not_before: Option<DateTime<Utc>>) -> bool {
     match not_before {
         Some(nbf) => Utc::now() < nbf,
@@ -132,11 +136,13 @@ pub fn format_datetime(dt: Option<DateTime<Utc>>) -> String {
 }
 
 /// Parse Unix timestamp to DateTime<Utc>
+#[allow(dead_code)]
 pub fn parse_unix_timestamp(timestamp: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp(timestamp, 0)
 }
 
 /// Convert DateTime to Unix timestamp
+#[allow(dead_code)]
 pub fn to_unix_timestamp(dt: DateTime<Utc>) -> i64 {
     dt.timestamp()
 }

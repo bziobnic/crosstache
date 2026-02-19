@@ -137,6 +137,7 @@ impl ResourceDetector {
     }
     
     /// Check if a name is a valid vault name
+    #[allow(dead_code)]
     pub fn is_valid_vault_name(name: &str) -> bool {
         // More strict validation for vault names
         let len = name.len();
@@ -177,6 +178,7 @@ impl ResourceDetector {
     }
     
     /// Check if a name is a valid secret name
+    #[allow(dead_code)]
     pub fn is_valid_secret_name(name: &str) -> bool {
         // Azure Key Vault secret naming rules:
         // - 1-127 characters
@@ -198,6 +200,7 @@ impl ResourceDetector {
     }
     
     /// Check if a name is a valid file name
+    #[allow(dead_code)]
     pub fn is_valid_file_name(name: &str) -> bool {
         // Basic file name validation
         // Azure Blob Storage naming rules are quite permissive

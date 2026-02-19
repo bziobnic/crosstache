@@ -123,6 +123,7 @@ pub struct ConnectionComponent {
 
 /// Secret group information
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SecretGroup {
     pub name: String,
     pub secrets: Vec<SecretSummary>,
@@ -182,6 +183,7 @@ pub trait SecretOperations: Send + Sync {
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()>;
 
     /// List deleted secrets
+    #[allow(dead_code)]
     async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<SecretSummary>>;
 
     /// Check if secret exists
@@ -203,9 +205,11 @@ pub trait SecretOperations: Send + Sync {
     ) -> Result<SecretProperties>;
 
     /// Backup secret
+    #[allow(dead_code)]
     async fn backup_secret(&self, vault_name: &str, secret_name: &str) -> Result<Vec<u8>>;
 
     /// Restore secret from backup
+    #[allow(dead_code)]
     async fn restore_secret_from_backup(
         &self,
         vault_name: &str,
@@ -610,7 +614,7 @@ impl SecretOperations for AzureSecretOperations {
         let version = json
             .get("id")
             .and_then(|id| id.as_str())
-            .and_then(|id| id.split('/').last())
+            .and_then(|id| id.split('/').next_back())
             .unwrap_or(version)
             .to_string();
 
@@ -1100,7 +1104,7 @@ impl SecretOperations for AzureSecretOperations {
                 
                 let version = version_json["kid"]
                     .as_str()
-                    .and_then(|kid| kid.split('/').last())
+                    .and_then(|kid| kid.split('/').next_back())
                     .unwrap_or("unknown")
                     .to_string();
 
@@ -1553,6 +1557,7 @@ impl SecretManager {
     }
 
     /// Get secrets by group
+    #[allow(dead_code)]
     pub async fn get_secrets_by_group(&self, vault_name: &str) -> Result<Vec<SecretGroup>> {
         let secrets = self.secret_ops.list_secrets(vault_name, None).await?;
         let mut groups: HashMap<String, Vec<SecretSummary>> = HashMap::new();
@@ -1900,6 +1905,7 @@ impl SecretManager {
 }
 
 /// Secret manager builder for flexible construction
+#[allow(dead_code)]
 pub struct SecretManagerBuilder {
     auth_provider: Option<Arc<dyn AzureAuthProvider>>,
     no_color: bool,
@@ -1907,6 +1913,7 @@ pub struct SecretManagerBuilder {
 
 impl SecretManagerBuilder {
     /// Create a new builder
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             auth_provider: None,
@@ -1915,18 +1922,21 @@ impl SecretManagerBuilder {
     }
 
     /// Set the authentication provider
+    #[allow(dead_code)]
     pub fn with_auth_provider(mut self, auth_provider: Arc<dyn AzureAuthProvider>) -> Self {
         self.auth_provider = Some(auth_provider);
         self
     }
 
     /// Disable colored output
+    #[allow(dead_code)]
     pub fn with_no_color(mut self, no_color: bool) -> Self {
         self.no_color = no_color;
         self
     }
 
     /// Build the secret manager
+    #[allow(dead_code)]
     pub fn build(self) -> Result<SecretManager> {
         let auth_provider = self
             .auth_provider

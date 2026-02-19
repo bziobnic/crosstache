@@ -123,9 +123,11 @@ pub trait AzureAuthProvider: Send + Sync {
     async fn get_object_id(&self) -> Result<String>;
 
     /// Get the client ID (if applicable)
+    #[allow(dead_code)]
     async fn get_client_id(&self) -> Result<Option<String>>;
 
     /// Sign out and clear cached credentials
+    #[allow(dead_code)]
     async fn sign_out(&self) -> Result<()>;
 
     /// Get the underlying token credential for Azure SDK usage
@@ -216,6 +218,7 @@ impl DefaultAzureCredentialProvider {
     }
 
     /// Create a new DefaultAzureCredentialProvider with specific tenant
+    #[allow(dead_code)]
     pub fn with_tenant(tenant_id: String) -> Result<Self> {
         // Note: Azure Identity v0.20 may have different API for setting tenant
         let credential = Arc::new(
@@ -280,7 +283,7 @@ impl DefaultAzureCredentialProvider {
         
         // For base64url decoding, add padding if needed
         let mut payload_padded = payload.to_string();
-        while payload_padded.len() % 4 != 0 {
+        while !payload_padded.len().is_multiple_of(4) {
             payload_padded.push('=');
         }
         
@@ -397,6 +400,7 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
 }
 
 /// Client Secret Authentication Provider
+#[allow(dead_code)]
 pub struct ClientSecretProvider {
     credential: Arc<ClientSecretCredential>,
     http_client: Client,
@@ -406,6 +410,7 @@ pub struct ClientSecretProvider {
 
 impl ClientSecretProvider {
     /// Create a new ClientSecretProvider
+    #[allow(dead_code)]
     pub fn new(tenant_id: String, client_id: String, client_secret: String) -> Result<Self> {
         // Note: Azure Identity v0.20 has a different API for ClientSecretCredential
         // We'll need to adapt this based on the actual API
@@ -432,6 +437,7 @@ impl ClientSecretProvider {
     }
 
     /// Get service principal information from Microsoft Graph API
+    #[allow(dead_code)]
     async fn get_service_principal_info(&self, access_token: &str) -> Result<Value> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -521,10 +527,12 @@ impl AzureAuthProvider for ClientSecretProvider {
 }
 
 /// Authentication provider factory
+#[allow(dead_code)]
 pub struct AuthProviderFactory;
 
 impl AuthProviderFactory {
     /// Create an authentication provider based on configuration
+    #[allow(dead_code)]
     pub fn create_provider(
         provider_type: &str,
         config: &HashMap<String, String>,
