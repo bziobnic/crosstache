@@ -235,6 +235,7 @@ pub struct VaultUpdateRequest {
 
 /// Role definition for Azure RBAC
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RoleDefinition {
     pub id: String,
     pub name: String,
@@ -245,6 +246,7 @@ pub struct RoleDefinition {
 
 /// Role permission definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RolePermission {
     pub actions: Vec<String>,
     pub not_actions: Vec<String>,
@@ -254,6 +256,7 @@ pub struct RolePermission {
 
 /// Role assignment request
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RoleAssignmentRequest {
     pub role_definition_id: String,
     pub principal_id: String,
@@ -262,6 +265,7 @@ pub struct RoleAssignmentRequest {
 
 /// Vault status enumeration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(dead_code)]
 pub enum VaultStatus {
     Active,
     SoftDeleted,

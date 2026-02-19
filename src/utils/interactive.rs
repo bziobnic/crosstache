@@ -40,6 +40,7 @@ impl InteractivePrompt {
     }
 
     /// Prompt for text input with optional default and validation
+    #[allow(dead_code)]
     pub fn input_text(&self, message: &str, default: Option<&str>) -> Result<String> {
         let mut input = Input::with_theme(&self.theme).with_prompt(message);
         
@@ -105,6 +106,7 @@ impl InteractivePrompt {
     }
 
     /// Display a warning message
+    #[allow(dead_code)]
     pub fn warning(&self, message: &str) -> Result<()> {
         println!("⚠️  {message}");
         Ok(())

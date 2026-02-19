@@ -40,6 +40,7 @@ pub struct ColorTheme {
     pub header: CrosstermColor,
     pub success: CrosstermColor,
     pub warning: CrosstermColor,
+    #[allow(dead_code)]
     pub error: CrosstermColor,
     pub info: CrosstermColor,
     pub accent: CrosstermColor,
@@ -208,6 +209,7 @@ impl DisplayUtils {
     }
 
     /// Print an error message
+    #[allow(dead_code)]
     pub fn print_error(&self, message: &str) -> Result<()> {
         let styled_message = if self.no_color {
             format!("✗ {message}")
@@ -269,12 +271,14 @@ impl DisplayUtils {
     }
 
     /// Clear the screen
+    #[allow(dead_code)]
     pub fn clear_screen(&self) -> Result<()> {
         execute!(stdout(), Clear(ClearType::All))?;
         Ok(())
     }
 
     /// Print a banner with border
+    #[allow(dead_code)]
     pub fn print_banner(&self, title: &str, subtitle: Option<&str>) -> Result<()> {
         let width = if let Ok((w, _)) = size() {
             (w as usize).min(80)

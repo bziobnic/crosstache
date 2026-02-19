@@ -36,6 +36,7 @@ pub struct AzureSubscription {
     /// Whether this is the current default subscription
     pub is_default: bool,
     /// Subscription state (e.g., "Enabled")
+    #[allow(dead_code)]
     pub state: String,
 }
 
@@ -429,6 +430,7 @@ impl AzureDetector {
     }
 
     /// Check if a storage account exists
+    #[allow(dead_code)]
     pub async fn storage_account_exists(subscription_id: &str, storage_account: &str) -> Result<bool> {
         let output = Command::new("az")
             .args([

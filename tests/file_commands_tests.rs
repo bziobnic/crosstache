@@ -13,19 +13,20 @@ use tempfile::{NamedTempFile, TempDir};
 
 /// Helper function to create a test configuration
 fn create_test_config() -> Config {
-    let mut config = Config::default();
-    config.default_vault = "test-vault".to_string();
-    config.default_resource_group = "test-rg".to_string();
-    config.subscription_id = "test-subscription".to_string();
-    config.blob_config = Some(BlobConfig {
-        storage_account: "teststorage".to_string(),
-        container_name: "test-container".to_string(),
-        endpoint: Some("https://teststorage.blob.core.windows.net".to_string()),
-        enable_large_file_support: true,
-        chunk_size_mb: 4,
-        max_concurrent_uploads: 3,
-    });
-    config
+    Config {
+        default_vault: "test-vault".to_string(),
+        default_resource_group: "test-rg".to_string(),
+        subscription_id: "test-subscription".to_string(),
+        blob_config: Some(BlobConfig {
+            storage_account: "teststorage".to_string(),
+            container_name: "test-container".to_string(),
+            endpoint: Some("https://teststorage.blob.core.windows.net".to_string()),
+            enable_large_file_support: true,
+            chunk_size_mb: 4,
+            max_concurrent_uploads: 3,
+        }),
+        ..Default::default()
+    }
 }
 
 #[tokio::test]

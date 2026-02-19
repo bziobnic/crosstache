@@ -25,9 +25,11 @@ pub struct InitConfig {
     pub default_resource_group: String,
     pub default_location: String,
     pub default_vault: Option<String>,
+    #[allow(dead_code)]
     pub create_test_vault: bool,
     pub storage_account_name: String,
     pub blob_container_name: String,
+    #[allow(dead_code)]
     pub create_storage_account: bool,
 }
 

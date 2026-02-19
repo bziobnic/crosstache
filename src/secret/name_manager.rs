@@ -10,6 +10,7 @@ use tabled::Tabled;
 
 /// Name mapping entry for persistent storage
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
+#[allow(dead_code)]
 pub struct NameMapping {
     #[tabled(rename = "Original Name")]
     pub original_name: String,
@@ -31,6 +32,7 @@ pub struct NameMapping {
 
 /// Name mapping statistics
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
+#[allow(dead_code)]
 pub struct NameMappingStats {
     #[tabled(rename = "Total Mappings")]
     pub total_mappings: usize,

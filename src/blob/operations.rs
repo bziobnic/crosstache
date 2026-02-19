@@ -9,6 +9,7 @@ use crate::error::{CrosstacheError, Result};
 
 impl BlobManager {
     /// Batch upload multiple files
+    #[allow(dead_code)]
     pub async fn batch_upload_files(
         &self,
         requests: Vec<FileUploadRequest>,
@@ -24,6 +25,7 @@ impl BlobManager {
     }
 
     /// Batch delete multiple files
+    #[allow(dead_code)]
     pub async fn batch_delete_files(&self, names: Vec<String>) -> Result<Vec<Result<()>>> {
         let mut results = Vec::new();
         
@@ -36,6 +38,7 @@ impl BlobManager {
     }
 
     /// Upload file with progress tracking
+    #[allow(dead_code)]
     pub async fn upload_file_with_progress(
         &self,
         request: FileUploadRequest,
@@ -57,6 +60,7 @@ impl BlobManager {
     }
 
     /// Check if a file exists in the container
+    #[allow(dead_code)]
     pub async fn file_exists(&self, name: &str) -> Result<bool> {
         match self.get_file_info(name).await {
             Ok(_) => Ok(true),
@@ -66,6 +70,7 @@ impl BlobManager {
     }
 
     /// Get total size of all files in the container
+    #[allow(dead_code)]
     pub async fn get_container_size(&self) -> Result<u64> {
         let list_request = FileListRequest {
             prefix: None,
@@ -82,6 +87,7 @@ impl BlobManager {
     }
 
     /// List files with pagination support
+    #[allow(dead_code)]
     pub async fn list_files_paginated(
         &self,
         _request: FileListRequest,

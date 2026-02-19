@@ -9,11 +9,13 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Check if a string is a valid GUID/UUID
+#[allow(dead_code)]
 pub fn is_guid(s: &str) -> bool {
     Uuid::parse_str(s).is_ok()
 }
 
 /// Build a connection string from key-value pairs
+#[allow(dead_code)]
 pub fn build_connection_string(params: &HashMap<String, String>) -> String {
     if params.is_empty() {
         return String::new();
@@ -40,11 +42,13 @@ pub fn parse_connection_string(connection_string: &str) -> HashMap<String, Strin
 }
 
 /// Get vault URI from vault name
+#[allow(dead_code)]
 pub fn get_vault_uri(vault_name: &str) -> String {
     format!("https://{vault_name}.vault.azure.net/")
 }
 
 /// Extract vault name from vault URI
+#[allow(dead_code)]
 pub fn extract_vault_name_from_uri(vault_uri: &str) -> Result<String> {
     let re = Regex::new(r"^https://([^.]+)\.vault\.azure\.net/?$")?;
 
@@ -60,6 +64,7 @@ pub fn extract_vault_name_from_uri(vault_uri: &str) -> Result<String> {
 }
 
 /// Generate a new UUID
+#[allow(dead_code)]
 pub fn generate_uuid() -> String {
     Uuid::new_v4().to_string()
 }
@@ -71,6 +76,7 @@ pub fn to_env_var_name(name: &str) -> String {
 }
 
 /// Normalize a name for matching (lowercase, replace non-alphanumeric with underscore)
+#[allow(dead_code)]
 pub fn normalize_name_for_matching(name: &str) -> String {
     let re = Regex::new(r"[^a-zA-Z0-9]").unwrap();
     re.replace_all(&name.to_lowercase(), "_").to_string()

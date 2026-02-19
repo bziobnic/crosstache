@@ -1664,6 +1664,7 @@ async fn execute_secret_inject_direct(template: Option<String>, out: Option<Stri
     execute_secret_inject(&secret_manager, None, template, out, group, &config).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_update_direct(
     name: &str,
     value: Option<String>,
@@ -2001,6 +2002,7 @@ impl EnvironmentProfileManager {
     }
 
     /// Get the current environment profile
+    #[allow(dead_code)]
     pub fn current_profile(&self) -> Option<&EnvironmentProfile> {
         self.current_profile.as_ref()
             .and_then(|name| self.profiles.get(name))
@@ -2716,10 +2718,7 @@ async fn execute_audit_command(
 
     // Filter by operation if specified
     if let Some(op_filter) = operation {
-        logs = logs
-            .into_iter()
-            .filter(|log| log.operation.to_lowercase().contains(&op_filter.to_lowercase()))
-            .collect();
+        logs.retain(|log| log.operation.to_lowercase().contains(&op_filter.to_lowercase()));
     }
 
     if logs.is_empty() {
@@ -2746,7 +2745,7 @@ async fn execute_audit_command(
             // Extract resource name (last part after /)
             let resource_display = log.resource_name
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or(&log.resource_name);
             
             // Truncate long strings for better display
@@ -2980,13 +2979,13 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
         .map_err(|e| CrosstacheError::authentication(format!("Failed to get management token: {e}")))?;
 
     // Parse token to get tenant ID (from JWT)
-    let tenant_id = extract_tenant_from_token(&token.token.secret())?;
+    let tenant_id = extract_tenant_from_token(token.token.secret())?;
     
     println!("👤 Identity Information:");
     println!("   Tenant ID: {}", tenant_id);
     
     // Get subscription information
-    if let Ok(subscription_id) = get_current_subscription(&management_token.token.secret()).await {
+    if let Ok(subscription_id) = get_current_subscription(management_token.token.secret()).await {
         println!("   Subscription ID: {}", subscription_id);
     } else {
         println!("   Subscription ID: Unable to determine");
@@ -3345,6 +3344,7 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_set(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -3663,6 +3663,7 @@ fn execute_custom_generator(script_path: &str, length: usize) -> Result<String> 
     Ok(generated_value)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_rotate(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -4352,6 +4353,7 @@ async fn execute_secret_delete(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_update(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -4653,7 +4655,7 @@ async fn execute_secret_copy(
         .await?;
 
     // Check if target secret already exists
-    if let Ok(_) = secret_manager.get_secret_safe(to_vault, target_name, false, true).await {
+    if secret_manager.get_secret_safe(to_vault, target_name, false, true).await.is_ok() {
         return Err(CrosstacheError::config(format!(
             "Secret '{}' already exists in vault '{}'. Use 'xv move' with --force or delete the target secret first.",
             target_name, to_vault
@@ -4729,7 +4731,7 @@ async fn execute_secret_move(
     }
 
     // Check if target secret already exists and handle accordingly
-    if let Ok(_) = secret_manager.get_secret_safe(to_vault, target_name, false, true).await {
+    if secret_manager.get_secret_safe(to_vault, target_name, false, true).await.is_ok() {
         if !force {
             return Err(CrosstacheError::config(format!(
                 "Secret '{}' already exists in vault '{}'. Use --force to overwrite.",
@@ -4845,6 +4847,7 @@ async fn execute_vault_purge(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_vault_export(
     _vault_manager: &VaultManager,
     name: &str,
@@ -5045,6 +5048,7 @@ async fn execute_vault_export(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_vault_import(
     _vault_manager: &VaultManager,
     name: &str,
@@ -5226,6 +5230,7 @@ async fn execute_vault_import(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_vault_update(
     vault_manager: &VaultManager,
     name: &str,
@@ -5527,6 +5532,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
 
 // File operation functions
 #[cfg(feature = "file-ops")]
+#[allow(clippy::too_many_arguments)]
 async fn execute_file_upload(
     blob_manager: &BlobManager,
     file_path: &str,
@@ -5839,7 +5845,7 @@ struct FileUploadInfo {
     /// Full local file path
     local_path: PathBuf,
     /// Relative path from base directory (for blob name calculation)
-    relative_path: String,
+    _relative_path: String,
     /// Final blob name (includes prefix and converted path separators)
     blob_name: String,
 }
@@ -5875,7 +5881,7 @@ fn path_to_blob_name(path: &Path, prefix: Option<&str>) -> String {
 
 /// Recursively collect all files from a directory
 #[cfg(feature = "file-ops")]
-fn collect_files_recursive(path: &Path) -> Result<Vec<PathBuf>> {
+fn _collect_files_recursive(path: &Path) -> Result<Vec<PathBuf>> {
     use std::fs;
     
     let mut files = Vec::new();
@@ -5897,7 +5903,7 @@ fn collect_files_recursive(path: &Path) -> Result<Vec<PathBuf>> {
                 files.push(entry_path);
             } else if entry_path.is_dir() {
                 // Recursively collect files from subdirectory
-                files.extend(collect_files_recursive(&entry_path)?);
+                files.extend(_collect_files_recursive(&entry_path)?);
             }
         }
     } else {
@@ -5954,7 +5960,7 @@ fn collect_files_with_structure(
 
         files.push(FileUploadInfo {
             local_path: path.to_path_buf(),
-            relative_path: relative.to_string_lossy().to_string(),
+            _relative_path: relative.to_string_lossy().to_string(),
             blob_name,
         });
     } else if path.is_dir() {
@@ -5991,6 +5997,7 @@ fn collect_files_with_structure(
 }
 
 #[cfg(feature = "file-ops")]
+#[allow(clippy::too_many_arguments)]
 async fn execute_file_upload_recursive(
     blob_manager: &BlobManager,
     paths: Vec<String>,
@@ -6069,7 +6076,7 @@ async fn execute_file_upload_recursive(
         }
         let result = execute_file_upload(
             blob_manager,
-            &local_path_str.to_string(),
+            &local_path_str,
             Some(file_info.blob_name.clone()), // Use the calculated blob name
             group.clone(),
             metadata.clone(),
@@ -6110,6 +6117,7 @@ async fn execute_file_upload_recursive(
 }
 
 #[cfg(feature = "file-ops")]
+#[allow(clippy::too_many_arguments)]
 async fn execute_file_upload_multiple(
     blob_manager: &BlobManager,
     files: Vec<String>,
@@ -6476,7 +6484,7 @@ async fn execute_secret_set_bulk(
             
             // Handle @file syntax for value
             let value = if value_part.starts_with('@') {
-                let file_path = &value_part[1..];
+                let file_path = value_part.strip_prefix('@').unwrap();
                 
                 if !Path::new(file_path).exists() {
                     return Err(CrosstacheError::config(format!(

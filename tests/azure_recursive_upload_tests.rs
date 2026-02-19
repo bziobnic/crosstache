@@ -40,7 +40,7 @@ fn run_xv_command(args: &[&str]) -> std::process::Output {
 /// Helper to list blobs in Azure using Azure CLI
 fn list_azure_blobs(prefix: &str) -> Vec<String> {
     let output = Command::new("az")
-        .args(&[
+        .args([
             "storage",
             "blob",
             "list",
@@ -73,7 +73,7 @@ fn cleanup_test_blobs(prefix: &str) {
     let blobs = list_azure_blobs(prefix);
     for blob in blobs {
         let _ = Command::new("az")
-            .args(&[
+            .args([
                 "storage",
                 "blob",
                 "delete",
