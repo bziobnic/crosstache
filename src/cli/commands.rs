@@ -132,6 +132,40 @@ impl std::fmt::Display for ResourceType {
     }
 }
 
+/// Character set type for secret rotation
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+pub enum CharsetType {
+    /// Alphanumeric characters (A-Z, a-z, 0-9)
+    Alphanumeric,
+    /// Alphanumeric with symbols
+    AlphanumericSymbols,
+    /// Hexadecimal (0-9, A-F)
+    Hex,
+    /// Base64 characters (A-Z, a-z, 0-9, +, /)
+    Base64,
+    /// Numeric only (0-9)
+    Numeric,
+    /// Uppercase letters only (A-Z)
+    Uppercase,
+    /// Lowercase letters only (a-z)
+    Lowercase,
+}
+
+impl CharsetType {
+    /// Get the character set string for this type
+    pub fn chars(&self) -> &'static str {
+        match self {
+            CharsetType::Alphanumeric => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            CharsetType::AlphanumericSymbols => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?",
+            CharsetType::Hex => "0123456789ABCDEF",
+            CharsetType::Base64 => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+            CharsetType::Numeric => "0123456789",
+            CharsetType::Uppercase => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            CharsetType::Lowercase => "abcdefghijklmnopqrstuvwxyz",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Set a secret in the current vault context
@@ -196,6 +230,26 @@ pub enum Commands {
         #[arg(long)]
         version: String,
         /// Force rollback without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Rotate a secret with a new random value
+    Rotate {
+        /// Secret name
+        name: String,
+        /// Length of the generated value (default: 32)
+        #[arg(long, default_value = "32")]
+        length: usize,
+        /// Character set to use for generation
+        #[arg(long, value_enum, default_value = "alphanumeric")]
+        charset: CharsetType,
+        /// Custom generator script path (overrides charset and length)
+        #[arg(long)]
+        generator: Option<String>,
+        /// Show the generated value (default: hidden for security)
+        #[arg(long)]
+        show_value: bool,
+        /// Force rotation without confirmation
         #[arg(short, long)]
         force: bool,
     },
@@ -823,6 +877,9 @@ impl Cli {
             Commands::Rollback { name, version, force } => {
                 execute_secret_rollback_direct(&name, &version, force, config).await
             }
+            Commands::Rotate { name, length, charset, generator, show_value, force } => {
+                execute_secret_rotate_direct(&name, length, charset, generator, show_value, force, config).await
+            }
             Commands::Run { group, no_masking, command } => {
                 execute_secret_run_direct(group, no_masking, command, config).await
             }
@@ -1444,6 +1501,31 @@ async fn execute_secret_rollback_direct(name: &str, version: &str, force: bool, 
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     execute_secret_rollback(&secret_manager, name, None, version, force, &config).await
+}
+
+async fn execute_secret_rotate_direct(
+    name: &str,
+    length: usize,
+    charset: CharsetType,
+    generator: Option<String>,
+    show_value: bool,
+    force: bool,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_rotate(&secret_manager, name, None, length, charset, generator, show_value, force, &config).await
 }
 
 async fn execute_secret_run_direct(group: Vec<String>, no_masking: bool, command: Vec<String>, config: Config) -> Result<()> {
@@ -3093,6 +3175,189 @@ async fn execute_secret_rollback(
 
     println!("✅ Successfully rolled back secret '{name}' to version '{version}'");
     println!("New version: {}", result.version);
+
+    Ok(())
+}
+
+/// Generate a random value using the specified parameters
+fn generate_random_value(length: usize, charset: CharsetType, custom_generator: Option<String>) -> Result<String> {
+    use rand::prelude::*;
+
+    if let Some(generator_script) = custom_generator {
+        // Execute custom generator script
+        return execute_custom_generator(&generator_script, length);
+    }
+
+    if length == 0 {
+        return Err(CrosstacheError::invalid_argument("Length must be greater than 0"));
+    }
+
+    let charset_str = charset.chars();
+    let charset_bytes = charset_str.as_bytes();
+
+    if charset_bytes.is_empty() {
+        return Err(CrosstacheError::invalid_argument("Character set cannot be empty"));
+    }
+
+    let mut rng = thread_rng();
+    let random_value: String = (0..length)
+        .map(|_| {
+            let idx = rng.gen_range(0..charset_bytes.len());
+            charset_bytes[idx] as char
+        })
+        .collect();
+
+    Ok(random_value)
+}
+
+/// Execute a custom generator script
+fn execute_custom_generator(script_path: &str, length: usize) -> Result<String> {
+    use std::process::{Command, Stdio};
+
+    // Check if the script exists
+    if !std::path::Path::new(script_path).exists() {
+        return Err(CrosstacheError::config(format!(
+            "Generator script not found: {}", script_path
+        )));
+    }
+
+    // Set up environment for the script
+    let mut cmd = Command::new(script_path);
+    cmd.env("XV_SECRET_LENGTH", length.to_string());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // Execute the script
+    let output = cmd
+        .output()
+        .map_err(|e| CrosstacheError::config(format!(
+            "Failed to execute generator script '{}': {}", script_path, e
+        )))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CrosstacheError::config(format!(
+            "Generator script failed with exit code {}: {}",
+            output.status.code().unwrap_or(-1),
+            stderr
+        )));
+    }
+
+    let generated_value = String::from_utf8(output.stdout)
+        .map_err(|e| CrosstacheError::config(format!(
+            "Generator script output is not valid UTF-8: {}", e
+        )))?
+        .trim()
+        .to_string();
+
+    if generated_value.is_empty() {
+        return Err(CrosstacheError::config(
+            "Generator script produced empty output"
+        ));
+    }
+
+    Ok(generated_value)
+}
+
+async fn execute_secret_rotate(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    vault: Option<String>,
+    length: usize,
+    charset: CharsetType,
+    custom_generator: Option<String>,
+    show_value: bool,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use crate::utils::interactive::InteractivePrompt;
+    use crate::secret::manager::SecretRequest;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Check if the secret exists first
+    let existing_secret = secret_manager
+        .secret_ops()
+        .get_secret(&vault_name, name, true)
+        .await
+        .map_err(|e| CrosstacheError::config(format!(
+            "Failed to verify secret exists: {}. Use 'xv set' to create a new secret.", e
+        )))?;
+
+    println!("🔄 Rotating secret: {}", name);
+    
+    // Show generation parameters
+    if let Some(ref script) = custom_generator {
+        println!("  Generator: {} (length: {})", script, length);
+    } else {
+        println!("  Character set: {:?}", charset);
+        println!("  Length: {}", length);
+    }
+
+    // Confirm rotation unless force flag is used
+    if !force {
+        let prompt = InteractivePrompt::new();
+        let confirm = prompt.confirm(
+            &format!(
+                "Are you sure you want to rotate secret '{}'? This will generate a new value and increment the version.",
+                name
+            ),
+            false,
+        )?;
+
+        if !confirm {
+            println!("Rotation cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Generate the new value
+    let new_value = generate_random_value(length, charset, custom_generator)?;
+    
+    // Preserve existing secret metadata
+    let set_request = SecretRequest {
+        name: name.to_string(),
+        value: new_value.clone(),
+        content_type: if existing_secret.content_type.is_empty() { 
+            None 
+        } else { 
+            Some(existing_secret.content_type) 
+        },
+        enabled: Some(true),
+        expires_on: existing_secret.expires_on,
+        not_before: existing_secret.not_before,
+        tags: if existing_secret.tags.is_empty() { 
+            None 
+        } else { 
+            Some(existing_secret.tags) 
+        },
+        groups: None, // Groups are managed via tags
+        note: None,
+        folder: None,
+    };
+
+    // Set the rotated secret
+    let result = secret_manager
+        .secret_ops()
+        .set_secret(&vault_name, &set_request)
+        .await?;
+
+    println!("✅ Successfully rotated secret '{}'", name);
+    println!("New version: {}", result.version);
+    
+    if show_value {
+        println!("Generated value: {}", new_value);
+    } else {
+        println!("Generated value: [hidden] (use --show-value to display)");
+    }
+
+    println!("💡 Use 'xv history {}' to see version history", name);
 
     Ok(())
 }
