@@ -5,10 +5,10 @@
 
 use crate::error::{CrosstacheError, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 use tabled::Tabled;
-use std::fmt;
 
 /// Azure credential type priority for authentication
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -156,7 +156,7 @@ impl Config {
             };
             Ok(config_dir.join("xv").join("xv.conf"))
         }
-        
+
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             // Use platform-appropriate config directory for other platforms
@@ -264,7 +264,8 @@ impl Config {
     /// Check if blob storage is configured
     #[allow(dead_code)]
     pub fn is_blob_storage_configured(&self) -> bool {
-        self.blob_config.as_ref()
+        self.blob_config
+            .as_ref()
             .map(|config| !config.storage_account.is_empty())
             .unwrap_or(false)
     }
@@ -272,16 +273,18 @@ impl Config {
     /// Get storage account endpoint URL
     #[allow(dead_code)]
     pub fn get_storage_endpoint(&self) -> Option<String> {
-        self.blob_config.as_ref()
-            .and_then(|config| {
-                config.endpoint.clone().or_else(|| {
-                    if !config.storage_account.is_empty() {
-                        Some(format!("https://{}.blob.core.windows.net", config.storage_account))
-                    } else {
-                        None
-                    }
-                })
+        self.blob_config.as_ref().and_then(|config| {
+            config.endpoint.clone().or_else(|| {
+                if !config.storage_account.is_empty() {
+                    Some(format!(
+                        "https://{}.blob.core.windows.net",
+                        config.storage_account
+                    ))
+                } else {
+                    None
+                }
             })
+        })
     }
 }
 
@@ -292,10 +295,10 @@ impl Config {
 /// 4. Default values
 pub async fn load_config() -> Result<Config> {
     let config = load_config_no_validation().await?;
-    
+
     // Validate configuration
     config.validate()?;
-    
+
     Ok(config)
 }
 
@@ -448,19 +451,49 @@ mod tests {
         use std::str::FromStr;
 
         // Test valid credential types
-        assert_eq!(AzureCredentialType::from_str("cli").unwrap(), AzureCredentialType::Cli);
-        assert_eq!(AzureCredentialType::from_str("CLI").unwrap(), AzureCredentialType::Cli);
-        assert_eq!(AzureCredentialType::from_str("azure-cli").unwrap(), AzureCredentialType::Cli);
-        assert_eq!(AzureCredentialType::from_str("az").unwrap(), AzureCredentialType::Cli);
-        
-        assert_eq!(AzureCredentialType::from_str("managed_identity").unwrap(), AzureCredentialType::ManagedIdentity);
-        assert_eq!(AzureCredentialType::from_str("managed-identity").unwrap(), AzureCredentialType::ManagedIdentity);
-        assert_eq!(AzureCredentialType::from_str("msi").unwrap(), AzureCredentialType::ManagedIdentity);
-        
-        assert_eq!(AzureCredentialType::from_str("environment").unwrap(), AzureCredentialType::Environment);
-        assert_eq!(AzureCredentialType::from_str("env").unwrap(), AzureCredentialType::Environment);
-        
-        assert_eq!(AzureCredentialType::from_str("default").unwrap(), AzureCredentialType::Default);
+        assert_eq!(
+            AzureCredentialType::from_str("cli").unwrap(),
+            AzureCredentialType::Cli
+        );
+        assert_eq!(
+            AzureCredentialType::from_str("CLI").unwrap(),
+            AzureCredentialType::Cli
+        );
+        assert_eq!(
+            AzureCredentialType::from_str("azure-cli").unwrap(),
+            AzureCredentialType::Cli
+        );
+        assert_eq!(
+            AzureCredentialType::from_str("az").unwrap(),
+            AzureCredentialType::Cli
+        );
+
+        assert_eq!(
+            AzureCredentialType::from_str("managed_identity").unwrap(),
+            AzureCredentialType::ManagedIdentity
+        );
+        assert_eq!(
+            AzureCredentialType::from_str("managed-identity").unwrap(),
+            AzureCredentialType::ManagedIdentity
+        );
+        assert_eq!(
+            AzureCredentialType::from_str("msi").unwrap(),
+            AzureCredentialType::ManagedIdentity
+        );
+
+        assert_eq!(
+            AzureCredentialType::from_str("environment").unwrap(),
+            AzureCredentialType::Environment
+        );
+        assert_eq!(
+            AzureCredentialType::from_str("env").unwrap(),
+            AzureCredentialType::Environment
+        );
+
+        assert_eq!(
+            AzureCredentialType::from_str("default").unwrap(),
+            AzureCredentialType::Default
+        );
 
         // Test invalid credential types
         assert!(AzureCredentialType::from_str("invalid").is_err());
@@ -471,7 +504,10 @@ mod tests {
     #[test]
     fn test_azure_credential_type_display() {
         assert_eq!(AzureCredentialType::Cli.to_string(), "cli");
-        assert_eq!(AzureCredentialType::ManagedIdentity.to_string(), "managed_identity");
+        assert_eq!(
+            AzureCredentialType::ManagedIdentity.to_string(),
+            "managed_identity"
+        );
         assert_eq!(AzureCredentialType::Environment.to_string(), "environment");
         assert_eq!(AzureCredentialType::Default.to_string(), "default");
     }
@@ -484,8 +520,11 @@ mod tests {
     #[test]
     fn test_config_with_credential_priority() {
         let mut config = Config::default();
-        assert_eq!(config.azure_credential_priority, AzureCredentialType::Default);
-        
+        assert_eq!(
+            config.azure_credential_priority,
+            AzureCredentialType::Default
+        );
+
         config.azure_credential_priority = AzureCredentialType::Cli;
         assert_eq!(config.azure_credential_priority, AzureCredentialType::Cli);
     }

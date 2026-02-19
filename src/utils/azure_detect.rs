@@ -58,7 +58,7 @@ impl AzureDetector {
     /// Detect the current Azure environment
     pub async fn detect_environment() -> Result<AzureEnvironment> {
         let cli_available = Self::check_cli_available();
-        
+
         if !cli_available {
             return Ok(AzureEnvironment {
                 cli_available: false,
@@ -72,7 +72,7 @@ impl AzureDetector {
 
         let cli_version = Self::get_cli_version();
         let cli_logged_in = Self::check_cli_logged_in();
-        
+
         if !cli_logged_in {
             return Ok(AzureEnvironment {
                 cli_available: true,
@@ -109,10 +109,7 @@ impl AzureDetector {
 
     /// Get Azure CLI version
     fn get_cli_version() -> Option<String> {
-        let output = Command::new("az")
-            .arg("--version")
-            .output()
-            .ok()?;
+        let output = Command::new("az").arg("--version").output().ok()?;
 
         if !output.status.success() {
             return None;
@@ -123,11 +120,7 @@ impl AzureDetector {
         version_output
             .lines()
             .next()
-            .and_then(|line| {
-                line.split_whitespace()
-                    .nth(1)
-                    .map(|v| v.to_string())
-            })
+            .and_then(|line| line.split_whitespace().nth(1).map(|v| v.to_string()))
     }
 
     /// Check if user is logged into Azure CLI
@@ -154,13 +147,12 @@ impl AzureDetector {
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
-        let subscriptions_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| CrosstacheError::serialization(format!(
-                "Failed to parse Azure CLI output: {e}"
-            )))?;
+        let subscriptions_json: Value = serde_json::from_str(&output_str).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to parse Azure CLI output: {e}"))
+        })?;
 
         let mut subscriptions = Vec::new();
-        
+
         if let Some(subs_array) = subscriptions_json.as_array() {
             for sub_json in subs_array {
                 if let Some(subscription) = Self::parse_subscription(sub_json) {
@@ -178,7 +170,11 @@ impl AzureDetector {
         let name = sub_json.get("name")?.as_str()?.to_string();
         let tenant_id = sub_json.get("tenantId")?.as_str()?.to_string();
         let is_default = sub_json.get("isDefault")?.as_bool().unwrap_or(false);
-        let state = sub_json.get("state")?.as_str().unwrap_or("Unknown").to_string();
+        let state = sub_json
+            .get("state")?
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string();
 
         Some(AzureSubscription {
             id,
@@ -201,10 +197,9 @@ impl AzureDetector {
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
-        let account_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| CrosstacheError::serialization(format!(
-                "Failed to parse Azure CLI output: {e}"
-            )))?;
+        let account_json: Value = serde_json::from_str(&output_str).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to parse Azure CLI output: {e}"))
+        })?;
 
         let tenant_id = account_json
             .get("tenantId")
@@ -214,7 +209,7 @@ impl AzureDetector {
         if let Some(id) = tenant_id {
             // Try to get additional tenant info
             let tenant_details = Self::get_tenant_details(&id).await;
-            
+
             Ok(Some(AzureTenant {
                 id,
                 domain: tenant_details.as_ref().and_then(|t| t.domain.clone()),
@@ -228,8 +223,15 @@ impl AzureDetector {
     /// Get detailed tenant information
     async fn get_tenant_details(tenant_id: &str) -> Option<AzureTenant> {
         let output = Command::new("az")
-            .args(["rest", "--method", "GET", "--url", 
-                   &format!("https://graph.microsoft.com/v1.0/organization?$filter=id eq '{tenant_id}'")])
+            .args([
+                "rest",
+                "--method",
+                "GET",
+                "--url",
+                &format!(
+                    "https://graph.microsoft.com/v1.0/organization?$filter=id eq '{tenant_id}'"
+                ),
+            ])
             .output()
             .ok()?;
 
@@ -248,7 +250,8 @@ impl AzureDetector {
             .as_array()?
             .iter()
             .find(|domain| {
-                domain.get("isDefault")
+                domain
+                    .get("isDefault")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
             })
@@ -272,10 +275,14 @@ impl AzureDetector {
     pub async fn get_resource_groups(subscription_id: &str) -> Result<Vec<String>> {
         let output = Command::new("az")
             .args([
-                "group", "list",
-                "--subscription", subscription_id,
-                "--query", "[].name",
-                "--output", "json"
+                "group",
+                "list",
+                "--subscription",
+                subscription_id,
+                "--query",
+                "[].name",
+                "--output",
+                "json",
             ])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -288,10 +295,9 @@ impl AzureDetector {
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
-        let groups_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| CrosstacheError::serialization(format!(
-                "Failed to parse resource groups: {e}"
-            )))?;
+        let groups_json: Value = serde_json::from_str(&output_str).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to parse resource groups: {e}"))
+        })?;
 
         let mut resource_groups = Vec::new();
         if let Some(groups_array) = groups_json.as_array() {
@@ -310,10 +316,14 @@ impl AzureDetector {
     pub async fn get_locations(subscription_id: &str) -> Result<Vec<String>> {
         let output = Command::new("az")
             .args([
-                "account", "list-locations",
-                "--subscription", subscription_id,
-                "--query", "[].name",
-                "--output", "json"
+                "account",
+                "list-locations",
+                "--subscription",
+                subscription_id,
+                "--query",
+                "[].name",
+                "--output",
+                "json",
             ])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -326,10 +336,9 @@ impl AzureDetector {
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
-        let locations_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| CrosstacheError::serialization(format!(
-                "Failed to parse locations: {e}"
-            )))?;
+        let locations_json: Value = serde_json::from_str(&output_str).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to parse locations: {e}"))
+        })?;
 
         let mut locations = Vec::new();
         if let Some(locations_array) = locations_json.as_array() {
@@ -345,12 +354,18 @@ impl AzureDetector {
     }
 
     /// Check if a resource group exists
-    pub async fn resource_group_exists(subscription_id: &str, resource_group: &str) -> Result<bool> {
+    pub async fn resource_group_exists(
+        subscription_id: &str,
+        resource_group: &str,
+    ) -> Result<bool> {
         let output = Command::new("az")
             .args([
-                "group", "exists",
-                "--subscription", subscription_id,
-                "--name", resource_group
+                "group",
+                "exists",
+                "--subscription",
+                subscription_id,
+                "--name",
+                resource_group,
             ])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -366,16 +381,20 @@ impl AzureDetector {
 
     /// Create a resource group
     pub async fn create_resource_group(
-        subscription_id: &str, 
-        resource_group: &str, 
-        location: &str
+        subscription_id: &str,
+        resource_group: &str,
+        location: &str,
     ) -> Result<()> {
         let output = Command::new("az")
             .args([
-                "group", "create",
-                "--subscription", subscription_id,
-                "--name", resource_group,
-                "--location", location
+                "group",
+                "create",
+                "--subscription",
+                subscription_id,
+                "--name",
+                resource_group,
+                "--location",
+                location,
             ])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -391,14 +410,23 @@ impl AzureDetector {
     }
 
     /// Get storage accounts in a resource group
-    pub async fn get_storage_accounts(subscription_id: &str, resource_group: &str) -> Result<Vec<String>> {
+    pub async fn get_storage_accounts(
+        subscription_id: &str,
+        resource_group: &str,
+    ) -> Result<Vec<String>> {
         let output = Command::new("az")
             .args([
-                "storage", "account", "list",
-                "--subscription", subscription_id,
-                "--resource-group", resource_group,
-                "--query", "[].name",
-                "--output", "json"
+                "storage",
+                "account",
+                "list",
+                "--subscription",
+                subscription_id,
+                "--resource-group",
+                resource_group,
+                "--query",
+                "[].name",
+                "--output",
+                "json",
             ])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -411,10 +439,9 @@ impl AzureDetector {
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
-        let accounts_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| CrosstacheError::serialization(format!(
-                "Failed to parse storage accounts: {e}"
-            )))?;
+        let accounts_json: Value = serde_json::from_str(&output_str).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to parse storage accounts: {e}"))
+        })?;
 
         let mut storage_accounts = Vec::new();
         if let Some(accounts_array) = accounts_json.as_array() {
@@ -431,14 +458,23 @@ impl AzureDetector {
 
     /// Check if a storage account exists
     #[allow(dead_code)]
-    pub async fn storage_account_exists(subscription_id: &str, storage_account: &str) -> Result<bool> {
+    pub async fn storage_account_exists(
+        subscription_id: &str,
+        storage_account: &str,
+    ) -> Result<bool> {
         let output = Command::new("az")
             .args([
-                "storage", "account", "show",
-                "--subscription", subscription_id,
-                "--name", storage_account,
-                "--query", "name",
-                "--output", "json"
+                "storage",
+                "account",
+                "show",
+                "--subscription",
+                subscription_id,
+                "--name",
+                storage_account,
+                "--query",
+                "name",
+                "--output",
+                "json",
             ])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -447,14 +483,24 @@ impl AzureDetector {
     }
 
     /// Check if a container exists in a storage account
-    pub async fn container_exists(subscription_id: &str, storage_account: &str, container_name: &str) -> Result<bool> {
+    pub async fn container_exists(
+        subscription_id: &str,
+        storage_account: &str,
+        container_name: &str,
+    ) -> Result<bool> {
         let output = Command::new("az")
             .args([
-                "storage", "container", "exists",
-                "--subscription", subscription_id,
-                "--account-name", storage_account,
-                "--name", container_name,
-                "--output", "json"
+                "storage",
+                "container",
+                "exists",
+                "--subscription",
+                subscription_id,
+                "--account-name",
+                storage_account,
+                "--name",
+                container_name,
+                "--output",
+                "json",
             ])
             .output()
             .map_err(|e| CrosstacheError::config(format!("Failed to execute Azure CLI: {e}")))?;
@@ -464,12 +510,14 @@ impl AzureDetector {
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
-        let exists_json: Value = serde_json::from_str(&output_str)
-            .map_err(|e| CrosstacheError::serialization(format!(
+        let exists_json: Value = serde_json::from_str(&output_str).map_err(|e| {
+            CrosstacheError::serialization(format!(
                 "Failed to parse container existence check: {e}"
-            )))?;
+            ))
+        })?;
 
-        Ok(exists_json.get("exists")
+        Ok(exists_json
+            .get("exists")
             .and_then(|v| v.as_bool())
             .unwrap_or(false))
     }
@@ -490,7 +538,10 @@ impl AzureEnvironment {
         } else if self.subscriptions.is_empty() {
             "Azure CLI is available but no subscriptions found".to_string()
         } else {
-            format!("Azure CLI ready with {} subscription(s)", self.subscriptions.len())
+            format!(
+                "Azure CLI ready with {} subscription(s)",
+                self.subscriptions.len()
+            )
         }
     }
 
@@ -499,11 +550,15 @@ impl AzureEnvironment {
         let mut instructions = Vec::new();
 
         if !self.cli_available {
-            instructions.push("Install Azure CLI: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli".to_string());
+            instructions.push(
+                "Install Azure CLI: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
+                    .to_string(),
+            );
         } else if !self.cli_logged_in {
             instructions.push("Log in to Azure: az login".to_string());
         } else if self.subscriptions.is_empty() {
-            instructions.push("Ensure you have access to at least one Azure subscription".to_string());
+            instructions
+                .push("Ensure you have access to at least one Azure subscription".to_string());
         }
 
         instructions
@@ -518,7 +573,7 @@ mod tests {
     async fn test_azure_detection() {
         // This test will only pass if Azure CLI is available and configured
         let env = AzureDetector::detect_environment().await.unwrap();
-        
+
         // At minimum, we should be able to detect CLI availability
         assert!(env.cli_available == AzureDetector::check_cli_available());
     }

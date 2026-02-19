@@ -6,9 +6,7 @@
 
 use std::sync::Arc;
 
-use super::models::{
-    AccessLevel, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary,
-};
+use super::models::{AccessLevel, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary};
 use super::operations::{AzureVaultOperations, VaultOperations};
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::Result;
@@ -361,5 +359,4 @@ impl VaultManager {
 
         Ok(())
     }
-
 }

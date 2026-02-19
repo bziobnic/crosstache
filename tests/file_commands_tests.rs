@@ -5,7 +5,7 @@
 
 use crosstache::{
     cli::commands::{Commands, FileCommands},
-    config::{Config, BlobConfig},
+    config::{BlobConfig, Config},
     error::Result,
 };
 use std::fs;
@@ -48,9 +48,7 @@ async fn test_file_upload_command_basic() -> Result<()> {
             ("author".to_string(), "test-user".to_string()),
             ("version".to_string(), "1.0".to_string()),
         ],
-        tag: vec![
-            ("environment".to_string(), "test".to_string()),
-        ],
+        tag: vec![("environment".to_string(), "test".to_string())],
         content_type: Some("text/plain".to_string()),
         progress: true,
         continue_on_error: false,
@@ -164,7 +162,16 @@ async fn test_file_download_command_basic() -> Result<()> {
     };
 
     match download_command {
-        FileCommands::Download { files, output, rename, recursive: _, flatten: _, stream, force, continue_on_error: _ } => {
+        FileCommands::Download {
+            files,
+            output,
+            rename,
+            recursive: _,
+            flatten: _,
+            stream,
+            force,
+            continue_on_error: _,
+        } => {
             assert_eq!(files, vec!["test-file.txt"]);
             assert_eq!(output, Some(output_path.to_string_lossy().to_string()));
             assert!(rename.is_none());
@@ -191,7 +198,16 @@ async fn test_file_download_command_with_streaming() -> Result<()> {
     };
 
     match download_command {
-        FileCommands::Download { files, output, rename: _, recursive: _, flatten: _, stream, force, continue_on_error: _ } => {
+        FileCommands::Download {
+            files,
+            output,
+            rename: _,
+            recursive: _,
+            flatten: _,
+            stream,
+            force,
+            continue_on_error: _,
+        } => {
             assert_eq!(files, vec!["large-file.bin"]);
             assert!(output.is_none());
             assert!(stream);
@@ -213,14 +229,16 @@ async fn test_quick_upload_command() -> Result<()> {
         file_path: temp_file.path().to_string_lossy().to_string(),
         name: Some("quick-upload.txt".to_string()),
         groups: Some("quick,test".to_string()),
-        metadata: vec![
-            "type=quick-test".to_string(),
-            "method=cli".to_string(),
-        ],
+        metadata: vec!["type=quick-test".to_string(), "method=cli".to_string()],
     };
 
     match quick_upload_command {
-        Commands::Upload { file_path, name, groups, metadata } => {
+        Commands::Upload {
+            file_path,
+            name,
+            groups,
+            metadata,
+        } => {
             assert_eq!(file_path, temp_file.path().to_string_lossy().to_string());
             assert_eq!(name, Some("quick-upload.txt".to_string()));
             assert_eq!(groups, Some("quick,test".to_string()));
@@ -389,7 +407,13 @@ async fn test_file_list_command() -> Result<()> {
     };
 
     match list_command {
-        FileCommands::List { prefix, group, metadata, limit, recursive: _ } => {
+        FileCommands::List {
+            prefix,
+            group,
+            metadata,
+            limit,
+            recursive: _,
+        } => {
             assert_eq!(prefix, Some("config/".to_string()));
             assert_eq!(group, Some("production".to_string()));
             assert!(metadata);
@@ -410,7 +434,11 @@ async fn test_file_delete_command() -> Result<()> {
     };
 
     match delete_command {
-        FileCommands::Delete { files, force, continue_on_error: _ } => {
+        FileCommands::Delete {
+            files,
+            force,
+            continue_on_error: _,
+        } => {
             assert_eq!(files, vec!["old-file.txt"]);
             assert!(force);
         }

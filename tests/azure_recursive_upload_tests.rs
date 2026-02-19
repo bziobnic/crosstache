@@ -103,12 +103,7 @@ fn test_recursive_upload_preserves_structure() {
     cleanup_test_blobs("test-structure/");
 
     // Execute: Upload with structure preservation (default)
-    let output = run_xv_command(&[
-        "file",
-        "upload",
-        test_dir.to_str().unwrap(),
-        "--recursive",
-    ]);
+    let output = run_xv_command(&["file", "upload", test_dir.to_str().unwrap(), "--recursive"]);
 
     // Verify command succeeded
     assert!(
@@ -296,12 +291,7 @@ fn test_hidden_files_are_skipped() {
     cleanup_test_blobs("hidden-test/");
 
     // Execute: Upload recursively
-    let output = run_xv_command(&[
-        "file",
-        "upload",
-        test_dir.to_str().unwrap(),
-        "--recursive",
-    ]);
+    let output = run_xv_command(&["file", "upload", test_dir.to_str().unwrap(), "--recursive"]);
 
     // Verify command succeeded
     assert!(

@@ -75,8 +75,7 @@ impl VaultContext {
 }
 
 /// Manages vault contexts with local and global persistence
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContextManager {
     /// Current active context
     pub current: Option<VaultContext>,
@@ -89,7 +88,6 @@ pub struct ContextManager {
     #[serde(skip)]
     pub is_local: bool,
 }
-
 
 impl ContextManager {
     /// Load context from local directory or global config
@@ -302,7 +300,7 @@ impl ContextManager {
             };
             Ok(config_dir.join("xv").join("context"))
         }
-        
+
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             // Use platform-appropriate config directory for other platforms

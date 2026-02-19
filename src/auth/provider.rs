@@ -8,8 +8,8 @@ use crate::utils::network::{classify_network_error, create_http_client, NetworkC
 use async_trait::async_trait;
 use azure_core::auth::{AccessToken, TokenCredential};
 use azure_identity::{
-    AzureCliCredential, ClientSecretCredential, DefaultAzureCredential, 
-    EnvironmentCredential, TokenCredentialOptions
+    AzureCliCredential, ClientSecretCredential, DefaultAzureCredential, EnvironmentCredential,
+    TokenCredentialOptions,
 };
 use base64::Engine;
 use reqwest::{header::HeaderMap, Client};
@@ -148,7 +148,9 @@ impl DefaultAzureCredentialProvider {
     }
 
     /// Create a new DefaultAzureCredentialProvider with specific credential priority
-    pub fn with_credential_priority(priority: crate::config::settings::AzureCredentialType) -> Result<Self> {
+    pub fn with_credential_priority(
+        priority: crate::config::settings::AzureCredentialType,
+    ) -> Result<Self> {
         // Try to get tenant ID from Azure CLI to configure the credential
         let tenant_id = match std::process::Command::new("az")
             .args(["account", "show", "--query", "tenantId", "-o", "tsv"])
@@ -161,8 +163,8 @@ impl DefaultAzureCredentialProvider {
                 } else {
                     None
                 }
-            },
-            _ => None
+            }
+            _ => None,
         };
 
         let credential = Self::create_prioritized_credential(priority)?;
@@ -177,23 +179,25 @@ impl DefaultAzureCredentialProvider {
     }
 
     /// Create a credential chain based on the specified priority
-    fn create_prioritized_credential(priority: crate::config::settings::AzureCredentialType) -> Result<Arc<dyn TokenCredential>> {
+    fn create_prioritized_credential(
+        priority: crate::config::settings::AzureCredentialType,
+    ) -> Result<Arc<dyn TokenCredential>> {
         use crate::config::settings::AzureCredentialType;
-        
+
         match priority {
             AzureCredentialType::Cli => {
                 // AzureCliCredential doesn't have a fallback constructor, just use it directly
                 Ok(Arc::new(AzureCliCredential::new()) as Arc<dyn TokenCredential>)
-            },
+            }
             AzureCredentialType::ManagedIdentity => {
-                // For managed identity, we use DefaultAzureCredential which will prioritize 
+                // For managed identity, we use DefaultAzureCredential which will prioritize
                 // managed identity when running in Azure
                 // Note: The Azure SDK for Rust doesn't expose individual managed identity credentials publicly
                 Ok(Arc::new(
                     DefaultAzureCredential::create(TokenCredentialOptions::default())
-                        .map_err(create_user_friendly_credential_error)?
+                        .map_err(create_user_friendly_credential_error)?,
                 ) as Arc<dyn TokenCredential>)
-            },
+            }
             AzureCredentialType::Environment => {
                 // Try Environment credentials with proper create method
                 match EnvironmentCredential::create(TokenCredentialOptions::default()) {
@@ -202,16 +206,16 @@ impl DefaultAzureCredentialProvider {
                         // Fall back to default if environment vars are not set
                         Ok(Arc::new(
                             DefaultAzureCredential::create(TokenCredentialOptions::default())
-                                .map_err(create_user_friendly_credential_error)?
+                                .map_err(create_user_friendly_credential_error)?,
                         ) as Arc<dyn TokenCredential>)
                     }
                 }
-            },
+            }
             AzureCredentialType::Default => {
                 // Use the default credential chain
                 Ok(Arc::new(
                     DefaultAzureCredential::create(TokenCredentialOptions::default())
-                        .map_err(create_user_friendly_credential_error)?
+                        .map_err(create_user_friendly_credential_error)?,
                 ) as Arc<dyn TokenCredential>)
             }
         }
@@ -280,13 +284,13 @@ impl DefaultAzureCredentialProvider {
 
         // Decode the payload (second part)
         let payload = parts[1];
-        
+
         // For base64url decoding, add padding if needed
         let mut payload_padded = payload.to_string();
         while !payload_padded.len().is_multiple_of(4) {
             payload_padded.push('=');
         }
-        
+
         let decoded_bytes = base64::engine::general_purpose::URL_SAFE
             .decode(payload_padded)
             .map_err(|e| {
@@ -337,7 +341,8 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
 
         // First try to get tenant ID from environment variable
         if let Ok(env_tenant_id) = std::env::var("AZURE_TENANT_ID") {
-            if !env_tenant_id.is_empty() && env_tenant_id != "00000000-0000-0000-0000-000000000000" {
+            if !env_tenant_id.is_empty() && env_tenant_id != "00000000-0000-0000-0000-000000000000"
+            {
                 return Ok(env_tenant_id);
             }
         }
@@ -352,7 +357,7 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
                 if !tenant_id.is_empty() && tenant_id != "00000000-0000-0000-0000-000000000000" {
                     return Ok(tenant_id);
                 }
-            },
+            }
             _ => {}
         }
 
@@ -360,11 +365,13 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
         let token = self
             .get_token(&["https://graph.microsoft.com/.default"])
             .await?;
-        
+
         // Extract tenant ID from JWT token
         match self.extract_tenant_from_token(token.token.secret()) {
             Ok(tenant_id) => Ok(tenant_id),
-            Err(_) => Err(CrosstacheError::authentication("Unable to determine tenant ID from any source".to_string()))
+            Err(_) => Err(CrosstacheError::authentication(
+                "Unable to determine tenant ID from any source".to_string(),
+            )),
         }
     }
 

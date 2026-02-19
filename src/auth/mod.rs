@@ -5,4 +5,3 @@
 //! DefaultAzureCredential, client secrets, and Graph API integration.
 
 pub mod provider;
-

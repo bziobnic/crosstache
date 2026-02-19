@@ -360,6 +360,4 @@ impl AccessPolicy {
             user_email,
         }
     }
-
 }
-

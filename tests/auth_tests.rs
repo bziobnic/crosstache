@@ -117,7 +117,6 @@ mod graph_api_tests {
 
 #[cfg(test)]
 mod authentication_flow_tests {
-    
 
     #[test]
     fn test_azure_scope_validation() {
@@ -152,30 +151,35 @@ mod authentication_flow_tests {
         let _secret = std::env::var(secret_var).unwrap_or_default();
         let _priority = std::env::var(priority_var).unwrap_or_default();
     }
-    
+
     #[test]
-    fn test_credential_priority_parsing() {        
+    fn test_credential_priority_parsing() {
         // Test parsing of credential priority values
         let valid_priorities = vec!["cli", "managed_identity", "environment", "default"];
         let invalid_priorities = vec!["invalid", "unknown", ""];
-        
+
         for priority in valid_priorities {
             // This would normally use AzureCredentialType::from_str
             // but we're just testing the string values here
             assert!(!priority.is_empty());
-            assert!(matches!(priority, "cli" | "managed_identity" | "environment" | "default"));
+            assert!(matches!(
+                priority,
+                "cli" | "managed_identity" | "environment" | "default"
+            ));
         }
-        
+
         for priority in invalid_priorities {
             // Invalid priorities should be caught
-            assert!(!matches!(priority, "cli" | "managed_identity" | "environment" | "default"));
+            assert!(!matches!(
+                priority,
+                "cli" | "managed_identity" | "environment" | "default"
+            ));
         }
     }
 }
 
 #[cfg(test)]
 mod error_handling_tests {
-    
 
     #[test]
     fn test_error_message_formatting() {
@@ -213,7 +217,6 @@ mod error_handling_tests {
 
 #[cfg(test)]
 mod integration_tests {
-    
 
     #[test]
     fn test_authentication_configuration() {
