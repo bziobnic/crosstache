@@ -183,6 +183,12 @@ pub enum Commands {
         /// Folder path for the secret(s) (e.g., 'app/database', 'config/dev')
         #[arg(long)]
         folder: Option<String>,
+        /// Set expiration date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        #[arg(long)]
+        expires: Option<String>,
+        /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        #[arg(long)]
+        not_before: Option<String>,
     },
     /// Get a secret from the current vault context
     Get {
@@ -204,6 +210,12 @@ pub enum Commands {
         /// Show all secrets including disabled ones
         #[arg(long)]
         all: bool,
+        /// Show secrets expiring within specified period (e.g., 30d, 7d, 1h)
+        #[arg(long)]
+        expiring: Option<String>,
+        /// Show expired secrets only
+        #[arg(long)]
+        expired: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -307,6 +319,18 @@ pub enum Commands {
         /// Replace existing groups instead of merging
         #[arg(long)]
         replace_groups: bool,
+        /// Set expiration date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        #[arg(long)]
+        expires: Option<String>,
+        /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        #[arg(long)]
+        not_before: Option<String>,
+        /// Clear expiration date
+        #[arg(long, conflicts_with = "expires")]
+        clear_expires: bool,
+        /// Clear not-before date
+        #[arg(long, conflicts_with = "not_before")]
+        clear_not_before: bool,
     },
     /// Permanently delete (purge) a secret from the current vault context
     Purge {
@@ -865,9 +889,13 @@ impl Cli {
                 stdin,
                 note,
                 folder,
-            } => execute_secret_set_direct(args, stdin, note, folder, config).await,
+                expires,
+                not_before,
+            } => execute_secret_set_direct(args, stdin, note, folder, expires, not_before, config).await,
             Commands::Get { name, raw, version } => execute_secret_get_direct(&name, raw, version, config).await,
-            Commands::List { group, all } => execute_secret_list_direct(group, all, config).await,
+            Commands::List { group, all, expiring, expired } => {
+                execute_secret_list_direct(group, all, expiring, expired, config).await
+            },
             Commands::Delete { name, group, force } => {
                 execute_secret_delete_direct(name, group, force, config).await
             }
@@ -897,6 +925,10 @@ impl Cli {
                 folder,
                 replace_tags,
                 replace_groups,
+                expires,
+                not_before,
+                clear_expires,
+                clear_not_before,
             } => {
                 execute_secret_update_direct(
                     &name,
@@ -909,6 +941,10 @@ impl Cli {
                     folder,
                     replace_tags,
                     replace_groups,
+                    expires,
+                    not_before,
+                    clear_expires,
+                    clear_not_before,
                     config,
                 )
                 .await
@@ -1378,6 +1414,8 @@ async fn execute_secret_set_direct(
     stdin: bool,
     note: Option<String>,
     folder: Option<String>,
+    expires: Option<String>,
+    not_before: Option<String>,
     config: Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
