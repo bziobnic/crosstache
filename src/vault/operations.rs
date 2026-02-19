@@ -11,8 +11,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::models::{
-    AccessLevel, AccessPolicy, VaultCreateRequest,
-    VaultProperties, VaultRole, VaultSummary, VaultUpdateRequest,
+    AccessLevel, AccessPolicy, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary,
+    VaultUpdateRequest,
 };
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::{CrosstacheError, Result};
@@ -71,7 +71,6 @@ pub trait VaultOperations: Send + Sync {
 
     /// List vault access assignments
     async fn list_access(&self, vault_name: &str, resource_group: &str) -> Result<Vec<VaultRole>>;
-
 }
 
 /// Azure vault operations implementation
@@ -617,7 +616,6 @@ impl VaultOperations for AzureVaultOperations {
 
         self.execute_with_retry(operation).await
     }
-
 }
 
 impl AzureVaultOperations {

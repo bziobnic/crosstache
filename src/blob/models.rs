@@ -27,10 +27,7 @@ pub enum BlobListItem {
     #[serde(rename = "file")]
     File(FileInfo),
     #[serde(rename = "directory")]
-    Directory {
-        name: String,
-        full_path: String,
-    },
+    Directory { name: String, full_path: String },
 }
 
 /// Request for uploading a file
@@ -64,4 +61,3 @@ pub struct FileListRequest {
     #[allow(dead_code)]
     pub recursive: bool,
 }
-

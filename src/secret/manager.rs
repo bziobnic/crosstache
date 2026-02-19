@@ -316,7 +316,6 @@ impl AzureSecretOperations {
     fn get_folder(&self, tags: &HashMap<String, String>) -> Option<String> {
         tags.get("folder").cloned()
     }
-
 }
 
 #[async_trait]
@@ -519,7 +518,7 @@ impl SecretOperations for AzureSecretOperations {
             .get("exp")
             .and_then(|v| v.as_i64())
             .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-        
+
         let not_before = attributes
             .get("nbf")
             .and_then(|v| v.as_i64())
@@ -644,7 +643,7 @@ impl SecretOperations for AzureSecretOperations {
             .get("exp")
             .and_then(|v| v.as_i64())
             .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-        
+
         let not_before = attributes
             .get("nbf")
             .and_then(|v| v.as_i64())
@@ -779,9 +778,7 @@ impl SecretOperations for AzureSecretOperations {
                         }
                         Err(e) => {
                             // If we can't get details, add with basic info
-                            eprintln!(
-                                "Warning: Failed to get details for secret '{name}': {e}"
-                            );
+                            eprintln!("Warning: Failed to get details for secret '{name}': {e}");
                             let summary = SecretSummary {
                                 name: name.clone(),
                                 original_name: name,
@@ -865,9 +862,8 @@ impl SecretOperations for AzureSecretOperations {
 
         // Use REST API to restore a deleted secret
         let vault_url = format!("https://{vault_name}.vault.azure.net");
-        let restore_url = format!(
-            "{vault_url}/deletedsecrets/{sanitized_name}/recover?api-version=7.4"
-        );
+        let restore_url =
+            format!("{vault_url}/deletedsecrets/{sanitized_name}/recover?api-version=7.4");
 
         // Get an access token for Key Vault
         let token = self
@@ -985,9 +981,8 @@ impl SecretOperations for AzureSecretOperations {
 
         // Use REST API to permanently purge a deleted secret
         let vault_url = format!("https://{vault_name}.vault.azure.net");
-        let purge_url = format!(
-            "{vault_url}/deletedsecrets/{sanitized_name}/purge?api-version=7.4"
-        );
+        let purge_url =
+            format!("{vault_url}/deletedsecrets/{sanitized_name}/purge?api-version=7.4");
 
         // Get an access token for Key Vault
         let token = self
@@ -1101,7 +1096,7 @@ impl SecretOperations for AzureSecretOperations {
         if let Some(value_array) = json["value"].as_array() {
             for version_json in value_array {
                 let attributes = &version_json["attributes"];
-                
+
                 let version = version_json["kid"]
                     .as_str()
                     .and_then(|kid| kid.split('/').next_back())
@@ -1340,22 +1335,22 @@ impl SecretManager {
     }
 
     /// Get detailed secret information without the secret value
-    pub async fn get_secret_info(
-        &self,
-        vault_name: &str,
-        secret_name: &str,
-    ) -> Result<SecretInfo> {
+    pub async fn get_secret_info(&self, vault_name: &str, secret_name: &str) -> Result<SecretInfo> {
         // Use the existing get_secret method to fetch properties
-        let secret_props = self.secret_ops
+        let secret_props = self
+            .secret_ops
             .get_secret(vault_name, secret_name, false)
             .await?;
-        
+
         // Build the vault URI
         let vault_uri = format!("https://{vault_name}.vault.azure.net");
-        
+
         // Build the secret ID (simulated since we don't have it from SecretProperties)
-        let id = format!("{}/secrets/{}/{}", vault_uri, secret_props.name, secret_props.version);
-        
+        let id = format!(
+            "{}/secrets/{}/{}",
+            vault_uri, secret_props.name, secret_props.version
+        );
+
         // Extract metadata from tags
         let tags = secret_props.tags.clone();
         let groups = SecretInfo::extract_groups(&tags);
@@ -1363,7 +1358,7 @@ impl SecretManager {
         let note = SecretInfo::extract_note(&tags);
         let original_name = SecretInfo::extract_original_name(&tags)
             .or_else(|| Some(secret_props.original_name.clone()));
-        
+
         // Parse timestamps from the string formats
         let created = if !secret_props.created_on.is_empty() {
             DateTime::parse_from_rfc3339(&secret_props.created_on)
@@ -1372,7 +1367,7 @@ impl SecretManager {
         } else {
             None
         };
-        
+
         let updated = if !secret_props.updated_on.is_empty() {
             DateTime::parse_from_rfc3339(&secret_props.updated_on)
                 .ok()
@@ -1380,7 +1375,7 @@ impl SecretManager {
         } else {
             None
         };
-        
+
         // Build SecretInfo
         let info = SecretInfo {
             name: secret_props.name.clone(),
@@ -1405,7 +1400,7 @@ impl SecretManager {
             vault_uri,
             version_count: None, // Could be populated by calling list versions endpoint
         };
-        
+
         Ok(info)
     }
 

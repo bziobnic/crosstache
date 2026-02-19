@@ -43,7 +43,7 @@ impl InteractivePrompt {
     #[allow(dead_code)]
     pub fn input_text(&self, message: &str, default: Option<&str>) -> Result<String> {
         let mut input = Input::with_theme(&self.theme).with_prompt(message);
-        
+
         if let Some(default_value) = default {
             input = input.default(default_value.to_string());
         }
@@ -51,19 +51,24 @@ impl InteractivePrompt {
         let result = input
             .interact_text()
             .map_err(|e| CrosstacheError::config(format!("Failed to get user input: {e}")))?;
-        
+
         Ok(result)
     }
 
     /// Prompt for text input with validation function
-    pub fn input_text_validated<F>(&self, message: &str, default: Option<&str>, validator: F) -> Result<String>
+    pub fn input_text_validated<F>(
+        &self,
+        message: &str,
+        default: Option<&str>,
+        validator: F,
+    ) -> Result<String>
     where
         F: Fn(&str) -> std::result::Result<(), String> + 'static,
     {
         let mut input = Input::with_theme(&self.theme)
             .with_prompt(message)
             .validate_with(|input: &String| validator(input.as_str()));
-        
+
         if let Some(default_value) = default {
             input = input.default(default_value.to_string());
         }
@@ -71,12 +76,17 @@ impl InteractivePrompt {
         let result = input
             .interact_text()
             .map_err(|e| CrosstacheError::config(format!("Failed to get user input: {e}")))?;
-        
+
         Ok(result)
     }
 
     /// Prompt for selection from a list of options
-    pub fn select(&self, message: &str, options: &[String], default: Option<usize>) -> Result<usize> {
+    pub fn select(
+        &self,
+        message: &str,
+        options: &[String],
+        default: Option<usize>,
+    ) -> Result<usize> {
         let mut select = Select::with_theme(&self.theme)
             .with_prompt(message)
             .items(options)
@@ -89,7 +99,7 @@ impl InteractivePrompt {
         let result = select
             .interact()
             .map_err(|e| CrosstacheError::config(format!("Failed to get user selection: {e}")))?;
-        
+
         Ok(result)
     }
 
@@ -150,7 +160,7 @@ impl ProgressIndicator {
         );
         bar.set_message(message.to_string());
         bar.enable_steady_tick(Duration::from_millis(100));
-        
+
         Self { bar }
     }
 
@@ -184,34 +194,40 @@ impl SetupHelper {
         if subscription_id.trim().is_empty() {
             return Err("Subscription ID cannot be empty".to_string());
         }
-        
+
         // Basic GUID format validation
-        let guid_pattern = regex::Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-            .map_err(|_| "Invalid regex pattern".to_string())?;
-        
+        let guid_pattern = regex::Regex::new(
+            r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        )
+        .map_err(|_| "Invalid regex pattern".to_string())?;
+
         if !guid_pattern.is_match(subscription_id.trim()) {
             return Err("Subscription ID must be a valid GUID format".to_string());
         }
-        
+
         Ok(())
     }
 
     /// Validate resource group name
     pub fn validate_resource_group_name(name: &str) -> std::result::Result<(), String> {
         let name = name.trim();
-        
+
         if name.is_empty() {
             return Err("Resource group name cannot be empty".to_string());
         }
-        
+
         if name.len() > 90 {
             return Err("Resource group name cannot exceed 90 characters".to_string());
         }
-        
-        if name.starts_with('.') || name.starts_with('-') || name.ends_with('.') || name.ends_with('-') {
+
+        if name.starts_with('.')
+            || name.starts_with('-')
+            || name.ends_with('.')
+            || name.ends_with('-')
+        {
             return Err("Resource group name cannot start or end with '.' or '-'".to_string());
         }
-        
+
         // Check for valid characters and no consecutive periods/hyphens
         let mut prev_char = ' ';
         for ch in name.chars() {
@@ -219,43 +235,47 @@ impl SetupHelper {
                 return Err("Resource group name can only contain alphanumeric characters, periods, hyphens, and underscores".to_string());
             }
             if (ch == '.' && prev_char == '.') || (ch == '-' && prev_char == '-') {
-                return Err("Resource group name cannot contain consecutive periods or hyphens".to_string());
+                return Err(
+                    "Resource group name cannot contain consecutive periods or hyphens".to_string(),
+                );
             }
             prev_char = ch;
         }
-        
+
         Ok(())
     }
 
     /// Validate vault name according to Azure Key Vault requirements
     pub fn validate_vault_name(name: &str) -> std::result::Result<(), String> {
         let name = name.trim();
-        
+
         if name.is_empty() {
             return Err("Vault name cannot be empty".to_string());
         }
-        
+
         if name.len() < 3 || name.len() > 24 {
             return Err("Vault name must be between 3 and 24 characters".to_string());
         }
-        
+
         if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return Err("Vault name can only contain alphanumeric characters and hyphens".to_string());
+            return Err(
+                "Vault name can only contain alphanumeric characters and hyphens".to_string(),
+            );
         }
-        
+
         if name.starts_with('-') || name.ends_with('-') {
             return Err("Vault name cannot start or end with a hyphen".to_string());
         }
-        
+
         if name.contains("--") {
             return Err("Vault name cannot contain consecutive hyphens".to_string());
         }
-        
+
         // Must start with a letter
         if !name.chars().next().unwrap_or(' ').is_ascii_alphabetic() {
             return Err("Vault name must start with a letter".to_string());
         }
-        
+
         Ok(())
     }
 
@@ -268,7 +288,7 @@ impl SetupHelper {
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .collect::<String>();
-        
+
         let timestamp = chrono::Utc::now().format("%m%d").to_string();
         format!("kv-{username}-{timestamp}")
     }
@@ -282,7 +302,7 @@ impl SetupHelper {
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .collect::<String>();
-        
+
         format!("rg-{username}-keyvaults")
     }
 
@@ -295,10 +315,10 @@ impl SetupHelper {
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .collect::<String>();
-        
+
         let timestamp = chrono::Utc::now().format("%m%d%H%M").to_string();
         let generated_name = format!("st{username}{timestamp}");
-        
+
         // Ensure it's not too long (max 24 characters)
         if generated_name.len() > 24 {
             format!("st{username}{timestamp}")
@@ -310,54 +330,65 @@ impl SetupHelper {
     /// Validate storage account name according to Azure Storage requirements
     pub fn validate_storage_account_name(name: &str) -> std::result::Result<(), String> {
         let name = name.trim();
-        
+
         if name.is_empty() {
             return Err("Storage account name cannot be empty".to_string());
         }
-        
+
         if name.len() < 3 || name.len() > 24 {
             return Err("Storage account name must be between 3 and 24 characters".to_string());
         }
-        
-        if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
-            return Err("Storage account name can only contain lowercase letters and numbers".to_string());
+
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        {
+            return Err(
+                "Storage account name can only contain lowercase letters and numbers".to_string(),
+            );
         }
-        
+
         if !name.chars().next().unwrap_or(' ').is_ascii_alphabetic() {
             return Err("Storage account name must start with a letter".to_string());
         }
-        
+
         Ok(())
     }
 
     /// Validate container name according to Azure Storage requirements
     pub fn validate_container_name(name: &str) -> std::result::Result<(), String> {
         let name = name.trim();
-        
+
         if name.is_empty() {
             return Err("Container name cannot be empty".to_string());
         }
-        
+
         if name.len() < 3 || name.len() > 63 {
             return Err("Container name must be between 3 and 63 characters".to_string());
         }
-        
-        if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-            return Err("Container name can only contain lowercase letters, numbers, and hyphens".to_string());
+
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(
+                "Container name can only contain lowercase letters, numbers, and hyphens"
+                    .to_string(),
+            );
         }
-        
+
         if name.starts_with('-') || name.ends_with('-') {
             return Err("Container name cannot start or end with a hyphen".to_string());
         }
-        
+
         if name.contains("--") {
             return Err("Container name cannot contain consecutive hyphens".to_string());
         }
-        
+
         if !name.chars().next().unwrap_or(' ').is_ascii_alphabetic() {
             return Err("Container name must start with a letter".to_string());
         }
-        
+
         Ok(())
     }
 }
@@ -369,12 +400,16 @@ mod tests {
     #[test]
     fn test_validate_subscription_id() {
         // Valid GUID
-        assert!(SetupHelper::validate_subscription_id("12345678-1234-1234-1234-123456789012").is_ok());
-        
+        assert!(
+            SetupHelper::validate_subscription_id("12345678-1234-1234-1234-123456789012").is_ok()
+        );
+
         // Invalid format
         assert!(SetupHelper::validate_subscription_id("not-a-guid").is_err());
         assert!(SetupHelper::validate_subscription_id("").is_err());
-        assert!(SetupHelper::validate_subscription_id("12345678-1234-1234-1234-12345678901").is_err());
+        assert!(
+            SetupHelper::validate_subscription_id("12345678-1234-1234-1234-12345678901").is_err()
+        );
     }
 
     #[test]
@@ -382,7 +417,7 @@ mod tests {
         // Valid names
         assert!(SetupHelper::validate_resource_group_name("my-resource-group").is_ok());
         assert!(SetupHelper::validate_resource_group_name("rg_test_123").is_ok());
-        
+
         // Invalid names
         assert!(SetupHelper::validate_resource_group_name("").is_err());
         assert!(SetupHelper::validate_resource_group_name(".invalid").is_err());
@@ -396,7 +431,7 @@ mod tests {
         // Valid names
         assert!(SetupHelper::validate_vault_name("myvault123").is_ok());
         assert!(SetupHelper::validate_vault_name("my-vault").is_ok());
-        
+
         // Invalid names
         assert!(SetupHelper::validate_vault_name("").is_err());
         assert!(SetupHelper::validate_vault_name("ab").is_err());
@@ -412,7 +447,7 @@ mod tests {
         let vault_name = SetupHelper::generate_default_vault_name();
         assert!(vault_name.starts_with("kv-"));
         assert!(SetupHelper::validate_vault_name(&vault_name).is_ok());
-        
+
         let rg_name = SetupHelper::generate_default_resource_group();
         assert!(rg_name.starts_with("rg-"));
         assert!(rg_name.ends_with("-keyvaults"));

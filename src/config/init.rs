@@ -63,11 +63,15 @@ impl ConfigInitializer {
 
         // Step 5: Configure blob storage
         self.prompt.step(5, 6, "Configuring Blob Storage")?;
-        let (storage_account, container_name, blob_storage_configured) = self.configure_blob_storage(&subscription, &resource_group, &location).await?;
+        let (storage_account, container_name, blob_storage_configured) = self
+            .configure_blob_storage(&subscription, &resource_group, &location)
+            .await?;
 
         // Step 6: Optional vault creation
         self.prompt.step(6, 6, "Optional Test Vault Creation")?;
-        let vault_config = self.configure_vault_creation(&subscription, &resource_group, &location).await?;
+        let vault_config = self
+            .configure_vault_creation(&subscription, &resource_group, &location)
+            .await?;
 
         // Build the final configuration
         let init_config = InitConfig {
@@ -87,7 +91,8 @@ impl ConfigInitializer {
         self.save_config(&config).await?;
 
         self.prompt.success("Setup completed successfully!")?;
-        self.prompt.info("You can now start using crosstache with your configured defaults.")?;
+        self.prompt
+            .info("You can now start using crosstache with your configured defaults.")?;
 
         Ok(config)
     }
@@ -95,13 +100,13 @@ impl ConfigInitializer {
     /// Detect Azure environment and handle issues
     async fn detect_azure_environment(&self) -> Result<AzureEnvironment> {
         let progress = ProgressIndicator::new("Detecting Azure CLI and environment...");
-        
+
         let azure_env = AzureDetector::detect_environment().await?;
-        
+
         if !azure_env.is_ready() {
             progress.finish_error("Azure environment not ready");
             self.prompt.error(&azure_env.get_status_message())?;
-            
+
             let instructions = azure_env.get_setup_instructions();
             if !instructions.is_empty() {
                 self.prompt.info("Please complete the following steps:")?;
@@ -121,18 +126,27 @@ impl ConfigInitializer {
         ));
 
         if let Some(current) = &azure_env.current_subscription {
-            self.prompt.info(&format!("Current subscription: {} ({})", current.name, current.id))?;
+            self.prompt.info(&format!(
+                "Current subscription: {} ({})",
+                current.name, current.id
+            ))?;
         }
 
         Ok(azure_env)
     }
 
     /// Configure Azure subscription
-    async fn configure_subscription(&self, azure_env: &AzureEnvironment) -> Result<AzureSubscription> {
+    async fn configure_subscription(
+        &self,
+        azure_env: &AzureEnvironment,
+    ) -> Result<AzureSubscription> {
         if azure_env.subscriptions.len() == 1 {
             let subscription = &azure_env.subscriptions[0];
             let use_default = self.prompt.confirm(
-                &format!("Use subscription '{}' ({})?", subscription.name, subscription.id),
+                &format!(
+                    "Use subscription '{}' ({})?",
+                    subscription.name, subscription.id
+                ),
                 true,
             )?;
 
@@ -143,16 +157,19 @@ impl ConfigInitializer {
 
         if azure_env.subscriptions.len() > 1 {
             self.prompt.info("Multiple subscriptions available:")?;
-            
-            let subscription_options: Vec<String> = azure_env.subscriptions
+
+            let subscription_options: Vec<String> = azure_env
+                .subscriptions
                 .iter()
                 .map(|s| format!("{} ({})", s.name, s.id))
                 .collect();
 
-            let default_index = azure_env.current_subscription.as_ref()
-                .and_then(|current| {
-                    azure_env.subscriptions.iter().position(|s| s.id == current.id)
-                });
+            let default_index = azure_env.current_subscription.as_ref().and_then(|current| {
+                azure_env
+                    .subscriptions
+                    .iter()
+                    .position(|s| s.id == current.id)
+            });
 
             let selected_index = self.prompt.select(
                 "Select a subscription",
@@ -174,7 +191,9 @@ impl ConfigInitializer {
         Ok(AzureSubscription {
             id: subscription_id,
             name: "Manual Entry".to_string(),
-            tenant_id: azure_env.tenant_info.as_ref()
+            tenant_id: azure_env
+                .tenant_info
+                .as_ref()
                 .map(|t| t.id.clone())
                 .unwrap_or_else(|| "unknown".to_string()),
             is_default: false,
@@ -185,27 +204,28 @@ impl ConfigInitializer {
     /// Configure resource group
     async fn configure_resource_group(&self, subscription: &AzureSubscription) -> Result<String> {
         let progress = ProgressIndicator::new("Loading resource groups...");
-        
+
         // Try to get existing resource groups
-        let existing_groups = AzureDetector::get_resource_groups(&subscription.id).await
+        let existing_groups = AzureDetector::get_resource_groups(&subscription.id)
+            .await
             .unwrap_or_default();
-        
+
         progress.finish_clear();
 
         if !existing_groups.is_empty() {
-            self.prompt.info(&format!("Found {} existing resource group(s)", existing_groups.len()))?;
-            
-            let use_existing = self.prompt.confirm(
-                "Use an existing resource group?",
-                true,
-            )?;
+            self.prompt.info(&format!(
+                "Found {} existing resource group(s)",
+                existing_groups.len()
+            ))?;
+
+            let use_existing = self
+                .prompt
+                .confirm("Use an existing resource group?", true)?;
 
             if use_existing {
-                let selected_index = self.prompt.select(
-                    "Select a resource group",
-                    &existing_groups,
-                    None,
-                )?;
+                let selected_index =
+                    self.prompt
+                        .select("Select a resource group", &existing_groups, None)?;
                 return Ok(existing_groups[selected_index].clone());
             }
         }
@@ -219,7 +239,8 @@ impl ConfigInitializer {
         )?;
 
         // Check if it exists
-        let exists = AzureDetector::resource_group_exists(&subscription.id, &resource_group_name).await
+        let exists = AzureDetector::resource_group_exists(&subscription.id, &resource_group_name)
+            .await
             .unwrap_or(false);
 
         if !exists {
@@ -230,7 +251,8 @@ impl ConfigInitializer {
 
             if create_rg {
                 // We'll create it when we know the location
-                self.prompt.info("Resource group will be created with the selected location.")?;
+                self.prompt
+                    .info("Resource group will be created with the selected location.")?;
             }
         }
 
@@ -240,30 +262,32 @@ impl ConfigInitializer {
     /// Configure default location
     async fn configure_location(&self, subscription: &AzureSubscription) -> Result<String> {
         let progress = ProgressIndicator::new("Loading available locations...");
-        
-        let locations = AzureDetector::get_locations(&subscription.id).await
-            .unwrap_or_else(|_| vec![
-                "eastus".to_string(),
-                "westus2".to_string(),
-                "centralus".to_string(),
-                "northeurope".to_string(),
-                "westeurope".to_string(),
-            ]);
-        
+
+        let locations = AzureDetector::get_locations(&subscription.id)
+            .await
+            .unwrap_or_else(|_| {
+                vec![
+                    "eastus".to_string(),
+                    "westus2".to_string(),
+                    "centralus".to_string(),
+                    "northeurope".to_string(),
+                    "westeurope".to_string(),
+                ]
+            });
+
         progress.finish_clear();
 
         // Suggest a good default location
-        let default_location = locations.iter()
+        let default_location = locations
+            .iter()
             .find(|&loc| loc == "eastus" || loc == "westus2")
             .unwrap_or(&locations[0]);
 
         let default_index = locations.iter().position(|loc| loc == default_location);
 
-        let selected_index = self.prompt.select(
-            "Select default location",
-            &locations,
-            default_index,
-        )?;
+        let selected_index =
+            self.prompt
+                .select("Select default location", &locations, default_index)?;
 
         Ok(locations[selected_index].clone())
     }
@@ -275,37 +299,39 @@ impl ConfigInitializer {
         resource_group: &str,
         location: &str,
     ) -> Result<(String, String, bool)> {
-        let create_storage = self.prompt.confirm(
-            "Configure blob storage for file operations?",
-            true,
-        )?;
+        let create_storage = self
+            .prompt
+            .confirm("Configure blob storage for file operations?", true)?;
 
         if !create_storage {
             return Ok((String::new(), String::new(), false));
         }
 
         let progress = ProgressIndicator::new("Loading existing storage accounts...");
-        
+
         // Try to get existing storage accounts in the resource group
-        let existing_accounts = AzureDetector::get_storage_accounts(&subscription.id, resource_group).await
-            .unwrap_or_default();
-        
+        let existing_accounts =
+            AzureDetector::get_storage_accounts(&subscription.id, resource_group)
+                .await
+                .unwrap_or_default();
+
         progress.finish_clear();
 
         let (storage_name, create_new_storage) = if !existing_accounts.is_empty() {
-            self.prompt.info(&format!("Found {} existing storage account(s) in resource group '{}'", existing_accounts.len(), resource_group))?;
-            
-            let use_existing = self.prompt.confirm(
-                "Use an existing storage account?",
-                true,
-            )?;
+            self.prompt.info(&format!(
+                "Found {} existing storage account(s) in resource group '{}'",
+                existing_accounts.len(),
+                resource_group
+            ))?;
+
+            let use_existing = self
+                .prompt
+                .confirm("Use an existing storage account?", true)?;
 
             if use_existing {
-                let selected_index = self.prompt.select(
-                    "Select a storage account",
-                    &existing_accounts,
-                    None,
-                )?;
+                let selected_index =
+                    self.prompt
+                        .select("Select a storage account", &existing_accounts, None)?;
                 (existing_accounts[selected_index].clone(), false)
             } else {
                 // Create new storage account
@@ -336,10 +362,12 @@ impl ConfigInitializer {
 
         // Create storage account if needed
         if create_new_storage {
-            self.create_storage_account(&storage_name, subscription, resource_group, location).await?;
+            self.create_storage_account(&storage_name, subscription, resource_group, location)
+                .await?;
         } else {
             // If using existing storage account, just create the container
-            self.create_blob_container(&storage_name, &container_name, subscription).await?;
+            self.create_blob_container(&storage_name, &container_name, subscription)
+                .await?;
         }
 
         Ok((storage_name, container_name, true))
@@ -358,25 +386,37 @@ impl ConfigInitializer {
         // For now, we'll use Azure CLI to create the storage account
         // TODO: Implement proper Azure Management API integration
         progress.set_message("Creating storage account...");
-        
+
         // Create storage account using Azure CLI with timeout
         let create_storage_cmd = tokio::time::timeout(
             std::time::Duration::from_secs(180), // 3 minute timeout for storage account creation
             tokio::process::Command::new("az")
                 .args([
-                    "storage", "account", "create",
-                    "--name", storage_name,
-                    "--resource-group", resource_group,
-                    "--location", location,
-                    "--sku", "Standard_LRS",
-                    "--kind", "StorageV2",
-                    "--access-tier", "Hot",
-                    "--allow-blob-public-access", "false",
-                    "--min-tls-version", "TLS1_2",
-                    "--subscription", &subscription.id,
+                    "storage",
+                    "account",
+                    "create",
+                    "--name",
+                    storage_name,
+                    "--resource-group",
+                    resource_group,
+                    "--location",
+                    location,
+                    "--sku",
+                    "Standard_LRS",
+                    "--kind",
+                    "StorageV2",
+                    "--access-tier",
+                    "Hot",
+                    "--allow-blob-public-access",
+                    "false",
+                    "--min-tls-version",
+                    "TLS1_2",
+                    "--subscription",
+                    &subscription.id,
                 ])
-                .output()
-        ).await;
+                .output(),
+        )
+        .await;
 
         let create_storage_cmd = match create_storage_cmd {
             Ok(result) => result?,
@@ -395,7 +435,7 @@ impl ConfigInitializer {
         }
 
         progress.set_message("Waiting for storage account to be ready...");
-        
+
         // Wait for storage account to propagate before creating container
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
@@ -406,22 +446,26 @@ impl ConfigInitializer {
             std::time::Duration::from_secs(120), // 2 minute timeout
             tokio::process::Command::new("az")
                 .args([
-                    "storage", "container", "create",
-                    "--name", "crosstache-files",
-                    "--account-name", storage_name,
-                    "--subscription", &subscription.id,
+                    "storage",
+                    "container",
+                    "create",
+                    "--name",
+                    "crosstache-files",
+                    "--account-name",
+                    storage_name,
+                    "--subscription",
+                    &subscription.id,
                 ])
-                .output()
-        ).await;
+                .output(),
+        )
+        .await;
 
         // Check if container creation command completed
         let command_succeeded = match &create_container_cmd {
-            Ok(result) => {
-                match result {
-                    Ok(output) => output.status.success(),
-                    Err(_) => false,
-                }
-            }
+            Ok(result) => match result {
+                Ok(output) => output.status.success(),
+                Err(_) => false,
+            },
             Err(_) => {
                 // Command timed out, but container might still have been created
                 progress.set_message("Container creation timed out, verifying...");
@@ -431,35 +475,43 @@ impl ConfigInitializer {
 
         // Always verify if the container actually exists, regardless of command result
         progress.set_message("Verifying container creation...");
-        let container_exists = AzureDetector::container_exists(&subscription.id, storage_name, "crosstache-files").await
-            .unwrap_or(false);
+        let container_exists =
+            AzureDetector::container_exists(&subscription.id, storage_name, "crosstache-files")
+                .await
+                .unwrap_or(false);
 
         if !container_exists {
             // Container doesn't exist, check for specific errors only if command failed
             if !command_succeeded {
                 if let Ok(Ok(output)) = create_container_cmd {
                     let error_msg = String::from_utf8_lossy(&output.stderr);
-                    
+
                     // Check for specific authentication errors
-                    if error_msg.contains("authentication") || error_msg.contains("login") || error_msg.contains("Please run 'az login'") {
+                    if error_msg.contains("authentication")
+                        || error_msg.contains("login")
+                        || error_msg.contains("Please run 'az login'")
+                    {
                         return Err(CrosstacheError::authentication(
                             "Failed to authenticate with Azure Storage. Please ensure you're logged in with 'az login' and have proper permissions.".to_string()
                         ));
                     }
-                    
+
                     // Check for permission errors
-                    if error_msg.contains("authorization") || error_msg.contains("permission") || error_msg.contains("forbidden") {
+                    if error_msg.contains("authorization")
+                        || error_msg.contains("permission")
+                        || error_msg.contains("forbidden")
+                    {
                         return Err(CrosstacheError::permission_denied(
                             "Insufficient permissions to create blob container. Please ensure you have Storage Blob Data Contributor role.".to_string()
                         ));
                     }
-                    
+
                     return Err(CrosstacheError::azure_api(format!(
                         "Failed to create blob container: {error_msg}"
                     )));
                 }
             }
-            
+
             return Err(CrosstacheError::azure_api(
                 "Container creation failed or timed out and container does not exist. Please check your Azure CLI authentication and network connection.".to_string()
             ));
@@ -479,11 +531,15 @@ impl ConfigInitializer {
         let progress = ProgressIndicator::new("Creating blob container...");
 
         // Check if container already exists
-        let container_exists = AzureDetector::container_exists(&subscription.id, storage_name, container_name).await
-            .unwrap_or(false);
+        let container_exists =
+            AzureDetector::container_exists(&subscription.id, storage_name, container_name)
+                .await
+                .unwrap_or(false);
 
         if container_exists {
-            progress.finish_success(&format!("Container '{container_name}' already exists in storage account '{storage_name}'"));
+            progress.finish_success(&format!(
+                "Container '{container_name}' already exists in storage account '{storage_name}'"
+            ));
             return Ok(());
         }
 
@@ -492,22 +548,26 @@ impl ConfigInitializer {
             std::time::Duration::from_secs(120), // 2 minute timeout
             tokio::process::Command::new("az")
                 .args([
-                    "storage", "container", "create",
-                    "--name", container_name,
-                    "--account-name", storage_name,
-                    "--subscription", &subscription.id,
+                    "storage",
+                    "container",
+                    "create",
+                    "--name",
+                    container_name,
+                    "--account-name",
+                    storage_name,
+                    "--subscription",
+                    &subscription.id,
                 ])
-                .output()
-        ).await;
+                .output(),
+        )
+        .await;
 
         // Check if container creation command completed
         let command_succeeded = match &create_container_cmd {
-            Ok(result) => {
-                match result {
-                    Ok(output) => output.status.success(),
-                    Err(_) => false,
-                }
-            }
+            Ok(result) => match result {
+                Ok(output) => output.status.success(),
+                Err(_) => false,
+            },
             Err(_) => {
                 // Command timed out, but container might still have been created
                 progress.set_message("Container creation timed out, verifying...");
@@ -517,41 +577,51 @@ impl ConfigInitializer {
 
         // Always verify if the container actually exists, regardless of command result
         progress.set_message("Verifying container creation...");
-        let container_exists = AzureDetector::container_exists(&subscription.id, storage_name, container_name).await
-            .unwrap_or(false);
+        let container_exists =
+            AzureDetector::container_exists(&subscription.id, storage_name, container_name)
+                .await
+                .unwrap_or(false);
 
         if !container_exists {
             // Container doesn't exist, check for specific errors only if command failed
             if !command_succeeded {
                 if let Ok(Ok(output)) = create_container_cmd {
                     let error_msg = String::from_utf8_lossy(&output.stderr);
-                    
+
                     // Check for specific authentication errors
-                    if error_msg.contains("authentication") || error_msg.contains("login") || error_msg.contains("Please run 'az login'") {
+                    if error_msg.contains("authentication")
+                        || error_msg.contains("login")
+                        || error_msg.contains("Please run 'az login'")
+                    {
                         return Err(CrosstacheError::authentication(
                             "Failed to authenticate with Azure Storage. Please ensure you're logged in with 'az login' and have proper permissions.".to_string()
                         ));
                     }
-                    
+
                     // Check for permission errors
-                    if error_msg.contains("authorization") || error_msg.contains("permission") || error_msg.contains("forbidden") {
+                    if error_msg.contains("authorization")
+                        || error_msg.contains("permission")
+                        || error_msg.contains("forbidden")
+                    {
                         return Err(CrosstacheError::permission_denied(
                             "Insufficient permissions to create blob container. Please ensure you have Storage Blob Data Contributor role.".to_string()
                         ));
                     }
-                    
+
                     return Err(CrosstacheError::azure_api(format!(
                         "Failed to create blob container: {error_msg}"
                     )));
                 }
             }
-            
+
             return Err(CrosstacheError::azure_api(
                 "Container creation failed or timed out and container does not exist. Please check your Azure CLI authentication and network connection.".to_string()
             ));
         }
 
-        progress.finish_success(&format!("Created container '{container_name}' in storage account '{storage_name}'"));
+        progress.finish_success(&format!(
+            "Created container '{container_name}' in storage account '{storage_name}'"
+        ));
         Ok(())
     }
 
@@ -562,10 +632,9 @@ impl ConfigInitializer {
         resource_group: &str,
         location: &str,
     ) -> Result<Option<String>> {
-        let create_vault = self.prompt.confirm(
-            "Create a test vault to get started?",
-            true,
-        )?;
+        let create_vault = self
+            .prompt
+            .confirm("Create a test vault to get started?", true)?;
 
         if !create_vault {
             return Ok(None);
@@ -579,7 +648,8 @@ impl ConfigInitializer {
         )?;
 
         // Create the vault
-        self.create_test_vault(&vault_name, subscription, resource_group, location).await?;
+        self.create_test_vault(&vault_name, subscription, resource_group, location)
+            .await?;
 
         Ok(Some(vault_name))
     }
@@ -595,17 +665,20 @@ impl ConfigInitializer {
         let progress = ProgressIndicator::new("Creating test vault...");
 
         // First, ensure resource group exists
-        let rg_exists = AzureDetector::resource_group_exists(&subscription.id, resource_group).await
+        let rg_exists = AzureDetector::resource_group_exists(&subscription.id, resource_group)
+            .await
             .unwrap_or(false);
 
         if !rg_exists {
             progress.set_message("Creating resource group...");
-            AzureDetector::create_resource_group(&subscription.id, resource_group, location).await?;
+            AzureDetector::create_resource_group(&subscription.id, resource_group, location)
+                .await?;
         }
 
         // Create authentication provider
-        let auth_provider = Arc::new(DefaultAzureCredentialProvider::new()?) as Arc<dyn AzureAuthProvider>;
-        
+        let auth_provider =
+            Arc::new(DefaultAzureCredentialProvider::new()?) as Arc<dyn AzureAuthProvider>;
+
         // Create vault manager
         let vault_manager = VaultManager::new(
             auth_provider,
@@ -633,13 +706,15 @@ impl ConfigInitializer {
         let vault_name = vault_request.name.clone();
         let vault_location = vault_request.location.clone();
         let vault_resource_group = vault_request.resource_group.clone();
-        
-        vault_manager.create_vault_with_setup(
-            &vault_name,
-            &vault_location,
-            &vault_resource_group,
-            Some(vault_request),
-        ).await?;
+
+        vault_manager
+            .create_vault_with_setup(
+                &vault_name,
+                &vault_location,
+                &vault_resource_group,
+                Some(vault_request),
+            )
+            .await?;
 
         progress.finish_success(&format!("Created vault '{vault_name}'"));
         Ok(())
@@ -647,9 +722,9 @@ impl ConfigInitializer {
 
     /// Build the final configuration
     async fn build_config(&self, init_config: InitConfig) -> Result<Config> {
-        use std::time::Duration;
         use crate::config::settings::BlobConfig;
-        
+        use std::time::Duration;
+
         // Create blob config if storage account was configured
         let blob_config = if !init_config.storage_account_name.is_empty() {
             Some(BlobConfig {
@@ -683,28 +758,25 @@ impl ConfigInitializer {
     /// Save configuration to file
     async fn save_config(&self, config: &Config) -> Result<()> {
         let progress = ProgressIndicator::new("Saving configuration...");
-        
+
         // Use the same config path as the settings module for consistency
         let config_file = Config::get_config_path()?;
-        
+
         // Create parent directories if they don't exist
         if let Some(parent) = config_file.parent() {
-            tokio::fs::create_dir_all(parent).await
-                .map_err(|e| CrosstacheError::config(format!(
-                    "Failed to create config directory: {e}"
-                )))?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                CrosstacheError::config(format!("Failed to create config directory: {e}"))
+            })?;
         }
 
         // Save configuration file
-        let config_content = toml::to_string_pretty(config)
-            .map_err(|e| CrosstacheError::serialization(format!(
-                "Failed to serialize config: {e}"
-            )))?;
+        let config_content = toml::to_string_pretty(config).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to serialize config: {e}"))
+        })?;
 
-        tokio::fs::write(&config_file, config_content).await
-            .map_err(|e| CrosstacheError::config(format!(
-                "Failed to write config file: {e}"
-            )))?;
+        tokio::fs::write(&config_file, config_content)
+            .await
+            .map_err(|e| CrosstacheError::config(format!("Failed to write config file: {e}")))?;
 
         progress.finish_success(&format!("Configuration saved to {}", config_file.display()));
         Ok(())
@@ -720,11 +792,11 @@ impl ConfigInitializer {
         println!("│ Subscription ID: {:<39} │", config.subscription_id);
         println!("│ Resource Group:  {:<39} │", config.default_resource_group);
         println!("│ Default Location: {:<38} │", config.default_location);
-        
+
         if !config.default_vault.is_empty() {
             println!("│ Default Vault:   {:<40} │", config.default_vault);
         }
-        
+
         // Show blob storage configuration if present
         if let Some(blob_config) = &config.blob_config {
             if !blob_config.storage_account.is_empty() {
@@ -732,15 +804,15 @@ impl ConfigInitializer {
                 println!("│ Blob Container:  {:<40} │", blob_config.container_name);
             }
         }
-        
+
         println!("└─────────────────────────────────────────────────────────────┘");
         println!();
-        
+
         self.prompt.info("Next steps:")?;
         println!("  • List your vaults: xv vault list");
         println!("  • Set a secret: xv set my-secret");
         println!("  • Get help: xv --help");
-        
+
         Ok(())
     }
 }

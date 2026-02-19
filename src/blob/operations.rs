@@ -15,12 +15,12 @@ impl BlobManager {
         requests: Vec<FileUploadRequest>,
     ) -> Result<Vec<Result<FileInfo>>> {
         let mut results = Vec::new();
-        
+
         for request in requests {
             let result = self.upload_file(request).await;
             results.push(result);
         }
-        
+
         Ok(results)
     }
 
@@ -28,12 +28,12 @@ impl BlobManager {
     #[allow(dead_code)]
     pub async fn batch_delete_files(&self, names: Vec<String>) -> Result<Vec<Result<()>>> {
         let mut results = Vec::new();
-        
+
         for name in names {
             let result = self.delete_file(&name).await;
             results.push(result);
         }
-        
+
         Ok(results)
     }
 
@@ -45,17 +45,17 @@ impl BlobManager {
         progress_callback: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<FileInfo> {
         let file_size = request.content.len() as u64;
-        
+
         if let Some(ref callback) = progress_callback {
             callback(0, file_size);
         }
-        
+
         let result = self.upload_file(request).await?;
-        
+
         if let Some(ref callback) = progress_callback {
             callback(file_size, file_size);
         }
-        
+
         Ok(result)
     }
 
@@ -79,10 +79,10 @@ impl BlobManager {
             delimiter: None,
             recursive: true,
         };
-        
+
         let files = self.list_files(list_request).await?;
         let total_size = files.iter().map(|f| f.size).sum();
-        
+
         Ok(total_size)
     }
 

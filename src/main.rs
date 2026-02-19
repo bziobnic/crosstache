@@ -59,7 +59,7 @@ async fn run(cli: Cli) -> Result<()> {
 
 async fn load_config_without_validation() -> Result<crate::config::Config> {
     use crate::config::load_config_no_validation;
-    
+
     // Use the config module's function but without validation
     load_config_no_validation().await
 }

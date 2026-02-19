@@ -374,5 +374,4 @@ mod tests {
         assert!(result.contains("Name"));
         assert!(result.contains("Test Vault"));
     }
-
 }
