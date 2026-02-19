@@ -9,7 +9,9 @@ use crate::utils::format::OutputFormat;
 use crate::vault::{VaultCreateRequest, VaultManager};
 #[cfg(feature = "file-ops")]
 use crate::blob::manager::{BlobManager, create_blob_manager};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 // Include the built information generated at compile time
@@ -130,21 +132,63 @@ impl std::fmt::Display for ResourceType {
     }
 }
 
+/// Character set type for secret rotation
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+pub enum CharsetType {
+    /// Alphanumeric characters (A-Z, a-z, 0-9)
+    Alphanumeric,
+    /// Alphanumeric with symbols
+    AlphanumericSymbols,
+    /// Hexadecimal (0-9, A-F)
+    Hex,
+    /// Base64 characters (A-Z, a-z, 0-9, +, /)
+    Base64,
+    /// Numeric only (0-9)
+    Numeric,
+    /// Uppercase letters only (A-Z)
+    Uppercase,
+    /// Lowercase letters only (a-z)
+    Lowercase,
+}
+
+impl CharsetType {
+    /// Get the character set string for this type
+    pub fn chars(&self) -> &'static str {
+        match self {
+            CharsetType::Alphanumeric => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            CharsetType::AlphanumericSymbols => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?",
+            CharsetType::Hex => "0123456789ABCDEF",
+            CharsetType::Base64 => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+            CharsetType::Numeric => "0123456789",
+            CharsetType::Uppercase => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            CharsetType::Lowercase => "abcdefghijklmnopqrstuvwxyz",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Set a secret in the current vault context
     Set {
-        /// Secret name
-        name: String,
-        /// Read value from stdin instead of prompting
+        /// Secret name (for single secret) or multiple KEY=value pairs (for bulk set)
+        /// Supports @/path/to/file to load value from file (e.g., KEY=@/path/to/file)
+        #[arg(required = true, num_args = 1..)]
+        args: Vec<String>,
+        /// Read value from stdin instead of prompting (only for single secret)
         #[arg(long)]
         stdin: bool,
-        /// Note to attach to the secret
+        /// Note to attach to the secret(s)
         #[arg(long)]
         note: Option<String>,
-        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
+        /// Folder path for the secret(s) (e.g., 'app/database', 'config/dev')
         #[arg(long)]
         folder: Option<String>,
+        /// Set expiration date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        #[arg(long)]
+        expires: Option<String>,
+        /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        #[arg(long)]
+        not_before: Option<String>,
     },
     /// Get a secret from the current vault context
     Get {
@@ -153,6 +197,9 @@ pub enum Commands {
         /// Raw output (print value instead of copying to clipboard)
         #[arg(short, long)]
         raw: bool,
+        /// Get a specific version of the secret
+        #[arg(long)]
+        version: Option<String>,
     },
     /// List secrets in the current vault context (alias: ls)
     #[command(alias = "ls")]
@@ -163,15 +210,84 @@ pub enum Commands {
         /// Show all secrets including disabled ones
         #[arg(long)]
         all: bool,
+        /// Show secrets expiring within specified period (e.g., 30d, 7d, 1h)
+        #[arg(long)]
+        expiring: Option<String>,
+        /// Show expired secrets only
+        #[arg(long)]
+        expired: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
     Delete {
-        /// Secret name
-        name: String,
+        /// Secret name (mutually exclusive with --group)
+        name: Option<String>,
+        /// Delete all secrets in the specified group (mutually exclusive with name)
+        #[arg(long, conflicts_with = "name")]
+        group: Option<String>,
         /// Force deletion without confirmation
         #[arg(short, long)]
         force: bool,
+    },
+    /// Show version history of a secret
+    History {
+        /// Secret name
+        name: String,
+    },
+    /// Rollback a secret to a previous version
+    Rollback {
+        /// Secret name
+        name: String,
+        /// Version ID to rollback to
+        #[arg(long)]
+        version: String,
+        /// Force rollback without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Rotate a secret with a new random value
+    Rotate {
+        /// Secret name
+        name: String,
+        /// Length of the generated value (default: 32)
+        #[arg(long, default_value = "32")]
+        length: usize,
+        /// Character set to use for generation
+        #[arg(long, value_enum, default_value = "alphanumeric")]
+        charset: CharsetType,
+        /// Custom generator script path (overrides charset and length)
+        #[arg(long)]
+        generator: Option<String>,
+        /// Show the generated value (default: hidden for security)
+        #[arg(long)]
+        show_value: bool,
+        /// Force rotation without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Run a command with secrets injected as environment variables
+    Run {
+        /// Filter secrets by group (can be specified multiple times)
+        #[arg(short, long)]
+        group: Vec<String>,
+        /// Disable masking of secret values in output
+        #[arg(long)]
+        no_masking: bool,
+        /// Command and arguments to run
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Inject secrets into a template file using {{ secret:name }} syntax
+    Inject {
+        /// Template file path (reads from stdin if not specified)
+        #[arg(short, long)]
+        template: Option<String>,
+        /// Output file path (writes to stdout if not specified)
+        #[arg(short, long)]
+        out: Option<String>,
+        /// Filter secrets by group (can be specified multiple times)
+        #[arg(short, long)]
+        group: Vec<String>,
     },
     /// Update secret properties in the current vault context
     Update {
@@ -203,6 +319,49 @@ pub enum Commands {
         /// Replace existing groups instead of merging
         #[arg(long)]
         replace_groups: bool,
+        /// Set expiration date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        #[arg(long)]
+        expires: Option<String>,
+        /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        #[arg(long)]
+        not_before: Option<String>,
+        /// Clear expiration date
+        #[arg(long, conflicts_with = "expires")]
+        clear_expires: bool,
+        /// Clear not-before date
+        #[arg(long, conflicts_with = "not_before")]
+        clear_not_before: bool,
+    },
+    /// Copy a secret from one vault to another
+    Copy {
+        /// Secret name
+        name: String,
+        /// Source vault name
+        #[arg(long, required = true)]
+        from: String,
+        /// Destination vault name
+        #[arg(long, required = true)]
+        to: String,
+        /// New name for the secret in the destination vault (optional, defaults to original name)
+        #[arg(long)]
+        new_name: Option<String>,
+    },
+    /// Move a secret from one vault to another (copy then delete from source)
+    Move {
+        /// Secret name
+        name: String,
+        /// Source vault name
+        #[arg(long, required = true)]
+        from: String,
+        /// Destination vault name
+        #[arg(long, required = true)]
+        to: String,
+        /// New name for the secret in the destination vault (optional, defaults to original name)
+        #[arg(long)]
+        new_name: Option<String>,
+        /// Force move without confirmation
+        #[arg(short, long)]
+        force: bool,
     },
     /// Permanently delete (purge) a secret from the current vault context
     Purge {
@@ -252,6 +411,28 @@ pub enum Commands {
         #[command(subcommand)]
         command: ContextCommands,
     },
+    /// Environment profile management
+    Env {
+        #[command(subcommand)]
+        command: EnvCommands,
+    },
+    /// Show audit history for secrets or vaults
+    Audit {
+        /// Secret name to show audit history for (exclusive with --vault)
+        name: Option<String>,
+        /// Show audit history for entire vault
+        #[arg(long, conflicts_with = "name")]
+        vault: Option<String>,
+        /// Number of days to look back (default: 30)
+        #[arg(long, default_value = "30")]
+        days: u32,
+        /// Filter by operation type (get, set, delete, list)
+        #[arg(long)]
+        operation: Option<String>,
+        /// Show raw Azure Activity Log output
+        #[arg(long)]
+        raw: bool,
+    },
     /// Initialize default configuration
     Init,
     /// Show information about a resource (vault, secret, or file)
@@ -270,6 +451,14 @@ pub enum Commands {
     },
     /// Show detailed version and build information
     Version,
+    /// Generate shell completion scripts
+    Completion {
+        /// Shell type
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Show authenticated identity and context information
+    Whoami,
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
@@ -676,6 +865,64 @@ pub enum ContextCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum EnvCommands {
+    /// List available environment profiles
+    List,
+    /// Use an environment profile (sets vault and group context)
+    Use {
+        /// Profile name
+        name: String,
+    },
+    /// Create a new environment profile
+    Create {
+        /// Profile name
+        name: String,
+        /// Vault name for this profile
+        #[arg(long)]
+        vault: String,
+        /// Resource group for the vault
+        #[arg(long)]
+        group: String,
+        /// Subscription ID (optional)
+        #[arg(long)]
+        subscription: Option<String>,
+        /// Set this profile as global default
+        #[arg(long)]
+        global: bool,
+    },
+    /// Delete an environment profile
+    Delete {
+        /// Profile name
+        name: String,
+        /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Show current environment profile
+    Show,
+    /// Pull secrets to .env file format
+    Pull {
+        /// Output format (only 'dotenv' supported currently)
+        #[arg(long, default_value = "dotenv")]
+        format: String,
+        /// Filter secrets by group (can be specified multiple times)
+        #[arg(short, long)]
+        group: Vec<String>,
+        /// Output file path (writes to stdout if not specified)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Push .env file to vault as secrets
+    Push {
+        /// Input .env file path (reads from stdin if not specified)
+        file: Option<String>,
+        /// Overwrite existing secrets
+        #[arg(long)]
+        overwrite: bool,
+    },
+}
+
 impl Cli {
     pub async fn execute(self, mut config: Config) -> Result<()> {
         // Apply CLI credential type if specified (CLI flag overrides config/env)
@@ -689,15 +936,34 @@ impl Cli {
         
         match self.command {
             Commands::Set {
-                name,
+                args,
                 stdin,
                 note,
                 folder,
-            } => execute_secret_set_direct(&name, stdin, note, folder, config).await,
-            Commands::Get { name, raw } => execute_secret_get_direct(&name, raw, config).await,
-            Commands::List { group, all } => execute_secret_list_direct(group, all, config).await,
-            Commands::Delete { name, force } => {
-                execute_secret_delete_direct(&name, force, config).await
+                expires,
+                not_before,
+            } => execute_secret_set_direct(args, stdin, note, folder, expires, not_before, config).await,
+            Commands::Get { name, raw, version } => execute_secret_get_direct(&name, raw, version, config).await,
+            Commands::List { group, all, expiring, expired } => {
+                execute_secret_list_direct(group, all, expiring, expired, config).await
+            },
+            Commands::Delete { name, group, force } => {
+                execute_secret_delete_direct(name, group, force, config).await
+            }
+            Commands::History { name } => {
+                execute_secret_history_direct(&name, config).await
+            }
+            Commands::Rollback { name, version, force } => {
+                execute_secret_rollback_direct(&name, &version, force, config).await
+            }
+            Commands::Rotate { name, length, charset, generator, show_value, force } => {
+                execute_secret_rotate_direct(&name, length, charset, generator, show_value, force, config).await
+            }
+            Commands::Run { group, no_masking, command } => {
+                execute_secret_run_direct(group, no_masking, command, config).await
+            }
+            Commands::Inject { template, out, group } => {
+                execute_secret_inject_direct(template, out, group, config).await
             }
             Commands::Update {
                 name,
@@ -710,6 +976,10 @@ impl Cli {
                 folder,
                 replace_tags,
                 replace_groups,
+                expires,
+                not_before,
+                clear_expires,
+                clear_not_before,
             } => {
                 execute_secret_update_direct(
                     &name,
@@ -722,9 +992,19 @@ impl Cli {
                     folder,
                     replace_tags,
                     replace_groups,
+                    expires,
+                    not_before,
+                    clear_expires,
+                    clear_not_before,
                     config,
                 )
                 .await
+            }
+            Commands::Copy { name, from, to, new_name } => {
+                execute_secret_copy_direct(&name, &from, &to, new_name, config).await
+            }
+            Commands::Move { name, from, to, new_name, force } => {
+                execute_secret_move_direct(&name, &from, &to, new_name, force, config).await
             }
             Commands::Purge { name, force } => {
                 execute_secret_purge_direct(&name, force, config).await
@@ -740,6 +1020,10 @@ impl Cli {
             Commands::File { command } => execute_file_command(command, config).await,
             Commands::Config { command } => execute_config_command(command, config).await,
             Commands::Context { command } => execute_context_command(command, config).await,
+            Commands::Env { command } => execute_env_command(command, config).await,
+            Commands::Audit { name, vault, days, operation, raw } => {
+                execute_audit_command(name, vault, days, operation, raw, config).await
+            },
             Commands::Init => execute_init_command(config).await,
             Commands::Info {
                 resource,
@@ -748,6 +1032,8 @@ impl Cli {
                 subscription,
             } => execute_info_command(resource, resource_type, resource_group, subscription, config).await,
             Commands::Version => execute_version_command().await,
+            Commands::Completion { shell } => execute_completion_command(shell).await,
+            Commands::Whoami => execute_whoami_command(config).await,
             #[cfg(feature = "file-ops")]
             Commands::Upload { file_path, name, groups, metadata } => {
                 execute_file_upload_quick(&file_path, name, groups, metadata, &config).await
@@ -1181,10 +1467,12 @@ async fn execute_vault_info(
 
 // Direct secret command execution functions (context-aware)
 async fn execute_secret_set_direct(
-    name: &str,
+    args: Vec<String>,
     stdin: bool,
     note: Option<String>,
     folder: Option<String>,
+    expires: Option<String>,
+    not_before: Option<String>,
     config: Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
@@ -1199,10 +1487,28 @@ async fn execute_secret_set_direct(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_set(&secret_manager, name, None, stdin, note, folder, &config).await
+    // Check if this is a bulk set operation (multiple KEY=value pairs)
+    if args.len() == 1 && !args[0].contains('=') {
+        // Single secret operation (original behavior)
+        let name = &args[0];
+        execute_secret_set(&secret_manager, name, None, stdin, note, folder, expires, not_before, &config).await
+    } else {
+        // Bulk set operation
+        if stdin {
+            return Err(CrosstacheError::invalid_argument(
+                "--stdin cannot be used with bulk set operation"
+            ));
+        }
+        if expires.is_some() || not_before.is_some() {
+            return Err(CrosstacheError::invalid_argument(
+                "--expires and --not-before cannot be used with bulk set operation"
+            ));
+        }
+        execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await
+    }
 }
 
-async fn execute_secret_get_direct(name: &str, raw: bool, config: Config) -> Result<()> {
+async fn execute_secret_get_direct(name: &str, raw: bool, version: Option<String>, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
     use std::sync::Arc;
@@ -1215,12 +1521,14 @@ async fn execute_secret_get_direct(name: &str, raw: bool, config: Config) -> Res
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_get(&secret_manager, name, None, raw, &config).await
+    execute_secret_get(&secret_manager, name, None, raw, version, &config).await
 }
 
 async fn execute_secret_list_direct(
     group: Option<String>,
     all: bool,
+    expiring: Option<String>,
+    expired: bool,
     config: Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
@@ -1235,10 +1543,10 @@ async fn execute_secret_list_direct(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_list(&secret_manager, None, group, all, &config).await
+    execute_secret_list(&secret_manager, None, group, all, expiring, expired, &config).await
 }
 
-async fn execute_secret_delete_direct(name: &str, force: bool, config: Config) -> Result<()> {
+async fn execute_secret_delete_direct(name: Option<String>, group: Option<String>, force: bool, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
     use std::sync::Arc;
@@ -1251,7 +1559,109 @@ async fn execute_secret_delete_direct(name: &str, force: bool, config: Config) -
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_delete(&secret_manager, name, None, force, &config).await
+    // Check if this is a group delete operation
+    if let Some(group_name) = group {
+        execute_secret_delete_group(&secret_manager, &group_name, force, &config).await
+    } else if let Some(secret_name) = name {
+        execute_secret_delete(&secret_manager, &secret_name, None, force, &config).await
+    } else {
+        Err(CrosstacheError::invalid_argument(
+            "Either secret name or --group must be specified"
+        ))
+    }
+}
+
+async fn execute_secret_history_direct(name: &str, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_history(&secret_manager, name, None, &config).await
+}
+
+async fn execute_secret_rollback_direct(name: &str, version: &str, force: bool, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_rollback(&secret_manager, name, None, version, force, &config).await
+}
+
+async fn execute_secret_rotate_direct(
+    name: &str,
+    length: usize,
+    charset: CharsetType,
+    generator: Option<String>,
+    show_value: bool,
+    force: bool,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_rotate(&secret_manager, name, None, length, charset, generator, show_value, force, &config).await
+}
+
+async fn execute_secret_run_direct(group: Vec<String>, no_masking: bool, command: Vec<String>, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_run(&secret_manager, None, group, no_masking, command, &config).await
+}
+
+async fn execute_secret_inject_direct(template: Option<String>, out: Option<String>, group: Vec<String>, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_inject(&secret_manager, None, template, out, group, &config).await
 }
 
 async fn execute_secret_update_direct(
@@ -1265,6 +1675,10 @@ async fn execute_secret_update_direct(
     folder: Option<String>,
     replace_tags: bool,
     replace_groups: bool,
+    expires: Option<String>,
+    not_before: Option<String>,
+    clear_expires: bool,
+    clear_not_before: bool,
     config: Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
@@ -1292,6 +1706,10 @@ async fn execute_secret_update_direct(
         folder,
         replace_tags,
         replace_groups,
+        expires,
+        not_before,
+        clear_expires,
+        clear_not_before,
         &config,
     )
     .await
@@ -1327,6 +1745,51 @@ async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()>
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     execute_secret_restore(&secret_manager, name, None, &config).await
+}
+
+async fn execute_secret_copy_direct(
+    name: &str,
+    from_vault: &str,
+    to_vault: &str,
+    new_name: Option<String>,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_copy(&secret_manager, name, from_vault, to_vault, new_name, &config).await
+}
+
+async fn execute_secret_move_direct(
+    name: &str,
+    from_vault: &str,
+    to_vault: &str,
+    new_name: Option<String>,
+    force: bool,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_move(&secret_manager, name, from_vault, to_vault, new_name, force, &config).await
 }
 
 async fn execute_secret_parse_direct(
@@ -1400,6 +1863,924 @@ async fn execute_context_command(command: ContextCommands, config: Config) -> Re
             execute_context_clear(global, &config).await?;
         }
     }
+    Ok(())
+}
+
+/// Environment profile structure  
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentProfile {
+    pub name: String,
+    pub vault_name: String,
+    pub resource_group: String,
+    pub subscription_id: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_used: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl EnvironmentProfile {
+    pub fn new(name: String, vault_name: String, resource_group: String, subscription_id: Option<String>) -> Self {
+        Self {
+            name,
+            vault_name,
+            resource_group,
+            subscription_id,
+            created_at: chrono::Utc::now(),
+            last_used: None,
+        }
+    }
+
+    pub fn update_usage(&mut self) {
+        self.last_used = Some(chrono::Utc::now());
+    }
+}
+
+/// Environment profile manager
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnvironmentProfileManager {
+    pub profiles: std::collections::HashMap<String, EnvironmentProfile>,
+    pub current_profile: Option<String>,
+}
+
+impl EnvironmentProfileManager {
+    /// Load profiles from configuration file
+    pub async fn load() -> Result<Self> {
+        let profile_path = Self::get_profile_path()?;
+        
+        if !profile_path.exists() {
+            return Ok(Self::default());
+        }
+        
+        let content = tokio::fs::read_to_string(&profile_path).await?;
+        let manager = serde_json::from_str(&content)?;
+        Ok(manager)
+    }
+
+    /// Save profiles to configuration file
+    pub async fn save(&self) -> Result<()> {
+        let profile_path = Self::get_profile_path()?;
+        
+        // Create parent directories if they don't exist
+        if let Some(parent) = profile_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        let content = serde_json::to_string_pretty(self)?;
+        tokio::fs::write(&profile_path, content).await?;
+        Ok(())
+    }
+
+    /// Get the profile configuration file path
+    fn get_profile_path() -> Result<PathBuf> {
+        // Check for local .xv.json file first
+        let local_path = std::env::current_dir()?.join(".xv.json");
+        if local_path.exists() {
+            return Ok(local_path);
+        }
+
+        // Use global profile path
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::env;
+            let config_dir = if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
+                PathBuf::from(xdg_config_home)
+            } else {
+                let home_dir = env::var("HOME")
+                    .map_err(|_| CrosstacheError::config("HOME environment variable not set"))?;
+                PathBuf::from(home_dir).join(".config")
+            };
+            Ok(config_dir.join("xv").join("profiles.json"))
+        }
+        
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let config_dir = dirs::config_dir()
+                .ok_or_else(|| CrosstacheError::config("Unable to determine config directory"))?;
+            Ok(config_dir.join("xv").join("profiles.json"))
+        }
+    }
+
+    /// Add a new environment profile
+    pub fn create_profile(&mut self, profile: EnvironmentProfile) -> Result<()> {
+        if self.profiles.contains_key(&profile.name) {
+            return Err(CrosstacheError::config(format!(
+                "Environment profile '{}' already exists", profile.name
+            )));
+        }
+        
+        self.profiles.insert(profile.name.clone(), profile);
+        Ok(())
+    }
+
+    /// Delete an environment profile
+    pub fn delete_profile(&mut self, name: &str) -> Result<()> {
+        if !self.profiles.contains_key(name) {
+            return Err(CrosstacheError::config(format!(
+                "Environment profile '{}' not found", name
+            )));
+        }
+
+        // Clear current profile if it's the one being deleted
+        if self.current_profile.as_ref() == Some(&name.to_string()) {
+            self.current_profile = None;
+        }
+
+        self.profiles.remove(name);
+        Ok(())
+    }
+
+    /// Use an environment profile (set it as current)
+    pub fn use_profile(&mut self, name: &str) -> Result<&EnvironmentProfile> {
+        let profile = self.profiles.get_mut(name)
+            .ok_or_else(|| CrosstacheError::config(format!(
+                "Environment profile '{}' not found", name
+            )))?;
+
+        profile.update_usage();
+        self.current_profile = Some(name.to_string());
+        Ok(profile)
+    }
+
+    /// Get the current environment profile
+    pub fn current_profile(&self) -> Option<&EnvironmentProfile> {
+        self.current_profile.as_ref()
+            .and_then(|name| self.profiles.get(name))
+    }
+}
+
+async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()> {
+    match command {
+        EnvCommands::List => execute_env_list(&config).await,
+        EnvCommands::Use { name } => execute_env_use(&name, &config).await,
+        EnvCommands::Create { name, vault, group, subscription, global } => {
+            execute_env_create(&name, &vault, &group, subscription, global, &config).await
+        },
+        EnvCommands::Delete { name, force } => execute_env_delete(&name, force, &config).await,
+        EnvCommands::Show => execute_env_show(&config).await,
+        EnvCommands::Pull { format, group, output } => execute_env_pull(&format, group, output, &config).await,
+        EnvCommands::Push { file, overwrite } => execute_env_push(file, overwrite, &config).await,
+    }
+}
+
+async fn execute_env_list(_config: &Config) -> Result<()> {
+    let manager = EnvironmentProfileManager::load().await?;
+    
+    if manager.profiles.is_empty() {
+        println!("No environment profiles found.");
+        println!("Create one with: xv env create <name> --vault <vault> --group <group>");
+        return Ok(());
+    }
+
+    println!("Environment Profiles:");
+    println!("────────────────────");
+    
+    for (name, profile) in &manager.profiles {
+        let current_marker = if manager.current_profile.as_ref() == Some(name) {
+            "* " 
+        } else { 
+            "  " 
+        };
+        
+        println!("{}{} → {} ({})", 
+            current_marker, 
+            name, 
+            profile.vault_name, 
+            profile.resource_group
+        );
+        
+        if let Some(last_used) = profile.last_used {
+            println!("    Last used: {}", last_used.format("%Y-%m-%d %H:%M:%S UTC"));
+        }
+    }
+    
+    if let Some(current_name) = &manager.current_profile {
+        println!("\nCurrent profile: {}", current_name);
+    } else {
+        println!("\nNo profile currently active");
+    }
+    
+    Ok(())
+}
+
+async fn execute_env_use(name: &str, _config: &Config) -> Result<()> {
+    let mut manager = EnvironmentProfileManager::load().await?;
+    
+    // Get profile data before using (to avoid borrow checker issues)
+    let (vault_name, resource_group, subscription_id) = {
+        let profile = manager.use_profile(name)?;
+        (
+            profile.vault_name.clone(),
+            profile.resource_group.clone(),
+            profile.subscription_id.clone(),
+        )
+    };
+    
+    // Update the vault context using the profile
+    use crate::config::ContextManager;
+    use crate::config::context::VaultContext;
+    
+    let vault_context = VaultContext::new(
+        vault_name.clone(),
+        Some(resource_group.clone()),
+        subscription_id.clone(),
+    );
+    
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    context_manager.set_context(vault_context).await?;
+    
+    // Save the profile manager
+    manager.save().await?;
+    
+    println!("✓ Using environment profile: {}", name);
+    println!("  Vault: {}", vault_name);
+    println!("  Resource Group: {}", resource_group);
+    if let Some(subscription) = &subscription_id {
+        println!("  Subscription: {}", subscription);
+    }
+    
+    Ok(())
+}
+
+async fn execute_env_create(name: &str, vault: &str, group: &str, subscription: Option<String>, global: bool, _config: &Config) -> Result<()> {
+    let mut manager = EnvironmentProfileManager::load().await?;
+    
+    let profile = EnvironmentProfile::new(
+        name.to_string(),
+        vault.to_string(),
+        group.to_string(),
+        subscription.clone(),
+    );
+    
+    manager.create_profile(profile.clone())?;
+    
+    if global {
+        // Set as current profile
+        manager.use_profile(name)?;
+        
+        // Update the vault context
+        use crate::config::ContextManager;
+        use crate::config::context::VaultContext;
+        
+        let vault_context = VaultContext::new(
+            vault.to_string(),
+            Some(group.to_string()),
+            subscription.clone(),
+        );
+        
+        let mut context_manager = ContextManager::load().await.unwrap_or_default();
+        context_manager.set_context(vault_context).await?;
+    }
+    
+    manager.save().await?;
+    
+    println!("✓ Created environment profile: {}", name);
+    println!("  Vault: {}", vault);
+    println!("  Resource Group: {}", group);
+    if let Some(subscription) = &subscription {
+        println!("  Subscription: {}", subscription);
+    }
+    
+    if global {
+        println!("  Set as current profile");
+    }
+    
+    Ok(())
+}
+
+async fn execute_env_delete(name: &str, force: bool, _config: &Config) -> Result<()> {
+    let mut manager = EnvironmentProfileManager::load().await?;
+    
+    if !manager.profiles.contains_key(name) {
+        return Err(CrosstacheError::config(format!(
+            "Environment profile '{}' not found", name
+        )));
+    }
+    
+    if !force {
+        use crate::utils::interactive::InteractivePrompt;
+        
+        let prompt = InteractivePrompt::new();
+        let confirmation_message = format!("Delete environment profile '{}'?", name);
+        if !prompt.confirm(&confirmation_message, false)? {
+            println!("Delete cancelled");
+            return Ok(());
+        }
+    }
+    
+    manager.delete_profile(name)?;
+    manager.save().await?;
+    
+    println!("✓ Deleted environment profile: {}", name);
+    
+    Ok(())
+}
+
+async fn execute_env_show(_config: &Config) -> Result<()> {
+    let manager = EnvironmentProfileManager::load().await?;
+    
+    if let Some(current_name) = &manager.current_profile {
+        if let Some(profile) = manager.profiles.get(current_name) {
+            println!("Current Environment Profile: {}", current_name);
+            println!("──────────────────────────");
+            println!("Vault: {}", profile.vault_name);
+            println!("Resource Group: {}", profile.resource_group);
+            if let Some(subscription) = &profile.subscription_id {
+                println!("Subscription: {}", subscription);
+            }
+            println!("Created: {}", profile.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            if let Some(last_used) = profile.last_used {
+                println!("Last Used: {}", last_used.format("%Y-%m-%d %H:%M:%S UTC"));
+            }
+        } else {
+            println!("Current profile '{}' not found (corrupted state)", current_name);
+        }
+    } else {
+        println!("No environment profile is currently active");
+        println!("Use 'xv env list' to see available profiles");
+        println!("Use 'xv env use <name>' to activate a profile");
+    }
+    
+    Ok(())
+}
+
+async fn execute_env_pull(
+    format: &str,
+    groups: Vec<String>,
+    output: Option<String>,
+    config: &Config,
+) -> Result<()> {
+    if format != "dotenv" {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "Unsupported format '{}'. Only 'dotenv' is currently supported.", format
+        )));
+    }
+
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider and secret manager
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    // Determine vault name
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    println!("Pulling secrets from vault '{}' to dotenv format...", vault_name);
+
+    // Get all secrets or filtered by group
+    let mut all_secrets = Vec::new();
+    if groups.is_empty() {
+        // Get all secrets
+        let secrets = secret_manager.list_secrets_formatted(
+            &vault_name,
+            None,
+            crate::utils::format::OutputFormat::Json, // We don't use the output, just need the list
+            false,
+            true
+        ).await?;
+        for secret_summary in secrets {
+            match secret_manager.get_secret_safe(&vault_name, &secret_summary.name, true, true).await {
+                Ok(secret) => all_secrets.push(secret),
+                Err(e) => eprintln!("Warning: Failed to get secret '{}': {}", secret_summary.name, e),
+            }
+        }
+    } else {
+        // Get secrets filtered by groups
+        for group in &groups {
+            let secrets = secret_manager.list_secrets_formatted(
+                &vault_name,
+                Some(group),
+                crate::utils::format::OutputFormat::Json, // We don't use the output, just need the list
+                false,
+                true
+            ).await?;
+            for secret_summary in secrets {
+                match secret_manager.get_secret_safe(&vault_name, &secret_summary.name, true, true).await {
+                    Ok(secret) => all_secrets.push(secret),
+                    Err(e) => eprintln!("Warning: Failed to get secret '{}': {}", secret_summary.name, e),
+                }
+            }
+        }
+    }
+
+    // Convert to dotenv format
+    let mut dotenv_content = String::new();
+    for secret in &all_secrets {
+        if let Some(ref value) = secret.value {
+            // Use original name if available, otherwise use sanitized name
+            let key = &secret.original_name;
+            
+            // Escape value if it contains special characters
+            let escaped_value = if value.contains('\n') || value.contains('"') || value.contains('\\') {
+                format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
+            } else if value.contains(' ') || value.starts_with('#') {
+                format!("\"{}\"", value)
+            } else {
+                value.clone()
+            };
+            
+            dotenv_content.push_str(&format!("{}={}\n", key, escaped_value));
+        }
+    }
+
+    // Output to file or stdout
+    if let Some(output_path) = output {
+        std::fs::write(&output_path, dotenv_content)?;
+        println!("✅ Successfully exported {} secret(s) to '{}'", all_secrets.len(), output_path);
+    } else {
+        print!("{}", dotenv_content);
+    }
+
+    if !groups.is_empty() {
+        println!("# Filtered by groups: {}", groups.join(", "));
+    }
+
+    Ok(())
+}
+
+async fn execute_env_push(
+    file: Option<String>,
+    overwrite: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use crate::secret::manager::SecretRequest;
+    use std::sync::Arc;
+    use std::io::Read;
+    use std::collections::HashMap;
+
+    // Create authentication provider and secret manager
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    // Determine vault name
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Read .env content from file or stdin
+    let env_content = if let Some(file_path) = file {
+        println!("Reading .env file from '{}'...", file_path);
+        std::fs::read_to_string(&file_path)?
+    } else {
+        println!("Reading .env content from stdin...");
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    };
+
+    // Parse .env content
+    let mut secrets = HashMap::new();
+    for (line_num, line) in env_content.lines().enumerate() {
+        let line = line.trim();
+        
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Parse KEY=VALUE format
+        if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].trim();
+            let value = line[eq_pos + 1..].trim();
+
+            // Handle quoted values
+            let processed_value = if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+                let unquoted = &value[1..value.len() - 1];
+                // Unescape quoted content
+                unquoted.replace("\\\"", "\"").replace("\\n", "\n").replace("\\\\", "\\")
+            } else {
+                value.to_string()
+            };
+
+            if key.is_empty() {
+                eprintln!("Warning: Empty key on line {} - skipping", line_num + 1);
+                continue;
+            }
+
+            secrets.insert(key.to_string(), processed_value);
+        } else {
+            eprintln!("Warning: Invalid format on line {} - skipping: {}", line_num + 1, line);
+        }
+    }
+
+    if secrets.is_empty() {
+        println!("No valid key=value pairs found in input");
+        return Ok(());
+    }
+
+    println!("Pushing {} secret(s) to vault '{}'...", secrets.len(), vault_name);
+
+    // Check for existing secrets if not overwriting
+    if !overwrite {
+        let mut existing_secrets = Vec::new();
+        for key in secrets.keys() {
+            if secret_manager.get_secret_safe(&vault_name, key, false, false).await.is_ok() {
+                existing_secrets.push(key);
+            }
+        }
+
+        if !existing_secrets.is_empty() {
+            return Err(CrosstacheError::config(format!(
+                "The following secret(s) already exist: {}. Use --overwrite to replace them.",
+                existing_secrets.into_iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+
+    // Set each secret
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for (key, value) in secrets {
+        let secret_request = SecretRequest {
+            name: key.clone(),
+            value: value.clone(),
+            content_type: Some("text/plain".to_string()),
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: Some(HashMap::new()),
+            groups: None,
+            note: None,
+            folder: None,
+        };
+
+        match secret_manager.set_secret_safe(&vault_name, &key, &value, Some(secret_request)).await {
+            Ok(_) => {
+                println!("  ✅ Set '{}'", key);
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ Failed to set '{}': {}", key, e);
+                error_count += 1;
+            }
+        }
+    }
+
+    if error_count > 0 {
+        println!("Completed with {} successful and {} failed operations", success_count, error_count);
+    } else {
+        println!("✅ Successfully pushed {} secret(s) to vault '{}'", success_count, vault_name);
+    }
+
+    Ok(())
+}
+
+/// Azure Activity Log entry for audit purposes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLogEntry {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub operation: String,
+    pub resource_name: String,
+    pub resource_type: String,
+    pub caller: String,
+    pub status: String,
+    pub correlation_id: String,
+    pub vault_name: Option<String>,
+    pub subscription_id: String,
+    pub resource_group: String,
+    pub properties: serde_json::Value,
+}
+
+impl std::fmt::Display for AuditLogEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} | {} | {} | {} | {}",
+            self.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
+            self.operation,
+            self.resource_name,
+            self.caller,
+            self.status
+        )
+    }
+}
+
+/// Azure Activity Log client for fetching audit data
+pub struct AzureActivityLogClient {
+    auth_provider: std::sync::Arc<dyn crate::auth::provider::AzureAuthProvider>,
+}
+
+impl AzureActivityLogClient {
+    pub fn new(auth_provider: std::sync::Arc<dyn crate::auth::provider::AzureAuthProvider>) -> Self {
+        Self { auth_provider }
+    }
+
+    /// Fetch audit logs for a specific vault
+    pub async fn get_vault_audit_logs(
+        &self,
+        subscription_id: &str,
+        resource_group: &str,
+        vault_name: &str,
+        days: u32,
+    ) -> Result<Vec<AuditLogEntry>> {
+        let end_time = chrono::Utc::now();
+        let start_time = end_time - chrono::Duration::days(days as i64);
+        
+        let start_time_str = start_time.format("%Y-%m-%dT%H:%M:%S.%3fZ");
+        let end_time_str = end_time.format("%Y-%m-%dT%H:%M:%S.%3fZ");
+
+        // Build the Azure Activity Log API URL
+        let activity_url = format!(
+            "https://management.azure.com/subscriptions/{}/providers/microsoft.insights/eventtypes/management/values?api-version=2015-04-01&$filter=eventTimestamp ge '{}' and eventTimestamp le '{}' and resourceUri eq '/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}'",
+            subscription_id, start_time_str, end_time_str, subscription_id, resource_group, vault_name
+        );
+
+        // Get access token from auth provider
+        let token = self.auth_provider.get_token(&["https://management.azure.com/.default"]).await?;
+
+        // Make HTTP request
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&activity_url)
+            .header("Authorization", format!("Bearer {}", token.token.secret()))
+            .header("Content-Type", "application/json")
+            .send()
+            .await
+            .map_err(|e| CrosstacheError::network(format!("Failed to fetch activity logs: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(CrosstacheError::azure_api(format!(
+                "Activity Log API returned {}: {}",
+                status,
+                error_text
+            )));
+        }
+
+        let activity_response: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| CrosstacheError::serialization(format!("Failed to parse activity logs: {}", e)))?;
+
+        // Parse the Azure Activity Log response
+        self.parse_activity_log_response(activity_response, vault_name)
+    }
+
+    /// Fetch audit logs for a specific secret
+    pub async fn get_secret_audit_logs(
+        &self,
+        subscription_id: &str,
+        resource_group: &str,
+        vault_name: &str,
+        secret_name: &str,
+        days: u32,
+    ) -> Result<Vec<AuditLogEntry>> {
+        // Get all vault logs and filter for the specific secret
+        let vault_logs = self.get_vault_audit_logs(subscription_id, resource_group, vault_name, days).await?;
+        
+        let secret_logs: Vec<AuditLogEntry> = vault_logs
+            .into_iter()
+            .filter(|log| {
+                log.resource_name.contains(secret_name) || 
+                log.properties.get("secretName").and_then(|v| v.as_str()) == Some(secret_name)
+            })
+            .collect();
+
+        Ok(secret_logs)
+    }
+
+    /// Parse Azure Activity Log API response
+    fn parse_activity_log_response(
+        &self,
+        response: serde_json::Value,
+        vault_name: &str,
+    ) -> Result<Vec<AuditLogEntry>> {
+        let mut entries = Vec::new();
+
+        if let Some(value) = response.get("value").and_then(|v| v.as_array()) {
+            for event in value {
+                if let Ok(entry) = self.parse_activity_log_entry(event, vault_name) {
+                    entries.push(entry);
+                }
+            }
+        }
+
+        // Sort by timestamp (newest first)
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        
+        Ok(entries)
+    }
+
+    /// Parse individual activity log entry
+    fn parse_activity_log_entry(
+        &self,
+        event: &serde_json::Value,
+        vault_name: &str,
+    ) -> Result<AuditLogEntry> {
+        let timestamp = event
+            .get("eventTimestamp")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .ok_or_else(|| CrosstacheError::serialization("Invalid timestamp in activity log"))?;
+
+        let operation = event
+            .get("operationName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let resource_name = event
+            .get("resourceId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let resource_type = event
+            .get("resourceType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Microsoft.KeyVault/vaults")
+            .to_string();
+
+        let caller = event
+            .get("caller")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let status = event
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or(event
+                .get("subStatus")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"))
+            .to_string();
+
+        let correlation_id = event
+            .get("correlationId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let subscription_id = event
+            .get("subscriptionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let resource_group = event
+            .get("resourceGroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let properties = event
+            .get("properties")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+
+        Ok(AuditLogEntry {
+            timestamp,
+            operation,
+            resource_name,
+            resource_type,
+            caller,
+            status,
+            correlation_id,
+            vault_name: Some(vault_name.to_string()),
+            subscription_id,
+            resource_group,
+            properties,
+        })
+    }
+}
+
+async fn execute_audit_command(
+    name: Option<String>,
+    vault: Option<String>,
+    days: u32,
+    operation: Option<String>,
+    raw: bool,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {}", e)))?
+    );
+
+    // Create audit log client
+    let audit_client = AzureActivityLogClient::new(auth_provider);
+
+    // Determine vault and context
+    let (vault_name, resource_group, subscription_id) = if let Some(vault_name) = vault {
+        // Use specified vault, need to get resource group and subscription
+        let rg = config.default_resource_group.clone();
+        let sub = config.subscription_id.clone();
+        
+        if rg.is_empty() {
+            return Err(CrosstacheError::config(
+                "No default resource group configured. Use 'xv init' to configure or specify with --resource-group"
+            ));
+        }
+        
+        (vault_name, rg, sub)
+    } else {
+        // Use current vault context
+        let vault_name = config.resolve_vault_name(None).await?;
+        let rg = config.default_resource_group.clone();
+        let sub = config.subscription_id.clone();
+        
+        if rg.is_empty() {
+            return Err(CrosstacheError::config(
+                "No default resource group configured. Use 'xv init' to configure"
+            ));
+        }
+        
+        (vault_name, rg, sub)
+    };
+
+    println!("🔍 Fetching audit logs for {} days...", days);
+    
+    // Fetch audit logs
+    let mut logs = if let Some(secret_name) = name {
+        println!("  Secret: {}", secret_name);
+        println!("  Vault: {}", vault_name);
+        audit_client.get_secret_audit_logs(&subscription_id, &resource_group, &vault_name, &secret_name, days).await?
+    } else {
+        println!("  Vault: {}", vault_name);
+        audit_client.get_vault_audit_logs(&subscription_id, &resource_group, &vault_name, days).await?
+    };
+
+    // Filter by operation if specified
+    if let Some(op_filter) = operation {
+        logs = logs
+            .into_iter()
+            .filter(|log| log.operation.to_lowercase().contains(&op_filter.to_lowercase()))
+            .collect();
+    }
+
+    if logs.is_empty() {
+        println!("📭 No audit log entries found for the specified criteria");
+        return Ok(());
+    }
+
+    println!("\n📊 Found {} audit log entries:\n", logs.len());
+
+    if raw {
+        // Show raw JSON output
+        for log in logs {
+            let json_output = serde_json::to_string_pretty(&log)
+                .map_err(|e| CrosstacheError::serialization(format!("Failed to serialize log entry: {}", e)))?;
+            println!("{}", json_output);
+            println!("---");
+        }
+    } else {
+        // Show formatted output
+        println!("{:<20} | {:<25} | {:<20} | {:<30} | {:<10}", "Timestamp", "Operation", "Resource", "Caller", "Status");
+        println!("{}", "-".repeat(120));
+        
+        for log in logs {
+            // Extract resource name (last part after /)
+            let resource_display = log.resource_name
+                .split('/')
+                .last()
+                .unwrap_or(&log.resource_name);
+            
+            // Truncate long strings for better display
+            let operation = if log.operation.len() > 25 {
+                format!("{}...", &log.operation[..22])
+            } else {
+                log.operation.clone()
+            };
+            
+            let caller = if log.caller.len() > 30 {
+                format!("{}...", &log.caller[..27])
+            } else {
+                log.caller.clone()
+            };
+            
+            let resource = if resource_display.len() > 20 {
+                format!("{}...", &resource_display[..17])
+            } else {
+                resource_display.to_string()
+            };
+
+            println!(
+                "{:<20} | {:<25} | {:<20} | {:<30} | {:<10}",
+                log.timestamp.format("%m-%d %H:%M:%S"),
+                operation,
+                resource,
+                caller,
+                log.status
+            );
+        }
+        
+        println!("\n💡 Use --raw to see full details, or --operation <type> to filter by operation type");
+    }
+
     Ok(())
 }
 
@@ -1559,6 +2940,167 @@ async fn execute_version_command() -> Result<()> {
     println!("Git Branch:   {}", build_info.git_branch);
 
     Ok(())
+}
+
+async fn execute_completion_command(shell: Shell) -> Result<()> {
+    use clap_complete::generate;
+    use std::io;
+    
+    let mut cmd = Cli::command();
+    let name = "xv";
+    
+    generate(shell, &mut cmd, name, &mut io::stdout());
+    
+    Ok(())
+}
+
+async fn execute_whoami_command(config: Config) -> Result<()> {
+    use crate::auth::provider::{DefaultAzureCredentialProvider, AzureAuthProvider};
+    use crate::config::ContextManager;
+    
+    println!("🔍 Checking authentication and context...\n");
+
+    // Create authentication provider
+    let auth_provider = DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+        .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?;
+
+    // Get access token to validate authentication
+    let token = match auth_provider.get_token(&["https://vault.azure.net/.default"]).await {
+        Ok(token) => token,
+        Err(e) => {
+            println!("❌ Authentication failed: {}", e);
+            return Ok(());
+        }
+    };
+
+    println!("✅ Authentication successful\n");
+
+    // Try to get tenant and subscription information
+    let management_token = auth_provider.get_token(&["https://management.azure.com/.default"]).await
+        .map_err(|e| CrosstacheError::authentication(format!("Failed to get management token: {e}")))?;
+
+    // Parse token to get tenant ID (from JWT)
+    let tenant_id = extract_tenant_from_token(&token.token.secret())?;
+    
+    println!("👤 Identity Information:");
+    println!("   Tenant ID: {}", tenant_id);
+    
+    // Get subscription information
+    if let Ok(subscription_id) = get_current_subscription(&management_token.token.secret()).await {
+        println!("   Subscription ID: {}", subscription_id);
+    } else {
+        println!("   Subscription ID: Unable to determine");
+    }
+
+    // Show current context information
+    println!("\n📊 Context Information:");
+    
+    let context_manager = ContextManager::load().await.unwrap_or_default();
+    
+    if let Some(current_vault) = context_manager.current_vault() {
+        println!("   Default Vault: {}", current_vault);
+    } else {
+        println!("   Default Vault: None set");
+    }
+
+    if let Some(current_sub) = context_manager.current_subscription_id() {
+        println!("   Current Subscription: {}", current_sub);
+    } else {
+        println!("   Current Subscription: None set");
+    }
+
+    // Show recent vaults
+    let recent_contexts = context_manager.list_recent();
+    if !recent_contexts.is_empty() {
+        println!("\n📝 Recent Vaults:");
+        for context in recent_contexts.iter().take(5) {
+            println!("   {} (last used: {})", context.vault_name, 
+                context.last_used.format("%Y-%m-%d %H:%M:%S"));
+        }
+    }
+
+    println!("\n🔧 Configuration:");
+    println!("   Default vault: {}", config.default_vault);
+    println!("   Default subscription: {}", config.subscription_id);
+    println!("   No color mode: {}", config.no_color);
+    println!("   Credential priority: {:?}", config.azure_credential_priority);
+
+    Ok(())
+}
+
+/// Extract tenant ID from JWT token
+fn extract_tenant_from_token(token: &str) -> Result<String> {
+    // JWT tokens have 3 parts separated by dots: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(CrosstacheError::authentication("Invalid JWT token format"));
+    }
+
+    // Decode the payload (second part)
+    let payload = parts[1];
+    
+    // Add padding if needed for base64 decoding
+    let padded = match payload.len() % 4 {
+        0 => payload.to_string(),
+        n => format!("{}{}", payload, "=".repeat(4 - n)),
+    };
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let decoded = STANDARD.decode(&padded)
+        .map_err(|_| CrosstacheError::authentication("Failed to decode token payload"))?;
+    
+    let payload_str = String::from_utf8(decoded)
+        .map_err(|_| CrosstacheError::authentication("Invalid UTF-8 in token payload"))?;
+    
+    let payload_json: serde_json::Value = serde_json::from_str(&payload_str)
+        .map_err(|_| CrosstacheError::authentication("Invalid JSON in token payload"))?;
+    
+    payload_json["tid"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| CrosstacheError::authentication("Tenant ID not found in token"))
+}
+
+/// Get current subscription ID from Azure management API
+async fn get_current_subscription(token: &str) -> Result<String> {
+    use crate::utils::network::{create_http_client, NetworkConfig};
+    
+    let network_config = NetworkConfig::default();
+    let http_client = create_http_client(&network_config)?;
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {}", token)
+            .parse()
+            .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+    );
+
+    let response = http_client
+        .get("https://management.azure.com/subscriptions?api-version=2020-01-01")
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to get subscriptions: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(CrosstacheError::azure_api(
+            "Failed to get subscription information"
+        ));
+    }
+
+    let json: serde_json::Value = response.json().await
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to parse response: {e}")))?;
+
+    if let Some(subscriptions) = json["value"].as_array() {
+        if let Some(first_sub) = subscriptions.first() {
+            if let Some(sub_id) = first_sub["subscriptionId"].as_str() {
+                return Ok(sub_id.to_string());
+            }
+        }
+    }
+
+    Err(CrosstacheError::azure_api("No subscriptions found"))
 }
 
 async fn execute_config_show(config: &Config) -> Result<()> {
@@ -1810,6 +3352,8 @@ async fn execute_secret_set(
     stdin: bool,
     note: Option<String>,
     folder: Option<String>,
+    expires: Option<String>,
+    not_before: Option<String>,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -1836,15 +3380,30 @@ async fn execute_secret_set(
         return Err(CrosstacheError::config("Secret value cannot be empty"));
     }
 
-    // Create secret request with note and/or folder if provided
-    let secret_request = if note.is_some() || folder.is_some() {
+    // Parse expiry dates if provided
+    let expires_on = if let Some(expires_str) = expires.as_deref() {
+        use crate::utils::datetime::parse_datetime_or_duration;
+        Some(parse_datetime_or_duration(expires_str)?)
+    } else {
+        None
+    };
+
+    let not_before_on = if let Some(not_before_str) = not_before.as_deref() {
+        use crate::utils::datetime::parse_datetime_or_duration;
+        Some(parse_datetime_or_duration(not_before_str)?)
+    } else {
+        None
+    };
+
+    // Create secret request with note, folder, and/or expiry dates if provided
+    let secret_request = if note.is_some() || folder.is_some() || expires_on.is_some() || not_before_on.is_some() {
         Some(crate::secret::manager::SecretRequest {
             name: name.to_string(),
             value: value.clone(),
             content_type: None,
             enabled: Some(true),
-            expires_on: None,
-            not_before: None,
+            expires_on,
+            not_before: not_before_on,
             tags: None,
             groups: None,
             note,
@@ -1871,6 +3430,7 @@ async fn execute_secret_get(
     name: &str,
     vault: Option<String>,
     raw: bool,
+    version: Option<String>,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -1883,9 +3443,9 @@ async fn execute_secret_get(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
-    // Get the secret
+    // Get the secret (specific version or current)
     let secret = secret_manager
-        .get_secret_safe(&vault_name, name, true, true)
+        .get_secret_with_version(&vault_name, name, version.as_deref(), true, true)
         .await?;
 
     if raw {
@@ -1919,11 +3479,738 @@ async fn execute_secret_get(
     Ok(())
 }
 
+async fn execute_secret_history(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    vault: Option<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use tabled::{Table, Tabled};
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Get secret versions using the secret operations
+    let versions = secret_manager
+        .secret_ops()
+        .get_secret_versions(&vault_name, name)
+        .await?;
+
+    if versions.is_empty() {
+        println!("No versions found for secret '{name}'");
+        return Ok(());
+    }
+
+    // Display versions in a table
+    #[derive(Tabled)]
+    struct VersionInfo {
+        #[tabled(rename = "Version")]
+        version: String,
+        #[tabled(rename = "Created")]
+        created: String,
+        #[tabled(rename = "Updated")]  
+        updated: String,
+        #[tabled(rename = "Enabled")]
+        enabled: String,
+    }
+
+    let version_infos: Vec<VersionInfo> = versions
+        .into_iter()
+        .map(|v| VersionInfo {
+            version: v.version,
+            created: v.created_on,
+            updated: v.updated_on,
+            enabled: if v.enabled { "Yes" } else { "No" }.to_string(),
+        })
+        .collect();
+
+    let table = Table::new(&version_infos).to_string();
+    println!("Version history for secret '{name}' in vault '{vault_name}':");
+    println!();
+    println!("{table}");
+
+    Ok(())
+}
+
+async fn execute_secret_rollback(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    vault: Option<String>,
+    version: &str,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use crate::utils::interactive::InteractivePrompt;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Confirm rollback unless force flag is used
+    if !force {
+        let prompt = InteractivePrompt::new();
+        let confirm = prompt.confirm(
+            &format!(
+                "Are you sure you want to rollback secret '{name}' to version '{version}'?"
+            ),
+            false,
+        )?;
+
+        if !confirm {
+            println!("Rollback cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Perform rollback using the secret operations
+    let result = secret_manager
+        .secret_ops()
+        .rollback_secret(&vault_name, name, version)
+        .await?;
+
+    println!("✅ Successfully rolled back secret '{name}' to version '{version}'");
+    println!("New version: {}", result.version);
+
+    Ok(())
+}
+
+/// Generate a random value using the specified parameters
+fn generate_random_value(length: usize, charset: CharsetType, custom_generator: Option<String>) -> Result<String> {
+    use rand::prelude::*;
+
+    if let Some(generator_script) = custom_generator {
+        // Execute custom generator script
+        return execute_custom_generator(&generator_script, length);
+    }
+
+    if length == 0 {
+        return Err(CrosstacheError::invalid_argument("Length must be greater than 0"));
+    }
+
+    let charset_str = charset.chars();
+    let charset_bytes = charset_str.as_bytes();
+
+    if charset_bytes.is_empty() {
+        return Err(CrosstacheError::invalid_argument("Character set cannot be empty"));
+    }
+
+    let mut rng = thread_rng();
+    let random_value: String = (0..length)
+        .map(|_| {
+            let idx = rng.gen_range(0..charset_bytes.len());
+            charset_bytes[idx] as char
+        })
+        .collect();
+
+    Ok(random_value)
+}
+
+/// Execute a custom generator script
+fn execute_custom_generator(script_path: &str, length: usize) -> Result<String> {
+    use std::process::{Command, Stdio};
+
+    // Check if the script exists
+    if !std::path::Path::new(script_path).exists() {
+        return Err(CrosstacheError::config(format!(
+            "Generator script not found: {}", script_path
+        )));
+    }
+
+    // Set up environment for the script
+    let mut cmd = Command::new(script_path);
+    cmd.env("XV_SECRET_LENGTH", length.to_string());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // Execute the script
+    let output = cmd
+        .output()
+        .map_err(|e| CrosstacheError::config(format!(
+            "Failed to execute generator script '{}': {}", script_path, e
+        )))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CrosstacheError::config(format!(
+            "Generator script failed with exit code {}: {}",
+            output.status.code().unwrap_or(-1),
+            stderr
+        )));
+    }
+
+    let generated_value = String::from_utf8(output.stdout)
+        .map_err(|e| CrosstacheError::config(format!(
+            "Generator script output is not valid UTF-8: {}", e
+        )))?
+        .trim()
+        .to_string();
+
+    if generated_value.is_empty() {
+        return Err(CrosstacheError::config(
+            "Generator script produced empty output"
+        ));
+    }
+
+    Ok(generated_value)
+}
+
+async fn execute_secret_rotate(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    vault: Option<String>,
+    length: usize,
+    charset: CharsetType,
+    custom_generator: Option<String>,
+    show_value: bool,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use crate::utils::interactive::InteractivePrompt;
+    use crate::secret::manager::SecretRequest;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Check if the secret exists first
+    let existing_secret = secret_manager
+        .secret_ops()
+        .get_secret(&vault_name, name, true)
+        .await
+        .map_err(|e| CrosstacheError::config(format!(
+            "Failed to verify secret exists: {}. Use 'xv set' to create a new secret.", e
+        )))?;
+
+    println!("🔄 Rotating secret: {}", name);
+    
+    // Show generation parameters
+    if let Some(ref script) = custom_generator {
+        println!("  Generator: {} (length: {})", script, length);
+    } else {
+        println!("  Character set: {:?}", charset);
+        println!("  Length: {}", length);
+    }
+
+    // Confirm rotation unless force flag is used
+    if !force {
+        let prompt = InteractivePrompt::new();
+        let confirm = prompt.confirm(
+            &format!(
+                "Are you sure you want to rotate secret '{}'? This will generate a new value and increment the version.",
+                name
+            ),
+            false,
+        )?;
+
+        if !confirm {
+            println!("Rotation cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Generate the new value
+    let new_value = generate_random_value(length, charset, custom_generator)?;
+    
+    // Preserve existing secret metadata
+    let set_request = SecretRequest {
+        name: name.to_string(),
+        value: new_value.clone(),
+        content_type: if existing_secret.content_type.is_empty() { 
+            None 
+        } else { 
+            Some(existing_secret.content_type) 
+        },
+        enabled: Some(true),
+        expires_on: existing_secret.expires_on,
+        not_before: existing_secret.not_before,
+        tags: if existing_secret.tags.is_empty() { 
+            None 
+        } else { 
+            Some(existing_secret.tags) 
+        },
+        groups: None, // Groups are managed via tags
+        note: None,
+        folder: None,
+    };
+
+    // Set the rotated secret
+    let result = secret_manager
+        .secret_ops()
+        .set_secret(&vault_name, &set_request)
+        .await?;
+
+    println!("✅ Successfully rotated secret '{}'", name);
+    println!("New version: {}", result.version);
+    
+    if show_value {
+        println!("Generated value: {}", new_value);
+    } else {
+        println!("Generated value: [hidden] (use --show-value to display)");
+    }
+
+    println!("💡 Use 'xv history {}' to see version history", name);
+
+    Ok(())
+}
+
+async fn execute_secret_run(
+    secret_manager: &crate::secret::manager::SecretManager,
+    vault: Option<String>,
+    groups: Vec<String>,
+    no_masking: bool,
+    command: Vec<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use crate::utils::helpers::to_env_var_name;
+    use std::collections::HashMap;
+    use std::process::{Command, Stdio};
+    use regex::Regex;
+
+    if command.is_empty() {
+        return Err(CrosstacheError::config("No command specified"));
+    }
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Parse current environment for xv:// URI references
+    let mut uri_secrets: Vec<(String, String)> = Vec::new(); // (vault, secret) pairs
+    let uri_regex = Regex::new(r"xv://([^/]+)/([^/\s]+)").unwrap();
+    
+    for (_env_name, env_value) in std::env::vars() {
+        for captures in uri_regex.captures_iter(&env_value) {
+            if let Some(vault_match) = captures.get(1) {
+                if let Some(secret_match) = captures.get(2) {
+                    let target_vault = vault_match.as_str().to_string();
+                    let secret_name = secret_match.as_str().to_string();
+                    let pair = (target_vault, secret_name);
+                    if !uri_secrets.contains(&pair) {
+                        uri_secrets.push(pair);
+                    }
+                }
+            }
+        }
+    }
+
+    // Get all secrets from the vault
+    let secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
+        .await?;
+
+    // Filter secrets by groups if specified
+    let filtered_secrets = if !groups.is_empty() {
+        secrets
+            .into_iter()
+            .filter(|secret| {
+                if let Some(secret_groups) = &secret.groups {
+                    // Secret can have multiple groups (comma-separated)
+                    let secret_group_list: Vec<&str> = secret_groups.split(',').map(|g| g.trim()).collect();
+                    groups.iter().any(|filter_group| {
+                        secret_group_list.contains(&filter_group.as_str())
+                    })
+                } else {
+                    false
+                }
+            })
+            .collect()
+    } else {
+        secrets
+    };
+
+    if filtered_secrets.is_empty() {
+        println!("No secrets found to inject");
+        return Ok(());
+    }
+
+    println!(
+        "🔐 Injecting {} secret(s) as environment variables...",
+        filtered_secrets.len()
+    );
+
+    // Fetch secret values and build environment map
+    let mut env_vars: HashMap<String, String> = HashMap::new();
+    let mut secret_values: Vec<String> = Vec::new(); // For masking
+    let mut uri_values: HashMap<String, String> = HashMap::new(); // URI -> value mapping
+
+    // Fetch secrets from current vault (group-filtered)
+    for secret in filtered_secrets {
+        // Get the secret value
+        match secret_manager
+            .secret_ops()
+            .get_secret(&vault_name, &secret.name, true)
+            .await
+        {
+            Ok(secret_props) => {
+                if let Some(value) = secret_props.value {
+                    let env_name = to_env_var_name(&secret.name);
+                    env_vars.insert(env_name, value.clone());
+                    
+                    // Store for masking (if enabled)
+                    if !no_masking && !value.is_empty() {
+                        secret_values.push(value.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to get value for secret '{}': {}", secret.name, e);
+            }
+        }
+    }
+
+    // Fetch cross-vault secrets referenced by URIs in environment
+    if !uri_secrets.is_empty() {
+        println!("🔗 Found {} cross-vault URI reference(s) in environment", uri_secrets.len());
+        
+        for (target_vault, secret_name) in &uri_secrets {
+            let uri = format!("xv://{}/{}", target_vault, secret_name);
+            
+            match secret_manager
+                .secret_ops()
+                .get_secret(target_vault, secret_name, true)
+                .await
+            {
+                Ok(secret_props) => {
+                    if let Some(value) = secret_props.value {
+                        uri_values.insert(uri.clone(), value.clone());
+                        
+                        // Store for masking (if enabled)
+                        if !no_masking && !value.is_empty() {
+                            secret_values.push(value);
+                        }
+                    } else {
+                        eprintln!("⚠️  Secret '{}' in vault '{}' has no value", secret_name, target_vault);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to get secret '{}' from vault '{}': {}", secret_name, target_vault, e);
+                }
+            }
+        }
+    }
+
+    // Set up the command
+    let mut cmd = Command::new(&command[0]);
+    if command.len() > 1 {
+        cmd.args(&command[1..]);
+    }
+
+    // Set environment variables from vault secrets
+    cmd.envs(&env_vars);
+    
+    // Resolve URI references in existing environment variables
+    if !uri_values.is_empty() {
+        for (env_name, env_value) in std::env::vars() {
+            let mut resolved_value = env_value.clone();
+            
+            // Replace any xv:// URIs with actual secret values
+            for (uri, secret_value) in &uri_values {
+                resolved_value = resolved_value.replace(uri, secret_value);
+            }
+            
+            // Only set if the value changed (had URI references)
+            if resolved_value != env_value {
+                cmd.env(env_name, resolved_value);
+            }
+        }
+    }
+
+    // Set up stdio for output capture and masking
+    if no_masking {
+        // Direct passthrough
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        // Capture output for masking
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+
+    println!("🚀 Executing: {}", command.join(" "));
+
+    // Execute the command
+    let output = cmd.output().map_err(|e| {
+        CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
+    })?;
+
+    // Handle output with masking if needed
+    if no_masking {
+        // Exit with the same code as the child process
+        std::process::exit(output.status.code().unwrap_or(1));
+    } else {
+        // Mask secret values in output
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let masked_stdout = mask_secrets(&stdout, &secret_values);
+        let masked_stderr = mask_secrets(&stderr, &secret_values);
+
+        print!("{}", masked_stdout);
+        eprint!("{}", masked_stderr);
+
+        // Exit with the same code as the child process
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+}
+
+/// Mask secret values in text output
+fn mask_secrets(text: &str, secrets: &[String]) -> String {
+    let mut result = text.to_string();
+    
+    for secret in secrets {
+        if secret.len() >= 4 {  // Only mask secrets that are at least 4 characters
+            // Replace with [MASKED] to indicate redaction
+            result = result.replace(secret, "[MASKED]");
+        }
+    }
+    
+    result
+}
+
+async fn execute_secret_inject(
+    secret_manager: &crate::secret::manager::SecretManager,
+    vault: Option<String>,
+    template_file: Option<String>,
+    output_file: Option<String>,
+    groups: Vec<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::io::{self, Read};
+    use regex::Regex;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Read template content
+    let template_content = match template_file {
+        Some(path) => {
+            fs::read_to_string(&path).map_err(|e| {
+                CrosstacheError::config(format!("Failed to read template file '{}': {}", path, e))
+            })?
+        }
+        None => {
+            // Read from stdin
+            let mut buffer = String::new();
+            io::stdin().read_to_string(&mut buffer).map_err(|e| {
+                CrosstacheError::config(format!("Failed to read from stdin: {}", e))
+            })?;
+            buffer
+        }
+    };
+
+    // Parse template for secret references
+    // Supports: {{ secret:name }} and xv://vault-name/secret-name
+    let secret_regex = Regex::new(r"\{\{\s*secret:([^}\s]+)\s*\}\}").unwrap();
+    let uri_regex = Regex::new(r"xv://([^/]+)/([^/\s]+)").unwrap();
+    
+    let mut required_secrets: Vec<String> = Vec::new();
+    let mut cross_vault_secrets: Vec<(String, String)> = Vec::new(); // (vault, secret) pairs
+    
+    // Find {{ secret:name }} references (current vault)
+    for captures in secret_regex.captures_iter(&template_content) {
+        if let Some(secret_name) = captures.get(1) {
+            let name = secret_name.as_str().to_string();
+            if !required_secrets.contains(&name) {
+                required_secrets.push(name);
+            }
+        }
+    }
+    
+    // Find xv://vault/secret URI references
+    for captures in uri_regex.captures_iter(&template_content) {
+        if let Some(vault_match) = captures.get(1) {
+            if let Some(secret_match) = captures.get(2) {
+                let vault = vault_match.as_str().to_string();
+                let secret = secret_match.as_str().to_string();
+                let pair = (vault, secret);
+                if !cross_vault_secrets.contains(&pair) {
+                    cross_vault_secrets.push(pair);
+                }
+            }
+        }
+    }
+
+    if required_secrets.is_empty() && cross_vault_secrets.is_empty() {
+        println!("⚠️  No secret references found in template");
+        println!("    Use {{ secret:name }} syntax or xv://vault-name/secret-name URIs");
+        
+        // Still write the template content as-is to output
+        match output_file {
+            Some(path) => {
+                fs::write(&path, &template_content).map_err(|e| {
+                    CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
+                })?;
+                println!("Template written to '{}'", path);
+            }
+            None => {
+                print!("{}", template_content);
+            }
+        }
+        return Ok(());
+    }
+
+    let total_references = required_secrets.len() + cross_vault_secrets.len();
+    println!("📋 Found {} secret reference(s) in template", total_references);
+    
+    if !required_secrets.is_empty() {
+        println!("  Current vault ({}): {} secret(s)", vault_name, required_secrets.len());
+    }
+    if !cross_vault_secrets.is_empty() {
+        println!("  Cross-vault: {} secret(s)", cross_vault_secrets.len());
+    }
+
+    // Get all secrets from the vault
+    let secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
+        .await?;
+
+    // Filter secrets by groups if specified
+    let available_secrets = if !groups.is_empty() {
+        secrets
+            .into_iter()
+            .filter(|secret| {
+                if let Some(secret_groups) = &secret.groups {
+                    let secret_group_list: Vec<&str> = secret_groups.split(',').map(|g| g.trim()).collect();
+                    groups.iter().any(|filter_group| {
+                        secret_group_list.contains(&filter_group.as_str())
+                    })
+                } else {
+                    false
+                }
+            })
+            .collect()
+    } else {
+        secrets
+    };
+
+    // Build a map of secret names/URIs to values
+    let mut secret_values: HashMap<String, String> = HashMap::new();
+    let mut cross_vault_values: HashMap<String, String> = HashMap::new(); // URI -> value
+    let mut missing_secrets: Vec<String> = Vec::new();
+
+    // Fetch secrets from current vault
+    for secret_name in &required_secrets {
+        // Check if the secret exists in the available secrets
+        if let Some(secret_summary) = available_secrets.iter().find(|s| s.name == *secret_name) {
+            // Get the secret value
+            match secret_manager
+                .secret_ops()
+                .get_secret(&vault_name, &secret_summary.name, true)
+                .await
+            {
+                Ok(secret_props) => {
+                    if let Some(value) = secret_props.value {
+                        secret_values.insert(secret_name.clone(), value);
+                    } else {
+                        missing_secrets.push(secret_name.clone());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to get value for secret '{}' from vault '{}': {}", secret_name, vault_name, e);
+                    missing_secrets.push(secret_name.clone());
+                }
+            }
+        } else {
+            missing_secrets.push(secret_name.clone());
+        }
+    }
+
+    // Fetch cross-vault secrets
+    for (target_vault, secret_name) in &cross_vault_secrets {
+        let uri = format!("xv://{}/{}", target_vault, secret_name);
+        
+        match secret_manager
+            .secret_ops()
+            .get_secret(target_vault, secret_name, true)
+            .await
+        {
+            Ok(secret_props) => {
+                if let Some(value) = secret_props.value {
+                    cross_vault_values.insert(uri.clone(), value);
+                } else {
+                    eprintln!("⚠️  Secret '{}' in vault '{}' has no value", secret_name, target_vault);
+                    missing_secrets.push(uri);
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to get secret '{}' from vault '{}': {}", secret_name, target_vault, e);
+                missing_secrets.push(uri);
+            }
+        }
+    }
+
+    if !missing_secrets.is_empty() {
+        return Err(CrosstacheError::config(format!(
+            "Missing secrets: {}",
+            missing_secrets.join(", ")
+        )));
+    }
+
+    let total_injected = secret_values.len() + cross_vault_values.len();
+    println!("🔐 Injecting {} secret(s) into template...", total_injected);
+
+    // Replace secret references with actual values
+    let mut result_content = template_content;
+    
+    // Replace {{ secret:name }} references (current vault)
+    for (secret_name, secret_value) in &secret_values {
+        let pattern = format!(r"\{{\{{\s*secret:{}\s*\}}\}}", regex::escape(secret_name));
+        let regex_pattern = Regex::new(&pattern).unwrap();
+        result_content = regex_pattern.replace_all(&result_content, secret_value).to_string();
+    }
+    
+    // Replace xv://vault/secret URI references
+    for (uri, secret_value) in &cross_vault_values {
+        result_content = result_content.replace(uri, secret_value);
+    }
+
+    // Write result
+    match output_file {
+        Some(path) => {
+            fs::write(&path, &result_content).map_err(|e| {
+                CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
+            })?;
+            println!("✅ Template resolved and written to '{}'", path);
+        }
+        None => {
+            print!("{}", result_content);
+        }
+    }
+
+    Ok(())
+}
+
 async fn execute_secret_list(
     secret_manager: &crate::secret::manager::SecretManager,
     vault: Option<String>,
     group: Option<String>,
     show_all: bool,
+    expiring: Option<String>,
+    expired: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -1941,15 +4228,90 @@ async fn execute_secret_list(
         crate::utils::format::OutputFormat::Table
     };
 
-    secret_manager
+    // Get the basic secret list first
+    let mut secrets = secret_manager
         .list_secrets_formatted(
             &vault_name,
             group.as_deref(),
-            output_format,
+            output_format.clone(),
             false,
             show_all,
         )
         .await?;
+
+    // Apply expiry filtering if requested
+    if expired || expiring.is_some() {
+        use crate::utils::datetime::{is_expired, is_expiring_within};
+        
+        // We need to get full secret details to check expiry dates
+        let mut filtered_secrets = Vec::new();
+        
+        for secret_summary in secrets {
+            // Get full secret details to access expiry dates
+            match secret_manager.get_secret_safe(&vault_name, &secret_summary.name, false, true).await {
+                Ok(secret_props) => {
+                    let should_include = if expired {
+                        // Show only expired secrets
+                        is_expired(secret_props.expires_on)
+                    } else if let Some(ref duration) = expiring {
+                        // Show secrets expiring within the specified duration
+                        match is_expiring_within(secret_props.expires_on, duration) {
+                            Ok(is_exp) => is_exp,
+                            Err(e) => {
+                                eprintln!("Warning: Invalid duration '{}': {}", duration, e);
+                                false
+                            }
+                        }
+                    } else {
+                        true // Include all if no expiry filter
+                    };
+                    
+                    if should_include {
+                        filtered_secrets.push(secret_summary);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to get details for secret '{}': {}", secret_summary.name, e);
+                }
+            }
+        }
+        
+        secrets = filtered_secrets;
+        
+        // Display the filtered results
+        if secrets.is_empty() {
+            let filter_desc = if expired {
+                "expired"
+            } else if expiring.is_some() {
+                "expiring"
+            } else {
+                "matching"
+            };
+            println!("No {} secrets found in vault '{}'.", filter_desc, vault_name);
+        } else {
+            // Re-display with the filtered list
+            if output_format == crate::utils::format::OutputFormat::Table {
+                use crate::utils::format::format_table;
+                use tabled::Table;
+                
+                let table = Table::new(&secrets);
+                println!("{}", format_table(table, config.no_color));
+                
+                let filter_desc = if expired {
+                    "expired".to_string()
+                } else if let Some(ref duration) = expiring {
+                    format!("expiring within {}", duration)
+                } else {
+                    "matching".to_string()
+                };
+                println!("\nShowing {} {} secret(s) in vault '{}'", secrets.len(), filter_desc, vault_name);
+            } else {
+                let json_output = serde_json::to_string_pretty(&secrets)
+                    .map_err(|e| CrosstacheError::serialization(format!("Failed to serialize secrets: {e}")))?;
+                println!("{}", json_output);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -2003,6 +4365,10 @@ async fn execute_secret_update(
     folder: Option<String>,
     replace_tags: bool,
     replace_groups: bool,
+    expires: Option<String>,
+    not_before: Option<String>,
+    clear_expires: bool,
+    clear_not_before: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -2043,9 +4409,13 @@ async fn execute_secret_update(
         && rename.is_none()
         && note.is_none()
         && folder.is_none()
+        && expires.is_none()
+        && not_before.is_none()
+        && !clear_expires
+        && !clear_not_before
     {
         return Err(CrosstacheError::invalid_argument(
-            "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note) or rename secrets. Use 'secret set' to update secret values."
+            "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note, expiry) or rename secrets. Use 'secret set' to update secret values."
         ));
     }
 
@@ -2077,6 +4447,25 @@ async fn execute_secret_update(
         }
     }
 
+    // Parse expiry dates if provided
+    let expires_on = if clear_expires {
+        None // Explicitly clear the expiry date
+    } else if let Some(expires_str) = expires.as_deref() {
+        use crate::utils::datetime::parse_datetime_or_duration;
+        Some(parse_datetime_or_duration(expires_str)?)
+    } else {
+        None // No change to expiry
+    };
+
+    let not_before_on = if clear_not_before {
+        None // Explicitly clear the not-before date
+    } else if let Some(not_before_str) = not_before.as_deref() {
+        use crate::utils::datetime::parse_datetime_or_duration;
+        Some(parse_datetime_or_duration(not_before_str)?)
+    } else {
+        None // No change to not-before
+    };
+
     // Create update request with enhanced parameters
     let update_request = SecretUpdateRequest {
         name: name.to_string(),
@@ -2084,8 +4473,8 @@ async fn execute_secret_update(
         value: new_value.clone(),
         content_type: None,
         enabled: None,
-        expires_on: None,
-        not_before: None,
+        expires_on,
+        not_before: not_before_on,
         tags: tags_map,
         groups: groups_vec,
         note: note.clone(),
@@ -2137,6 +4526,16 @@ async fn execute_secret_update(
     }
     if let Some(ref folder_path) = folder {
         println!("  → Setting folder: {folder_path}");
+    }
+    if clear_expires {
+        println!("  → Clearing expiry date");
+    } else if let Some(ref expires_str) = expires {
+        println!("  → Setting expiry: {expires_str}");
+    }
+    if clear_not_before {
+        println!("  → Clearing not-before date");
+    } else if let Some(ref not_before_str) = not_before {
+        println!("  → Setting not-before: {not_before_str}");
     }
 
     // Perform enhanced secret update
@@ -2227,6 +4626,128 @@ async fn execute_secret_restore(
     if !restored_secret.tags.is_empty() {
         println!("   Tags: {}", restored_secret.tags.len());
     }
+
+    Ok(())
+}
+
+async fn execute_secret_copy(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    from_vault: &str,
+    to_vault: &str,
+    new_name: Option<String>,
+    _config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use crate::secret::manager::SecretRequest;
+
+    // Determine target name (use new_name if provided, otherwise use original)
+    let target_name = new_name.as_deref().unwrap_or(name);
+
+    println!("Copying secret '{}' from vault '{}' to vault '{}' as '{}'...", 
+             name, from_vault, to_vault, target_name);
+
+    // Get the source secret with all its metadata
+    let source_secret = secret_manager
+        .get_secret_safe(from_vault, name, true, true)
+        .await?;
+
+    // Check if target secret already exists
+    if let Ok(_) = secret_manager.get_secret_safe(to_vault, target_name, false, true).await {
+        return Err(CrosstacheError::config(format!(
+            "Secret '{}' already exists in vault '{}'. Use 'xv move' with --force or delete the target secret first.",
+            target_name, to_vault
+        )));
+    }
+
+    // Create the request for the target vault preserving all metadata
+    let secret_request = SecretRequest {
+        name: target_name.to_string(),
+        value: source_secret.value.unwrap_or_default(),
+        content_type: Some(source_secret.content_type),
+        enabled: Some(source_secret.enabled),
+        expires_on: source_secret.expires_on,
+        not_before: source_secret.not_before,
+        tags: Some(source_secret.tags),
+        groups: None, // Will be preserved through tags
+        note: None,   // Will be preserved through tags
+        folder: None, // Will be preserved through tags
+    };
+
+    // Set the secret in the target vault
+    let value = secret_request.value.clone();
+    let copied_secret = secret_manager
+        .set_secret_safe(to_vault, target_name, &value, Some(secret_request))
+        .await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(to_vault).await;
+
+    println!("✅ Successfully copied secret '{}' to vault '{}'", copied_secret.original_name, to_vault);
+    println!("   Source: {}/{}", from_vault, name);
+    println!("   Target: {}/{}", to_vault, target_name);
+    println!("   Version: {}", copied_secret.version);
+    println!("   Enabled: {}", copied_secret.enabled);
+
+    if let Some(expires_on) = copied_secret.expires_on {
+        use crate::utils::datetime::format_datetime;
+        println!("   Expires: {}", format_datetime(Some(expires_on)));
+    }
+
+    Ok(())
+}
+
+async fn execute_secret_move(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    from_vault: &str,
+    to_vault: &str,
+    new_name: Option<String>,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::utils::interactive::InteractivePrompt;
+
+    // Determine target name (use new_name if provided, otherwise use original)
+    let target_name = new_name.as_deref().unwrap_or(name);
+
+    println!("Moving secret '{}' from vault '{}' to vault '{}' as '{}'...", 
+             name, from_vault, to_vault, target_name);
+
+    // Confirmation prompt if not forced
+    if !force {
+        let prompt = InteractivePrompt::new();
+        let message = format!(
+            "This will delete secret '{}' from vault '{}' after copying it to vault '{}'. Continue?",
+            name, from_vault, to_vault
+        );
+        if !prompt.confirm(&message, false)? {
+            println!("Move operation cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Check if target secret already exists and handle accordingly
+    if let Ok(_) = secret_manager.get_secret_safe(to_vault, target_name, false, true).await {
+        if !force {
+            return Err(CrosstacheError::config(format!(
+                "Secret '{}' already exists in vault '{}'. Use --force to overwrite.",
+                target_name, to_vault
+            )));
+        } else {
+            println!("⚠️  Overwriting existing secret '{}' in vault '{}'", target_name, to_vault);
+        }
+    }
+
+    // First copy the secret
+    execute_secret_copy(secret_manager, name, from_vault, to_vault, new_name.clone(), config).await?;
+
+    // Then delete from source
+    println!("Deleting source secret '{}' from vault '{}'...", name, from_vault);
+    secret_manager.delete_secret_safe(from_vault, name, true).await?;
+
+    println!("✅ Successfully moved secret '{}' from '{}' to '{}'", name, from_vault, to_vault);
 
     Ok(())
 }
@@ -3918,6 +6439,220 @@ async fn execute_file_sync(
     eprintln!("File sync is not yet implemented.");
     
     Ok(())
+}
+
+/// Execute bulk secret set operation
+async fn execute_secret_set_bulk(
+    secret_manager: &crate::secret::manager::SecretManager,
+    args: Vec<String>,
+    note: Option<String>,
+    folder: Option<String>,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use std::fs;
+    use std::path::Path;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Parse KEY=value pairs
+    let mut secrets_to_set = Vec::new();
+    
+    for arg in args {
+        if let Some(pos) = arg.find('=') {
+            let key = arg[..pos].trim();
+            let value_part = arg[pos + 1..].trim();
+            
+            if key.is_empty() {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "Invalid KEY=value pair: empty key in '{}'", arg
+                )));
+            }
+            
+            // Handle @file syntax for value
+            let value = if value_part.starts_with('@') {
+                let file_path = &value_part[1..];
+                
+                if !Path::new(file_path).exists() {
+                    return Err(CrosstacheError::config(format!(
+                        "File not found: {}", file_path
+                    )));
+                }
+                
+                fs::read_to_string(file_path).map_err(|e| {
+                    CrosstacheError::config(format!(
+                        "Failed to read file '{}': {}", file_path, e
+                    ))
+                })?
+            } else {
+                value_part.to_string()
+            };
+            
+            if value.is_empty() {
+                return Err(CrosstacheError::config(format!(
+                    "Secret value cannot be empty for key '{}'", key
+                )));
+            }
+            
+            secrets_to_set.push((key.to_string(), value));
+        } else {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "Invalid format: '{}'. Expected KEY=value or KEY=@/path/to/file", arg
+            )));
+        }
+    }
+    
+    if secrets_to_set.is_empty() {
+        return Err(CrosstacheError::invalid_argument(
+            "No valid KEY=value pairs provided"
+        ));
+    }
+    
+    println!("🔐 Setting {} secret(s) in vault '{}'...", secrets_to_set.len(), vault_name);
+    
+    let mut success_count = 0;
+    let mut error_count = 0;
+    
+    for (key, value) in secrets_to_set {
+        // Create secret request with note and/or folder if provided
+        let secret_request = if note.is_some() || folder.is_some() {
+            Some(crate::secret::manager::SecretRequest {
+                name: key.clone(),
+                value: value.clone(),
+                content_type: None,
+                enabled: Some(true),
+                expires_on: None,
+                not_before: None,
+                tags: None,
+                groups: None,
+                note: note.clone(),
+                folder: folder.clone(),
+            })
+        } else {
+            None
+        };
+
+        match secret_manager
+            .set_secret_safe(&vault_name, &key, &value, secret_request)
+            .await
+        {
+            Ok(secret) => {
+                println!("  ✅ {}: {} (version {})", key, secret.original_name, secret.version);
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ {}: {}", key, e);
+                error_count += 1;
+            }
+        }
+    }
+    
+    println!("\n📊 Bulk Set Summary:");
+    println!("  ✅ Successful: {}", success_count);
+    if error_count > 0 {
+        println!("  ❌ Failed: {}", error_count);
+    }
+    
+    if error_count > 0 {
+        Err(CrosstacheError::config(format!(
+            "{} secret(s) failed to set", error_count
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Execute group delete operation
+async fn execute_secret_delete_group(
+    secret_manager: &crate::secret::manager::SecretManager,
+    group_name: &str,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+
+    // Determine vault name using context resolution
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Get all secrets from the vault
+    let secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, Some(group_name))
+        .await?;
+
+    if secrets.is_empty() {
+        println!("No secrets found in group '{}'", group_name);
+        return Ok(());
+    }
+
+    println!(
+        "Found {} secret(s) in group '{}' to delete:",
+        secrets.len(),
+        group_name
+    );
+    
+    for secret in &secrets {
+        println!("  - {}", secret.name);
+    }
+
+    // Confirmation unless forced
+    if !force {
+        let confirm = rpassword::prompt_password(format!(
+            "Are you sure you want to delete ALL {} secret(s) in group '{}'? (y/N): ",
+            secrets.len(),
+            group_name
+        ))?;
+
+        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+            println!("Group delete operation cancelled.");
+            return Ok(());
+        }
+    }
+
+    println!("🗑️  Deleting {} secret(s) from group '{}'...", secrets.len(), group_name);
+
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for secret in secrets {
+        match secret_manager
+            .delete_secret_safe(&vault_name, &secret.name, true) // force=true to avoid individual prompts
+            .await
+        {
+            Ok(_) => {
+                println!("  ✅ Deleted: {}", secret.name);
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ Failed to delete '{}': {}", secret.name, e);
+                error_count += 1;
+            }
+        }
+    }
+
+    println!("\n📊 Group Delete Summary:");
+    println!("  ✅ Successful: {}", success_count);
+    if error_count > 0 {
+        println!("  ❌ Failed: {}", error_count);
+    }
+
+    if error_count > 0 {
+        Err(CrosstacheError::config(format!(
+            "{} secret(s) failed to delete from group '{}'", error_count, group_name
+        )))
+    } else {
+        println!("✅ Successfully deleted all secrets from group '{}'", group_name);
+        Ok(())
+    }
 }
 
 /// Parse a single key-value pair

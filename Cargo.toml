@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 # CLI framework
 clap = { version = "4.0", features = ["derive", "env", "unicode", "wrap_help"] }
+clap_complete = "4.0"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
@@ -46,6 +47,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 
 # Utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
+rand = "0.8"
 regex = "1.0"
 dirs = "5.0"
 config = "0.14"
