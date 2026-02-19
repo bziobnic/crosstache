@@ -332,6 +332,37 @@ pub enum Commands {
         #[arg(long, conflicts_with = "not_before")]
         clear_not_before: bool,
     },
+    /// Copy a secret from one vault to another
+    Copy {
+        /// Secret name
+        name: String,
+        /// Source vault name
+        #[arg(long, required = true)]
+        from: String,
+        /// Destination vault name
+        #[arg(long, required = true)]
+        to: String,
+        /// New name for the secret in the destination vault (optional, defaults to original name)
+        #[arg(long)]
+        new_name: Option<String>,
+    },
+    /// Move a secret from one vault to another (copy then delete from source)
+    Move {
+        /// Secret name
+        name: String,
+        /// Source vault name
+        #[arg(long, required = true)]
+        from: String,
+        /// Destination vault name
+        #[arg(long, required = true)]
+        to: String,
+        /// New name for the secret in the destination vault (optional, defaults to original name)
+        #[arg(long)]
+        new_name: Option<String>,
+        /// Force move without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Permanently delete (purge) a secret from the current vault context
     Purge {
         /// Secret name
@@ -948,6 +979,12 @@ impl Cli {
                     config,
                 )
                 .await
+            }
+            Commands::Copy { name, from, to, new_name } => {
+                execute_secret_copy_direct(&name, &from, &to, new_name, config).await
+            }
+            Commands::Move { name, from, to, new_name, force } => {
+                execute_secret_move_direct(&name, &from, &to, new_name, force, config).await
             }
             Commands::Purge { name, force } => {
                 execute_secret_purge_direct(&name, force, config).await
@@ -1688,6 +1725,51 @@ async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()>
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     execute_secret_restore(&secret_manager, name, None, &config).await
+}
+
+async fn execute_secret_copy_direct(
+    name: &str,
+    from_vault: &str,
+    to_vault: &str,
+    new_name: Option<String>,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_copy(&secret_manager, name, from_vault, to_vault, new_name, &config).await
+}
+
+async fn execute_secret_move_direct(
+    name: &str,
+    from_vault: &str,
+    to_vault: &str,
+    new_name: Option<String>,
+    force: bool,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?    );
+
+    // Create secret manager
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    execute_secret_move(&secret_manager, name, from_vault, to_vault, new_name, force, &config).await
 }
 
 async fn execute_secret_parse_direct(
@@ -4292,6 +4374,128 @@ async fn execute_secret_restore(
     if !restored_secret.tags.is_empty() {
         println!("   Tags: {}", restored_secret.tags.len());
     }
+
+    Ok(())
+}
+
+async fn execute_secret_copy(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    from_vault: &str,
+    to_vault: &str,
+    new_name: Option<String>,
+    _config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use crate::secret::manager::SecretRequest;
+
+    // Determine target name (use new_name if provided, otherwise use original)
+    let target_name = new_name.as_deref().unwrap_or(name);
+
+    println!("Copying secret '{}' from vault '{}' to vault '{}' as '{}'...", 
+             name, from_vault, to_vault, target_name);
+
+    // Get the source secret with all its metadata
+    let source_secret = secret_manager
+        .get_secret_safe(from_vault, name, true, true)
+        .await?;
+
+    // Check if target secret already exists
+    if let Ok(_) = secret_manager.get_secret_safe(to_vault, target_name, false, true).await {
+        return Err(CrosstacheError::config(format!(
+            "Secret '{}' already exists in vault '{}'. Use 'xv move' with --force or delete the target secret first.",
+            target_name, to_vault
+        )));
+    }
+
+    // Create the request for the target vault preserving all metadata
+    let secret_request = SecretRequest {
+        name: target_name.to_string(),
+        value: source_secret.value.unwrap_or_default(),
+        content_type: Some(source_secret.content_type),
+        enabled: Some(source_secret.enabled),
+        expires_on: source_secret.expires_on,
+        not_before: source_secret.not_before,
+        tags: Some(source_secret.tags),
+        groups: None, // Will be preserved through tags
+        note: None,   // Will be preserved through tags
+        folder: None, // Will be preserved through tags
+    };
+
+    // Set the secret in the target vault
+    let value = secret_request.value.clone();
+    let copied_secret = secret_manager
+        .set_secret_safe(to_vault, target_name, &value, Some(secret_request))
+        .await?;
+
+    // Update context usage tracking
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(to_vault).await;
+
+    println!("✅ Successfully copied secret '{}' to vault '{}'", copied_secret.original_name, to_vault);
+    println!("   Source: {}/{}", from_vault, name);
+    println!("   Target: {}/{}", to_vault, target_name);
+    println!("   Version: {}", copied_secret.version);
+    println!("   Enabled: {}", copied_secret.enabled);
+
+    if let Some(expires_on) = copied_secret.expires_on {
+        use crate::utils::datetime::format_datetime;
+        println!("   Expires: {}", format_datetime(Some(expires_on)));
+    }
+
+    Ok(())
+}
+
+async fn execute_secret_move(
+    secret_manager: &crate::secret::manager::SecretManager,
+    name: &str,
+    from_vault: &str,
+    to_vault: &str,
+    new_name: Option<String>,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::utils::interactive::InteractivePrompt;
+
+    // Determine target name (use new_name if provided, otherwise use original)
+    let target_name = new_name.as_deref().unwrap_or(name);
+
+    println!("Moving secret '{}' from vault '{}' to vault '{}' as '{}'...", 
+             name, from_vault, to_vault, target_name);
+
+    // Confirmation prompt if not forced
+    if !force {
+        let prompt = InteractivePrompt::new();
+        let message = format!(
+            "This will delete secret '{}' from vault '{}' after copying it to vault '{}'. Continue?",
+            name, from_vault, to_vault
+        );
+        if !prompt.confirm(&message, false)? {
+            println!("Move operation cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Check if target secret already exists and handle accordingly
+    if let Ok(_) = secret_manager.get_secret_safe(to_vault, target_name, false, true).await {
+        if !force {
+            return Err(CrosstacheError::config(format!(
+                "Secret '{}' already exists in vault '{}'. Use --force to overwrite.",
+                target_name, to_vault
+            )));
+        } else {
+            println!("⚠️  Overwriting existing secret '{}' in vault '{}'", target_name, to_vault);
+        }
+    }
+
+    // First copy the secret
+    execute_secret_copy(secret_manager, name, from_vault, to_vault, new_name.clone(), config).await?;
+
+    // Then delete from source
+    println!("Deleting source secret '{}' from vault '{}'...", name, from_vault);
+    secret_manager.delete_secret_safe(from_vault, name, true).await?;
+
+    println!("✅ Successfully moved secret '{}' from '{}' to '{}'", name, from_vault, to_vault);
 
     Ok(())
 }
