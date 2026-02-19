@@ -901,6 +901,26 @@ pub enum EnvCommands {
     },
     /// Show current environment profile
     Show,
+    /// Pull secrets to .env file format
+    Pull {
+        /// Output format (only 'dotenv' supported currently)
+        #[arg(long, default_value = "dotenv")]
+        format: String,
+        /// Filter secrets by group (can be specified multiple times)
+        #[arg(short, long)]
+        group: Vec<String>,
+        /// Output file path (writes to stdout if not specified)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Push .env file to vault as secrets
+    Push {
+        /// Input .env file path (reads from stdin if not specified)
+        file: Option<String>,
+        /// Overwrite existing secrets
+        #[arg(long)]
+        overwrite: bool,
+    },
 }
 
 impl Cli {
@@ -1996,6 +2016,8 @@ async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()>
         },
         EnvCommands::Delete { name, force } => execute_env_delete(&name, force, &config).await,
         EnvCommands::Show => execute_env_show(&config).await,
+        EnvCommands::Pull { format, group, output } => execute_env_pull(&format, group, output, &config).await,
+        EnvCommands::Push { file, overwrite } => execute_env_push(file, overwrite, &config).await,
     }
 }
 
@@ -2177,6 +2199,236 @@ async fn execute_env_show(_config: &Config) -> Result<()> {
         println!("Use 'xv env use <name>' to activate a profile");
     }
     
+    Ok(())
+}
+
+async fn execute_env_pull(
+    format: &str,
+    groups: Vec<String>,
+    output: Option<String>,
+    config: &Config,
+) -> Result<()> {
+    if format != "dotenv" {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "Unsupported format '{}'. Only 'dotenv' is currently supported.", format
+        )));
+    }
+
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    // Create authentication provider and secret manager
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    // Determine vault name
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    println!("Pulling secrets from vault '{}' to dotenv format...", vault_name);
+
+    // Get all secrets or filtered by group
+    let mut all_secrets = Vec::new();
+    if groups.is_empty() {
+        // Get all secrets
+        let secrets = secret_manager.list_secrets_formatted(
+            &vault_name,
+            None,
+            crate::utils::format::OutputFormat::Json, // We don't use the output, just need the list
+            false,
+            true
+        ).await?;
+        for secret_summary in secrets {
+            match secret_manager.get_secret_safe(&vault_name, &secret_summary.name, true, true).await {
+                Ok(secret) => all_secrets.push(secret),
+                Err(e) => eprintln!("Warning: Failed to get secret '{}': {}", secret_summary.name, e),
+            }
+        }
+    } else {
+        // Get secrets filtered by groups
+        for group in &groups {
+            let secrets = secret_manager.list_secrets_formatted(
+                &vault_name,
+                Some(group),
+                crate::utils::format::OutputFormat::Json, // We don't use the output, just need the list
+                false,
+                true
+            ).await?;
+            for secret_summary in secrets {
+                match secret_manager.get_secret_safe(&vault_name, &secret_summary.name, true, true).await {
+                    Ok(secret) => all_secrets.push(secret),
+                    Err(e) => eprintln!("Warning: Failed to get secret '{}': {}", secret_summary.name, e),
+                }
+            }
+        }
+    }
+
+    // Convert to dotenv format
+    let mut dotenv_content = String::new();
+    for secret in &all_secrets {
+        if let Some(ref value) = secret.value {
+            // Use original name if available, otherwise use sanitized name
+            let key = &secret.original_name;
+            
+            // Escape value if it contains special characters
+            let escaped_value = if value.contains('\n') || value.contains('"') || value.contains('\\') {
+                format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
+            } else if value.contains(' ') || value.starts_with('#') {
+                format!("\"{}\"", value)
+            } else {
+                value.clone()
+            };
+            
+            dotenv_content.push_str(&format!("{}={}\n", key, escaped_value));
+        }
+    }
+
+    // Output to file or stdout
+    if let Some(output_path) = output {
+        std::fs::write(&output_path, dotenv_content)?;
+        println!("✅ Successfully exported {} secret(s) to '{}'", all_secrets.len(), output_path);
+    } else {
+        print!("{}", dotenv_content);
+    }
+
+    if !groups.is_empty() {
+        println!("# Filtered by groups: {}", groups.join(", "));
+    }
+
+    Ok(())
+}
+
+async fn execute_env_push(
+    file: Option<String>,
+    overwrite: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use crate::secret::manager::SecretRequest;
+    use std::sync::Arc;
+    use std::io::Read;
+    use std::collections::HashMap;
+
+    // Create authentication provider and secret manager
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(config.azure_credential_priority.clone())
+            .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?
+    );
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    // Determine vault name
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Read .env content from file or stdin
+    let env_content = if let Some(file_path) = file {
+        println!("Reading .env file from '{}'...", file_path);
+        std::fs::read_to_string(&file_path)?
+    } else {
+        println!("Reading .env content from stdin...");
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    };
+
+    // Parse .env content
+    let mut secrets = HashMap::new();
+    for (line_num, line) in env_content.lines().enumerate() {
+        let line = line.trim();
+        
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Parse KEY=VALUE format
+        if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].trim();
+            let value = line[eq_pos + 1..].trim();
+
+            // Handle quoted values
+            let processed_value = if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+                let unquoted = &value[1..value.len() - 1];
+                // Unescape quoted content
+                unquoted.replace("\\\"", "\"").replace("\\n", "\n").replace("\\\\", "\\")
+            } else {
+                value.to_string()
+            };
+
+            if key.is_empty() {
+                eprintln!("Warning: Empty key on line {} - skipping", line_num + 1);
+                continue;
+            }
+
+            secrets.insert(key.to_string(), processed_value);
+        } else {
+            eprintln!("Warning: Invalid format on line {} - skipping: {}", line_num + 1, line);
+        }
+    }
+
+    if secrets.is_empty() {
+        println!("No valid key=value pairs found in input");
+        return Ok(());
+    }
+
+    println!("Pushing {} secret(s) to vault '{}'...", secrets.len(), vault_name);
+
+    // Check for existing secrets if not overwriting
+    if !overwrite {
+        let mut existing_secrets = Vec::new();
+        for key in secrets.keys() {
+            if secret_manager.get_secret_safe(&vault_name, key, false, false).await.is_ok() {
+                existing_secrets.push(key);
+            }
+        }
+
+        if !existing_secrets.is_empty() {
+            return Err(CrosstacheError::config(format!(
+                "The following secret(s) already exist: {}. Use --overwrite to replace them.",
+                existing_secrets.into_iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+
+    // Set each secret
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for (key, value) in secrets {
+        let secret_request = SecretRequest {
+            name: key.clone(),
+            value: value.clone(),
+            content_type: Some("text/plain".to_string()),
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: Some(HashMap::new()),
+            groups: None,
+            note: None,
+            folder: None,
+        };
+
+        match secret_manager.set_secret_safe(&vault_name, &key, &value, Some(secret_request)).await {
+            Ok(_) => {
+                println!("  ✅ Set '{}'", key);
+                success_count += 1;
+            }
+            Err(e) => {
+                eprintln!("  ❌ Failed to set '{}': {}", key, e);
+                error_count += 1;
+            }
+        }
+    }
+
+    if error_count > 0 {
+        println!("Completed with {} successful and {} failed operations", success_count, error_count);
+    } else {
+        println!("✅ Successfully pushed {} secret(s) to vault '{}'", success_count, vault_name);
+    }
+
     Ok(())
 }
 
