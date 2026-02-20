@@ -2162,7 +2162,7 @@ impl EnvironmentProfileManager {
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        tokio::fs::write(&profile_path, content).await?;
+        crate::utils::helpers::write_sensitive_file_async(&profile_path, content.as_bytes()).await?;
         Ok(())
     }
 
@@ -2582,9 +2582,9 @@ async fn execute_env_pull(
 
     // Output to file or stdout
     if let Some(output_path) = output {
-        std::fs::write(&output_path, dotenv_content)?;
+        crate::utils::helpers::write_sensitive_file(std::path::Path::new(&output_path), dotenv_content.as_bytes())?;
         println!(
-            "✅ Successfully exported {} secret(s) to '{}'",
+            "✅ Successfully exported {} secret(s) to '{}' (permissions: owner-only)",
             all_secrets.len(),
             output_path
         );
@@ -3828,16 +3828,24 @@ async fn execute_secret_get(
             match ClipboardContext::new() {
                 Ok(mut ctx) => match ctx.set_contents(value.to_string()) {
                     Ok(_) => {
-                        println!("✅ Secret '{name}' copied to clipboard");
+                        println!("✅ Secret '{name}' copied to clipboard (auto-clears in 30s)");
+
+                        // Auto-clear clipboard after 30 seconds
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_secs(30));
+                            if let Ok(mut ctx) = ClipboardContext::new() {
+                                let _ = ctx.set_contents(String::new());
+                            }
+                        });
                     }
                     Err(e) => {
                         eprintln!("⚠️  Failed to copy to clipboard: {e}");
-                        eprintln!("Secret value: {}", value.as_str());
+                        eprintln!("Use 'xv get {name} --raw' to print the value to stdout instead.");
                     }
                 },
                 Err(e) => {
                     eprintln!("⚠️  Failed to access clipboard: {e}");
-                    eprintln!("Secret value: {}", value.as_str());
+                    eprintln!("Use 'xv get {name} --raw' to print the value to stdout instead.");
                 }
             }
         } else {
@@ -3993,12 +4001,36 @@ fn generate_random_value(
 fn execute_custom_generator(script_path: &str, length: usize) -> Result<String> {
     use std::process::{Command, Stdio};
 
+    let script = std::path::Path::new(script_path);
+
     // Check if the script exists
-    if !std::path::Path::new(script_path).exists() {
+    if !script.exists() {
         return Err(CrosstacheError::config(format!(
             "Generator script not found: {}",
             script_path
         )));
+    }
+
+    // Security: validate script ownership and permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(script).map_err(|e| {
+            CrosstacheError::config(format!("Cannot read script metadata: {e}"))
+        })?;
+        let uid = unsafe { libc::getuid() };
+        if meta.uid() != uid && meta.uid() != 0 {
+            return Err(CrosstacheError::config(format!(
+                "Generator script '{}' is not owned by you or root — refusing to execute",
+                script_path
+            )));
+        }
+        if meta.mode() & 0o002 != 0 {
+            return Err(CrosstacheError::config(format!(
+                "Generator script '{}' is world-writable — refusing to execute (chmod o-w to fix)",
+                script_path
+            )));
+        }
     }
 
     // Set up environment for the script
@@ -4360,6 +4392,9 @@ async fn execute_secret_run(
         let masked_stdout = mask_secrets(&stdout, &secret_values);
         let masked_stderr = mask_secrets(&stderr, &secret_values);
 
+        // Zeroize secret values now that masking is complete
+        drop(secret_values);
+
         print!("{}", masked_stdout);
         eprint!("{}", masked_stderr);
 
@@ -4458,7 +4493,7 @@ async fn execute_secret_inject(
         // Still write the template content as-is to output
         match output_file {
             Some(path) => {
-                fs::write(&path, &template_content).map_err(|e| {
+                crate::utils::helpers::write_sensitive_file(std::path::Path::new(&path), template_content.as_bytes()).map_err(|e| {
                     CrosstacheError::config(format!(
                         "Failed to write to output file '{}': {}",
                         path, e
@@ -4611,10 +4646,11 @@ async fn execute_secret_inject(
     // Write result
     match output_file {
         Some(path) => {
-            fs::write(&path, result_content.as_str()).map_err(|e| {
+            crate::utils::helpers::write_sensitive_file(std::path::Path::new(&path), result_content.as_bytes()).map_err(|e| {
                 CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
             })?;
-            println!("✅ Template resolved and written to '{}'", path);
+            println!("✅ Template resolved and written to '{}' (permissions: owner-only)", path);
+            eprintln!("⚠️  Output file contains resolved secrets — treat as sensitive");
         }
         None => {
             print!("{}", result_content.as_str());
@@ -5328,8 +5364,6 @@ async fn execute_vault_export(
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
-    use std::fs::File;
-    use std::io::Write;
     use std::sync::Arc;
 
     let _resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
@@ -5507,13 +5541,10 @@ async fn execute_vault_export(
     // Write to output
     match output {
         Some(file_path) => {
-            let mut file = File::create(&file_path).map_err(|e| {
-                CrosstacheError::unknown(format!("Failed to create output file: {e}"))
-            })?;
-            file.write_all(export_data.as_bytes()).map_err(|e| {
+            crate::utils::helpers::write_sensitive_file(std::path::Path::new(&file_path), export_data.as_bytes()).map_err(|e| {
                 CrosstacheError::unknown(format!("Failed to write to output file: {e}"))
             })?;
-            println!("Exported {} secrets to {}", secrets.len(), file_path);
+            println!("Exported {} secrets to {} (permissions: owner-only)", secrets.len(), file_path);
         }
         None => {
             println!("{export_data}");
@@ -6799,6 +6830,31 @@ async fn execute_file_download_recursive(
             // Preserve structure: use full blob path
             output_path.join(blob_name)
         };
+
+        // Security: prevent path traversal via malicious blob names (e.g. "../../etc/passwd")
+        {
+            let canonical_output = output_path
+                .canonicalize()
+                .unwrap_or_else(|_| output_path.to_path_buf());
+            // Resolve what we can — parent dirs may not exist yet, so normalize components
+            let mut resolved = canonical_output.clone();
+            for component in local_path.strip_prefix(output_path).unwrap_or(&local_path).components() {
+                match component {
+                    std::path::Component::ParentDir => { resolved.pop(); }
+                    std::path::Component::Normal(c) => { resolved.push(c); }
+                    _ => {}
+                }
+            }
+            if !resolved.starts_with(&canonical_output) {
+                eprintln!("⚠️  Skipping '{}': path traversal detected in blob name", blob_name);
+                failure_count += 1;
+                if continue_on_error { continue; } else {
+                    return Err(CrosstacheError::config(format!(
+                        "Path traversal detected in blob name: {blob_name}"
+                    )));
+                }
+            }
+        }
 
         let local_path_str = local_path.to_string_lossy().to_string();
 

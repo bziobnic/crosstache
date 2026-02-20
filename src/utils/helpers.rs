@@ -6,7 +6,31 @@
 use crate::error::{CrosstacheError, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::path::Path;
 use uuid::Uuid;
+
+/// Write content to a file with restricted permissions (0600 on Unix).
+/// Use for any file that may contain secrets, tokens, or sensitive config.
+pub fn write_sensitive_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Async version of write_sensitive_file.
+pub async fn write_sensitive_file_async(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    tokio::fs::write(path, content).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+    }
+    Ok(())
+}
 
 /// Check if a string is a valid GUID/UUID
 #[allow(dead_code)]
