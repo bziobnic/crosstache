@@ -1313,11 +1313,11 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
 }
 
 async fn execute_vault_command(command: VaultCommands, config: Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
     use std::sync::Arc;
 
     // Create authentication provider with credential priority from config
-    let auth_provider = Arc::new(
+    let auth_provider: Arc<dyn AzureAuthProvider> = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
             config.azure_credential_priority.clone(),
         )
@@ -1328,7 +1328,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
 
     // Create vault manager
     let vault_manager = VaultManager::new(
-        auth_provider,
+        auth_provider.clone(),
         config.subscription_id.clone(),
         config.no_color,
     )?;
@@ -1435,7 +1435,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
             .await?;
         }
         VaultCommands::Share { command } => {
-            execute_vault_share(&vault_manager, command, &config).await?;
+            execute_vault_share(&vault_manager, &auth_provider, command, &config).await?;
         }
     }
     Ok(())
@@ -2040,12 +2040,12 @@ async fn execute_secret_parse_direct(
 }
 
 async fn execute_secret_share_direct(command: ShareCommands, config: Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
-    use crate::secret::manager::SecretManager;
+    use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
+    use crate::vault::manager::VaultManager;
     use std::sync::Arc;
 
     // Create authentication provider
-    let auth_provider = Arc::new(
+    let auth_provider: Arc<dyn AzureAuthProvider> = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
             config.azure_credential_priority.clone(),
         )
@@ -2054,10 +2054,14 @@ async fn execute_secret_share_direct(command: ShareCommands, config: Config) -> 
         })?,
     );
 
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    // Create vault manager for secret-level RBAC
+    let vault_manager = VaultManager::new(
+        auth_provider.clone(),
+        config.subscription_id.clone(),
+        config.no_color,
+    )?;
 
-    execute_secret_share(&secret_manager, command, &config).await
+    execute_secret_share(&vault_manager, &auth_provider, command, &config).await
 }
 
 async fn execute_config_command(command: ConfigCommands, config: Config) -> Result<()> {
@@ -2162,7 +2166,8 @@ impl EnvironmentProfileManager {
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        crate::utils::helpers::write_sensitive_file_async(&profile_path, content.as_bytes()).await?;
+        crate::utils::helpers::write_sensitive_file_async(&profile_path, content.as_bytes())
+            .await?;
         Ok(())
     }
 
@@ -2582,7 +2587,10 @@ async fn execute_env_pull(
 
     // Output to file or stdout
     if let Some(output_path) = output {
-        crate::utils::helpers::write_sensitive_file(std::path::Path::new(&output_path), dotenv_content.as_bytes())?;
+        crate::utils::helpers::write_sensitive_file(
+            std::path::Path::new(&output_path),
+            dotenv_content.as_bytes(),
+        )?;
         println!(
             "✅ Successfully exported {} secret(s) to '{}' (permissions: owner-only)",
             all_secrets.len(),
@@ -3840,7 +3848,9 @@ async fn execute_secret_get(
                     }
                     Err(e) => {
                         eprintln!("⚠️  Failed to copy to clipboard: {e}");
-                        eprintln!("Use 'xv get {name} --raw' to print the value to stdout instead.");
+                        eprintln!(
+                            "Use 'xv get {name} --raw' to print the value to stdout instead."
+                        );
                     }
                 },
                 Err(e) => {
@@ -4015,9 +4025,8 @@ fn execute_custom_generator(script_path: &str, length: usize) -> Result<String> 
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::metadata(script).map_err(|e| {
-            CrosstacheError::config(format!("Cannot read script metadata: {e}"))
-        })?;
+        let meta = std::fs::metadata(script)
+            .map_err(|e| CrosstacheError::config(format!("Cannot read script metadata: {e}")))?;
         let uid = unsafe { libc::getuid() };
         if meta.uid() != uid && meta.uid() != 0 {
             return Err(CrosstacheError::config(format!(
@@ -4493,7 +4502,11 @@ async fn execute_secret_inject(
         // Still write the template content as-is to output
         match output_file {
             Some(path) => {
-                crate::utils::helpers::write_sensitive_file(std::path::Path::new(&path), template_content.as_bytes()).map_err(|e| {
+                crate::utils::helpers::write_sensitive_file(
+                    std::path::Path::new(&path),
+                    template_content.as_bytes(),
+                )
+                .map_err(|e| {
                     CrosstacheError::config(format!(
                         "Failed to write to output file '{}': {}",
                         path, e
@@ -4646,10 +4659,17 @@ async fn execute_secret_inject(
     // Write result
     match output_file {
         Some(path) => {
-            crate::utils::helpers::write_sensitive_file(std::path::Path::new(&path), result_content.as_bytes()).map_err(|e| {
+            crate::utils::helpers::write_sensitive_file(
+                std::path::Path::new(&path),
+                result_content.as_bytes(),
+            )
+            .map_err(|e| {
                 CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
             })?;
-            println!("✅ Template resolved and written to '{}' (permissions: owner-only)", path);
+            println!(
+                "✅ Template resolved and written to '{}' (permissions: owner-only)",
+                path
+            );
             eprintln!("⚠️  Output file contains resolved secrets — treat as sensitive");
         }
         None => {
@@ -5295,13 +5315,16 @@ async fn execute_secret_parse(
 }
 
 async fn execute_secret_share(
-    secret_manager: &crate::secret::manager::SecretManager,
+    vault_manager: &crate::vault::manager::VaultManager,
+    auth_provider: &std::sync::Arc<dyn crate::auth::provider::AzureAuthProvider>,
     command: ShareCommands,
     config: &Config,
 ) -> Result<()> {
-    let _ = secret_manager;
+    use crate::vault::models::AccessLevel;
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(None).await?;
+    let resource_group = config.default_resource_group.clone();
 
     match command {
         ShareCommands::Grant {
@@ -5309,19 +5332,74 @@ async fn execute_secret_share(
             user,
             level,
         } => {
-            eprintln!(
-                "Secret sharing (grant {level} access to '{secret_name}' for '{user}' in vault '{vault_name}') is not yet implemented."
+            let object_id = auth_provider.resolve_user_to_object_id(&user).await?;
+            if object_id != user {
+                println!("Resolved '{}' to object ID '{}'", user, object_id);
+            }
+
+            let access_level = match level.to_lowercase().as_str() {
+                "reader" | "read" => AccessLevel::Reader,
+                "contributor" | "write" => AccessLevel::Contributor,
+                "admin" | "administrator" => AccessLevel::Admin,
+                _ => {
+                    return Err(CrosstacheError::invalid_argument(format!(
+                        "Invalid access level: {level}"
+                    )))
+                }
+            };
+
+            vault_manager
+                .grant_secret_access(
+                    &vault_name,
+                    &resource_group,
+                    &secret_name,
+                    &object_id,
+                    access_level,
+                )
+                .await?;
+
+            println!(
+                "Successfully granted {} access to secret '{}' for '{}' in vault '{}'",
+                level, secret_name, user, vault_name
             );
         }
         ShareCommands::Revoke { secret_name, user } => {
-            eprintln!(
-                "Secret sharing (revoke access to '{secret_name}' for '{user}' in vault '{vault_name}') is not yet implemented."
+            let object_id = auth_provider.resolve_user_to_object_id(&user).await?;
+            if object_id != user {
+                println!("Resolved '{}' to object ID '{}'", user, object_id);
+            }
+
+            vault_manager
+                .revoke_secret_access(&vault_name, &resource_group, &secret_name, &object_id)
+                .await?;
+
+            println!(
+                "Successfully revoked access to secret '{}' for '{}' in vault '{}'",
+                secret_name, user, vault_name
             );
         }
         ShareCommands::List { secret_name } => {
-            eprintln!(
-                "Secret sharing (list permissions for '{secret_name}' in vault '{vault_name}') is not yet implemented."
-            );
+            let roles = vault_manager
+                .list_secret_access(&vault_name, &resource_group, &secret_name)
+                .await?;
+
+            if roles.is_empty() {
+                println!(
+                    "No access assignments found for secret '{}' in vault '{}'",
+                    secret_name, vault_name
+                );
+            } else {
+                println!(
+                    "Access assignments for secret '{}' in vault '{}':",
+                    secret_name, vault_name
+                );
+                let formatter = crate::utils::format::TableFormatter::new(
+                    crate::utils::format::OutputFormat::Table,
+                    config.no_color,
+                );
+                let table_output = formatter.format_table(&roles)?;
+                println!("{table_output}");
+            }
         }
     }
 
@@ -5541,10 +5619,18 @@ async fn execute_vault_export(
     // Write to output
     match output {
         Some(file_path) => {
-            crate::utils::helpers::write_sensitive_file(std::path::Path::new(&file_path), export_data.as_bytes()).map_err(|e| {
+            crate::utils::helpers::write_sensitive_file(
+                std::path::Path::new(&file_path),
+                export_data.as_bytes(),
+            )
+            .map_err(|e| {
                 CrosstacheError::unknown(format!("Failed to write to output file: {e}"))
             })?;
-            println!("Exported {} secrets to {} (permissions: owner-only)", secrets.len(), file_path);
+            println!(
+                "Exported {} secrets to {} (permissions: owner-only)",
+                secrets.len(),
+                file_path
+            );
         }
         None => {
             println!("{export_data}");
@@ -5774,17 +5860,18 @@ async fn execute_vault_update(
         access_policies: None, // Don't modify access policies in update
     };
 
-    // Vault update requires proper implementation in vault manager
-    let _ = (vault_manager, update_request);
-    eprintln!(
-        "Vault update for '{name}' in resource group '{resource_group}' is not yet implemented."
-    );
+    let vault = vault_manager
+        .update_vault(&name, &resource_group, &update_request)
+        .await?;
+
+    println!("Successfully updated vault '{}'", vault.name);
 
     Ok(())
 }
 
 async fn execute_vault_share(
     vault_manager: &VaultManager,
+    auth_provider: &std::sync::Arc<dyn crate::auth::provider::AzureAuthProvider>,
     command: VaultShareCommands,
     config: &Config,
 ) -> Result<()> {
@@ -5799,6 +5886,11 @@ async fn execute_vault_share(
         } => {
             let resource_group =
                 resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+
+            let object_id = auth_provider.resolve_user_to_object_id(&user).await?;
+            if object_id != user {
+                println!("Resolved '{}' to object ID '{}'", user, object_id);
+            }
 
             let access_level = match level.to_lowercase().as_str() {
                 "reader" | "read" => AccessLevel::Reader,
@@ -5815,7 +5907,7 @@ async fn execute_vault_share(
                 .grant_vault_access(
                     &vault_name,
                     &resource_group,
-                    &user,
+                    &object_id,
                     access_level,
                     Some(&user),
                 )
@@ -5829,8 +5921,13 @@ async fn execute_vault_share(
             let resource_group =
                 resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
+            let object_id = auth_provider.resolve_user_to_object_id(&user).await?;
+            if object_id != user {
+                println!("Resolved '{}' to object ID '{}'", user, object_id);
+            }
+
             vault_manager
-                .revoke_vault_access(&vault_name, &resource_group, &user, Some(&user))
+                .revoke_vault_access(&vault_name, &resource_group, &object_id, Some(&user))
                 .await?;
         }
         VaultShareCommands::List {
@@ -6838,17 +6935,30 @@ async fn execute_file_download_recursive(
                 .unwrap_or_else(|_| output_path.to_path_buf());
             // Resolve what we can — parent dirs may not exist yet, so normalize components
             let mut resolved = canonical_output.clone();
-            for component in local_path.strip_prefix(output_path).unwrap_or(&local_path).components() {
+            for component in local_path
+                .strip_prefix(output_path)
+                .unwrap_or(&local_path)
+                .components()
+            {
                 match component {
-                    std::path::Component::ParentDir => { resolved.pop(); }
-                    std::path::Component::Normal(c) => { resolved.push(c); }
+                    std::path::Component::ParentDir => {
+                        resolved.pop();
+                    }
+                    std::path::Component::Normal(c) => {
+                        resolved.push(c);
+                    }
                     _ => {}
                 }
             }
             if !resolved.starts_with(&canonical_output) {
-                eprintln!("⚠️  Skipping '{}': path traversal detected in blob name", blob_name);
+                eprintln!(
+                    "⚠️  Skipping '{}': path traversal detected in blob name",
+                    blob_name
+                );
                 failure_count += 1;
-                if continue_on_error { continue; } else {
+                if continue_on_error {
+                    continue;
+                } else {
                     return Err(CrosstacheError::config(format!(
                         "Path traversal detected in blob name: {blob_name}"
                     )));

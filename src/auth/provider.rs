@@ -132,6 +132,9 @@ pub trait AzureAuthProvider: Send + Sync {
 
     /// Get the underlying token credential for Azure SDK usage
     fn get_token_credential(&self) -> Arc<dyn TokenCredential>;
+
+    /// Resolve a user identifier (email, UPN, or object ID) to an Azure AD object ID
+    async fn resolve_user_to_object_id(&self, user: &str) -> Result<String>;
 }
 
 /// Default Azure Credential Provider using DefaultAzureCredential
@@ -404,6 +407,62 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
     fn get_token_credential(&self) -> Arc<dyn TokenCredential> {
         self.credential.clone()
     }
+
+    async fn resolve_user_to_object_id(&self, user: &str) -> Result<String> {
+        // If it's already a UUID, return as-is
+        let uuid_regex = regex::Regex::new(
+            r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        )
+        .unwrap();
+        if uuid_regex.is_match(user) {
+            return Ok(user.to_string());
+        }
+
+        // Otherwise resolve via Graph API
+        let token = self
+            .get_token(&["https://graph.microsoft.com/.default"])
+            .await?;
+        let graph_url = format!("https://graph.microsoft.com/v1.0/users/{user}");
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| {
+                    CrosstacheError::authentication(format!("Invalid token format: {e}"))
+                })?,
+        );
+
+        let response = self
+            .http_client
+            .get(&graph_url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| classify_network_error(&e, &graph_url))?;
+
+        if !response.status().is_success() {
+            return Err(CrosstacheError::authentication(format!(
+                "Failed to resolve user '{}': HTTP {}",
+                user,
+                response.status()
+            )));
+        }
+
+        let user_info: serde_json::Value = response.json().await.map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to parse user info: {e}"))
+        })?;
+
+        user_info
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                CrosstacheError::authentication(format!(
+                    "Could not resolve object ID for user '{user}'"
+                ))
+            })
+    }
 }
 
 /// Client Secret Authentication Provider
@@ -530,6 +589,62 @@ impl AzureAuthProvider for ClientSecretProvider {
 
     fn get_token_credential(&self) -> Arc<dyn TokenCredential> {
         self.credential.clone()
+    }
+
+    async fn resolve_user_to_object_id(&self, user: &str) -> Result<String> {
+        // If it's already a UUID, return as-is
+        let uuid_regex = regex::Regex::new(
+            r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        )
+        .unwrap();
+        if uuid_regex.is_match(user) {
+            return Ok(user.to_string());
+        }
+
+        // Otherwise resolve via Graph API
+        let token = self
+            .get_token(&["https://graph.microsoft.com/.default"])
+            .await?;
+        let graph_url = format!("https://graph.microsoft.com/v1.0/users/{user}");
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| {
+                    CrosstacheError::authentication(format!("Invalid token format: {e}"))
+                })?,
+        );
+
+        let response = self
+            .http_client
+            .get(&graph_url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| classify_network_error(&e, &graph_url))?;
+
+        if !response.status().is_success() {
+            return Err(CrosstacheError::authentication(format!(
+                "Failed to resolve user '{}': HTTP {}",
+                user,
+                response.status()
+            )));
+        }
+
+        let user_info: serde_json::Value = response.json().await.map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to parse user info: {e}"))
+        })?;
+
+        user_info
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                CrosstacheError::authentication(format!(
+                    "Could not resolve object ID for user '{user}'"
+                ))
+            })
     }
 }
 

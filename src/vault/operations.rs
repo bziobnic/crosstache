@@ -71,6 +71,33 @@ pub trait VaultOperations: Send + Sync {
 
     /// List vault access assignments
     async fn list_access(&self, vault_name: &str, resource_group: &str) -> Result<Vec<VaultRole>>;
+
+    /// Grant access to a specific secret via Azure RBAC role assignment
+    async fn grant_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+        user_object_id: &str,
+        access_level: AccessLevel,
+    ) -> Result<()>;
+
+    /// Revoke access from a specific secret
+    async fn revoke_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+        user_object_id: &str,
+    ) -> Result<()>;
+
+    /// List access assignments for a specific secret
+    async fn list_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+    ) -> Result<Vec<VaultRole>>;
 }
 
 /// Azure vault operations implementation
@@ -607,6 +634,260 @@ impl VaultOperations for AzureVaultOperations {
                     scope: vault.id.clone(),
                     created_on: vault.created_at,
                     updated_on: vault.created_at,
+                };
+                roles.push(role);
+            }
+
+            Ok(roles)
+        };
+
+        self.execute_with_retry(operation).await
+    }
+
+    async fn grant_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+        user_object_id: &str,
+        access_level: AccessLevel,
+    ) -> Result<()> {
+        let operation = || async {
+            let headers = self.create_headers().await?;
+            let scope = format!(
+                "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}/secrets/{}",
+                self.subscription_id, resource_group, vault_name, secret_name
+            );
+
+            let role_definition_id = match access_level {
+                AccessLevel::Reader => "4633458b-17de-408a-b874-0445c86b69e6",
+                AccessLevel::Contributor => "b86a8fe4-44ce-4948-aee5-eccb2c155cd7",
+                AccessLevel::Admin => "00482a5a-887f-4fb3-b363-3b7fe8e74483",
+            };
+
+            let assignment_id = Uuid::new_v4();
+            let url = self.build_arm_url(&format!(
+                "{scope}/providers/Microsoft.Authorization/roleAssignments/{assignment_id}?api-version=2022-04-01"
+            ));
+
+            let body = json!({
+                "properties": {
+                    "roleDefinitionId": format!(
+                        "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}",
+                        self.subscription_id
+                    ),
+                    "principalId": user_object_id
+                }
+            });
+
+            let response = self
+                .http_client
+                .put(&url)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    CrosstacheError::network(format!("Failed to grant secret access: {e}"))
+                })?;
+
+            if !response.status().is_success() {
+                let status_code = response.status().as_u16();
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(self.parse_azure_error(status_code, &error_body));
+            }
+
+            Ok(())
+        };
+
+        self.execute_with_retry(operation).await
+    }
+
+    async fn revoke_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+        user_object_id: &str,
+    ) -> Result<()> {
+        let operation = || async {
+            let headers = self.create_headers().await?;
+            let scope = format!(
+                "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}/secrets/{}",
+                self.subscription_id, resource_group, vault_name, secret_name
+            );
+
+            // List role assignments for this scope
+            let list_url = self.build_arm_url(&format!(
+                "{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId eq '{user_object_id}'"
+            ));
+
+            let response = self
+                .http_client
+                .get(&list_url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map_err(|e| {
+                    CrosstacheError::network(format!("Failed to list secret role assignments: {e}"))
+                })?;
+
+            if !response.status().is_success() {
+                let status_code = response.status().as_u16();
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(self.parse_azure_error(status_code, &error_body));
+            }
+
+            let response_data: Value = response.json().await.map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to parse role assignments: {e}"))
+            })?;
+
+            let assignments = response_data
+                .get("value")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            if assignments.is_empty() {
+                return Err(CrosstacheError::permission_denied(
+                    "User does not have any role assignments on this secret",
+                ));
+            }
+
+            // Delete each matching assignment
+            for assignment in &assignments {
+                if let Some(assignment_id) = assignment.get("id").and_then(|v| v.as_str()) {
+                    let delete_url =
+                        self.build_arm_url(&format!("{assignment_id}?api-version=2022-04-01"));
+
+                    let del_response = self
+                        .http_client
+                        .delete(&delete_url)
+                        .headers(headers.clone())
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            CrosstacheError::network(format!(
+                                "Failed to delete role assignment: {e}"
+                            ))
+                        })?;
+
+                    if !del_response.status().is_success() {
+                        let status_code = del_response.status().as_u16();
+                        let error_body = del_response.text().await.unwrap_or_default();
+                        return Err(self.parse_azure_error(status_code, &error_body));
+                    }
+                }
+            }
+
+            Ok(())
+        };
+
+        self.execute_with_retry(operation).await
+    }
+
+    async fn list_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+    ) -> Result<Vec<VaultRole>> {
+        let operation = || async {
+            let headers = self.create_headers().await?;
+            let scope = format!(
+                "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}/secrets/{}",
+                self.subscription_id, resource_group, vault_name, secret_name
+            );
+
+            let url = self.build_arm_url(&format!(
+                "{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=atScope()"
+            ));
+
+            let response = self
+                .http_client
+                .get(&url)
+                .headers(headers)
+                .send()
+                .await
+                .map_err(|e| {
+                    CrosstacheError::network(format!("Failed to list secret access: {e}"))
+                })?;
+
+            if !response.status().is_success() {
+                let status_code = response.status().as_u16();
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(self.parse_azure_error(status_code, &error_body));
+            }
+
+            let response_data: Value = response.json().await.map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to parse role assignments: {e}"))
+            })?;
+
+            let assignments = response_data
+                .get("value")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let mut roles = Vec::new();
+            for assignment in &assignments {
+                let props = assignment.get("properties").unwrap_or(assignment);
+                let role_def_id = props
+                    .get("roleDefinitionId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                let role_name = if role_def_id.contains("4633458b-17de-408a-b874-0445c86b69e6") {
+                    "Key Vault Secrets User"
+                } else if role_def_id.contains("b86a8fe4-44ce-4948-aee5-eccb2c155cd7") {
+                    "Key Vault Secrets Officer"
+                } else if role_def_id.contains("00482a5a-887f-4fb3-b363-3b7fe8e74483") {
+                    "Key Vault Administrator"
+                } else {
+                    "Unknown Role"
+                };
+
+                let role = VaultRole {
+                    assignment_id: assignment
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    role_id: role_def_id.to_string(),
+                    role_name: role_name.to_string(),
+                    role_description: role_name.to_string(),
+                    principal_id: props
+                        .get("principalId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    principal_name: props
+                        .get("principalId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    principal_type: props
+                        .get("principalType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string(),
+                    scope: props
+                        .get("scope")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    created_on: props
+                        .get("createdOn")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(chrono::Utc::now),
+                    updated_on: props
+                        .get("updatedOn")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(chrono::Utc::now),
                 };
                 roles.push(role);
             }
