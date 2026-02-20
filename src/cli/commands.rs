@@ -2162,7 +2162,8 @@ impl EnvironmentProfileManager {
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        crate::utils::helpers::write_sensitive_file_async(&profile_path, content.as_bytes()).await?;
+        crate::utils::helpers::write_sensitive_file_async(&profile_path, content.as_bytes())
+            .await?;
         Ok(())
     }
 
@@ -2582,7 +2583,10 @@ async fn execute_env_pull(
 
     // Output to file or stdout
     if let Some(output_path) = output {
-        crate::utils::helpers::write_sensitive_file(std::path::Path::new(&output_path), dotenv_content.as_bytes())?;
+        crate::utils::helpers::write_sensitive_file(
+            std::path::Path::new(&output_path),
+            dotenv_content.as_bytes(),
+        )?;
         println!(
             "✅ Successfully exported {} secret(s) to '{}' (permissions: owner-only)",
             all_secrets.len(),
@@ -3840,7 +3844,9 @@ async fn execute_secret_get(
                     }
                     Err(e) => {
                         eprintln!("⚠️  Failed to copy to clipboard: {e}");
-                        eprintln!("Use 'xv get {name} --raw' to print the value to stdout instead.");
+                        eprintln!(
+                            "Use 'xv get {name} --raw' to print the value to stdout instead."
+                        );
                     }
                 },
                 Err(e) => {
@@ -4015,9 +4021,8 @@ fn execute_custom_generator(script_path: &str, length: usize) -> Result<String> 
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::metadata(script).map_err(|e| {
-            CrosstacheError::config(format!("Cannot read script metadata: {e}"))
-        })?;
+        let meta = std::fs::metadata(script)
+            .map_err(|e| CrosstacheError::config(format!("Cannot read script metadata: {e}")))?;
         let uid = unsafe { libc::getuid() };
         if meta.uid() != uid && meta.uid() != 0 {
             return Err(CrosstacheError::config(format!(
@@ -4493,7 +4498,11 @@ async fn execute_secret_inject(
         // Still write the template content as-is to output
         match output_file {
             Some(path) => {
-                crate::utils::helpers::write_sensitive_file(std::path::Path::new(&path), template_content.as_bytes()).map_err(|e| {
+                crate::utils::helpers::write_sensitive_file(
+                    std::path::Path::new(&path),
+                    template_content.as_bytes(),
+                )
+                .map_err(|e| {
                     CrosstacheError::config(format!(
                         "Failed to write to output file '{}': {}",
                         path, e
@@ -4646,10 +4655,17 @@ async fn execute_secret_inject(
     // Write result
     match output_file {
         Some(path) => {
-            crate::utils::helpers::write_sensitive_file(std::path::Path::new(&path), result_content.as_bytes()).map_err(|e| {
+            crate::utils::helpers::write_sensitive_file(
+                std::path::Path::new(&path),
+                result_content.as_bytes(),
+            )
+            .map_err(|e| {
                 CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
             })?;
-            println!("✅ Template resolved and written to '{}' (permissions: owner-only)", path);
+            println!(
+                "✅ Template resolved and written to '{}' (permissions: owner-only)",
+                path
+            );
             eprintln!("⚠️  Output file contains resolved secrets — treat as sensitive");
         }
         None => {
@@ -5541,10 +5557,18 @@ async fn execute_vault_export(
     // Write to output
     match output {
         Some(file_path) => {
-            crate::utils::helpers::write_sensitive_file(std::path::Path::new(&file_path), export_data.as_bytes()).map_err(|e| {
+            crate::utils::helpers::write_sensitive_file(
+                std::path::Path::new(&file_path),
+                export_data.as_bytes(),
+            )
+            .map_err(|e| {
                 CrosstacheError::unknown(format!("Failed to write to output file: {e}"))
             })?;
-            println!("Exported {} secrets to {} (permissions: owner-only)", secrets.len(), file_path);
+            println!(
+                "Exported {} secrets to {} (permissions: owner-only)",
+                secrets.len(),
+                file_path
+            );
         }
         None => {
             println!("{export_data}");
@@ -6838,17 +6862,30 @@ async fn execute_file_download_recursive(
                 .unwrap_or_else(|_| output_path.to_path_buf());
             // Resolve what we can — parent dirs may not exist yet, so normalize components
             let mut resolved = canonical_output.clone();
-            for component in local_path.strip_prefix(output_path).unwrap_or(&local_path).components() {
+            for component in local_path
+                .strip_prefix(output_path)
+                .unwrap_or(&local_path)
+                .components()
+            {
                 match component {
-                    std::path::Component::ParentDir => { resolved.pop(); }
-                    std::path::Component::Normal(c) => { resolved.push(c); }
+                    std::path::Component::ParentDir => {
+                        resolved.pop();
+                    }
+                    std::path::Component::Normal(c) => {
+                        resolved.push(c);
+                    }
                     _ => {}
                 }
             }
             if !resolved.starts_with(&canonical_output) {
-                eprintln!("⚠️  Skipping '{}': path traversal detected in blob name", blob_name);
+                eprintln!(
+                    "⚠️  Skipping '{}': path traversal detected in blob name",
+                    blob_name
+                );
                 failure_count += 1;
-                if continue_on_error { continue; } else {
+                if continue_on_error {
+                    continue;
+                } else {
                     return Err(CrosstacheError::config(format!(
                         "Path traversal detected in blob name: {blob_name}"
                     )));
