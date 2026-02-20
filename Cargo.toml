@@ -76,6 +76,7 @@ toml = "0.8"
 async-trait = "0.1"
 tempfile = "3.0"
 mime_guess = "2.0"
+libc = "0.2.182"
 
 [features]
 default = ["file-ops"]

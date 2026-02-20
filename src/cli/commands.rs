@@ -3828,7 +3828,15 @@ async fn execute_secret_get(
             match ClipboardContext::new() {
                 Ok(mut ctx) => match ctx.set_contents(value.to_string()) {
                     Ok(_) => {
-                        println!("✅ Secret '{name}' copied to clipboard");
+                        println!("✅ Secret '{name}' copied to clipboard (auto-clears in 30s)");
+
+                        // Auto-clear clipboard after 30 seconds
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_secs(30));
+                            if let Ok(mut ctx) = ClipboardContext::new() {
+                                let _ = ctx.set_contents(String::new());
+                            }
+                        });
                     }
                     Err(e) => {
                         eprintln!("⚠️  Failed to copy to clipboard: {e}");
@@ -3993,12 +4001,36 @@ fn generate_random_value(
 fn execute_custom_generator(script_path: &str, length: usize) -> Result<String> {
     use std::process::{Command, Stdio};
 
+    let script = std::path::Path::new(script_path);
+
     // Check if the script exists
-    if !std::path::Path::new(script_path).exists() {
+    if !script.exists() {
         return Err(CrosstacheError::config(format!(
             "Generator script not found: {}",
             script_path
         )));
+    }
+
+    // Security: validate script ownership and permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(script).map_err(|e| {
+            CrosstacheError::config(format!("Cannot read script metadata: {e}"))
+        })?;
+        let uid = unsafe { libc::getuid() };
+        if meta.uid() != uid && meta.uid() != 0 {
+            return Err(CrosstacheError::config(format!(
+                "Generator script '{}' is not owned by you or root — refusing to execute",
+                script_path
+            )));
+        }
+        if meta.mode() & 0o002 != 0 {
+            return Err(CrosstacheError::config(format!(
+                "Generator script '{}' is world-writable — refusing to execute (chmod o-w to fix)",
+                script_path
+            )));
+        }
     }
 
     // Set up environment for the script
