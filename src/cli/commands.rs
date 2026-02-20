@@ -6031,7 +6031,7 @@ async fn execute_vault_update(
     };
 
     let vault = vault_manager
-        .update_vault(&name, &resource_group, &update_request)
+        .update_vault(name, &resource_group, &update_request)
         .await?;
 
     println!("Successfully updated vault '{}'", vault.name);
