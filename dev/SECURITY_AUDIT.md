@@ -1,147 +1,161 @@
 # Security Audit — crosstache
 
-> Reviewed: 2026-02-19 | Reviewer: Jackson (AI security review)
+> Last reviewed: 2026-02-20 | Reviewer: Jackson (AI security review)
 
 ---
 
-## 🔴 Critical Issues
+## Status of Previously Identified Issues
 
-### 1. Secret Values Not Zeroed from Memory
-**Location:** `src/secret/manager.rs`, `src/cli/commands.rs` throughout  
-**Risk:** High  
-**Issue:** Secret values are stored as plain `String` types. When these go out of scope, Rust deallocates the memory but does NOT zero it. The secret data remains in the process's memory pages until overwritten by something else. A memory dump, core dump, or swap file could expose secrets.
+| # | Issue | Status |
+|---|-------|--------|
+| 1 | Secret values not zeroed from memory | ✅ **Fixed** (v0.3.0, PR #26 — `Zeroizing<String>` throughout) |
+| 2 | Secrets printed to stderr on clipboard failure | ❌ **Still open** |
+| 3 | Config file written without restricted permissions | ❌ **Still open** |
+| 4 | Custom generator scripts — command injection risk | ❌ **Still open** |
+| 5 | Secrets leaked into process environment (`xv run`) | ⚠️ Inherent to design, undocumented |
+| 6 | Clipboard not cleared after timeout | ❌ **Still open** |
+| 7 | Export files written without restricted permissions | ❌ **Still open** |
+| 8 | Template output may contain secrets in plain text | ❌ **Still open** |
+| 9 | Token/JWT parsed without verification | ⚠️ Informational, acceptable |
+| 10 | 105 `unwrap()` calls in non-test code | ❌ **Still open** (still 105) |
+| 11 | No rate limiting on authentication retries | ⚠️ Low risk |
+| 12 | Secret names visible in process arguments | ⚠️ Inherent to CLI design |
+| 13 | No audit logging of local operations | ⚠️ Informational |
 
-**The `zeroize` crate is in Cargo.toml but never actually used anywhere.**
+---
 
-**Fix:**
-- Replace `String` with `zeroize::Zeroizing<String>` for all secret value fields (`SecretProperties.value`, `SetSecretRequest.value`, `UpdateSecretRequest.value`)
-- Use `Zeroizing<String>` for any local variable holding a secret value
-- Ensure clipboard contents, env vars in `xv run`, and template injection outputs all use zeroized types where possible
+## 🔴 Critical — Outstanding
 
 ### 2. Secrets Printed to stderr on Clipboard Failure
-**Location:** `src/cli/commands.rs:3834, 3839`  
-**Risk:** High  
-**Issue:** When clipboard copy fails, the code falls back to printing the raw secret value to stderr:
+**Location:** `src/cli/commands.rs:3835, 3840`
+**Status:** Still present.
 ```rust
-eprintln!("Secret value: {value}");
+eprintln!("Secret value: {}", value.as_str());
 ```
-This could end up in terminal scrollback, log files, or screen recordings.
+**Risk:** Secret values end up in terminal scrollback, log files, or screen recordings.
+**Fix:** Replace with message telling user to use `--raw`. Never print secrets as fallback.
+**Effort:** Low (5 min)
 
-**Fix:** Remove these fallback prints. On clipboard failure, tell the user to use `--raw` flag instead. Never print secrets as a fallback.
+### 3. Config & Export Files Written World-Readable
+**Locations:**
+- `src/config/init.rs:777` — config file
+- `src/config/settings.rs:425` — config save
+- `src/cli/commands.rs:2585` — `xv env pull` output
+- `src/cli/commands.rs:4461, 4614` — `xv inject` output
+- `src/cli/commands.rs:5510` — `xv vault export`
+- `src/cli/commands.rs:6125, 6137` — other file writes
+- `src/cli/commands.rs:2165` — profile files
 
-### 3. Config File Written Without Restricted Permissions
-**Location:** `src/config/init.rs:737`, `src/config/settings.rs`  
-**Risk:** High  
-**Issue:** Config files (which may contain subscription IDs, tenant IDs, storage account names) are written with default file permissions (typically 0644 — world-readable). Should be 0600 (owner-only).
-
-**Fix:**
+**Status:** No `set_permissions` or `PermissionsExt` usage anywhere in the codebase.
+**Risk:** Any file containing secrets or sensitive config (subscription IDs, tenant IDs) is created with default 0644 permissions — readable by all users on the system.
+**Fix:** Create a helper function and use it everywhere:
 ```rust
-use std::os::unix::fs::PermissionsExt;
-let perms = std::fs::Permissions::from_mode(0o600);
-std::fs::set_permissions(&config_file, perms)?;
+#[cfg(unix)]
+fn write_sensitive_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, content)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
 ```
+**Effort:** Low-Medium (create helper, update ~8 call sites)
 
 ---
 
-## 🟡 Medium Issues
+## 🔴 Critical — New Finding
 
-### 4. Custom Generator Scripts — Command Injection Risk
-**Location:** `src/cli/commands.rs:4004`  
-**Risk:** Medium  
-**Issue:** `xv rotate --generator <script>` executes an arbitrary file path as a subprocess. While this is intentional functionality, there's no validation that the script is owned by the current user, no check for world-writable scripts, and no sandboxing.
+### 14. Path Traversal in Recursive Download
+**Location:** `src/cli/commands.rs:6800`
+```rust
+let local_path = output_path.join(blob_name);
+```
+**Risk:** If a malicious blob is named `../../etc/cron.d/backdoor` or `../../../.ssh/authorized_keys`, a recursive download would write files outside the intended output directory. An attacker with write access to the blob container could use this for arbitrary file write on the user's machine.
+**Fix:** Validate that the resolved path stays within the output directory:
+```rust
+let local_path = output_path.join(blob_name);
+let canonical_output = output_path.canonicalize()?;
+let canonical_local = local_path.canonicalize()
+    .unwrap_or_else(|_| local_path.clone());
+if !canonical_local.starts_with(&canonical_output) {
+    return Err(CrosstacheError::config(format!(
+        "Path traversal detected in blob name: {blob_name}"
+    )));
+}
+```
+**Effort:** Low (10 min)
 
-**Fix:**
-- Validate script is owned by current user
-- Reject world-writable scripts (anyone could have modified it)
-- Document the security implications clearly in `--help`
+---
 
-### 5. Secrets Leaked into Process Environment
-**Location:** `src/cli/commands.rs:4304` (`xv run`)  
-**Risk:** Medium  
-**Issue:** `xv run` injects secrets as environment variables into the child process. These are visible via `/proc/<pid>/environ` on Linux (readable by same user), and persist in the child's memory. Any child process crash dump will contain them.
+## 🟡 Medium — Outstanding
 
-**Fix:** This is inherent to the env-var injection pattern (1Password, Doppler, etc. all have this). Document the risk. Consider adding a `--no-env` mode that uses a Unix domain socket or named pipe instead. At minimum, ensure parent process env vars with secrets are cleaned up after the child exits.
+### 4. Custom Generator Scripts — No Validation
+**Location:** `src/cli/commands.rs:4005`
+**Status:** Still no ownership or permission checks on the script file.
+**Risk:** A world-writable script at the given path could be modified by another user.
+**Fix:** Check script is owned by current user, reject world-writable (mode & 0o002).
+**Effort:** Low
 
 ### 6. Clipboard Not Cleared After Timeout
-**Location:** `src/cli/commands.rs:3830`  
-**Risk:** Medium  
-**Issue:** After copying a secret to clipboard, it stays there indefinitely. Any application can read it. Other tools (1Password CLI, Bitwarden) auto-clear clipboard after 30 seconds.
+**Location:** `src/cli/commands.rs:3830`
+**Status:** Still no auto-clear.
+**Risk:** Secrets persist in clipboard indefinitely. Every other secret manager (1Password, Bitwarden) clears after 30s.
+**Fix:** Spawn background thread to clear clipboard after configurable timeout.
+**Effort:** Low
 
-**Fix:** Spawn a background thread that clears the clipboard after a configurable timeout (default 30s):
+### 8. Template/Inject Output Not Marked Sensitive
+**Location:** `src/cli/commands.rs:4461, 4614`
+**Status:** Files with resolved secrets written without warning or restricted permissions.
+**Fix:** Set 0600 + print warning about sensitive content.
+**Effort:** Low
+
+---
+
+## 🟡 Medium — New Finding
+
+### 15. Bearer Tokens Not Zeroized
+**Location:** `src/secret/manager.rs` — 7+ locations with pattern:
 ```rust
-std::thread::spawn(move || {
-    std::thread::sleep(Duration::from_secs(30));
-    if let Ok(mut ctx) = ClipboardContext::new() {
-        let _ = ctx.set_contents(String::new());
-    }
-});
+format!("Bearer {}", token.token.secret())
 ```
+**Risk:** Bearer tokens are stored as plain `String` in the authorization header value. While tokens are short-lived (~1 hour), they remain in process memory until the page is reused. A core dump during an active session could expose tokens.
+**Status:** Zeroize was applied to secret values but not to auth tokens.
+**Fix:** Use `Zeroizing<String>` for the formatted bearer string. Lower priority than secret values since tokens are ephemeral.
+**Effort:** Low-Medium
 
-### 7. Export Files Written Without Restricted Permissions
-**Location:** `src/cli/commands.rs:2584, 5505, 6117`  
-**Risk:** Medium  
-**Issue:** `xv vault export`, `xv env pull`, and `xv inject --out` write files containing secret values with default permissions (world-readable).
-
-**Fix:** Set 0600 permissions on any file that contains secret values.
-
-### 8. Template Output May Contain Secrets in Plain Text
-**Location:** `src/cli/commands.rs:4455, 4608` (`xv inject`)  
-**Risk:** Medium  
-**Issue:** `xv inject` writes resolved templates (with real secret values) to files. These files should be treated as sensitive, but there's no warning, no restricted permissions, and no cleanup mechanism.
-
-**Fix:** 
-- Set 0600 on output files
-- Print a warning: "⚠️  Output file contains resolved secrets — treat as sensitive"
-- Consider a `--cleanup-after <duration>` flag
-
-### 9. Token/JWT Parsed Without Verification
-**Location:** `src/auth/provider.rs` (JWT parsing in whoami)  
-**Risk:** Low-Medium  
-**Issue:** JWT tokens are decoded (base64) to extract claims like tenant ID, but signature verification is not performed. This is fine for display purposes but should never be used for authorization decisions.
-
-**Fix:** Add a comment documenting this is display-only. Not a functional issue currently.
+### 16. `xv run` — Env Vars Not Cleaned After Child Exits
+**Location:** `src/cli/commands.rs:4305+`
+**Risk:** The `env_vars`, `secret_values`, and `uri_values` collections persist in the parent process memory until the function returns. They should be explicitly dropped immediately after the child process spawns.
+**Fix:** Add `drop(env_vars); drop(secret_values); drop(uri_values);` after `cmd.spawn()`.
+**Effort:** Low (5 min)
 
 ---
 
 ## 🟢 Low / Informational
 
 ### 10. 105 `unwrap()` Calls in Non-Test Code
-**Risk:** Low (availability, not confidentiality)  
-**Issue:** Panics in production are bad UX and could leave secrets in an inconsistent state.
-
-**Fix:** Gradually replace with proper error handling. Not a security-critical issue but improves robustness.
-
-### 11. No Rate Limiting on Authentication Retries
-**Location:** `src/utils/retry.rs`  
-**Risk:** Low  
-**Issue:** Retry logic uses exponential backoff but doesn't cap total retries for auth failures. Unlikely to be exploitable since Azure handles auth server-side.
+**Status:** Still 105. Panics could leave the process in an inconsistent state.
+**Effort:** High (gradual cleanup)
 
 ### 12. Secret Names Visible in Process Arguments
-**Risk:** Low  
-**Issue:** Running `xv get my-database-password` exposes the secret *name* in `ps` output. Not the value, but the name itself may be sensitive.
+**Status:** Inherent to CLI design. Document in README security section.
 
-**Fix:** Document this. No easy fix without changing the CLI interface.
-
-### 13. No Audit Logging of Local Operations
-**Risk:** Informational  
-**Issue:** There's no local log of which secrets were accessed, when, and by whom. Azure has server-side audit logs, but local access (clipboard copies, env injection) is untracked.
-
-**Fix:** Optional local audit log file (append-only, restricted permissions).
+### 13. No Local Audit Logging
+**Status:** Optional enhancement. Azure-side logs exist.
 
 ---
 
 ## Priority Implementation Order
 
-| # | Issue | Effort | Impact |
-|---|-------|--------|--------|
-| 1 | Zeroize secret values in memory | Medium | 🔴 Critical |
-| 2 | Remove secret fallback printing | Low | 🔴 Critical |
-| 3 | Restrict config file permissions | Low | 🔴 Critical |
-| 6 | Auto-clear clipboard | Low | 🟡 Medium |
-| 7 | Restrict export file permissions | Low | 🟡 Medium |
-| 4 | Validate generator scripts | Low | 🟡 Medium |
-| 8 | Restrict template output permissions | Low | 🟡 Medium |
-| 5 | Document env var exposure risk | Low | 🟡 Medium |
+| Priority | Issue | Effort | Impact |
+|----------|-------|--------|--------|
+| 1 | **#14** Path traversal in recursive download | Low | 🔴 Arbitrary file write |
+| 2 | **#2** Remove secret fallback printing | Low | 🔴 Secret exposure |
+| 3 | **#3** Restrict file permissions (all write sites) | Low-Med | 🔴 Secret exposure |
+| 4 | **#6** Auto-clear clipboard | Low | 🟡 Secret persistence |
+| 5 | **#4** Validate generator scripts | Low | 🟡 Code execution |
+| 6 | **#16** Drop env vars after child spawn | Low | 🟡 Memory hygiene |
+| 7 | **#15** Zeroize bearer tokens | Low-Med | 🟡 Token exposure |
+| 8 | **#8** Restrict inject output permissions | Low | 🟡 Secret exposure |
 
-Issues 2, 3, 6, and 7 are quick wins — could be done in an afternoon.
-Issue 1 (zeroize) is the most impactful but requires touching many files.
+**Quick wins (items 1, 2, 4, 6):** Could be done in under an hour combined.
+**File permissions (#3):** Create one helper function, update ~8 call sites — a focused PR.
