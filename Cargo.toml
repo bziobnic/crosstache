@@ -56,7 +56,7 @@ config = "0.14"
 tabled = "0.15"
 rpassword = "7.0"
 crossterm = "0.27"
-clipboard = "0.5"
+arboard = "3"
 dialoguer = "0.11"
 indicatif = "0.17"
 

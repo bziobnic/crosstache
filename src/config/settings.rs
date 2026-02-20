@@ -102,6 +102,14 @@ pub struct Config {
     #[tabled(rename = "Credential Priority")]
     #[serde(default)]
     pub azure_credential_priority: AzureCredentialType,
+    /// Seconds before clipboard is automatically cleared (0 to disable)
+    #[tabled(rename = "Clipboard Timeout")]
+    #[serde(default = "default_clipboard_timeout")]
+    pub clipboard_timeout: u64,
+}
+
+fn default_clipboard_timeout() -> u64 {
+    30
 }
 
 impl Default for Config {
@@ -119,6 +127,7 @@ impl Default for Config {
             no_color: false,
             blob_config: None,
             azure_credential_priority: AzureCredentialType::Default,
+            clipboard_timeout: default_clipboard_timeout(),
         }
     }
 }

@@ -3877,9 +3877,16 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
             blob_config.max_concurrent_uploads = max_uploads;
             config.set_blob_config(blob_config);
         }
+        "clipboard_timeout" => {
+            config.clipboard_timeout = value.parse::<u64>().map_err(|_| {
+                CrosstacheError::config(format!(
+                    "Invalid value for clipboard_timeout: {value} (expected seconds as integer, 0 to disable)"
+                ))
+            })?;
+        }
         _ => {
             return Err(CrosstacheError::config(format!(
-                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads"
+                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout"
             )));
         }
     }
@@ -3981,8 +3988,6 @@ async fn execute_secret_get(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    use clipboard::{ClipboardContext, ClipboardProvider};
-
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
 
@@ -4003,18 +4008,18 @@ async fn execute_secret_get(
     } else {
         // Default behavior - copy to clipboard
         if let Some(ref value) = secret.value {
-            match ClipboardContext::new() {
-                Ok(mut ctx) => match ctx.set_contents(value.to_string()) {
+            match arboard::Clipboard::new() {
+                Ok(mut clipboard) => match clipboard.set_text(value.to_string()) {
                     Ok(_) => {
-                        println!("✅ Secret '{name}' copied to clipboard (auto-clears in 30s)");
-
-                        // Auto-clear clipboard after 30 seconds
-                        std::thread::spawn(|| {
-                            std::thread::sleep(std::time::Duration::from_secs(30));
-                            if let Ok(mut ctx) = ClipboardContext::new() {
-                                let _ = ctx.set_contents(String::new());
-                            }
-                        });
+                        let timeout = config.clipboard_timeout;
+                        if timeout > 0 {
+                            println!(
+                                "✅ Secret '{name}' copied to clipboard (auto-clears in {timeout}s)"
+                            );
+                            schedule_clipboard_clear(timeout);
+                        } else {
+                            println!("✅ Secret '{name}' copied to clipboard");
+                        }
                     }
                     Err(e) => {
                         eprintln!("⚠️  Failed to copy to clipboard: {e}");
@@ -4034,6 +4039,48 @@ async fn execute_secret_get(
     }
 
     Ok(())
+}
+
+/// Spawn a detached child process that clears the clipboard after `seconds`.
+/// The child outlives the parent process, fixing the issue where std::thread::spawn
+/// would be killed when the CLI exits.
+fn schedule_clipboard_clear(seconds: u64) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("sh")
+            .args(["-c", &format!("sleep {seconds} && printf '' | pbcopy")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try xclip first (most common), fall back to xsel
+        let cmd = format!(
+            "sleep {seconds} && \
+             (xclip -selection clipboard < /dev/null 2>/dev/null || \
+              xsel --clipboard --delete 2>/dev/null || true)"
+        );
+        let _ = std::process::Command::new("sh")
+            .args(["-c", &cmd])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let cmd = format!("Start-Sleep -Seconds {seconds}; Set-Clipboard ''");
+        let _ = std::process::Command::new("powershell")
+            .args(["-WindowStyle", "Hidden", "-Command", &cmd])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 }
 
 async fn execute_secret_history(
