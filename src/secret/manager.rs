@@ -708,102 +708,96 @@ impl SecretOperations for AzureSecretOperations {
                 .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
 
-        // Make the REST API call
-        let response = client
-            .get(&list_url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| classify_network_error(&e, &list_url))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(CrosstacheError::azure_api(format!(
-                "Failed to list secrets: HTTP {status} - {error_text}"
-            )));
-        }
-
-        // Parse the response
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to parse list response: {e}"))
-        })?;
-
         let mut secret_summaries = Vec::new();
+        let mut next_url: Option<String> = Some(list_url);
 
-        // Process the secrets from the response
-        if let Some(values) = json.get("value").and_then(|v| v.as_array()) {
-            for secret_value in values {
-                if let Some(id) = secret_value.get("id").and_then(|v| v.as_str()) {
-                    // Extract name from ID
-                    let name = id.rsplit('/').next().unwrap_or(id).to_string();
+        while let Some(current_url) = next_url.take() {
+            let response = client
+                .get(&current_url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map_err(|e| classify_network_error(&e, &current_url))?;
 
-                    // Extract attributes
-                    let attributes = secret_value
-                        .get("attributes")
-                        .unwrap_or(&serde_json::Value::Null);
-                    let enabled = attributes
-                        .get("enabled")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    let updated = attributes
-                        .get("updated")
-                        .and_then(|v| v.as_i64())
-                        .map(|ts| {
-                            chrono::DateTime::from_timestamp(ts, 0)
-                                .map(|dt| dt.to_string())
-                                .unwrap_or_else(|| "Unknown".to_string())
-                        })
-                        .unwrap_or_else(|| "Unknown".to_string());
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_default();
+                return Err(CrosstacheError::azure_api(format!(
+                    "Failed to list secrets: HTTP {status} - {error_text}"
+                )));
+            }
 
-                    // For tags and groups, we need to get the full secret details
-                    // Make an individual get call to extract tags and original name
-                    match self.get_secret(vault_name, &name, false).await {
-                        Ok(secret_details) => {
-                            // Extract original name, folder, group, and note from tags
-                            let original_name = self.get_original_name(&name, &secret_details.tags);
-                            let folder = self.get_folder(&secret_details.tags);
-                            let group = self.get_group_name(&original_name, &secret_details.tags);
-                            let note = self.get_note(&secret_details.tags);
+            let json: serde_json::Value = response.json().await.map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to parse list response: {e}"))
+            })?;
 
-                            let summary = SecretSummary {
-                                name: original_name.clone(),
-                                original_name,
-                                note,
-                                folder,
-                                groups: group,
-                                updated_on: updated,
-                                enabled,
-                                content_type: secret_details.content_type,
-                            };
+            if let Some(values) = json.get("value").and_then(|v| v.as_array()) {
+                for secret_value in values {
+                    if let Some(id) = secret_value.get("id").and_then(|v| v.as_str()) {
+                        let name = id.rsplit('/').next().unwrap_or(id).to_string();
 
-                            secret_summaries.push(summary);
-                        }
-                        Err(e) => {
-                            // If we can't get details, add with basic info
-                            eprintln!("Warning: Failed to get details for secret '{name}': {e}");
-                            let summary = SecretSummary {
-                                name: name.clone(),
-                                original_name: name,
-                                note: None,
-                                folder: None,
-                                groups: None,
-                                updated_on: updated,
-                                enabled,
-                                content_type: "text/plain".to_string(),
-                            };
+                        let attributes = secret_value
+                            .get("attributes")
+                            .unwrap_or(&serde_json::Value::Null);
+                        let enabled = attributes
+                            .get("enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        let updated = attributes
+                            .get("updated")
+                            .and_then(|v| v.as_i64())
+                            .map(|ts| {
+                                chrono::DateTime::from_timestamp(ts, 0)
+                                    .map(|dt| dt.to_string())
+                                    .unwrap_or_else(|| "Unknown".to_string())
+                            })
+                            .unwrap_or_else(|| "Unknown".to_string());
 
-                            secret_summaries.push(summary);
+                        match self.get_secret(vault_name, &name, false).await {
+                            Ok(secret_details) => {
+                                let original_name =
+                                    self.get_original_name(&name, &secret_details.tags);
+                                let folder = self.get_folder(&secret_details.tags);
+                                let group =
+                                    self.get_group_name(&original_name, &secret_details.tags);
+                                let note = self.get_note(&secret_details.tags);
+
+                                secret_summaries.push(SecretSummary {
+                                    name: original_name.clone(),
+                                    original_name,
+                                    note,
+                                    folder,
+                                    groups: group,
+                                    updated_on: updated,
+                                    enabled,
+                                    content_type: secret_details.content_type,
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: Failed to get details for secret '{name}': {e}"
+                                );
+                                secret_summaries.push(SecretSummary {
+                                    name: name.clone(),
+                                    original_name: name,
+                                    note: None,
+                                    folder: None,
+                                    groups: None,
+                                    updated_on: updated,
+                                    enabled,
+                                    content_type: "text/plain".to_string(),
+                                });
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Handle pagination if there's a nextLink
-        if let Some(_next_link) = json.get("nextLink").and_then(|v| v.as_str()) {
-            // TODO: Implement pagination support
-            eprintln!("Warning: Pagination not yet implemented, showing first page only");
+            // Follow pagination nextLink if present
+            next_url = json
+                .get("nextLink")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
         }
 
         // Apply group filter if specified
@@ -1073,67 +1067,74 @@ impl SecretOperations for AzureSecretOperations {
                 .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
 
-        let response = http_client
-            .get(&versions_url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| classify_network_error(&e, &versions_url))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(CrosstacheError::azure_api(format!(
-                "Failed to list secret versions: HTTP {} - {}",
-                status, error_text
-            )));
-        }
-
-        // Parse the JSON response
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::azure_api(format!("Failed to parse response JSON: {e}"))
-        })?;
-
-        // Extract versions from the response
         let mut versions = Vec::new();
-        if let Some(value_array) = json["value"].as_array() {
-            for version_json in value_array {
-                let attributes = &version_json["attributes"];
+        let mut next_url: Option<String> = Some(versions_url);
 
-                let version = version_json["kid"]
-                    .as_str()
-                    .and_then(|kid| kid.split('/').next_back())
-                    .unwrap_or("unknown")
-                    .to_string();
+        while let Some(current_url) = next_url.take() {
+            let response = http_client
+                .get(&current_url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map_err(|e| classify_network_error(&e, &current_url))?;
 
-                let enabled = attributes["enabled"].as_bool().unwrap_or(true);
-                let created_timestamp = attributes["created"].as_i64().unwrap_or(0);
-                let updated_timestamp = attributes["updated"].as_i64().unwrap_or(0);
-
-                let created_on = DateTime::from_timestamp(created_timestamp, 0)
-                    .unwrap_or_else(Utc::now)
-                    .format("%Y-%m-%d %H:%M:%S UTC")
-                    .to_string();
-
-                let updated_on = DateTime::from_timestamp(updated_timestamp, 0)
-                    .unwrap_or_else(Utc::now)
-                    .format("%Y-%m-%d %H:%M:%S UTC")
-                    .to_string();
-
-                versions.push(SecretProperties {
-                    name: secret_name.to_string(),
-                    original_name: secret_name.to_string(),
-                    value: None, // Don't include values in version list
-                    version,
-                    created_on,
-                    updated_on,
-                    enabled,
-                    expires_on: None,
-                    not_before: None,
-                    tags: HashMap::new(),
-                    content_type: String::new(),
-                });
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_default();
+                return Err(CrosstacheError::azure_api(format!(
+                    "Failed to list secret versions: HTTP {} - {}",
+                    status, error_text
+                )));
             }
+
+            let json: serde_json::Value = response.json().await.map_err(|e| {
+                CrosstacheError::azure_api(format!("Failed to parse response JSON: {e}"))
+            })?;
+
+            if let Some(value_array) = json["value"].as_array() {
+                for version_json in value_array {
+                    let attributes = &version_json["attributes"];
+
+                    let version = version_json["kid"]
+                        .as_str()
+                        .and_then(|kid| kid.split('/').next_back())
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    let enabled = attributes["enabled"].as_bool().unwrap_or(true);
+                    let created_timestamp = attributes["created"].as_i64().unwrap_or(0);
+                    let updated_timestamp = attributes["updated"].as_i64().unwrap_or(0);
+
+                    let created_on = DateTime::from_timestamp(created_timestamp, 0)
+                        .unwrap_or_else(Utc::now)
+                        .format("%Y-%m-%d %H:%M:%S UTC")
+                        .to_string();
+
+                    let updated_on = DateTime::from_timestamp(updated_timestamp, 0)
+                        .unwrap_or_else(Utc::now)
+                        .format("%Y-%m-%d %H:%M:%S UTC")
+                        .to_string();
+
+                    versions.push(SecretProperties {
+                        name: secret_name.to_string(),
+                        original_name: secret_name.to_string(),
+                        value: None,
+                        version,
+                        created_on,
+                        updated_on,
+                        enabled,
+                        expires_on: None,
+                        not_before: None,
+                        tags: HashMap::new(),
+                        content_type: String::new(),
+                    });
+                }
+            }
+
+            next_url = json
+                .get("nextLink")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
         }
 
         // Sort by creation time, newest first
