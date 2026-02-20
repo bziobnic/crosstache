@@ -141,11 +141,11 @@ You can control which authentication method is tried first using the credential 
 
 ```bash
 # Use Azure CLI credentials first
-xv secret list --credential-type cli
+xv list --credential-type cli
 
 # Set environment variable for all commands
 export AZURE_CREDENTIAL_PRIORITY=cli
-xv secret list
+xv list
 
 # Configure in config file for persistent setting
 xv config set azure_credential_priority cli

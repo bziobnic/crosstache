@@ -16,29 +16,22 @@ Groups are implemented using Azure Key Vault tags, ensuring compatibility with t
 
 ## Group Assignment Methods
 
-### 1. Explicit Group Assignment
+### 1. Group Assignment via Update
 
-You can explicitly assign secrets to groups using the `--group` flag:
-
-```bash
-# Assign to a single group
-xv secret set "api-key" "abc123" --group "authentication"
-
-# Assign to multiple groups
-xv secret set "shared-secret" "xyz789" --group "auth" --group "payments"
-```
-
-### 2. Group Assignment During Updates
-
-Groups can be modified when updating secrets:
+Groups are assigned using the `--group` flag on the `update` command:
 
 ```bash
-# Add to additional groups (merge mode - default)
-xv secret update "my-secret" --group "new-group"
+# Add a secret to a group (merge mode - default)
+xv update "my-secret" --group "authentication"
+
+# Add to multiple groups at once
+xv update "shared-secret" --group "auth" --group "payments"
 
 # Replace all groups (replace mode)
-xv secret update "my-secret" --group "only-group" --replace-groups
+xv update "my-secret" --group "only-group" --replace-groups
 ```
+
+> **Note:** The `xv set` command does not accept `--group`. Create the secret first with `xv set`, then assign groups with `xv update`.
 
 ## Group Storage Implementation
 
@@ -84,7 +77,7 @@ When determining a secret's group for display purposes, crosstache uses the foll
 ### List All Secrets with Groups
 ```bash
 # Shows all secrets with their group assignments
-xv secret list
+xv list
 ```
 
 Output format:
@@ -101,16 +94,16 @@ Output format:
 ### Filter by Specific Group
 ```bash
 # Show only secrets in the "myapp/database" group
-xv secret list --group "myapp/database"
+xv list --group "myapp/database"
 
 # Show only secrets in the "auth" group  
-xv secret list --group "auth"
+xv list --group "auth"
 ```
 
 ### Group-based Organization View
 ```bash
 # Display secrets organized by groups (grouped view)
-xv secret list --group-by
+xv list --group-by
 ```
 
 Output format:
@@ -137,25 +130,25 @@ Group: (No Group) (1 secret)
 ### Adding Groups to Existing Secrets
 ```bash
 # Add a secret to additional groups (merge mode)
-xv secret update "existing-secret" --group "new-group"
+xv update "existing-secret" --group "new-group"
 
 # Add to multiple groups at once
-xv secret update "existing-secret" --group "group1" --group "group2"
+xv update "existing-secret" --group "group1" --group "group2"
 ```
 
 ### Replacing Groups
 ```bash
 # Replace all existing groups with new ones
-xv secret update "existing-secret" --group "only-group" --replace-groups
+xv update "existing-secret" --group "only-group" --replace-groups
 
 # Remove from all groups (leaves secret ungrouped)
-xv secret update "existing-secret" --replace-groups
+xv update "existing-secret" --replace-groups
 ```
 
 ### Group Assignment with Secret Renaming
 ```bash
 # Rename secret and change its group
-xv secret update "old-name" --rename "new-name" --group "new-group" --replace-groups
+xv update "old-name" --rename "new-name" --group "new-group" --replace-groups
 ```
 
 ## Best Practices
@@ -199,8 +192,8 @@ notification-service/*
 ### 3. Use Explicit Groups for Cross-cutting Concerns
 ```bash
 # Secrets used by multiple applications
-xv secret set "shared-encryption-key" "key123" --group "shared" --group "encryption"
-xv secret set "monitoring-token" "token456" --group "shared" --group "monitoring"
+xv set "shared-encryption-key" "key123" --group "shared" --group "encryption"
+xv set "monitoring-token" "token456" --group "shared" --group "monitoring"
 ```
 
 ### 4. Group-based Access Control Planning
@@ -291,34 +284,34 @@ Existing secrets without group information will:
 ### Development Workflow
 ```bash
 # Set up application secrets with automatic grouping
-xv secret set "myapp/database/host" "localhost"
-xv secret set "myapp/database/user" "dbuser"
-xv secret set "myapp/api/external-key" "ext_abc123"
+xv set "myapp/database/host" "localhost"
+xv set "myapp/database/user" "dbuser"
+xv set "myapp/api/external-key" "ext_abc123"
 
 # List all database-related secrets
-xv secret list --group "myapp/database"
+xv list --group "myapp/database"
 
 # Update multiple secrets in a group (hypothetical bulk operation)
-xv secret list --group "myapp/database" | xargs -I {} xv secret update {} --group "production"
+xv list --group "myapp/database" | xargs -I {} xv update {} --group "production"
 ```
 
 ### Cross-Service Secrets
 ```bash
 # Secret used by multiple services
-xv secret set "shared-encryption-key" "key123" \
+xv set "shared-encryption-key" "key123" \
   --group "encryption" \
   --group "auth-service" \
   --group "payment-service"
 
 # Find all encryption-related secrets
-xv secret list --group "encryption"
+xv list --group "encryption"
 ```
 
 ### Environment Migration
 ```bash
 # Copy development secrets to staging with group change
-xv secret get "myapp/database/host" --raw | \
-  xv secret set "myapp/database/host" --stdin --group "staging"
+xv get "myapp/database/host" --raw | \
+  xv set "myapp/database/host" --stdin --group "staging"
 ```
 
 This group system provides powerful organization capabilities while maintaining full compatibility with Azure Key Vault's underlying infrastructure.

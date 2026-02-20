@@ -32,7 +32,7 @@ xv init
 
 ```bash
 xv vault use my-vault        # Switch context
-xv secret list              # No --vault needed, uses context
+xv list              # No --vault needed, uses context
 xv context                  # Show current vault/resource group
 ```
 
@@ -45,9 +45,9 @@ xv context                  # Show current vault/resource group
 - Better handling of JSON/YAML values
 
 ```bash
-xv secret set api-config --editor        # Opens $EDITOR
-xv secret set cert --from-file cert.pem  # Read from file  
-xv secret set db-url --env-subst         # Use env var substitution
+xv set api-config --editor        # Opens $EDITOR
+xv set cert --from-file cert.pem  # Read from file  
+xv set db-url --env-subst         # Use env var substitution
 ```
 
 ### 4. Enhanced Secret Discovery & Search
@@ -59,10 +59,10 @@ xv secret set db-url --env-subst         # Use env var substitution
 - Group visualization improvements
 
 ```bash
-xv secret find "database"               # Fuzzy search
-xv secret search --tag env=prod         # Search by tags
-xv secret tree                          # Tree view of folders/groups
-xv secret recent                        # Recently accessed secrets
+xv find "database"               # Fuzzy search
+xv search --tag env=prod         # Search by tags
+xv tree                          # Tree view of folders/groups
+xv recent                        # Recently accessed secrets
 ```
 
 ## 🎯 Medium Priority Improvements
@@ -91,8 +91,8 @@ xv cp secret1 secret2       # copy secret values
 - Add progress indicators for long operations
 
 ```bash
-xv secret list --format template --template "{{.name}}: {{.updated}}"
-xv secret list --columns name,groups,updated    # Custom columns
+xv list --format template --template "{{.name}}: {{.updated}}"
+xv list --columns name,groups,updated    # Custom columns
 xv vault create my-vault --progress             # Show progress
 ```
 
@@ -105,9 +105,9 @@ xv vault create my-vault --progress             # Show progress
 - Parallel processing for large operations
 
 ```bash
-xv secret set --batch secrets.json              # Batch create
-xv secret update --pattern "app-*" --tag env=prod  # Pattern matching
-xv secret migrate --from vault1 --to vault2     # Migration tool
+xv set --batch secrets.json              # Batch create
+xv update --pattern "app-*" --tag env=prod  # Pattern matching
+xv migrate --from vault1 --to vault2     # Migration tool
 ```
 
 ### 8. Configuration Management Improvements

@@ -156,24 +156,29 @@ Built-in update command to fetch the latest release.
 
 ## Summary by Priority
 
+### ✅ Implemented
+| Feature | Status |
+|---------|--------|
+| Secret injection (`xv run`) | ✅ Shipped |
+| Template injection (`xv inject`) | ✅ Shipped |
+| Secret versioning & rollback (`xv history`, `xv rollback`) | ✅ Shipped |
+| Shell completion (`xv completion`) | ✅ Shipped |
+| Environment profiles (`xv env`) | ✅ Shipped |
+| Audit log (`xv audit`) | ✅ Shipped |
+| Bulk set (`xv set K1=v1 K2=v2`) | ✅ Shipped |
+| Secret rotation (`xv rotate`) | ✅ Shipped |
+| `whoami` (`xv whoami`) | ✅ Shipped |
+| `.env` file sync (`xv env pull/push`) | ✅ Shipped |
+| Secret expiration/TTL (`--expires`, `--expiring`) | ✅ Shipped |
+| Cross-vault copy/move (`xv copy`, `xv move`) | ✅ Shipped |
+
+### 🔜 Still Open
 | Priority | Feature | Complexity |
 |----------|---------|------------|
-| 🔥 High | Secret injection (`xv run`) | Medium |
-| 🔥 High | Template injection (`xv inject`) | Medium |
-| 🔥 High | Secret versioning & rollback | Low–Medium |
-| 🔥 High | Shell completion | Low |
-| ⚡ Med | Environment profiles | Medium |
 | ⚡ Med | Secret references / URI scheme | Medium |
-| ⚡ Med | Audit log | Low–Medium |
-| ⚡ Med | Bulk set/delete | Low |
-| ⚡ Med | Secret rotation helpers | Medium |
-| ⚡ Med | `whoami` | Low |
 | 🧩 Nice | Interactive TUI | High |
 | 🧩 Nice | Vault diff | Medium |
-| 🧩 Nice | `.env` file sync | Low–Medium |
-| 🧩 Nice | Secret expiration/TTL | Low |
 | 🧩 Nice | Webhook notifications | Medium |
-| 🧩 Nice | Secret masking in logs | Medium |
-| 🧩 Nice | Cross-vault copy/move | Low |
+| 🧩 Nice | Secret masking in `xv run` output | Medium |
 | 🧩 Nice | Plugin system | High |
 | 🧩 Nice | Self-update | Low |
