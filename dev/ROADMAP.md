@@ -1,122 +1,168 @@
-# Crosstache Roadmap — Prioritized by User Impact
+# Crosstache Roadmap
 
-> Updated: 2026-02-20
+> Updated: 2026-02-20 | Current version: **v0.4.1**
 
 ---
 
-## Tier 1 — High Impact, Noticeable Gaps
+## ✅ Completed
 
-These are features users will hit quickly and wonder why they don't work.
+Features shipped and verified in the codebase.
 
-### 1. Recursive File Delete (`xv file delete -r`)
-**Impact:** Users can upload directory trees but can't delete them without naming each file individually.
-**Current state:** `xv file delete` only accepts explicit file names. No `-r`, `--dry-run`, or glob support.
+### Core Secret Management (v0.1–v0.3)
+- Secret CRUD, bulk set (`xv set K1=v1 K2=v2`), groups, folders, notes, tags, expiry
+- Secret injection (`xv run`) with output masking and env var cleanup after child spawn
+- Template injection (`xv inject`) with cross-vault secret references
+- Secret history, rollback, rotation (`xv history`, `xv rollback`, `xv rotate`)
+- Vault CRUD, import/export
+- Environment profiles (`.env` pull/push, `xv env`)
+- Cross-vault copy/move (`xv copy`, `xv move`)
+- Shell completion (`xv completion bash|zsh|fish|powershell`)
+- `xv whoami` — authenticated identity and active context
+- `xv audit` — access/change history from Azure Activity Log
+- Secret expiration/TTL (`--expires`, `--expiring`)
+
+### File Operations (v0.2–v0.3)
+- File upload/download (recursive, with directory structure preservation)
+- Directory-style file listing
+- Recursive file delete with `-r`, `-f`, `-i`, `--dry-run`, `--verbose`, glob patterns
+
+### Security Hardening (v0.3.0–v0.3.1)
+- Zeroize secret values in memory after use
+- Clipboard auto-clear after 30 seconds
+- Sensitive files written with 0600 permissions (config, exports, template output)
+- Generator script ownership + world-writable checks
+- Path traversal protection in recursive download
+- Env vars dropped after child process spawn
+
+### v0.4.0 — Sharing, Diff, Pagination
+- `xv vault update` — update vault properties (tags, purge protection, retention, deployment flags)
+- `xv vault share grant/revoke/list` — RBAC-based vault access management
+- `xv share grant/revoke/list` — secret-level sharing
+- `xv diff <vault1> <vault2>` — compare secrets across vaults (shows added/removed/changed; values hidden by default, `--show-values` to reveal)
+- Pagination for secret listing (follows Azure `nextLink`)
+- Configurable select page size
+
+### v0.4.1
+- Bug fixes and release cleanup
+
+---
+
+## 🔜 Open — High Priority
+
+### 1. File Sync (`xv file sync`)
+**Impact:** Listed in `xv file --help` but prints "not yet implemented."
+**Current state:** Fully stubbed — no sync logic exists.
+**Effort:** Medium-High
+**Scope:** Start with one-way `sync up` and `sync down` before bidirectional.
+
+### 2. Configurable Clipboard Timeout
+**Impact:** 30-second auto-clear is hardcoded. Users want longer/shorter or to disable it.
+**Current state:** Hardcoded `Duration::from_secs(30)` in `commands.rs`.
+**Effort:** Low — read from config, pass to thread.
+
+### 3. Progress Indicators for File Operations
+**Impact:** Large file uploads/downloads give no feedback until completion.
+**Current state:** No progress bars or per-file status during recursive ops.
+**Effort:** Low-Medium (`indicatif` crate or similar).
+
+### 4. Large File Chunked Upload
+**Impact:** Files over ~100MB may fail. Block-based upload with resume needed.
+**Current state:** Stubbed in `src/blob/manager.rs` and `src/blob/operations.rs` (paginated listing also stubbed).
 **Effort:** Medium
-**See:** `dev/DELETE_ROADMAP.md`
 
-### 2. File Sync (`xv file sync`)
-**Impact:** Sync is listed in `xv file --help` but prints "not yet implemented." Users expect it to work.
-**Current state:** Fully stubbed.
-**Effort:** Medium-High (need diffing logic, conflict resolution)
-**Scope:** Start with one-way `sync up` and `sync down` before tackling bidirectional.
-
-### 3. `xv vault update`
-**Impact:** Command exists, accepts flags, but does nothing. Users trying to update vault properties (tags, purge protection, retention) get a silent no-op.
-**Current state:** Parses all args, builds the request struct, then prints "not yet implemented."
-**Effort:** Low-Medium (the request struct is ready, just needs the REST API call)
-
-### 4. Vault & Secret Sharing (`xv vault share`, `xv share`)
-**Impact:** RBAC commands exist in `--help` but all print TODO. Users setting up team access hit a wall.
-**Current state:** CLI parsing done, execution prints "not yet implemented."
-**Effort:** Medium (Azure RBAC API integration)
-
-### 5. Progress Indicators for File Operations
-**Impact:** Uploading/downloading large files or directories gives no feedback until completion. Feels broken on slow connections.
-**Current state:** No progress bars, no per-file status during recursive ops.
-**Effort:** Low-Medium (indicatif crate or similar)
-
----
-
-## Tier 2 — Quality of Life Improvements
-
-Features that make the daily experience significantly better.
-
-### 6. Pagination for Large Vaults
-**Impact:** Vaults with hundreds of secrets may only show the first page. Warning is printed but no way to get more.
-**Current state:** `src/secret/manager.rs` prints "Pagination not yet implemented."
+### 5. Output Format Support (JSON, YAML, CSV, Template)
+**Impact:** `--format json|yaml|csv|template` flags exist but all return "not yet implemented."
+**Current state:** Stubbed in `src/utils/format.rs`.
 **Effort:** Low-Medium
 
-### 7. Configurable Clipboard Timeout
-**Impact:** 30-second auto-clear is hardcoded. Some users want longer/shorter, or to disable it.
-**Current state:** Hardcoded `Duration::from_secs(30)`.
-**Effort:** Low (read from config, pass to thread)
+---
 
-### 8. `xv diff` — Compare Secrets Across Vaults
-**Impact:** Common need when promoting secrets between environments (dev → staging → prod).
-**Current state:** Not implemented. Users manually `xv list` both vaults and compare.
-**Effort:** Medium
-**Scope:** Show added/removed/changed keys. Never show values by default.
+## 🔜 Open — Medium Priority
 
-### 9. Large File Chunked Upload
-**Impact:** Files over ~100MB may fail or hang. Block-based upload with resume would fix this.
-**Current state:** Stubbed in `src/blob/manager.rs`.
-**Effort:** Medium
+### 6. Secret References / URI Scheme
+**Impact:** Stable `xv://vault/secret` URIs for templates, env vars, and config files. Partially supported in `xv inject`.
+**Effort:** Medium — formalize the scheme, integrate with `xv run`.
 
-### 10. Interactive TUI (`xv tui`)
-**Impact:** Browse vaults → secrets → values with keyboard navigation. Fuzzy search, quick copy. Very appealing for exploration.
+### 7. Interactive TUI (`xv tui`)
+**Impact:** Browse vaults → secrets → values with keyboard navigation, fuzzy search, quick copy.
 **Current state:** Not started.
-**Effort:** High (ratatui or similar)
+**Effort:** High (`ratatui` or similar).
+
+### 8. Blob Metadata & Tags
+**Impact:** File metadata and tag setting stubbed but not functional (Azure SDK limitation noted).
+**Current state:** `src/blob/manager.rs` logs warnings — "not yet implemented for Azure SDK v0.21."
+**Effort:** Medium — depends on Azure SDK support.
 
 ---
 
-## Tier 3 — Polish & Power Features
+## 🔜 Open — Low Priority / Nice to Have
 
-### 11. `xv info` for Vaults
-**Impact:** `xv info <vault>` is listed but stubbed. Minor since `xv vault info` works.
-**Effort:** Low (route to vault info)
+### 9. Self-Update (`xv update`)
+**Effort:** Low (`self_update` crate). Convenient but not essential.
 
-### 12. Secret References / URI Scheme
-**Impact:** Stable `xv://vault/secret` URIs usable in templates, env vars, and config files. Already partially supported in `xv inject`.
-**Effort:** Medium (formalize the scheme, add to `xv run`)
+### 10. Plugin / Extension System
+**Effort:** High. Premature for current user base.
 
-### 13. Self-Update (`xv update`)
-**Impact:** Convenient but not essential — users can re-download.
-**Effort:** Low (self_update crate)
+### 11. Webhook / Event Notifications
+**Effort:** Medium. Niche use case — notify external systems on secret changes.
 
-### 14. Plugin/Extension System
-**Impact:** Community extensions without bloating core. Nice long-term but premature now.
-**Effort:** High
-
-### 15. Webhook Notifications
-**Impact:** Notify external systems on secret changes. Niche use case.
-**Effort:** Medium
-
----
-
-## Tier 4 — Backend & Architecture
-
-### 16. AWS Secrets Manager Backend
-**Impact:** Opens the tool to the AWS ecosystem. Significant market expansion.
-**Current state:** Architecture uses manager/provider patterns that could support this.
-**Effort:** High (new backend module, credential handling, feature mapping)
+### 12. AWS Secrets Manager Backend
+**Impact:** Opens tool to AWS ecosystem. Architecture supports it (manager/provider patterns).
+**Effort:** High — new backend module, credential handling, feature mapping.
 **Prerequisite:** Abstract the backend trait boundary first.
 
-### 17. HashiCorp Vault Backend
+### 13. HashiCorp Vault Backend
 **Impact:** Popular in self-hosted/hybrid environments.
 **Effort:** High
 
 ---
 
-## Completed (v0.3.1)
+## 🔧 Technical Debt & Security
 
-✅ Secret CRUD, bulk set, groups, folders, notes, tags, expiry
-✅ Secret injection (`xv run`) with output masking
-✅ Template injection (`xv inject`) with cross-vault refs
-✅ Secret history, rollback, rotation
-✅ Vault CRUD, import/export
-✅ Environment profiles, `.env` pull/push
-✅ Cross-vault copy/move
-✅ File upload/download (recursive, with structure preservation)
-✅ Directory-style file listing
-✅ Shell completion, whoami, audit
-✅ Zeroize, clipboard auto-clear, file permissions, path traversal protection
+### Security (from audit)
+
+| # | Issue | Status | Priority |
+|---|-------|--------|----------|
+| 15 | Bearer tokens not zeroized (`format!("Bearer {}", token)`) | ❌ Open | Medium |
+| 5 | Secrets visible in process env (`xv run`) | ⚠️ By design | Document it |
+| 10 | 105 `unwrap()` calls in non-test code | ❌ Open | Low (robustness) |
+| 12 | Secret names visible in process arguments | ⚠️ Inherent to CLI | Document it |
+
+### Code Quality
+- `unwrap()` cleanup — gradual replacement with proper error handling
+- Blob operations: paginated listing stub in `src/blob/operations.rs` needs real implementation
+- Azure Management API integration stub in `src/config/init.rs`
+
+---
+
+## 🎨 UX Improvements (Backlog)
+
+These are quality-of-life ideas — not committed, but worth considering:
+
+- **Interactive setup** (`xv init`) — guided wizard with Azure CLI auto-detection
+- **Smart vault context** — per-directory `.xv` config, `xv vault use` context switching
+- **Better error messages** — context-aware suggestions (e.g., "Vault not found → try `xv vault list`")
+- **Command aliases** — `xv ls`, `xv get`, `xv set` as shortcuts
+- **Fuzzy search** — `xv find "database"` across all secrets
+- **Tree view** — `xv tree` for folder/group visualization
+
+---
+
+## Delete Command Status
+
+The `xv file delete` enhancement is **largely complete**. Implemented:
+
+- ✅ `-r`, `-f`, `-i`, `--verbose`, `--dry-run` flags
+- ✅ Path analysis (file/directory/glob/empty-dir-marker)
+- ✅ Recursive delete with confirmation prompts
+- ✅ Glob pattern expansion
+- ✅ Interactive mode (per-item prompts)
+- ✅ Batch deletion via `BlobManager`
+- ✅ Progress reporting and summaries
+
+Still open:
+- ❌ Double-confirmation for large deletions (>10 files or >100MB)
+- ❌ Unit and integration tests
+- ❌ Empty directory marker edge cases (cleanup/recreation)
+- ❌ Performance optimization (concurrent deletion, caching)
+- ❌ Documentation updates (README examples)

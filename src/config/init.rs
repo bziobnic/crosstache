@@ -752,6 +752,7 @@ impl ConfigInitializer {
             function_app_url: String::new(),
             blob_config,
             azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
+            clipboard_timeout: 30,
         })
     }
 
