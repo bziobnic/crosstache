@@ -13,6 +13,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 // Include the built information generated at compile time
 pub mod built_info {
@@ -2570,9 +2571,9 @@ async fn execute_env_pull(
                             .replace('\n', "\\n")
                     )
                 } else if value.contains(' ') || value.starts_with('#') {
-                    format!("\"{}\"", value)
+                    format!("\"{}\"", value.as_str())
                 } else {
-                    value.clone()
+                    value.to_string()
                 };
 
             dotenv_content.push_str(&format!("{}={}\n", key, escaped_value));
@@ -2717,7 +2718,7 @@ async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config
     for (key, value) in secrets {
         let secret_request = SecretRequest {
             name: key.clone(),
-            value: value.clone(),
+            value: Zeroizing::new(value.clone()),
             content_type: Some("text/plain".to_string()),
             enabled: Some(true),
             expires_on: None,
@@ -3767,7 +3768,7 @@ async fn execute_secret_set(
         if note.is_some() || folder.is_some() || expires_on.is_some() || not_before_on.is_some() {
             Some(crate::secret::manager::SecretRequest {
                 name: name.to_string(),
-                value: value.clone(),
+                value: Zeroizing::new(value.clone()),
                 content_type: None,
                 enabled: Some(true),
                 expires_on,
@@ -3819,24 +3820,24 @@ async fn execute_secret_get(
     if raw {
         // Raw output - print the value
         if let Some(value) = secret.value {
-            print!("{value}");
+            print!("{}", value.as_str());
         }
     } else {
         // Default behavior - copy to clipboard
         if let Some(ref value) = secret.value {
             match ClipboardContext::new() {
-                Ok(mut ctx) => match ctx.set_contents(value.clone()) {
+                Ok(mut ctx) => match ctx.set_contents(value.to_string()) {
                     Ok(_) => {
                         println!("✅ Secret '{name}' copied to clipboard");
                     }
                     Err(e) => {
                         eprintln!("⚠️  Failed to copy to clipboard: {e}");
-                        eprintln!("Secret value: {value}");
+                        eprintln!("Secret value: {}", value.as_str());
                     }
                 },
                 Err(e) => {
                     eprintln!("⚠️  Failed to access clipboard: {e}");
-                    eprintln!("Secret value: {value}");
+                    eprintln!("Secret value: {}", value.as_str());
                 }
             }
         } else {
@@ -3954,12 +3955,12 @@ fn generate_random_value(
     length: usize,
     charset: CharsetType,
     custom_generator: Option<String>,
-) -> Result<String> {
+) -> Result<Zeroizing<String>> {
     use rand::prelude::*;
 
     if let Some(generator_script) = custom_generator {
         // Execute custom generator script
-        return execute_custom_generator(&generator_script, length);
+        return execute_custom_generator(&generator_script, length).map(Zeroizing::new);
     }
 
     if length == 0 {
@@ -3985,7 +3986,7 @@ fn generate_random_value(
         })
         .collect();
 
-    Ok(random_value)
+    Ok(Zeroizing::new(random_value))
 }
 
 /// Execute a custom generator script
@@ -4136,7 +4137,7 @@ async fn execute_secret_rotate(
     println!("New version: {}", result.version);
 
     if show_value {
-        println!("Generated value: {}", new_value);
+        println!("Generated value: {}", new_value.as_str());
     } else {
         println!("Generated value: [hidden] (use --show-value to display)");
     }
@@ -4228,9 +4229,9 @@ async fn execute_secret_run(
     );
 
     // Fetch secret values and build environment map
-    let mut env_vars: HashMap<String, String> = HashMap::new();
-    let mut secret_values: Vec<String> = Vec::new(); // For masking
-    let mut uri_values: HashMap<String, String> = HashMap::new(); // URI -> value mapping
+    let mut env_vars: HashMap<String, Zeroizing<String>> = HashMap::new();
+    let mut secret_values: Vec<Zeroizing<String>> = Vec::new(); // For masking
+    let mut uri_values: HashMap<String, Zeroizing<String>> = HashMap::new(); // URI -> value mapping
 
     // Fetch secrets from current vault (group-filtered)
     for secret in filtered_secrets {
@@ -4342,6 +4343,11 @@ async fn execute_secret_run(
         CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
     })?;
 
+    // Explicitly drop secret-holding variables to zeroize them immediately after child process
+    // Note: secret_values is still needed for masking, so we can't drop it yet
+    drop(env_vars);
+    drop(uri_values);
+
     // Handle output with masking if needed
     if no_masking {
         // Exit with the same code as the child process
@@ -4363,14 +4369,14 @@ async fn execute_secret_run(
 }
 
 /// Mask secret values in text output
-fn mask_secrets(text: &str, secrets: &[String]) -> String {
+fn mask_secrets(text: &str, secrets: &[Zeroizing<String>]) -> String {
     let mut result = text.to_string();
 
     for secret in secrets {
         if secret.len() >= 4 {
             // Only mask secrets that are at least 4 characters
             // Replace with [MASKED] to indicate redaction
-            result = result.replace(secret, "[MASKED]");
+            result = result.replace(secret.as_str(), "[MASKED]");
         }
     }
 
@@ -4511,8 +4517,8 @@ async fn execute_secret_inject(
     };
 
     // Build a map of secret names/URIs to values
-    let mut secret_values: HashMap<String, String> = HashMap::new();
-    let mut cross_vault_values: HashMap<String, String> = HashMap::new(); // URI -> value
+    let mut secret_values: HashMap<String, Zeroizing<String>> = HashMap::new();
+    let mut cross_vault_values: HashMap<String, Zeroizing<String>> = HashMap::new(); // URI -> value
     let mut missing_secrets: Vec<String> = Vec::new();
 
     // Fetch secrets from current vault
@@ -4586,32 +4592,32 @@ async fn execute_secret_inject(
     println!("🔐 Injecting {} secret(s) into template...", total_injected);
 
     // Replace secret references with actual values
-    let mut result_content = template_content;
+    let mut result_content = Zeroizing::new(template_content);
 
     // Replace {{ secret:name }} references (current vault)
     for (secret_name, secret_value) in &secret_values {
         let pattern = format!(r"\{{\{{\s*secret:{}\s*\}}\}}", regex::escape(secret_name));
         let regex_pattern = Regex::new(&pattern).unwrap();
-        result_content = regex_pattern
-            .replace_all(&result_content, secret_value)
+        *result_content = regex_pattern
+            .replace_all(&result_content, secret_value.as_str())
             .to_string();
     }
 
     // Replace xv://vault/secret URI references
     for (uri, secret_value) in &cross_vault_values {
-        result_content = result_content.replace(uri, secret_value);
+        *result_content = result_content.replace(uri, secret_value.as_str());
     }
 
     // Write result
     match output_file {
         Some(path) => {
-            fs::write(&path, &result_content).map_err(|e| {
+            fs::write(&path, result_content.as_str()).map_err(|e| {
                 CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
             })?;
             println!("✅ Template resolved and written to '{}'", path);
         }
         None => {
-            print!("{}", result_content);
+            print!("{}", result_content.as_str());
         }
     }
 
@@ -4819,7 +4825,7 @@ async fn execute_secret_update(
         if v.is_empty() {
             return Err(CrosstacheError::config("Secret value cannot be empty"));
         }
-        Some(v)
+        Some(Zeroizing::new(v))
     } else if stdin {
         let mut buffer = String::new();
         io::stdin().read_to_string(&mut buffer)?;
@@ -4827,7 +4833,7 @@ async fn execute_secret_update(
         if trimmed.is_empty() {
             return Err(CrosstacheError::config("Secret value cannot be empty"));
         }
-        Some(trimmed)
+        Some(Zeroizing::new(trimmed))
     } else {
         None // Don't update value, just metadata
     };
@@ -5387,8 +5393,10 @@ async fn execute_vault_export(
                     {
                         Ok(secret_props) => {
                             if let Some(value) = secret_props.value {
-                                secret_data
-                                    .insert("value".to_string(), serde_json::Value::String(value));
+                                secret_data.insert(
+                                    "value".to_string(),
+                                    serde_json::Value::String(value.to_string()),
+                                );
                             }
                         }
                         Err(e) => {
@@ -5432,7 +5440,7 @@ async fn execute_vault_export(
                                     .to_uppercase()
                                     .replace("-", "_")
                                     .replace(".", "_");
-                                env_lines.push(format!("{env_name}={value}"));
+                                env_lines.push(format!("{env_name}={}", value.as_str()));
                             }
                         }
                         Err(e) => {
@@ -5473,7 +5481,7 @@ async fn execute_vault_export(
                     {
                         Ok(secret_props) => {
                             if let Some(value) = secret_props.value {
-                                txt_lines.push(format!("  Value: {value}"));
+                                txt_lines.push(format!("  Value: {}", value.as_str()));
                             }
                         }
                         Err(e) => {
@@ -5584,7 +5592,7 @@ async fn execute_vault_import(
 
                 secrets.push(SecretRequest {
                     name: name.to_string(),
-                    value: value.to_string(),
+                    value: Zeroizing::new(value.to_string()),
                     content_type,
                     enabled,
                     expires_on: None,
@@ -5612,7 +5620,7 @@ async fn execute_vault_import(
 
                     secrets.push(SecretRequest {
                         name: key,
-                        value: value.to_string(),
+                        value: Zeroizing::new(value.to_string()),
                         content_type: Some("text/plain".to_string()),
                         enabled: Some(true),
                         expires_on: None,
@@ -7047,7 +7055,7 @@ async fn execute_secret_set_bulk(
         let secret_request = if note.is_some() || folder.is_some() {
             Some(crate::secret::manager::SecretRequest {
                 name: key.clone(),
-                value: value.clone(),
+                value: Zeroizing::new(value.clone()),
                 content_type: None,
                 enabled: Some(true),
                 expires_on: None,

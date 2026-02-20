@@ -11,6 +11,7 @@ use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tabled::Tabled;
+use zeroize::Zeroizing;
 
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::{CrosstacheError, Result};
@@ -28,7 +29,7 @@ pub struct SecretProperties {
     #[tabled(rename = "Original Name")]
     pub original_name: String,
     #[tabled(skip)]
-    pub value: Option<String>,
+    pub value: Option<Zeroizing<String>>,
     #[tabled(rename = "Version")]
     pub version: String,
     #[tabled(rename = "Created")]
@@ -51,7 +52,7 @@ pub struct SecretProperties {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRequest {
     pub name: String,
-    pub value: String,
+    pub value: Zeroizing<String>,
     pub content_type: Option<String>,
     pub enabled: Option<bool>,
     pub expires_on: Option<DateTime<Utc>>,
@@ -67,7 +68,7 @@ pub struct SecretRequest {
 pub struct SecretUpdateRequest {
     pub name: String,
     pub new_name: Option<String>, // For renaming
-    pub value: Option<String>,
+    pub value: Option<Zeroizing<String>>,
     pub content_type: Option<String>,
     pub enabled: Option<bool>,
     pub expires_on: Option<DateTime<Utc>>,
@@ -468,7 +469,7 @@ impl SecretOperations for AzureSecretOperations {
         let value = if include_value {
             json.get("value")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(|s| Zeroizing::new(s.to_string()))
         } else {
             None
         };
@@ -604,7 +605,9 @@ impl SecretOperations for AzureSecretOperations {
 
         // Extract the secret value if requested
         let value = if include_value {
-            json.get("value").and_then(|v| v.as_str()).map(String::from)
+            json.get("value")
+                .and_then(|v| v.as_str())
+                .map(|s| Zeroizing::new(s.to_string()))
         } else {
             None
         };
@@ -1233,7 +1236,7 @@ impl SecretManager {
 
         let mut request = options.unwrap_or_else(|| SecretRequest {
             name: name.to_string(),
-            value: value.to_string(),
+            value: Zeroizing::new(value.to_string()),
             content_type: None,
             enabled: Some(true),
             expires_on: None,
@@ -1245,7 +1248,7 @@ impl SecretManager {
         });
 
         request.name = name.to_string();
-        request.value = value.to_string();
+        request.value = Zeroizing::new(value.to_string());
 
         // Show name sanitization info if needed
         let name_info = get_secret_name_info(name)?;
@@ -1844,11 +1847,11 @@ impl SecretManager {
                 .as_ref()
                 .unwrap_or(&update_request.name)
                 .clone(),
-            value: update_request
-                .value
-                .as_ref()
-                .unwrap_or(&current_secret.value.unwrap_or_default())
-                .clone(),
+            value: update_request.value.as_ref().cloned().unwrap_or_else(|| {
+                current_secret
+                    .value
+                    .unwrap_or_else(|| Zeroizing::new(String::new()))
+            }),
             content_type: update_request.content_type.clone(),
             enabled: update_request.enabled,
             expires_on: update_request.expires_on,
