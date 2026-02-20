@@ -774,7 +774,7 @@ impl ConfigInitializer {
             CrosstacheError::serialization(format!("Failed to serialize config: {e}"))
         })?;
 
-        tokio::fs::write(&config_file, config_content)
+        crate::utils::helpers::write_sensitive_file_async(&config_file, config_content.as_bytes())
             .await
             .map_err(|e| CrosstacheError::config(format!("Failed to write config file: {e}")))?;
 

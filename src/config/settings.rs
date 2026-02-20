@@ -422,7 +422,7 @@ pub async fn save_config(config: &Config) -> Result<()> {
     let contents = toml::to_string_pretty(config)
         .map_err(|e| CrosstacheError::serialization(e.to_string()))?;
 
-    tokio::fs::write(&config_path, contents).await?;
+    crate::utils::helpers::write_sensitive_file_async(&config_path, contents.as_bytes()).await?;
 
     Ok(())
 }
