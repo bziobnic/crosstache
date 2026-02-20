@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use super::models::{AccessLevel, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary};
+use super::models::{
+    AccessLevel, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary, VaultUpdateRequest,
+};
 use super::operations::{AzureVaultOperations, VaultOperations};
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::Result;
@@ -280,6 +282,63 @@ impl VaultManager {
         println!("{table_output}");
 
         Ok(roles)
+    }
+
+    /// Update vault properties
+    pub async fn update_vault(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        request: &VaultUpdateRequest,
+    ) -> Result<VaultProperties> {
+        self.vault_ops
+            .update_vault(vault_name, resource_group, request)
+            .await
+    }
+
+    /// Grant access to a specific secret
+    pub async fn grant_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+        user_object_id: &str,
+        access_level: AccessLevel,
+    ) -> Result<()> {
+        self.vault_ops
+            .grant_secret_access(
+                vault_name,
+                resource_group,
+                secret_name,
+                user_object_id,
+                access_level,
+            )
+            .await
+    }
+
+    /// Revoke access from a specific secret
+    pub async fn revoke_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+        user_object_id: &str,
+    ) -> Result<()> {
+        self.vault_ops
+            .revoke_secret_access(vault_name, resource_group, secret_name, user_object_id)
+            .await
+    }
+
+    /// List access assignments for a specific secret
+    pub async fn list_secret_access(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+        secret_name: &str,
+    ) -> Result<Vec<VaultRole>> {
+        self.vault_ops
+            .list_secret_access(vault_name, resource_group, secret_name)
+            .await
     }
 
     /// Display detailed vault information
