@@ -335,6 +335,19 @@ pub enum Commands {
         #[arg(long, conflicts_with = "not_before")]
         clear_not_before: bool,
     },
+    /// Compare secrets between two vaults
+    Diff {
+        /// First vault name
+        vault1: String,
+        /// Second vault name
+        vault2: String,
+        /// Show actual secret values in diff output
+        #[arg(long)]
+        show_values: bool,
+        /// Filter by group in both vaults
+        #[arg(short, long)]
+        group: Option<String>,
+    },
     /// Copy a secret from one vault to another
     Copy {
         /// Secret name
@@ -1025,6 +1038,12 @@ impl Cli {
                 )
                 .await
             }
+            Commands::Diff {
+                vault1,
+                vault2,
+                show_values,
+                group,
+            } => execute_diff_command(&vault1, &vault2, show_values, group, config).await,
             Commands::Copy {
                 name,
                 from,
@@ -1940,6 +1959,157 @@ async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()>
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     execute_secret_restore(&secret_manager, name, None, &config).await
+}
+
+async fn execute_diff_command(
+    vault1: &str,
+    vault2: &str,
+    show_values: bool,
+    group: Option<String>,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    // Create authentication provider
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone(),
+        )
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        })?,
+    );
+
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    // List secrets from both vaults
+    let secrets_a = secret_manager
+        .list_secrets_formatted(
+            vault1,
+            group.as_deref(),
+            crate::utils::format::OutputFormat::Json,
+            false,
+            true,
+        )
+        .await?;
+
+    let secrets_b = secret_manager
+        .list_secrets_formatted(
+            vault2,
+            group.as_deref(),
+            crate::utils::format::OutputFormat::Json,
+            false,
+            true,
+        )
+        .await?;
+
+    // Build name sets
+    let names_a: BTreeSet<String> = secrets_a.iter().map(|s| s.name.clone()).collect();
+    let names_b: BTreeSet<String> = secrets_b.iter().map(|s| s.name.clone()).collect();
+    let all_names: BTreeSet<String> = names_a.union(&names_b).cloned().collect();
+
+    // Fetch values from both vaults for comparison
+    let mut values_a = std::collections::HashMap::new();
+    let mut values_b = std::collections::HashMap::new();
+
+    for name in &names_a {
+        match secret_manager
+            .get_secret_safe(vault1, name, true, true)
+            .await
+        {
+            Ok(props) => {
+                if let Some(val) = props.value {
+                    values_a.insert(name.clone(), val);
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to get '{}' from {}: {}", name, vault1, e);
+            }
+        }
+    }
+
+    for name in &names_b {
+        match secret_manager
+            .get_secret_safe(vault2, name, true, true)
+            .await
+        {
+            Ok(props) => {
+                if let Some(val) = props.value {
+                    values_b.insert(name.clone(), val);
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to get '{}' from {}: {}", name, vault2, e);
+            }
+        }
+    }
+
+    // Compare and output
+    println!("Comparing {} → {}", vault1, vault2);
+    println!();
+
+    let mut added = 0u32;
+    let mut removed = 0u32;
+    let mut changed = 0u32;
+    let mut identical = 0u32;
+
+    // Find max name length for alignment
+    let max_len = all_names.iter().map(|n| n.len()).max().unwrap_or(0);
+
+    for name in &all_names {
+        let in_a = names_a.contains(name);
+        let in_b = names_b.contains(name);
+
+        match (in_a, in_b) {
+            (false, true) => {
+                println!(
+                    "  + {:<width$}  (only in {})",
+                    name,
+                    vault2,
+                    width = max_len
+                );
+                added += 1;
+            }
+            (true, false) => {
+                println!(
+                    "  - {:<width$}  (only in {})",
+                    name,
+                    vault1,
+                    width = max_len
+                );
+                removed += 1;
+            }
+            (true, true) => {
+                let val_a = values_a.get(name);
+                let val_b = values_b.get(name);
+                if val_a == val_b {
+                    println!("  = {:<width$}  (identical)", name, width = max_len);
+                    identical += 1;
+                } else {
+                    println!("  ~ {:<width$}  (value differs)", name, width = max_len);
+                    if show_values {
+                        let a_str = val_a.map(|v| v.as_str()).unwrap_or("<empty>");
+                        let b_str = val_b.map(|v| v.as_str()).unwrap_or("<empty>");
+                        println!("      {} : {}", vault1, a_str);
+                        println!("      {} : {}", vault2, b_str);
+                    }
+                    changed += 1;
+                }
+            }
+            (false, false) => unreachable!(),
+        }
+    }
+
+    println!();
+    println!(
+        "Summary: {} added, {} removed, {} changed, {} identical",
+        added, removed, changed, identical
+    );
+
+    Ok(())
 }
 
 async fn execute_secret_copy_direct(
