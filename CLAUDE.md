@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-crosstache is a comprehensive Azure Key Vault CLI tool written in Rust. The binary is named `xv` and provides secret management, vault operations, blob file storage, and access control for Azure Key Vault.
+crosstache is a cross-platform secrets manager CLI written in Rust. The binary is named `xv`. Currently backed by Azure Key Vault, with the architecture intended to support additional backends (AWS Secrets Manager, etc.) in the future. Core features include secret CRUD, group organization, secret injection (`xv run`), template rendering (`xv inject`), and optional blob file storage.
 
 ## Key Architecture Details
 

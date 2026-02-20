@@ -1,23 +1,37 @@
-# crosstache - Cross-platform Azure Key Vault CLI
+# crosstache
 
-A comprehensive command-line tool for managing Azure Key Vaults, written in Rust. crosstache provides simplified access to secrets, vault management capabilities, and advanced features like secret name sanitization and group-based organization.
+A cross-platform secrets manager for the command line. Currently backed by Azure Key Vault, with plans to support additional backends (AWS Secrets Manager, HashiCorp Vault, etc.).
 
-## Features
+The binary is called `xv`.
 
-- 🔐 **Full Secret Management**: Create, read, update, delete, and list secrets
-- 🏷️ **Group Organization**: Organize secrets into logical groups using tags
-- 🔄 **Name Sanitization**: Support for any secret name through automatic sanitization
-- 🏗️ **Vault Operations**: Create, delete, restore, and manage vaults
-- 👥 **Access Control**: RBAC-based access management for users and service principals
-- 📦 **Import/Export**: Bulk secret operations with JSON/TXT/ENV formats
-- 🔧 **Configuration**: Persistent settings with environment variable overrides
-- 🔍 **Connection String Parsing**: Parse and display connection string components
+## Why crosstache?
+
+Most cloud secret managers have clunky CLIs or force you into their ecosystem. crosstache gives you a clean, consistent interface for everyday secret operations — with features like group organization, secret injection, template rendering, and automatic name sanitization that the native tools lack.
+
+## Quick Start
+
+```bash
+# Install (macOS/Linux)
+curl -sSL https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/install.sh | bash
+
+# Set up your first vault
+xv init
+
+# Store a secret
+xv set "db-password"
+
+# Retrieve it
+xv get "db-password"
+
+# Run a process with secrets injected as env vars
+xv run -- ./my-app
+```
 
 ## Installation
 
-### Quick Install (Recommended)
+### Quick Install
 
-**Linux/macOS:**
+**macOS/Linux:**
 ```bash
 curl -sSL https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/install.sh | bash
 ```
@@ -27,500 +41,252 @@ curl -sSL https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/ins
 iwr -useb https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/install.ps1 | iex
 ```
 
-### Manual Download
+### Pre-built Binaries
 
-Download pre-built binaries from the [releases page](https://github.com/bziobnic/crosstache/releases):
+Download from the [releases page](https://github.com/bziobnic/crosstache/releases):
 
-- **Windows**: `xv-windows-x64.zip`
-- **macOS Intel**: `xv-macos-intel.tar.gz`
-- **macOS Apple Silicon**: `xv-macos-apple-silicon.tar.gz`  
-- **Linux**: `xv-linux-x64.tar.gz`
-
-Extract and add the `xv` binary to your PATH.
+| Platform | Binary |
+|----------|--------|
+| Windows x64 | `xv-windows-x64.zip` |
+| macOS Intel | `xv-macos-intel.tar.gz` |
+| macOS Apple Silicon | `xv-macos-apple-silicon.tar.gz` |
+| Linux x64 | `xv-linux-x64.tar.gz` |
 
 ### From Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/bziobnic/crosstache.git
 cd crosstache
-
-# Build and install
-cargo build --release
 cargo install --path .
-```
-
-### Verify Installation
-
-```bash
-xv --version
 ```
 
 ### macOS Security Note
 
-On macOS, you may see "cannot be opened because the developer cannot be verified" because the binary isn't code-signed. To fix this:
-
-**Option 1 - Right-click method:**
-
-1. Right-click the `xv` binary in Finder
-2. Select "Open"
-3. Click "Open" when prompted
-
-**Option 2 - Command line:**
-
+If macOS blocks the binary ("developer cannot be verified"), run:
 ```bash
-# Remove quarantine attribute (done automatically by install script)
 xattr -d com.apple.quarantine ~/.local/bin/xv
 ```
 
-This only needs to be done once per binary.
+## Core Concepts
 
-## Configuration
-
-crosstache uses a hierarchical configuration system:
-
-1. Command-line flags (highest priority)
-2. Environment variables
-3. Configuration file (`$XDG_CONFIG_HOME/xv/xv.conf` or `$HOME/.config/xv/xv.conf`)
-4. Default values
-
-### Initial Setup
+### Secrets
 
 ```bash
-# Initialize configuration
-xv init
-
-# View current configuration
-xv config show
-
-# Set default vault
-xv config set default_vault my-vault
-
-# Set default subscription
-xv config set subscription_id YOUR_SUBSCRIPTION_ID
+xv set "api-key"                          # Create (prompts for value)
+xv set "api-key" --stdin < key.txt        # Create from stdin
+xv set K1=val1 K2=val2 K3=@file.pem      # Bulk create
+xv get "api-key"                          # Copy to clipboard (auto-clears after 30s)
+xv get "api-key" --raw                    # Print to stdout
+xv list                                   # List all secrets
+xv list --group production                # Filter by group
+xv list --expiring 30d                    # Show secrets expiring soon
+xv update "api-key" --group prod --note "Frontend key"
+xv delete "api-key"                       # Soft-delete
+xv restore "api-key"                      # Restore soft-deleted
+xv purge "api-key"                        # Permanently delete
 ```
 
-### Environment Variables
+### Secret Injection
 
-- `AZURE_SUBSCRIPTION_ID`: Default Azure subscription
-- `AZURE_TENANT_ID`: Azure tenant ID
-- `AZURE_CREDENTIAL_PRIORITY`: Azure credential type to use first (cli, managed_identity, environment, default)
-- `DEFAULT_VAULT`: Default vault name
-- `DEFAULT_RESOURCE_GROUP`: Default resource group
-- `FUNCTION_APP_URL`: Function app URL for extended functionality
-- `CACHE_TTL`: Cache time-to-live in seconds
-- `DEBUG`: Enable debug logging (true/1)
-
-## Authentication
-
-crosstache uses Azure DefaultAzureCredential, supporting multiple authentication methods:
-
-1. Environment variables (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`)
-2. Managed Identity
-3. Azure CLI
-4. Visual Studio Code
-5. Azure PowerShell
-
-### Credential Priority Configuration
-
-You can control which authentication method is tried first using the credential priority setting. This is useful when you want to prioritize Azure CLI over Managed Identity or vice versa.
-
-**Configuration methods (in order of precedence):**
-
-1. **CLI flag**: `--credential-type cli`
-2. **Environment variable**: `export AZURE_CREDENTIAL_PRIORITY=cli`
-3. **Config file**: Add `azure_credential_priority = "cli"` to your config file
-
-**Available credential types:**
-- `cli` or `azure-cli` or `az`: Use Azure CLI credentials first
-- `managed_identity` or `managed-identity` or `msi`: Use Managed Identity first
-- `environment` or `env`: Use environment variable credentials first
-- `default`: Use the default Azure SDK credential chain order
-
-**Examples:**
+Run processes with secrets available as environment variables:
 
 ```bash
-# Use Azure CLI credentials first
-xv list --credential-type cli
+# Inject all secrets from current vault
+xv run -- npm start
 
-# Set environment variable for all commands
-export AZURE_CREDENTIAL_PRIORITY=cli
-xv list
+# Inject only a specific group
+xv run --group production -- ./deploy.sh
 
-# Configure in config file for persistent setting
-xv config set azure_credential_priority cli
+# Secret values are masked in stdout/stderr by default
+xv run --no-masking -- ./debug.sh
 ```
 
-## Usage Examples
+### Template Injection
 
-### Secret Management
+Render config files with secret references resolved:
 
 ```bash
-# Set a secret (prompts for value)
-xv set "api-key"
+# Template uses {{ secret:name }} syntax
+xv inject --template app.config.tmpl --out app.config
 
-# Set a secret with value from stdin
-echo "my-secret-value" | xv set "api-key" --stdin
-
-# Get a secret
-xv get "api-key"
-
-# List all secrets
-xv list
-
-# Delete a secret
-xv delete "api-key"
+# Also supports cross-vault references: xv://vault-name/secret-name
+cat template.yml | xv inject > resolved.yml
 ```
 
-### Group Management
+### Organization
 
+**Folders** — hierarchical organization:
 ```bash
-# Set a secret with folder organization
-xv set "db-password" --folder "production/database"
+xv set "host" --folder "myapp/database"
+xv set "port" --folder "myapp/database"
+```
 
-# List secrets by group
+**Groups** — tag-based, assigned via update:
+```bash
+xv update "db-host" --group "production" --group "database"
 xv list --group production
-
-# Update secret with folder and note
-xv update "db-password" --folder "staging/database" --note "Updated for staging"
 ```
 
-### Advanced Secret Operations
+See [docs/GROUPS.md](docs/GROUPS.md) for details.
+
+### Secret History & Rotation
 
 ```bash
-# Update secret with note and folder
-xv update "api-key" \
-  --note "Production API key for frontend service" \
-  --folder "app/frontend"
-
-# Parse connection string
-xv parse "db-connection"
-
-# Get secret value only (for scripting)
-xv get "api-key" --format raw
+xv history "api-key"                      # Version history
+xv rollback "api-key" --version <id>      # Restore previous version
+xv rotate "api-key"                       # Generate new random value
+xv rotate "api-key" --length 64 --charset alphanumeric
+xv rotate "api-key" --generator ./gen.sh  # Custom generator
 ```
 
 ### Vault Management
 
 ```bash
-# Create a new vault
-xv vault create my-new-vault --resource-group my-rg --location eastus
-
-# List all vaults
+xv vault create my-vault --resource-group my-rg --location eastus
 xv vault list
-
-# Get vault information
-xv info my-vault
-# or
 xv vault info my-vault
-
-# Delete vault (soft delete)
-xv vault delete my-vault --resource-group my-rg
-
-# Restore deleted vault
-xv vault restore my-vault --location eastus
-
-# Switch vault context
-xv context set my-vault
-# or
-xv cx set my-vault
-
-# View current context
-xv context show
+xv vault delete my-vault
+xv vault export my-vault --output secrets.json
+xv vault import my-vault --input secrets.json --dry-run
 ```
 
-### File Operations
+### Vault Context
 
-crosstache includes comprehensive file management capabilities using Azure Blob Storage:
+Switch between vaults without repeating `--vault` on every command:
 
 ```bash
-# Quick file upload
-xv upload config.json
+xv context use my-vault         # Switch
+xv cx use my-vault              # Alias
+xv context show                 # Current context
+xv context list                 # Recent contexts
+```
 
-# Quick file download
+### Environment Profiles
+
+Named profiles that map to different vaults/groups:
+
+```bash
+xv env create prod --vault prod-vault --group production
+xv env use prod
+xv env pull --output .env       # Download as .env file
+xv env push .env                # Upload .env contents as secrets
+```
+
+### Cross-Vault Operations
+
+```bash
+xv copy "api-key" --from vault-a --to vault-b
+xv move "api-key" --from vault-a --to vault-b
+```
+
+### File Storage
+
+Optional blob storage for files (requires setup via `xv init`):
+
+```bash
+xv upload ./config.json
 xv download config.json
-
-# Full file command syntax
-xv file upload config.json
-xv file download config.json --output ./downloads/
 xv file list
-xv file delete config.json
-
-# File editing (download, edit, upload)
-xv file edit config.json
-```
-
-#### Recursive Upload with Directory Structure Preservation
-
-Upload entire directory trees while preserving folder structure:
-
-```bash
-# Upload directory preserving structure (default behavior)
-xv file upload ./docs --recursive
-
-# Result in blob storage:
-# docs/README.md
-# docs/api/v1/users.md
-# docs/api/v1/auth.md
-# docs/guides/quickstart.md
-
-# Upload with custom prefix
+xv file upload ./docs --recursive              # Preserves directory structure
+xv file download "docs" --recursive --output ./local
 xv file upload ./src --recursive --prefix "backup/2024-01-15"
-
-# Result in blob storage:
-# backup/2024-01-15/src/main.rs
-# backup/2024-01-15/src/lib.rs
-
-# Flatten structure (upload all files to root)
-xv file upload ./docs --recursive --flatten
-
-# Result in blob storage:
-# README.md
-# users.md
-# auth.md
-# quickstart.md
 ```
 
-**Directory Upload Features:**
-- ✅ **Structure preservation**: Maintains folder hierarchy using Azure blob name prefixes
-- ✅ **Custom prefixes**: Add prefixes like `backup/2024-01-15/` to organize uploads
-- ✅ **Flatten option**: Upload all files to container root (backward compatibility)
-- ✅ **Security**: Hidden files (`.git`, `.env`) are automatically skipped
-- ✅ **Safety**: Symbolic links are skipped to prevent loops
-- ✅ **Validation**: Checks blob name length limits (1024 chars max)
-
-#### Recursive Download with Directory Structure Recreation
-
-Download entire directory trees from blob storage while recreating folder structure:
+### Identity & Auditing
 
 ```bash
-# Download directory preserving structure (default behavior)
-xv file download "backup/2024-01-15" --recursive
-
-# Result locally:
-# ./backup/2024-01-15/api/users.md
-# ./backup/2024-01-15/api/auth.md
-# ./backup/2024-01-15/docs/guide.md
-
-# Flatten structure (download all files to current directory)
-xv file download "backup/2024-01-15" --recursive --flatten
-
-# Result locally:
-# ./users.md
-# ./auth.md
-# ./guide.md
-
-# Download to custom output directory
-xv file download "backup/2024-01-15" --recursive --output ./restored
+xv whoami                       # Show authenticated identity
+xv audit "api-key"              # Access/change history
+xv audit --vault my-vault       # Vault-wide activity
 ```
 
-**Directory Download Features:**
-- ✅ **Structure recreation**: Recreates local directory hierarchy from blob names
-- ✅ **Flatten option**: Download all files to a single directory
-- ✅ **Custom output**: Specify custom local directory for downloads
-- ✅ **Empty file support**: Handles 0-byte files correctly
-- ✅ **Force overwrite**: Use `--force` to overwrite existing files
-- ✅ **Error handling**: Continue on error with `--continue-on-error` flag
+## Configuration
 
-**Note**: File operations require blob storage configuration during `xv init`.
+### Hierarchy (highest → lowest priority)
 
-### Access Management
+1. CLI flags (e.g., `--credential-type cli`)
+2. Environment variables
+3. Config file (`~/.config/xv/xv.conf`)
+4. Defaults
 
-**Note**: Vault sharing commands are currently not implemented (see TODO.md for status)
+### Setup
 
 ```bash
-# These commands are planned but not yet functional:
-# xv vault share grant my-vault user@example.com --access-level reader
-# xv vault share list my-vault
-# xv vault share revoke my-vault user@example.com
+xv init                                   # Interactive setup
+xv config show                            # View current config
+xv config set default_vault my-vault      # Set a value
 ```
 
-## Secret Name Sanitization
+### Key Environment Variables
 
-crosstache automatically sanitizes secret names to comply with Azure Key Vault requirements:
+| Variable | Purpose |
+|----------|---------|
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription |
+| `AZURE_TENANT_ID` | Azure tenant |
+| `AZURE_CREDENTIAL_PRIORITY` | Auth method priority (`cli`, `managed_identity`, `environment`, `default`) |
+| `DEFAULT_VAULT` | Default vault name |
+| `DEFAULT_RESOURCE_GROUP` | Default resource group |
 
-- Replaces invalid characters with hyphens
-- Removes consecutive hyphens
-- Trims hyphens from start/end
-- Hashes names longer than 127 characters
-- Preserves original names in tags
+### Authentication
 
-Example:
+crosstache uses Azure's credential chain. You can control priority:
+
 ```bash
-# Original name with special characters
+xv list --credential-type cli             # Prefer Azure CLI
+export AZURE_CREDENTIAL_PRIORITY=cli      # For all commands
+xv config set azure_credential_priority cli  # Persistent
+```
+
+Supported methods: Azure CLI, environment variables, managed identity, VS Code, PowerShell.
+
+## Name Sanitization
+
+Azure Key Vault only allows alphanumeric characters and hyphens. crosstache handles this transparently:
+
+```bash
 xv set "my-app/database:connection@prod"
-
-# Sanitized to: my-app-database-connection-prod
-# Original name stored in tags for reference
+# Stored as: my-app-database-connection-prod
+# Original name preserved in tags for lookup
 ```
 
-## Folder Organization
-
-Use folders to organize related secrets hierarchically:
-
-```bash
-# Hierarchical organization using folders
-xv set "host" --folder "myapp/database"
-xv set "port" --folder "myapp/database"
-xv set "key" --folder "myapp/api"
-
-# Filter by group (folder-based)
-xv list --group "myapp/database"
-```
+Names longer than 127 characters are SHA256-hashed.
 
 ## Output Formats
 
-crosstache supports multiple output formats:
-
 ```bash
-# Table format (default)
-xv list
-
-# JSON format
-xv list --format json
-
-# YAML format
-xv list --format yaml
-
-# Raw value only (for scripting)
-xv get "api-key" --format raw
+xv list                         # Table (default)
+xv list --format json           # JSON
+xv list --format yaml           # YAML
+xv get "key" --raw              # Raw value (for scripting)
 ```
 
-## Architecture
+## Security
 
-crosstache uses a hybrid approach for Azure integration:
-
-- **Authentication**: Azure SDK v0.21 with DefaultAzureCredential
-- **Secret Operations**: Direct REST API calls to Azure Key Vault API v7.4
-- **Vault Management**: REST API for full control over operations
-- **File Storage**: Azure Blob Storage for file operations (in development)
-- **Tag Support**: Full tag persistence for groups and metadata
-
-### Module Structure
-
-- `auth/`: Azure authentication using DefaultAzureCredential pattern
-  - `provider.rs`: Core Azure authentication implementation with Graph API integration
-- `vault/`: Vault management operations (create, delete, list, restore)
-  - `manager.rs`: Core vault operations and lifecycle management
-  - `operations.rs`: Specific vault operations (RBAC, access control)
-- `secret/`: Secret CRUD operations with group and metadata support
-  - `manager.rs`: Core secret operations with REST API integration
-  - `name_manager.rs`: Name sanitization and validation logic
-- `blob/`: File storage operations using Azure Blob Storage (in development)
-  - `manager.rs`: Core file operations
-  - `models.rs`: File-related data structures
-- `config/`: Configuration management with hierarchy (CLI → env vars → config file → defaults)
-  - `settings.rs`: Configuration structure and loading
-  - `context.rs`: Runtime context management
-- `utils/`: Sanitization, formatting, retry logic, and helper functions
-  - `sanitizer.rs`: Azure Key Vault name sanitization with hashing
-  - `network.rs`: HTTP client configuration with proper error handling
-  - `retry.rs`: Retry logic for Azure API calls
-  - `format.rs`: Output formatting (JSON, table, plain text)
-- `cli/`: Command parsing using `clap` with derive macros
-  - `commands.rs`: All CLI command definitions and execution logic
-
-### Key Implementation Details
-
-- **Group Management**: Groups stored as comma-separated values in single "groups" tag
-- **Name Sanitization**: Client-side sanitization with original names preserved in "original_name" tag; names >127 chars are SHA256 hashed
-- **Error Handling**: Custom `crosstacheError` enum with `thiserror` for structured errors
-- **Async**: Full `tokio` async runtime throughout
-- **REST API Integration**: Uses `reqwest` with bearer tokens from Azure SDK for secret operations
-- **Context System**: Vault context management for seamless multi-vault workflows
-
-### Why REST API?
-
-The Azure SDK has limitations with tag support in secret operations. By using the REST API directly, crosstache ensures:
-
-- Complete tag persistence (groups, original_name, created_by)
-- Full control over secret metadata
-- Compatibility with all Azure Key Vault features
-- Reliable group management functionality
+- Secret values are zeroized from memory after use (`zeroize` crate)
+- Clipboard auto-clears 30 seconds after copy
+- Config and export files are written with restricted permissions (0600)
+- Recursive downloads are protected against path traversal
+- Generator scripts are validated for ownership and permissions
+- Secret values in `xv run` output are masked by default
 
 ## Development
 
-### Building and Running
 ```bash
-# Build in debug mode
-cargo build
-
-# Build release version
-cargo build --release
-
-# Run the CLI tool
-cargo run -- [COMMAND]
-
-# Install locally
-cargo install --path .
+cargo build                     # Debug build
+cargo build --release           # Release build
+cargo test                      # Run tests
+cargo fmt && cargo clippy       # Format + lint
 ```
 
-### Testing
-```bash
-# Run all tests
-cargo test
+Build without file operations: `cargo build --no-default-features`
 
-# Run tests with output
-cargo test -- --nocapture
-
-# Run specific test file
-cargo test --test auth_tests
-cargo test --test vault_tests
-
-# Run tests in single thread (useful for Azure API tests)
-cargo test -- --test-threads=1
-
-# Run unit tests only (exclude integration tests)
-cargo test --lib
-```
-
-### Code Quality
-```bash
-# Format code
-cargo fmt
-
-# Run clippy linter
-cargo clippy
-
-# Check without building
-cargo check
-```
-
-### Build System
-
-The project uses modern Rust tooling for version management and releases:
-
-- **Versioning**: Uses `cargo-release` for semantic version bumping and automated releases
-- **Build Metadata**: Uses the `built` crate to embed git commit hash, branch, target, and compiler information
-- **GitHub Releases**: Automated binary building and publishing via GitHub Actions
-- **Cross-platform**: Builds for Windows (x64), macOS (Intel + Apple Silicon), and Linux (x64)
-
-#### Release Process
+### Release
 
 ```bash
-# Bump version and create release
-cargo release patch    # 0.1.0 → 0.1.1
-cargo release minor    # 0.1.0 → 0.2.0  
-cargo release major    # 0.1.0 → 1.0.0
-
-# Preview what would happen
-cargo release patch --dry-run
-
-# View changes since last release
-cargo release changes
+cargo release patch             # 0.1.0 → 0.1.1
+cargo release minor             # 0.1.0 → 0.2.0
 ```
-
-GitHub Actions automatically builds and publishes binaries when tags are pushed.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- Built with Rust and the Azure SDK for Rust
-- Uses REST API for enhanced functionality
+MIT — see [LICENSE](LICENSE).
