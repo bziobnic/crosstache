@@ -1,6 +1,6 @@
 [package]
 name = "crosstache"
-version = "0.4.2"
+version = "0.4.5"
 edition = "2021"
 authors = ["crosstache Team"]
 description = "A comprehensive command-line tool for managing Azure Key Vaults"
