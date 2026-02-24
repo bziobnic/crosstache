@@ -3608,14 +3608,10 @@ fn extract_claims_from_token(token: &str) -> Result<TokenClaims> {
     }
 
     let payload = parts[1];
-    let padded = match payload.len() % 4 {
-        0 => payload.to_string(),
-        n => format!("{}{}", payload, "=".repeat(4 - n)),
-    };
-
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let decoded = STANDARD
-        .decode(&padded)
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    // Azure AD JWT tokens use base64url encoding (RFC 4648 §5), no padding
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
         .map_err(|_| CrosstacheError::authentication("Failed to decode token payload"))?;
 
     let payload_str = String::from_utf8(decoded)
