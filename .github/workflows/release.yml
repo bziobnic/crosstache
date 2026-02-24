@@ -13,9 +13,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify-version:
+    name: Verify Version Match
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Cargo.toml version matches tag
+        run: |
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          TAG_VERSION=${GITHUB_REF_NAME#v}
+          echo "Cargo.toml version : $CARGO_VERSION"
+          echo "Git tag version     : $TAG_VERSION"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo ""
+            echo "❌ Version mismatch!"
+            echo "   Cargo.toml says $CARGO_VERSION but the tag is v$TAG_VERSION."
+            echo "   Bump the version in Cargo.toml before tagging, or use 'cargo release'."
+            exit 1
+          fi
+          echo "✅ Versions match — good to go."
+
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    needs: verify-version
     steps:
       - uses: actions/checkout@v4
         with:
