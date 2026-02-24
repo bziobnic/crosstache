@@ -3556,9 +3556,9 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     let context_manager = ContextManager::load().await.unwrap_or_default();
 
     if let Some(current_vault) = context_manager.current_vault() {
-        println!("   Default Vault: {}", current_vault);
+        println!("   Current Vault: {}", current_vault);
     } else {
-        println!("   Default Vault: None set");
+        println!("   Current Vault: None set");
     }
 
     if let Some(current_sub) = context_manager.current_subscription_id() {
@@ -3581,7 +3581,7 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     }
 
     println!("\n🔧 Configuration:");
-    println!("   Default vault: {}", config.default_vault);
+    println!("   Configured Default Vault: {}", config.default_vault);
     println!("   Default subscription: {}", config.subscription_id);
     println!("   No color mode: {}", config.no_color);
     println!(
