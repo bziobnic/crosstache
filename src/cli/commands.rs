@@ -3514,17 +3514,40 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
             CrosstacheError::authentication(format!("Failed to get management token: {e}"))
         })?;
 
-    // Parse token to get tenant ID (from JWT)
-    let tenant_id = extract_tenant_from_token(token.token.secret())?;
+    // Parse token to get identity info (from JWT)
+    let token_claims = extract_claims_from_token(token.token.secret())?;
 
     println!("👤 Identity Information:");
-    println!("   Tenant ID: {}", tenant_id);
+    if let Some(ref name) = token_claims.name {
+        println!("   Name: {}", name);
+    }
+    if let Some(ref email) = token_claims.email {
+        println!("   Email: {}", email);
+    }
+    if token_claims.name.is_none() && token_claims.email.is_none() {
+        if let Some(ref oid) = token_claims.object_id {
+            println!("   Object ID: {}", oid);
+        }
+    }
 
-    // Get subscription information
-    if let Ok(subscription_id) = get_current_subscription(management_token.token.secret()).await {
-        println!("   Subscription ID: {}", subscription_id);
-    } else {
-        println!("   Subscription ID: Unable to determine");
+    // Get tenant name
+    if let Some(ref tid) = token_claims.tenant_id {
+        let tenant_display =
+            match get_tenant_name(management_token.token.secret(), tid).await {
+                Ok(name) => format!("{} ({})", name, tid),
+                Err(_) => tid.clone(),
+            };
+        println!("   Tenant: {}", tenant_display);
+    }
+
+    // Get subscription information with name
+    match get_current_subscription_details(management_token.token.secret()).await {
+        Ok((sub_id, sub_name)) => {
+            println!("   Subscription: {} ({})", sub_name, sub_id);
+        }
+        Err(_) => {
+            println!("   Subscription: Unable to determine");
+        }
     }
 
     // Show current context information
@@ -3569,18 +3592,22 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Extract tenant ID from JWT token
-fn extract_tenant_from_token(token: &str) -> Result<String> {
-    // JWT tokens have 3 parts separated by dots: header.payload.signature
+/// Claims extracted from a JWT token.
+struct TokenClaims {
+    tenant_id: Option<String>,
+    name: Option<String>,
+    email: Option<String>,
+    object_id: Option<String>,
+}
+
+/// Decode a JWT payload and extract identity claims.
+fn extract_claims_from_token(token: &str) -> Result<TokenClaims> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return Err(CrosstacheError::authentication("Invalid JWT token format"));
     }
 
-    // Decode the payload (second part)
     let payload = parts[1];
-
-    // Add padding if needed for base64 decoding
     let padded = match payload.len() % 4 {
         0 => payload.to_string(),
         n => format!("{}{}", payload, "=".repeat(4 - n)),
@@ -3594,17 +3621,78 @@ fn extract_tenant_from_token(token: &str) -> Result<String> {
     let payload_str = String::from_utf8(decoded)
         .map_err(|_| CrosstacheError::authentication("Invalid UTF-8 in token payload"))?;
 
-    let payload_json: serde_json::Value = serde_json::from_str(&payload_str)
+    let v: serde_json::Value = serde_json::from_str(&payload_str)
         .map_err(|_| CrosstacheError::authentication("Invalid JSON in token payload"))?;
 
-    payload_json["tid"]
+    // Azure AD tokens use different claim names depending on token version:
+    //   v1: unique_name, upn    v2: preferred_username, email
+    let email = v["email"]
         .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| CrosstacheError::authentication("Tenant ID not found in token"))
+        .or_else(|| v["preferred_username"].as_str())
+        .or_else(|| v["upn"].as_str())
+        .or_else(|| v["unique_name"].as_str())
+        .map(String::from);
+
+    let name = v["name"].as_str().map(String::from);
+
+    let tenant_id = v["tid"].as_str().map(String::from);
+
+    let object_id = v["oid"].as_str().map(String::from);
+
+    Ok(TokenClaims {
+        tenant_id,
+        name,
+        email,
+        object_id,
+    })
 }
 
-/// Get current subscription ID from Azure management API
-async fn get_current_subscription(token: &str) -> Result<String> {
+/// Resolve a tenant ID to its display name via the Azure management API.
+async fn get_tenant_name(token: &str, _tenant_id: &str) -> Result<String> {
+    use crate::utils::network::{create_http_client, NetworkConfig};
+
+    let network_config = NetworkConfig::default();
+    let http_client = create_http_client(&network_config)?;
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {}", token)
+            .parse()
+            .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+    );
+
+    let response = http_client
+        .get("https://management.azure.com/tenants?api-version=2020-01-01")
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to get tenants: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(CrosstacheError::azure_api("Failed to get tenant information"));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to parse response: {e}")))?;
+
+    if let Some(tenants) = json["value"].as_array() {
+        for tenant in tenants {
+            if tenant["tenantId"].as_str() == Some(_tenant_id) {
+                if let Some(name) = tenant["displayName"].as_str() {
+                    return Ok(name.to_string());
+                }
+            }
+        }
+    }
+
+    Err(CrosstacheError::azure_api("Tenant name not found"))
+}
+
+/// Get the current subscription ID and display name.
+async fn get_current_subscription_details(token: &str) -> Result<(String, String)> {
     use crate::utils::network::{create_http_client, NetworkConfig};
 
     let network_config = NetworkConfig::default();
@@ -3638,9 +3726,15 @@ async fn get_current_subscription(token: &str) -> Result<String> {
 
     if let Some(subscriptions) = json["value"].as_array() {
         if let Some(first_sub) = subscriptions.first() {
-            if let Some(sub_id) = first_sub["subscriptionId"].as_str() {
-                return Ok(sub_id.to_string());
-            }
+            let sub_id = first_sub["subscriptionId"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let sub_name = first_sub["displayName"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            return Ok((sub_id, sub_name));
         }
     }
 
