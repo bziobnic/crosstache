@@ -4098,29 +4098,23 @@ async fn execute_secret_get(
     } else {
         // Default behavior - copy to clipboard
         if let Some(ref value) = secret.value {
-            match arboard::Clipboard::new() {
-                Ok(mut clipboard) => match clipboard.set_text(value.to_string()) {
-                    Ok(_) => {
-                        let timeout = config.clipboard_timeout;
-                        if timeout > 0 {
-                            println!(
-                                "✅ Secret '{name}' copied to clipboard (auto-clears in {timeout}s)"
-                            );
-                            schedule_clipboard_clear(timeout);
-                        } else {
-                            println!("✅ Secret '{name}' copied to clipboard");
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️  Failed to copy to clipboard: {e}");
-                        eprintln!(
-                            "Use 'xv get {name} --raw' to print the value to stdout instead."
+            match copy_to_clipboard(value) {
+                Ok(()) => {
+                    let timeout = config.clipboard_timeout;
+                    if timeout > 0 {
+                        println!(
+                            "✅ Secret '{name}' copied to clipboard (auto-clears in {timeout}s)"
                         );
+                        schedule_clipboard_clear(timeout);
+                    } else {
+                        println!("✅ Secret '{name}' copied to clipboard");
                     }
-                },
+                }
                 Err(e) => {
-                    eprintln!("⚠️  Failed to access clipboard: {e}");
-                    eprintln!("Use 'xv get {name} --raw' to print the value to stdout instead.");
+                    eprintln!("⚠️  Failed to copy to clipboard: {e}");
+                    eprintln!(
+                        "Use 'xv get {name} --raw' to print the value to stdout instead."
+                    );
                 }
             }
         } else {
@@ -4129,6 +4123,98 @@ async fn execute_secret_get(
     }
 
     Ok(())
+}
+
+/// Copy text to the system clipboard.
+///
+/// On Linux (X11/Wayland), `arboard` clipboard content is lost when the process exits
+/// because the clipboard is owned by the process. We use external tools (`wl-copy`,
+/// `xclip`, `xsel`) which fork a daemon to hold the selection, so clipboard content
+/// persists. Falls back to `arboard` on other platforms or if no tool is available.
+fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(result) = linux_clipboard_copy(text) {
+            return result;
+        }
+        // No external tool found — fall back to arboard with a warning
+        eprintln!(
+            "hint: Install xclip, xsel, or wl-clipboard for reliable clipboard support on Linux."
+        );
+    }
+
+    // macOS, Windows, and Linux fallback
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("Failed to access clipboard: {e}"))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| format!("Failed to copy to clipboard: {e}"))
+}
+
+/// Try to copy to clipboard using a Linux external tool.
+/// Returns `Some(Ok(()))` on success, `Some(Err(...))` if a tool was found but failed,
+/// or `None` if no suitable tool is available.
+#[cfg(target_os = "linux")]
+fn linux_clipboard_copy(text: &str) -> Option<std::result::Result<(), String>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+
+    // Ordered list of clipboard commands to try
+    let candidates: &[(&str, &[&str])] = if is_wayland {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    } else {
+        &[
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+            ("wl-copy", &[]),
+        ]
+    };
+
+    for &(cmd, args) in candidates {
+        if Command::new("which")
+            .arg(cmd)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            let child = Command::new(cmd)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            match child {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        if let Err(e) = stdin.write_all(text.as_bytes()) {
+                            return Some(Err(format!("{cmd}: failed to write to stdin: {e}")));
+                        }
+                        drop(stdin);
+                    }
+                    match child.wait() {
+                        Ok(status) if status.success() => return Some(Ok(())),
+                        Ok(status) => {
+                            return Some(Err(format!("{cmd} exited with {status}")));
+                        }
+                        Err(e) => {
+                            return Some(Err(format!("{cmd}: {e}")));
+                        }
+                    }
+                }
+                Err(_) => continue, // tool exists but failed to spawn, try next
+            }
+        }
+    }
+
+    None // no suitable tool found
 }
 
 /// Spawn a detached child process that clears the clipboard after `seconds`.
@@ -4147,12 +4233,22 @@ fn schedule_clipboard_clear(seconds: u64) {
 
     #[cfg(target_os = "linux")]
     {
-        // Try xclip first (most common), fall back to xsel
-        let cmd = format!(
-            "sleep {seconds} && \
-             (xclip -selection clipboard < /dev/null 2>/dev/null || \
-              xsel --clipboard --delete 2>/dev/null || true)"
-        );
+        let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+        let cmd = if is_wayland {
+            format!(
+                "sleep {seconds} && \
+                 (wl-copy --clear 2>/dev/null || \
+                  xclip -selection clipboard < /dev/null 2>/dev/null || \
+                  xsel --clipboard --delete 2>/dev/null || true)"
+            )
+        } else {
+            format!(
+                "sleep {seconds} && \
+                 (xclip -selection clipboard < /dev/null 2>/dev/null || \
+                  xsel --clipboard --delete 2>/dev/null || \
+                  wl-copy --clear 2>/dev/null || true)"
+            )
+        };
         let _ = std::process::Command::new("sh")
             .args(["-c", &cmd])
             .stdin(std::process::Stdio::null())
