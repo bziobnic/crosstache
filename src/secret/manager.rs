@@ -1095,9 +1095,9 @@ impl SecretOperations for AzureSecretOperations {
                 for version_json in value_array {
                     let attributes = &version_json["attributes"];
 
-                    let version = version_json["kid"]
+                    let version = version_json["id"]
                         .as_str()
-                        .and_then(|kid| kid.split('/').next_back())
+                        .and_then(|id| id.split('/').next_back())
                         .unwrap_or("unknown")
                         .to_string();
 
