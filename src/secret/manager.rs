@@ -30,8 +30,14 @@ pub struct SecretProperties {
     pub original_name: String,
     #[tabled(skip)]
     pub value: Option<Zeroizing<String>>,
-    #[tabled(rename = "Version")]
+    #[tabled(skip)]
     pub version: String,
+    /// Human-readable sequential version number (1 = oldest). None when not in a version list context.
+    #[tabled(rename = "Version", display_with = "display_version_number")]
+    pub version_number: Option<u32>,
+    /// Raw Unix timestamp for sorting (not displayed)
+    #[tabled(skip)]
+    pub created_timestamp: i64,
     #[tabled(rename = "Created")]
     pub created_on: String,
     #[tabled(rename = "Updated")]
@@ -79,6 +85,14 @@ pub struct SecretUpdateRequest {
     pub folder: Option<String>,
     pub replace_tags: bool,
     pub replace_groups: bool,
+}
+
+/// Display function for optional version number (e.g. Some(3) → "v3", None → "-")
+fn display_version_number(v: &Option<u32>) -> String {
+    match v {
+        Some(n) => format!("v{n}"),
+        None => "-".to_string(),
+    }
 }
 
 /// Display function for optional group
@@ -544,6 +558,8 @@ impl SecretOperations for AzureSecretOperations {
                 .and_then(|v| v.as_str())
                 .unwrap_or("text/plain")
                 .to_string(),
+            version_number: None,
+            created_timestamp: 0,
         })
     }
 
@@ -678,6 +694,8 @@ impl SecretOperations for AzureSecretOperations {
                 .and_then(|v| v.as_str())
                 .unwrap_or("text/plain")
                 .to_string(),
+            version_number: None,
+            created_timestamp: 0,
         })
     }
 
@@ -970,6 +988,8 @@ impl SecretOperations for AzureSecretOperations {
                 .and_then(|v| v.as_str())
                 .unwrap_or("text/plain")
                 .to_string(),
+            version_number: None,
+            created_timestamp: 0,
         })
     }
 
@@ -1120,6 +1140,7 @@ impl SecretOperations for AzureSecretOperations {
                         original_name: secret_name.to_string(),
                         value: None,
                         version,
+                        version_number: None,
                         created_on,
                         updated_on,
                         enabled,
@@ -1127,6 +1148,7 @@ impl SecretOperations for AzureSecretOperations {
                         not_before: None,
                         tags: HashMap::new(),
                         content_type: String::new(),
+                        created_timestamp,
                     });
                 }
             }
@@ -1137,8 +1159,13 @@ impl SecretOperations for AzureSecretOperations {
                 .map(|s| s.to_string());
         }
 
-        // Sort by creation time, newest first
-        versions.sort_by(|a, b| b.created_on.cmp(&a.created_on));
+        // Sort ascending by raw Unix timestamp to assign sequential version numbers (oldest = v1)
+        versions.sort_by_key(|v| v.created_timestamp);
+        for (i, v) in versions.iter_mut().enumerate() {
+            v.version_number = Some((i + 1) as u32);
+        }
+        // Re-sort newest first for display
+        versions.sort_by(|a, b| b.created_timestamp.cmp(&a.created_timestamp));
         Ok(versions)
     }
 

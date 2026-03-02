@@ -4312,7 +4312,10 @@ async fn execute_secret_history(
     let version_infos: Vec<VersionInfo> = versions
         .into_iter()
         .map(|v| VersionInfo {
-            version: v.version,
+            version: v
+                .version_number
+                .map(|n| format!("v{n}"))
+                .unwrap_or_else(|| v.version.chars().take(8).collect::<String>() + "..."),
             created: v.created_on,
             updated: v.updated_on,
             enabled: if v.enabled { "Yes" } else { "No" }.to_string(),
@@ -4345,11 +4348,50 @@ async fn execute_secret_rollback(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
+    // Resolve version: if the user passed an integer (e.g. "3"), look up the GUID
+    let resolved_version_guid: String;
+    let display_version: String;
+    if let Ok(version_num) = version.trim_start_matches('v').parse::<u32>() {
+        if version_num == 0 {
+            return Err(crate::error::CrosstacheError::invalid_argument(
+                "Version number must be 1 or greater (v1 is the oldest version)",
+            ));
+        }
+        let versions_list = secret_manager
+            .secret_ops()
+            .get_secret_versions(&vault_name, name)
+            .await?;
+        let max_version = versions_list
+            .iter()
+            .filter_map(|v| v.version_number)
+            .max()
+            .unwrap_or(0);
+        let matched = versions_list
+            .into_iter()
+            .find(|v| v.version_number == Some(version_num));
+        match matched {
+            Some(v) => {
+                display_version = format!("v{version_num}");
+                resolved_version_guid = v.version;
+            }
+            None => {
+                return Err(crate::error::CrosstacheError::invalid_argument(format!(
+                    "Version v{version_num} not found for secret '{name}'. \
+                     Available versions: v1–v{max_version} (use 'xv history {name}' to list them)"
+                )));
+            }
+        }
+    } else {
+        // Assume it's already a GUID
+        resolved_version_guid = version.to_string();
+        display_version = version.to_string();
+    }
+
     // Confirm rollback unless force flag is used
     if !force {
         let prompt = InteractivePrompt::new();
         let confirm = prompt.confirm(
-            &format!("Are you sure you want to rollback secret '{name}' to version '{version}'?"),
+            &format!("Are you sure you want to rollback secret '{name}' to version '{display_version}'?"),
             false,
         )?;
 
@@ -4362,11 +4404,11 @@ async fn execute_secret_rollback(
     // Perform rollback using the secret operations
     let result = secret_manager
         .secret_ops()
-        .rollback_secret(&vault_name, name, version)
+        .rollback_secret(&vault_name, name, &resolved_version_guid)
         .await?;
 
-    println!("✅ Successfully rolled back secret '{name}' to version '{version}'");
-    println!("New version: {}", result.version);
+    println!("✅ Successfully rolled back secret '{name}' to version '{display_version}'");
+    println!("New version GUID: {}", result.version);
 
     Ok(())
 }
