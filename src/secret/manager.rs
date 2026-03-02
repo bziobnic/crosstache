@@ -35,6 +35,9 @@ pub struct SecretProperties {
     /// Human-readable sequential version number (1 = oldest). None when not in a version list context.
     #[tabled(rename = "Version", display_with = "display_version_number")]
     pub version_number: Option<u32>,
+    /// Raw Unix timestamp for sorting (not displayed)
+    #[tabled(skip)]
+    pub created_timestamp: i64,
     #[tabled(rename = "Created")]
     pub created_on: String,
     #[tabled(rename = "Updated")]
@@ -556,6 +559,7 @@ impl SecretOperations for AzureSecretOperations {
                 .unwrap_or("text/plain")
                 .to_string(),
             version_number: None,
+            created_timestamp: 0,
         })
     }
 
@@ -691,6 +695,7 @@ impl SecretOperations for AzureSecretOperations {
                 .unwrap_or("text/plain")
                 .to_string(),
             version_number: None,
+            created_timestamp: 0,
         })
     }
 
@@ -984,6 +989,7 @@ impl SecretOperations for AzureSecretOperations {
                 .unwrap_or("text/plain")
                 .to_string(),
             version_number: None,
+            created_timestamp: 0,
         })
     }
 
@@ -1142,6 +1148,7 @@ impl SecretOperations for AzureSecretOperations {
                         not_before: None,
                         tags: HashMap::new(),
                         content_type: String::new(),
+                        created_timestamp,
                     });
                 }
             }
@@ -1152,13 +1159,13 @@ impl SecretOperations for AzureSecretOperations {
                 .map(|s| s.to_string());
         }
 
-        // Sort ascending by creation time to assign sequential version numbers (oldest = v1)
-        versions.sort_by(|a, b| a.created_on.cmp(&b.created_on));
+        // Sort ascending by raw Unix timestamp to assign sequential version numbers (oldest = v1)
+        versions.sort_by_key(|v| v.created_timestamp);
         for (i, v) in versions.iter_mut().enumerate() {
             v.version_number = Some((i + 1) as u32);
         }
         // Re-sort newest first for display
-        versions.sort_by(|a, b| b.created_on.cmp(&a.created_on));
+        versions.sort_by(|a, b| b.created_timestamp.cmp(&a.created_timestamp));
         Ok(versions)
     }
 

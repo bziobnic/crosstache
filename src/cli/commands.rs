@@ -4352,10 +4352,20 @@ async fn execute_secret_rollback(
     let resolved_version_guid: String;
     let display_version: String;
     if let Ok(version_num) = version.trim_start_matches('v').parse::<u32>() {
+        if version_num == 0 {
+            return Err(crate::error::CrosstacheError::invalid_argument(
+                "Version number must be 1 or greater (v1 is the oldest version)",
+            ));
+        }
         let versions_list = secret_manager
             .secret_ops()
             .get_secret_versions(&vault_name, name)
             .await?;
+        let max_version = versions_list
+            .iter()
+            .filter_map(|v| v.version_number)
+            .max()
+            .unwrap_or(0);
         let matched = versions_list
             .into_iter()
             .find(|v| v.version_number == Some(version_num));
@@ -4366,7 +4376,8 @@ async fn execute_secret_rollback(
             }
             None => {
                 return Err(crate::error::CrosstacheError::invalid_argument(format!(
-                    "Version number {version_num} not found for secret '{name}'"
+                    "Version v{version_num} not found for secret '{name}'. \
+                     Available versions: v1–v{max_version} (use 'xv history {name}' to list them)"
                 )));
             }
         }
