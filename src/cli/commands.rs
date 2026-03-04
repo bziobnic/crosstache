@@ -204,6 +204,16 @@ pub enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Interactively find and copy a secret by name pattern (alias: search)
+    #[command(alias = "search")]
+    Find {
+        /// Search term — substring match, or prefix with trailing * (e.g. claude-*)
+        /// Omit to browse all secrets interactively.
+        term: Option<String>,
+        /// Print value to stdout instead of copying to clipboard
+        #[arg(short, long)]
+        raw: bool,
+    },
     /// List secrets in the current vault context (alias: ls)
     #[command(alias = "ls")]
     List {
@@ -964,6 +974,9 @@ impl Cli {
             }
             Commands::Get { name, raw, version } => {
                 execute_secret_get_direct(&name, raw, version, config).await
+            }
+            Commands::Find { term, raw } => {
+                execute_secret_find_direct(term, raw, config).await
             }
             Commands::List {
                 group,
@@ -4120,6 +4133,170 @@ async fn execute_secret_get(
         } else {
             println!("⚠️  Secret '{name}' has no value");
         }
+    }
+
+    Ok(())
+}
+
+async fn execute_secret_find_direct(
+    term: Option<String>,
+    raw: bool,
+    config: Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone(),
+        )
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        })?,
+    );
+
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    execute_secret_find(&secret_manager, term.as_deref(), raw, &config).await
+}
+
+async fn execute_secret_find(
+    secret_manager: &crate::secret::manager::SecretManager,
+    term: Option<&str>,
+    raw: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::ContextManager;
+    use dialoguer::{theme::ColorfulTheme, FuzzySelect};
+
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let _ = context_manager.update_usage(&vault_name).await;
+
+    // Fetch all secrets from the vault
+    let all_secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
+        .await?;
+
+    if all_secrets.is_empty() {
+        println!("No secrets found in vault '{vault_name}'");
+        return Ok(());
+    }
+
+    // Filter by term if provided
+    let filtered: Vec<_> = if let Some(term) = term {
+        // Support simple glob prefix (e.g. "claude-*" → prefix match on "claude-")
+        let (prefix_only, search_term) = if term.ends_with('*') {
+            (true, term.trim_end_matches('*'))
+        } else {
+            (false, term)
+        };
+        let term_lower = search_term.to_lowercase();
+
+        all_secrets
+            .iter()
+            .filter(|s| {
+                let name = s.name.to_lowercase();
+                let orig = s.original_name.to_lowercase();
+                if prefix_only {
+                    name.starts_with(&term_lower) || orig.starts_with(&term_lower)
+                } else {
+                    name.contains(&term_lower) || orig.contains(&term_lower)
+                }
+            })
+            .collect()
+    } else {
+        all_secrets.iter().collect()
+    };
+
+    if filtered.is_empty() {
+        let msg = term.map_or_else(
+            || format!("No secrets found in vault '{vault_name}'"),
+            |t| format!("No secrets match '{t}' in vault '{vault_name}'"),
+        );
+        return Err(CrosstacheError::invalid_argument(msg));
+    }
+
+    // Resolve which secret to use
+    let secret_name = if filtered.len() == 1 {
+        // Single match — skip the TUI
+        let s = &filtered[0];
+        let display = if !s.original_name.is_empty() && s.original_name != s.name {
+            &s.original_name
+        } else {
+            &s.name
+        };
+        println!("Found: {display}");
+        s.name.clone()
+    } else {
+        // Multiple matches — interactive fuzzy selector
+        let display_names: Vec<String> = filtered
+            .iter()
+            .map(|s| {
+                let base = if !s.original_name.is_empty() && s.original_name != s.name {
+                    s.original_name.clone()
+                } else {
+                    s.name.clone()
+                };
+                // Annotate with folder and groups for extra context
+                let mut label = base;
+                if let Some(folder) = &s.folder {
+                    label = format!("{folder}/{label}");
+                }
+                if let Some(groups) = &s.groups {
+                    label = format!("{label}  [{groups}]");
+                }
+                label
+            })
+            .collect();
+
+        let prompt = term.map_or_else(
+            || format!("Select a secret from '{vault_name}'"),
+            |t| format!("Select a secret matching '{t}'"),
+        );
+
+        let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
+            .with_prompt(prompt)
+            .items(&display_names)
+            .default(0)
+            .interact()
+            .map_err(|_| CrosstacheError::config("Selection cancelled"))?;
+
+        filtered[selection].name.clone()
+    };
+
+    // Fetch the secret value
+    let secret = secret_manager
+        .get_secret_with_version(&vault_name, &secret_name, None, true, true)
+        .await?;
+
+    if raw {
+        if let Some(value) = secret.value {
+            print!("{}", value.as_str());
+        }
+    } else if let Some(ref value) = secret.value {
+        match copy_to_clipboard(value) {
+            Ok(()) => {
+                let timeout = config.clipboard_timeout;
+                if timeout > 0 {
+                    println!(
+                        "✅ Secret '{secret_name}' copied to clipboard (auto-clears in {timeout}s)"
+                    );
+                    schedule_clipboard_clear(timeout);
+                } else {
+                    println!("✅ Secret '{secret_name}' copied to clipboard");
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to copy to clipboard: {e}");
+                eprintln!("Use 'xv find --raw {term_hint}' to print to stdout instead.",
+                    term_hint = term.unwrap_or(""));
+            }
+        }
+    } else {
+        println!("⚠️  Secret '{secret_name}' has no value");
     }
 
     Ok(())
