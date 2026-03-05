@@ -4436,12 +4436,17 @@ fn schedule_clipboard_clear(seconds: u64) {
 
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW prevents the child from inheriting the parent console,
+        // which would otherwise cause the terminal to close when PowerShell detaches.
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let cmd = format!("Start-Sleep -Seconds {seconds}; Set-Clipboard ''");
         let _ = std::process::Command::new("powershell")
-            .args(["-WindowStyle", "Hidden", "-Command", &cmd])
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &cmd])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
 }
