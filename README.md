@@ -151,8 +151,12 @@ xv vault create my-vault --resource-group my-rg --location eastus
 xv vault list
 xv vault info my-vault
 xv vault delete my-vault
+xv vault restore my-vault                 # Restore soft-deleted vault
+xv vault purge my-vault                   # Permanently delete vault
+xv vault update my-vault                  # Update vault properties
 xv vault export my-vault --output secrets.json
 xv vault import my-vault --input secrets.json --dry-run
+xv vault share grant my-vault             # Vault-level access management
 ```
 
 ### Vault Context
