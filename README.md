@@ -74,7 +74,7 @@ xattr -d com.apple.quarantine ~/.local/bin/xv
 ```bash
 xv set "api-key"                          # Create (prompts for value)
 xv set "api-key" --stdin < key.txt        # Create from stdin
-xv set K1=val1 K2=val2 K3=@file.pem      # Bulk create
+xv set K1=val1 K2=val2 K3=@file.pem       # Bulk create
 xv get "api-key"                          # Copy to clipboard (auto-clears)
 xv get "api-key" --raw                    # Print to stdout
 xv find                                   # Browse all secrets interactively
@@ -219,7 +219,7 @@ xv audit "api-key" --operation get        # Filter by operation type
 ### Utilities
 
 ```bash
-xv parse "Server=db;User=admin;Pass=secret"   # Parse connection strings
+xv parse "Server=db;User=admin;Pass=secret"    # Parse connection strings
 xv version                                     # Detailed build info
 xv completion bash                             # Generate shell completions
 xv completion zsh > ~/.zfunc/_xv               # Install zsh completions
@@ -258,8 +258,8 @@ xv config path                            # Show config file location
 crosstache uses Azure's credential chain. You can control priority:
 
 ```bash
-xv list --credential-type cli             # Prefer Azure CLI
-export AZURE_CREDENTIAL_PRIORITY=cli      # For all commands
+xv list --credential-type cli                # Prefer Azure CLI
+export AZURE_CREDENTIAL_PRIORITY=cli         # For all commands
 xv config set azure_credential_priority cli  # Persistent
 ```
 
