@@ -270,12 +270,19 @@ Names longer than 127 characters are SHA256-hashed.
 
 ## Output Formats
 
+Most commands support a global `--format` flag:
+
 ```bash
 xv list                         # Table (default)
 xv list --format json           # JSON
 xv list --format yaml           # YAML
+xv list --format csv            # CSV
+xv list --format plain          # Simple text
+xv list --columns name,groups   # Select specific columns
 xv get "key" --raw              # Raw value (for scripting)
 ```
+
+Available formats: `table`, `json`, `yaml`, `csv`, `plain`, `raw`, `template`.
 
 ## Security
 
