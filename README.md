@@ -185,7 +185,10 @@ xv env push .env                # Upload .env contents as secrets
 ### Cross-Vault Operations
 
 ```bash
+xv diff vault-a vault-b                   # Compare secrets between vaults
+xv diff vault-a vault-b --show-values     # Include values in comparison
 xv copy "api-key" --from vault-a --to vault-b
+xv copy "api-key" --from vault-a --to vault-b --new-name "api-key-v2"
 xv move "api-key" --from vault-a --to vault-b
 ```
 
