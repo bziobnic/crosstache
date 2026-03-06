@@ -256,6 +256,7 @@ impl VaultManager {
     }
 
     /// List vault access with formatted output
+    #[allow(dead_code)]
     pub async fn list_vault_access(
         &self,
         vault_name: &str,
