@@ -684,6 +684,9 @@ pub enum VaultShareCommands {
         /// Output format
         #[arg(short, long, default_value = "table")]
         format: String,
+        /// Include service accounts in output
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -845,6 +848,9 @@ pub enum ShareCommands {
     List {
         /// Secret name
         secret_name: String,
+        /// Include service accounts in output
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -6005,10 +6011,12 @@ async fn execute_secret_share(
                 secret_name, user, vault_name
             );
         }
-        ShareCommands::List { secret_name } => {
-            let roles = vault_manager
+        ShareCommands::List { secret_name, all } => {
+            let mut roles = vault_manager
                 .list_secret_access(&vault_name, &resource_group, &secret_name)
                 .await?;
+
+            vault_manager.resolve_and_filter_roles(&mut roles, all).await;
 
             if roles.is_empty() {
                 println!(
@@ -6561,18 +6569,32 @@ async fn execute_vault_share(
             vault_name,
             resource_group,
             format,
+            all,
         } => {
             let resource_group =
                 resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
-            let output_format = match format.to_lowercase().as_str() {
-                "json" => OutputFormat::Json,
-                _ => OutputFormat::Table,
-            };
-
-            vault_manager
-                .list_vault_access(&vault_name, &resource_group, output_format)
+            let mut roles = vault_manager
+                .list_vault_access_raw(&vault_name, &resource_group)
                 .await?;
+
+            vault_manager.resolve_and_filter_roles(&mut roles, all).await;
+
+            if roles.is_empty() {
+                println!("No access assignments found for vault '{vault_name}'");
+            } else {
+                println!("Access assignments for vault '{vault_name}':");
+                let output_format = match format.to_lowercase().as_str() {
+                    "json" => crate::utils::format::OutputFormat::Json,
+                    _ => crate::utils::format::OutputFormat::Table,
+                };
+                let formatter = crate::utils::format::TableFormatter::new(
+                    output_format,
+                    config.no_color,
+                );
+                let table_output = formatter.format_table(&roles)?;
+                println!("{table_output}");
+            }
         }
     }
 

@@ -256,6 +256,7 @@ impl VaultManager {
     }
 
     /// List vault access with formatted output
+    #[allow(dead_code)]
     pub async fn list_vault_access(
         &self,
         vault_name: &str,
@@ -282,6 +283,17 @@ impl VaultManager {
         println!("{table_output}");
 
         Ok(roles)
+    }
+
+    /// List vault access roles without displaying them
+    pub async fn list_vault_access_raw(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+    ) -> Result<Vec<VaultRole>> {
+        self.vault_ops
+            .list_access(vault_name, resource_group)
+            .await
     }
 
     /// Update vault properties
@@ -339,6 +351,41 @@ impl VaultManager {
         self.vault_ops
             .list_secret_access(vault_name, resource_group, secret_name)
             .await
+    }
+
+    /// Resolve principal IDs to display names and emails
+    pub async fn resolve_principal_ids(
+        &self,
+        principal_ids: &[String],
+    ) -> std::collections::HashMap<String, (String, String)> {
+        self.vault_ops.resolve_principal_ids(principal_ids).await
+    }
+
+    /// Resolve principal names/emails and optionally filter service accounts
+    pub async fn resolve_and_filter_roles(
+        &self,
+        roles: &mut Vec<VaultRole>,
+        include_all: bool,
+    ) {
+        let principal_ids: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            roles.iter()
+                .map(|r| r.principal_id.clone())
+                .filter(|id| seen.insert(id.clone()))
+                .collect()
+        };
+        let resolved = self.resolve_principal_ids(&principal_ids).await;
+        for role in roles.iter_mut() {
+            if let Some((name, email)) = resolved.get(&role.principal_id) {
+                if !name.is_empty() {
+                    role.principal_name = name.clone();
+                }
+                role.email = email.clone();
+            }
+        }
+        if !include_all {
+            roles.retain(|r| r.principal_type != "ServicePrincipal");
+        }
     }
 
     /// Display detailed vault information
