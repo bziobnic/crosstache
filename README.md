@@ -164,10 +164,11 @@ xv vault share grant my-vault             # Vault-level access management
 Switch between vaults without repeating `--vault` on every command:
 
 ```bash
-xv context use my-vault         # Switch
+xv context use my-vault         # Switch active vault
 xv cx use my-vault              # Alias
 xv context show                 # Current context
 xv context list                 # Recent contexts
+xv context clear                # Clear current context
 ```
 
 ### Environment Profiles
