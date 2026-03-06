@@ -625,6 +625,7 @@ impl VaultOperations for AzureVaultOperations {
                         .user_email
                         .clone()
                         .unwrap_or_else(|| policy.object_id.clone()),
+                    email: String::new(),
                     principal_type: if policy.application_id.is_some() {
                         "ServicePrincipal"
                     } else {
@@ -866,6 +867,7 @@ impl VaultOperations for AzureVaultOperations {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string(),
+                    email: String::new(),
                     principal_type: props
                         .get("principalType")
                         .and_then(|v| v.as_str())

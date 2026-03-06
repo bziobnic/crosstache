@@ -163,7 +163,7 @@ impl AccessLevel {
 /// Role assignment for Azure RBAC
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct VaultRole {
-    #[tabled(rename = "Assignment ID")]
+    #[tabled(skip)]
     pub assignment_id: String,
     #[tabled(skip)]
     pub role_id: String,
@@ -173,13 +173,15 @@ pub struct VaultRole {
     pub role_description: String,
     #[tabled(skip)]
     pub principal_id: String,
-    #[tabled(rename = "Principal")]
+    #[tabled(rename = "Name")]
     pub principal_name: String,
-    #[tabled(rename = "Type")]
+    #[tabled(rename = "Email")]
+    pub email: String,
+    #[tabled(skip)]
     pub principal_type: String,
     #[tabled(skip)]
     pub scope: String,
-    #[tabled(rename = "Created")]
+    #[tabled(skip)]
     pub created_on: DateTime<Utc>,
     #[tabled(skip)]
     pub updated_on: DateTime<Utc>,
