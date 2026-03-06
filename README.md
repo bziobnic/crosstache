@@ -216,6 +216,15 @@ xv audit --vault my-vault --days 7        # Last 7 days only
 xv audit "api-key" --operation get        # Filter by operation type
 ```
 
+### Utilities
+
+```bash
+xv parse "Server=db;User=admin;Pass=secret"   # Parse connection strings
+xv version                                     # Detailed build info
+xv completion bash                             # Generate shell completions
+xv completion zsh > ~/.zfunc/_xv               # Install zsh completions
+```
+
 ## Configuration
 
 ### Hierarchy (highest → lowest priority)
