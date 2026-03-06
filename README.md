@@ -136,10 +136,12 @@ See [docs/GROUPS.md](docs/GROUPS.md) for details.
 
 ```bash
 xv history "api-key"                      # Version history
-xv rollback "api-key" --version <id>      # Restore previous version
-xv rotate "api-key"                       # Generate new random value
+xv rollback "api-key" --version 2         # Restore previous version (required)
+xv rotate "api-key"                       # Generate new random value (32 chars)
 xv rotate "api-key" --length 64 --charset alphanumeric
-xv rotate "api-key" --generator ./gen.sh  # Custom generator
+xv rotate "api-key" --charset hex         # Also: base64, numeric, uppercase, lowercase
+xv rotate "api-key" --generator ./gen.sh  # Custom generator script
+xv rotate "api-key" --show-value          # Display the generated value
 ```
 
 ### Vault Management
