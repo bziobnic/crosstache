@@ -75,15 +75,18 @@ xattr -d com.apple.quarantine ~/.local/bin/xv
 xv set "api-key"                          # Create (prompts for value)
 xv set "api-key" --stdin < key.txt        # Create from stdin
 xv set K1=val1 K2=val2 K3=@file.pem      # Bulk create
-xv get "api-key"                          # Copy to clipboard (auto-clears after 30s)
+xv get "api-key"                          # Copy to clipboard (auto-clears)
 xv get "api-key" --raw                    # Print to stdout
-xv list                                   # List all secrets
+xv find                                   # Browse all secrets interactively
+xv find "api"                             # Fuzzy search by name pattern
+xv list                                   # List all secrets (alias: ls)
 xv list --group production                # Filter by group
 xv list --expiring 30d                    # Show secrets expiring soon
 xv update "api-key" --group prod --note "Frontend key"
-xv delete "api-key"                       # Soft-delete
+xv delete "api-key"                       # Soft-delete (alias: rm)
+xv delete --group legacy --force          # Bulk delete by group
 xv restore "api-key"                      # Restore soft-deleted
-xv purge "api-key"                        # Permanently delete
+xv purge "api-key" --force                # Permanently delete
 ```
 
 ### Secret Injection
