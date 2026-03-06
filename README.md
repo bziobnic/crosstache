@@ -231,6 +231,7 @@ xv audit "api-key" --operation get        # Filter by operation type
 xv init                                   # Interactive setup
 xv config show                            # View current config
 xv config set default_vault my-vault      # Set a value
+xv config path                            # Show config file location
 ```
 
 ### Key Environment Variables
