@@ -208,9 +208,12 @@ xv file upload ./src --recursive --prefix "backup/2024-01-15"
 ### Identity & Auditing
 
 ```bash
-xv whoami                       # Show authenticated identity
-xv audit "api-key"              # Access/change history
-xv audit --vault my-vault       # Vault-wide activity
+xv whoami                                 # Show authenticated identity
+xv info my-vault                          # Resource info (vault, secret, or file)
+xv audit "api-key"                        # Access/change history
+xv audit --vault my-vault                 # Vault-wide activity
+xv audit --vault my-vault --days 7        # Last 7 days only
+xv audit "api-key" --operation get        # Filter by operation type
 ```
 
 ## Configuration
