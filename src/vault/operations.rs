@@ -817,7 +817,7 @@ impl VaultOperations for AzureVaultOperations {
             let response = self
                 .http_client
                 .get(&url)
-                .headers(headers)
+                .headers(headers.clone())
                 .send()
                 .await
                 .map_err(|e| {
@@ -840,6 +840,48 @@ impl VaultOperations for AzureVaultOperations {
                 .cloned()
                 .unwrap_or_default();
 
+            // Collect unique role definition IDs and resolve their names via ARM API
+            let unique_role_def_ids: Vec<String> = {
+                let mut seen = std::collections::HashSet::new();
+                assignments
+                    .iter()
+                    .filter_map(|a| {
+                        let props = a.get("properties").unwrap_or(a);
+                        props
+                            .get("roleDefinitionId")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .filter(|id| seen.insert(id.clone()))
+                    .collect()
+            };
+
+            let mut role_name_map: HashMap<String, String> = HashMap::new();
+            for role_def_id in &unique_role_def_ids {
+                let url = self.build_arm_url(&format!(
+                    "{role_def_id}?api-version=2022-04-01"
+                ));
+                if let Ok(resp) = self
+                    .http_client
+                    .get(&url)
+                    .headers(headers.clone())
+                    .send()
+                    .await
+                {
+                    if resp.status().is_success() {
+                        if let Ok(data) = resp.json::<Value>().await {
+                            if let Some(name) = data
+                                .get("properties")
+                                .and_then(|p| p.get("roleName"))
+                                .and_then(|v| v.as_str())
+                            {
+                                role_name_map.insert(role_def_id.clone(), name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
             let mut roles = Vec::new();
             for assignment in &assignments {
                 let props = assignment.get("properties").unwrap_or(assignment);
@@ -848,15 +890,10 @@ impl VaultOperations for AzureVaultOperations {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
 
-                let role_name = if role_def_id.contains("4633458b-17de-408a-b874-0445c86b69e6") {
-                    "Key Vault Secrets User"
-                } else if role_def_id.contains("b86a8fe4-44ce-4948-aee5-eccb2c155cd7") {
-                    "Key Vault Secrets Officer"
-                } else if role_def_id.contains("00482a5a-887f-4fb3-b363-3b7fe8e74483") {
-                    "Key Vault Administrator"
-                } else {
-                    "Unknown Role"
-                };
+                let role_name = role_name_map
+                    .get(role_def_id)
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown Role".to_string());
 
                 let role = VaultRole {
                     assignment_id: assignment
@@ -865,8 +902,8 @@ impl VaultOperations for AzureVaultOperations {
                         .unwrap_or_default()
                         .to_string(),
                     role_id: role_def_id.to_string(),
-                    role_name: role_name.to_string(),
-                    role_description: role_name.to_string(),
+                    role_name: role_name.clone(),
+                    role_description: role_name,
                     principal_id: props
                         .get("principalId")
                         .and_then(|v| v.as_str())
