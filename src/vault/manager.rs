@@ -284,6 +284,17 @@ impl VaultManager {
         Ok(roles)
     }
 
+    /// List vault access roles without displaying them
+    pub async fn list_vault_access_raw(
+        &self,
+        vault_name: &str,
+        resource_group: &str,
+    ) -> Result<Vec<VaultRole>> {
+        self.vault_ops
+            .list_access(vault_name, resource_group)
+            .await
+    }
+
     /// Update vault properties
     pub async fn update_vault(
         &self,
