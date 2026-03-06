@@ -293,6 +293,17 @@ xv get "key" --raw              # Raw value (for scripting)
 
 Available formats: `table`, `json`, `yaml`, `csv`, `plain`, `raw`, `template`.
 
+## Global Options
+
+These flags work with any command:
+
+| Flag | Purpose |
+|------|---------|
+| `--format <FORMAT>` | Output format (`table`, `json`, `yaml`, `csv`, `plain`, `raw`, `template`) |
+| `--columns <COLS>` | Select specific columns for table output (comma-separated) |
+| `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
+| `--debug` | Enable debug logging |
+
 ## Security
 
 - Secret values are zeroized from memory after use (`zeroize` crate)
