@@ -361,6 +361,33 @@ impl VaultManager {
         self.vault_ops.resolve_principal_ids(principal_ids).await
     }
 
+    /// Resolve principal names/emails and optionally filter service accounts
+    pub async fn resolve_and_filter_roles(
+        &self,
+        roles: &mut Vec<VaultRole>,
+        include_all: bool,
+    ) {
+        let principal_ids: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            roles.iter()
+                .map(|r| r.principal_id.clone())
+                .filter(|id| seen.insert(id.clone()))
+                .collect()
+        };
+        let resolved = self.resolve_principal_ids(&principal_ids).await;
+        for role in roles.iter_mut() {
+            if let Some((name, email)) = resolved.get(&role.principal_id) {
+                if !name.is_empty() {
+                    role.principal_name = name.clone();
+                }
+                role.email = email.clone();
+            }
+        }
+        if !include_all {
+            roles.retain(|r| r.principal_type != "ServicePrincipal");
+        }
+    }
+
     /// Display detailed vault information
     fn display_vault_details(&self, vault: &VaultProperties) -> Result<()> {
         self.display_utils
