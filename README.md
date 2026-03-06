@@ -74,16 +74,19 @@ xattr -d com.apple.quarantine ~/.local/bin/xv
 ```bash
 xv set "api-key"                          # Create (prompts for value)
 xv set "api-key" --stdin < key.txt        # Create from stdin
-xv set K1=val1 K2=val2 K3=@file.pem      # Bulk create
-xv get "api-key"                          # Copy to clipboard (auto-clears after 30s)
+xv set K1=val1 K2=val2 K3=@file.pem       # Bulk create
+xv get "api-key"                          # Copy to clipboard (auto-clears)
 xv get "api-key" --raw                    # Print to stdout
-xv list                                   # List all secrets
+xv find                                   # Browse all secrets interactively
+xv find "api"                             # Fuzzy search by name pattern
+xv list                                   # List all secrets (alias: ls)
 xv list --group production                # Filter by group
 xv list --expiring 30d                    # Show secrets expiring soon
 xv update "api-key" --group prod --note "Frontend key"
-xv delete "api-key"                       # Soft-delete
+xv delete "api-key"                       # Soft-delete (alias: rm)
+xv delete --group legacy --force          # Bulk delete by group
 xv restore "api-key"                      # Restore soft-deleted
-xv purge "api-key"                        # Permanently delete
+xv purge "api-key" --force                # Permanently delete
 ```
 
 ### Secret Injection
@@ -133,10 +136,12 @@ See [docs/GROUPS.md](docs/GROUPS.md) for details.
 
 ```bash
 xv history "api-key"                      # Version history
-xv rollback "api-key" --version <id>      # Restore previous version
-xv rotate "api-key"                       # Generate new random value
+xv rollback "api-key" --version 2         # Restore previous version (required)
+xv rotate "api-key"                       # Generate new random value (32 chars)
 xv rotate "api-key" --length 64 --charset alphanumeric
-xv rotate "api-key" --generator ./gen.sh  # Custom generator
+xv rotate "api-key" --charset hex         # Also: base64, numeric, uppercase, lowercase
+xv rotate "api-key" --generator ./gen.sh  # Custom generator script
+xv rotate "api-key" --show-value          # Display the generated value
 ```
 
 ### Vault Management
@@ -146,8 +151,12 @@ xv vault create my-vault --resource-group my-rg --location eastus
 xv vault list
 xv vault info my-vault
 xv vault delete my-vault
+xv vault restore my-vault                 # Restore soft-deleted vault
+xv vault purge my-vault                   # Permanently delete vault
+xv vault update my-vault                  # Update vault properties
 xv vault export my-vault --output secrets.json
 xv vault import my-vault --input secrets.json --dry-run
+xv vault share grant my-vault             # Vault-level access management
 ```
 
 ### Vault Context
@@ -155,27 +164,33 @@ xv vault import my-vault --input secrets.json --dry-run
 Switch between vaults without repeating `--vault` on every command:
 
 ```bash
-xv context use my-vault         # Switch
+xv context use my-vault         # Switch active vault
 xv cx use my-vault              # Alias
 xv context show                 # Current context
 xv context list                 # Recent contexts
+xv context clear                # Clear current context
 ```
 
 ### Environment Profiles
 
-Named profiles that map to different vaults/groups:
+Named profiles that map to different vaults:
 
 ```bash
-xv env create prod --vault prod-vault --group production
+xv env create prod --vault prod-vault --group my-rg
 xv env use prod
 xv env pull --output .env       # Download as .env file
 xv env push .env                # Upload .env contents as secrets
 ```
 
+Note: `--group` here refers to the Azure resource group, not a secret group.
+
 ### Cross-Vault Operations
 
 ```bash
+xv diff vault-a vault-b                   # Compare secrets between vaults
+xv diff vault-a vault-b --show-values     # Include values in comparison
 xv copy "api-key" --from vault-a --to vault-b
+xv copy "api-key" --from vault-a --to vault-b --new-name "api-key-v2"
 xv move "api-key" --from vault-a --to vault-b
 ```
 
@@ -192,12 +207,27 @@ xv file download "docs" --recursive --output ./local
 xv file upload ./src --recursive --prefix "backup/2024-01-15"
 ```
 
-### Identity & Auditing
+### Identity & Access
 
 ```bash
-xv whoami                       # Show authenticated identity
-xv audit "api-key"              # Access/change history
-xv audit --vault my-vault       # Vault-wide activity
+xv whoami                                 # Show authenticated identity
+xv info my-vault                          # Resource info (vault, secret, or file)
+xv share grant "api-key"                  # Grant access to a secret
+xv share revoke "api-key"                 # Revoke access to a secret
+xv share list "api-key"                   # List access permissions
+xv audit "api-key"                        # Access/change history
+xv audit --vault my-vault                 # Vault-wide activity
+xv audit --vault my-vault --days 7        # Last 7 days only
+xv audit "api-key" --operation get        # Filter by operation type
+```
+
+### Utilities
+
+```bash
+xv parse "Server=db;User=admin;Pass=secret"    # Parse connection strings
+xv version                                     # Detailed build info
+xv completion bash                             # Generate shell completions
+xv completion zsh > ~/.zfunc/_xv               # Install zsh completions
 ```
 
 ## Configuration
@@ -215,6 +245,7 @@ xv audit --vault my-vault       # Vault-wide activity
 xv init                                   # Interactive setup
 xv config show                            # View current config
 xv config set default_vault my-vault      # Set a value
+xv config path                            # Show config file location
 ```
 
 ### Key Environment Variables
@@ -232,8 +263,8 @@ xv config set default_vault my-vault      # Set a value
 crosstache uses Azure's credential chain. You can control priority:
 
 ```bash
-xv list --credential-type cli             # Prefer Azure CLI
-export AZURE_CREDENTIAL_PRIORITY=cli      # For all commands
+xv list --credential-type cli                # Prefer Azure CLI
+export AZURE_CREDENTIAL_PRIORITY=cli         # For all commands
 xv config set azure_credential_priority cli  # Persistent
 ```
 
@@ -253,12 +284,30 @@ Names longer than 127 characters are SHA256-hashed.
 
 ## Output Formats
 
+Most commands support a global `--format` flag:
+
 ```bash
 xv list                         # Table (default)
 xv list --format json           # JSON
 xv list --format yaml           # YAML
+xv list --format csv            # CSV
+xv list --format plain          # Simple text
+xv list --columns name,groups   # Select specific columns
 xv get "key" --raw              # Raw value (for scripting)
 ```
+
+Available formats: `table`, `json`, `yaml`, `csv`, `plain`, `raw`, `template`.
+
+## Global Options
+
+These flags work with any command:
+
+| Flag | Purpose |
+|------|---------|
+| `--format <FORMAT>` | Output format (`table`, `json`, `yaml`, `csv`, `plain`, `raw`, `template`) |
+| `--columns <COLS>` | Select specific columns for table output (comma-separated) |
+| `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
+| `--debug` | Enable debug logging |
 
 ## Security
 
