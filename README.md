@@ -173,14 +173,16 @@ xv context clear                # Clear current context
 
 ### Environment Profiles
 
-Named profiles that map to different vaults/groups:
+Named profiles that map to different vaults:
 
 ```bash
-xv env create prod --vault prod-vault --group production
+xv env create prod --vault prod-vault --group my-rg
 xv env use prod
 xv env pull --output .env       # Download as .env file
 xv env push .env                # Upload .env contents as secrets
 ```
+
+Note: `--group` here refers to the Azure resource group, not a secret group.
 
 ### Cross-Vault Operations
 
@@ -205,11 +207,14 @@ xv file download "docs" --recursive --output ./local
 xv file upload ./src --recursive --prefix "backup/2024-01-15"
 ```
 
-### Identity & Auditing
+### Identity & Access
 
 ```bash
 xv whoami                                 # Show authenticated identity
 xv info my-vault                          # Resource info (vault, secret, or file)
+xv share grant "api-key"                  # Grant access to a secret
+xv share revoke "api-key"                 # Revoke access to a secret
+xv share list "api-key"                   # List access permissions
 xv audit "api-key"                        # Access/change history
 xv audit --vault my-vault                 # Vault-wide activity
 xv audit --vault my-vault --days 7        # Last 7 days only
