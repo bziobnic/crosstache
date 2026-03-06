@@ -341,6 +341,14 @@ impl VaultManager {
             .await
     }
 
+    /// Resolve principal IDs to display names and emails
+    pub async fn resolve_principal_ids(
+        &self,
+        principal_ids: &[String],
+    ) -> std::collections::HashMap<String, (String, String)> {
+        self.vault_ops.resolve_principal_ids(principal_ids).await
+    }
+
     /// Display detailed vault information
     fn display_vault_details(&self, vault: &VaultProperties) -> Result<()> {
         self.display_utils

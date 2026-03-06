@@ -845,6 +845,9 @@ pub enum ShareCommands {
     List {
         /// Secret name
         secret_name: String,
+        /// Include service accounts in output
+        #[arg(short, long)]
+        all: bool,
     },
 }
 
@@ -6005,10 +6008,30 @@ async fn execute_secret_share(
                 secret_name, user, vault_name
             );
         }
-        ShareCommands::List { secret_name } => {
-            let roles = vault_manager
+        ShareCommands::List { secret_name, all } => {
+            let mut roles = vault_manager
                 .list_secret_access(&vault_name, &resource_group, &secret_name)
                 .await?;
+
+            // Resolve principal IDs to display names and emails
+            let principal_ids: Vec<String> =
+                roles.iter().map(|r| r.principal_id.clone()).collect();
+            let resolved = vault_manager
+                .resolve_principal_ids(&principal_ids)
+                .await;
+            for role in &mut roles {
+                if let Some((name, email)) = resolved.get(&role.principal_id) {
+                    if !name.is_empty() {
+                        role.principal_name = name.clone();
+                    }
+                    role.email = email.clone();
+                }
+            }
+
+            // Filter out service principals unless --all
+            if !all {
+                roles.retain(|r| r.principal_type != "ServicePrincipal");
+            }
 
             if roles.is_empty() {
                 println!(

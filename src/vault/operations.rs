@@ -98,6 +98,15 @@ pub trait VaultOperations: Send + Sync {
         resource_group: &str,
         secret_name: &str,
     ) -> Result<Vec<VaultRole>>;
+
+    /// Resolve principal IDs to display names and emails via Graph API.
+    /// Default implementation returns empty map (no resolution).
+    async fn resolve_principal_ids(
+        &self,
+        _principal_ids: &[String],
+    ) -> HashMap<String, (String, String)> {
+        HashMap::new()
+    }
 }
 
 /// Azure vault operations implementation
@@ -183,79 +192,6 @@ impl AzureVaultOperations {
         retry_with_backoff(operation, retry_options).await
     }
 
-    /// Resolve principal IDs to display names and emails using Microsoft Graph API.
-    /// Returns a map of principal_id -> (display_name, email).
-    /// Falls back gracefully if the Graph API call fails.
-    pub async fn resolve_principal_ids(
-        &self,
-        principal_ids: &[String],
-    ) -> HashMap<String, (String, String)> {
-        if principal_ids.is_empty() {
-            return HashMap::new();
-        }
-
-        let graph_token = match self
-            .auth_provider
-            .get_token(&["https://graph.microsoft.com/.default"])
-            .await
-        {
-            Ok(token) => token.token.secret().to_string(),
-            Err(_) => return HashMap::new(),
-        };
-
-        let mut headers = HeaderMap::new();
-        if let Ok(auth_value) = format!("Bearer {graph_token}").parse() {
-            headers.insert("Authorization", auth_value);
-        }
-        headers.insert("Content-Type", "application/json".parse().unwrap());
-
-        let body = json!({
-            "ids": principal_ids,
-            "types": ["user", "group", "servicePrincipal"]
-        });
-
-        let response = match self
-            .http_client
-            .post("https://graph.microsoft.com/v1.0/directoryObjects/getByIds")
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(resp) => resp,
-            Err(_) => return HashMap::new(),
-        };
-
-        if !response.status().is_success() {
-            return HashMap::new();
-        }
-
-        let data: Value = match response.json().await {
-            Ok(d) => d,
-            Err(_) => return HashMap::new(),
-        };
-
-        let mut result = HashMap::new();
-        if let Some(values) = data.get("value").and_then(|v| v.as_array()) {
-            for obj in values {
-                let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                let display_name = obj
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let email = obj
-                    .get("userPrincipalName")
-                    .or_else(|| obj.get("mail"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                result.insert(id.to_string(), (display_name, email));
-            }
-        }
-
-        result
-    }
 }
 
 #[async_trait]
@@ -972,6 +908,80 @@ impl VaultOperations for AzureVaultOperations {
         };
 
         self.execute_with_retry(operation).await
+    }
+
+    /// Resolve principal IDs to display names and emails using Microsoft Graph API.
+    /// Returns a map of principal_id -> (display_name, email).
+    /// Falls back gracefully if the Graph API call fails.
+    async fn resolve_principal_ids(
+        &self,
+        principal_ids: &[String],
+    ) -> HashMap<String, (String, String)> {
+        if principal_ids.is_empty() {
+            return HashMap::new();
+        }
+
+        let graph_token = match self
+            .auth_provider
+            .get_token(&["https://graph.microsoft.com/.default"])
+            .await
+        {
+            Ok(token) => token.token.secret().to_string(),
+            Err(_) => return HashMap::new(),
+        };
+
+        let mut headers = HeaderMap::new();
+        if let Ok(auth_value) = format!("Bearer {graph_token}").parse() {
+            headers.insert("Authorization", auth_value);
+        }
+        headers.insert("Content-Type", "application/json".parse().unwrap());
+
+        let body = json!({
+            "ids": principal_ids,
+            "types": ["user", "group", "servicePrincipal"]
+        });
+
+        let response = match self
+            .http_client
+            .post("https://graph.microsoft.com/v1.0/directoryObjects/getByIds")
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(_) => return HashMap::new(),
+        };
+
+        if !response.status().is_success() {
+            return HashMap::new();
+        }
+
+        let data: Value = match response.json().await {
+            Ok(d) => d,
+            Err(_) => return HashMap::new(),
+        };
+
+        let mut result = HashMap::new();
+        if let Some(values) = data.get("value").and_then(|v| v.as_array()) {
+            for obj in values {
+                let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let display_name = obj
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let email = obj
+                    .get("userPrincipalName")
+                    .or_else(|| obj.get("mail"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                result.insert(id.to_string(), (display_name, email));
+            }
+        }
+
+        result
     }
 }
 
