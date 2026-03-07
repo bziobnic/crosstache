@@ -8,6 +8,7 @@ use crate::blob::manager::{create_blob_manager, BlobManager};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
+use crate::utils::output;
 use crate::vault::{VaultCreateRequest, VaultManager};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
@@ -1519,7 +1520,7 @@ async fn execute_vault_create(
         .create_vault_with_setup(name, &location, &resource_group, Some(create_request))
         .await?;
 
-    println!("✅ Successfully created vault '{}'", vault.name);
+    output::success(&format!("Successfully created vault '{}'", vault.name));
     println!("   Resource Group: {}", vault.resource_group);
     println!("   Location: {}", vault.location);
     println!("   URI: {}", vault.uri);
@@ -2045,7 +2046,7 @@ async fn execute_diff_command(
                 }
             }
             Err(e) => {
-                eprintln!("⚠️  Failed to get '{}' from {}: {}", name, vault1, e);
+                output::warn(&format!("Failed to get '{}' from {}: {}", name, vault1, e));
             }
         }
     }
@@ -2061,7 +2062,7 @@ async fn execute_diff_command(
                 }
             }
             Err(e) => {
-                eprintln!("⚠️  Failed to get '{}' from {}: {}", name, vault2, e);
+                output::warn(&format!("Failed to get '{}' from {}: {}", name, vault2, e));
             }
         }
     }
@@ -2533,7 +2534,7 @@ async fn execute_env_use(name: &str, _config: &Config) -> Result<()> {
     // Save the profile manager
     manager.save().await?;
 
-    println!("✓ Using environment profile: {}", name);
+    output::success(&format!("Using environment profile: {}", name));
     println!("  Vault: {}", vault_name);
     println!("  Resource Group: {}", resource_group);
     if let Some(subscription) = &subscription_id {
@@ -2582,7 +2583,7 @@ async fn execute_env_create(
 
     manager.save().await?;
 
-    println!("✓ Created environment profile: {}", name);
+    output::success(&format!("Created environment profile: {}", name));
     println!("  Vault: {}", vault);
     println!("  Resource Group: {}", group);
     if let Some(subscription) = &subscription {
@@ -2620,7 +2621,7 @@ async fn execute_env_delete(name: &str, force: bool, _config: &Config) -> Result
     manager.delete_profile(name)?;
     manager.save().await?;
 
-    println!("✓ Deleted environment profile: {}", name);
+    output::success(&format!("Deleted environment profile: {}", name));
 
     Ok(())
 }
@@ -2780,11 +2781,11 @@ async fn execute_env_pull(
             std::path::Path::new(&output_path),
             dotenv_content.as_bytes(),
         )?;
-        println!(
-            "✅ Successfully exported {} secret(s) to '{}' (permissions: owner-only)",
+        output::success(&format!(
+            "Successfully exported {} secret(s) to '{}' (permissions: owner-only)",
             all_secrets.len(),
             output_path
-        );
+        ));
     } else {
         print!("{}", dotenv_content);
     }
@@ -2931,11 +2932,11 @@ async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config
             .await
         {
             Ok(_) => {
-                println!("  ✅ Set '{}'", key);
+                println!("  {}", output::format_line(output::Level::Success, &format!("Set '{}'", key), output::should_use_rich_stdout()));
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ Failed to set '{}': {}", key, e);
+                output::error(&format!("  Failed to set '{}': {}", key, e));
                 error_count += 1;
             }
         }
@@ -2947,10 +2948,10 @@ async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config
             success_count, error_count
         );
     } else {
-        println!(
-            "✅ Successfully pushed {} secret(s) to vault '{}'",
+        output::success(&format!(
+            "Successfully pushed {} secret(s) to vault '{}'",
             success_count, vault_name
-        );
+        ));
     }
 
     Ok(())
@@ -3240,7 +3241,7 @@ async fn execute_audit_command(
         (vault_name, rg, sub)
     };
 
-    println!("🔍 Fetching audit logs for {} days...", days);
+    output::step(&format!("Fetching audit logs for {} days...", days));
 
     // Fetch audit logs
     let mut logs = if let Some(secret_name) = name {
@@ -3276,7 +3277,8 @@ async fn execute_audit_command(
         return Ok(());
     }
 
-    println!("\n📊 Found {} audit log entries:\n", logs.len());
+    println!();
+    output::info(&format!("Found {} audit log entries:\n", logs.len()));
 
     if raw {
         // Show raw JSON output
@@ -3332,9 +3334,8 @@ async fn execute_audit_command(
             );
         }
 
-        println!(
-            "\n💡 Use --raw to see full details, or --operation <type> to filter by operation type"
-        );
+        println!();
+        output::hint("Use --raw to see full details, or --operation <type> to filter by operation type");
     }
 
     Ok(())
@@ -3503,7 +3504,7 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
     use crate::config::ContextManager;
 
-    println!("🔍 Checking authentication and context...\n");
+    output::step("Checking authentication and context...\n");
 
     // Create authentication provider
     let auth_provider = DefaultAzureCredentialProvider::with_credential_priority(
@@ -3518,12 +3519,12 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     {
         Ok(token) => token,
         Err(e) => {
-            println!("❌ Authentication failed: {}", e);
+            output::error(&format!("Authentication failed: {}", e));
             return Ok(());
         }
     };
 
-    println!("✅ Authentication successful\n");
+    output::success("Authentication successful\n");
 
     // Try to get tenant and subscription information
     let management_token = auth_provider
@@ -3570,7 +3571,8 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     }
 
     // Show current context information
-    println!("\n📊 Context Information:");
+    println!();
+    output::info("Context Information:");
 
     let context_manager = ContextManager::load().await.unwrap_or_default();
 
@@ -4001,7 +4003,7 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
     }
 
     config.save().await?;
-    println!("✅ Configuration updated: {key} = {value}");
+    output::success(&format!("Configuration updated: {key} = {value}"));
 
     Ok(())
 }
@@ -4081,7 +4083,7 @@ async fn execute_secret_set(
         .set_secret_safe(&vault_name, name, &value, secret_request)
         .await?;
 
-    println!("✅ Successfully set secret '{}'", secret.original_name);
+    output::success(&format!("Successfully set secret '{}'", secret.original_name));
     println!("   Vault: {vault_name}");
     println!("   Version: {}", secret.version);
 
@@ -4121,23 +4123,21 @@ async fn execute_secret_get(
                 Ok(()) => {
                     let timeout = config.clipboard_timeout;
                     if timeout > 0 {
-                        println!(
-                            "✅ Secret '{name}' copied to clipboard (auto-clears in {timeout}s)"
-                        );
+                        output::success(&format!("Secret '{name}' copied to clipboard (auto-clears in {timeout}s)"));
                         schedule_clipboard_clear(timeout);
                     } else {
-                        println!("✅ Secret '{name}' copied to clipboard");
+                        output::success(&format!("Secret '{name}' copied to clipboard"));
                     }
                 }
                 Err(e) => {
-                    eprintln!("⚠️  Failed to copy to clipboard: {e}");
+                    output::warn(&format!("Failed to copy to clipboard: {e}"));
                     eprintln!(
                         "Use 'xv get {name} --raw' to print the value to stdout instead."
                     );
                 }
             }
         } else {
-            println!("⚠️  Secret '{name}' has no value");
+            output::warn(&format!("Secret '{name}' has no value"));
         }
     }
 
@@ -4287,22 +4287,20 @@ async fn execute_secret_find(
             Ok(()) => {
                 let timeout = config.clipboard_timeout;
                 if timeout > 0 {
-                    println!(
-                        "✅ Secret '{secret_name}' copied to clipboard (auto-clears in {timeout}s)"
-                    );
+                    output::success(&format!("Secret '{secret_name}' copied to clipboard (auto-clears in {timeout}s)"));
                     schedule_clipboard_clear(timeout);
                 } else {
-                    println!("✅ Secret '{secret_name}' copied to clipboard");
+                    output::success(&format!("Secret '{secret_name}' copied to clipboard"));
                 }
             }
             Err(e) => {
-                eprintln!("⚠️  Failed to copy to clipboard: {e}");
+                output::warn(&format!("Failed to copy to clipboard: {e}"));
                 eprintln!("Use 'xv find --raw {term_hint}' to print to stdout instead.",
                     term_hint = term.unwrap_or(""));
             }
         }
     } else {
-        println!("⚠️  Secret '{secret_name}' has no value");
+        output::warn(&format!("Secret '{secret_name}' has no value"));
     }
 
     Ok(())
@@ -4595,7 +4593,7 @@ async fn execute_secret_rollback(
         .rollback_secret(&vault_name, name, &resolved_version_guid)
         .await?;
 
-    println!("✅ Successfully rolled back secret '{name}' to version '{display_version}'");
+    output::success(&format!("Successfully rolled back secret '{name}' to version '{display_version}'"));
     println!("New version GUID: {}", result.version);
 
     Ok(())
@@ -4749,7 +4747,7 @@ async fn execute_secret_rotate(
             ))
         })?;
 
-    println!("🔄 Rotating secret: {}", name);
+    output::step(&format!("Rotating secret: {}", name));
 
     // Show generation parameters
     if let Some(ref script) = custom_generator {
@@ -4807,7 +4805,7 @@ async fn execute_secret_rotate(
         .set_secret(&vault_name, &set_request)
         .await?;
 
-    println!("✅ Successfully rotated secret '{}'", name);
+    output::success(&format!("Successfully rotated secret '{}'", name));
     println!("New version: {}", result.version);
 
     if show_value {
@@ -4816,7 +4814,7 @@ async fn execute_secret_rotate(
         println!("Generated value: [hidden] (use --show-value to display)");
     }
 
-    println!("💡 Use 'xv history {}' to see version history", name);
+    output::hint(&format!("Use 'xv history {}' to see version history", name));
 
     Ok(())
 }
@@ -4897,10 +4895,10 @@ async fn execute_secret_run(
         return Ok(());
     }
 
-    println!(
-        "🔐 Injecting {} secret(s) as environment variables...",
+    output::step(&format!(
+        "Injecting {} secret(s) as environment variables...",
         filtered_secrets.len()
-    );
+    ));
 
     // Fetch secret values and build environment map
     let mut env_vars: HashMap<String, Zeroizing<String>> = HashMap::new();
@@ -4927,10 +4925,10 @@ async fn execute_secret_run(
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "⚠️  Failed to get value for secret '{}': {}",
+                output::warn(&format!(
+                    "Failed to get value for secret '{}': {}",
                     secret.name, e
-                );
+                ));
             }
         }
     }
@@ -4959,17 +4957,17 @@ async fn execute_secret_run(
                             secret_values.push(value);
                         }
                     } else {
-                        eprintln!(
-                            "⚠️  Secret '{}' in vault '{}' has no value",
+                        output::warn(&format!(
+                            "Secret '{}' in vault '{}' has no value",
                             secret_name, target_vault
-                        );
+                        ));
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "⚠️  Failed to get secret '{}' from vault '{}': {}",
+                    output::warn(&format!(
+                        "Failed to get secret '{}' from vault '{}': {}",
                         secret_name, target_vault, e
-                    );
+                    ));
                 }
             }
         }
@@ -5010,7 +5008,7 @@ async fn execute_secret_run(
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
 
-    println!("🚀 Executing: {}", command.join(" "));
+    output::step(&format!("Executing: {}", command.join(" ")));
 
     // Execute the command
     let output = cmd.output().map_err(|e| {
@@ -5129,7 +5127,7 @@ async fn execute_secret_inject(
     }
 
     if required_secrets.is_empty() && cross_vault_secrets.is_empty() {
-        println!("⚠️  No secret references found in template");
+        output::warn("No secret references found in template");
         println!("    Use {{ secret:name }} syntax or xv://vault-name/secret-name URIs");
 
         // Still write the template content as-is to output
@@ -5155,10 +5153,10 @@ async fn execute_secret_inject(
     }
 
     let total_references = required_secrets.len() + cross_vault_secrets.len();
-    println!(
-        "📋 Found {} secret reference(s) in template",
+    output::info(&format!(
+        "Found {} secret reference(s) in template",
         total_references
-    );
+    ));
 
     if !required_secrets.is_empty() {
         println!(
@@ -5220,10 +5218,10 @@ async fn execute_secret_inject(
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "⚠️  Failed to get value for secret '{}' from vault '{}': {}",
+                    output::warn(&format!(
+                        "Failed to get value for secret '{}' from vault '{}': {}",
                         secret_name, vault_name, e
-                    );
+                    ));
                     missing_secrets.push(secret_name.clone());
                 }
             }
@@ -5245,18 +5243,18 @@ async fn execute_secret_inject(
                 if let Some(value) = secret_props.value {
                     cross_vault_values.insert(uri.clone(), value);
                 } else {
-                    eprintln!(
-                        "⚠️  Secret '{}' in vault '{}' has no value",
+                    output::warn(&format!(
+                        "Secret '{}' in vault '{}' has no value",
                         secret_name, target_vault
-                    );
+                    ));
                     missing_secrets.push(uri);
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "⚠️  Failed to get secret '{}' from vault '{}': {}",
+                output::warn(&format!(
+                    "Failed to get secret '{}' from vault '{}': {}",
                     secret_name, target_vault, e
-                );
+                ));
                 missing_secrets.push(uri);
             }
         }
@@ -5270,7 +5268,7 @@ async fn execute_secret_inject(
     }
 
     let total_injected = secret_values.len() + cross_vault_values.len();
-    println!("🔐 Injecting {} secret(s) into template...", total_injected);
+    output::step(&format!("Injecting {} secret(s) into template...", total_injected));
 
     // Replace secret references with actual values
     let mut result_content = Zeroizing::new(template_content);
@@ -5299,11 +5297,11 @@ async fn execute_secret_inject(
             .map_err(|e| {
                 CrosstacheError::config(format!("Failed to write to output file '{}': {}", path, e))
             })?;
-            println!(
-                "✅ Template resolved and written to '{}' (permissions: owner-only)",
+            output::success(&format!(
+                "Template resolved and written to '{}' (permissions: owner-only)",
                 path
-            );
-            eprintln!("⚠️  Output file contains resolved secrets — treat as sensitive");
+            ));
+            output::warn("Output file contains resolved secrets -- treat as sensitive");
         }
         None => {
             print!("{}", result_content.as_str());
@@ -5471,7 +5469,7 @@ async fn execute_secret_delete(
     secret_manager
         .delete_secret_safe(&vault_name, name, force)
         .await?;
-    println!("✅ Successfully deleted secret '{name}'");
+    output::success(&format!("Successfully deleted secret '{name}'"));
 
     Ok(())
 }
@@ -5668,7 +5666,7 @@ async fn execute_secret_update(
         .update_secret_enhanced(&vault_name, &update_request)
         .await?;
 
-    println!("✅ Successfully updated secret '{}'", secret.original_name);
+    output::success(&format!("Successfully updated secret '{}'", secret.original_name));
     println!("   Vault: {vault_name}");
     println!("   Version: {}", secret.version);
 
@@ -5711,7 +5709,7 @@ async fn execute_secret_purge(
     secret_manager
         .purge_secret_safe(&vault_name, name, force)
         .await?;
-    println!("✅ Successfully purged secret '{name}'");
+    output::success(&format!("Successfully purged secret '{name}'"));
 
     Ok(())
 }
@@ -5738,10 +5736,10 @@ async fn execute_secret_restore(
         .restore_secret_safe(&vault_name, name)
         .await?;
 
-    println!(
-        "✅ Successfully restored secret '{}'",
+    output::success(&format!(
+        "Successfully restored secret '{}'",
         restored_secret.original_name
-    );
+    ));
     println!("   Vault: {vault_name}");
     println!("   Version: {}", restored_secret.version);
     println!("   Enabled: {}", restored_secret.enabled);
@@ -5815,10 +5813,10 @@ async fn execute_secret_copy(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(to_vault).await;
 
-    println!(
-        "✅ Successfully copied secret '{}' to vault '{}'",
+    output::success(&format!(
+        "Successfully copied secret '{}' to vault '{}'",
         copied_secret.original_name, to_vault
-    );
+    ));
     println!("   Source: {}/{}", from_vault, name);
     println!("   Target: {}/{}", to_vault, target_name);
     println!("   Version: {}", copied_secret.version);
@@ -5876,10 +5874,10 @@ async fn execute_secret_move(
                 target_name, to_vault
             )));
         } else {
-            println!(
-                "⚠️  Overwriting existing secret '{}' in vault '{}'",
+            output::warn(&format!(
+                "Overwriting existing secret '{}' in vault '{}'",
                 target_name, to_vault
-            );
+            ));
         }
     }
 
@@ -5903,10 +5901,10 @@ async fn execute_secret_move(
         .delete_secret_safe(from_vault, name, true)
         .await?;
 
-    println!(
-        "✅ Successfully moved secret '{}' from '{}' to '{}'",
+    output::success(&format!(
+        "Successfully moved secret '{}' from '{}' to '{}'",
         name, from_vault, to_vault
-    );
+    ));
 
     Ok(())
 }
@@ -5940,7 +5938,7 @@ async fn execute_secret_parse(
             }
         }
         _ => {
-            println!("Unimnplemented format selected: {format}");
+            output::warn(&format!("Unimplemented format selected: {format}"));
         }
     }
 
@@ -6678,7 +6676,7 @@ async fn execute_context_use(
     context_manager.set_context(new_context).await?;
 
     let scope = if local { "local" } else { "global" };
-    println!("✅ Switched to vault '{vault_name}' ({scope} context)");
+    output::success(&format!("Switched to vault '{vault_name}' ({scope} context)"));
 
     if let Some(ref rg) = context_manager.current_resource_group() {
         println!("   Resource Group: {rg}");
@@ -6780,7 +6778,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
     } else {
         context_manager.scope_description()
     };
-    println!("✅ Cleared vault context for '{vault_name}' ({scope} scope)");
+    output::success(&format!("Cleared vault context for '{vault_name}' ({scope} scope)"));
 
     Ok(())
 }
@@ -6844,7 +6842,7 @@ async fn execute_file_upload(
     if progress {
         // TODO: Use progress callback when implemented
         let file_info = blob_manager.upload_file(upload_request).await?;
-        println!("✅ Successfully uploaded file '{}'", file_info.name);
+        output::success(&format!("Successfully uploaded file '{}'", file_info.name));
         println!("   Size: {} bytes", file_info.size);
         println!("   Content-Type: {}", file_info.content_type);
         if !file_info.groups.is_empty() {
@@ -6852,7 +6850,7 @@ async fn execute_file_upload(
         }
     } else {
         let file_info = blob_manager.upload_file(upload_request).await?;
-        println!("✅ Successfully uploaded file '{}'", file_info.name);
+        output::success(&format!("Successfully uploaded file '{}'", file_info.name));
         println!("   Size: {} bytes", file_info.size);
         println!("   Content-Type: {}", file_info.content_type);
         if !file_info.groups.is_empty() {
@@ -6902,7 +6900,7 @@ async fn execute_file_download(
                 fs::write(&output_path, content).map_err(|e| {
                     CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
                 })?;
-                println!("✅ Successfully downloaded file '{name}'");
+                output::success(&format!("Successfully downloaded file '{name}'"));
             }
             Err(e) => {
                 return Err(e);
@@ -6914,7 +6912,7 @@ async fn execute_file_download(
                 fs::write(&output_path, content).map_err(|e| {
                     CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
                 })?;
-                println!("✅ Successfully downloaded file '{name}'");
+                output::success(&format!("Successfully downloaded file '{name}'"));
             }
             Err(e) => {
                 return Err(e);
@@ -7058,7 +7056,7 @@ async fn execute_file_delete(
     // Delete file
     println!("Deleting file '{name}'...");
     blob_manager.delete_file(name).await?;
-    println!("✅ Successfully deleted file '{name}'");
+    output::success(&format!("Successfully deleted file '{name}'"));
 
     Ok(())
 }
@@ -7299,7 +7297,7 @@ async fn execute_file_upload_recursive(
         let path = Path::new(path_str);
         if !path.exists() {
             if continue_on_error {
-                eprintln!("❌ Path not found: {path_str}");
+                output::error(&format!("Path not found: {path_str}"));
                 continue;
             } else {
                 return Err(CrosstacheError::config(format!(
@@ -7334,7 +7332,7 @@ async fn execute_file_upload_recursive(
                 file_info.blob_name
             );
             if continue_on_error {
-                eprintln!("❌ {}", error_msg);
+                output::error(&error_msg);
                 failure_count += 1;
                 continue;
             } else {
@@ -7369,7 +7367,7 @@ async fn execute_file_upload_recursive(
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("❌ Failed to upload '{}': {}", local_path_str, e);
+                output::error(&format!("Failed to upload '{}': {}", local_path_str, e));
                 failure_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -7379,10 +7377,11 @@ async fn execute_file_upload_recursive(
     }
 
     // Print summary
-    println!("\n📊 Upload Summary:");
-    println!("  ✅ Successful: {success_count}");
+    println!();
+    output::info("Upload Summary:");
+    println!("  {}", output::format_line(output::Level::Success, &format!("Successful: {success_count}"), output::should_use_rich_stdout()));
     if failure_count > 0 {
-        println!("  ❌ Failed: {failure_count}");
+        println!("  {}", output::format_line(output::Level::Error, &format!("Failed: {failure_count}"), output::should_use_rich_stdout()));
     }
 
     if failure_count > 0 && continue_on_error {
@@ -7426,11 +7425,11 @@ async fn execute_file_upload_multiple(
         .await
         {
             Ok(_) => {
-                println!("  ✅ {file_path}");
+                println!("  {}", output::format_line(output::Level::Success, &file_path, output::should_use_rich_stdout()));
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ {file_path}: {e}");
+                eprintln!("  {}", output::format_line(output::Level::Error, &format!("{file_path}: {e}"), output::should_use_rich_stdout()));
                 error_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -7477,11 +7476,11 @@ async fn execute_file_download_multiple(
         .await
         {
             Ok(_) => {
-                println!("  ✅ {file_name}");
+                println!("  {}", output::format_line(output::Level::Success, &file_name, output::should_use_rich_stdout()));
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ {file_name}: {e}");
+                eprintln!("  {}", output::format_line(output::Level::Error, &format!("{file_name}: {e}"), output::should_use_rich_stdout()));
                 error_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -7544,7 +7543,7 @@ async fn execute_file_download_recursive(
         let files = blob_manager.list_files(list_request).await?;
 
         if files.is_empty() {
-            eprintln!("⚠️  No files found matching prefix: {}", prefix);
+            output::warn(&format!("No files found matching prefix: {}", prefix));
             continue;
         }
 
@@ -7600,10 +7599,10 @@ async fn execute_file_download_recursive(
                 }
             }
             if !resolved.starts_with(&canonical_output) {
-                eprintln!(
-                    "⚠️  Skipping '{}': path traversal detected in blob name",
+                output::warn(&format!(
+                    "Skipping '{}': path traversal detected in blob name",
                     blob_name
-                );
+                ));
                 failure_count += 1;
                 if continue_on_error {
                     continue;
@@ -7634,10 +7633,10 @@ async fn execute_file_download_recursive(
 
         // Check if file exists and handle force flag
         if local_path.exists() && !force {
-            eprintln!(
-                "⚠️  File already exists: {} (use --force to overwrite)",
+            output::warn(&format!(
+                "File already exists: {} (use --force to overwrite)",
                 local_path_str
-            );
+            ));
             failure_count += 1;
             if !continue_on_error {
                 return Err(CrosstacheError::config(format!(
@@ -7670,7 +7669,7 @@ async fn execute_file_download_recursive(
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("❌ Failed to download '{}': {}", blob_name, e);
+                output::error(&format!("Failed to download '{}': {}", blob_name, e));
                 failure_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -7680,10 +7679,11 @@ async fn execute_file_download_recursive(
     }
 
     // Print summary
-    println!("\n📊 Download Summary:");
-    println!("  ✅ Successful: {}", success_count);
+    println!();
+    output::info("Download Summary:");
+    println!("  {}", output::format_line(output::Level::Success, &format!("Successful: {}", success_count), output::should_use_rich_stdout()));
     if failure_count > 0 {
-        println!("  ❌ Failed: {}", failure_count);
+        println!("  {}", output::format_line(output::Level::Error, &format!("Failed: {}", failure_count), output::should_use_rich_stdout()));
     }
 
     if failure_count > 0 && continue_on_error {
@@ -7734,11 +7734,11 @@ async fn execute_file_delete_multiple(
     for file_name in files {
         match execute_file_delete(blob_manager, &file_name, force, config).await {
             Ok(_) => {
-                println!("  ✅ {file_name}");
+                println!("  {}", output::format_line(output::Level::Success, &file_name, output::should_use_rich_stdout()));
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ {file_name}: {e}");
+                eprintln!("  {}", output::format_line(output::Level::Error, &format!("{file_name}: {e}"), output::should_use_rich_stdout()));
                 error_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -7856,11 +7856,11 @@ async fn execute_secret_set_bulk(
         ));
     }
 
-    println!(
-        "🔐 Setting {} secret(s) in vault '{}'...",
+    output::step(&format!(
+        "Setting {} secret(s) in vault '{}'...",
         secrets_to_set.len(),
         vault_name
-    );
+    ));
 
     let mut success_count = 0;
     let mut error_count = 0;
@@ -7890,22 +7890,23 @@ async fn execute_secret_set_bulk(
         {
             Ok(secret) => {
                 println!(
-                    "  ✅ {}: {} (version {})",
-                    key, secret.original_name, secret.version
+                    "  {}",
+                    output::format_line(output::Level::Success, &format!("{}: {} (version {})", key, secret.original_name, secret.version), output::should_use_rich_stdout())
                 );
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ {}: {}", key, e);
+                eprintln!("  {}", output::format_line(output::Level::Error, &format!("{}: {}", key, e), output::should_use_rich_stdout()));
                 error_count += 1;
             }
         }
     }
 
-    println!("\n📊 Bulk Set Summary:");
-    println!("  ✅ Successful: {}", success_count);
+    println!();
+    output::info("Bulk Set Summary:");
+    println!("  {}", output::format_line(output::Level::Success, &format!("Successful: {}", success_count), output::should_use_rich_stdout()));
     if error_count > 0 {
-        println!("  ❌ Failed: {}", error_count);
+        println!("  {}", output::format_line(output::Level::Error, &format!("Failed: {}", error_count), output::should_use_rich_stdout()));
     }
 
     if error_count > 0 {
@@ -7969,11 +7970,11 @@ async fn execute_secret_delete_group(
         }
     }
 
-    println!(
-        "🗑️  Deleting {} secret(s) from group '{}'...",
+    output::step(&format!(
+        "Deleting {} secret(s) from group '{}'...",
         secrets.len(),
         group_name
-    );
+    ));
 
     let mut success_count = 0;
     let mut error_count = 0;
@@ -7984,20 +7985,21 @@ async fn execute_secret_delete_group(
             .await
         {
             Ok(_) => {
-                println!("  ✅ Deleted: {}", secret.name);
+                println!("  {}", output::format_line(output::Level::Success, &format!("Deleted: {}", secret.name), output::should_use_rich_stdout()));
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ Failed to delete '{}': {}", secret.name, e);
+                eprintln!("  {}", output::format_line(output::Level::Error, &format!("Failed to delete '{}': {}", secret.name, e), output::should_use_rich_stdout()));
                 error_count += 1;
             }
         }
     }
 
-    println!("\n📊 Group Delete Summary:");
-    println!("  ✅ Successful: {}", success_count);
+    println!();
+    output::info("Group Delete Summary:");
+    println!("  {}", output::format_line(output::Level::Success, &format!("Successful: {}", success_count), output::should_use_rich_stdout()));
     if error_count > 0 {
-        println!("  ❌ Failed: {}", error_count);
+        println!("  {}", output::format_line(output::Level::Error, &format!("Failed: {}", error_count), output::should_use_rich_stdout()));
     }
 
     if error_count > 0 {
@@ -8006,10 +8008,10 @@ async fn execute_secret_delete_group(
             error_count, group_name
         )))
     } else {
-        println!(
-            "✅ Successfully deleted all secrets from group '{}'",
+        output::success(&format!(
+            "Successfully deleted all secrets from group '{}'",
             group_name
-        );
+        ));
         Ok(())
     }
 }
