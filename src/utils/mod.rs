@@ -11,4 +11,5 @@ pub mod interactive;
 pub mod network;
 pub mod resource_detector;
 pub mod retry;
+pub mod output;
 pub mod sanitizer;
