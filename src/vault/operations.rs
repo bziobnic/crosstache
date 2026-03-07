@@ -191,7 +191,6 @@ impl AzureVaultOperations {
         };
         retry_with_backoff(operation, retry_options).await
     }
-
 }
 
 #[async_trait]
@@ -858,9 +857,7 @@ impl VaultOperations for AzureVaultOperations {
 
             let mut role_name_map: HashMap<String, String> = HashMap::new();
             for role_def_id in &unique_role_def_ids {
-                let url = self.build_arm_url(&format!(
-                    "{role_def_id}?api-version=2022-04-01"
-                ));
+                let url = self.build_arm_url(&format!("{role_def_id}?api-version=2022-04-01"));
                 if let Ok(resp) = self
                     .http_client
                     .get(&url)

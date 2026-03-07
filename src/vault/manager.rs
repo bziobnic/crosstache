@@ -284,9 +284,7 @@ impl VaultManager {
         vault_name: &str,
         resource_group: &str,
     ) -> Result<Vec<VaultRole>> {
-        self.vault_ops
-            .list_access(vault_name, resource_group)
-            .await
+        self.vault_ops.list_access(vault_name, resource_group).await
     }
 
     /// Update vault properties
@@ -355,14 +353,11 @@ impl VaultManager {
     }
 
     /// Resolve principal names/emails and optionally filter service accounts
-    pub async fn resolve_and_filter_roles(
-        &self,
-        roles: &mut Vec<VaultRole>,
-        include_all: bool,
-    ) {
+    pub async fn resolve_and_filter_roles(&self, roles: &mut Vec<VaultRole>, include_all: bool) {
         let principal_ids: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
-            roles.iter()
+            roles
+                .iter()
                 .map(|r| r.principal_id.clone())
                 .filter(|id| seen.insert(id.clone()))
                 .collect()

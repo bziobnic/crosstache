@@ -17,9 +17,9 @@ use crate::auth::provider::AzureAuthProvider;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::models::SecretInfo;
 use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
-use crate::utils::output;
 use crate::utils::helpers::{parse_connection_string, validate_folder_path};
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
+use crate::utils::output;
 use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name};
 
 /// Secret properties and metadata
@@ -1285,9 +1285,7 @@ impl SecretManager {
             ));
 
             if name_info.is_hashed {
-                output::info(
-                    "Long or complex name was hashed - original name preserved in tags",
-                );
+                output::info("Long or complex name was hashed - original name preserved in tags");
             }
         }
 

@@ -176,10 +176,7 @@ mod tests {
     #[test]
     fn test_format_step_tty() {
         let out = format_line(Level::Step, "building", true);
-        assert!(
-            out.contains('\u{25b6}'),
-            "should contain play-button emoji"
-        );
+        assert!(out.contains('\u{25b6}'), "should contain play-button emoji");
         assert!(out.contains("building"), "should contain the message");
     }
 }

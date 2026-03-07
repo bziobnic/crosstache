@@ -23,7 +23,7 @@ impl InteractivePrompt {
 
     /// Display a welcome message for the setup process
     pub fn welcome(&self) -> Result<()> {
-        println!("🚀 Welcome to crosstache!");
+        crate::utils::output::step("Welcome to crosstache!");
         println!("Let's get you set up for Azure Key Vault management.");
         println!();
         Ok(())
@@ -102,7 +102,6 @@ impl InteractivePrompt {
 
         Ok(result)
     }
-
 }
 
 impl Default for InteractivePrompt {
@@ -139,24 +138,22 @@ impl ProgressIndicator {
 
     /// Finish with success message
     pub fn finish_success(&self, message: &str) {
-        self.bar.finish_with_message(
-            crate::utils::output::format_line(
+        self.bar
+            .finish_with_message(crate::utils::output::format_line(
                 crate::utils::output::Level::Success,
                 message,
                 crate::utils::output::should_use_rich_stdout(),
-            )
-        );
+            ));
     }
 
     /// Finish with error message
     pub fn finish_error(&self, message: &str) {
-        self.bar.finish_with_message(
-            crate::utils::output::format_line(
+        self.bar
+            .finish_with_message(crate::utils::output::format_line(
                 crate::utils::output::Level::Error,
                 message,
                 crate::utils::output::should_use_rich_stderr(),
-            )
-        );
+            ));
     }
 
     /// Finish and clear the progress indicator
