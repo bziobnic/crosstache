@@ -16,12 +16,6 @@ fn display_option(opt: &Option<String>) -> String {
 }
 
 /// Display function for Option<u32> in tables
-fn display_option_u32(opt: &Option<u32>) -> String {
-    match opt {
-        Some(value) => value.to_string(),
-        None => "-".to_string(),
-    }
-}
 
 /// Azure Key Vault properties and metadata
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
@@ -301,21 +295,18 @@ pub struct VaultSummary {
     pub resource_group: String,
     #[tabled(rename = "Status")]
     pub status: String,
-    #[tabled(rename = "Secrets", display_with = "display_option_u32")]
-    pub secret_count: Option<u32>,
     #[tabled(rename = "Created")]
     pub created_at: String,
 }
 
 impl VaultProperties {
     /// Convert to vault summary
-    pub fn to_summary(&self, secret_count: Option<u32>) -> VaultSummary {
+    pub fn to_summary(&self) -> VaultSummary {
         VaultSummary {
             name: self.name.clone(),
             location: self.location.clone(),
             resource_group: self.resource_group.clone(),
             status: "Active".to_string(),
-            secret_count,
             created_at: self.created_at.format("%Y-%m-%d %H:%M").to_string(),
         }
     }
