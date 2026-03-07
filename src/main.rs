@@ -75,27 +75,28 @@ fn init_logging() {
 }
 
 fn print_user_friendly_error(error: &CrosstacheError) {
+    use crate::utils::output;
     use CrosstacheError::*;
 
     match error {
         AuthenticationError(msg) => {
-            eprintln!("🔐 Authentication Error");
+            output::error("Authentication Error");
             eprintln!("{msg}");
         }
         AzureApiError(msg) => {
-            eprintln!("☁️  Azure API Error");
+            output::error("Azure API Error");
             eprintln!("{msg}");
         }
         NetworkError(msg) => {
-            eprintln!("🌐 Network Error");
+            output::error("Network Error");
             eprintln!("{msg}");
         }
         ConfigError(msg) => {
-            eprintln!("⚙️  Configuration Error");
+            output::error("Configuration Error");
             eprintln!("{msg}");
         }
         VaultNotFound { name } => {
-            eprintln!("🔒 Vault Not Found");
+            output::error("Vault Not Found");
             eprintln!("The Azure Key Vault '{name}' was not found.");
             eprintln!("\nPlease verify:");
             eprintln!("1. The vault name is correct");
@@ -104,7 +105,7 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             eprintln!("4. You're using the correct subscription");
         }
         SecretNotFound { name } => {
-            eprintln!("🔑 Secret Not Found");
+            output::error("Secret Not Found");
             eprintln!("The secret '{name}' was not found in the vault.");
             eprintln!("\nPlease verify:");
             eprintln!("1. The secret name is correct");
@@ -112,7 +113,7 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             eprintln!("3. You have 'Get' permissions for secrets");
         }
         PermissionDenied(msg) => {
-            eprintln!("🚫 Permission Denied");
+            output::error("Permission Denied");
             eprintln!("{msg}");
             eprintln!("\nPlease verify:");
             eprintln!("1. Your account has the necessary permissions");
@@ -120,7 +121,7 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             eprintln!("3. The resource you're trying to access exists");
         }
         _ => {
-            eprintln!("❌ Error: {error}");
+            output::error(&format!("{error}"));
         }
     }
 }
