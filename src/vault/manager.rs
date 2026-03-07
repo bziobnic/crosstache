@@ -13,11 +13,11 @@ use super::operations::{AzureVaultOperations, VaultOperations};
 use crate::auth::provider::AzureAuthProvider;
 use crate::error::Result;
 use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
+use crate::utils::output;
 
 /// High-level vault manager
 pub struct VaultManager {
     vault_ops: Arc<dyn VaultOperations>,
-    display_utils: DisplayUtils,
     no_color: bool,
 }
 
@@ -29,11 +29,9 @@ impl VaultManager {
         no_color: bool,
     ) -> Result<Self> {
         let vault_ops = Arc::new(AzureVaultOperations::new(auth_provider, subscription_id)?);
-        let display_utils = DisplayUtils::new(no_color);
 
         Ok(Self {
             vault_ops,
-            display_utils,
             no_color,
         })
     }
@@ -46,8 +44,7 @@ impl VaultManager {
         resource_group: &str,
         additional_options: Option<VaultCreateRequest>,
     ) -> Result<VaultProperties> {
-        self.display_utils
-            .print_info(&format!("Creating vault '{name}'..."))?;
+        output::info(&format!("Creating vault '{name}'..."));
 
         let mut request = additional_options.unwrap_or_default();
         request.name = name.to_string();
@@ -67,10 +64,10 @@ impl VaultManager {
 
         let vault = self.vault_ops.create_vault(&request).await?;
 
-        self.display_utils.print_success(&format!(
+        output::success(&format!(
             "Successfully created vault '{}' in {} ({})",
             vault.name, vault.location, vault.resource_group
-        ))?;
+        ));
 
         Ok(vault)
     }
@@ -111,7 +108,7 @@ impl VaultManager {
             .await?;
 
         if vaults.is_empty() {
-            self.display_utils.print_info("No vaults found.")?;
+            output::info("No vaults found.");
             return Ok(vaults);
         }
 
@@ -134,19 +131,19 @@ impl VaultManager {
         let vault = self.vault_ops.get_vault(vault_name, resource_group).await?;
 
         if !force {
-            self.display_utils.print_warning(&format!(
+            output::warn(&format!(
                 "This will soft-delete vault '{vault_name}' in resource group '{resource_group}'"
-            ))?;
+            ));
 
             if vault.has_purge_protection() {
-                self.display_utils.print_warning(
+                output::warn(
                     "This vault has purge protection enabled - it cannot be permanently deleted.",
-                )?;
+                );
             } else {
-                self.display_utils.print_warning(&format!(
+                output::warn(&format!(
                     "The vault will be recoverable for {} days after deletion.",
                     vault.get_retention_days()
-                ))?;
+                ));
             }
         }
 
@@ -154,22 +151,20 @@ impl VaultManager {
             .delete_vault(vault_name, resource_group)
             .await?;
 
-        self.display_utils.print_success(&format!(
+        output::success(&format!(
             "Successfully deleted vault '{vault_name}' (soft delete)"
-        ))?;
+        ));
 
         Ok(())
     }
 
     /// Restore a soft-deleted vault
     pub async fn restore_vault(&self, vault_name: &str, location: &str) -> Result<VaultProperties> {
-        self.display_utils
-            .print_info(&format!("Restoring soft-deleted vault '{vault_name}'..."))?;
+        output::info(&format!("Restoring soft-deleted vault '{vault_name}'..."));
 
         let vault = self.vault_ops.restore_vault(vault_name, location).await?;
 
-        self.display_utils
-            .print_success(&format!("Successfully restored vault '{vault_name}'"))?;
+        output::success(&format!("Successfully restored vault '{vault_name}'"));
 
         Ok(vault)
     }
@@ -182,18 +177,17 @@ impl VaultManager {
         force: bool,
     ) -> Result<()> {
         if !force {
-            self.display_utils.print_warning(&format!(
+            output::warn(&format!(
                 "This will PERMANENTLY delete vault '{vault_name}' and all its contents!"
-            ))?;
-            self.display_utils
-                .print_warning("This action cannot be undone.")?;
+            ));
+            output::warn("This action cannot be undone.");
         }
 
         self.vault_ops.purge_vault(vault_name, location).await?;
 
-        self.display_utils.print_success(&format!(
+        output::success(&format!(
             "Successfully purged vault '{vault_name}' (permanent deletion)"
-        ))?;
+        ));
 
         Ok(())
     }
@@ -215,17 +209,17 @@ impl VaultManager {
 
         let user_display = user_email.unwrap_or(user_object_id);
 
-        self.display_utils.print_info(&format!(
+        output::info(&format!(
             "Granting {access_level_str} access to vault '{vault_name}' for user '{user_display}'..."
-        ))?;
+        ));
 
         self.vault_ops
             .grant_access(vault_name, resource_group, user_object_id, access_level)
             .await?;
 
-        self.display_utils.print_success(&format!(
+        output::success(&format!(
             "Successfully granted {access_level_str} access to vault '{vault_name}' for user '{user_display}'"
-        ))?;
+        ));
 
         Ok(())
     }
@@ -240,17 +234,17 @@ impl VaultManager {
     ) -> Result<()> {
         let user_display = user_email.unwrap_or(user_object_id);
 
-        self.display_utils.print_info(&format!(
+        output::info(&format!(
             "Revoking access to vault '{vault_name}' for user '{user_display}'..."
-        ))?;
+        ));
 
         self.vault_ops
             .revoke_access(vault_name, resource_group, user_object_id)
             .await?;
 
-        self.display_utils.print_success(&format!(
+        output::success(&format!(
             "Successfully revoked access to vault '{vault_name}' for user '{user_display}'"
-        ))?;
+        ));
 
         Ok(())
     }
@@ -269,13 +263,12 @@ impl VaultManager {
             .await?;
 
         if roles.is_empty() {
-            self.display_utils
-                .print_info("No access policies found for this vault.")?;
+            output::info("No access policies found for this vault.");
             return Ok(roles);
         }
 
-        self.display_utils
-            .print_header(&format!("Access Policies for Vault '{vault_name}'"))?;
+        let du = DisplayUtils::new(self.no_color);
+        du.print_header(&format!("Access Policies for Vault '{vault_name}'"))?;
 
         // Format and display results
         let formatter = TableFormatter::new(output_format, self.no_color);
@@ -390,8 +383,8 @@ impl VaultManager {
 
     /// Display detailed vault information
     fn display_vault_details(&self, vault: &VaultProperties) -> Result<()> {
-        self.display_utils
-            .print_header(&format!("Vault: {}", vault.name))?;
+        let du = DisplayUtils::new(self.no_color);
+        du.print_header(&format!("Vault: {}", vault.name))?;
 
         let vault_uri = vault.get_vault_uri();
         let retention_days = format!("{} days", vault.soft_delete_retention_in_days);
@@ -438,12 +431,12 @@ impl VaultManager {
             ),
         ];
 
-        let formatted_details = self.display_utils.format_key_value_pairs(&details);
+        let formatted_details = du.format_key_value_pairs(&details);
         println!("{formatted_details}");
 
         if !vault.access_policies.is_empty() {
-            self.display_utils.print_separator()?;
-            self.display_utils.print_header("Access Policies")?;
+            du.print_separator()?;
+            du.print_header("Access Policies")?;
 
             let formatter = TableFormatter::new(OutputFormat::Table, self.no_color);
             let table_output = formatter.format_table(&vault.access_policies)?;
@@ -451,15 +444,15 @@ impl VaultManager {
         }
 
         if !vault.tags.is_empty() {
-            self.display_utils.print_separator()?;
-            self.display_utils.print_header("Tags")?;
+            du.print_separator()?;
+            du.print_header("Tags")?;
 
             let tag_pairs: Vec<(&str, &str)> = vault
                 .tags
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
-            let formatted_tags = self.display_utils.format_key_value_pairs(&tag_pairs);
+            let formatted_tags = du.format_key_value_pairs(&tag_pairs);
             println!("{formatted_tags}");
         }
 

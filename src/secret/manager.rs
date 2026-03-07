@@ -17,6 +17,7 @@ use crate::auth::provider::AzureAuthProvider;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::models::SecretInfo;
 use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
+use crate::utils::output;
 use crate::utils::helpers::{parse_connection_string, validate_folder_path};
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
 use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name};
@@ -1229,7 +1230,6 @@ impl SecretOperations for AzureSecretOperations {
 /// High-level secret manager with user-friendly operations
 pub struct SecretManager {
     secret_ops: Arc<dyn SecretOperations>,
-    display_utils: DisplayUtils,
     no_color: bool,
 }
 
@@ -1237,11 +1237,9 @@ impl SecretManager {
     /// Create a new secret manager
     pub fn new(auth_provider: Arc<dyn AzureAuthProvider>, no_color: bool) -> Self {
         let secret_ops = Arc::new(AzureSecretOperations::new(auth_provider));
-        let display_utils = DisplayUtils::new(no_color);
 
         Self {
             secret_ops,
-            display_utils,
             no_color,
         }
     }
@@ -1281,27 +1279,26 @@ impl SecretManager {
         // Show name sanitization info if needed
         let name_info = get_secret_name_info(name)?;
         if name_info.was_modified {
-            self.display_utils.print_warning(&format!(
+            output::warn(&format!(
                 "Secret name '{}' will be sanitized to '{}'",
                 name_info.original_name, name_info.sanitized_name
-            ))?;
+            ));
 
             if name_info.is_hashed {
-                self.display_utils.print_info(
+                output::info(
                     "Long or complex name was hashed - original name preserved in tags",
-                )?;
+                );
             }
         }
 
-        self.display_utils
-            .print_info(&format!("Setting secret '{name}'..."))?;
+        output::info(&format!("Setting secret '{name}'..."));
 
         let secret = self.secret_ops.set_secret(vault_name, &request).await?;
 
-        self.display_utils.print_success(&format!(
+        output::success(&format!(
             "Successfully set secret '{}'",
             secret.original_name
-        ))?;
+        ));
 
         Ok(secret)
     }
@@ -1465,7 +1462,7 @@ impl SecretManager {
             } else {
                 "No enabled secrets found in vault. Use --all to show disabled secrets."
             };
-            self.display_utils.print_info(message)?;
+            output::info(message);
             return Ok(secrets);
         }
 
@@ -1486,19 +1483,17 @@ impl SecretManager {
         force: bool,
     ) -> Result<()> {
         if !force {
-            self.display_utils.print_warning(&format!(
+            output::warn(&format!(
                 "This will delete secret '{secret_name}' from vault '{vault_name}'"
-            ))?;
-            self.display_utils
-                .print_info("The secret will be recoverable for the vault's retention period.")?;
+            ));
+            output::info("The secret will be recoverable for the vault's retention period.");
         }
 
         self.secret_ops
             .delete_secret(vault_name, secret_name)
             .await?;
 
-        self.display_utils
-            .print_success(&format!("Successfully deleted secret '{secret_name}'"))?;
+        output::success(&format!("Successfully deleted secret '{secret_name}'"));
 
         Ok(())
     }
@@ -1509,19 +1504,19 @@ impl SecretManager {
         vault_name: &str,
         secret_name: &str,
     ) -> Result<SecretProperties> {
-        self.display_utils.print_info(&format!(
+        output::info(&format!(
             "Restoring deleted secret '{secret_name}' from vault '{vault_name}'..."
-        ))?;
+        ));
 
         let restored_secret = self
             .secret_ops
             .restore_secret(vault_name, secret_name)
             .await?;
 
-        self.display_utils.print_success(&format!(
+        output::success(&format!(
             "Successfully restored secret '{}'",
             restored_secret.original_name
-        ))?;
+        ));
 
         Ok(restored_secret)
     }
@@ -1534,25 +1529,22 @@ impl SecretManager {
         force: bool,
     ) -> Result<()> {
         if !force {
-            self.display_utils.print_warning(&format!(
+            output::warn(&format!(
                 "This will PERMANENTLY DELETE secret '{secret_name}' from vault '{vault_name}'"
-            ))?;
-            self.display_utils
-                .print_warning("This operation cannot be undone!")?;
-            self.display_utils
-                .print_info("The secret must be in a deleted state before it can be purged.")?;
+            ));
+            output::warn("This operation cannot be undone!");
+            output::info("The secret must be in a deleted state before it can be purged.");
         }
 
-        self.display_utils.print_info(&format!(
+        output::info(&format!(
             "Permanently purging deleted secret '{secret_name}' from vault '{vault_name}'..."
-        ))?;
+        ));
 
         self.secret_ops
             .purge_secret(vault_name, secret_name)
             .await?;
 
-        self.display_utils
-            .print_success(&format!("Successfully purged secret '{secret_name}'"))?;
+        output::success(&format!("Successfully purged secret '{secret_name}'"));
 
         Ok(())
     }
@@ -1643,8 +1635,8 @@ impl SecretManager {
 
     /// Display secret details
     fn display_secret_details(&self, secret: &SecretProperties, show_value: bool) -> Result<()> {
-        self.display_utils
-            .print_header(&format!("Secret: {}", secret.original_name))?;
+        let du = DisplayUtils::new(self.no_color);
+        du.print_header(&format!("Secret: {}", secret.original_name))?;
 
         let mut details = vec![
             ("Name", secret.name.as_str()),
@@ -1662,19 +1654,19 @@ impl SecretManager {
             }
         }
 
-        let formatted_details = self.display_utils.format_key_value_pairs(&details);
+        let formatted_details = du.format_key_value_pairs(&details);
         println!("{formatted_details}");
 
         if !secret.tags.is_empty() {
-            self.display_utils.print_separator()?;
-            self.display_utils.print_header("Tags")?;
+            du.print_separator()?;
+            du.print_header("Tags")?;
 
             let tag_pairs: Vec<(&str, &str)> = secret
                 .tags
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
-            let formatted_tags = self.display_utils.format_key_value_pairs(&tag_pairs);
+            let formatted_tags = du.format_key_value_pairs(&tag_pairs);
             println!("{formatted_tags}");
         }
 
@@ -1711,6 +1703,7 @@ impl SecretManager {
         output_format: OutputFormat,
         vault_name: &str,
     ) -> Result<()> {
+        let du = DisplayUtils::new(self.no_color);
         // Display vault name header first
         if output_format == OutputFormat::Table {
             self.display_vault_header(vault_name)?;
@@ -1741,7 +1734,7 @@ impl SecretManager {
 
         // Display each group
         for (group_name, group_secrets) in groups {
-            self.display_utils.print_header(&format!(
+            du.print_header(&format!(
                 "Group: {} ({} secrets)",
                 group_name,
                 group_secrets.len()
@@ -1751,7 +1744,7 @@ impl SecretManager {
             let table_output = formatter.format_table(&group_secrets)?;
             println!("{table_output}");
 
-            self.display_utils.print_separator()?;
+            du.print_separator()?;
         }
 
         Ok(())
@@ -1800,10 +1793,10 @@ impl SecretManager {
                 )));
             }
 
-            self.display_utils.print_info(&format!(
+            output::info(&format!(
                 "Renaming secret '{}' to '{}'...",
                 update_request.name, new_name
-            ))?;
+            ));
         }
 
         // Handle tags merging/replacement
@@ -1891,8 +1884,7 @@ impl SecretManager {
         };
 
         // Show update progress
-        self.display_utils
-            .print_info(&format!("Updating secret '{}'...", update_request.name))?;
+        output::info(&format!("Updating secret '{}'...", update_request.name));
 
         // If renaming, we need to create a new secret and delete the old one
         if update_request.new_name.is_some() {
@@ -1907,10 +1899,10 @@ impl SecretManager {
                 .delete_secret(vault_name, &update_request.name)
                 .await?;
 
-            self.display_utils.print_info(&format!(
+            output::info(&format!(
                 "Successfully renamed secret '{}' to '{}'",
                 update_request.name, secret_request.name
-            ))?;
+            ));
 
             Ok(new_secret)
         } else {
@@ -1920,10 +1912,10 @@ impl SecretManager {
                 .update_secret(vault_name, &update_request.name, &secret_request)
                 .await?;
 
-            self.display_utils.print_info(&format!(
+            output::info(&format!(
                 "Successfully updated secret '{}'",
                 update_request.name
-            ))?;
+            ));
 
             Ok(updated_secret)
         }
