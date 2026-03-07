@@ -8,6 +8,7 @@ use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::azure_detect::{AzureDetector, AzureEnvironment, AzureSubscription};
 use crate::utils::interactive::{InteractivePrompt, ProgressIndicator, SetupHelper};
+use crate::utils::output;
 use crate::vault::manager::VaultManager;
 use crate::vault::models::VaultCreateRequest;
 use std::sync::Arc;
@@ -46,29 +47,35 @@ impl ConfigInitializer {
         self.prompt.welcome()?;
 
         // Step 1: Detect Azure environment
-        self.prompt.step(1, 6, "Detecting Azure Environment")?;
+        println!();
+        output::step("Step 1/6: Detecting Azure Environment");
         let azure_env = self.detect_azure_environment().await?;
 
         // Step 2: Configure subscription
-        self.prompt.step(2, 6, "Configuring Subscription")?;
+        println!();
+        output::step("Step 2/6: Configuring Subscription");
         let subscription = self.configure_subscription(&azure_env).await?;
 
         // Step 3: Configure resource group
-        self.prompt.step(3, 6, "Configuring Resource Group")?;
+        println!();
+        output::step("Step 3/6: Configuring Resource Group");
         let resource_group = self.configure_resource_group(&subscription).await?;
 
         // Step 4: Configure location
-        self.prompt.step(4, 6, "Configuring Default Location")?;
+        println!();
+        output::step("Step 4/6: Configuring Default Location");
         let location = self.configure_location(&subscription).await?;
 
         // Step 5: Configure blob storage
-        self.prompt.step(5, 6, "Configuring Blob Storage")?;
+        println!();
+        output::step("Step 5/6: Configuring Blob Storage");
         let (storage_account, container_name, blob_storage_configured) = self
             .configure_blob_storage(&subscription, &resource_group, &location)
             .await?;
 
         // Step 6: Optional vault creation
-        self.prompt.step(6, 6, "Optional Test Vault Creation")?;
+        println!();
+        output::step("Step 6/6: Optional Test Vault Creation");
         let vault_config = self
             .configure_vault_creation(&subscription, &resource_group, &location)
             .await?;
@@ -90,9 +97,8 @@ impl ConfigInitializer {
         let config = self.build_config(init_config).await?;
         self.save_config(&config).await?;
 
-        self.prompt.success("Setup completed successfully!")?;
-        self.prompt
-            .info("You can now start using crosstache with your configured defaults.")?;
+        output::success("Setup completed successfully!");
+        output::info("You can now start using crosstache with your configured defaults.");
 
         Ok(config)
     }
@@ -105,11 +111,11 @@ impl ConfigInitializer {
 
         if !azure_env.is_ready() {
             progress.finish_error("Azure environment not ready");
-            self.prompt.error(&azure_env.get_status_message())?;
+            output::error(&azure_env.get_status_message());
 
             let instructions = azure_env.get_setup_instructions();
             if !instructions.is_empty() {
-                self.prompt.info("Please complete the following steps:")?;
+                output::info("Please complete the following steps:");
                 for instruction in instructions {
                     println!("  • {instruction}");
                 }
@@ -126,10 +132,10 @@ impl ConfigInitializer {
         ));
 
         if let Some(current) = &azure_env.current_subscription {
-            self.prompt.info(&format!(
+            output::info(&format!(
                 "Current subscription: {} ({})",
                 current.name, current.id
-            ))?;
+            ));
         }
 
         Ok(azure_env)
@@ -156,7 +162,7 @@ impl ConfigInitializer {
         }
 
         if azure_env.subscriptions.len() > 1 {
-            self.prompt.info("Multiple subscriptions available:")?;
+            output::info("Multiple subscriptions available:");
 
             let subscription_options: Vec<String> = azure_env
                 .subscriptions
@@ -213,10 +219,10 @@ impl ConfigInitializer {
         progress.finish_clear();
 
         if !existing_groups.is_empty() {
-            self.prompt.info(&format!(
+            output::info(&format!(
                 "Found {} existing resource group(s)",
                 existing_groups.len()
-            ))?;
+            ));
 
             let use_existing = self
                 .prompt
@@ -251,8 +257,7 @@ impl ConfigInitializer {
 
             if create_rg {
                 // We'll create it when we know the location
-                self.prompt
-                    .info("Resource group will be created with the selected location.")?;
+                output::info("Resource group will be created with the selected location.");
             }
         }
 
@@ -318,11 +323,11 @@ impl ConfigInitializer {
         progress.finish_clear();
 
         let (storage_name, create_new_storage) = if !existing_accounts.is_empty() {
-            self.prompt.info(&format!(
+            output::info(&format!(
                 "Found {} existing storage account(s) in resource group '{}'",
                 existing_accounts.len(),
                 resource_group
-            ))?;
+            ));
 
             let use_existing = self
                 .prompt
@@ -786,7 +791,7 @@ impl ConfigInitializer {
     /// Show setup summary
     pub fn show_setup_summary(&self, config: &Config) -> Result<()> {
         println!();
-        self.prompt.success("Setup Summary")?;
+        output::success("Setup Summary");
         println!("┌─────────────────────────────────────────────────────────────┐");
         println!("│ Configuration                                               │");
         println!("├─────────────────────────────────────────────────────────────┤");
@@ -809,7 +814,7 @@ impl ConfigInitializer {
         println!("└─────────────────────────────────────────────────────────────┘");
         println!();
 
-        self.prompt.info("Next steps:")?;
+        output::info("Next steps:");
         println!("  • List your vaults: xv vault list");
         println!("  • Set a secret: xv set my-secret");
         println!("  • Get help: xv --help");
