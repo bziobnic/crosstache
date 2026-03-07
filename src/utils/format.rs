@@ -184,55 +184,6 @@ impl DisplayUtils {
         Ok(())
     }
 
-    /// Print a success message
-    pub fn print_success(&self, message: &str) -> Result<()> {
-        let styled_message = if self.no_color {
-            format!("✓ {message}")
-        } else {
-            format!("✓ {}", message.with(self.theme.success))
-        };
-
-        println!("{styled_message}");
-        Ok(())
-    }
-
-    /// Print a warning message
-    pub fn print_warning(&self, message: &str) -> Result<()> {
-        let styled_message = if self.no_color {
-            format!("⚠ {message}")
-        } else {
-            format!("⚠ {}", message.with(self.theme.warning))
-        };
-
-        println!("{styled_message}");
-        Ok(())
-    }
-
-    /// Print an error message
-    #[allow(dead_code)]
-    pub fn print_error(&self, message: &str) -> Result<()> {
-        let styled_message = if self.no_color {
-            format!("✗ {message}")
-        } else {
-            format!("✗ {}", message.with(self.theme.error))
-        };
-
-        eprintln!("{styled_message}");
-        Ok(())
-    }
-
-    /// Print an info message
-    pub fn print_info(&self, message: &str) -> Result<()> {
-        let styled_message = if self.no_color {
-            format!("ℹ {message}")
-        } else {
-            format!("ℹ {}", message.with(self.theme.info))
-        };
-
-        println!("{styled_message}");
-        Ok(())
-    }
-
     /// Format key-value pairs
     pub fn format_key_value_pairs(&self, pairs: &[(&str, &str)]) -> String {
         let max_key_length = pairs.iter().map(|(key, _)| key.len()).max().unwrap_or(0);

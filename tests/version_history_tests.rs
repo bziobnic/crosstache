@@ -24,13 +24,25 @@ mod version_command_tests {
             .output()
             .expect("Failed to execute xv version");
 
-        assert!(output.status.success(), "xv version should exit with code 0");
+        assert!(
+            output.status.success(),
+            "xv version should exit with code 0"
+        );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("crosstache Rust CLI"), "Should contain product name");
+        assert!(
+            stdout.contains("crosstache Rust CLI"),
+            "Should contain product name"
+        );
         assert!(stdout.contains("Version:"), "Should contain Version field");
-        assert!(stdout.contains("Git Hash:"), "Should contain Git Hash field");
-        assert!(stdout.contains("Git Branch:"), "Should contain Git Branch field");
+        assert!(
+            stdout.contains("Git Hash:"),
+            "Should contain Git Hash field"
+        );
+        assert!(
+            stdout.contains("Git Branch:"),
+            "Should contain Git Branch field"
+        );
     }
 
     /// Test that version string is a valid semver
@@ -47,10 +59,7 @@ mod version_command_tests {
             .find(|l| l.starts_with("Version:"))
             .expect("Should have a Version line");
 
-        let version_str = version_line
-            .strip_prefix("Version:")
-            .unwrap()
-            .trim();
+        let version_str = version_line.strip_prefix("Version:").unwrap().trim();
 
         // Should match semver pattern (e.g. 0.4.6 or 0.4.6.123)
         let parts: Vec<&str> = version_str.split('.').collect();
@@ -100,10 +109,7 @@ mod version_command_tests {
 
         let hash = hash_line.strip_prefix("Git Hash:").unwrap().trim();
         // Hash should be either a short hex string or "unknown" (in non-git builds)
-        assert!(
-            !hash.is_empty(),
-            "Git hash should not be empty"
-        );
+        assert!(!hash.is_empty(), "Git hash should not be empty");
     }
 }
 
@@ -128,7 +134,8 @@ mod version_id_parsing_tests {
 
     #[test]
     fn test_parse_version_from_id_with_long_version() {
-        let id = "https://myvault.vault.azure.net/secrets/mysecret/6a3b7c8d9e0f1a2b3c4d5e6f7a8b9c0d";
+        let id =
+            "https://myvault.vault.azure.net/secrets/mysecret/6a3b7c8d9e0f1a2b3c4d5e6f7a8b9c0d";
         assert_eq!(
             extract_version_from_id(Some(id)),
             "6a3b7c8d9e0f1a2b3c4d5e6f7a8b9c0d"
@@ -173,7 +180,10 @@ mod version_id_parsing_tests {
 
         // "kid" does not exist in secret responses
         let kid = secret_version_json["kid"].as_str();
-        assert!(kid.is_none(), "Secret responses should not have a 'kid' field");
+        assert!(
+            kid.is_none(),
+            "Secret responses should not have a 'kid' field"
+        );
 
         // "id" does exist
         let id = secret_version_json["id"].as_str();
@@ -414,9 +424,7 @@ mod history_response_parsing_tests {
             "nextLink": "https://vault.vault.azure.net/secrets/key/versions?api-version=7.4&$skiptoken=abc"
         });
 
-        let next_link = response
-            .get("nextLink")
-            .and_then(|v| v.as_str());
+        let next_link = response.get("nextLink").and_then(|v| v.as_str());
 
         assert!(next_link.is_some(), "Should have a nextLink for pagination");
         assert!(next_link.unwrap().contains("skiptoken"));
