@@ -356,7 +356,7 @@ impl VaultOperations for AzureVaultOperations {
             if let Some(vault_array) = response_data.get("value").and_then(|v| v.as_array()) {
                 for vault_value in vault_array {
                     if let Ok(vault_props) = self.parse_vault_properties(vault_value) {
-                        vaults.push(vault_props.to_summary(None));
+                        vaults.push(vault_props.to_summary());
                     }
                 }
             }
@@ -1122,7 +1122,13 @@ impl AzureVaultOperations {
                 .unwrap_or(false),
             sku,
             access_policies,
-            created_at: chrono::Utc::now(), // Azure doesn't provide creation time in ARM response
+            created_at: vault_data
+                .get("systemData")
+                .and_then(|sd| sd.get("createdAt"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(chrono::Utc::now),
             tags,
         })
     }
