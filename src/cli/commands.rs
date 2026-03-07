@@ -7484,7 +7484,7 @@ async fn execute_file_upload_multiple(
                     output::format_line(
                         output::Level::Error,
                         &format!("{file_path}: {e}"),
-                        output::should_use_rich_stdout()
+                        output::should_use_rich_stderr(),
                     )
                 );
                 error_count += 1;
@@ -7549,7 +7549,7 @@ async fn execute_file_download_multiple(
                     output::format_line(
                         output::Level::Error,
                         &format!("{file_name}: {e}"),
-                        output::should_use_rich_stdout()
+                        output::should_use_rich_stderr(),
                     )
                 );
                 error_count += 1;
@@ -7614,7 +7614,14 @@ async fn execute_file_download_recursive(
         let files = blob_manager.list_files(list_request).await?;
 
         if files.is_empty() {
-            output::warn(&format!("No files found matching prefix: {}", prefix));
+            eprintln!(
+                "{}",
+                output::format_line(
+                    output::Level::Warn,
+                    &format!("No files found matching prefix: {}", prefix),
+                    output::should_use_rich_stderr(),
+                )
+            );
             continue;
         }
 
@@ -7833,7 +7840,7 @@ async fn execute_file_delete_multiple(
                     output::format_line(
                         output::Level::Error,
                         &format!("{file_name}: {e}"),
-                        output::should_use_rich_stdout()
+                        output::should_use_rich_stderr(),
                     )
                 );
                 error_count += 1;
@@ -8005,7 +8012,7 @@ async fn execute_secret_set_bulk(
                     output::format_line(
                         output::Level::Error,
                         &format!("{}: {}", key, e),
-                        output::should_use_rich_stdout()
+                        output::should_use_rich_stderr(),
                     )
                 );
                 error_count += 1;
@@ -8129,7 +8136,7 @@ async fn execute_secret_delete_group(
                     output::format_line(
                         output::Level::Error,
                         &format!("Failed to delete '{}': {}", secret.name, e),
-                        output::should_use_rich_stdout()
+                        output::should_use_rich_stderr(),
                     )
                 );
                 error_count += 1;

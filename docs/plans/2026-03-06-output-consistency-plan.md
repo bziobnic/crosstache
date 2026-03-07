@@ -357,7 +357,7 @@ pub fn should_use_rich_stdout() -> bool {
 - Line 7372: `output::error(&format!("Failed to upload '{}': {}", local_path_str, e));`
 
 **Indented errors in summaries** (lines 7385, 7433, 7484, 7686, 7741, 7899, 7908, 7991, 8000):
-Same pattern as indented success, using `Level::Error`.
+Use `eprintln!("  {}", output::format_line(output::Level::Error, ..., output::should_use_rich_stderr()));` — **must use `should_use_rich_stderr()`** (not `should_use_rich_stdout()`) since output goes to stderr. Using stdout's TTY check would cause wrong formatting when stdout is piped but stderr is a TTY, or vice versa.
 
 **Warning messages** (`println!("⚠️ ...")` or `eprintln!("⚠️ ...")` -> `output::warn(...)`):
 - Line 2048: `output::warn(&format!("Failed to get '{}' from {}: {}", name, vault1, e));`

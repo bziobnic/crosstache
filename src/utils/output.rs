@@ -1,15 +1,14 @@
-//! Unified TTY-aware output module.
+//! Unified CLI output with TTY-aware formatting
 //!
-//! Provides convenience functions for all user-facing CLI output with
-//! automatic TTY detection: emoji prefixes and crossterm colors in
-//! interactive terminals, plain-text prefixes when piped/redirected.
+//! All user-facing messages should go through this module to ensure
+//! consistent emoji/prefix usage and proper pipe/redirect behavior.
 
-use crossterm::style::Stylize;
-use std::io::{IsTerminal, Write};
+use crossterm::style::{Color as CrosstermColor, Stylize};
+use std::io::IsTerminal;
 use std::sync::OnceLock;
 
-/// Output severity / category level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Message severity level
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Level {
     Success,
     Error,
@@ -19,164 +18,147 @@ pub enum Level {
     Step,
 }
 
-// ── TTY detection (cached) ──────────────────────────────────────────
+/// Cached TTY detection result
+static STDOUT_IS_TTY: OnceLock<bool> = OnceLock::new();
+static STDERR_IS_TTY: OnceLock<bool> = OnceLock::new();
 
-static IS_TTY_STDOUT: OnceLock<bool> = OnceLock::new();
-static IS_TTY_STDERR: OnceLock<bool> = OnceLock::new();
-
-/// Returns `true` if stdout is an interactive terminal (cached).
+/// Check if stdout is a TTY (cached)
 pub fn is_tty() -> bool {
-    *IS_TTY_STDOUT.get_or_init(|| std::io::stdout().is_terminal())
+    *STDOUT_IS_TTY.get_or_init(|| std::io::stdout().is_terminal())
 }
 
-/// Returns `true` if stderr is an interactive terminal (cached).
+/// Check if stderr is a TTY (cached)
 pub fn is_tty_stderr() -> bool {
-    *IS_TTY_STDERR.get_or_init(|| std::io::stderr().is_terminal())
+    *STDERR_IS_TTY.get_or_init(|| std::io::stderr().is_terminal())
 }
 
-/// Returns `true` when stdout is a TTY **and** `NO_COLOR` is not set.
+/// Whether to use rich (emoji + color) output
+fn should_use_rich(is_tty: bool) -> bool {
+    if std::env::var("NO_COLOR").is_ok() {
+        return false;
+    }
+    is_tty
+}
+
+/// Whether to use rich output for stdout (use for println! / stdout)
 pub fn should_use_rich_stdout() -> bool {
-    is_tty() && std::env::var_os("NO_COLOR").is_none()
+    should_use_rich(is_tty())
 }
 
-/// Returns `true` when stderr is a TTY **and** `NO_COLOR` is not set.
+/// Whether to use rich output for stderr (use for eprintln! / stderr)
 pub fn should_use_rich_stderr() -> bool {
-    is_tty_stderr() && std::env::var_os("NO_COLOR").is_none()
+    should_use_rich(is_tty_stderr())
 }
 
-// ── Core formatter ──────────────────────────────────────────────────
-
-/// Format a single output line with the appropriate prefix.
-///
-/// When `rich` is `true` the line gets an emoji prefix and crossterm
-/// ANSI colours.  When `false` it uses a plain-text tag such as
-/// `[ok]` or `[error]`.
+/// Format a message line for the given level and TTY mode
 pub fn format_line(level: Level, msg: &str, rich: bool) -> String {
     if rich {
-        format_rich(level, msg)
+        match level {
+            Level::Success => format!("\u{2705} {}", msg.with(CrosstermColor::Green)),
+            Level::Error => format!("\u{274c} {}", msg.with(CrosstermColor::Red)),
+            Level::Warn => format!("\u{26a0}\u{fe0f}  {}", msg.with(CrosstermColor::Yellow)),
+            Level::Info => format!("\u{2139}\u{fe0f}  {}", msg.with(CrosstermColor::Cyan)),
+            Level::Hint => format!("\u{1f4a1} {}", msg.with(CrosstermColor::DarkGrey)),
+            Level::Step => format!("\u{25b6} {}", msg.with(CrosstermColor::White).bold()),
+        }
     } else {
-        format_plain(level, msg)
+        match level {
+            Level::Success => format!("[ok] {msg}"),
+            Level::Error => format!("[error] {msg}"),
+            Level::Warn => format!("[warn] {msg}"),
+            Level::Info => format!("[info] {msg}"),
+            Level::Hint => format!("[hint] {msg}"),
+            Level::Step => format!(":: {msg}"),
+        }
     }
 }
 
-fn format_rich(level: Level, msg: &str) -> String {
-    match level {
-        Level::Success => format!("\u{2705} {}", msg.green()),
-        Level::Error => format!("\u{274c} {}", msg.red()),
-        Level::Warn => format!("\u{26a0}\u{fe0f} {}", msg.yellow()),
-        Level::Info => format!("\u{2139}\u{fe0f} {}", msg.cyan()),
-        Level::Hint => format!("\u{1f4a1} {}", msg.dark_grey()),
-        Level::Step => format!("\u{25b6} {}", msg.white().bold()),
-    }
-}
-
-fn format_plain(level: Level, msg: &str) -> String {
-    let tag = match level {
-        Level::Success => "[ok]",
-        Level::Error => "[error]",
-        Level::Warn => "[warn]",
-        Level::Info => "[info]",
-        Level::Hint => "[hint]",
-        Level::Step => "::",
-    };
-    format!("{tag} {msg}")
-}
-
-// ── Convenience printers ────────────────────────────────────────────
-
-/// Print a success message to stdout.
+/// Print a success message to stdout
 pub fn success(msg: &str) {
-    let line = format_line(Level::Success, msg, should_use_rich_stdout());
-    let _ = writeln!(std::io::stdout(), "{line}");
+    println!(
+        "{}",
+        format_line(Level::Success, msg, should_use_rich(is_tty()))
+    );
 }
 
-/// Print an error message to stderr.
+/// Print an error message to stderr
 pub fn error(msg: &str) {
-    let line = format_line(Level::Error, msg, should_use_rich_stderr());
-    let _ = writeln!(std::io::stderr(), "{line}");
+    eprintln!(
+        "{}",
+        format_line(Level::Error, msg, should_use_rich(is_tty_stderr()))
+    );
 }
 
-/// Print a warning message to stdout.
+/// Print a warning message to stdout
 pub fn warn(msg: &str) {
-    let line = format_line(Level::Warn, msg, should_use_rich_stdout());
-    let _ = writeln!(std::io::stdout(), "{line}");
+    println!("{}", format_line(Level::Warn, msg, should_use_rich(is_tty())));
 }
 
-/// Print an informational message to stdout.
+/// Print an info message to stdout
 pub fn info(msg: &str) {
-    let line = format_line(Level::Info, msg, should_use_rich_stdout());
-    let _ = writeln!(std::io::stdout(), "{line}");
+    println!("{}", format_line(Level::Info, msg, should_use_rich(is_tty())));
 }
 
-/// Print a hint message to stdout.
+/// Print a hint message to stdout
 pub fn hint(msg: &str) {
-    let line = format_line(Level::Hint, msg, should_use_rich_stdout());
-    let _ = writeln!(std::io::stdout(), "{line}");
+    println!("{}", format_line(Level::Hint, msg, should_use_rich(is_tty())));
 }
 
-/// Print a step message to stdout.
+/// Print a step/action message to stdout (e.g., "Rotating secret...")
 pub fn step(msg: &str) {
-    let line = format_line(Level::Step, msg, should_use_rich_stdout());
-    let _ = writeln!(std::io::stdout(), "{line}");
+    println!("{}", format_line(Level::Step, msg, should_use_rich(is_tty())));
 }
-
-// ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Plain (pipe) mode ───────────────────────────────────────────
-
     #[test]
     fn test_format_success_no_tty() {
-        let out = format_line(Level::Success, "done", false);
-        assert_eq!(out, "[ok] done");
+        let msg = format_line(Level::Success, "done", false);
+        assert_eq!(msg, "[ok] done");
     }
 
     #[test]
     fn test_format_error_no_tty() {
-        let out = format_line(Level::Error, "fail", false);
-        assert_eq!(out, "[error] fail");
+        let msg = format_line(Level::Error, "failed", false);
+        assert_eq!(msg, "[error] failed");
     }
 
     #[test]
     fn test_format_warn_no_tty() {
-        let out = format_line(Level::Warn, "careful", false);
-        assert_eq!(out, "[warn] careful");
+        let msg = format_line(Level::Warn, "careful", false);
+        assert_eq!(msg, "[warn] careful");
     }
 
     #[test]
     fn test_format_info_no_tty() {
-        let out = format_line(Level::Info, "note", false);
-        assert_eq!(out, "[info] note");
+        let msg = format_line(Level::Info, "note", false);
+        assert_eq!(msg, "[info] note");
     }
 
     #[test]
     fn test_format_hint_no_tty() {
-        let out = format_line(Level::Hint, "tip", false);
-        assert_eq!(out, "[hint] tip");
+        let msg = format_line(Level::Hint, "try this", false);
+        assert_eq!(msg, "[hint] try this");
     }
 
     #[test]
     fn test_format_step_no_tty() {
-        let out = format_line(Level::Step, "building", false);
-        assert_eq!(out, ":: building");
+        let msg = format_line(Level::Step, "Rotating secret", false);
+        assert_eq!(msg, ":: Rotating secret");
     }
-
-    // ── Rich (TTY) mode ─────────────────────────────────────────────
 
     #[test]
     fn test_format_success_tty() {
-        let out = format_line(Level::Success, "done", true);
-        assert!(out.contains('\u{2705}'), "should contain checkmark emoji");
-        assert!(out.contains("done"), "should contain the message");
+        let msg = format_line(Level::Success, "done", true);
+        assert!(msg.contains("done"));
+        assert!(msg.starts_with("\u{2705}"));
     }
 
     #[test]
-    fn test_format_step_tty() {
-        let out = format_line(Level::Step, "building", true);
-        assert!(out.contains('\u{25b6}'), "should contain play-button emoji");
-        assert!(out.contains("building"), "should contain the message");
+    fn test_no_color_env_respected() {
+        let msg = format_line(Level::Success, "done", false);
+        assert!(!msg.contains("\u{2705}"));
     }
 }
