@@ -8,6 +8,7 @@ use crate::blob::manager::{create_blob_manager, BlobManager};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
+use crate::utils::output;
 use crate::vault::{VaultCreateRequest, VaultManager};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
@@ -7430,7 +7431,14 @@ async fn execute_file_upload_multiple(
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ {file_path}: {e}");
+                eprintln!(
+                    "  {}",
+                    output::format_line(
+                        output::Level::Error,
+                        &format!("{file_path}: {e}"),
+                        output::should_use_rich_stderr(),
+                    )
+                );
                 error_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -7481,7 +7489,14 @@ async fn execute_file_download_multiple(
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ {file_name}: {e}");
+                eprintln!(
+                    "  {}",
+                    output::format_line(
+                        output::Level::Error,
+                        &format!("{file_name}: {e}"),
+                        output::should_use_rich_stderr(),
+                    )
+                );
                 error_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -7544,7 +7559,14 @@ async fn execute_file_download_recursive(
         let files = blob_manager.list_files(list_request).await?;
 
         if files.is_empty() {
-            eprintln!("⚠️  No files found matching prefix: {}", prefix);
+            eprintln!(
+                "{}",
+                output::format_line(
+                    output::Level::Warn,
+                    &format!("No files found matching prefix: {}", prefix),
+                    output::should_use_rich_stderr(),
+                )
+            );
             continue;
         }
 
@@ -7738,7 +7760,14 @@ async fn execute_file_delete_multiple(
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ {file_name}: {e}");
+                eprintln!(
+                    "  {}",
+                    output::format_line(
+                        output::Level::Error,
+                        &format!("{file_name}: {e}"),
+                        output::should_use_rich_stderr(),
+                    )
+                );
                 error_count += 1;
                 if !continue_on_error {
                     return Err(e);
@@ -7896,7 +7925,14 @@ async fn execute_secret_set_bulk(
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ {}: {}", key, e);
+                eprintln!(
+                    "  {}",
+                    output::format_line(
+                        output::Level::Error,
+                        &format!("{}: {}", key, e),
+                        output::should_use_rich_stderr(),
+                    )
+                );
                 error_count += 1;
             }
         }
@@ -7988,7 +8024,14 @@ async fn execute_secret_delete_group(
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ❌ Failed to delete '{}': {}", secret.name, e);
+                eprintln!(
+                    "  {}",
+                    output::format_line(
+                        output::Level::Error,
+                        &format!("Failed to delete '{}': {}", secret.name, e),
+                        output::should_use_rich_stderr(),
+                    )
+                );
                 error_count += 1;
             }
         }
