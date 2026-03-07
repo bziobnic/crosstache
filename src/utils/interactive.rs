@@ -103,38 +103,6 @@ impl InteractivePrompt {
         Ok(result)
     }
 
-    /// Display an informational message
-    pub fn info(&self, message: &str) -> Result<()> {
-        println!("ℹ️  {message}");
-        Ok(())
-    }
-
-    /// Display a success message
-    pub fn success(&self, message: &str) -> Result<()> {
-        println!("✅ {message}");
-        Ok(())
-    }
-
-    /// Display a warning message
-    #[allow(dead_code)]
-    pub fn warning(&self, message: &str) -> Result<()> {
-        println!("⚠️  {message}");
-        Ok(())
-    }
-
-    /// Display an error message
-    pub fn error(&self, message: &str) -> Result<()> {
-        println!("❌ {message}");
-        Ok(())
-    }
-
-    /// Display a step header during setup
-    pub fn step(&self, step_number: u8, total_steps: u8, title: &str) -> Result<()> {
-        println!();
-        println!("📋 Step {step_number}/{total_steps}: {title}");
-        println!();
-        Ok(())
-    }
 }
 
 impl Default for InteractivePrompt {
@@ -171,12 +139,24 @@ impl ProgressIndicator {
 
     /// Finish with success message
     pub fn finish_success(&self, message: &str) {
-        self.bar.finish_with_message(format!("✅ {message}"));
+        self.bar.finish_with_message(
+            crate::utils::output::format_line(
+                crate::utils::output::Level::Success,
+                message,
+                crate::utils::output::should_use_rich_stdout(),
+            )
+        );
     }
 
     /// Finish with error message
     pub fn finish_error(&self, message: &str) {
-        self.bar.finish_with_message(format!("❌ {message}"));
+        self.bar.finish_with_message(
+            crate::utils::output::format_line(
+                crate::utils::output::Level::Error,
+                message,
+                crate::utils::output::should_use_rich_stderr(),
+            )
+        );
     }
 
     /// Finish and clear the progress indicator
