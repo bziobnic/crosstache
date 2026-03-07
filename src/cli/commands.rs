@@ -5456,11 +5456,11 @@ async fn execute_secret_delete(
 
     // Confirmation unless forced
     if !force {
-        let confirm = rpassword::prompt_password(format!(
-            "Are you sure you want to delete secret '{name}' from vault '{vault_name}'? (y/N): "
-        ))?;
-
-        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+        use crate::utils::interactive::InteractivePrompt;
+        let prompt = InteractivePrompt::new();
+        if !prompt.confirm(&format!(
+            "Are you sure you want to delete secret '{name}' from vault '{vault_name}'?"
+        ), false)? {
             println!("Delete operation cancelled.");
             return Ok(());
         }
@@ -5695,11 +5695,11 @@ async fn execute_secret_purge(
 
     // Confirmation unless forced
     if !force {
-        let confirm = rpassword::prompt_password(format!(
-            "Are you sure you want to PERMANENTLY DELETE secret '{name}' from vault '{vault_name}'? This cannot be undone! (y/N): "
-        ))?;
-
-        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+        use crate::utils::interactive::InteractivePrompt;
+        let prompt = InteractivePrompt::new();
+        if !prompt.confirm(&format!(
+            "Are you sure you want to PERMANENTLY DELETE secret '{name}' from vault '{vault_name}'? This cannot be undone!"
+        ), false)? {
             println!("Purge operation cancelled.");
             return Ok(());
         }
@@ -7043,11 +7043,11 @@ async fn execute_file_delete(
 ) -> Result<()> {
     // Confirmation unless forced
     if !force {
-        let confirm = rpassword::prompt_password(format!(
-            "Are you sure you want to delete file '{name}'? (y/N): "
-        ))?;
-
-        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+        use crate::utils::interactive::InteractivePrompt;
+        let prompt = InteractivePrompt::new();
+        if !prompt.confirm(&format!(
+            "Are you sure you want to delete file '{name}' from blob storage?"
+        ), false)? {
             println!("Delete operation cancelled.");
             return Ok(());
         }
@@ -7716,11 +7716,11 @@ async fn execute_file_delete_multiple(
             }
         }
 
-        // Use rpassword for confirmation like other commands do
-        let confirm =
-            rpassword::prompt_password("Are you sure you want to delete these files? (y/N): ")?;
-
-        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+        use crate::utils::interactive::InteractivePrompt;
+        let prompt = InteractivePrompt::new();
+        if !prompt.confirm(
+            "Are you sure you want to delete these files?",
+        false)? {
             println!("Delete operation cancelled");
             return Ok(());
         }
@@ -7958,13 +7958,13 @@ async fn execute_secret_delete_group(
 
     // Confirmation unless forced
     if !force {
-        let confirm = rpassword::prompt_password(format!(
-            "Are you sure you want to delete ALL {} secret(s) in group '{}'? (y/N): ",
+        use crate::utils::interactive::InteractivePrompt;
+        let prompt = InteractivePrompt::new();
+        if !prompt.confirm(&format!(
+            "Are you sure you want to delete ALL {} secret(s) in group '{}'?",
             secrets.len(),
             group_name
-        ))?;
-
-        if confirm.to_lowercase() != "y" && confirm.to_lowercase() != "yes" {
+        ), false)? {
             println!("Group delete operation cancelled.");
             return Ok(());
         }
