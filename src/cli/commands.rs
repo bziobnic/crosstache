@@ -3355,6 +3355,23 @@ async fn execute_audit_command(
 
 async fn execute_init_command(_config: Config) -> Result<()> {
     use crate::config::init::ConfigInitializer;
+    use crate::config::settings::Config as SettingsConfig;
+
+    // Warn if config already exists
+    if let Ok(config_path) = SettingsConfig::get_config_path() {
+        if config_path.exists() {
+            output::warn(&format!(
+                "Configuration already exists at {}",
+                config_path.display()
+            ));
+            output::hint("This will overwrite your existing configuration.");
+            let prompt = crate::utils::interactive::InteractivePrompt::new();
+            if !prompt.confirm("Continue with re-initialization?", false)? {
+                output::info("Init cancelled. Existing configuration preserved.");
+                return Ok(());
+            }
+        }
+    }
 
     // Create the initializer and run the interactive setup
     let initializer = ConfigInitializer::new();
