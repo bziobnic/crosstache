@@ -793,9 +793,9 @@ impl SecretOperations for AzureSecretOperations {
                                 });
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "Warning: Failed to get details for secret '{name}': {e}"
-                                );
+                                crate::utils::output::warn(&format!(
+                                    "Failed to get details for secret '{name}': {e}"
+                                ));
                                 secret_summaries.push(SecretSummary {
                                     name: name.clone(),
                                     original_name: name,

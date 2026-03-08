@@ -2471,7 +2471,7 @@ async fn execute_env_list(_config: &Config) -> Result<()> {
     let manager = EnvironmentProfileManager::load().await?;
 
     if manager.profiles.is_empty() {
-        println!("No environment profiles found.");
+        output::info("No environment profiles found.");
         println!("Create one with: xv env create <name> --vault <vault> --group <group>");
         return Ok(());
     }
@@ -2655,7 +2655,7 @@ async fn execute_env_show(_config: &Config) -> Result<()> {
             );
         }
     } else {
-        println!("No environment profile is currently active");
+        output::info("No environment profile is currently active");
         println!("Use 'xv env list' to see available profiles");
         println!("Use 'xv env use <name>' to activate a profile");
     }
@@ -3283,7 +3283,7 @@ async fn execute_audit_command(
     }
 
     if logs.is_empty() {
-        println!("📭 No audit log entries found for the specified criteria");
+        output::info("No audit log entries found for the specified criteria");
         return Ok(());
     }
 
@@ -3566,7 +3566,7 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     // Parse token to get identity info (from JWT)
     let token_claims = extract_claims_from_token(token.token.secret())?;
 
-    println!("👤 Identity Information:");
+    output::step("Identity Information:");
     if let Some(ref name) = token_claims.name {
         println!("   Name: {}", name);
     }
@@ -3629,7 +3629,8 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
         }
     }
 
-    println!("\n🔧 Configuration:");
+    println!();
+    output::step("Configuration:");
     println!("   Configured Default Vault: {}", config.default_vault);
     println!("   Default subscription: {}", config.subscription_id);
     println!("   No color mode: {}", config.no_color);
@@ -4212,13 +4213,16 @@ async fn execute_secret_find(
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Fetch all secrets from the vault
+    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let all_secrets = secret_manager
         .secret_ops()
         .list_secrets(&vault_name, None)
-        .await?;
+        .await;
+    progress.finish_clear();
+    let all_secrets = all_secrets?;
 
     if all_secrets.is_empty() {
-        println!("No secrets found in vault '{vault_name}'");
+        output::info(&format!("No secrets found in vault '{vault_name}'"));
         return Ok(());
     }
 
@@ -4513,7 +4517,7 @@ async fn execute_secret_history(
         .await?;
 
     if versions.is_empty() {
-        println!("No versions found for secret '{name}'");
+        output::info(&format!("No versions found for secret '{name}'"));
         return Ok(());
     }
 
@@ -4903,10 +4907,13 @@ async fn execute_secret_run(
     }
 
     // Get all secrets from the vault
+    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let secrets = secret_manager
         .secret_ops()
         .list_secrets(&vault_name, None)
-        .await?;
+        .await;
+    progress.finish_clear();
+    let secrets = secrets?;
 
     // Filter secrets by groups if specified
     let filtered_secrets = if !groups.is_empty() {
@@ -4930,7 +4937,7 @@ async fn execute_secret_run(
     };
 
     if filtered_secrets.is_empty() {
-        println!("No secrets found to inject");
+        output::info("No secrets found to inject");
         return Ok(());
     }
 
@@ -5209,10 +5216,13 @@ async fn execute_secret_inject(
     }
 
     // Get all secrets from the vault
+    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let secrets = secret_manager
         .secret_ops()
         .list_secrets(&vault_name, None)
-        .await?;
+        .await;
+    progress.finish_clear();
+    let secrets = secrets?;
 
     // Filter secrets by groups if specified
     let available_secrets = if !groups.is_empty() {
@@ -6447,11 +6457,11 @@ async fn execute_vault_import(
     };
 
     if dry_run {
-        println!(
+        output::info(&format!(
             "Dry run: Would import {} secrets to vault '{}':",
             secrets_to_import.len(),
             name
-        );
+        ));
         for secret in &secrets_to_import {
             println!("  - {}", secret.name);
         }
@@ -6483,7 +6493,7 @@ async fn execute_vault_import(
                 .await
             {
                 Ok(_) => {
-                    println!("Skipping existing secret: {secret_name}");
+                    output::hint(&format!("Skipping existing secret: {secret_name}"));
                     skipped_count += 1;
                     continue;
                 }
@@ -6498,16 +6508,18 @@ async fn execute_vault_import(
             .await
         {
             Ok(_) => {
-                println!("Imported secret: {secret_name}");
+                output::success(&format!("Imported secret: {secret_name}"));
                 imported_count += 1;
             }
             Err(e) => {
-                eprintln!("Failed to import secret '{secret_name}': {e}");
+                output::error(&format!("Failed to import secret '{secret_name}': {e}"));
             }
         }
     }
 
-    println!("Import completed: {imported_count} imported, {skipped_count} skipped");
+    output::success(&format!(
+        "Import completed: {imported_count} imported, {skipped_count} skipped"
+    ));
 
     Ok(())
 }
@@ -6635,7 +6647,9 @@ async fn execute_vault_share(
                 .await;
 
             if roles.is_empty() {
-                println!("No access assignments found for vault '{vault_name}'");
+                output::info(&format!(
+                    "No access assignments found for vault '{vault_name}'"
+                ));
             } else {
                 println!("Access assignments for vault '{vault_name}':");
                 let output_format = match format.to_lowercase().as_str() {
@@ -6676,7 +6690,7 @@ async fn execute_context_show(config: &Config) -> Result<()> {
         // Show context source
         println!("  Scope: {}", context_manager.scope_description());
     } else {
-        println!("No vault context set");
+        output::info("No vault context set");
         if !config.default_vault.is_empty() {
             println!("Using config default: {}", config.default_vault);
         } else {
@@ -6749,7 +6763,7 @@ async fn execute_context_list(_config: &Config) -> Result<()> {
     let context_manager = ContextManager::load().await.unwrap_or_default();
 
     if context_manager.recent.is_empty() && context_manager.current.is_none() {
-        println!("No vault contexts found");
+        output::info("No vault contexts found");
         println!("Hint: Use 'xv context use <vault-name>' to create a context");
         return Ok(());
     }
@@ -6822,7 +6836,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
     };
 
     if context_manager.current.is_none() {
-        println!("No active context to clear");
+        output::info("No active context to clear");
         return Ok(());
     }
 
@@ -7038,7 +7052,7 @@ async fn execute_file_list(
     };
 
     if items.is_empty() {
-        println!("No files found");
+        output::info("No files found");
         return Ok(());
     }
 
@@ -7389,7 +7403,7 @@ async fn execute_file_upload_recursive(
     }
 
     if all_files.is_empty() {
-        println!("No files found to upload");
+        output::info("No files found to upload");
         return Ok(());
     }
 
@@ -7675,7 +7689,7 @@ async fn execute_file_download_recursive(
     }
 
     if all_files_to_download.is_empty() {
-        println!("No files found to download");
+        output::info("No files found to download");
         return Ok(());
     }
 
@@ -8113,21 +8127,24 @@ async fn execute_secret_delete_group(
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Get all secrets from the vault
+    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let secrets = secret_manager
         .secret_ops()
         .list_secrets(&vault_name, Some(group_name))
-        .await?;
+        .await;
+    progress.finish_clear();
+    let secrets = secrets?;
 
     if secrets.is_empty() {
-        println!("No secrets found in group '{}'", group_name);
+        output::info(&format!("No secrets found in group '{}'", group_name));
         return Ok(());
     }
 
-    println!(
+    output::info(&format!(
         "Found {} secret(s) in group '{}' to delete:",
         secrets.len(),
         group_name
-    );
+    ));
 
     for secret in &secrets {
         println!("  - {}", secret.name);
@@ -8145,7 +8162,7 @@ async fn execute_secret_delete_group(
             ),
             false,
         )? {
-            println!("Group delete operation cancelled.");
+            output::info("Group delete operation cancelled.");
             return Ok(());
         }
     }
