@@ -51,6 +51,9 @@ pub enum CrosstacheError {
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
 
+    #[error("YAML error: {0}")]
+    YamlError(#[from] serde_yaml::Error),
+
     #[error("HTTP request error: {0}")]
     HttpError(#[from] reqwest::Error),
 

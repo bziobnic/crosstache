@@ -331,12 +331,18 @@ async fn load_from_file(path: &PathBuf) -> Result<Config> {
     let contents = tokio::fs::read_to_string(path).await?;
 
     // Try to parse as TOML first, then JSON as fallback
-    if let Ok(config) = toml::from_str::<Config>(&contents) {
-        return Ok(config);
+    match toml::from_str::<Config>(&contents) {
+        Ok(config) => return Ok(config),
+        Err(_toml_err) => {}
     }
 
-    let config = serde_json::from_str::<Config>(&contents)?;
-    Ok(config)
+    serde_json::from_str::<Config>(&contents).map_err(|e| {
+        CrosstacheError::config(format!(
+            "Failed to parse config file '{}': {}. Run 'xv init' to create a valid configuration.",
+            path.display(),
+            e
+        ))
+    })
 }
 
 fn load_from_env(config: &mut Config) {

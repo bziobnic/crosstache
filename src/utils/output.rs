@@ -91,22 +91,34 @@ pub fn error(msg: &str) {
 
 /// Print a warning message to stdout
 pub fn warn(msg: &str) {
-    println!("{}", format_line(Level::Warn, msg, should_use_rich(is_tty())));
+    println!(
+        "{}",
+        format_line(Level::Warn, msg, should_use_rich(is_tty()))
+    );
 }
 
 /// Print an info message to stdout
 pub fn info(msg: &str) {
-    println!("{}", format_line(Level::Info, msg, should_use_rich(is_tty())));
+    println!(
+        "{}",
+        format_line(Level::Info, msg, should_use_rich(is_tty()))
+    );
 }
 
 /// Print a hint message to stdout
 pub fn hint(msg: &str) {
-    println!("{}", format_line(Level::Hint, msg, should_use_rich(is_tty())));
+    println!(
+        "{}",
+        format_line(Level::Hint, msg, should_use_rich(is_tty()))
+    );
 }
 
 /// Print a step/action message to stdout (e.g., "Rotating secret...")
 pub fn step(msg: &str) {
-    println!("{}", format_line(Level::Step, msg, should_use_rich(is_tty())));
+    println!(
+        "{}",
+        format_line(Level::Step, msg, should_use_rich(is_tty()))
+    );
 }
 
 #[cfg(test)]

@@ -116,9 +116,10 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             output::error("Permission Denied");
             eprintln!("{msg}");
             eprintln!("\nPlease verify:");
-            eprintln!("1. Your account has the necessary permissions");
+            eprintln!("1. Your account has the required RBAC role (e.g., 'Key Vault Secrets User' or 'Key Vault Administrator')");
             eprintln!("2. You have access to the Azure subscription");
-            eprintln!("3. The resource you're trying to access exists");
+            eprintln!("3. If using access policies, ensure Get/List/Set permissions are granted");
+            eprintln!("\nTo check your roles: xv vault roles");
         }
         _ => {
             output::error(&format!("{error}"));

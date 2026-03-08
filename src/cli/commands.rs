@@ -1523,6 +1523,11 @@ async fn execute_vault_create(
     println!("   Location: {}", vault.location);
     println!("   URI: {}", vault.uri);
 
+    output::hint(&format!(
+        "Start using it with 'xv use {}' or 'xv set <name> <value>'",
+        vault.name
+    ));
+
     Ok(())
 }
 
@@ -2466,7 +2471,7 @@ async fn execute_env_list(_config: &Config) -> Result<()> {
     let manager = EnvironmentProfileManager::load().await?;
 
     if manager.profiles.is_empty() {
-        println!("No environment profiles found.");
+        output::info("No environment profiles found.");
         println!("Create one with: xv env create <name> --vault <vault> --group <group>");
         return Ok(());
     }
@@ -2650,7 +2655,7 @@ async fn execute_env_show(_config: &Config) -> Result<()> {
             );
         }
     } else {
-        println!("No environment profile is currently active");
+        output::info("No environment profile is currently active");
         println!("Use 'xv env list' to see available profiles");
         println!("Use 'xv env use <name>' to activate a profile");
     }
@@ -3278,7 +3283,7 @@ async fn execute_audit_command(
     }
 
     if logs.is_empty() {
-        println!("📭 No audit log entries found for the specified criteria");
+        output::info("No audit log entries found for the specified criteria");
         return Ok(());
     }
 
@@ -3350,6 +3355,23 @@ async fn execute_audit_command(
 
 async fn execute_init_command(_config: Config) -> Result<()> {
     use crate::config::init::ConfigInitializer;
+    use crate::config::settings::Config as SettingsConfig;
+
+    // Warn if config already exists
+    if let Ok(config_path) = SettingsConfig::get_config_path() {
+        if config_path.exists() {
+            output::warn(&format!(
+                "Configuration already exists at {}",
+                config_path.display()
+            ));
+            output::hint("This will overwrite your existing configuration.");
+            let prompt = crate::utils::interactive::InteractivePrompt::new();
+            if !prompt.confirm("Continue with re-initialization?", false)? {
+                output::info("Init cancelled. Existing configuration preserved.");
+                return Ok(());
+            }
+        }
+    }
 
     // Create the initializer and run the interactive setup
     let initializer = ConfigInitializer::new();
@@ -3544,7 +3566,7 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     // Parse token to get identity info (from JWT)
     let token_claims = extract_claims_from_token(token.token.secret())?;
 
-    println!("👤 Identity Information:");
+    output::step("Identity Information:");
     if let Some(ref name) = token_claims.name {
         println!("   Name: {}", name);
     }
@@ -3607,7 +3629,8 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
         }
     }
 
-    println!("\n🔧 Configuration:");
+    println!();
+    output::step("Configuration:");
     println!("   Configured Default Vault: {}", config.default_vault);
     println!("   Default subscription: {}", config.subscription_id);
     println!("   No color mode: {}", config.no_color);
@@ -4098,6 +4121,8 @@ async fn execute_secret_set(
     println!("   Vault: {vault_name}");
     println!("   Version: {}", secret.version);
 
+    output::hint(&format!("Verify with 'xv get {}'", secret.original_name));
+
     Ok(())
 }
 
@@ -4188,13 +4213,16 @@ async fn execute_secret_find(
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Fetch all secrets from the vault
+    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let all_secrets = secret_manager
         .secret_ops()
         .list_secrets(&vault_name, None)
-        .await?;
+        .await;
+    progress.finish_clear();
+    let all_secrets = all_secrets?;
 
     if all_secrets.is_empty() {
-        println!("No secrets found in vault '{vault_name}'");
+        output::info(&format!("No secrets found in vault '{vault_name}'"));
         return Ok(());
     }
 
@@ -4489,7 +4517,7 @@ async fn execute_secret_history(
         .await?;
 
     if versions.is_empty() {
-        println!("No versions found for secret '{name}'");
+        output::info(&format!("No versions found for secret '{name}'"));
         return Ok(());
     }
 
@@ -4879,10 +4907,13 @@ async fn execute_secret_run(
     }
 
     // Get all secrets from the vault
+    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let secrets = secret_manager
         .secret_ops()
         .list_secrets(&vault_name, None)
-        .await?;
+        .await;
+    progress.finish_clear();
+    let secrets = secrets?;
 
     // Filter secrets by groups if specified
     let filtered_secrets = if !groups.is_empty() {
@@ -4906,7 +4937,7 @@ async fn execute_secret_run(
     };
 
     if filtered_secrets.is_empty() {
-        println!("No secrets found to inject");
+        output::info("No secrets found to inject");
         return Ok(());
     }
 
@@ -5185,10 +5216,13 @@ async fn execute_secret_inject(
     }
 
     // Get all secrets from the vault
+    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let secrets = secret_manager
         .secret_ops()
         .list_secrets(&vault_name, None)
-        .await?;
+        .await;
+    progress.finish_clear();
+    let secrets = secrets?;
 
     // Filter secrets by groups if specified
     let available_secrets = if !groups.is_empty() {
@@ -5489,6 +5523,9 @@ async fn execute_secret_delete(
         .delete_secret_safe(&vault_name, name, force)
         .await?;
     output::success(&format!("Successfully deleted secret '{name}'"));
+    output::hint(&format!(
+        "Undo with 'xv restore {name}' (before purge retention expires)"
+    ));
 
     Ok(())
 }
@@ -5732,6 +5769,7 @@ async fn execute_secret_purge(
         .purge_secret_safe(&vault_name, name, force)
         .await?;
     output::success(&format!("Successfully purged secret '{name}'"));
+    output::warn("This is permanent. The secret cannot be recovered.");
 
     Ok(())
 }
@@ -5960,7 +5998,9 @@ async fn execute_secret_parse(
             }
         }
         _ => {
-            output::warn(&format!("Unimplemented format selected: {format}"));
+            output::error(&format!(
+                "Unsupported format '{format}' for this command. Use 'json' or 'table'."
+            ));
         }
     }
 
@@ -6417,11 +6457,11 @@ async fn execute_vault_import(
     };
 
     if dry_run {
-        println!(
+        output::info(&format!(
             "Dry run: Would import {} secrets to vault '{}':",
             secrets_to_import.len(),
             name
-        );
+        ));
         for secret in &secrets_to_import {
             println!("  - {}", secret.name);
         }
@@ -6453,7 +6493,7 @@ async fn execute_vault_import(
                 .await
             {
                 Ok(_) => {
-                    println!("Skipping existing secret: {secret_name}");
+                    output::hint(&format!("Skipping existing secret: {secret_name}"));
                     skipped_count += 1;
                     continue;
                 }
@@ -6468,16 +6508,18 @@ async fn execute_vault_import(
             .await
         {
             Ok(_) => {
-                println!("Imported secret: {secret_name}");
+                output::success(&format!("Imported secret: {secret_name}"));
                 imported_count += 1;
             }
             Err(e) => {
-                eprintln!("Failed to import secret '{secret_name}': {e}");
+                output::error(&format!("Failed to import secret '{secret_name}': {e}"));
             }
         }
     }
 
-    println!("Import completed: {imported_count} imported, {skipped_count} skipped");
+    output::success(&format!(
+        "Import completed: {imported_count} imported, {skipped_count} skipped"
+    ));
 
     Ok(())
 }
@@ -6605,7 +6647,9 @@ async fn execute_vault_share(
                 .await;
 
             if roles.is_empty() {
-                println!("No access assignments found for vault '{vault_name}'");
+                output::info(&format!(
+                    "No access assignments found for vault '{vault_name}'"
+                ));
             } else {
                 println!("Access assignments for vault '{vault_name}':");
                 let output_format = match format.to_lowercase().as_str() {
@@ -6646,7 +6690,7 @@ async fn execute_context_show(config: &Config) -> Result<()> {
         // Show context source
         println!("  Scope: {}", context_manager.scope_description());
     } else {
-        println!("No vault context set");
+        output::info("No vault context set");
         if !config.default_vault.is_empty() {
             println!("Using config default: {}", config.default_vault);
         } else {
@@ -6719,7 +6763,7 @@ async fn execute_context_list(_config: &Config) -> Result<()> {
     let context_manager = ContextManager::load().await.unwrap_or_default();
 
     if context_manager.recent.is_empty() && context_manager.current.is_none() {
-        println!("No vault contexts found");
+        output::info("No vault contexts found");
         println!("Hint: Use 'xv context use <vault-name>' to create a context");
         return Ok(());
     }
@@ -6792,7 +6836,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
     };
 
     if context_manager.current.is_none() {
-        println!("No active context to clear");
+        output::info("No active context to clear");
         return Ok(());
     }
 
@@ -6841,6 +6885,12 @@ async fn execute_file_upload(
     let content = fs::read(file_path)
         .map_err(|e| CrosstacheError::config(format!("Failed to read file {file_path}: {e}")))?;
 
+    if content.is_empty() {
+        output::warn(&format!(
+            "File '{file_path}' is empty (0 bytes). Uploading anyway."
+        ));
+    }
+
     // Determine remote file name
     let remote_name = name.unwrap_or_else(|| {
         Path::new(file_path)
@@ -6853,6 +6903,15 @@ async fn execute_file_upload(
     // Convert metadata and tags to HashMap
     let metadata_map: HashMap<String, String> = metadata.into_iter().collect();
     let tags_map: HashMap<String, String> = tags.into_iter().collect();
+
+    // Azure Blob Storage supports a maximum of 10 tags per blob
+    if tags_map.len() > 10 {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "Too many tags ({}) — Azure Blob Storage allows a maximum of 10 tags per blob. Remove {} tag(s).",
+            tags_map.len(),
+            tags_map.len() - 10
+        )));
+    }
 
     // Create upload request
     let upload_request = FileUploadRequest {
@@ -6993,7 +7052,7 @@ async fn execute_file_list(
     };
 
     if items.is_empty() {
-        println!("No files found");
+        output::info("No files found");
         return Ok(());
     }
 
@@ -7086,6 +7145,7 @@ async fn execute_file_delete(
     println!("Deleting file '{name}'...");
     blob_manager.delete_file(name).await?;
     output::success(&format!("Successfully deleted file '{name}'"));
+    output::hint("Blob soft-delete may allow recovery depending on storage account settings.");
 
     Ok(())
 }
@@ -7343,7 +7403,7 @@ async fn execute_file_upload_recursive(
     }
 
     if all_files.is_empty() {
-        println!("No files found to upload");
+        output::info("No files found to upload");
         return Ok(());
     }
 
@@ -7629,7 +7689,7 @@ async fn execute_file_download_recursive(
     }
 
     if all_files_to_download.is_empty() {
-        println!("No files found to download");
+        output::info("No files found to download");
         return Ok(());
     }
 
@@ -7881,9 +7941,8 @@ async fn execute_file_sync(
         delete,
         config,
     );
-    eprintln!("File sync is not yet implemented.");
-
-    Ok(())
+    output::error("File sync is not yet implemented. Track progress at: https://github.com/bziobnic/crosstache/issues");
+    Err(CrosstacheError::config("'xv file sync' is not yet available. Use 'xv file upload' and 'xv file download' for individual transfers.".to_string()))
 }
 
 /// Execute bulk secret set operation
@@ -8068,21 +8127,24 @@ async fn execute_secret_delete_group(
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Get all secrets from the vault
+    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let secrets = secret_manager
         .secret_ops()
         .list_secrets(&vault_name, Some(group_name))
-        .await?;
+        .await;
+    progress.finish_clear();
+    let secrets = secrets?;
 
     if secrets.is_empty() {
-        println!("No secrets found in group '{}'", group_name);
+        output::info(&format!("No secrets found in group '{}'", group_name));
         return Ok(());
     }
 
-    println!(
+    output::info(&format!(
         "Found {} secret(s) in group '{}' to delete:",
         secrets.len(),
         group_name
-    );
+    ));
 
     for secret in &secrets {
         println!("  - {}", secret.name);
@@ -8100,7 +8162,7 @@ async fn execute_secret_delete_group(
             ),
             false,
         )? {
-            println!("Group delete operation cancelled.");
+            output::info("Group delete operation cancelled.");
             return Ok(());
         }
     }
