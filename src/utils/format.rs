@@ -9,6 +9,7 @@ use crossterm::{
     style::{Color as CrosstermColor, Stylize},
     terminal::{size, Clear, ClearType},
 };
+use serde::Serialize;
 use std::io::stdout;
 use tabled::{
     settings::{object::Rows, Alignment, Color, Modify, Padding, Style, Width},
@@ -77,7 +78,7 @@ impl TableFormatter {
     }
 
     /// Create a formatted table from data
-    pub fn format_table<T: Tabled>(&self, data: &[T]) -> Result<String> {
+    pub fn format_table<T: Tabled + Serialize>(&self, data: &[T]) -> Result<String> {
         if data.is_empty() {
             return Ok("No data to display".to_string());
         }
@@ -117,22 +118,31 @@ impl TableFormatter {
     }
 
     /// Format data as JSON
-    fn format_as_json<T: Tabled>(&self, _data: &[T]) -> Result<String> {
-        // Note: This is a simplified implementation
-        // In a real implementation, you'd need to serialize T to JSON
-        Ok("JSON output not yet implemented".to_string())
+    fn format_as_json<T: Serialize>(&self, data: &[T]) -> Result<String> {
+        Ok(serde_json::to_string_pretty(data)?)
     }
 
     /// Format data as YAML
-    fn format_as_yaml<T: Tabled>(&self, _data: &[T]) -> Result<String> {
-        // Note: This is a simplified implementation
-        Ok("YAML output not yet implemented".to_string())
+    fn format_as_yaml<T: Serialize>(&self, data: &[T]) -> Result<String> {
+        Ok(serde_yaml::to_string(data)?)
     }
 
     /// Format data as CSV
-    fn format_as_csv<T: Tabled>(&self, _data: &[T]) -> Result<String> {
-        // Note: This is a simplified implementation
-        Ok("CSV output not yet implemented".to_string())
+    fn format_as_csv<T: Tabled>(&self, data: &[T]) -> Result<String> {
+        let mut output = String::new();
+        // Header row from Tabled trait
+        let headers = T::headers();
+        let header_row: Vec<String> = headers.iter().map(|h| csv_escape(h.as_ref())).collect();
+        output.push_str(&header_row.join(","));
+        output.push('\n');
+        // Data rows
+        for item in data {
+            let fields = item.fields();
+            let row: Vec<String> = fields.iter().map(|f| csv_escape(f.as_ref())).collect();
+            output.push_str(&row.join(","));
+            output.push('\n');
+        }
+        Ok(output)
     }
 
     /// Format data as plain text
@@ -144,9 +154,9 @@ impl TableFormatter {
 
     /// Format data using a template
     fn format_as_template<T: Tabled>(&self, _data: &[T], _template: &str) -> Result<String> {
-        // Note: This is a placeholder implementation
-        // Full template implementation will be added in Phase 2
-        Ok("Template output not yet implemented".to_string())
+        Err(crate::error::CrosstacheError::config(
+            "Template output format is not yet supported. Use --format=json, --format=yaml, or --format=csv instead.".to_string(),
+        ))
     }
 
     /// Format data as raw text
@@ -154,6 +164,15 @@ impl TableFormatter {
         let mut table = Table::new(data);
         table.with(Style::empty());
         Ok(table.to_string())
+    }
+}
+
+/// Escape a value for CSV output (RFC 4180)
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 

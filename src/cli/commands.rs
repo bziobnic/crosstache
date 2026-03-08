@@ -5960,7 +5960,7 @@ async fn execute_secret_parse(
             }
         }
         _ => {
-            output::warn(&format!("Unimplemented format selected: {format}"));
+            output::error(&format!("Unsupported format '{format}' for this command. Use 'json' or 'table'."));
         }
     }
 
