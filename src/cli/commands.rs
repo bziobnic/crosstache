@@ -7911,7 +7911,7 @@ async fn execute_file_sync(
         config,
     );
     output::error("File sync is not yet implemented. Track progress at: https://github.com/bziobnic/crosstache/issues");
-    return Err(CrosstacheError::config("'xv file sync' is not yet available. Use 'xv file upload' and 'xv file download' for individual transfers.".to_string()));
+    Err(CrosstacheError::config("'xv file sync' is not yet available. Use 'xv file upload' and 'xv file download' for individual transfers.".to_string()))
 }
 
 /// Execute bulk secret set operation

@@ -39,7 +39,9 @@ pub enum OutputFormat {
 #[derive(Debug, Clone)]
 pub struct ColorTheme {
     pub header: CrosstermColor,
+    #[allow(dead_code)]
     pub success: CrosstermColor,
+    #[allow(dead_code)]
     pub warning: CrosstermColor,
     #[allow(dead_code)]
     pub error: CrosstermColor,

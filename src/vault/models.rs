@@ -15,8 +15,6 @@ fn display_option(opt: &Option<String>) -> String {
     }
 }
 
-/// Display function for Option<u32> in tables
-
 /// Azure Key Vault properties and metadata
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct VaultProperties {
