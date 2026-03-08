@@ -792,32 +792,29 @@ impl ConfigInitializer {
     pub fn show_setup_summary(&self, config: &Config) -> Result<()> {
         println!();
         output::success("Setup Summary");
-        println!("┌─────────────────────────────────────────────────────────────┐");
-        println!("│ Configuration                                               │");
-        println!("├─────────────────────────────────────────────────────────────┤");
-        println!("│ Subscription ID: {:<39} │", config.subscription_id);
-        println!("│ Resource Group:  {:<39} │", config.default_resource_group);
-        println!("│ Default Location: {:<38} │", config.default_location);
+        println!();
+        println!("  Subscription ID:  {}", config.subscription_id);
+        println!("  Resource Group:   {}", config.default_resource_group);
+        println!("  Default Location: {}", config.default_location);
 
         if !config.default_vault.is_empty() {
-            println!("│ Default Vault:   {:<40} │", config.default_vault);
+            println!("  Default Vault:    {}", config.default_vault);
         }
 
         // Show blob storage configuration if present
         if let Some(blob_config) = &config.blob_config {
             if !blob_config.storage_account.is_empty() {
-                println!("│ Storage Account: {:<40} │", blob_config.storage_account);
-                println!("│ Blob Container:  {:<40} │", blob_config.container_name);
+                println!("  Storage Account:  {}", blob_config.storage_account);
+                println!("  Blob Container:   {}", blob_config.container_name);
             }
         }
 
-        println!("└─────────────────────────────────────────────────────────────┘");
         println!();
 
         output::info("Next steps:");
-        println!("  • List your vaults: xv vault list");
-        println!("  • Set a secret: xv set my-secret");
-        println!("  • Get help: xv --help");
+        output::hint("List your vaults: xv vault list");
+        output::hint("Set a secret: xv set my-secret");
+        output::hint("Get help: xv --help");
 
         Ok(())
     }

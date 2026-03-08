@@ -24,8 +24,7 @@ impl InteractivePrompt {
     /// Display a welcome message for the setup process
     pub fn welcome(&self) -> Result<()> {
         crate::utils::output::step("Welcome to crosstache!");
-        println!("Let's get you set up for Azure Key Vault management.");
-        println!();
+        crate::utils::output::info("Let's get you set up for Azure Key Vault management.");
         Ok(())
     }
 
@@ -90,7 +89,7 @@ impl InteractivePrompt {
         let mut select = Select::with_theme(&self.theme)
             .with_prompt(message)
             .items(options)
-            .max_length(20);
+            .max_length(30);
 
         if let Some(default_index) = default {
             select = select.default(default_index);

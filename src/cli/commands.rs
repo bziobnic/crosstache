@@ -1523,6 +1523,11 @@ async fn execute_vault_create(
     println!("   Location: {}", vault.location);
     println!("   URI: {}", vault.uri);
 
+    output::hint(&format!(
+        "Start using it with 'xv use {}' or 'xv set <name> <value>'",
+        vault.name
+    ));
+
     Ok(())
 }
 
@@ -3350,6 +3355,23 @@ async fn execute_audit_command(
 
 async fn execute_init_command(_config: Config) -> Result<()> {
     use crate::config::init::ConfigInitializer;
+    use crate::config::settings::Config as SettingsConfig;
+
+    // Warn if config already exists
+    if let Ok(config_path) = SettingsConfig::get_config_path() {
+        if config_path.exists() {
+            output::warn(&format!(
+                "Configuration already exists at {}",
+                config_path.display()
+            ));
+            output::hint("This will overwrite your existing configuration.");
+            let prompt = crate::utils::interactive::InteractivePrompt::new();
+            if !prompt.confirm("Continue with re-initialization?", false)? {
+                output::info("Init cancelled. Existing configuration preserved.");
+                return Ok(());
+            }
+        }
+    }
 
     // Create the initializer and run the interactive setup
     let initializer = ConfigInitializer::new();
@@ -4097,6 +4119,8 @@ async fn execute_secret_set(
     ));
     println!("   Vault: {vault_name}");
     println!("   Version: {}", secret.version);
+
+    output::hint(&format!("Verify with 'xv get {}'", secret.original_name));
 
     Ok(())
 }
@@ -5489,6 +5513,9 @@ async fn execute_secret_delete(
         .delete_secret_safe(&vault_name, name, force)
         .await?;
     output::success(&format!("Successfully deleted secret '{name}'"));
+    output::hint(&format!(
+        "Undo with 'xv restore {name}' (before purge retention expires)"
+    ));
 
     Ok(())
 }
@@ -5732,6 +5759,7 @@ async fn execute_secret_purge(
         .purge_secret_safe(&vault_name, name, force)
         .await?;
     output::success(&format!("Successfully purged secret '{name}'"));
+    output::warn("This is permanent. The secret cannot be recovered.");
 
     Ok(())
 }
@@ -5960,7 +5988,9 @@ async fn execute_secret_parse(
             }
         }
         _ => {
-            output::error(&format!("Unsupported format '{format}' for this command. Use 'json' or 'table'."));
+            output::error(&format!(
+                "Unsupported format '{format}' for this command. Use 'json' or 'table'."
+            ));
         }
     }
 
@@ -6841,6 +6871,12 @@ async fn execute_file_upload(
     let content = fs::read(file_path)
         .map_err(|e| CrosstacheError::config(format!("Failed to read file {file_path}: {e}")))?;
 
+    if content.is_empty() {
+        output::warn(&format!(
+            "File '{file_path}' is empty (0 bytes). Uploading anyway."
+        ));
+    }
+
     // Determine remote file name
     let remote_name = name.unwrap_or_else(|| {
         Path::new(file_path)
@@ -6853,6 +6889,15 @@ async fn execute_file_upload(
     // Convert metadata and tags to HashMap
     let metadata_map: HashMap<String, String> = metadata.into_iter().collect();
     let tags_map: HashMap<String, String> = tags.into_iter().collect();
+
+    // Azure Blob Storage supports a maximum of 10 tags per blob
+    if tags_map.len() > 10 {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "Too many tags ({}) — Azure Blob Storage allows a maximum of 10 tags per blob. Remove {} tag(s).",
+            tags_map.len(),
+            tags_map.len() - 10
+        )));
+    }
 
     // Create upload request
     let upload_request = FileUploadRequest {
@@ -7086,6 +7131,7 @@ async fn execute_file_delete(
     println!("Deleting file '{name}'...");
     blob_manager.delete_file(name).await?;
     output::success(&format!("Successfully deleted file '{name}'"));
+    output::hint("Blob soft-delete may allow recovery depending on storage account settings.");
 
     Ok(())
 }
@@ -7881,9 +7927,8 @@ async fn execute_file_sync(
         delete,
         config,
     );
-    eprintln!("File sync is not yet implemented.");
-
-    Ok(())
+    output::error("File sync is not yet implemented. Track progress at: https://github.com/bziobnic/crosstache/issues");
+    Err(CrosstacheError::config("'xv file sync' is not yet available. Use 'xv file upload' and 'xv file download' for individual transfers.".to_string()))
 }
 
 /// Execute bulk secret set operation

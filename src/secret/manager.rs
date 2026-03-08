@@ -1286,6 +1286,10 @@ impl SecretManager {
 
             if name_info.is_hashed {
                 output::info("Long or complex name was hashed - original name preserved in tags");
+                output::hint(&format!(
+                    "Access by original name: xv get '{}'",
+                    name_info.original_name
+                ));
             }
         }
 
@@ -1492,6 +1496,9 @@ impl SecretManager {
             .await?;
 
         output::success(&format!("Successfully deleted secret '{secret_name}'"));
+        output::hint(&format!(
+            "Undo with 'xv restore {secret_name}' (before purge retention expires)"
+        ));
 
         Ok(())
     }
