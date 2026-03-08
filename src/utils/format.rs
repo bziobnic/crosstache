@@ -80,7 +80,7 @@ impl TableFormatter {
     /// Create a formatted table from data
     pub fn format_table<T: Tabled + Serialize>(&self, data: &[T]) -> Result<String> {
         if data.is_empty() {
-            return Ok("No data to display".to_string());
+            return Ok("No results found. If this is unexpected, check your vault permissions or filter criteria.".to_string());
         }
 
         match self.format {

@@ -147,8 +147,8 @@ fn extract_vault_name_from_url(url: &str) -> String {
         }
     }
 
-    // Last resort: return a generic placeholder
-    "unknown-vault".to_string()
+    // Last resort: include the URL for debugging
+    format!("<unresolved from: {}>", url.chars().take(60).collect::<String>())
 }
 
 /// Check if a network error is retryable
@@ -165,12 +165,15 @@ pub fn is_retryable_error(error: &CrosstacheError) -> bool {
                 || msg_lower.contains("504")
         }
         CrosstacheError::AzureApiError(msg) => {
-            // Retry on specific Azure API errors
+            // Retry on specific Azure API errors (including 429 rate limiting)
             let msg_lower = msg.to_lowercase();
             msg_lower.contains("503")
                 || msg_lower.contains("502")
                 || msg_lower.contains("504")
+                || msg_lower.contains("429")
                 || msg_lower.contains("throttled")
+                || msg_lower.contains("rate limit")
+                || msg_lower.contains("too many requests")
         }
         CrosstacheError::DnsResolutionError { .. } => false, // DNS errors are usually not transient
         CrosstacheError::ConnectionRefused(_) => false, // Connection refused is usually persistent
