@@ -4511,6 +4511,7 @@ async fn execute_secret_history(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
+    use crate::utils::format::format_table;
     use tabled::{Table, Tabled};
 
     // Determine vault name using context resolution
@@ -4557,10 +4558,10 @@ async fn execute_secret_history(
         })
         .collect();
 
-    let table = Table::new(&version_infos).to_string();
+    let table = Table::new(&version_infos);
     println!("Version history for secret '{name}' in vault '{vault_name}':");
     println!();
-    println!("{table}");
+    println!("{}", format_table(table, config.no_color));
 
     Ok(())
 }
