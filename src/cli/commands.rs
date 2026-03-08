@@ -4103,10 +4103,7 @@ async fn execute_secret_set(
     println!("   Vault: {vault_name}");
     println!("   Version: {}", secret.version);
 
-    output::hint(&format!(
-        "Verify with 'xv get {}'",
-        secret.original_name
-    ));
+    output::hint(&format!("Verify with 'xv get {}'", secret.original_name));
 
     Ok(())
 }
@@ -5974,7 +5971,9 @@ async fn execute_secret_parse(
             }
         }
         _ => {
-            output::error(&format!("Unsupported format '{format}' for this command. Use 'json' or 'table'."));
+            output::error(&format!(
+                "Unsupported format '{format}' for this command. Use 'json' or 'table'."
+            ));
         }
     }
 
@@ -6856,7 +6855,9 @@ async fn execute_file_upload(
         .map_err(|e| CrosstacheError::config(format!("Failed to read file {file_path}: {e}")))?;
 
     if content.is_empty() {
-        output::warn(&format!("File '{file_path}' is empty (0 bytes). Uploading anyway."));
+        output::warn(&format!(
+            "File '{file_path}' is empty (0 bytes). Uploading anyway."
+        ));
     }
 
     // Determine remote file name

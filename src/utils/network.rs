@@ -148,7 +148,10 @@ fn extract_vault_name_from_url(url: &str) -> String {
     }
 
     // Last resort: include the URL for debugging
-    format!("<unresolved from: {}>", url.chars().take(60).collect::<String>())
+    format!(
+        "<unresolved from: {}>",
+        url.chars().take(60).collect::<String>()
+    )
 }
 
 /// Check if a network error is retryable
