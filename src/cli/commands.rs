@@ -4142,9 +4142,19 @@ async fn execute_secret_get(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
+    // Resolve user-friendly version (e.g. "v6") to Azure GUID
+    let resolved_version = match &version {
+        Some(ver) => {
+            let (guid, _display) =
+                resolve_version_to_guid(secret_manager, &vault_name, name, ver).await?;
+            Some(guid)
+        }
+        None => None,
+    };
+
     // Get the secret (specific version or current)
     let secret = secret_manager
-        .get_secret_with_version(&vault_name, name, version.as_deref(), true, true)
+        .get_secret_with_version(&vault_name, name, resolved_version.as_deref(), true, true)
         .await?;
 
     if raw {
@@ -4555,6 +4565,45 @@ async fn execute_secret_history(
     Ok(())
 }
 
+/// Resolve a user-friendly version identifier (e.g. "v6", "6") to the Azure Key Vault hex GUID.
+/// If the version string is already a hex GUID, it is returned as-is.
+async fn resolve_version_to_guid(
+    secret_manager: &crate::secret::manager::SecretManager,
+    vault_name: &str,
+    secret_name: &str,
+    version: &str,
+) -> Result<(String, String)> {
+    if let Ok(version_num) = version.trim_start_matches('v').parse::<u32>() {
+        if version_num == 0 {
+            return Err(crate::error::CrosstacheError::invalid_argument(
+                "Version number must be 1 or greater (v1 is the oldest version)",
+            ));
+        }
+        let versions_list = secret_manager
+            .secret_ops()
+            .get_secret_versions(vault_name, secret_name)
+            .await?;
+        let max_version = versions_list
+            .iter()
+            .filter_map(|v| v.version_number)
+            .max()
+            .unwrap_or(0);
+        let matched = versions_list
+            .into_iter()
+            .find(|v| v.version_number == Some(version_num));
+        match matched {
+            Some(v) => Ok((v.version, format!("v{version_num}"))),
+            None => Err(crate::error::CrosstacheError::invalid_argument(format!(
+                "Version v{version_num} not found for secret '{secret_name}'. \
+                 Available versions: v1–v{max_version} (use 'xv history {secret_name}' to list them)"
+            ))),
+        }
+    } else {
+        // Assume it's already a GUID
+        Ok((version.to_string(), version.to_string()))
+    }
+}
+
 async fn execute_secret_rollback(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -4573,44 +4622,9 @@ async fn execute_secret_rollback(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
-    // Resolve version: if the user passed an integer (e.g. "3"), look up the GUID
-    let resolved_version_guid: String;
-    let display_version: String;
-    if let Ok(version_num) = version.trim_start_matches('v').parse::<u32>() {
-        if version_num == 0 {
-            return Err(crate::error::CrosstacheError::invalid_argument(
-                "Version number must be 1 or greater (v1 is the oldest version)",
-            ));
-        }
-        let versions_list = secret_manager
-            .secret_ops()
-            .get_secret_versions(&vault_name, name)
-            .await?;
-        let max_version = versions_list
-            .iter()
-            .filter_map(|v| v.version_number)
-            .max()
-            .unwrap_or(0);
-        let matched = versions_list
-            .into_iter()
-            .find(|v| v.version_number == Some(version_num));
-        match matched {
-            Some(v) => {
-                display_version = format!("v{version_num}");
-                resolved_version_guid = v.version;
-            }
-            None => {
-                return Err(crate::error::CrosstacheError::invalid_argument(format!(
-                    "Version v{version_num} not found for secret '{name}'. \
-                     Available versions: v1–v{max_version} (use 'xv history {name}' to list them)"
-                )));
-            }
-        }
-    } else {
-        // Assume it's already a GUID
-        resolved_version_guid = version.to_string();
-        display_version = version.to_string();
-    }
+    // Resolve user-friendly version (e.g. "v6") to Azure GUID
+    let (resolved_version_guid, display_version) =
+        resolve_version_to_guid(secret_manager, &vault_name, name, version).await?;
 
     // Confirm rollback unless force flag is used
     if !force {
