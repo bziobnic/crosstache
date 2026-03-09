@@ -456,6 +456,9 @@ pub enum Commands {
         /// Filter by operation type (get, set, delete, list)
         #[arg(long)]
         operation: Option<String>,
+        /// Azure resource group (defaults to config value)
+        #[arg(long)]
+        resource_group: Option<String>,
         /// Show raw Azure Activity Log output
         #[arg(long)]
         raw: bool,
@@ -1095,8 +1098,12 @@ impl Cli {
                 vault,
                 days,
                 operation,
+                resource_group,
                 raw,
-            } => execute_audit_command(name, vault, days, operation, raw, config).await,
+            } => {
+                execute_audit_command(name, vault, days, operation, resource_group, raw, config)
+                    .await
+            }
             Commands::Init => execute_init_command(config).await,
             Commands::Info {
                 resource,
@@ -3204,6 +3211,7 @@ async fn execute_audit_command(
     vault: Option<String>,
     days: u32,
     operation: Option<String>,
+    resource_group_override: Option<String>,
     raw: bool,
     config: Config,
 ) -> Result<()> {
@@ -3226,12 +3234,14 @@ async fn execute_audit_command(
     // Determine vault and context
     let (vault_name, resource_group, subscription_id) = if let Some(vault_name) = vault {
         // Use specified vault, need to get resource group and subscription
-        let rg = config.default_resource_group.clone();
+        let rg = resource_group_override
+            .clone()
+            .unwrap_or_else(|| config.default_resource_group.clone());
         let sub = config.subscription_id.clone();
 
         if rg.is_empty() {
             return Err(CrosstacheError::config(
-                "No default resource group configured. Use 'xv init' to configure or specify with --resource-group"
+                "No resource group specified. Use --resource-group or 'xv init' to configure"
             ));
         }
 
@@ -3239,12 +3249,13 @@ async fn execute_audit_command(
     } else {
         // Use current vault context
         let vault_name = config.resolve_vault_name(None).await?;
-        let rg = config.default_resource_group.clone();
+        let rg = resource_group_override
+            .unwrap_or_else(|| config.default_resource_group.clone());
         let sub = config.subscription_id.clone();
 
         if rg.is_empty() {
             return Err(CrosstacheError::config(
-                "No default resource group configured. Use 'xv init' to configure",
+                "No resource group specified. Use --resource-group or 'xv init' to configure",
             ));
         }
 
