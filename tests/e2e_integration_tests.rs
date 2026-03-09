@@ -16,7 +16,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
-const VAULT: &str = "test-test-delete";
+const VAULT: &str = "xvtestdeleteme";
 
 /// Generate a unique prefix for this test run to avoid collisions
 fn test_prefix() -> String {
