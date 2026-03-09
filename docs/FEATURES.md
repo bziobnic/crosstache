@@ -100,7 +100,7 @@ Requires blob storage setup via `xv init`. Gated behind the `file-ops` feature f
 | `xv file upload` | Upload files (`--recursive`, `--prefix`, `--flatten`) |
 | `xv file download` | Download files (`--recursive`, `--flatten`, `--output`, `--force`) |
 | `xv file list` | List files (hierarchical by default; `--recursive` for flat) |
-| `xv file delete` | Delete files (`--force`, `--continue-on-error`) |
+| `xv file delete` | Delete files (`-r`, `-f`, `-i`, `--dry-run`, `--verbose`, `--force`, `--continue-on-error`, glob patterns) |
 | `xv file info` | File metadata |
 
 ---
@@ -138,7 +138,7 @@ Requires blob storage setup via `xv init`. Gated behind the `file-ops` feature f
 
 ## Output Formats
 
-Table (default), JSON (`--format json`), YAML (`--format yaml`), raw (`--format raw`).
+Table (default), JSON (`--format json`), YAML (`--format yaml`), CSV (`--format csv`), plain (`--format plain`), raw (`--format raw`).
 
 ---
 

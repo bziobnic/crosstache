@@ -21,7 +21,7 @@ let credential = Arc::new(DefaultAzureCredential::default());
 ## API Integration Approach
 
 ### Hybrid Strategy
-- **Authentication**: Azure SDK v0.20 for credential management
+- **Authentication**: Azure SDK v0.21 for credential management
 - **Operations**: Direct REST API calls to Azure Key Vault API v7.4
 - **Rationale**: SDK limitations with tag support require REST API for full functionality
 

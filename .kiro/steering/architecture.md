@@ -7,6 +7,7 @@ The crosstache project follows a modular Rust architecture with clear separation
 ```
 src/
 ├── auth/          # Authentication providers and Azure credential management
+├── blob/          # Azure Blob Storage operations for file management (feature-gated: file-ops)
 ├── cli/           # Command-line interface and argument parsing
 ├── config/        # Configuration management and persistence
 ├── secret/        # Secret operations and management
@@ -20,9 +21,9 @@ src/
 ## Key Architectural Decisions
 
 ### Hybrid Azure Integration
-- **Authentication**: Uses Azure SDK v0.20 for credential management via `DefaultAzureCredential`
+- **Authentication**: Uses Azure SDK v0.21 for credential management via `DefaultAzureCredential`
 - **Operations**: Direct REST API calls to Azure Key Vault API v7.4 for full control
-- **Rationale**: Azure SDK v0.20 has limitations with tag support; REST API ensures complete functionality
+- **Rationale**: Azure SDK v0.21 has limitations with tag support; REST API ensures complete functionality
 
 ### Error Handling
 - Centralized error types in `error.rs` using `thiserror`
