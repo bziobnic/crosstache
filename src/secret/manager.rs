@@ -53,6 +53,8 @@ pub struct SecretProperties {
     pub tags: HashMap<String, String>,
     #[tabled(rename = "Content Type")]
     pub content_type: String,
+    #[tabled(skip)]
+    pub recovery_level: Option<String>,
 }
 
 /// Secret creation/update request
@@ -539,6 +541,12 @@ impl SecretOperations for AzureSecretOperations {
             .and_then(|v| v.as_i64())
             .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
 
+        // Extract recovery level from attributes
+        let recovery_level = attributes
+            .get("recoveryLevel")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Get original name from tags
         let original_name = self.get_original_name(&sanitized_name, &tags);
 
@@ -560,6 +568,7 @@ impl SecretOperations for AzureSecretOperations {
                 .to_string(),
             version_number: None,
             created_timestamp: created_ts,
+            recovery_level,
         })
     }
 
@@ -678,6 +687,11 @@ impl SecretOperations for AzureSecretOperations {
             }
         }
 
+        let recovery_level = attributes
+            .get("recoveryLevel")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         Ok(SecretProperties {
             name: secret_name.to_string(),
             original_name: secret_name.to_string(),
@@ -696,6 +710,7 @@ impl SecretOperations for AzureSecretOperations {
                 .to_string(),
             version_number: None,
             created_timestamp: created_ts,
+            recovery_level,
         })
     }
 
@@ -971,6 +986,11 @@ impl SecretOperations for AzureSecretOperations {
         // Get original name from tags
         let original_name = self.get_original_name(&sanitized_name, &tags);
 
+        let recovery_level = attributes
+            .get("recoveryLevel")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         Ok(SecretProperties {
             name: sanitized_name,
             original_name,
@@ -989,6 +1009,7 @@ impl SecretOperations for AzureSecretOperations {
                 .to_string(),
             version_number: None,
             created_timestamp: created_ts,
+            recovery_level,
         })
     }
 
@@ -1134,6 +1155,11 @@ impl SecretOperations for AzureSecretOperations {
                         .format("%Y-%m-%d %H:%M:%S UTC")
                         .to_string();
 
+                    let recovery_level = attributes
+                        .get("recoveryLevel")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
                     versions.push(SecretProperties {
                         name: secret_name.to_string(),
                         original_name: secret_name.to_string(),
@@ -1148,6 +1174,7 @@ impl SecretOperations for AzureSecretOperations {
                         tags: HashMap::new(),
                         content_type: String::new(),
                         created_timestamp,
+                        recovery_level,
                     });
                 }
             }
@@ -1415,7 +1442,7 @@ impl SecretManager {
             updated,
             expires: secret_props.expires_on,
             not_before: secret_props.not_before,
-            recovery_level: None, // Not available in SecretProperties
+            recovery_level: secret_props.recovery_level.clone(),
             content_type: if secret_props.content_type.is_empty() {
                 None
             } else {
@@ -1426,7 +1453,8 @@ impl SecretManager {
             folder,
             note,
             vault_uri,
-            version_count: None, // Could be populated by calling list versions endpoint
+            // version_count requires an additional API call to get_secret_versions; left as None to avoid extra network overhead
+            version_count: None,
         };
 
         Ok(info)
@@ -1924,54 +1952,6 @@ impl SecretManager {
 
             Ok(updated_secret)
         }
-    }
-}
-
-/// Secret manager builder for flexible construction
-#[allow(dead_code)]
-pub struct SecretManagerBuilder {
-    auth_provider: Option<Arc<dyn AzureAuthProvider>>,
-    no_color: bool,
-}
-
-impl SecretManagerBuilder {
-    /// Create a new builder
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self {
-            auth_provider: None,
-            no_color: false,
-        }
-    }
-
-    /// Set the authentication provider
-    #[allow(dead_code)]
-    pub fn with_auth_provider(mut self, auth_provider: Arc<dyn AzureAuthProvider>) -> Self {
-        self.auth_provider = Some(auth_provider);
-        self
-    }
-
-    /// Disable colored output
-    #[allow(dead_code)]
-    pub fn with_no_color(mut self, no_color: bool) -> Self {
-        self.no_color = no_color;
-        self
-    }
-
-    /// Build the secret manager
-    #[allow(dead_code)]
-    pub fn build(self) -> Result<SecretManager> {
-        let auth_provider = self
-            .auth_provider
-            .ok_or_else(|| CrosstacheError::config("Authentication provider is required"))?;
-
-        Ok(SecretManager::new(auth_provider, self.no_color))
-    }
-}
-
-impl Default for SecretManagerBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
