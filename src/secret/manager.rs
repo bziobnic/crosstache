@@ -1782,9 +1782,11 @@ impl SecretManager {
         self.validate_secret_name(&update_request.name)?;
 
         // Check if secret exists first
+        // If renaming or no new value provided, we need the current value to preserve it
+        let need_value = update_request.new_name.is_some() && update_request.value.is_none();
         let current_secret = self
             .secret_ops
-            .get_secret(vault_name, &update_request.name, false)
+            .get_secret(vault_name, &update_request.name, need_value)
             .await?;
 
         // Handle secret renaming if requested
