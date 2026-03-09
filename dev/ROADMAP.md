@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> Updated: 2026-02-20 | Current version: **v0.4.1**
+> Updated: 2026-03-09 | Current version: **v0.4.17**
 
 ---
 
@@ -42,8 +42,12 @@ Features shipped and verified in the codebase.
 - Pagination for secret listing (follows Azure `nextLink`)
 - Configurable select page size
 
-### v0.4.1
-- Bug fixes and release cleanup
+### v0.4.1–v0.4.17
+- Bug fixes, release cleanup, output consistency improvements
+- Configurable clipboard timeout (`clipboard_timeout` config key, 0 to disable)
+- Output format support: JSON, YAML, CSV, plain, raw all implemented (only `template` format remains stubbed)
+- Pagination for secret listing (follows Azure `nextLink`)
+- Configurable select page size
 
 ---
 
@@ -55,23 +59,18 @@ Features shipped and verified in the codebase.
 **Effort:** Medium-High
 **Scope:** Start with one-way `sync up` and `sync down` before bidirectional.
 
-### 2. Configurable Clipboard Timeout
-**Impact:** 30-second auto-clear is hardcoded. Users want longer/shorter or to disable it.
-**Current state:** Hardcoded `Duration::from_secs(30)` in `commands.rs`.
-**Effort:** Low — read from config, pass to thread.
-
-### 3. Progress Indicators for File Operations
+### 2. Progress Indicators for File Operations
 **Impact:** Large file uploads/downloads give no feedback until completion.
 **Current state:** No progress bars or per-file status during recursive ops.
 **Effort:** Low-Medium (`indicatif` crate or similar).
 
-### 4. Large File Chunked Upload
+### 3. Large File Chunked Upload
 **Impact:** Files over ~100MB may fail. Block-based upload with resume needed.
 **Current state:** Stubbed in `src/blob/manager.rs` and `src/blob/operations.rs` (paginated listing also stubbed).
 **Effort:** Medium
 
-### 5. Output Format Support (JSON, YAML, CSV, Template)
-**Impact:** `--format json|yaml|csv|template` flags exist but all return "not yet implemented."
+### 4. Template Output Format
+**Impact:** `--format template` flag exists but returns "not yet supported."
 **Current state:** Stubbed in `src/utils/format.rs`.
 **Effort:** Low-Medium
 

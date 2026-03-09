@@ -24,6 +24,7 @@ crosstache is a cross-platform secrets manager CLI written in Rust. The binary i
   - `operations.rs`: Specific vault operations (RBAC, access control)
 - `secret/`: Secret CRUD operations with group and metadata support
   - `manager.rs`: Core secret operations with REST API integration
+  - `models.rs`: Secret-related data structures (SecretInfo, etc.)
   - `name_manager.rs`: Name sanitization and validation logic
 - `blob/`: Azure Blob Storage operations for file management
   - `manager.rs`: Core blob operations (upload, download, list, delete)
@@ -37,11 +38,15 @@ crosstache is a cross-platform secrets manager CLI written in Rust. The binary i
   - `sanitizer.rs`: Azure Key Vault name sanitization with hashing for long names
   - `network.rs`: HTTP client configuration with proper timeouts and error classification
   - `retry.rs`: Retry logic for Azure API calls
-  - `format.rs`: Output formatting (JSON, table, plain text)
+  - `format.rs`: Output formatting (JSON, YAML, CSV, table, plain text)
   - `azure_detect.rs`: Azure environment detection
+  - `resource_detector.rs`: Azure resource detection utilities
   - `interactive.rs`: Interactive prompting utilities
+  - `helpers.rs`: General helper functions
+  - `output.rs`: User-friendly output and formatting
+  - `datetime.rs`: Date/time parsing and formatting utilities
 - `cli/`: Command parsing using `clap` with derive macros
-  - `commands.rs`: All CLI command definitions and execution logic (3000+ lines)
+  - `commands.rs`: All CLI command definitions and execution logic (~8,300+ lines)
 
 ### Critical Implementation Details
 - **Group Management**: Groups stored as comma-separated values in single "groups" tag
@@ -131,9 +136,15 @@ Key environment variables:
 - `AZURE_CREDENTIAL_PRIORITY`: Credential type priority (cli, managed_identity, environment, default)
 - `DEFAULT_VAULT`: Default vault name
 - `DEFAULT_RESOURCE_GROUP`: Default resource group
+- `DEFAULT_LOCATION`: Default Azure location (e.g., eastus)
 - `FUNCTION_APP_URL`: Function app URL for extended functionality
 - `CACHE_TTL`: Cache time-to-live in seconds
 - `DEBUG`: Enable debug logging (true/1)
+- `AZURE_STORAGE_ACCOUNT`: Azure storage account name (for blob/file operations)
+- `AZURE_STORAGE_CONTAINER`: Azure storage container name
+- `AZURE_STORAGE_ENDPOINT`: Custom Azure storage endpoint
+- `BLOB_CHUNK_SIZE_MB`: Chunk size in MB for blob uploads
+- `BLOB_MAX_CONCURRENT_UPLOADS`: Max concurrent blob uploads
 
 ## Important Implementation Notes
 
@@ -162,10 +173,10 @@ Azure Key Vault secrets are limited to 15 tags total. crosstache uses:
 - User can add additional tags up to the 15-tag limit
 
 ### Build System
-- Uses custom `build.rs` that auto-increments build numbers stored in `build_number.txt`
-- Embeds git commit hash, branch, and build timestamp
-- Creates version strings like `0.1.0.123+abc1234`
-- Build metadata available via environment variables: `BUILD_NUMBER`, `GIT_HASH`, `BUILD_TIME`, `GIT_BRANCH`
+- Uses `built` crate (v0.7 with `git2` and `chrono` features) via `build.rs`
+- Automatically embeds git commit hash, branch, build timestamp, and other metadata
+- Generated build info is included at compile time from `OUT_DIR/built.rs`
+- Release profile: `strip = true`, `lto = true`, `codegen-units = 1`, `panic = "abort"`
 
 ### Network Configuration
 - HTTP client configured with 30s connect timeout, 120s request timeout
@@ -191,12 +202,16 @@ Azure Key Vault secrets are limited to 15 tags total. crosstache uses:
 - Tests require Azure credentials for integration testing
 
 ### Current Implementation Status
-Major features partially implemented or TODO:
-- **File Sync** (`xv file sync`): Command structure exists but not implemented (see `execute_file_sync` at line 3071 in commands.rs)
-- **Vault Sharing**: Commands defined but not implemented (grant/revoke/list)
-- **Secret Backup/Restore**: Methods stubbed in `secret/manager.rs`
-- **Advanced Secret Operations**: List deleted secrets, get versions, backup/restore
-- **Pagination**: Not implemented for large result sets
-- **Template Output**: Format option exists but not implemented
+Implemented features:
+- **Output Formats**: JSON, YAML, CSV, plain, raw all working; only `template` format is stubbed
+- **Pagination**: Secret listing follows Azure `nextLink` for large result sets
+- **Configurable Clipboard Timeout**: `clipboard_timeout` config key (default 30s, 0 to disable)
 
-For detailed task list, see TODO.md
+Features partially implemented or stubbed:
+- **File Sync** (`xv file sync`): Command structure exists but prints "not yet implemented"
+- **Vault Sharing**: Commands defined (grant/revoke/list) — implemented via RBAC
+- **Secret Backup/Restore**: Methods stubbed in `secret/manager.rs`
+- **Blob Metadata/Tags**: Stubbed with warnings ("not yet implemented for Azure SDK v0.21")
+- **Template Output**: `--format template` flag exists but returns "not yet supported"
+
+For open work items, see `dev/ROADMAP.md` or run `bd ready`
