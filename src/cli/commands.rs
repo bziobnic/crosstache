@@ -930,7 +930,7 @@ pub enum EnvCommands {
     Show,
     /// Pull secrets to .env file format
     Pull {
-        /// Output format (only 'dotenv' supported currently)
+        /// Output format (currently only 'dotenv' is supported)
         #[arg(long, default_value = "dotenv")]
         format: String,
         /// Filter secrets by group (can be specified multiple times)
@@ -2425,13 +2425,6 @@ impl EnvironmentProfileManager {
         Ok(profile)
     }
 
-    /// Get the current environment profile
-    #[allow(dead_code)]
-    pub fn current_profile(&self) -> Option<&EnvironmentProfile> {
-        self.current_profile
-            .as_ref()
-            .and_then(|name| self.profiles.get(name))
-    }
 }
 
 async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()> {
@@ -6738,7 +6731,7 @@ async fn execute_context_use(
         // Load existing or create new (defaults to global)
         ContextManager::load()
             .await
-            .unwrap_or_else(|_| ContextManager::new_global().unwrap())
+            .unwrap_or_else(|_| ContextManager::new_global().unwrap_or_default())
     };
 
     // Create new context
@@ -6858,7 +6851,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let vault_name = context_manager.current_vault().unwrap().to_string();
+    let vault_name = context_manager.current_vault().unwrap_or("unknown").to_string();
     context_manager.clear_context().await?;
 
     let scope = if global {
@@ -7215,47 +7208,6 @@ fn path_to_blob_name(path: &Path, prefix: Option<&str>) -> String {
     } else {
         relative_path
     }
-}
-
-/// Recursively collect all files from a directory
-#[cfg(feature = "file-ops")]
-fn _collect_files_recursive(path: &Path) -> Result<Vec<PathBuf>> {
-    use std::fs;
-
-    let mut files = Vec::new();
-
-    if path.is_file() {
-        files.push(path.to_path_buf());
-    } else if path.is_dir() {
-        let entries = fs::read_dir(path).map_err(|e| {
-            CrosstacheError::config(format!(
-                "Failed to read directory {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                CrosstacheError::config(format!("Failed to read directory entry: {e}"))
-            })?;
-
-            let entry_path = entry.path();
-            if entry_path.is_file() {
-                files.push(entry_path);
-            } else if entry_path.is_dir() {
-                // Recursively collect files from subdirectory
-                files.extend(_collect_files_recursive(&entry_path)?);
-            }
-        }
-    } else {
-        return Err(CrosstacheError::config(format!(
-            "Path {} is neither a file nor a directory",
-            path.display()
-        )));
-    }
-
-    Ok(files)
 }
 
 /// Recursively collect files with path structure information
