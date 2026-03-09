@@ -408,7 +408,7 @@ pub enum Commands {
         /// Connection string to parse
         connection_string: String,
         /// Output format
-        #[arg(short, long, default_value = "table")]
+        #[arg(short = 'f', long = "fmt", default_value = "table", id = "parse_format")]
         format: String,
     },
     /// Secret-level access management
@@ -591,7 +591,7 @@ pub enum VaultCommands {
         #[arg(short, long)]
         output: Option<String>,
         /// Export format (json, env, txt)
-        #[arg(short, long, default_value = "json")]
+        #[arg(short = 'f', long = "fmt", default_value = "json", id = "export_format")]
         format: String,
         /// Include secret values (requires appropriate permissions)
         #[arg(long)]
@@ -611,7 +611,7 @@ pub enum VaultCommands {
         #[arg(short, long)]
         input: Option<String>,
         /// Import format (json, env, txt)
-        #[arg(short, long, default_value = "json")]
+        #[arg(short = 'f', long = "fmt", default_value = "json", id = "import_format")]
         format: String,
         /// Overwrite existing secrets
         #[arg(long)]
@@ -686,7 +686,7 @@ pub enum VaultShareCommands {
         #[arg(short, long)]
         resource_group: Option<String>,
         /// Output format
-        #[arg(short, long, default_value = "table")]
+        #[arg(short = 'f', long = "fmt", default_value = "table", id = "share_list_format")]
         format: String,
         /// Include service accounts in output
         #[arg(long)]
@@ -931,7 +931,7 @@ pub enum EnvCommands {
     /// Pull secrets to .env file format
     Pull {
         /// Output format (currently only 'dotenv' is supported)
-        #[arg(long, default_value = "dotenv")]
+        #[arg(long = "fmt", default_value = "dotenv", id = "pull_format")]
         format: String,
         /// Filter secrets by group (can be specified multiple times)
         #[arg(short, long)]
