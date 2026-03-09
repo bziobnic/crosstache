@@ -121,6 +121,33 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             eprintln!("3. If using access policies, ensure Get/List/Set permissions are granted");
             eprintln!("\nTo check your roles: xv vault roles");
         }
+        DnsResolutionError { vault_name, .. } => {
+            output::error("DNS Resolution Failed");
+            eprintln!("Could not resolve the vault '{vault_name}'.");
+            eprintln!("\nPlease verify:");
+            eprintln!("1. The vault name is spelled correctly");
+            eprintln!("2. The vault exists and has not been deleted");
+            eprintln!("3. Your network/DNS settings are correct");
+        }
+        ConnectionTimeout(msg) => {
+            output::error("Connection Timeout");
+            eprintln!("{msg}");
+            eprintln!("\nPlease check your network connection and try again.");
+        }
+        ConnectionRefused(msg) => {
+            output::error("Connection Refused");
+            eprintln!("{msg}");
+            eprintln!("\nPlease check that the vault exists and is accessible.");
+        }
+        SslError(msg) => {
+            output::error("SSL/TLS Error");
+            eprintln!("{msg}");
+            eprintln!("\nPlease check your TLS configuration and proxy settings.");
+        }
+        InvalidArgument(msg) => {
+            output::error("Invalid Argument");
+            eprintln!("{msg}");
+        }
         _ => {
             output::error(&format!("{error}"));
         }
