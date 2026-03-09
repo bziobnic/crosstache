@@ -52,7 +52,7 @@ pub struct ColorTheme {
 impl Default for ColorTheme {
     fn default() -> Self {
         Self {
-            header: CrosstermColor::Blue,
+            header: CrosstermColor::Cyan,
             success: CrosstermColor::Green,
             warning: CrosstermColor::Yellow,
             error: CrosstermColor::Red,
@@ -108,7 +108,7 @@ impl TableFormatter {
 
         // Apply color if enabled
         if !self.no_color {
-            table.with(Modify::new(Rows::first()).with(Color::FG_BLUE));
+            table.with(Modify::new(Rows::first()).with(Color::FG_CYAN));
         }
 
         // Auto-adjust width to terminal
@@ -291,7 +291,7 @@ pub fn format_table(mut table: Table, no_color: bool) -> String {
         .with(Padding::new(1, 1, 0, 0));
 
     if !no_color {
-        table.with(Modify::new(Rows::first()).with(Color::FG_BLUE));
+        table.with(Modify::new(Rows::first()).with(Color::FG_CYAN));
     }
 
     table.to_string()
