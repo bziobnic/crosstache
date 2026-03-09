@@ -6015,9 +6015,9 @@ async fn execute_secret_parse(
             }
         }
         _ => {
-            output::error(&format!(
+            return Err(CrosstacheError::invalid_argument(format!(
                 "Unsupported format '{format}' for this command. Use 'json' or 'table'."
-            ));
+            )));
         }
     }
 
