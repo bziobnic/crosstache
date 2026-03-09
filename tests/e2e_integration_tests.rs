@@ -166,24 +166,7 @@ fn e2e_secret_full_lifecycle() {
     let secret_name = format!("{prefix}-lifecycle");
     let secret_value = "test-value-12345";
 
-    // --- SET ---
-    let stdout = xv_ok(&[
-        "set",
-        &secret_name,
-        "--vault",
-        VAULT,
-        "--stdin",
-        "--note",
-        "e2e test secret",
-    ].iter()
-        .copied()
-        .collect::<Vec<&str>>()
-        .as_slice(),
-    );
-    // Actually, --stdin reads from stdin. Let's use a different approach.
-    // We'll pipe the value via Command directly.
-    drop(stdout); // discard - let's redo with stdin piping
-
+    // --- SET --- (must pipe value via stdin; xv_ok uses null stdin)
     let binary = env!("CARGO_BIN_EXE_xv");
     let set_output = Command::new(binary)
         .args(["set", &secret_name, "--vault", VAULT, "--stdin", "--note", "e2e test secret"])
