@@ -5060,32 +5060,34 @@ async fn execute_secret_run(
         }
     }
 
-    // Set up stdio for output capture and masking
+    output::step(&format!("Executing: {}", command.join(" ")));
+
     if no_masking {
-        // Direct passthrough
+        // Direct passthrough — use .status() so inherited stdio works correctly
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+        let status = cmd.status().map_err(|e| {
+            CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
+        })?;
+
+        // Explicitly drop secret-holding variables to zeroize them after child exits
+        drop(env_vars);
+        drop(uri_values);
+        drop(secret_values);
+
+        std::process::exit(status.code().unwrap_or(1));
     } else {
         // Capture output for masking
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    }
 
-    output::step(&format!("Executing: {}", command.join(" ")));
+        let output = cmd.output().map_err(|e| {
+            CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
+        })?;
 
-    // Execute the command
-    let output = cmd.output().map_err(|e| {
-        CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
-    })?;
+        // Explicitly drop secret-holding variables to zeroize them after child exits
+        drop(env_vars);
+        drop(uri_values);
 
-    // Explicitly drop secret-holding variables to zeroize them immediately after child process
-    // Note: secret_values is still needed for masking, so we can't drop it yet
-    drop(env_vars);
-    drop(uri_values);
-
-    // Handle output with masking if needed
-    if no_masking {
-        // Exit with the same code as the child process
-        std::process::exit(output.status.code().unwrap_or(1));
-    } else {
         // Mask secret values in output
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
