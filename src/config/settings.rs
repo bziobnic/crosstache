@@ -333,7 +333,9 @@ async fn load_from_file(path: &PathBuf) -> Result<Config> {
     // Try to parse as TOML first, then JSON as fallback
     match toml::from_str::<Config>(&contents) {
         Ok(config) => return Ok(config),
-        Err(_toml_err) => {}
+        Err(toml_err) => {
+            tracing::debug!("TOML parse failed: {}, trying JSON", toml_err);
+        }
     }
 
     serde_json::from_str::<Config>(&contents).map_err(|e| {
