@@ -77,6 +77,7 @@ xv set "api-key" --stdin < key.txt        # Create from stdin
 xv set K1=val1 K2=val2 K3=@file.pem       # Bulk create
 xv get "api-key"                          # Copy to clipboard (auto-clears)
 xv get "api-key" --raw                    # Print to stdout
+xv get "api-key" --version v1             # Get a specific version
 xv find                                   # Browse all secrets interactively
 xv find "api"                             # Fuzzy search by name pattern
 xv list                                   # List all secrets (alias: ls)
@@ -136,7 +137,8 @@ See [docs/GROUPS.md](docs/GROUPS.md) for details.
 
 ```bash
 xv history "api-key"                      # Version history
-xv rollback "api-key" --version 2         # Restore previous version (required)
+xv rollback "api-key" --version 2         # Restore previous version (--version required)
+xv rollback "api-key" --version 2 --force # Skip confirmation
 xv rotate "api-key"                       # Generate new random value (32 chars)
 xv rotate "api-key" --length 64 --charset alphanumeric
 xv rotate "api-key" --charset hex         # Also: base64, numeric, uppercase, lowercase
@@ -177,9 +179,14 @@ Named profiles that map to different vaults:
 
 ```bash
 xv env create prod --vault prod-vault --group my-rg
+xv env list                     # List available profiles
 xv env use prod
+xv env show                     # Show current profile
 xv env pull --output .env       # Download as .env file
+xv env pull --group production  # Filter by group
 xv env push .env                # Upload .env contents as secrets
+xv env push .env --overwrite    # Overwrite existing secrets
+xv env delete prod              # Remove a profile
 ```
 
 Note: `--group` here refers to the Azure resource group, not a secret group.
@@ -189,9 +196,11 @@ Note: `--group` here refers to the Azure resource group, not a secret group.
 ```bash
 xv diff vault-a vault-b                   # Compare secrets between vaults
 xv diff vault-a vault-b --show-values     # Include values in comparison
+xv diff vault-a vault-b --group prod      # Filter by group in both vaults
 xv copy "api-key" --from vault-a --to vault-b
 xv copy "api-key" --from vault-a --to vault-b --new-name "api-key-v2"
 xv move "api-key" --from vault-a --to vault-b
+xv move "api-key" --from vault-a --to vault-b --force
 ```
 
 ### File Storage
@@ -202,9 +211,12 @@ Optional blob storage for files (requires setup via `xv init`):
 xv upload ./config.json
 xv download config.json
 xv file list
+xv file info config.json                       # File metadata
 xv file upload ./docs --recursive              # Preserves directory structure
 xv file download "docs" --recursive --output ./local
 xv file upload ./src --recursive --prefix "backup/2024-01-15"
+xv file delete config.json                     # Delete a file
+xv file sync                                   # Sync local and remote files
 ```
 
 ### Identity & Access
@@ -307,7 +319,9 @@ These flags work with any command:
 | `--format <FORMAT>` | Output format (`table`, `json`, `yaml`, `csv`, `plain`, `raw`, `template`) |
 | `--columns <COLS>` | Select specific columns for table output (comma-separated) |
 | `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
+| `--template <TEMPLATE>` | Custom template string for template format |
 | `--debug` | Enable debug logging |
+| `--show-options` | Show global options in help output |
 
 ## Security
 
