@@ -86,6 +86,10 @@ impl CrosstacheError {
         Self::ConfigError(msg.into())
     }
 
+    pub fn secret_not_found<S: Into<String>>(name: S) -> Self {
+        Self::SecretNotFound { name: name.into() }
+    }
+
     pub fn vault_not_found<S: Into<String>>(name: S) -> Self {
         Self::VaultNotFound { name: name.into() }
     }
@@ -149,5 +153,5 @@ impl From<azure_core::Error> for CrosstacheError {
 }
 
 // TODO: Convert Azure Identity errors to CrosstacheError
-// Note: Azure Identity crate doesn't expose a specific Error type in v0.20
+// Note: Azure Identity crate doesn't expose a specific Error type in v0.21
 // We'll implement this when we integrate with actual Azure Identity APIs

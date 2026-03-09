@@ -94,10 +94,14 @@ pub fn parse_iso_datetime(input: &str) -> Result<DateTime<Utc>> {
     }
 
     // Try parsing datetime without timezone (assume UTC)
-    if input.contains('T') && !input.contains('Z') && !input.contains('+') && !input.contains('-') {
-        let utc_str = format!("{}Z", input);
-        if let Ok(dt) = DateTime::parse_from_rfc3339(&utc_str) {
-            return Ok(dt.with_timezone(&Utc));
+    // Check that there's a 'T' but no timezone indicator after it (Z, +, or trailing offset)
+    if let Some(t_pos) = input.find('T') {
+        let after_t = &input[t_pos..];
+        if !after_t.contains('Z') && !after_t.contains('+') && !after_t[1..].contains('-') {
+            let utc_str = format!("{}Z", input);
+            if let Ok(dt) = DateTime::parse_from_rfc3339(&utc_str) {
+                return Ok(dt.with_timezone(&Utc));
+            }
         }
     }
 

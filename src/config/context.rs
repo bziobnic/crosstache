@@ -115,10 +115,9 @@ impl ContextManager {
         context.context_file = Some(context_path);
         context.is_local = true;
 
-        debug!(
-            "Loaded local context from: {}",
-            context.context_file.as_ref().unwrap().display()
-        );
+        if let Some(ref path) = context.context_file {
+            debug!("Loaded local context from: {}", path.display());
+        }
         Ok(context)
     }
 
@@ -139,10 +138,9 @@ impl ContextManager {
         context.context_file = Some(context_path);
         context.is_local = false;
 
-        debug!(
-            "Loaded global context from: {}",
-            context.context_file.as_ref().unwrap().display()
-        );
+        if let Some(ref path) = context.context_file {
+            debug!("Loaded global context from: {}", path.display());
+        }
         Ok(context)
     }
 

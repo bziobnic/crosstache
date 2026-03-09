@@ -257,30 +257,6 @@ pub struct RoleAssignmentRequest {
     pub scope: String,
 }
 
-/// Vault status enumeration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[allow(dead_code)]
-pub enum VaultStatus {
-    Active,
-    SoftDeleted,
-    PendingDeletion,
-    Creating,
-    Updating,
-    Unknown,
-}
-
-impl std::fmt::Display for VaultStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VaultStatus::Active => write!(f, "Active"),
-            VaultStatus::SoftDeleted => write!(f, "Soft Deleted"),
-            VaultStatus::PendingDeletion => write!(f, "Pending Deletion"),
-            VaultStatus::Creating => write!(f, "Creating"),
-            VaultStatus::Updating => write!(f, "Updating"),
-            VaultStatus::Unknown => write!(f, "Unknown"),
-        }
-    }
-}
 
 /// Vault summary for list operations
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]

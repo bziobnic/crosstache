@@ -456,6 +456,9 @@ pub enum Commands {
         /// Filter by operation type (get, set, delete, list)
         #[arg(long)]
         operation: Option<String>,
+        /// Azure resource group (defaults to config value)
+        #[arg(long)]
+        resource_group: Option<String>,
         /// Show raw Azure Activity Log output
         #[arg(long)]
         raw: bool,
@@ -511,7 +514,7 @@ pub enum Commands {
         /// Local output path (optional, defaults to current directory)
         #[arg(long)]
         output: Option<String>,
-        /// Open file after download
+        /// Print full file path after download
         #[arg(long)]
         open: bool,
     },
@@ -723,9 +726,6 @@ pub enum FileCommands {
         /// Content type override (only valid for single file)
         #[arg(long)]
         content_type: Option<String>,
-        /// Show progress during upload
-        #[arg(long)]
-        progress: bool,
         /// Continue on error when uploading multiple files
         #[arg(long)]
         continue_on_error: bool,
@@ -747,9 +747,6 @@ pub enum FileCommands {
         /// Flatten directory structure (download all files to output root)
         #[arg(long, requires = "recursive")]
         flatten: bool,
-        /// Stream download for large files
-        #[arg(long)]
-        stream: bool,
         /// Force overwrite if file exists
         #[arg(short, long)]
         force: bool,
@@ -771,9 +768,6 @@ pub enum FileCommands {
         /// Filter by group
         #[arg(short, long)]
         group: Option<String>,
-        /// Include metadata in output
-        #[arg(long)]
-        metadata: bool,
         /// Maximum number of results
         #[arg(long)]
         limit: Option<usize>,
@@ -936,7 +930,7 @@ pub enum EnvCommands {
     Show,
     /// Pull secrets to .env file format
     Pull {
-        /// Output format (only 'dotenv' supported currently)
+        /// Output format (currently only 'dotenv' is supported)
         #[arg(long, default_value = "dotenv")]
         format: String,
         /// Filter secrets by group (can be specified multiple times)
@@ -1095,8 +1089,12 @@ impl Cli {
                 vault,
                 days,
                 operation,
+                resource_group,
                 raw,
-            } => execute_audit_command(name, vault, days, operation, raw, config).await,
+            } => {
+                execute_audit_command(name, vault, days, operation, resource_group, raw, config)
+                    .await
+            }
             Commands::Init => execute_init_command(config).await,
             Commands::Info {
                 resource,
@@ -1155,7 +1153,6 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
             metadata,
             tag,
             content_type,
-            progress,
             continue_on_error,
         } => {
             // Handle recursive directory upload
@@ -1178,7 +1175,6 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                     group,
                     metadata,
                     tag,
-                    progress,
                     continue_on_error,
                     flatten,
                     prefix,
@@ -1195,7 +1191,6 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                     metadata,
                     tag,
                     content_type,
-                    progress,
                     &config,
                 )
                 .await?;
@@ -1212,7 +1207,6 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                     group,
                     metadata,
                     tag,
-                    progress,
                     continue_on_error,
                     &config,
                 )
@@ -1225,16 +1219,15 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
             rename,
             recursive,
             flatten,
-            stream,
             force,
             continue_on_error,
         } => {
             // Handle recursive download
             if recursive {
-                // Validate that --rename and --stream are not used with --recursive
-                if rename.is_some() || stream {
+                // Validate that --rename is not used with --recursive
+                if rename.is_some() {
                     return Err(CrosstacheError::invalid_argument(
-                        "--rename and --stream cannot be used with --recursive",
+                        "--rename cannot be used with --recursive",
                     ));
                 }
                 execute_file_download_recursive(
@@ -1267,7 +1260,6 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                         &blob_manager,
                         &files[0],
                         output_path,
-                        stream,
                         force,
                         &config,
                     )
@@ -1277,7 +1269,6 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                         &blob_manager,
                         files,
                         output,
-                        stream,
                         force,
                         continue_on_error,
                         &config,
@@ -1289,7 +1280,6 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
         FileCommands::List {
             prefix,
             group,
-            metadata,
             limit,
             recursive,
         } => {
@@ -1297,7 +1287,6 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                 &blob_manager,
                 prefix,
                 group,
-                metadata,
                 limit,
                 recursive,
                 &config,
@@ -2436,13 +2425,6 @@ impl EnvironmentProfileManager {
         Ok(profile)
     }
 
-    /// Get the current environment profile
-    #[allow(dead_code)]
-    pub fn current_profile(&self) -> Option<&EnvironmentProfile> {
-        self.current_profile
-            .as_ref()
-            .and_then(|name| self.profiles.get(name))
-    }
 }
 
 async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()> {
@@ -3204,6 +3186,7 @@ async fn execute_audit_command(
     vault: Option<String>,
     days: u32,
     operation: Option<String>,
+    resource_group_override: Option<String>,
     raw: bool,
     config: Config,
 ) -> Result<()> {
@@ -3226,12 +3209,14 @@ async fn execute_audit_command(
     // Determine vault and context
     let (vault_name, resource_group, subscription_id) = if let Some(vault_name) = vault {
         // Use specified vault, need to get resource group and subscription
-        let rg = config.default_resource_group.clone();
+        let rg = resource_group_override
+            .clone()
+            .unwrap_or_else(|| config.default_resource_group.clone());
         let sub = config.subscription_id.clone();
 
         if rg.is_empty() {
             return Err(CrosstacheError::config(
-                "No default resource group configured. Use 'xv init' to configure or specify with --resource-group"
+                "No resource group specified. Use --resource-group or 'xv init' to configure"
             ));
         }
 
@@ -3239,12 +3224,13 @@ async fn execute_audit_command(
     } else {
         // Use current vault context
         let vault_name = config.resolve_vault_name(None).await?;
-        let rg = config.default_resource_group.clone();
+        let rg = resource_group_override
+            .unwrap_or_else(|| config.default_resource_group.clone());
         let sub = config.subscription_id.clone();
 
         if rg.is_empty() {
             return Err(CrosstacheError::config(
-                "No default resource group configured. Use 'xv init' to configure",
+                "No resource group specified. Use --resource-group or 'xv init' to configure",
             ));
         }
 
@@ -3619,7 +3605,8 @@ async fn execute_whoami_command(config: Config) -> Result<()> {
     // Show recent vaults
     let recent_contexts = context_manager.list_recent();
     if !recent_contexts.is_empty() {
-        println!("\n📝 Recent Vaults:");
+        println!();
+        output::info("Recent Vaults:");
         for context in recent_contexts.iter().take(5) {
             println!(
                 "   {} (last used: {})",
@@ -4996,10 +4983,10 @@ async fn execute_secret_run(
 
     // Fetch cross-vault secrets referenced by URIs in environment
     if !uri_secrets.is_empty() {
-        println!(
-            "🔗 Found {} cross-vault URI reference(s) in environment",
+        output::info(&format!(
+            "Found {} cross-vault URI reference(s) in environment",
             uri_secrets.len()
-        );
+        ));
 
         for (target_vault, secret_name) in &uri_secrets {
             let uri = format!("xv://{}/{}", target_vault, secret_name);
@@ -5060,32 +5047,34 @@ async fn execute_secret_run(
         }
     }
 
-    // Set up stdio for output capture and masking
+    output::step(&format!("Executing: {}", command.join(" ")));
+
     if no_masking {
-        // Direct passthrough
+        // Direct passthrough — use .status() so inherited stdio works correctly
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+        let status = cmd.status().map_err(|e| {
+            CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
+        })?;
+
+        // Explicitly drop secret-holding variables to zeroize them after child exits
+        drop(env_vars);
+        drop(uri_values);
+        drop(secret_values);
+
+        std::process::exit(status.code().unwrap_or(1));
     } else {
         // Capture output for masking
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    }
 
-    output::step(&format!("Executing: {}", command.join(" ")));
+        let output = cmd.output().map_err(|e| {
+            CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
+        })?;
 
-    // Execute the command
-    let output = cmd.output().map_err(|e| {
-        CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
-    })?;
+        // Explicitly drop secret-holding variables to zeroize them after child exits
+        drop(env_vars);
+        drop(uri_values);
 
-    // Explicitly drop secret-holding variables to zeroize them immediately after child process
-    // Note: secret_values is still needed for masking, so we can't drop it yet
-    drop(env_vars);
-    drop(uri_values);
-
-    // Handle output with masking if needed
-    if no_masking {
-        // Exit with the same code as the child process
-        std::process::exit(output.status.code().unwrap_or(1));
-    } else {
         // Mask secret values in output
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -6013,9 +6002,9 @@ async fn execute_secret_parse(
             }
         }
         _ => {
-            output::error(&format!(
+            return Err(CrosstacheError::invalid_argument(format!(
                 "Unsupported format '{format}' for this command. Use 'json' or 'table'."
-            ));
+            )));
         }
     }
 
@@ -6669,7 +6658,14 @@ async fn execute_vault_share(
                 println!("Access assignments for vault '{vault_name}':");
                 let output_format = match format.to_lowercase().as_str() {
                     "json" => crate::utils::format::OutputFormat::Json,
-                    _ => crate::utils::format::OutputFormat::Table,
+                    "table" | "" => crate::utils::format::OutputFormat::Table,
+                    other => {
+                        output::warn(&format!(
+                            "Unrecognized format '{}', using table",
+                            other
+                        ));
+                        crate::utils::format::OutputFormat::Table
+                    }
                 };
                 let formatter =
                     crate::utils::format::TableFormatter::new(output_format, config.no_color);
@@ -6735,7 +6731,7 @@ async fn execute_context_use(
         // Load existing or create new (defaults to global)
         ContextManager::load()
             .await
-            .unwrap_or_else(|_| ContextManager::new_global().unwrap())
+            .unwrap_or_else(|_| ContextManager::new_global().unwrap_or_default())
     };
 
     // Create new context
@@ -6855,7 +6851,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let vault_name = context_manager.current_vault().unwrap().to_string();
+    let vault_name = context_manager.current_vault().unwrap_or("unknown").to_string();
     context_manager.clear_context().await?;
 
     let scope = if global {
@@ -6881,7 +6877,6 @@ async fn execute_file_upload(
     metadata: Vec<(String, String)>,
     tags: Vec<(String, String)>,
     content_type: Option<String>,
-    progress: bool,
     _config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileUploadRequest;
@@ -6941,23 +6936,12 @@ async fn execute_file_upload(
     // Upload file
     println!("Uploading file '{file_path}' as '{remote_name}'...");
 
-    if progress {
-        // TODO: Use progress callback when implemented
-        let file_info = blob_manager.upload_file(upload_request).await?;
-        output::success(&format!("Successfully uploaded file '{}'", file_info.name));
-        println!("   Size: {} bytes", file_info.size);
-        println!("   Content-Type: {}", file_info.content_type);
-        if !file_info.groups.is_empty() {
-            println!("   Groups: {:?}", file_info.groups);
-        }
-    } else {
-        let file_info = blob_manager.upload_file(upload_request).await?;
-        output::success(&format!("Successfully uploaded file '{}'", file_info.name));
-        println!("   Size: {} bytes", file_info.size);
-        println!("   Content-Type: {}", file_info.content_type);
-        if !file_info.groups.is_empty() {
-            println!("   Groups: {:?}", file_info.groups);
-        }
+    let file_info = blob_manager.upload_file(upload_request).await?;
+    output::success(&format!("Successfully uploaded file '{}'", file_info.name));
+    println!("   Size: {} bytes", file_info.size);
+    println!("   Content-Type: {}", file_info.content_type);
+    if !file_info.groups.is_empty() {
+        println!("   Groups: {:?}", file_info.groups);
     }
 
     Ok(())
@@ -6968,7 +6952,6 @@ async fn execute_file_download(
     blob_manager: &BlobManager,
     name: &str,
     output: Option<String>,
-    stream: bool,
     force: bool,
     _config: &Config,
 ) -> Result<()> {
@@ -6990,37 +6973,16 @@ async fn execute_file_download(
     let download_request = FileDownloadRequest {
         name: name.to_string(),
         output_path: Some(output_path.clone()),
-        stream,
+        stream: false,
     };
 
     println!("Downloading file '{name}' to '{output_path}'...");
 
-    if stream {
-        // TODO: Use streaming download when implemented
-        match blob_manager.download_file(download_request).await {
-            Ok(content) => {
-                fs::write(&output_path, content).map_err(|e| {
-                    CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
-                })?;
-                output::success(&format!("Successfully downloaded file '{name}'"));
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        }
-    } else {
-        match blob_manager.download_file(download_request).await {
-            Ok(content) => {
-                fs::write(&output_path, content).map_err(|e| {
-                    CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
-                })?;
-                output::success(&format!("Successfully downloaded file '{name}'"));
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        }
-    }
+    let content = blob_manager.download_file(download_request).await?;
+    fs::write(&output_path, content).map_err(|e| {
+        CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
+    })?;
+    output::success(&format!("Successfully downloaded file '{name}'"));
 
     Ok(())
 }
@@ -7030,7 +6992,6 @@ async fn execute_file_list(
     blob_manager: &BlobManager,
     prefix: Option<String>,
     group: Option<String>,
-    _include_metadata: bool,
     limit: Option<usize>,
     recursive: bool,
     config: &Config,
@@ -7249,47 +7210,6 @@ fn path_to_blob_name(path: &Path, prefix: Option<&str>) -> String {
     }
 }
 
-/// Recursively collect all files from a directory
-#[cfg(feature = "file-ops")]
-fn _collect_files_recursive(path: &Path) -> Result<Vec<PathBuf>> {
-    use std::fs;
-
-    let mut files = Vec::new();
-
-    if path.is_file() {
-        files.push(path.to_path_buf());
-    } else if path.is_dir() {
-        let entries = fs::read_dir(path).map_err(|e| {
-            CrosstacheError::config(format!(
-                "Failed to read directory {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                CrosstacheError::config(format!("Failed to read directory entry: {e}"))
-            })?;
-
-            let entry_path = entry.path();
-            if entry_path.is_file() {
-                files.push(entry_path);
-            } else if entry_path.is_dir() {
-                // Recursively collect files from subdirectory
-                files.extend(_collect_files_recursive(&entry_path)?);
-            }
-        }
-    } else {
-        return Err(CrosstacheError::config(format!(
-            "Path {} is neither a file nor a directory",
-            path.display()
-        )));
-    }
-
-    Ok(files)
-}
-
 /// Recursively collect files with path structure information
 ///
 /// # Arguments
@@ -7386,7 +7306,6 @@ async fn execute_file_upload_recursive(
     group: Vec<String>,
     metadata: Vec<(String, String)>,
     tag: Vec<(String, String)>,
-    progress: bool,
     continue_on_error: bool,
     flatten: bool,
     prefix: Option<String>,
@@ -7461,7 +7380,6 @@ async fn execute_file_upload_recursive(
             metadata.clone(),
             tag.clone(),
             None, // No content type override for batch uploads
-            progress,
             config,
         )
         .await;
@@ -7519,7 +7437,6 @@ async fn execute_file_upload_multiple(
     group: Vec<String>,
     metadata: Vec<(String, String)>,
     tag: Vec<(String, String)>,
-    progress: bool,
     continue_on_error: bool,
     config: &Config,
 ) -> Result<()> {
@@ -7537,7 +7454,6 @@ async fn execute_file_upload_multiple(
             metadata.clone(),
             tag.clone(),
             None, // content_type is not allowed for multiple files
-            progress,
             config,
         )
         .await
@@ -7586,7 +7502,6 @@ async fn execute_file_download_multiple(
     blob_manager: &BlobManager,
     files: Vec<String>,
     output: Option<String>,
-    stream: bool,
     force: bool,
     continue_on_error: bool,
     config: &Config,
@@ -7601,7 +7516,6 @@ async fn execute_file_download_multiple(
             blob_manager,
             &file_name,
             output.clone(),
-            stream,
             force,
             config,
         )
@@ -7811,7 +7725,6 @@ async fn execute_file_download_recursive(
             blob_manager,
             blob_name,
             Some(local_path_str.clone()),
-            false, // stream
             force,
             config,
         )
@@ -8316,7 +8229,6 @@ async fn execute_file_upload_quick(
         metadata_map,
         Vec::new(),
         None,
-        true,
         config,
     )
     .await
@@ -8346,19 +8258,16 @@ async fn execute_file_download_quick(
         &blob_manager,
         name,
         output,
-        false, // stream
         false, // force
         config,
     )
     .await?;
 
-    // Handle --open flag
+    // Handle --open flag: print the full absolute path of the downloaded file
     if open {
         let final_output_path = output_path.unwrap_or_else(|| name.to_string());
         if let Ok(path) = std::fs::canonicalize(&final_output_path) {
-            println!("Opening file: {}", path.display());
-            // Note: opener crate would need to be added to dependencies for this to work
-            // For now, just print the path
+            println!("Downloaded to: {}", path.display());
         }
     }
 
