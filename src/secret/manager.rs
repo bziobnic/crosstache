@@ -500,15 +500,14 @@ impl SecretOperations for AzureSecretOperations {
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let created_on = attributes
-            .get("created")
-            .and_then(|v| v.as_i64())
-            .map(|ts| {
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.to_string())
-                    .unwrap_or_else(|| "Unknown".to_string())
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
+        let created_ts = attributes.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+        let created_on = if created_ts > 0 {
+            chrono::DateTime::from_timestamp(created_ts, 0)
+                .map(|dt| dt.to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+        } else {
+            "Unknown".to_string()
+        };
         let updated_on = attributes
             .get("updated")
             .and_then(|v| v.as_i64())
@@ -560,7 +559,7 @@ impl SecretOperations for AzureSecretOperations {
                 .unwrap_or("text/plain")
                 .to_string(),
             version_number: None,
-            created_timestamp: 0,
+            created_timestamp: created_ts,
         })
     }
 
@@ -640,14 +639,14 @@ impl SecretOperations for AzureSecretOperations {
         let attributes = &json["attributes"];
         let enabled = attributes["enabled"].as_bool().unwrap_or(true);
 
-        let created_on = attributes
-            .get("created")
-            .and_then(|v| v.as_i64())
-            .and_then(|ts| {
-                DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
+        let created_ts = attributes.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+        let created_on = if created_ts > 0 {
+            DateTime::from_timestamp(created_ts, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+        } else {
+            "Unknown".to_string()
+        };
 
         let updated_on = attributes
             .get("updated")
@@ -696,7 +695,7 @@ impl SecretOperations for AzureSecretOperations {
                 .unwrap_or("text/plain")
                 .to_string(),
             version_number: None,
-            created_timestamp: 0,
+            created_timestamp: created_ts,
         })
     }
 
@@ -941,15 +940,14 @@ impl SecretOperations for AzureSecretOperations {
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let created_on = attributes
-            .get("created")
-            .and_then(|v| v.as_i64())
-            .map(|ts| {
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.to_string())
-                    .unwrap_or_else(|| "Unknown".to_string())
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
+        let created_ts = attributes.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+        let created_on = if created_ts > 0 {
+            chrono::DateTime::from_timestamp(created_ts, 0)
+                .map(|dt| dt.to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+        } else {
+            "Unknown".to_string()
+        };
         let updated_on = attributes
             .get("updated")
             .and_then(|v| v.as_i64())
@@ -990,7 +988,7 @@ impl SecretOperations for AzureSecretOperations {
                 .unwrap_or("text/plain")
                 .to_string(),
             version_number: None,
-            created_timestamp: 0,
+            created_timestamp: created_ts,
         })
     }
 
