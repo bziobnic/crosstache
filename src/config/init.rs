@@ -758,6 +758,7 @@ impl ConfigInitializer {
             blob_config,
             azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
             clipboard_timeout: 30,
+            gen_default_charset: None,
         })
     }
 

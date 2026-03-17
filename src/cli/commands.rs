@@ -4047,9 +4047,14 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
                 ))
             })?;
         }
+        "gen_default_charset" => {
+            // Validate the value by parsing it — reject unknown charsets early
+            value.parse::<CharsetType>().map_err(CrosstacheError::config)?;
+            config.gen_default_charset = Some(value.to_string());
+        }
         _ => {
             return Err(CrosstacheError::config(format!(
-                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout"
+                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout, gen_default_charset"
             )));
         }
     }

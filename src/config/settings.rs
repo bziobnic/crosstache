@@ -106,6 +106,12 @@ pub struct Config {
     #[tabled(rename = "Clipboard Timeout")]
     #[serde(default = "default_clipboard_timeout")]
     pub clipboard_timeout: u64,
+    /// Default character set for the `gen` command.
+    /// Valid values: alphanumeric, alphanumeric-symbols, hex, base64, numeric, uppercase, lowercase
+    /// If absent, `gen` defaults to alphanumeric.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub gen_default_charset: Option<String>,
 }
 
 fn default_clipboard_timeout() -> u64 {
@@ -128,6 +134,7 @@ impl Default for Config {
             blob_config: None,
             azure_credential_priority: AzureCredentialType::Default,
             clipboard_timeout: default_clipboard_timeout(),
+            gen_default_charset: None,
         }
     }
 }
@@ -544,5 +551,48 @@ mod tests {
 
         config.azure_credential_priority = AzureCredentialType::Cli;
         assert_eq!(config.azure_credential_priority, AzureCredentialType::Cli);
+    }
+
+    #[test]
+    fn test_gen_default_charset_defaults_to_none() {
+        let config = Config::default();
+        assert!(config.gen_default_charset.is_none());
+    }
+
+    #[test]
+    fn test_gen_default_charset_serde_round_trip() {
+        let toml = r#"
+            debug = false
+            subscription_id = ""
+            default_vault = ""
+            default_resource_group = "Vaults"
+            default_location = "eastus"
+            tenant_id = ""
+            function_app_url = ""
+            cache_ttl = { secs = 300, nanos = 0 }
+            output_json = false
+            no_color = false
+            gen_default_charset = "alphanumeric-symbols"
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.gen_default_charset.as_deref(), Some("alphanumeric-symbols"));
+    }
+
+    #[test]
+    fn test_gen_default_charset_absent_in_toml_is_none() {
+        let toml = r#"
+            debug = false
+            subscription_id = ""
+            default_vault = ""
+            default_resource_group = "Vaults"
+            default_location = "eastus"
+            tenant_id = ""
+            function_app_url = ""
+            cache_ttl = { secs = 300, nanos = 0 }
+            output_json = false
+            no_color = false
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.gen_default_charset.is_none());
     }
 }
