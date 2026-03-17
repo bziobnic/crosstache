@@ -313,6 +313,24 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Generate a random password and copy it to the clipboard
+    Gen {
+        /// Password length — must be between 6 and 100 (default: 15)
+        #[arg(short, long, default_value = "15")]
+        length: usize,
+        /// Character set to use (default: alphanumeric, or gen_default_charset config)
+        #[arg(short, long, value_enum)]
+        charset: Option<CharsetType>,
+        /// Save the generated password as a secret in the vault
+        #[arg(long)]
+        save: Option<String>,
+        /// Target vault for --save (overrides context/config default)
+        #[arg(long)]
+        vault: Option<String>,
+        /// Print to stdout instead of copying to clipboard
+        #[arg(long)]
+        raw: bool,
+    },
     /// Run a command with secrets injected as environment variables
     Run {
         /// Filter secrets by group (can be specified multiple times)
@@ -1039,6 +1057,13 @@ impl Cli {
                 )
                 .await
             }
+            Commands::Gen {
+                length,
+                charset,
+                save,
+                vault,
+                raw,
+            } => execute_gen_command(length, charset, save, vault, raw, config).await,
             Commands::Run {
                 group,
                 no_masking,
@@ -8310,6 +8335,17 @@ async fn execute_file_download_quick(
     }
 
     Ok(())
+}
+
+async fn execute_gen_command(
+    _length: usize,
+    _charset: Option<CharsetType>,
+    _save: Option<String>,
+    _vault: Option<String>,
+    _raw: bool,
+    _config: Config,
+) -> Result<()> {
+    todo!("gen command not yet implemented")
 }
 
 #[cfg(test)]
