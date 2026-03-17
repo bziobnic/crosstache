@@ -561,21 +561,20 @@ mod tests {
 
     #[test]
     fn test_gen_default_charset_serde_round_trip() {
-        let toml = r#"
-            debug = false
-            subscription_id = ""
-            default_vault = ""
-            default_resource_group = "Vaults"
-            default_location = "eastus"
-            tenant_id = ""
-            function_app_url = ""
-            cache_ttl = { secs = 300, nanos = 0 }
-            output_json = false
-            no_color = false
-            gen_default_charset = "alphanumeric-symbols"
-        "#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.gen_default_charset.as_deref(), Some("alphanumeric-symbols"));
+        let mut config = Config::default();
+        config.gen_default_charset = Some("alphanumeric-symbols".to_string());
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            serialized.contains("gen_default_charset"),
+            "field must be present in serialized output: {serialized}"
+        );
+
+        let deserialized: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            deserialized.gen_default_charset.as_deref(),
+            Some("alphanumeric-symbols")
+        );
     }
 
     #[test]

@@ -4048,9 +4048,8 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
             })?;
         }
         "gen_default_charset" => {
-            // Validate the value by parsing it — reject unknown charsets early
-            value.parse::<CharsetType>().map_err(CrosstacheError::config)?;
-            config.gen_default_charset = Some(value.to_string());
+            let charset = value.parse::<CharsetType>().map_err(CrosstacheError::config)?;
+            config.gen_default_charset = Some(charset.to_string());
         }
         _ => {
             return Err(CrosstacheError::config(format!(
