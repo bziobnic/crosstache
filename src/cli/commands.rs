@@ -4708,7 +4708,7 @@ async fn execute_secret_rollback(
 }
 
 /// Generate a random value using the specified parameters
-fn generate_random_value(
+pub(crate) fn generate_random_value(
     length: usize,
     charset: CharsetType,
     custom_generator: Option<String>,
@@ -8338,14 +8338,112 @@ async fn execute_file_download_quick(
 }
 
 async fn execute_gen_command(
-    _length: usize,
-    _charset: Option<CharsetType>,
-    _save: Option<String>,
-    _vault: Option<String>,
-    _raw: bool,
-    _config: Config,
+    length: usize,
+    charset: Option<CharsetType>,
+    save: Option<String>,
+    vault: Option<String>,
+    raw: bool,
+    config: Config,
 ) -> Result<()> {
-    todo!("gen command not yet implemented")
+    // Validate length
+    if length < 6 || length > 100 {
+        return Err(CrosstacheError::invalid_argument(
+            "Length must be between 6 and 100",
+        ));
+    }
+
+    // Resolve charset: CLI flag → config default → Alphanumeric
+    let resolved_charset = charset.unwrap_or_else(|| {
+        config
+            .gen_default_charset
+            .as_deref()
+            .and_then(|s| s.parse::<CharsetType>().ok())
+            .unwrap_or(CharsetType::Alphanumeric)
+    });
+
+    // Generate the password
+    let password = generate_random_value(length, resolved_charset, None)?;
+
+    // Handle --save
+    if let Some(ref name) = save {
+        use crate::auth::provider::DefaultAzureCredentialProvider;
+        use crate::secret::manager::SecretManager;
+        use std::sync::Arc;
+
+        let auth_provider = Arc::new(
+            DefaultAzureCredentialProvider::with_credential_priority(
+                config.azure_credential_priority.clone(),
+            )
+            .map_err(|e| {
+                CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+            })?,
+        );
+        let secret_manager = SecretManager::new(auth_provider, config.no_color);
+        let vault_name = config.resolve_vault_name(vault).await?;
+
+        match secret_manager
+            .set_secret_safe(&vault_name, name, password.as_str(), None)
+            .await
+        {
+            Ok(_) => {
+                if raw {
+                    println!("{}", password.as_str());
+                    output::success(&format!("Secret '{name}' saved."));
+                } else {
+                    match copy_to_clipboard(password.as_str()) {
+                        Ok(()) => {
+                            let timeout = config.clipboard_timeout;
+                            if timeout > 0 {
+                                output::success(&format!(
+                                    "Secret '{name}' saved and copied to clipboard (auto-clears in {timeout}s)"
+                                ));
+                                schedule_clipboard_clear(timeout);
+                            } else {
+                                output::success(&format!(
+                                    "Secret '{name}' saved and copied to clipboard"
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            output::warn(&format!("Failed to copy to clipboard: {e}"));
+                            println!("{}", password.as_str());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                output::warn(&format!("Failed to save secret '{name}': {e}"));
+                output::warn("Generated password (save this now):");
+                println!("{}", password.as_str());
+            }
+        }
+        return Ok(());
+    }
+
+    // No --save — just output
+    if raw {
+        println!("{}", password.as_str());
+    } else {
+        match copy_to_clipboard(password.as_str()) {
+            Ok(()) => {
+                let timeout = config.clipboard_timeout;
+                if timeout > 0 {
+                    output::success(&format!(
+                        "Password copied to clipboard (auto-clears in {timeout}s)"
+                    ));
+                    schedule_clipboard_clear(timeout);
+                } else {
+                    output::success("Password copied to clipboard");
+                }
+            }
+            Err(e) => {
+                output::warn(&format!("Failed to copy to clipboard: {e}"));
+                println!("{}", password.as_str());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -8386,5 +8484,79 @@ mod tests {
         assert!("alpha".parse::<CharsetType>().is_err());
         assert!("unknown".parse::<CharsetType>().is_err());
         assert!("".parse::<CharsetType>().is_err());
+    }
+
+    // ── gen command unit tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_gen_length_validation_lower_bound() {
+        let result = generate_random_value(6, CharsetType::Alphanumeric, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 6);
+    }
+
+    #[test]
+    fn test_gen_length_validation_upper_bound() {
+        let result = generate_random_value(100, CharsetType::Alphanumeric, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 100);
+    }
+
+    #[test]
+    fn test_gen_default_length_is_15() {
+        let result = generate_random_value(15, CharsetType::Alphanumeric, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 15);
+    }
+
+    #[test]
+    fn test_gen_alphanumeric_chars_only() {
+        let value = generate_random_value(200, CharsetType::Alphanumeric, None).unwrap();
+        let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        for ch in value.chars() {
+            assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric output");
+        }
+    }
+
+    #[test]
+    fn test_gen_numeric_chars_only() {
+        let value = generate_random_value(200, CharsetType::Numeric, None).unwrap();
+        for ch in value.chars() {
+            assert!(ch.is_ascii_digit(), "Unexpected char '{ch}' in numeric output");
+        }
+    }
+
+    #[test]
+    fn test_gen_uppercase_chars_only() {
+        let value = generate_random_value(200, CharsetType::Uppercase, None).unwrap();
+        for ch in value.chars() {
+            assert!(ch.is_ascii_uppercase(), "Unexpected char '{ch}' in uppercase output");
+        }
+    }
+
+    #[test]
+    fn test_gen_lowercase_chars_only() {
+        let value = generate_random_value(200, CharsetType::Lowercase, None).unwrap();
+        for ch in value.chars() {
+            assert!(ch.is_ascii_lowercase(), "Unexpected char '{ch}' in lowercase output");
+        }
+    }
+
+    #[test]
+    fn test_gen_hex_chars_only() {
+        let value = generate_random_value(200, CharsetType::Hex, None).unwrap();
+        let valid = "0123456789ABCDEF";
+        for ch in value.chars() {
+            assert!(valid.contains(ch), "Unexpected char '{ch}' in hex output");
+        }
+    }
+
+    #[test]
+    fn test_gen_alphanumeric_symbols_chars_only() {
+        let value = generate_random_value(500, CharsetType::AlphanumericSymbols, None).unwrap();
+        let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?";
+        for ch in value.chars() {
+            assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric-symbols output");
+        }
     }
 }
