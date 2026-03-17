@@ -80,7 +80,6 @@ mod tests {
 - [ ] **Step 2: Run tests to confirm they fail**
 
 ```bash
-cd /Users/scottzionic/Code/crosstache
 cargo test test_charset -- --nocapture 2>&1 | tail -20
 ```
 
