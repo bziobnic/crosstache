@@ -137,9 +137,10 @@ impl std::fmt::Display for ResourceType {
 }
 
 /// Character set type for secret rotation
-#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, ValueEnum)]
 pub enum CharsetType {
     /// Alphanumeric characters (A-Z, a-z, 0-9)
+    #[default]
     Alphanumeric,
     /// Alphanumeric with symbols
     AlphanumericSymbols,
@@ -166,6 +167,39 @@ impl CharsetType {
             CharsetType::Numeric => "0123456789",
             CharsetType::Uppercase => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
             CharsetType::Lowercase => "abcdefghijklmnopqrstuvwxyz",
+        }
+    }
+}
+
+impl std::fmt::Display for CharsetType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Alphanumeric => write!(f, "alphanumeric"),
+            Self::AlphanumericSymbols => write!(f, "alphanumeric-symbols"),
+            Self::Hex => write!(f, "hex"),
+            Self::Base64 => write!(f, "base64"),
+            Self::Numeric => write!(f, "numeric"),
+            Self::Uppercase => write!(f, "uppercase"),
+            Self::Lowercase => write!(f, "lowercase"),
+        }
+    }
+}
+
+impl std::str::FromStr for CharsetType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "alphanumeric" => Ok(Self::Alphanumeric),
+            "alphanumeric-symbols" | "alphanumeric_symbols" => Ok(Self::AlphanumericSymbols),
+            "hex" => Ok(Self::Hex),
+            "base64" => Ok(Self::Base64),
+            "numeric" => Ok(Self::Numeric),
+            "uppercase" => Ok(Self::Uppercase),
+            "lowercase" => Ok(Self::Lowercase),
+            _ => Err(format!(
+                "Invalid charset: '{s}'. Valid options: alphanumeric, alphanumeric-symbols, hex, base64, numeric, uppercase, lowercase"
+            )),
         }
     }
 }
@@ -8272,4 +8306,45 @@ async fn execute_file_download_quick(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_charset_default_is_alphanumeric() {
+        assert_eq!(CharsetType::default(), CharsetType::Alphanumeric);
+    }
+
+    #[test]
+    fn test_charset_display() {
+        assert_eq!(CharsetType::Alphanumeric.to_string(), "alphanumeric");
+        assert_eq!(CharsetType::AlphanumericSymbols.to_string(), "alphanumeric-symbols");
+        assert_eq!(CharsetType::Hex.to_string(), "hex");
+        assert_eq!(CharsetType::Base64.to_string(), "base64");
+        assert_eq!(CharsetType::Numeric.to_string(), "numeric");
+        assert_eq!(CharsetType::Uppercase.to_string(), "uppercase");
+        assert_eq!(CharsetType::Lowercase.to_string(), "lowercase");
+    }
+
+    #[test]
+    fn test_charset_from_str_valid() {
+        assert_eq!("alphanumeric".parse::<CharsetType>().unwrap(), CharsetType::Alphanumeric);
+        assert_eq!("alphanumeric-symbols".parse::<CharsetType>().unwrap(), CharsetType::AlphanumericSymbols);
+        assert_eq!("alphanumeric_symbols".parse::<CharsetType>().unwrap(), CharsetType::AlphanumericSymbols);
+        assert_eq!("hex".parse::<CharsetType>().unwrap(), CharsetType::Hex);
+        assert_eq!("base64".parse::<CharsetType>().unwrap(), CharsetType::Base64);
+        assert_eq!("numeric".parse::<CharsetType>().unwrap(), CharsetType::Numeric);
+        assert_eq!("uppercase".parse::<CharsetType>().unwrap(), CharsetType::Uppercase);
+        assert_eq!("lowercase".parse::<CharsetType>().unwrap(), CharsetType::Lowercase);
+        assert_eq!("ALPHANUMERIC".parse::<CharsetType>().unwrap(), CharsetType::Alphanumeric);
+    }
+
+    #[test]
+    fn test_charset_from_str_invalid() {
+        assert!("alpha".parse::<CharsetType>().is_err());
+        assert!("unknown".parse::<CharsetType>().is_err());
+        assert!("".parse::<CharsetType>().is_err());
+    }
 }
