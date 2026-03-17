@@ -561,8 +561,10 @@ mod tests {
 
     #[test]
     fn test_gen_default_charset_serde_round_trip() {
-        let mut config = Config::default();
-        config.gen_default_charset = Some("alphanumeric-symbols".to_string());
+        let config = Config {
+            gen_default_charset: Some("alphanumeric-symbols".to_string()),
+            ..Default::default()
+        };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
         assert!(

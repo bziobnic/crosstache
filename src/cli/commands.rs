@@ -8353,13 +8353,17 @@ async fn execute_gen_command(
     }
 
     // Resolve charset: CLI flag → config default → Alphanumeric
-    let resolved_charset = charset.unwrap_or_else(|| {
-        config
-            .gen_default_charset
-            .as_deref()
-            .and_then(|s| s.parse::<CharsetType>().ok())
-            .unwrap_or(CharsetType::Alphanumeric)
-    });
+    let resolved_charset = if let Some(c) = charset {
+        c
+    } else if let Some(ref s) = config.gen_default_charset {
+        s.parse::<CharsetType>().map_err(|e| {
+            CrosstacheError::config(format!(
+                "Invalid value for config key 'gen_default_charset': {e}"
+            ))
+        })?
+    } else {
+        CharsetType::Alphanumeric
+    };
 
     // Generate the password
     let password = generate_random_value(length, resolved_charset, None)?;
@@ -8569,4 +8573,5 @@ mod tests {
             assert!(valid.contains(ch), "Unexpected char '{ch}' in base64 output");
         }
     }
+
 }
