@@ -8346,7 +8346,7 @@ async fn execute_gen_command(
     config: Config,
 ) -> Result<()> {
     // Validate length
-    if length < 6 || length > 100 {
+    if !(6..=100).contains(&length) {
         return Err(CrosstacheError::invalid_argument(
             "Length must be between 6 and 100",
         ));
@@ -8438,6 +8438,7 @@ async fn execute_gen_command(
             }
             Err(e) => {
                 output::warn(&format!("Failed to copy to clipboard: {e}"));
+                output::hint("Use --raw to print the value to stdout instead.");
                 println!("{}", password.as_str());
             }
         }
@@ -8557,6 +8558,15 @@ mod tests {
         let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?";
         for ch in value.chars() {
             assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric-symbols output");
+        }
+    }
+
+    #[test]
+    fn test_gen_base64_chars_only() {
+        let value = generate_random_value(200, CharsetType::Base64, None).unwrap();
+        let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for ch in value.chars() {
+            assert!(valid.contains(ch), "Unexpected char '{ch}' in base64 output");
         }
     }
 }
