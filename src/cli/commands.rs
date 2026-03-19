@@ -1324,10 +1324,17 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                 )
                 .await?;
             }
-            // Invalidate the file list cache after any upload
+            // Invalidate the file list cache (both recursive and hierarchical) after any upload
             let cache_manager = crate::cache::CacheManager::from_config(&config);
             if let Ok(vault_name) = config.resolve_vault_name(None).await {
-                cache_manager.invalidate(&crate::cache::CacheKey::FileList { vault_name });
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
+                    vault_name: vault_name.clone(),
+                    recursive: true,
+                });
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
+                    vault_name,
+                    recursive: false,
+                });
             }
         }
         FileCommands::Download {
@@ -1424,10 +1431,17 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                 )
                 .await?;
             }
-            // Invalidate the file list cache after any delete
+            // Invalidate the file list cache (both recursive and hierarchical) after any delete
             let cache_manager = crate::cache::CacheManager::from_config(&config);
             if let Ok(vault_name) = config.resolve_vault_name(None).await {
-                cache_manager.invalidate(&crate::cache::CacheKey::FileList { vault_name });
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
+                    vault_name: vault_name.clone(),
+                    recursive: true,
+                });
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
+                    vault_name,
+                    recursive: false,
+                });
             }
         }
         FileCommands::Info { name } => {
@@ -2640,24 +2654,31 @@ fn format_cache_size(bytes: u64) -> String {
 }
 
 async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
-    use crate::cache::CacheKey;
+    use crate::cache::refresh::release_lock;
+    use crate::cache::{CacheKey, CacheManager};
 
     let cache_key: CacheKey = key
         .parse()
         .map_err(|e| CrosstacheError::invalid_argument(e))?;
 
-    match cache_key {
+    let cache_manager = CacheManager::from_config(&config);
+    let lock_path = cache_key
+        .to_path(cache_manager.cache_dir())
+        .with_extension("lock");
+
+    let result = match cache_key {
         CacheKey::SecretsList { ref vault_name } => {
-            refresh_secrets_list(vault_name.clone(), config).await?;
+            refresh_secrets_list(vault_name.clone(), config).await
         }
-        CacheKey::VaultList => {
-            refresh_vault_list(config).await?;
-        }
-        CacheKey::FileList { ref vault_name } => {
-            refresh_file_list(vault_name.clone(), config).await?;
-        }
-    }
-    Ok(())
+        CacheKey::VaultList => refresh_vault_list(config).await,
+        CacheKey::FileList {
+            ref vault_name,
+            recursive,
+        } => refresh_file_list(vault_name.clone(), recursive, config).await,
+    };
+
+    release_lock(&lock_path);
+    result
 }
 
 async fn refresh_secrets_list(vault_name: String, config: Config) -> Result<()> {
@@ -2723,9 +2744,9 @@ async fn refresh_vault_list(config: Config) -> Result<()> {
 }
 
 #[cfg(feature = "file-ops")]
-async fn refresh_file_list(vault_name: String, config: Config) -> Result<()> {
+async fn refresh_file_list(vault_name: String, recursive: bool, config: Config) -> Result<()> {
     use crate::blob::manager::create_blob_manager;
-    use crate::blob::models::FileListRequest;
+    use crate::blob::models::{BlobListItem, FileListRequest};
     use crate::cache::{CacheKey, CacheManager};
 
     let blob_manager = create_blob_manager(&config)?;
@@ -2733,20 +2754,33 @@ async fn refresh_file_list(vault_name: String, config: Config) -> Result<()> {
         prefix: None,
         groups: None,
         limit: None,
-        delimiter: None,
-        recursive: true,
+        delimiter: if recursive {
+            None
+        } else {
+            Some("/".to_string())
+        },
+        recursive,
     };
-    let files = blob_manager.list_files(list_request).await?;
+
+    let items: Vec<BlobListItem> = if recursive {
+        let files = blob_manager.list_files(list_request).await?;
+        files.into_iter().map(BlobListItem::File).collect()
+    } else {
+        blob_manager.list_files_hierarchical(list_request).await?
+    };
 
     let cache_manager = CacheManager::from_config(&config);
-    let cache_key = CacheKey::FileList { vault_name };
-    cache_manager.set(&cache_key, &files);
+    let cache_key = CacheKey::FileList {
+        vault_name,
+        recursive,
+    };
+    cache_manager.set(&cache_key, &items);
 
     Ok(())
 }
 
 #[cfg(not(feature = "file-ops"))]
-async fn refresh_file_list(_vault_name: String, _config: Config) -> Result<()> {
+async fn refresh_file_list(_vault_name: String, _recursive: bool, _config: Config) -> Result<()> {
     Ok(())
 }
 
@@ -5878,11 +5912,11 @@ async fn execute_secret_list(
     config: &Config,
 ) -> Result<Vec<crate::secret::manager::SecretSummary>> {
     use crate::config::ContextManager;
+    use crate::utils::format::format_table;
+    use tabled::Table;
 
-    // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
 
-    // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
@@ -5892,38 +5926,42 @@ async fn execute_secret_list(
         crate::utils::format::OutputFormat::Table
     };
 
-    // Get the basic secret list first
-    let mut secrets = secret_manager
-        .list_secrets_formatted(
-            &vault_name,
-            group.as_deref(),
-            output_format.clone(),
-            false,
-            show_all,
-        )
+    // Always fetch the complete unfiltered list so the caller can cache
+    // the full dataset. Filters are applied in-memory below.
+    let all_secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
         .await?;
 
-    let all_secrets = secrets.clone(); // Save pre-filter copy for cache
+    // Apply group and enabled filters for display
+    let mut secrets: Vec<_> = all_secrets.clone();
+    if !show_all {
+        secrets.retain(|s| s.enabled);
+    }
+    if let Some(ref g) = group {
+        secrets.retain(|s| {
+            s.groups
+                .as_ref()
+                .map(|groups| groups.split(',').any(|grp| grp.trim() == g))
+                .unwrap_or(false)
+        });
+    }
 
-    // Apply expiry filtering if requested
+    // Apply expiry filtering if requested (requires per-secret API calls)
     if expired || expiring.is_some() {
         use crate::utils::datetime::{is_expired, is_expiring_within};
 
-        // We need to get full secret details to check expiry dates
         let mut filtered_secrets = Vec::new();
 
         for secret_summary in secrets {
-            // Get full secret details to access expiry dates
             match secret_manager
                 .get_secret_safe(&vault_name, &secret_summary.name, false, true)
                 .await
             {
                 Ok(secret_props) => {
                     let should_include = if expired {
-                        // Show only expired secrets
                         is_expired(secret_props.expires_on)
                     } else if let Some(ref duration) = expiring {
-                        // Show secrets expiring within the specified duration
                         match is_expiring_within(secret_props.expires_on, duration) {
                             Ok(is_exp) => is_exp,
                             Err(e) => {
@@ -5932,7 +5970,7 @@ async fn execute_secret_list(
                             }
                         }
                     } else {
-                        true // Include all if no expiry filter
+                        true
                     };
 
                     if should_include {
@@ -5949,49 +5987,49 @@ async fn execute_secret_list(
         }
 
         secrets = filtered_secrets;
+    }
 
-        // Display the filtered results
-        if secrets.is_empty() {
-            let filter_desc = if expired {
-                "expired"
-            } else if expiring.is_some() {
-                "expiring"
-            } else {
-                "matching"
-            };
-            println!(
-                "No {} secrets found in vault '{}'.",
-                filter_desc, vault_name
-            );
+    // Display results
+    if output_format == crate::utils::format::OutputFormat::Table {
+        println!();
+        if config.no_color {
+            println!("Vault: {}", vault_name);
         } else {
-            // Re-display with the filtered list
-            if output_format == crate::utils::format::OutputFormat::Table {
-                use crate::utils::format::format_table;
-                use tabled::Table;
-
-                let table = Table::new(&secrets);
-                println!("{}", format_table(table, config.no_color));
-
-                let filter_desc = if expired {
-                    "expired".to_string()
-                } else if let Some(ref duration) = expiring {
-                    format!("expiring within {}", duration)
-                } else {
-                    "matching".to_string()
-                };
-                println!(
-                    "\nShowing {} {} secret(s) in vault '{}'",
-                    secrets.len(),
-                    filter_desc,
-                    vault_name
-                );
-            } else {
-                let json_output = serde_json::to_string_pretty(&secrets).map_err(|e| {
-                    CrosstacheError::serialization(format!("Failed to serialize secrets: {e}"))
-                })?;
-                println!("{}", json_output);
-            }
+            println!("\x1b[36mVault: {}\x1b[0m", vault_name);
         }
+        println!();
+
+        if secrets.is_empty() {
+            let msg = if expired || expiring.is_some() {
+                let filter_desc = if expired { "expired" } else { "expiring" };
+                format!(
+                    "No {} secrets found in vault '{}'.",
+                    filter_desc, vault_name
+                )
+            } else if show_all {
+                "No secrets found in vault.".to_string()
+            } else {
+                "No enabled secrets found in vault. Use --all to show disabled secrets.".to_string()
+            };
+            output::info(&msg);
+        } else {
+            let table = Table::new(&secrets);
+            println!("{}", format_table(table, config.no_color));
+
+            let count_label = if expired {
+                format!("{} expired secret(s)", secrets.len())
+            } else if let Some(ref duration) = expiring {
+                format!("{} secret(s) expiring within {}", secrets.len(), duration)
+            } else {
+                format!("{} secret(s)", secrets.len())
+            };
+            println!("\n{} in vault '{}'", count_label, vault_name);
+        }
+    } else {
+        let json = serde_json::to_string_pretty(&secrets).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to serialize secrets: {e}"))
+        })?;
+        println!("{json}");
     }
 
     Ok(all_secrets)
@@ -7593,10 +7631,12 @@ async fn execute_file_list(
 
     let cache_manager = CacheManager::from_config(config);
     let vault_name = config.resolve_vault_name(None).await.unwrap_or_default();
-    let cache_key = CacheKey::FileList { vault_name };
+    let cache_key = CacheKey::FileList {
+        vault_name,
+        recursive,
+    };
     let use_cache = cache_manager.is_enabled() && !no_cache;
 
-    // Only cache unfiltered queries
     let is_unfiltered = prefix.is_none() && group.is_none() && limit.is_none();
 
     if use_cache && is_unfiltered {

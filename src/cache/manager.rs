@@ -455,6 +455,7 @@ mod tests {
         };
         let key2 = CacheKey::FileList {
             vault_name: "my-vault".to_string(),
+            recursive: false,
         };
 
         mgr.set(&key1, &vec!["s1".to_string()]);

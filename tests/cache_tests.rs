@@ -133,6 +133,7 @@ fn test_cache_invalidate_vault_removes_all_entries() {
     mgr.set(
         &CacheKey::FileList {
             vault_name: "v1".to_string(),
+            recursive: false,
         },
         &vec!["f".to_string()],
     );
@@ -142,6 +143,7 @@ fn test_cache_invalidate_vault_removes_all_entries() {
     });
     let f: Option<Vec<String>> = mgr.get(&CacheKey::FileList {
         vault_name: "v1".to_string(),
+        recursive: false,
     });
     assert!(s.is_none());
     assert!(f.is_none());
