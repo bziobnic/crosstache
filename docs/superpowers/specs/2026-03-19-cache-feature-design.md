@@ -146,7 +146,15 @@ Constructed from `Config` at the start of command execution.
 2. Resolve `key` to file path.
 3. Create parent directories via `std::fs::create_dir_all`.
 4. Serialize `CacheEntry` to JSON.
+<<<<<<< HEAD
+<<<<<<< HEAD
 5. Atomic write: create a temporary file **in the same directory** as the target (not via `tempfile::NamedTempFile` which defaults to `/tmp`), write contents, then `std::fs::rename` to the target path. Same-directory temp file ensures the rename is an atomic same-filesystem operation. Prevents partial reads by concurrent processes.
+=======
+5. Atomic write: write to a temporary file in the same directory, then `std::fs::rename` to the target path. Prevents partial reads by concurrent processes.
+>>>>>>> fa17e18 (docs: add cache feature design spec)
+=======
+5. Atomic write: create a temporary file **in the same directory** as the target (not via `tempfile::NamedTempFile` which defaults to `/tmp`), write contents, then `std::fs::rename` to the target path. Same-directory temp file ensures the rename is an atomic same-filesystem operation. Prevents partial reads by concurrent processes.
+>>>>>>> 60b2ad5 (docs: address spec reviewer recommendations for cache design)
 6. On any failure, log at debug level and return silently.
 
 ### `invalidate(key: &CacheKey)`
@@ -331,7 +339,15 @@ fn trigger_background_refresh(key: &CacheKey) -> Result<()> {
 The `xv cache refresh --key <key>` hidden subcommand:
 
 1. Acquires a lock file (`<cache-file>.lock`)
+<<<<<<< HEAD
+<<<<<<< HEAD
 2. Loads config and authenticates with Azure using the same credential chain (the child process inherits the same environment, config file, and credential context as any normal `xv` invocation)
+=======
+2. Authenticates with Azure using the same credential chain
+>>>>>>> fa17e18 (docs: add cache feature design spec)
+=======
+2. Loads config and authenticates with Azure using the same credential chain (the child process inherits the same environment, config file, and credential context as any normal `xv` invocation)
+>>>>>>> 60b2ad5 (docs: address spec reviewer recommendations for cache design)
 3. Fetches fresh listing data
 4. Writes updated cache entry via `CacheManager::set`
 5. Removes the lock file
