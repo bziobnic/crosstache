@@ -463,7 +463,12 @@ pub enum Commands {
         /// Connection string to parse
         connection_string: String,
         /// Output format
-        #[arg(short = 'f', long = "fmt", default_value = "table", id = "parse_format")]
+        #[arg(
+            short = 'f',
+            long = "fmt",
+            default_value = "table",
+            id = "parse_format"
+        )]
         format: String,
     },
     /// Secret-level access management
@@ -654,7 +659,12 @@ pub enum VaultCommands {
         #[arg(short, long)]
         output: Option<String>,
         /// Export format (json, env, txt)
-        #[arg(short = 'f', long = "fmt", default_value = "json", id = "export_format")]
+        #[arg(
+            short = 'f',
+            long = "fmt",
+            default_value = "json",
+            id = "export_format"
+        )]
         format: String,
         /// Include secret values (requires appropriate permissions)
         #[arg(long)]
@@ -674,7 +684,12 @@ pub enum VaultCommands {
         #[arg(short, long)]
         input: Option<String>,
         /// Import format (json, env, txt)
-        #[arg(short = 'f', long = "fmt", default_value = "json", id = "import_format")]
+        #[arg(
+            short = 'f',
+            long = "fmt",
+            default_value = "json",
+            id = "import_format"
+        )]
         format: String,
         /// Overwrite existing secrets
         #[arg(long)]
@@ -749,7 +764,12 @@ pub enum VaultShareCommands {
         #[arg(short, long)]
         resource_group: Option<String>,
         /// Output format
-        #[arg(short = 'f', long = "fmt", default_value = "table", id = "share_list_format")]
+        #[arg(
+            short = 'f',
+            long = "fmt",
+            default_value = "table",
+            id = "share_list_format"
+        )]
         format: String,
         /// Include service accounts in output
         #[arg(long)]
@@ -1353,14 +1373,8 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                     } else {
                         output
                     };
-                    execute_file_download(
-                        &blob_manager,
-                        &files[0],
-                        output_path,
-                        force,
-                        &config,
-                    )
-                    .await?;
+                    execute_file_download(&blob_manager, &files[0], output_path, force, &config)
+                        .await?;
                 } else {
                     execute_file_download_multiple(
                         &blob_manager,
@@ -1895,12 +1909,16 @@ async fn execute_secret_list_direct(
 
     let cache_manager = CacheManager::from_config(&config);
     let vault_name = config.resolve_vault_name(None).await?;
-    let cache_key = CacheKey::SecretsList { vault_name: vault_name.clone() };
+    let cache_key = CacheKey::SecretsList {
+        vault_name: vault_name.clone(),
+    };
     let use_cache = cache_manager.is_enabled() && !no_cache;
 
     // Try cache (skip for expiry filters — they need per-secret API calls)
     if use_cache && expiring.is_none() && !expired {
-        if let Some(cached) = cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key) {
+        if let Some(cached) =
+            cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+        {
             return display_cached_secret_list(cached, group, all, &vault_name, &config);
         }
     }
@@ -2443,8 +2461,12 @@ async fn execute_secret_copy_direct(
 
     // Invalidate the secrets list cache for both source and destination vaults
     let cache_manager = crate::cache::CacheManager::from_config(&config);
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name: from_vault.to_string() });
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name: to_vault.to_string() });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        vault_name: from_vault.to_string(),
+    });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        vault_name: to_vault.to_string(),
+    });
 
     Ok(())
 }
@@ -2487,8 +2509,12 @@ async fn execute_secret_move_direct(
 
     // Invalidate the secrets list cache for both source and destination vaults
     let cache_manager = crate::cache::CacheManager::from_config(&config);
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name: from_vault.to_string() });
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name: to_vault.to_string() });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        vault_name: from_vault.to_string(),
+    });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        vault_name: to_vault.to_string(),
+    });
 
     Ok(())
 }
@@ -2578,7 +2604,10 @@ async fn execute_cache_command(command: CacheCommands, config: Config) -> Result
             println!("Enabled         : {}", status.enabled);
             println!("TTL             : {}s", status.ttl_secs);
             println!("Entries         : {}", status.entry_count);
-            println!("Total size      : {}", format_cache_size(status.total_size_bytes));
+            println!(
+                "Total size      : {}",
+                format_cache_size(status.total_size_bytes)
+            );
             if !status.entries.is_empty() {
                 println!("\nEntries:");
                 for entry in &status.entries {
@@ -2613,7 +2642,9 @@ fn format_cache_size(bytes: u64) -> String {
 async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
     use crate::cache::CacheKey;
 
-    let cache_key: CacheKey = key.parse().map_err(|e| CrosstacheError::invalid_argument(e))?;
+    let cache_key: CacheKey = key
+        .parse()
+        .map_err(|e| CrosstacheError::invalid_argument(e))?;
 
     match cache_key {
         CacheKey::SecretsList { ref vault_name } => {
@@ -2882,7 +2913,6 @@ impl EnvironmentProfileManager {
         self.current_profile = Some(name.to_string());
         Ok(profile)
     }
-
 }
 
 async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()> {
@@ -3674,7 +3704,7 @@ async fn execute_audit_command(
 
         if rg.is_empty() {
             return Err(CrosstacheError::config(
-                "No resource group specified. Use --resource-group or 'xv init' to configure"
+                "No resource group specified. Use --resource-group or 'xv init' to configure",
             ));
         }
 
@@ -3682,8 +3712,7 @@ async fn execute_audit_command(
     } else {
         // Use current vault context
         let vault_name = config.resolve_vault_name(None).await?;
-        let rg = resource_group_override
-            .unwrap_or_else(|| config.default_resource_group.clone());
+        let rg = resource_group_override.unwrap_or_else(|| config.default_resource_group.clone());
         let sub = config.subscription_id.clone();
 
         if rg.is_empty() {
@@ -4480,7 +4509,9 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
             })?;
         }
         "gen_default_charset" => {
-            let charset = value.parse::<CharsetType>().map_err(CrosstacheError::config)?;
+            let charset = value
+                .parse::<CharsetType>()
+                .map_err(CrosstacheError::config)?;
             config.gen_default_charset = Some(charset.to_string());
         }
         _ => {
@@ -7140,10 +7171,7 @@ async fn execute_vault_share(
                     "json" => crate::utils::format::OutputFormat::Json,
                     "table" | "" => crate::utils::format::OutputFormat::Table,
                     other => {
-                        output::warn(&format!(
-                            "Unrecognized format '{}', using table",
-                            other
-                        ));
+                        output::warn(&format!("Unrecognized format '{}', using table", other));
                         crate::utils::format::OutputFormat::Table
                     }
                 };
@@ -7331,7 +7359,10 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let vault_name = context_manager.current_vault().unwrap_or("unknown").to_string();
+    let vault_name = context_manager
+        .current_vault()
+        .unwrap_or("unknown")
+        .to_string();
     context_manager.clear_context().await?;
 
     let scope = if global {
@@ -7459,9 +7490,8 @@ async fn execute_file_download(
     println!("Downloading file '{name}' to '{output_path}'...");
 
     let content = blob_manager.download_file(download_request).await?;
-    fs::write(&output_path, content).map_err(|e| {
-        CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
-    })?;
+    fs::write(&output_path, content)
+        .map_err(|e| CrosstacheError::config(format!("Failed to write file {output_path}: {e}")))?;
     output::success(&format!("Successfully downloaded file '{name}'"));
 
     Ok(())
@@ -8023,15 +8053,7 @@ async fn execute_file_download_multiple(
     let mut error_count = 0;
 
     for file_name in files {
-        match execute_file_download(
-            blob_manager,
-            &file_name,
-            output.clone(),
-            force,
-            config,
-        )
-        .await
-        {
+        match execute_file_download(blob_manager, &file_name, output.clone(), force, config).await {
             Ok(_) => {
                 println!(
                     "  {}",
@@ -8911,7 +8933,10 @@ mod tests {
     #[test]
     fn test_charset_display() {
         assert_eq!(CharsetType::Alphanumeric.to_string(), "alphanumeric");
-        assert_eq!(CharsetType::AlphanumericSymbols.to_string(), "alphanumeric-symbols");
+        assert_eq!(
+            CharsetType::AlphanumericSymbols.to_string(),
+            "alphanumeric-symbols"
+        );
         assert_eq!(CharsetType::Hex.to_string(), "hex");
         assert_eq!(CharsetType::Base64.to_string(), "base64");
         assert_eq!(CharsetType::Numeric.to_string(), "numeric");
@@ -8921,15 +8946,39 @@ mod tests {
 
     #[test]
     fn test_charset_from_str_valid() {
-        assert_eq!("alphanumeric".parse::<CharsetType>().unwrap(), CharsetType::Alphanumeric);
-        assert_eq!("alphanumeric-symbols".parse::<CharsetType>().unwrap(), CharsetType::AlphanumericSymbols);
-        assert_eq!("alphanumeric_symbols".parse::<CharsetType>().unwrap(), CharsetType::AlphanumericSymbols);
+        assert_eq!(
+            "alphanumeric".parse::<CharsetType>().unwrap(),
+            CharsetType::Alphanumeric
+        );
+        assert_eq!(
+            "alphanumeric-symbols".parse::<CharsetType>().unwrap(),
+            CharsetType::AlphanumericSymbols
+        );
+        assert_eq!(
+            "alphanumeric_symbols".parse::<CharsetType>().unwrap(),
+            CharsetType::AlphanumericSymbols
+        );
         assert_eq!("hex".parse::<CharsetType>().unwrap(), CharsetType::Hex);
-        assert_eq!("base64".parse::<CharsetType>().unwrap(), CharsetType::Base64);
-        assert_eq!("numeric".parse::<CharsetType>().unwrap(), CharsetType::Numeric);
-        assert_eq!("uppercase".parse::<CharsetType>().unwrap(), CharsetType::Uppercase);
-        assert_eq!("lowercase".parse::<CharsetType>().unwrap(), CharsetType::Lowercase);
-        assert_eq!("ALPHANUMERIC".parse::<CharsetType>().unwrap(), CharsetType::Alphanumeric);
+        assert_eq!(
+            "base64".parse::<CharsetType>().unwrap(),
+            CharsetType::Base64
+        );
+        assert_eq!(
+            "numeric".parse::<CharsetType>().unwrap(),
+            CharsetType::Numeric
+        );
+        assert_eq!(
+            "uppercase".parse::<CharsetType>().unwrap(),
+            CharsetType::Uppercase
+        );
+        assert_eq!(
+            "lowercase".parse::<CharsetType>().unwrap(),
+            CharsetType::Lowercase
+        );
+        assert_eq!(
+            "ALPHANUMERIC".parse::<CharsetType>().unwrap(),
+            CharsetType::Alphanumeric
+        );
     }
 
     #[test]
@@ -8967,7 +9016,10 @@ mod tests {
         let value = generate_random_value(200, CharsetType::Alphanumeric, None).unwrap();
         let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         for ch in value.chars() {
-            assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric output");
+            assert!(
+                valid.contains(ch),
+                "Unexpected char '{ch}' in alphanumeric output"
+            );
         }
     }
 
@@ -8975,7 +9027,10 @@ mod tests {
     fn test_gen_numeric_chars_only() {
         let value = generate_random_value(200, CharsetType::Numeric, None).unwrap();
         for ch in value.chars() {
-            assert!(ch.is_ascii_digit(), "Unexpected char '{ch}' in numeric output");
+            assert!(
+                ch.is_ascii_digit(),
+                "Unexpected char '{ch}' in numeric output"
+            );
         }
     }
 
@@ -8983,7 +9038,10 @@ mod tests {
     fn test_gen_uppercase_chars_only() {
         let value = generate_random_value(200, CharsetType::Uppercase, None).unwrap();
         for ch in value.chars() {
-            assert!(ch.is_ascii_uppercase(), "Unexpected char '{ch}' in uppercase output");
+            assert!(
+                ch.is_ascii_uppercase(),
+                "Unexpected char '{ch}' in uppercase output"
+            );
         }
     }
 
@@ -8991,7 +9049,10 @@ mod tests {
     fn test_gen_lowercase_chars_only() {
         let value = generate_random_value(200, CharsetType::Lowercase, None).unwrap();
         for ch in value.chars() {
-            assert!(ch.is_ascii_lowercase(), "Unexpected char '{ch}' in lowercase output");
+            assert!(
+                ch.is_ascii_lowercase(),
+                "Unexpected char '{ch}' in lowercase output"
+            );
         }
     }
 
@@ -9009,7 +9070,10 @@ mod tests {
         let value = generate_random_value(500, CharsetType::AlphanumericSymbols, None).unwrap();
         let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?";
         for ch in value.chars() {
-            assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric-symbols output");
+            assert!(
+                valid.contains(ch),
+                "Unexpected char '{ch}' in alphanumeric-symbols output"
+            );
         }
     }
 
@@ -9018,8 +9082,10 @@ mod tests {
         let value = generate_random_value(200, CharsetType::Base64, None).unwrap();
         let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         for ch in value.chars() {
-            assert!(valid.contains(ch), "Unexpected char '{ch}' in base64 output");
+            assert!(
+                valid.contains(ch),
+                "Unexpected char '{ch}' in base64 output"
+            );
         }
     }
-
 }

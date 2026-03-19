@@ -42,9 +42,7 @@ impl CacheKey {
                 cache_dir.join(vault_name).join("secrets-list.json")
             }
             CacheKey::VaultList => cache_dir.join("vaults-list.json"),
-            CacheKey::FileList { vault_name } => {
-                cache_dir.join(vault_name).join("files-list.json")
-            }
+            CacheKey::FileList { vault_name } => cache_dir.join(vault_name).join("files-list.json"),
         }
     }
 
@@ -135,12 +133,18 @@ mod tests {
     #[test]
     fn test_cache_key_display() {
         assert_eq!(
-            CacheKey::SecretsList { vault_name: "myvault".to_string() }.to_string(),
+            CacheKey::SecretsList {
+                vault_name: "myvault".to_string()
+            }
+            .to_string(),
             "secrets:myvault"
         );
         assert_eq!(CacheKey::VaultList.to_string(), "vaults");
         assert_eq!(
-            CacheKey::FileList { vault_name: "myvault".to_string() }.to_string(),
+            CacheKey::FileList {
+                vault_name: "myvault".to_string()
+            }
+            .to_string(),
             "files:myvault"
         );
     }
@@ -168,13 +172,23 @@ mod tests {
     fn test_cache_key_to_path() {
         let base = PathBuf::from("/cache");
 
-        let key = CacheKey::SecretsList { vault_name: "myvault".to_string() };
-        assert_eq!(key.to_path(&base), PathBuf::from("/cache/myvault/secrets-list.json"));
+        let key = CacheKey::SecretsList {
+            vault_name: "myvault".to_string(),
+        };
+        assert_eq!(
+            key.to_path(&base),
+            PathBuf::from("/cache/myvault/secrets-list.json")
+        );
 
         let key = CacheKey::VaultList;
         assert_eq!(key.to_path(&base), PathBuf::from("/cache/vaults-list.json"));
 
-        let key = CacheKey::FileList { vault_name: "myvault".to_string() };
-        assert_eq!(key.to_path(&base), PathBuf::from("/cache/myvault/files-list.json"));
+        let key = CacheKey::FileList {
+            vault_name: "myvault".to_string(),
+        };
+        assert_eq!(
+            key.to_path(&base),
+            PathBuf::from("/cache/myvault/files-list.json")
+        );
     }
 }

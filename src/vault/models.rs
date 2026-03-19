@@ -257,7 +257,6 @@ pub struct RoleAssignmentRequest {
     pub scope: String,
 }
 
-
 /// Vault summary for list operations
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct VaultSummary {

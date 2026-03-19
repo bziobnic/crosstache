@@ -99,7 +99,10 @@ impl CacheManager {
         let age_secs = (Utc::now() - entry.created_at).num_seconds().max(0) as u64;
 
         if age_secs >= self.ttl_secs {
-            debug!("Cache expired ({key}): age {age_secs}s ≥ ttl {}s", self.ttl_secs);
+            debug!(
+                "Cache expired ({key}): age {age_secs}s ≥ ttl {}s",
+                self.ttl_secs
+            );
             return None;
         }
 
@@ -194,7 +197,10 @@ impl CacheManager {
             if let Err(e) = std::fs::remove_dir_all(&vault_dir) {
                 debug!("invalidate_vault({vault_name}): {e}");
             } else {
-                debug!("invalidate_vault({vault_name}): removed {}", vault_dir.display());
+                debug!(
+                    "invalidate_vault({vault_name}): removed {}",
+                    vault_dir.display()
+                );
             }
         }
     }
@@ -293,7 +299,14 @@ fn collect_entries(
         };
 
         if ft.is_dir() {
-            collect_entries(&path, cache_root, ttl_secs, entry_count, total_size_bytes, entries);
+            collect_entries(
+                &path,
+                cache_root,
+                ttl_secs,
+                entry_count,
+                total_size_bytes,
+                entries,
+            );
             continue;
         }
 
@@ -312,11 +325,12 @@ fn collect_entries(
 
         // Build a human-readable key from the path relative to the cache root.
         let rel = path.strip_prefix(cache_root).unwrap_or(&path);
-        let key_str = rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        let key_str = rel
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
 
         // Parse timestamps from file contents if possible; fall back to epoch.
-        let (created_at, expires_at, is_stale) =
-            parse_entry_timestamps(&path, ttl_secs);
+        let (created_at, expires_at, is_stale) = parse_entry_timestamps(&path, ttl_secs);
 
         entries.push(CacheEntryInfo {
             key: key_str,
@@ -420,7 +434,9 @@ mod tests {
     fn test_invalidate_removes_entry() {
         let dir = tempdir().unwrap();
         let mgr = make_manager(dir.path(), true, 300);
-        let key = CacheKey::SecretsList { vault_name: "my-vault".to_string() };
+        let key = CacheKey::SecretsList {
+            vault_name: "my-vault".to_string(),
+        };
 
         mgr.set(&key, &vec!["secret-1".to_string()]);
         assert!(mgr.get::<Vec<String>>(&key).is_some());
@@ -434,8 +450,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let mgr = make_manager(dir.path(), true, 300);
 
-        let key1 = CacheKey::SecretsList { vault_name: "my-vault".to_string() };
-        let key2 = CacheKey::FileList { vault_name: "my-vault".to_string() };
+        let key1 = CacheKey::SecretsList {
+            vault_name: "my-vault".to_string(),
+        };
+        let key2 = CacheKey::FileList {
+            vault_name: "my-vault".to_string(),
+        };
 
         mgr.set(&key1, &vec!["s1".to_string()]);
         mgr.set(&key2, &vec!["f1".to_string()]);
@@ -456,17 +476,20 @@ mod tests {
 
         mgr.set(&CacheKey::VaultList, &vec!["v1".to_string()]);
         mgr.set(
-            &CacheKey::SecretsList { vault_name: "vlt".to_string() },
+            &CacheKey::SecretsList {
+                vault_name: "vlt".to_string(),
+            },
             &vec!["s1".to_string()],
         );
 
         mgr.clear(None);
 
         assert!(mgr.get::<Vec<String>>(&CacheKey::VaultList).is_none());
-        assert!(
-            mgr.get::<Vec<String>>(&CacheKey::SecretsList { vault_name: "vlt".to_string() })
-                .is_none()
-        );
+        assert!(mgr
+            .get::<Vec<String>>(&CacheKey::SecretsList {
+                vault_name: "vlt".to_string()
+            })
+            .is_none());
     }
 
     #[test]
@@ -476,11 +499,15 @@ mod tests {
 
         mgr.set(&CacheKey::VaultList, &vec!["v1".to_string()]);
         mgr.set(
-            &CacheKey::SecretsList { vault_name: "target".to_string() },
+            &CacheKey::SecretsList {
+                vault_name: "target".to_string(),
+            },
             &vec!["s1".to_string()],
         );
         mgr.set(
-            &CacheKey::SecretsList { vault_name: "other".to_string() },
+            &CacheKey::SecretsList {
+                vault_name: "other".to_string(),
+            },
             &vec!["s2".to_string()],
         );
 
@@ -488,15 +515,17 @@ mod tests {
 
         // VaultList and "other" vault should remain.
         assert!(mgr.get::<Vec<String>>(&CacheKey::VaultList).is_some());
-        assert!(
-            mgr.get::<Vec<String>>(&CacheKey::SecretsList { vault_name: "other".to_string() })
-                .is_some()
-        );
+        assert!(mgr
+            .get::<Vec<String>>(&CacheKey::SecretsList {
+                vault_name: "other".to_string()
+            })
+            .is_some());
         // "target" should be gone.
-        assert!(
-            mgr.get::<Vec<String>>(&CacheKey::SecretsList { vault_name: "target".to_string() })
-                .is_none()
-        );
+        assert!(mgr
+            .get::<Vec<String>>(&CacheKey::SecretsList {
+                vault_name: "target".to_string()
+            })
+            .is_none());
     }
 
     #[test]
@@ -517,7 +546,9 @@ mod tests {
     fn test_set_creates_directories() {
         let dir = tempdir().unwrap();
         let mgr = make_manager(dir.path(), true, 300);
-        let key = CacheKey::SecretsList { vault_name: "brand-new-vault".to_string() };
+        let key = CacheKey::SecretsList {
+            vault_name: "brand-new-vault".to_string(),
+        };
 
         // Parent directory does not exist yet.
         assert!(!dir.path().join("brand-new-vault").exists());
@@ -542,7 +573,9 @@ mod tests {
         // Add two entries.
         mgr.set(&CacheKey::VaultList, &vec!["v1".to_string()]);
         mgr.set(
-            &CacheKey::SecretsList { vault_name: "v1".to_string() },
+            &CacheKey::SecretsList {
+                vault_name: "v1".to_string(),
+            },
             &vec!["s1".to_string()],
         );
 

@@ -88,7 +88,10 @@ fn cleanup_secrets(names: &[String]) {
 #[ignore]
 fn e2e_version() {
     let stdout = xv_ok(&["version"]);
-    assert!(stdout.contains("crosstache"), "version output should contain 'crosstache'");
+    assert!(
+        stdout.contains("crosstache"),
+        "version output should contain 'crosstache'"
+    );
 }
 
 #[test]
@@ -97,7 +100,10 @@ fn e2e_whoami() {
     let stdout = xv_ok(&["whoami"]);
     // Should show some identity info (tenant, user, or object ID)
     assert!(
-        stdout.contains("Tenant") || stdout.contains("tenant") || stdout.contains("@") || stdout.contains("Identity"),
+        stdout.contains("Tenant")
+            || stdout.contains("tenant")
+            || stdout.contains("@")
+            || stdout.contains("Identity"),
         "whoami should show identity info, got: {}",
         stdout
     );
@@ -108,7 +114,9 @@ fn e2e_whoami() {
 fn e2e_config_show() {
     let stdout = xv_ok(&["config", "show"]);
     assert!(
-        stdout.contains("subscription") || stdout.contains("vault") || stdout.contains("Subscription"),
+        stdout.contains("subscription")
+            || stdout.contains("vault")
+            || stdout.contains("Subscription"),
         "config show should display configuration, got: {}",
         stdout
     );
@@ -139,9 +147,20 @@ fn e2e_completion_bash() {
 #[test]
 #[ignore]
 fn e2e_parse_connection_string() {
-    let stdout = xv_ok(&["parse", "Server=db.example.com;Database=mydb;User=admin;Password=secret123"]);
-    assert!(stdout.contains("db.example.com"), "parse should extract server, got: {}", stdout);
-    assert!(stdout.contains("mydb"), "parse should extract database, got: {}", stdout);
+    let stdout = xv_ok(&[
+        "parse",
+        "Server=db.example.com;Database=mydb;User=admin;Password=secret123",
+    ]);
+    assert!(
+        stdout.contains("db.example.com"),
+        "parse should extract server, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("mydb"),
+        "parse should extract database, got: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -153,7 +172,11 @@ fn e2e_parse_json_format() {
         "--fmt",
         "json",
     ]);
-    assert!(stdout.contains('"'), "json format should contain quotes, got: {}", stdout);
+    assert!(
+        stdout.contains('"'),
+        "json format should contain quotes, got: {}",
+        stdout
+    );
 }
 
 // ============================================================================
@@ -230,11 +253,7 @@ fn e2e_secret_full_lifecycle() {
     // --- UPDATE (change value to create a new version) ---
     let new_value = "updated-value-67890";
     let update_output = Command::new(binary)
-        .args([
-            "update",
-            &secret_name,
-            new_value,
-        ])
+        .args(["update", &secret_name, new_value])
         .env("DEFAULT_VAULT", VAULT)
         .output()
         .expect("Failed to run xv update");
@@ -330,13 +349,28 @@ fn e2e_bulk_set() {
 
     // Verify each was created
     let v1 = xv_ok(&["get", &k1, "--raw"]);
-    assert_eq!(v1.trim(), "alpha", "bulk k1 should be 'alpha', got: '{}'", v1.trim());
+    assert_eq!(
+        v1.trim(),
+        "alpha",
+        "bulk k1 should be 'alpha', got: '{}'",
+        v1.trim()
+    );
 
     let v2 = xv_ok(&["get", &k2, "--raw"]);
-    assert_eq!(v2.trim(), "beta", "bulk k2 should be 'beta', got: '{}'", v2.trim());
+    assert_eq!(
+        v2.trim(),
+        "beta",
+        "bulk k2 should be 'beta', got: '{}'",
+        v2.trim()
+    );
 
     let v3 = xv_ok(&["get", &k3, "--raw"]);
-    assert_eq!(v3.trim(), "gamma", "bulk k3 should be 'gamma', got: '{}'", v3.trim());
+    assert_eq!(
+        v3.trim(),
+        "gamma",
+        "bulk k3 should be 'gamma', got: '{}'",
+        v3.trim()
+    );
 
     // Cleanup
     cleanup_secrets(&[k1, k2, k3]);
@@ -440,11 +474,17 @@ fn e2e_vault_export_import() {
     let export_path = tmp_dir.path().join("export.json");
     let export_path_str = export_path.to_str().unwrap();
 
-    xv_ok(&["vault", "export", VAULT, "--output", export_path_str, "--include-values"]);
+    xv_ok(&[
+        "vault",
+        "export",
+        VAULT,
+        "--output",
+        export_path_str,
+        "--include-values",
+    ]);
 
     // Verify export file exists and contains our secret
-    let export_content = std::fs::read_to_string(&export_path)
-        .expect("Failed to read export file");
+    let export_content = std::fs::read_to_string(&export_path).expect("Failed to read export file");
     assert!(
         export_content.contains(&secret_name),
         "export should contain our secret '{}', got: {}",
@@ -462,7 +502,10 @@ fn e2e_vault_export_import() {
         "--dry-run",
     ]);
     assert!(
-        stdout.contains("dry") || stdout.contains("Dry") || stdout.contains(&secret_name) || stdout.contains("import"),
+        stdout.contains("dry")
+            || stdout.contains("Dry")
+            || stdout.contains(&secret_name)
+            || stdout.contains("import"),
         "dry-run import should show what would happen, got: {}",
         stdout
     );
@@ -534,13 +577,7 @@ fn e2e_run_injects_env_vars() {
     // Use xv run to inject secrets and echo them
     // The env var name is the sanitized secret name (uppercased, hyphens to underscores)
     let expected_env_var = secret_name.replace('-', "_").to_uppercase();
-    let output = xv(&[
-        "run",
-        "--no-masking",
-        "--",
-        "printenv",
-        &expected_env_var,
-    ]);
+    let output = xv(&["run", "--no-masking", "--", "printenv", &expected_env_var]);
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
@@ -607,8 +644,7 @@ fn e2e_inject_template() {
     ]);
 
     if output.status.success() {
-        let rendered = std::fs::read_to_string(&output_path)
-            .expect("Failed to read inject output");
+        let rendered = std::fs::read_to_string(&output_path).expect("Failed to read inject output");
         assert!(
             rendered.contains(secret_value),
             "inject should resolve secret reference to '{}', got: '{}'",
@@ -634,7 +670,10 @@ fn e2e_inject_template() {
 fn e2e_get_nonexistent_secret() {
     let stderr = xv_fail(&["get", "this-secret-definitely-does-not-exist-xyz", "--raw"]);
     assert!(
-        stderr.contains("not found") || stderr.contains("Not Found") || stderr.contains("404") || stderr.contains("Secret"),
+        stderr.contains("not found")
+            || stderr.contains("Not Found")
+            || stderr.contains("404")
+            || stderr.contains("Secret"),
         "getting nonexistent secret should show error, got: {}",
         stderr
     );
@@ -646,7 +685,10 @@ fn e2e_invalid_vault_name() {
     let binary = env!("CARGO_BIN_EXE_xv");
     let output = Command::new(binary)
         .args(["list"])
-        .env("DEFAULT_VAULT", "this-vault-definitely-does-not-exist-xyz-99999")
+        .env(
+            "DEFAULT_VAULT",
+            "this-vault-definitely-does-not-exist-xyz-99999",
+        )
         .output()
         .expect("Failed to execute xv binary");
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -682,7 +724,10 @@ fn e2e_audit() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() || stderr.contains("permission") || stderr.contains("Permission") || stderr.contains("error"),
+        output.status.success()
+            || stderr.contains("permission")
+            || stderr.contains("Permission")
+            || stderr.contains("error"),
         "audit should either succeed or fail gracefully, got stdout: {}, stderr: {}",
         stdout,
         stderr
@@ -703,7 +748,11 @@ fn e2e_diff_same_vault() {
     if output.status.success() {
         // All secrets should be "unchanged" or similar
         assert!(
-            stdout.contains("identical") || stdout.contains("match") || stdout.contains("0 added") || stdout.contains("Unchanged") || !stdout.is_empty(),
+            stdout.contains("identical")
+                || stdout.contains("match")
+                || stdout.contains("0 added")
+                || stdout.contains("Unchanged")
+                || !stdout.is_empty(),
             "diff of same vault should show no differences, got: {}",
             stdout
         );
@@ -809,7 +858,12 @@ fn e2e_rotate_with_charset() {
     // Verify the new value is hex
     let stdout = xv_ok(&["get", &secret_name, "--raw"]);
     let rotated = stdout.trim();
-    assert_eq!(rotated.len(), 16, "rotated hex value should be 16 chars, got {}", rotated.len());
+    assert_eq!(
+        rotated.len(),
+        16,
+        "rotated hex value should be 16 chars, got {}",
+        rotated.len()
+    );
     assert!(
         rotated.chars().all(|c| c.is_ascii_hexdigit()),
         "rotated value should be hex, got: '{}'",
