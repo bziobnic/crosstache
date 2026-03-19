@@ -37,16 +37,13 @@ impl CacheManager {
         }
     }
 
-    // TODO: uncomment when cache_enabled/cache_ttl_secs are added to Config
-    //
-    // pub fn from_config(config: &Config) -> Self {
-    //     let cache_dir = dirs::cache_dir()
-    //         .unwrap_or_else(|| PathBuf::from(".cache"))
-    //         .join("xv");
-    //     let enabled = config.cache_enabled && config.cache_ttl_secs > 0;
-    //     let ttl_secs = config.cache_ttl_secs;
-    //     Self::new(cache_dir, enabled, ttl_secs)
-    // }
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("xv");
+        let enabled = config.cache_enabled && config.cache_ttl_secs > 0;
+        Self::new(cache_dir, enabled, config.cache_ttl_secs)
+    }
 
     // ------------------------------------------------------------------
     // Getters

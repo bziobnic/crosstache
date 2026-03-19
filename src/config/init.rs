@@ -728,7 +728,6 @@ impl ConfigInitializer {
     /// Build the final configuration
     async fn build_config(&self, init_config: InitConfig) -> Result<Config> {
         use crate::config::settings::BlobConfig;
-        use std::time::Duration;
 
         // Create blob config if storage account was configured
         let blob_config = if !init_config.storage_account_name.is_empty() {
@@ -753,7 +752,8 @@ impl ConfigInitializer {
             output_json: false,
             no_color: false,
             debug: false,
-            cache_ttl: Duration::from_secs(300),
+            cache_enabled: true,
+            cache_ttl_secs: 900,
             function_app_url: String::new(),
             blob_config,
             azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
