@@ -52,20 +52,31 @@ mod gen_integration_tests {
         // Generate and save; --raw prints the value to stdout before the success message
         let (ok, stdout, _stderr) = run_xv(&[
             "gen",
-            "--length", "16",
-            "--charset", "alphanumeric",
-            "--save", &test_secret_name,
+            "--length",
+            "16",
+            "--charset",
+            "alphanumeric",
+            "--save",
+            &test_secret_name,
             "--raw",
         ]);
         assert!(ok, "gen --save should succeed");
         // First non-empty line is the password (println! adds a newline)
         let password_line = stdout.lines().next().unwrap_or("").trim().to_string();
-        assert_eq!(password_line.len(), 16, "Generated password should be 16 chars");
+        assert_eq!(
+            password_line.len(),
+            16,
+            "Generated password should be 16 chars"
+        );
 
         // Retrieve and verify the saved secret matches
         let (ok2, stdout2, _) = run_xv(&["get", &test_secret_name, "--raw"]);
         assert!(ok2, "get should succeed after gen --save");
-        assert_eq!(stdout2.trim(), password_line, "Retrieved value should match generated password");
+        assert_eq!(
+            stdout2.trim(),
+            password_line,
+            "Retrieved value should match generated password"
+        );
 
         // Cleanup
         let (ok3, _, _) = run_xv(&["delete", &test_secret_name, "--force"]);

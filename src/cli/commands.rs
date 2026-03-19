@@ -264,6 +264,9 @@ pub enum Commands {
         /// Show expired secrets only
         #[arg(long)]
         expired: bool,
+        /// Bypass the local cache and fetch fresh data
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -460,7 +463,12 @@ pub enum Commands {
         /// Connection string to parse
         connection_string: String,
         /// Output format
-        #[arg(short = 'f', long = "fmt", default_value = "table", id = "parse_format")]
+        #[arg(
+            short = 'f',
+            long = "fmt",
+            default_value = "table",
+            id = "parse_format"
+        )]
         format: String,
     },
     /// Secret-level access management
@@ -541,6 +549,11 @@ pub enum Commands {
     },
     /// Show authenticated identity and context information
     Whoami,
+    /// Cache management commands
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
@@ -593,6 +606,9 @@ pub enum VaultCommands {
         /// Output format
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
+        /// Bypass the local cache and fetch fresh data
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Delete a vault
     Delete {
@@ -643,7 +659,12 @@ pub enum VaultCommands {
         #[arg(short, long)]
         output: Option<String>,
         /// Export format (json, env, txt)
-        #[arg(short = 'f', long = "fmt", default_value = "json", id = "export_format")]
+        #[arg(
+            short = 'f',
+            long = "fmt",
+            default_value = "json",
+            id = "export_format"
+        )]
         format: String,
         /// Include secret values (requires appropriate permissions)
         #[arg(long)]
@@ -663,7 +684,12 @@ pub enum VaultCommands {
         #[arg(short, long)]
         input: Option<String>,
         /// Import format (json, env, txt)
-        #[arg(short = 'f', long = "fmt", default_value = "json", id = "import_format")]
+        #[arg(
+            short = 'f',
+            long = "fmt",
+            default_value = "json",
+            id = "import_format"
+        )]
         format: String,
         /// Overwrite existing secrets
         #[arg(long)]
@@ -738,7 +764,12 @@ pub enum VaultShareCommands {
         #[arg(short, long)]
         resource_group: Option<String>,
         /// Output format
-        #[arg(short = 'f', long = "fmt", default_value = "table", id = "share_list_format")]
+        #[arg(
+            short = 'f',
+            long = "fmt",
+            default_value = "table",
+            id = "share_list_format"
+        )]
         format: String,
         /// Include service accounts in output
         #[arg(long)]
@@ -826,6 +857,9 @@ pub enum FileCommands {
         /// List all files recursively (show all nested files instead of directory structure)
         #[arg(short, long)]
         recursive: bool,
+        /// Bypass the local cache and fetch fresh data
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Delete one or more files from blob storage
     #[command(alias = "rm")]
@@ -914,6 +948,23 @@ pub enum ConfigCommands {
     },
     /// Show configuration file path
     Path,
+}
+
+#[derive(Subcommand)]
+pub enum CacheCommands {
+    /// Remove cached data
+    Clear {
+        #[arg(long)]
+        vault: Option<String>,
+    },
+    /// Show cache status and statistics
+    Status,
+    /// Internal: refresh a cache entry in the background
+    #[command(hide = true)]
+    Refresh {
+        #[arg(long)]
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1034,7 +1085,8 @@ impl Cli {
                 all,
                 expiring,
                 expired,
-            } => execute_secret_list_direct(group, all, expiring, expired, config).await,
+                no_cache,
+            } => execute_secret_list_direct(group, all, expiring, expired, no_cache, config).await,
             Commands::Delete { name, group, force } => {
                 execute_secret_delete_direct(name, group, force, config).await
             }
@@ -1173,6 +1225,7 @@ impl Cli {
             Commands::Version => execute_version_command().await,
             Commands::Completion { shell } => execute_completion_command(shell).await,
             Commands::Whoami => execute_whoami_command(config).await,
+            Commands::Cache { command } => execute_cache_command(command, config).await,
             #[cfg(feature = "file-ops")]
             Commands::Upload {
                 file_path,
@@ -1271,6 +1324,18 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                 )
                 .await?;
             }
+            // Invalidate the file list cache (both recursive and hierarchical) after any upload
+            let cache_manager = crate::cache::CacheManager::from_config(&config);
+            if let Ok(vault_name) = config.resolve_vault_name(None).await {
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
+                    vault_name: vault_name.clone(),
+                    recursive: true,
+                });
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
+                    vault_name,
+                    recursive: false,
+                });
+            }
         }
         FileCommands::Download {
             files,
@@ -1315,14 +1380,8 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                     } else {
                         output
                     };
-                    execute_file_download(
-                        &blob_manager,
-                        &files[0],
-                        output_path,
-                        force,
-                        &config,
-                    )
-                    .await?;
+                    execute_file_download(&blob_manager, &files[0], output_path, force, &config)
+                        .await?;
                 } else {
                     execute_file_download_multiple(
                         &blob_manager,
@@ -1341,6 +1400,7 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
             group,
             limit,
             recursive,
+            no_cache,
         } => {
             execute_file_list(
                 &blob_manager,
@@ -1348,6 +1408,7 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                 group,
                 limit,
                 recursive,
+                no_cache,
                 &config,
             )
             .await?;
@@ -1369,6 +1430,18 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                     &config,
                 )
                 .await?;
+            }
+            // Invalidate the file list cache (both recursive and hierarchical) after any delete
+            let cache_manager = crate::cache::CacheManager::from_config(&config);
+            if let Ok(vault_name) = config.resolve_vault_name(None).await {
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
+                    vault_name: vault_name.clone(),
+                    recursive: true,
+                });
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
+                    vault_name,
+                    recursive: false,
+                });
             }
         }
         FileCommands::Info { name } => {
@@ -1418,6 +1491,8 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
         config.no_color,
     )?;
 
+    let vault_cache_manager = crate::cache::CacheManager::from_config(&config);
+
     match command {
         VaultCommands::Create {
             name,
@@ -1425,12 +1500,14 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
             location,
         } => {
             execute_vault_create(&vault_manager, &name, resource_group, location, &config).await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::List {
             resource_group,
             format,
+            no_cache,
         } => {
-            execute_vault_list(&vault_manager, resource_group, format, &config).await?;
+            execute_vault_list(&vault_manager, resource_group, format, no_cache, &config).await?;
         }
         VaultCommands::Delete {
             name,
@@ -1438,6 +1515,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
             force,
         } => {
             execute_vault_delete(&vault_manager, &name, resource_group, force, &config).await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Info {
             name,
@@ -1447,6 +1525,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
         }
         VaultCommands::Restore { name, location } => {
             execute_vault_restore(&vault_manager, &name, &location, &config).await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Purge {
             name,
@@ -1454,6 +1533,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
             force,
         } => {
             execute_vault_purge(&vault_manager, &name, &location, force, &config).await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Export {
             name,
@@ -1494,6 +1574,9 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
                 &config,
             )
             .await?;
+            // Invalidate the secrets list for the target vault (secrets were written)
+            vault_cache_manager
+                .invalidate(&crate::cache::CacheKey::SecretsList { vault_name: name });
         }
         VaultCommands::Update {
             name,
@@ -1518,6 +1601,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
                 &config,
             )
             .await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Share { command } => {
             execute_vault_share(&vault_manager, &auth_provider, command, &config).await?;
@@ -1583,15 +1667,48 @@ async fn execute_vault_list(
     vault_manager: &VaultManager,
     resource_group: Option<String>,
     format: OutputFormat,
+    no_cache: bool,
     config: &Config,
 ) -> Result<()> {
-    vault_manager
+    use crate::cache::{CacheKey, CacheManager};
+    use crate::vault::models::VaultSummary;
+
+    let cache_manager = CacheManager::from_config(config);
+    let cache_key = CacheKey::VaultList;
+    let use_cache = cache_manager.is_enabled() && !no_cache;
+
+    if use_cache && resource_group.is_none() {
+        if let Some(cached) = cache_manager.get::<Vec<VaultSummary>>(&cache_key) {
+            if cached.is_empty() {
+                output::info("No vaults found.");
+            } else {
+                use crate::utils::format::format_table;
+                use tabled::Table;
+                if format == OutputFormat::Table {
+                    let table = Table::new(&cached);
+                    println!("{}", format_table(table, config.no_color));
+                } else {
+                    let json = serde_json::to_string_pretty(&cached).map_err(|e| {
+                        CrosstacheError::serialization(format!("Failed to serialize: {e}"))
+                    })?;
+                    println!("{json}");
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    let vaults = vault_manager
         .list_vaults_formatted(
             Some(&config.subscription_id),
             resource_group.as_deref(),
             format,
         )
         .await?;
+
+    if use_cache && resource_group.is_none() {
+        cache_manager.set(&cache_key, &vaults);
+    }
 
     Ok(())
 }
@@ -1680,7 +1797,7 @@ async fn execute_secret_set_direct(
             not_before,
             &config,
         )
-        .await
+        .await?;
     } else {
         // Bulk set operation
         if stdin {
@@ -1693,8 +1810,16 @@ async fn execute_secret_set_direct(
                 "--expires and --not-before cannot be used with bulk set operation",
             ));
         }
-        execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await
+        execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await?;
     }
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_get_direct(
@@ -1723,18 +1848,96 @@ async fn execute_secret_get_direct(
     execute_secret_get(&secret_manager, name, None, raw, version, &config).await
 }
 
+fn display_cached_secret_list(
+    secrets: Vec<crate::secret::manager::SecretSummary>,
+    group: Option<String>,
+    all: bool,
+    vault_name: &str,
+    config: &Config,
+) -> Result<()> {
+    use crate::utils::format::format_table;
+    use tabled::Table;
+
+    let mut filtered = secrets;
+
+    if !all {
+        filtered.retain(|s| s.enabled);
+    }
+    if let Some(ref g) = group {
+        filtered.retain(|s| {
+            s.groups
+                .as_ref()
+                .map(|groups| groups.contains(g))
+                .unwrap_or(false)
+        });
+    }
+
+    let output_format = if config.output_json {
+        crate::utils::format::OutputFormat::Json
+    } else {
+        crate::utils::format::OutputFormat::Table
+    };
+
+    if output_format == crate::utils::format::OutputFormat::Table {
+        println!();
+        if config.no_color {
+            println!("Vault: {}", vault_name);
+        } else {
+            println!("\x1b[36mVault: {}\x1b[0m", vault_name);
+        }
+        println!();
+
+        if filtered.is_empty() {
+            output::info(if all {
+                "No secrets found in vault."
+            } else {
+                "No enabled secrets found in vault. Use --all to show disabled secrets."
+            });
+        } else {
+            let table = Table::new(&filtered);
+            println!("{}", format_table(table, config.no_color));
+            println!("\n{} secret(s) in vault '{}'", filtered.len(), vault_name);
+        }
+    } else {
+        let json = serde_json::to_string_pretty(&filtered).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to serialize secrets: {e}"))
+        })?;
+        println!("{json}");
+    }
+
+    Ok(())
+}
+
 async fn execute_secret_list_direct(
     group: Option<String>,
     all: bool,
     expiring: Option<String>,
     expired: bool,
+    no_cache: bool,
     config: Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::cache::{CacheKey, CacheManager};
     use crate::secret::manager::SecretManager;
     use std::sync::Arc;
 
-    // Create authentication provider
+    let cache_manager = CacheManager::from_config(&config);
+    let vault_name = config.resolve_vault_name(None).await?;
+    let cache_key = CacheKey::SecretsList {
+        vault_name: vault_name.clone(),
+    };
+    let use_cache = cache_manager.is_enabled() && !no_cache;
+
+    // Try cache (skip for expiry filters — they need per-secret API calls)
+    if use_cache && expiring.is_none() && !expired {
+        if let Some(cached) =
+            cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+        {
+            return display_cached_secret_list(cached, group, all, &vault_name, &config);
+        }
+    }
+
+    // Cache miss — create auth provider and secret manager
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
             config.azure_credential_priority.clone(),
@@ -1744,10 +1947,9 @@ async fn execute_secret_list_direct(
         })?,
     );
 
-    // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_list(
+    let secrets = execute_secret_list(
         &secret_manager,
         None,
         group,
@@ -1756,7 +1958,13 @@ async fn execute_secret_list_direct(
         expired,
         &config,
     )
-    .await
+    .await?;
+
+    if use_cache {
+        cache_manager.set(&cache_key, &secrets);
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_delete_direct(
@@ -1784,14 +1992,22 @@ async fn execute_secret_delete_direct(
 
     // Check if this is a group delete operation
     if let Some(group_name) = group {
-        execute_secret_delete_group(&secret_manager, &group_name, force, &config).await
+        execute_secret_delete_group(&secret_manager, &group_name, force, &config).await?;
     } else if let Some(secret_name) = name {
-        execute_secret_delete(&secret_manager, &secret_name, None, force, &config).await
+        execute_secret_delete(&secret_manager, &secret_name, None, force, &config).await?;
     } else {
-        Err(CrosstacheError::invalid_argument(
+        return Err(CrosstacheError::invalid_argument(
             "Either secret name or --group must be specified",
-        ))
+        ));
     }
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_history_direct(name: &str, config: Config) -> Result<()> {
@@ -1838,7 +2054,15 @@ async fn execute_secret_rollback_direct(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_rollback(&secret_manager, name, None, version, force, &config).await
+    execute_secret_rollback(&secret_manager, name, None, version, force, &config).await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_rotate_direct(
@@ -1878,7 +2102,15 @@ async fn execute_secret_rotate_direct(
         force,
         &config,
     )
-    .await
+    .await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_run_direct(
@@ -1987,7 +2219,15 @@ async fn execute_secret_update_direct(
         clear_not_before,
         &config,
     )
-    .await
+    .await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_purge_direct(name: &str, force: bool, config: Config) -> Result<()> {
@@ -2008,7 +2248,15 @@ async fn execute_secret_purge_direct(name: &str, force: bool, config: Config) ->
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_purge(&secret_manager, name, None, force, &config).await
+    execute_secret_purge(&secret_manager, name, None, force, &config).await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()> {
@@ -2029,7 +2277,15 @@ async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()>
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_restore(&secret_manager, name, None, &config).await
+    execute_secret_restore(&secret_manager, name, None, &config).await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_diff_command(
@@ -2215,7 +2471,18 @@ async fn execute_secret_copy_direct(
         new_name,
         &config,
     )
-    .await
+    .await?;
+
+    // Invalidate the secrets list cache for both source and destination vaults
+    let cache_manager = crate::cache::CacheManager::from_config(&config);
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        vault_name: from_vault.to_string(),
+    });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        vault_name: to_vault.to_string(),
+    });
+
+    Ok(())
 }
 
 async fn execute_secret_move_direct(
@@ -2252,7 +2519,18 @@ async fn execute_secret_move_direct(
         force,
         &config,
     )
-    .await
+    .await?;
+
+    // Invalidate the secrets list cache for both source and destination vaults
+    let cache_manager = crate::cache::CacheManager::from_config(&config);
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        vault_name: from_vault.to_string(),
+    });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        vault_name: to_vault.to_string(),
+    });
+
+    Ok(())
 }
 
 async fn execute_secret_parse_direct(
@@ -2317,6 +2595,192 @@ async fn execute_config_command(command: ConfigCommands, config: Config) -> Resu
             execute_config_path().await?;
         }
     }
+    Ok(())
+}
+
+async fn execute_cache_command(command: CacheCommands, config: Config) -> Result<()> {
+    use crate::cache::CacheManager;
+
+    let cache_manager = CacheManager::from_config(&config);
+
+    match command {
+        CacheCommands::Clear { vault } => {
+            let vault_ref = vault.as_deref();
+            cache_manager.clear(vault_ref);
+            match vault_ref {
+                Some(name) => output::success(&format!("Cache cleared for vault '{name}'.")),
+                None => output::success("Cache cleared."),
+            }
+        }
+        CacheCommands::Status => {
+            let status = cache_manager.status();
+            println!("Cache directory : {}", status.cache_dir.display());
+            println!("Enabled         : {}", status.enabled);
+            println!("TTL             : {}s", status.ttl_secs);
+            println!("Entries         : {}", status.entry_count);
+            println!(
+                "Total size      : {}",
+                format_cache_size(status.total_size_bytes)
+            );
+            if !status.entries.is_empty() {
+                println!("\nEntries:");
+                for entry in &status.entries {
+                    let freshness = if entry.is_stale { "stale" } else { "fresh" };
+                    println!(
+                        "  {} — created {} — expires {} [{}]",
+                        entry.key,
+                        entry.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                        entry.expires_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                        freshness,
+                    );
+                }
+            }
+        }
+        CacheCommands::Refresh { key } => {
+            execute_cache_refresh(&key, config).await?;
+        }
+    }
+    Ok(())
+}
+
+fn format_cache_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
+    use crate::cache::refresh::release_lock;
+    use crate::cache::{CacheKey, CacheManager};
+
+    let cache_key: CacheKey = key
+        .parse()
+        .map_err(|e| CrosstacheError::invalid_argument(e))?;
+
+    let cache_manager = CacheManager::from_config(&config);
+    let lock_path = cache_key
+        .to_path(cache_manager.cache_dir())
+        .with_extension("lock");
+
+    let result = match cache_key {
+        CacheKey::SecretsList { ref vault_name } => {
+            refresh_secrets_list(vault_name.clone(), config).await
+        }
+        CacheKey::VaultList => refresh_vault_list(config).await,
+        CacheKey::FileList {
+            ref vault_name,
+            recursive,
+        } => refresh_file_list(vault_name.clone(), recursive, config).await,
+    };
+
+    release_lock(&lock_path);
+    result
+}
+
+async fn refresh_secrets_list(vault_name: String, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::cache::{CacheKey, CacheManager};
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone(),
+        )
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        })?,
+    );
+
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    let secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
+        .await?;
+
+    let cache_manager = CacheManager::from_config(&config);
+    let cache_key = CacheKey::SecretsList { vault_name };
+    cache_manager.set(&cache_key, &secrets);
+
+    Ok(())
+}
+
+async fn refresh_vault_list(config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::cache::{CacheKey, CacheManager};
+    use std::sync::Arc;
+
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone(),
+        )
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        })?,
+    );
+
+    let vault_manager = VaultManager::new(
+        auth_provider,
+        config.subscription_id.clone(),
+        config.no_color,
+    )?;
+
+    let vaults = vault_manager
+        .list_vaults_formatted(
+            Some(&config.subscription_id),
+            None,
+            crate::utils::format::OutputFormat::Json,
+        )
+        .await?;
+
+    let cache_manager = CacheManager::from_config(&config);
+    cache_manager.set(&CacheKey::VaultList, &vaults);
+
+    Ok(())
+}
+
+#[cfg(feature = "file-ops")]
+async fn refresh_file_list(vault_name: String, recursive: bool, config: Config) -> Result<()> {
+    use crate::blob::manager::create_blob_manager;
+    use crate::blob::models::{BlobListItem, FileListRequest};
+    use crate::cache::{CacheKey, CacheManager};
+
+    let blob_manager = create_blob_manager(&config)?;
+    let list_request = FileListRequest {
+        prefix: None,
+        groups: None,
+        limit: None,
+        delimiter: if recursive {
+            None
+        } else {
+            Some("/".to_string())
+        },
+        recursive,
+    };
+
+    let items: Vec<BlobListItem> = if recursive {
+        let files = blob_manager.list_files(list_request).await?;
+        files.into_iter().map(BlobListItem::File).collect()
+    } else {
+        blob_manager.list_files_hierarchical(list_request).await?
+    };
+
+    let cache_manager = CacheManager::from_config(&config);
+    let cache_key = CacheKey::FileList {
+        vault_name,
+        recursive,
+    };
+    cache_manager.set(&cache_key, &items);
+
+    Ok(())
+}
+
+#[cfg(not(feature = "file-ops"))]
+async fn refresh_file_list(_vault_name: String, _recursive: bool, _config: Config) -> Result<()> {
     Ok(())
 }
 
@@ -2483,7 +2947,6 @@ impl EnvironmentProfileManager {
         self.current_profile = Some(name.to_string());
         Ok(profile)
     }
-
 }
 
 async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()> {
@@ -3275,7 +3738,7 @@ async fn execute_audit_command(
 
         if rg.is_empty() {
             return Err(CrosstacheError::config(
-                "No resource group specified. Use --resource-group or 'xv init' to configure"
+                "No resource group specified. Use --resource-group or 'xv init' to configure",
             ));
         }
 
@@ -3283,8 +3746,7 @@ async fn execute_audit_command(
     } else {
         // Use current vault context
         let vault_name = config.resolve_vault_name(None).await?;
-        let rg = resource_group_override
-            .unwrap_or_else(|| config.default_resource_group.clone());
+        let rg = resource_group_override.unwrap_or_else(|| config.default_resource_group.clone());
         let sub = config.subscription_id.clone();
 
         if rg.is_empty() {
@@ -3902,8 +4364,13 @@ async fn execute_config_show(config: &Config) -> Result<()> {
             source: "config".to_string(),
         },
         ConfigItem {
-            key: "cache_ttl".to_string(),
-            value: format!("{}s", config.cache_ttl.as_secs()),
+            key: "cache_enabled".to_string(),
+            value: config.cache_enabled.to_string(),
+            source: "config".to_string(),
+        },
+        ConfigItem {
+            key: "cache_ttl_secs".to_string(),
+            value: format!("{}s", config.cache_ttl_secs),
             source: "config".to_string(),
         },
         ConfigItem {
@@ -4009,11 +4476,14 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         "function_app_url" => {
             config.function_app_url = value.to_string();
         }
-        "cache_ttl" => {
+        "cache_enabled" => {
+            config.cache_enabled = value.to_lowercase() == "true" || value == "1";
+        }
+        "cache_ttl" | "cache_ttl_secs" => {
             let seconds = value.parse::<u64>().map_err(|_| {
-                CrosstacheError::config(format!("Invalid value for cache_ttl: {value}"))
+                CrosstacheError::config(format!("Invalid value for cache_ttl_secs: {value}"))
             })?;
-            config.cache_ttl = std::time::Duration::from_secs(seconds);
+            config.cache_ttl_secs = seconds;
         }
         "output_json" => {
             config.output_json = value.to_lowercase() == "true" || value == "1";
@@ -4073,12 +4543,14 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
             })?;
         }
         "gen_default_charset" => {
-            let charset = value.parse::<CharsetType>().map_err(CrosstacheError::config)?;
+            let charset = value
+                .parse::<CharsetType>()
+                .map_err(CrosstacheError::config)?;
             config.gen_default_charset = Some(charset.to_string());
         }
         _ => {
             return Err(CrosstacheError::config(format!(
-                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout, gen_default_charset"
+                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_enabled, cache_ttl_secs, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout, gen_default_charset"
             )));
         }
     }
@@ -5438,13 +5910,13 @@ async fn execute_secret_list(
     expiring: Option<String>,
     expired: bool,
     config: &Config,
-) -> Result<()> {
+) -> Result<Vec<crate::secret::manager::SecretSummary>> {
     use crate::config::ContextManager;
+    use crate::utils::format::format_table;
+    use tabled::Table;
 
-    // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
 
-    // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
@@ -5454,36 +5926,42 @@ async fn execute_secret_list(
         crate::utils::format::OutputFormat::Table
     };
 
-    // Get the basic secret list first
-    let mut secrets = secret_manager
-        .list_secrets_formatted(
-            &vault_name,
-            group.as_deref(),
-            output_format.clone(),
-            false,
-            show_all,
-        )
+    // Always fetch the complete unfiltered list so the caller can cache
+    // the full dataset. Filters are applied in-memory below.
+    let all_secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
         .await?;
 
-    // Apply expiry filtering if requested
+    // Apply group and enabled filters for display
+    let mut secrets: Vec<_> = all_secrets.clone();
+    if !show_all {
+        secrets.retain(|s| s.enabled);
+    }
+    if let Some(ref g) = group {
+        secrets.retain(|s| {
+            s.groups
+                .as_ref()
+                .map(|groups| groups.split(',').any(|grp| grp.trim() == g))
+                .unwrap_or(false)
+        });
+    }
+
+    // Apply expiry filtering if requested (requires per-secret API calls)
     if expired || expiring.is_some() {
         use crate::utils::datetime::{is_expired, is_expiring_within};
 
-        // We need to get full secret details to check expiry dates
         let mut filtered_secrets = Vec::new();
 
         for secret_summary in secrets {
-            // Get full secret details to access expiry dates
             match secret_manager
                 .get_secret_safe(&vault_name, &secret_summary.name, false, true)
                 .await
             {
                 Ok(secret_props) => {
                     let should_include = if expired {
-                        // Show only expired secrets
                         is_expired(secret_props.expires_on)
                     } else if let Some(ref duration) = expiring {
-                        // Show secrets expiring within the specified duration
                         match is_expiring_within(secret_props.expires_on, duration) {
                             Ok(is_exp) => is_exp,
                             Err(e) => {
@@ -5492,7 +5970,7 @@ async fn execute_secret_list(
                             }
                         }
                     } else {
-                        true // Include all if no expiry filter
+                        true
                     };
 
                     if should_include {
@@ -5509,52 +5987,52 @@ async fn execute_secret_list(
         }
 
         secrets = filtered_secrets;
-
-        // Display the filtered results
-        if secrets.is_empty() {
-            let filter_desc = if expired {
-                "expired"
-            } else if expiring.is_some() {
-                "expiring"
-            } else {
-                "matching"
-            };
-            println!(
-                "No {} secrets found in vault '{}'.",
-                filter_desc, vault_name
-            );
-        } else {
-            // Re-display with the filtered list
-            if output_format == crate::utils::format::OutputFormat::Table {
-                use crate::utils::format::format_table;
-                use tabled::Table;
-
-                let table = Table::new(&secrets);
-                println!("{}", format_table(table, config.no_color));
-
-                let filter_desc = if expired {
-                    "expired".to_string()
-                } else if let Some(ref duration) = expiring {
-                    format!("expiring within {}", duration)
-                } else {
-                    "matching".to_string()
-                };
-                println!(
-                    "\nShowing {} {} secret(s) in vault '{}'",
-                    secrets.len(),
-                    filter_desc,
-                    vault_name
-                );
-            } else {
-                let json_output = serde_json::to_string_pretty(&secrets).map_err(|e| {
-                    CrosstacheError::serialization(format!("Failed to serialize secrets: {e}"))
-                })?;
-                println!("{}", json_output);
-            }
-        }
     }
 
-    Ok(())
+    // Display results
+    if output_format == crate::utils::format::OutputFormat::Table {
+        println!();
+        if config.no_color {
+            println!("Vault: {}", vault_name);
+        } else {
+            println!("\x1b[36mVault: {}\x1b[0m", vault_name);
+        }
+        println!();
+
+        if secrets.is_empty() {
+            let msg = if expired || expiring.is_some() {
+                let filter_desc = if expired { "expired" } else { "expiring" };
+                format!(
+                    "No {} secrets found in vault '{}'.",
+                    filter_desc, vault_name
+                )
+            } else if show_all {
+                "No secrets found in vault.".to_string()
+            } else {
+                "No enabled secrets found in vault. Use --all to show disabled secrets.".to_string()
+            };
+            output::info(&msg);
+        } else {
+            let table = Table::new(&secrets);
+            println!("{}", format_table(table, config.no_color));
+
+            let count_label = if expired {
+                format!("{} expired secret(s)", secrets.len())
+            } else if let Some(ref duration) = expiring {
+                format!("{} secret(s) expiring within {}", secrets.len(), duration)
+            } else {
+                format!("{} secret(s)", secrets.len())
+            };
+            println!("\n{} in vault '{}'", count_label, vault_name);
+        }
+    } else {
+        let json = serde_json::to_string_pretty(&secrets).map_err(|e| {
+            CrosstacheError::serialization(format!("Failed to serialize secrets: {e}"))
+        })?;
+        println!("{json}");
+    }
+
+    Ok(all_secrets)
 }
 
 async fn execute_secret_delete(
@@ -6588,6 +7066,14 @@ async fn execute_vault_import(
         "Import completed: {imported_count} imported, {skipped_count} skipped"
     ));
 
+    // Invalidate the secrets list cache for the target vault
+    if imported_count > 0 {
+        let cache_manager = crate::cache::CacheManager::from_config(config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            vault_name: name.to_string(),
+        });
+    }
+
     Ok(())
 }
 
@@ -6723,10 +7209,7 @@ async fn execute_vault_share(
                     "json" => crate::utils::format::OutputFormat::Json,
                     "table" | "" => crate::utils::format::OutputFormat::Table,
                     other => {
-                        output::warn(&format!(
-                            "Unrecognized format '{}', using table",
-                            other
-                        ));
+                        output::warn(&format!("Unrecognized format '{}', using table", other));
                         crate::utils::format::OutputFormat::Table
                     }
                 };
@@ -6914,7 +7397,10 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let vault_name = context_manager.current_vault().unwrap_or("unknown").to_string();
+    let vault_name = context_manager
+        .current_vault()
+        .unwrap_or("unknown")
+        .to_string();
     context_manager.clear_context().await?;
 
     let scope = if global {
@@ -7042,53 +7528,23 @@ async fn execute_file_download(
     println!("Downloading file '{name}' to '{output_path}'...");
 
     let content = blob_manager.download_file(download_request).await?;
-    fs::write(&output_path, content).map_err(|e| {
-        CrosstacheError::config(format!("Failed to write file {output_path}: {e}"))
-    })?;
+    fs::write(&output_path, content)
+        .map_err(|e| CrosstacheError::config(format!("Failed to write file {output_path}: {e}")))?;
     output::success(&format!("Successfully downloaded file '{name}'"));
 
     Ok(())
 }
 
 #[cfg(feature = "file-ops")]
-async fn execute_file_list(
-    blob_manager: &BlobManager,
-    prefix: Option<String>,
-    group: Option<String>,
-    limit: Option<usize>,
+fn display_file_list_items(
+    items: &[crate::blob::models::BlobListItem],
     recursive: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::blob::manager::format_size;
-    use crate::blob::models::{BlobListItem, FileListRequest};
+    use crate::blob::models::BlobListItem;
     use crate::utils::format::format_table;
     use tabled::{Table, Tabled};
-
-    // Create list request
-    let list_request = FileListRequest {
-        prefix: prefix.clone(),
-        groups: group.map(|g| vec![g]),
-        limit,
-        delimiter: if recursive {
-            None
-        } else {
-            Some("/".to_string())
-        },
-        recursive,
-    };
-
-    // Get items based on recursive flag
-    let items = if recursive {
-        // Old behavior: flat list of all files
-        let files = blob_manager.list_files(list_request).await?;
-        files
-            .into_iter()
-            .map(BlobListItem::File)
-            .collect::<Vec<_>>()
-    } else {
-        // New behavior: hierarchical listing
-        blob_manager.list_files_hierarchical(list_request).await?
-    };
 
     if items.is_empty() {
         output::info("No files found");
@@ -7158,6 +7614,68 @@ async fn execute_file_list(
     }
 
     Ok(())
+}
+
+#[cfg(feature = "file-ops")]
+async fn execute_file_list(
+    blob_manager: &BlobManager,
+    prefix: Option<String>,
+    group: Option<String>,
+    limit: Option<usize>,
+    recursive: bool,
+    no_cache: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::blob::models::{BlobListItem, FileListRequest};
+    use crate::cache::{CacheKey, CacheManager};
+
+    let cache_manager = CacheManager::from_config(config);
+    let vault_name = config.resolve_vault_name(None).await.unwrap_or_default();
+    let cache_key = CacheKey::FileList {
+        vault_name,
+        recursive,
+    };
+    let use_cache = cache_manager.is_enabled() && !no_cache;
+
+    let is_unfiltered = prefix.is_none() && group.is_none() && limit.is_none();
+
+    if use_cache && is_unfiltered {
+        if let Some(cached) = cache_manager.get::<Vec<BlobListItem>>(&cache_key) {
+            return display_file_list_items(&cached, recursive, config);
+        }
+    }
+
+    // Create list request
+    let list_request = FileListRequest {
+        prefix: prefix.clone(),
+        groups: group.map(|g| vec![g]),
+        limit,
+        delimiter: if recursive {
+            None
+        } else {
+            Some("/".to_string())
+        },
+        recursive,
+    };
+
+    // Get items based on recursive flag
+    let items = if recursive {
+        // Old behavior: flat list of all files
+        let files = blob_manager.list_files(list_request).await?;
+        files
+            .into_iter()
+            .map(BlobListItem::File)
+            .collect::<Vec<_>>()
+    } else {
+        // New behavior: hierarchical listing
+        blob_manager.list_files_hierarchical(list_request).await?
+    };
+
+    if use_cache && is_unfiltered {
+        cache_manager.set(&cache_key, &items);
+    }
+
+    display_file_list_items(&items, recursive, config)
 }
 
 #[cfg(feature = "file-ops")]
@@ -7575,15 +8093,7 @@ async fn execute_file_download_multiple(
     let mut error_count = 0;
 
     for file_name in files {
-        match execute_file_download(
-            blob_manager,
-            &file_name,
-            output.clone(),
-            force,
-            config,
-        )
-        .await
-        {
+        match execute_file_download(blob_manager, &file_name, output.clone(), force, config).await {
             Ok(_) => {
                 println!(
                     "  {}",
@@ -8463,7 +8973,10 @@ mod tests {
     #[test]
     fn test_charset_display() {
         assert_eq!(CharsetType::Alphanumeric.to_string(), "alphanumeric");
-        assert_eq!(CharsetType::AlphanumericSymbols.to_string(), "alphanumeric-symbols");
+        assert_eq!(
+            CharsetType::AlphanumericSymbols.to_string(),
+            "alphanumeric-symbols"
+        );
         assert_eq!(CharsetType::Hex.to_string(), "hex");
         assert_eq!(CharsetType::Base64.to_string(), "base64");
         assert_eq!(CharsetType::Numeric.to_string(), "numeric");
@@ -8473,15 +8986,39 @@ mod tests {
 
     #[test]
     fn test_charset_from_str_valid() {
-        assert_eq!("alphanumeric".parse::<CharsetType>().unwrap(), CharsetType::Alphanumeric);
-        assert_eq!("alphanumeric-symbols".parse::<CharsetType>().unwrap(), CharsetType::AlphanumericSymbols);
-        assert_eq!("alphanumeric_symbols".parse::<CharsetType>().unwrap(), CharsetType::AlphanumericSymbols);
+        assert_eq!(
+            "alphanumeric".parse::<CharsetType>().unwrap(),
+            CharsetType::Alphanumeric
+        );
+        assert_eq!(
+            "alphanumeric-symbols".parse::<CharsetType>().unwrap(),
+            CharsetType::AlphanumericSymbols
+        );
+        assert_eq!(
+            "alphanumeric_symbols".parse::<CharsetType>().unwrap(),
+            CharsetType::AlphanumericSymbols
+        );
         assert_eq!("hex".parse::<CharsetType>().unwrap(), CharsetType::Hex);
-        assert_eq!("base64".parse::<CharsetType>().unwrap(), CharsetType::Base64);
-        assert_eq!("numeric".parse::<CharsetType>().unwrap(), CharsetType::Numeric);
-        assert_eq!("uppercase".parse::<CharsetType>().unwrap(), CharsetType::Uppercase);
-        assert_eq!("lowercase".parse::<CharsetType>().unwrap(), CharsetType::Lowercase);
-        assert_eq!("ALPHANUMERIC".parse::<CharsetType>().unwrap(), CharsetType::Alphanumeric);
+        assert_eq!(
+            "base64".parse::<CharsetType>().unwrap(),
+            CharsetType::Base64
+        );
+        assert_eq!(
+            "numeric".parse::<CharsetType>().unwrap(),
+            CharsetType::Numeric
+        );
+        assert_eq!(
+            "uppercase".parse::<CharsetType>().unwrap(),
+            CharsetType::Uppercase
+        );
+        assert_eq!(
+            "lowercase".parse::<CharsetType>().unwrap(),
+            CharsetType::Lowercase
+        );
+        assert_eq!(
+            "ALPHANUMERIC".parse::<CharsetType>().unwrap(),
+            CharsetType::Alphanumeric
+        );
     }
 
     #[test]
@@ -8519,7 +9056,10 @@ mod tests {
         let value = generate_random_value(200, CharsetType::Alphanumeric, None).unwrap();
         let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         for ch in value.chars() {
-            assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric output");
+            assert!(
+                valid.contains(ch),
+                "Unexpected char '{ch}' in alphanumeric output"
+            );
         }
     }
 
@@ -8527,7 +9067,10 @@ mod tests {
     fn test_gen_numeric_chars_only() {
         let value = generate_random_value(200, CharsetType::Numeric, None).unwrap();
         for ch in value.chars() {
-            assert!(ch.is_ascii_digit(), "Unexpected char '{ch}' in numeric output");
+            assert!(
+                ch.is_ascii_digit(),
+                "Unexpected char '{ch}' in numeric output"
+            );
         }
     }
 
@@ -8535,7 +9078,10 @@ mod tests {
     fn test_gen_uppercase_chars_only() {
         let value = generate_random_value(200, CharsetType::Uppercase, None).unwrap();
         for ch in value.chars() {
-            assert!(ch.is_ascii_uppercase(), "Unexpected char '{ch}' in uppercase output");
+            assert!(
+                ch.is_ascii_uppercase(),
+                "Unexpected char '{ch}' in uppercase output"
+            );
         }
     }
 
@@ -8543,7 +9089,10 @@ mod tests {
     fn test_gen_lowercase_chars_only() {
         let value = generate_random_value(200, CharsetType::Lowercase, None).unwrap();
         for ch in value.chars() {
-            assert!(ch.is_ascii_lowercase(), "Unexpected char '{ch}' in lowercase output");
+            assert!(
+                ch.is_ascii_lowercase(),
+                "Unexpected char '{ch}' in lowercase output"
+            );
         }
     }
 
@@ -8561,7 +9110,10 @@ mod tests {
         let value = generate_random_value(500, CharsetType::AlphanumericSymbols, None).unwrap();
         let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?";
         for ch in value.chars() {
-            assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric-symbols output");
+            assert!(
+                valid.contains(ch),
+                "Unexpected char '{ch}' in alphanumeric-symbols output"
+            );
         }
     }
 
@@ -8570,8 +9122,10 @@ mod tests {
         let value = generate_random_value(200, CharsetType::Base64, None).unwrap();
         let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         for ch in value.chars() {
-            assert!(valid.contains(ch), "Unexpected char '{ch}' in base64 output");
+            assert!(
+                valid.contains(ch),
+                "Unexpected char '{ch}' in base64 output"
+            );
         }
     }
-
 }

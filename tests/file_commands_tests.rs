@@ -401,22 +401,21 @@ async fn test_file_list_command() -> Result<()> {
     let list_command = FileCommands::List {
         prefix: Some("config/".to_string()),
         group: Some("production".to_string()),
-        metadata: true,
         limit: Some(50),
         recursive: false,
+        no_cache: false,
     };
 
     match list_command {
         FileCommands::List {
             prefix,
             group,
-            metadata,
             limit,
             recursive: _,
+            no_cache: _,
         } => {
             assert_eq!(prefix, Some("config/".to_string()));
             assert_eq!(group, Some("production".to_string()));
-            assert!(metadata);
             assert_eq!(limit, Some(50));
         }
         _ => panic!("Expected List command"),

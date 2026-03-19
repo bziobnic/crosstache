@@ -7,7 +7,6 @@ use crate::error::{CrosstacheError, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
-use std::time::Duration;
 use tabled::Tabled;
 
 /// Azure credential type priority for authentication
@@ -89,8 +88,14 @@ pub struct Config {
     pub tenant_id: String,
     #[tabled(skip)]
     pub function_app_url: String,
-    #[tabled(skip)]
-    pub cache_ttl: Duration,
+    /// Whether client-side caching is enabled for listing operations
+    #[tabled(rename = "Cache Enabled")]
+    #[serde(default = "default_cache_enabled")]
+    pub cache_enabled: bool,
+    /// Cache time-to-live in seconds (0 to disable)
+    #[tabled(rename = "Cache TTL")]
+    #[serde(default = "default_cache_ttl_secs")]
+    pub cache_ttl_secs: u64,
     #[tabled(rename = "JSON Output")]
     pub output_json: bool,
     #[tabled(rename = "No Color")]
@@ -118,6 +123,14 @@ fn default_clipboard_timeout() -> u64 {
     30
 }
 
+fn default_cache_enabled() -> bool {
+    true
+}
+
+fn default_cache_ttl_secs() -> u64 {
+    900
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -128,7 +141,8 @@ impl Default for Config {
             default_location: "eastus".to_string(),
             tenant_id: String::new(),
             function_app_url: String::new(),
-            cache_ttl: Duration::from_secs(300), // 5 minutes
+            cache_enabled: default_cache_enabled(),
+            cache_ttl_secs: default_cache_ttl_secs(),
             output_json: false,
             no_color: false,
             blob_config: None,
@@ -379,9 +393,13 @@ fn load_from_env(config: &mut Config) {
         config.function_app_url = value;
     }
 
+    if let Ok(value) = std::env::var("CACHE_ENABLED") {
+        config.cache_enabled = value.to_lowercase() == "true" || value == "1";
+    }
+
     if let Ok(value) = std::env::var("CACHE_TTL") {
         if let Ok(seconds) = value.parse::<u64>() {
-            config.cache_ttl = Duration::from_secs(seconds);
+            config.cache_ttl_secs = seconds;
         }
     }
 
@@ -589,11 +607,50 @@ mod tests {
             default_location = "eastus"
             tenant_id = ""
             function_app_url = ""
-            cache_ttl = { secs = 300, nanos = 0 }
             output_json = false
             no_color = false
         "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.gen_default_charset.is_none());
+    }
+
+    #[test]
+    fn test_cache_config_defaults() {
+        let config = Config::default();
+        assert!(config.cache_enabled);
+        assert_eq!(config.cache_ttl_secs, 900);
+    }
+
+    #[test]
+    fn test_cache_config_serde_round_trip() {
+        let config = Config {
+            cache_enabled: false,
+            cache_ttl_secs: 600,
+            ..Default::default()
+        };
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        assert!(serialized.contains("cache_enabled"));
+        assert!(serialized.contains("cache_ttl_secs"));
+        let deserialized: Config = toml::from_str(&serialized).unwrap();
+        assert!(!deserialized.cache_enabled);
+        assert_eq!(deserialized.cache_ttl_secs, 600);
+    }
+
+    #[test]
+    fn test_cache_config_absent_in_toml_uses_defaults() {
+        let toml = r#"
+            debug = false
+            subscription_id = ""
+            default_vault = ""
+            default_resource_group = "Vaults"
+            default_location = "eastus"
+            tenant_id = ""
+            function_app_url = ""
+            output_json = false
+            no_color = false
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.cache_enabled);
+        assert_eq!(config.cache_ttl_secs, 900);
     }
 }

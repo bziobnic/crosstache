@@ -502,7 +502,10 @@ impl SecretOperations for AzureSecretOperations {
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let created_ts = attributes.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+        let created_ts = attributes
+            .get("created")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         let created_on = if created_ts > 0 {
             chrono::DateTime::from_timestamp(created_ts, 0)
                 .map(|dt| dt.to_string())
@@ -648,7 +651,10 @@ impl SecretOperations for AzureSecretOperations {
         let attributes = &json["attributes"];
         let enabled = attributes["enabled"].as_bool().unwrap_or(true);
 
-        let created_ts = attributes.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+        let created_ts = attributes
+            .get("created")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         let created_on = if created_ts > 0 {
             DateTime::from_timestamp(created_ts, 0)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
@@ -955,7 +961,10 @@ impl SecretOperations for AzureSecretOperations {
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let created_ts = attributes.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+        let created_ts = attributes
+            .get("created")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         let created_on = if created_ts > 0 {
             chrono::DateTime::from_timestamp(created_ts, 0)
                 .map(|dt| dt.to_string())
