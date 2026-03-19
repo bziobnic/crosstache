@@ -1382,7 +1382,6 @@ At the end of the function, replace `Ok(())` with `Ok(all_secrets)`.
 This returns the **full unfiltered list** (before `--group`, `--expiring`, `--expired` filters), which is what we cache. The function still displays the filtered results as before.
 
 - [ ] **Step 2: Add display_cached_secret_list helper**
-PLACEHOLDER_DELETE_START
             let mut secrets = cached_secrets;
             if !all {
                 secrets.retain(|s| s.enabled);
