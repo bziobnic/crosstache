@@ -6,6 +6,7 @@
 pub mod auth;
 #[cfg(feature = "file-ops")]
 pub mod blob;
+pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod error;
