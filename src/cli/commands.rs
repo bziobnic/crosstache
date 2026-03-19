@@ -8472,6 +8472,7 @@ async fn file_sync_delete_remote_not_local(
     local_set: &std::collections::HashSet<String>,
     dry_run: bool,
     delete_requested: bool,
+    quiet_stdout: bool,
     summary: &mut FileSyncSummary,
     mutated: &mut bool,
 ) -> Result<()> {
@@ -8514,8 +8515,10 @@ async fn file_sync_delete_remote_not_local(
     }
 
     if dry_run {
-        for n in &to_delete {
-            println!("delete (dry-run): {n}");
+        if !quiet_stdout {
+            for n in &to_delete {
+                println!("delete (dry-run): {n}");
+            }
         }
         summary.deleted += to_delete.len();
         return Ok(());
@@ -8536,7 +8539,9 @@ async fn file_sync_delete_remote_not_local(
     }
 
     for n in to_delete {
-        println!("Deleting remote: {n}");
+        if !quiet_stdout {
+            println!("Deleting remote: {n}");
+        }
         blob_manager.delete_file(&n).await?;
         summary.deleted += 1;
         *mutated = true;
@@ -8568,12 +8573,18 @@ async fn execute_file_sync(
         )));
     }
 
+    if delete && matches!(direction, SyncDirection::Down) {
+        output::warn(
+            "`--delete` applies to remote files not present locally and is ignored for sync down; use sync up or both.",
+        );
+    }
+
     let base_path = path.parent().unwrap_or(path);
     let prefix_ref = prefix.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
     let local_files = collect_files_with_structure(path, base_path, prefix_ref, false)?;
 
-    if local_files.is_empty() {
+    if local_files.is_empty() && !config.output_json {
         output::info("No local files found to sync");
     }
 
@@ -8633,7 +8644,7 @@ async fn execute_file_sync(
                 let (size, mtime) = *local_meta.get(&blob_name).unwrap();
                 let need = match remote_by_name.get(&blob_name) {
                     None => true,
-                    Some(r) => !sync::is_unchanged(size, mtime, r),
+                    Some(r) => !sync::should_skip_sync_up(size, mtime, r),
                 };
                 if !need {
                     summary.skipped += 1;
@@ -8643,10 +8654,12 @@ async fn execute_file_sync(
                     continue;
                 }
                 if dry_run {
-                    println!(
-                        "upload (dry-run): {} → {blob_name}",
-                        info.local_path.display()
-                    );
+                    if !config.output_json {
+                        println!(
+                            "upload (dry-run): {} → {blob_name}",
+                            info.local_path.display()
+                        );
+                    }
                     summary.uploaded += 1;
                     continue;
                 }
@@ -8664,8 +8677,11 @@ async fn execute_file_sync(
                     metadata: std::collections::HashMap::new(),
                     tags: std::collections::HashMap::new(),
                 };
-                println!("upload: {} → {blob_name}", info.local_path.display());
-                blob_manager.upload_file(upload_request).await?;
+                if !config.output_json {
+                    println!("upload: {} → {blob_name}", info.local_path.display());
+                }
+                let uploaded_info = blob_manager.upload_file(upload_request).await?;
+                sync::set_file_mtime_utc(&info.local_path, uploaded_info.last_modified)?;
                 summary.uploaded += 1;
                 mutated = true;
             }
@@ -8677,6 +8693,7 @@ async fn execute_file_sync(
                 &local_names,
                 dry_run,
                 delete,
+                config.output_json,
                 &mut summary,
                 &mut mutated,
             )
@@ -8721,7 +8738,9 @@ async fn execute_file_sync(
                 }
 
                 if dry_run {
-                    println!("download (dry-run): {blob_name} → {}", target.display());
+                    if !config.output_json {
+                        println!("download (dry-run): {blob_name} → {}", target.display());
+                    }
                     summary.downloaded += 1;
                     continue;
                 }
@@ -8743,11 +8762,14 @@ async fn execute_file_sync(
                     output_path: Some(target.display().to_string()),
                     stream: false,
                 };
-                println!("download: {blob_name} → {}", target.display());
+                if !config.output_json {
+                    println!("download: {blob_name} → {}", target.display());
+                }
                 let content = blob_manager.download_file(download_request).await?;
                 fs::write(&target, content).map_err(|e| {
                     CrosstacheError::config(format!("Failed to write {}: {e}", target.display()))
                 })?;
+                sync::set_file_mtime_utc(&target, remote_info.last_modified)?;
                 summary.downloaded += 1;
                 mutated = true;
             }
@@ -8766,10 +8788,12 @@ async fn execute_file_sync(
                     (true, false) => {
                         let info = local_by_blob.get(&blob_name).unwrap();
                         if dry_run {
-                            println!(
-                                "upload (dry-run): {} → {blob_name}",
-                                info.local_path.display()
-                            );
+                            if !config.output_json {
+                                println!(
+                                    "upload (dry-run): {} → {blob_name}",
+                                    info.local_path.display()
+                                );
+                            }
                             summary.uploaded += 1;
                             continue;
                         }
@@ -8787,17 +8811,22 @@ async fn execute_file_sync(
                             metadata: std::collections::HashMap::new(),
                             tags: std::collections::HashMap::new(),
                         };
-                        println!("upload: {} → {blob_name}", info.local_path.display());
-                        blob_manager.upload_file(upload_request).await?;
+                        if !config.output_json {
+                            println!("upload: {} → {blob_name}", info.local_path.display());
+                        }
+                        let uploaded_info = blob_manager.upload_file(upload_request).await?;
+                        sync::set_file_mtime_utc(&info.local_path, uploaded_info.last_modified)?;
                         summary.uploaded += 1;
                         mutated = true;
                     }
                     (false, true) => {
-                        let _remote = remote_by_name.get(&blob_name).unwrap();
+                        let remote_info = remote_by_name.get(&blob_name).unwrap();
                         let target = sync::local_path_from_blob(base_path, prefix_ref, &blob_name);
                         sync_assert_safe_local_path(base_path, &target, &blob_name)?;
                         if dry_run {
-                            println!("download (dry-run): {blob_name} → {}", target.display());
+                            if !config.output_json {
+                                println!("download (dry-run): {blob_name} → {}", target.display());
+                            }
                             summary.downloaded += 1;
                             continue;
                         }
@@ -8817,7 +8846,9 @@ async fn execute_file_sync(
                             output_path: Some(target.display().to_string()),
                             stream: false,
                         };
-                        println!("download: {blob_name} → {}", target.display());
+                        if !config.output_json {
+                            println!("download: {blob_name} → {}", target.display());
+                        }
                         let content = blob_manager.download_file(download_request).await?;
                         fs::write(&target, content).map_err(|e| {
                             CrosstacheError::config(format!(
@@ -8825,6 +8856,7 @@ async fn execute_file_sync(
                                 target.display()
                             ))
                         })?;
+                        sync::set_file_mtime_utc(&target, remote_info.last_modified)?;
                         summary.downloaded += 1;
                         mutated = true;
                     }
@@ -8841,10 +8873,12 @@ async fn execute_file_sync(
                             }
                             BothAction::Upload => {
                                 if dry_run {
-                                    println!(
-                                        "upload (dry-run): {} → {blob_name}",
-                                        info.local_path.display()
-                                    );
+                                    if !config.output_json {
+                                        println!(
+                                            "upload (dry-run): {} → {blob_name}",
+                                            info.local_path.display()
+                                        );
+                                    }
                                     summary.uploaded += 1;
                                     continue;
                                 }
@@ -8862,8 +8896,15 @@ async fn execute_file_sync(
                                     metadata: std::collections::HashMap::new(),
                                     tags: std::collections::HashMap::new(),
                                 };
-                                println!("upload: {} → {blob_name}", info.local_path.display());
-                                blob_manager.upload_file(upload_request).await?;
+                                if !config.output_json {
+                                    println!("upload: {} → {blob_name}", info.local_path.display());
+                                }
+                                let uploaded_info =
+                                    blob_manager.upload_file(upload_request).await?;
+                                sync::set_file_mtime_utc(
+                                    &info.local_path,
+                                    uploaded_info.last_modified,
+                                )?;
                                 summary.uploaded += 1;
                                 mutated = true;
                             }
@@ -8872,10 +8913,12 @@ async fn execute_file_sync(
                                     sync::local_path_from_blob(base_path, prefix_ref, &blob_name);
                                 sync_assert_safe_local_path(base_path, &target, &blob_name)?;
                                 if dry_run {
-                                    println!(
-                                        "download (dry-run): {blob_name} → {}",
-                                        target.display()
-                                    );
+                                    if !config.output_json {
+                                        println!(
+                                            "download (dry-run): {blob_name} → {}",
+                                            target.display()
+                                        );
+                                    }
                                     summary.downloaded += 1;
                                     continue;
                                 }
@@ -8895,7 +8938,9 @@ async fn execute_file_sync(
                                     output_path: Some(target.display().to_string()),
                                     stream: false,
                                 };
-                                println!("download: {blob_name} → {}", target.display());
+                                if !config.output_json {
+                                    println!("download: {blob_name} → {}", target.display());
+                                }
                                 let content = blob_manager.download_file(download_request).await?;
                                 fs::write(&target, content).map_err(|e| {
                                     CrosstacheError::config(format!(
@@ -8903,6 +8948,7 @@ async fn execute_file_sync(
                                         target.display()
                                     ))
                                 })?;
+                                sync::set_file_mtime_utc(&target, remote_info.last_modified)?;
                                 summary.downloaded += 1;
                                 mutated = true;
                             }
@@ -8943,6 +8989,7 @@ async fn execute_file_sync(
                 &local_names_after,
                 dry_run,
                 delete,
+                config.output_json,
                 &mut summary,
                 &mut mutated,
             )

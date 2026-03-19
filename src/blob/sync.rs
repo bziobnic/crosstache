@@ -1,13 +1,43 @@
 //! Blob sync helpers: change detection and local path mapping for `xv file sync`.
 
 use crate::blob::models::FileInfo;
+use crate::error::{CrosstacheError, Result};
 use chrono::{DateTime, Duration, Utc};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::time::{Duration as StdDuration, UNIX_EPOCH};
 
 /// Clock skew / filesystem rounding tolerance for comparing mtimes (seconds).
 pub const SYNC_MTIME_EPSILON_SECS: i64 = 2;
 
+/// Set the local file's modification time to match the blob's `last_modified` so subsequent
+/// sync runs can compare mtimes without re-transferring the same content.
+pub fn set_file_mtime_utc(path: &Path, mtime: DateTime<Utc>) -> Result<()> {
+    let secs = mtime.timestamp();
+    let nanos = mtime.timestamp_subsec_nanos();
+    if secs < 0 {
+        return Err(CrosstacheError::config(
+            "blob last_modified cannot be represented as a local file timestamp",
+        ));
+    }
+    let st = UNIX_EPOCH + StdDuration::new(secs as u64, nanos);
+    let file = OpenOptions::new().write(true).open(path).map_err(|e| {
+        CrosstacheError::config(format!(
+            "Failed to open {} to set modification time: {e}",
+            path.display()
+        ))
+    })?;
+    file.set_modified(st).map_err(|e| {
+        CrosstacheError::config(format!(
+            "Failed to set modification time on {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
 /// Whether local file metadata matches remote closely enough to skip a transfer.
+/// Used after downloads (and uploads) when we align local mtime to the blob `last_modified`.
 #[must_use]
 pub fn is_unchanged(local_size: u64, local_mtime: DateTime<Utc>, remote: &FileInfo) -> bool {
     if local_size != remote.size {
@@ -15,6 +45,16 @@ pub fn is_unchanged(local_size: u64, local_mtime: DateTime<Utc>, remote: &FileIn
     }
     let diff = (local_mtime - remote.last_modified).num_seconds().abs();
     diff <= SYNC_MTIME_EPSILON_SECS
+}
+
+/// Whether sync **up** can skip this blob: same size and the remote version is at least as
+/// fresh as the local file (no local edits after the blob was written).
+#[must_use]
+pub fn should_skip_sync_up(local_size: u64, local_mtime: DateTime<Utc>, remote: &FileInfo) -> bool {
+    if local_size != remote.size {
+        return false;
+    }
+    remote.last_modified + Duration::seconds(SYNC_MTIME_EPSILON_SECS) >= local_mtime
 }
 
 #[must_use]
@@ -143,5 +183,21 @@ mod tests {
         s.insert("docs/a.txt".to_string());
         s.insert("docs/b.txt".to_string());
         assert_eq!(common_directory_prefix(&s), Some("docs/".to_string()));
+    }
+
+    #[test]
+    fn skip_sync_up_when_remote_newer_same_size() {
+        let local_t = Utc::now();
+        let remote_t = local_t + Duration::seconds(60);
+        let r = remote(100, remote_t);
+        assert!(should_skip_sync_up(100, local_t, &r));
+    }
+
+    #[test]
+    fn skip_sync_up_false_when_local_newer() {
+        let remote_t = Utc::now();
+        let local_t = remote_t + Duration::seconds(60);
+        let r = remote(100, remote_t);
+        assert!(!should_skip_sync_up(100, local_t, &r));
     }
 }
