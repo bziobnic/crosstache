@@ -264,6 +264,9 @@ pub enum Commands {
         /// Show expired secrets only
         #[arg(long)]
         expired: bool,
+        /// Bypass the local cache and fetch fresh data
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -541,6 +544,11 @@ pub enum Commands {
     },
     /// Show authenticated identity and context information
     Whoami,
+    /// Cache management commands
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
@@ -593,6 +601,9 @@ pub enum VaultCommands {
         /// Output format
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
+        /// Bypass the local cache and fetch fresh data
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Delete a vault
     Delete {
@@ -826,6 +837,9 @@ pub enum FileCommands {
         /// List all files recursively (show all nested files instead of directory structure)
         #[arg(short, long)]
         recursive: bool,
+        /// Bypass the local cache and fetch fresh data
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Delete one or more files from blob storage
     #[command(alias = "rm")]
@@ -914,6 +928,23 @@ pub enum ConfigCommands {
     },
     /// Show configuration file path
     Path,
+}
+
+#[derive(Subcommand)]
+pub enum CacheCommands {
+    /// Remove cached data
+    Clear {
+        #[arg(long)]
+        vault: Option<String>,
+    },
+    /// Show cache status and statistics
+    Status,
+    /// Internal: refresh a cache entry in the background
+    #[command(hide = true)]
+    Refresh {
+        #[arg(long)]
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1034,7 +1065,8 @@ impl Cli {
                 all,
                 expiring,
                 expired,
-            } => execute_secret_list_direct(group, all, expiring, expired, config).await,
+                no_cache,
+            } => execute_secret_list_direct(group, all, expiring, expired, no_cache, config).await,
             Commands::Delete { name, group, force } => {
                 execute_secret_delete_direct(name, group, force, config).await
             }
@@ -1173,6 +1205,7 @@ impl Cli {
             Commands::Version => execute_version_command().await,
             Commands::Completion { shell } => execute_completion_command(shell).await,
             Commands::Whoami => execute_whoami_command(config).await,
+            Commands::Cache { command } => execute_cache_command(command, config).await,
             #[cfg(feature = "file-ops")]
             Commands::Upload {
                 file_path,
@@ -1341,6 +1374,7 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
             group,
             limit,
             recursive,
+            no_cache,
         } => {
             execute_file_list(
                 &blob_manager,
@@ -1348,6 +1382,7 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                 group,
                 limit,
                 recursive,
+                no_cache,
                 &config,
             )
             .await?;
@@ -1429,8 +1464,9 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
         VaultCommands::List {
             resource_group,
             format,
+            no_cache,
         } => {
-            execute_vault_list(&vault_manager, resource_group, format, &config).await?;
+            execute_vault_list(&vault_manager, resource_group, format, no_cache, &config).await?;
         }
         VaultCommands::Delete {
             name,
@@ -1583,6 +1619,7 @@ async fn execute_vault_list(
     vault_manager: &VaultManager,
     resource_group: Option<String>,
     format: OutputFormat,
+    _no_cache: bool,
     config: &Config,
 ) -> Result<()> {
     vault_manager
@@ -1728,6 +1765,7 @@ async fn execute_secret_list_direct(
     all: bool,
     expiring: Option<String>,
     expired: bool,
+    _no_cache: bool,
     config: Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
@@ -2317,6 +2355,167 @@ async fn execute_config_command(command: ConfigCommands, config: Config) -> Resu
             execute_config_path().await?;
         }
     }
+    Ok(())
+}
+
+async fn execute_cache_command(command: CacheCommands, config: Config) -> Result<()> {
+    use crate::cache::CacheManager;
+
+    let cache_manager = CacheManager::from_config(&config);
+
+    match command {
+        CacheCommands::Clear { vault } => {
+            let vault_ref = vault.as_deref();
+            cache_manager.clear(vault_ref);
+            match vault_ref {
+                Some(name) => output::success(&format!("Cache cleared for vault '{name}'.")),
+                None => output::success("Cache cleared."),
+            }
+        }
+        CacheCommands::Status => {
+            let status = cache_manager.status();
+            println!("Cache directory : {}", status.cache_dir.display());
+            println!("Enabled         : {}", status.enabled);
+            println!("TTL             : {}s", status.ttl_secs);
+            println!("Entries         : {}", status.entry_count);
+            println!("Total size      : {}", format_cache_size(status.total_size_bytes));
+            if !status.entries.is_empty() {
+                println!("\nEntries:");
+                for entry in &status.entries {
+                    let freshness = if entry.is_stale { "stale" } else { "fresh" };
+                    println!(
+                        "  {} — created {} — expires {} [{}]",
+                        entry.key,
+                        entry.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                        entry.expires_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                        freshness,
+                    );
+                }
+            }
+        }
+        CacheCommands::Refresh { key } => {
+            execute_cache_refresh(&key, config).await?;
+        }
+    }
+    Ok(())
+}
+
+fn format_cache_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
+    use crate::cache::CacheKey;
+
+    let cache_key: CacheKey = key.parse().map_err(|e| CrosstacheError::invalid_argument(e))?;
+
+    match cache_key {
+        CacheKey::SecretsList { ref vault_name } => {
+            refresh_secrets_list(vault_name.clone(), config).await?;
+        }
+        CacheKey::VaultList => {
+            refresh_vault_list(config).await?;
+        }
+        CacheKey::FileList { ref vault_name } => {
+            refresh_file_list(vault_name.clone(), config).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn refresh_secrets_list(vault_name: String, config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::cache::{CacheKey, CacheManager};
+    use crate::secret::manager::SecretManager;
+    use std::sync::Arc;
+
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone(),
+        )
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        })?,
+    );
+
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    let secrets = secret_manager
+        .secret_ops()
+        .list_secrets(&vault_name, None)
+        .await?;
+
+    let cache_manager = CacheManager::from_config(&config);
+    let cache_key = CacheKey::SecretsList { vault_name };
+    cache_manager.set(&cache_key, &secrets);
+
+    Ok(())
+}
+
+async fn refresh_vault_list(config: Config) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::cache::{CacheKey, CacheManager};
+    use std::sync::Arc;
+
+    let auth_provider = Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone(),
+        )
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        })?,
+    );
+
+    let vault_manager = VaultManager::new(
+        auth_provider,
+        config.subscription_id.clone(),
+        config.no_color,
+    )?;
+
+    let vaults = vault_manager
+        .list_vaults_formatted(
+            Some(&config.subscription_id),
+            None,
+            crate::utils::format::OutputFormat::Json,
+        )
+        .await?;
+
+    let cache_manager = CacheManager::from_config(&config);
+    cache_manager.set(&CacheKey::VaultList, &vaults);
+
+    Ok(())
+}
+
+#[cfg(feature = "file-ops")]
+async fn refresh_file_list(vault_name: String, config: Config) -> Result<()> {
+    use crate::blob::manager::create_blob_manager;
+    use crate::blob::models::FileListRequest;
+    use crate::cache::{CacheKey, CacheManager};
+
+    let blob_manager = create_blob_manager(&config)?;
+    let list_request = FileListRequest {
+        prefix: None,
+        groups: None,
+        limit: None,
+        delimiter: None,
+        recursive: true,
+    };
+    let files = blob_manager.list_files(list_request).await?;
+
+    let cache_manager = CacheManager::from_config(&config);
+    let cache_key = CacheKey::FileList { vault_name };
+    cache_manager.set(&cache_key, &files);
+
+    Ok(())
+}
+
+#[cfg(not(feature = "file-ops"))]
+async fn refresh_file_list(_vault_name: String, _config: Config) -> Result<()> {
     Ok(())
 }
 
@@ -7065,6 +7264,7 @@ async fn execute_file_list(
     group: Option<String>,
     limit: Option<usize>,
     recursive: bool,
+    _no_cache: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::blob::manager::format_size;

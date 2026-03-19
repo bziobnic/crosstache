@@ -10,6 +10,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod auth;
 #[cfg(feature = "file-ops")]
 mod blob;
+mod cache;
 mod cli;
 mod config;
 mod error;
