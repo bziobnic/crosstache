@@ -8549,6 +8549,86 @@ async fn file_sync_delete_remote_not_local(
     Ok(())
 }
 
+/// Ensure parent directories exist for a sync download target.
+#[cfg(feature = "file-ops")]
+fn file_sync_ensure_parent_dirs(target: &std::path::Path) -> Result<()> {
+    use std::fs;
+    if let Some(parent) = target.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| {
+                CrosstacheError::config(format!(
+                    "Failed to create directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Read local file, upload blob, align local mtime to server `last_modified`.
+#[cfg(feature = "file-ops")]
+async fn file_sync_perform_upload(
+    blob_manager: &BlobManager,
+    info: &FileUploadInfo,
+    blob_name: &str,
+    output_json: bool,
+) -> Result<()> {
+    use crate::blob::models::FileUploadRequest;
+    use crate::blob::sync;
+    use std::collections::HashMap;
+    use std::fs;
+    let content = fs::read(&info.local_path).map_err(|e| {
+        CrosstacheError::config(format!("Failed to read {}: {e}", info.local_path.display()))
+    })?;
+    let upload_request = FileUploadRequest {
+        name: blob_name.to_string(),
+        content,
+        content_type: None,
+        groups: vec![],
+        metadata: HashMap::new(),
+        tags: HashMap::new(),
+    };
+    if !output_json {
+        println!("upload: {} → {blob_name}", info.local_path.display());
+    }
+    let uploaded_info = blob_manager.upload_file(upload_request).await?;
+    sync::set_file_mtime_utc(&info.local_path, uploaded_info.last_modified)?;
+    Ok(())
+}
+
+/// Download blob to local path (with traversal check, parents, mtime).
+#[cfg(feature = "file-ops")]
+async fn file_sync_perform_download(
+    blob_manager: &BlobManager,
+    base_path: &std::path::Path,
+    prefix_ref: Option<&str>,
+    blob_name: &str,
+    remote_info: &crate::blob::models::FileInfo,
+    output_json: bool,
+) -> Result<()> {
+    use crate::blob::models::FileDownloadRequest;
+    use crate::blob::sync;
+    use std::fs;
+    let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name);
+    sync_assert_safe_local_path(base_path, &target, blob_name)?;
+    file_sync_ensure_parent_dirs(&target)?;
+    if !output_json {
+        println!("download: {blob_name} → {}", target.display());
+    }
+    let download_request = FileDownloadRequest {
+        name: blob_name.to_string(),
+        output_path: Some(target.display().to_string()),
+        stream: false,
+    };
+    let content = blob_manager.download_file(download_request).await?;
+    fs::write(&target, content).map_err(|e| {
+        CrosstacheError::config(format!("Failed to write {}: {e}", target.display()))
+    })?;
+    sync::set_file_mtime_utc(&target, remote_info.last_modified)?;
+    Ok(())
+}
+
 #[cfg(feature = "file-ops")]
 async fn execute_file_sync(
     blob_manager: &BlobManager,
@@ -8559,7 +8639,7 @@ async fn execute_file_sync(
     delete: bool,
     config: &Config,
 ) -> Result<()> {
-    use crate::blob::models::{FileDownloadRequest, FileListRequest, FileUploadRequest};
+    use crate::blob::models::FileListRequest;
     use crate::blob::sync::{self, BothAction};
     use chrono::{DateTime, Utc};
     use std::collections::{HashMap, HashSet};
@@ -8663,25 +8743,8 @@ async fn execute_file_sync(
                     summary.uploaded += 1;
                     continue;
                 }
-                let content = fs::read(&info.local_path).map_err(|e| {
-                    CrosstacheError::config(format!(
-                        "Failed to read {}: {e}",
-                        info.local_path.display()
-                    ))
-                })?;
-                let upload_request = FileUploadRequest {
-                    name: blob_name.clone(),
-                    content,
-                    content_type: None,
-                    groups: vec![],
-                    metadata: std::collections::HashMap::new(),
-                    tags: std::collections::HashMap::new(),
-                };
-                if !config.output_json {
-                    println!("upload: {} → {blob_name}", info.local_path.display());
-                }
-                let uploaded_info = blob_manager.upload_file(upload_request).await?;
-                sync::set_file_mtime_utc(&info.local_path, uploaded_info.last_modified)?;
+                file_sync_perform_upload(blob_manager, info, &blob_name, config.output_json)
+                    .await?;
                 summary.uploaded += 1;
                 mutated = true;
             }
@@ -8745,31 +8808,15 @@ async fn execute_file_sync(
                     continue;
                 }
 
-                if let Some(parent) = target.parent() {
-                    if !parent.exists() {
-                        fs::create_dir_all(parent).map_err(|e| {
-                            CrosstacheError::config(format!(
-                                "Failed to create directory {}: {}",
-                                parent.display(),
-                                e
-                            ))
-                        })?;
-                    }
-                }
-
-                let download_request = FileDownloadRequest {
-                    name: blob_name.clone(),
-                    output_path: Some(target.display().to_string()),
-                    stream: false,
-                };
-                if !config.output_json {
-                    println!("download: {blob_name} → {}", target.display());
-                }
-                let content = blob_manager.download_file(download_request).await?;
-                fs::write(&target, content).map_err(|e| {
-                    CrosstacheError::config(format!("Failed to write {}: {e}", target.display()))
-                })?;
-                sync::set_file_mtime_utc(&target, remote_info.last_modified)?;
+                file_sync_perform_download(
+                    blob_manager,
+                    base_path,
+                    prefix_ref,
+                    &blob_name,
+                    remote_info,
+                    config.output_json,
+                )
+                .await?;
                 summary.downloaded += 1;
                 mutated = true;
             }
@@ -8797,25 +8844,13 @@ async fn execute_file_sync(
                             summary.uploaded += 1;
                             continue;
                         }
-                        let content = fs::read(&info.local_path).map_err(|e| {
-                            CrosstacheError::config(format!(
-                                "Failed to read {}: {e}",
-                                info.local_path.display()
-                            ))
-                        })?;
-                        let upload_request = FileUploadRequest {
-                            name: blob_name.clone(),
-                            content,
-                            content_type: None,
-                            groups: vec![],
-                            metadata: std::collections::HashMap::new(),
-                            tags: std::collections::HashMap::new(),
-                        };
-                        if !config.output_json {
-                            println!("upload: {} → {blob_name}", info.local_path.display());
-                        }
-                        let uploaded_info = blob_manager.upload_file(upload_request).await?;
-                        sync::set_file_mtime_utc(&info.local_path, uploaded_info.last_modified)?;
+                        file_sync_perform_upload(
+                            blob_manager,
+                            info,
+                            &blob_name,
+                            config.output_json,
+                        )
+                        .await?;
                         summary.uploaded += 1;
                         mutated = true;
                     }
@@ -8830,33 +8865,15 @@ async fn execute_file_sync(
                             summary.downloaded += 1;
                             continue;
                         }
-                        if let Some(parent) = target.parent() {
-                            if !parent.exists() {
-                                fs::create_dir_all(parent).map_err(|e| {
-                                    CrosstacheError::config(format!(
-                                        "Failed to create directory {}: {}",
-                                        parent.display(),
-                                        e
-                                    ))
-                                })?;
-                            }
-                        }
-                        let download_request = FileDownloadRequest {
-                            name: blob_name.clone(),
-                            output_path: Some(target.display().to_string()),
-                            stream: false,
-                        };
-                        if !config.output_json {
-                            println!("download: {blob_name} → {}", target.display());
-                        }
-                        let content = blob_manager.download_file(download_request).await?;
-                        fs::write(&target, content).map_err(|e| {
-                            CrosstacheError::config(format!(
-                                "Failed to write {}: {e}",
-                                target.display()
-                            ))
-                        })?;
-                        sync::set_file_mtime_utc(&target, remote_info.last_modified)?;
+                        file_sync_perform_download(
+                            blob_manager,
+                            base_path,
+                            prefix_ref,
+                            &blob_name,
+                            remote_info,
+                            config.output_json,
+                        )
+                        .await?;
                         summary.downloaded += 1;
                         mutated = true;
                     }
@@ -8882,29 +8899,13 @@ async fn execute_file_sync(
                                     summary.uploaded += 1;
                                     continue;
                                 }
-                                let content = fs::read(&info.local_path).map_err(|e| {
-                                    CrosstacheError::config(format!(
-                                        "Failed to read {}: {e}",
-                                        info.local_path.display()
-                                    ))
-                                })?;
-                                let upload_request = FileUploadRequest {
-                                    name: blob_name.clone(),
-                                    content,
-                                    content_type: None,
-                                    groups: vec![],
-                                    metadata: std::collections::HashMap::new(),
-                                    tags: std::collections::HashMap::new(),
-                                };
-                                if !config.output_json {
-                                    println!("upload: {} → {blob_name}", info.local_path.display());
-                                }
-                                let uploaded_info =
-                                    blob_manager.upload_file(upload_request).await?;
-                                sync::set_file_mtime_utc(
-                                    &info.local_path,
-                                    uploaded_info.last_modified,
-                                )?;
+                                file_sync_perform_upload(
+                                    blob_manager,
+                                    info,
+                                    &blob_name,
+                                    config.output_json,
+                                )
+                                .await?;
                                 summary.uploaded += 1;
                                 mutated = true;
                             }
@@ -8922,33 +8923,15 @@ async fn execute_file_sync(
                                     summary.downloaded += 1;
                                     continue;
                                 }
-                                if let Some(parent) = target.parent() {
-                                    if !parent.exists() {
-                                        fs::create_dir_all(parent).map_err(|e| {
-                                            CrosstacheError::config(format!(
-                                                "Failed to create directory {}: {}",
-                                                parent.display(),
-                                                e
-                                            ))
-                                        })?;
-                                    }
-                                }
-                                let download_request = FileDownloadRequest {
-                                    name: blob_name.clone(),
-                                    output_path: Some(target.display().to_string()),
-                                    stream: false,
-                                };
-                                if !config.output_json {
-                                    println!("download: {blob_name} → {}", target.display());
-                                }
-                                let content = blob_manager.download_file(download_request).await?;
-                                fs::write(&target, content).map_err(|e| {
-                                    CrosstacheError::config(format!(
-                                        "Failed to write {}: {e}",
-                                        target.display()
-                                    ))
-                                })?;
-                                sync::set_file_mtime_utc(&target, remote_info.last_modified)?;
+                                file_sync_perform_download(
+                                    blob_manager,
+                                    base_path,
+                                    prefix_ref,
+                                    &blob_name,
+                                    remote_info,
+                                    config.output_json,
+                                )
+                                .await?;
                                 summary.downloaded += 1;
                                 mutated = true;
                             }
@@ -8958,42 +8941,43 @@ async fn execute_file_sync(
                 }
             }
 
-            let local_names_after: HashSet<String> = if delete {
-                let path = Path::new(local_path);
-                let rescanned = collect_files_with_structure(path, base_path, prefix_ref, false)?;
-                rescanned.into_iter().map(|i| i.blob_name).collect()
-            } else {
-                local_names.clone()
-            };
+            if delete {
+                let local_names_after: HashSet<String> = {
+                    let path = Path::new(local_path);
+                    let rescanned =
+                        collect_files_with_structure(path, base_path, prefix_ref, false)?;
+                    rescanned.into_iter().map(|i| i.blob_name).collect()
+                };
 
-            let remote_after = blob_manager
-                .list_files(FileListRequest {
-                    prefix: list_prefix.clone(),
-                    groups: None,
-                    limit: None,
-                    delimiter: None,
-                    recursive: true,
-                })
+                let remote_after = blob_manager
+                    .list_files(FileListRequest {
+                        prefix: list_prefix.clone(),
+                        groups: None,
+                        limit: None,
+                        delimiter: None,
+                        recursive: true,
+                    })
+                    .await?;
+                let mut remote_map_after: HashMap<String, crate::blob::models::FileInfo> =
+                    HashMap::new();
+                for f in remote_after {
+                    remote_map_after.insert(f.name.clone(), f);
+                }
+
+                file_sync_delete_remote_not_local(
+                    blob_manager,
+                    direction,
+                    prefix_ref,
+                    &remote_map_after,
+                    &local_names_after,
+                    dry_run,
+                    delete,
+                    config.output_json,
+                    &mut summary,
+                    &mut mutated,
+                )
                 .await?;
-            let mut remote_map_after: HashMap<String, crate::blob::models::FileInfo> =
-                HashMap::new();
-            for f in remote_after {
-                remote_map_after.insert(f.name.clone(), f);
             }
-
-            file_sync_delete_remote_not_local(
-                blob_manager,
-                direction,
-                prefix_ref,
-                &remote_map_after,
-                &local_names_after,
-                dry_run,
-                delete,
-                config.output_json,
-                &mut summary,
-                &mut mutated,
-            )
-            .await?;
         }
     }
 
