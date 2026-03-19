@@ -1304,6 +1304,11 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                 )
                 .await?;
             }
+            // Invalidate the file list cache after any upload
+            let cache_manager = crate::cache::CacheManager::from_config(&config);
+            if let Ok(vault_name) = config.resolve_vault_name(None).await {
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList { vault_name });
+            }
         }
         FileCommands::Download {
             files,
@@ -1405,6 +1410,11 @@ async fn execute_file_command(command: FileCommands, config: Config) -> Result<(
                 )
                 .await?;
             }
+            // Invalidate the file list cache after any delete
+            let cache_manager = crate::cache::CacheManager::from_config(&config);
+            if let Ok(vault_name) = config.resolve_vault_name(None).await {
+                cache_manager.invalidate(&crate::cache::CacheKey::FileList { vault_name });
+            }
         }
         FileCommands::Info { name } => {
             execute_file_info(&blob_manager, &name, &config).await?;
@@ -1453,6 +1463,8 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
         config.no_color,
     )?;
 
+    let vault_cache_manager = crate::cache::CacheManager::from_config(&config);
+
     match command {
         VaultCommands::Create {
             name,
@@ -1460,6 +1472,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
             location,
         } => {
             execute_vault_create(&vault_manager, &name, resource_group, location, &config).await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::List {
             resource_group,
@@ -1474,6 +1487,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
             force,
         } => {
             execute_vault_delete(&vault_manager, &name, resource_group, force, &config).await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Info {
             name,
@@ -1483,6 +1497,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
         }
         VaultCommands::Restore { name, location } => {
             execute_vault_restore(&vault_manager, &name, &location, &config).await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Purge {
             name,
@@ -1490,6 +1505,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
             force,
         } => {
             execute_vault_purge(&vault_manager, &name, &location, force, &config).await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Export {
             name,
@@ -1530,6 +1546,9 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
                 &config,
             )
             .await?;
+            // Invalidate the secrets list for the target vault (secrets were written)
+            vault_cache_manager
+                .invalidate(&crate::cache::CacheKey::SecretsList { vault_name: name });
         }
         VaultCommands::Update {
             name,
@@ -1554,6 +1573,7 @@ async fn execute_vault_command(command: VaultCommands, config: Config) -> Result
                 &config,
             )
             .await?;
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Share { command } => {
             execute_vault_share(&vault_manager, &auth_provider, command, &config).await?;
@@ -1749,7 +1769,7 @@ async fn execute_secret_set_direct(
             not_before,
             &config,
         )
-        .await
+        .await?;
     } else {
         // Bulk set operation
         if stdin {
@@ -1762,8 +1782,16 @@ async fn execute_secret_set_direct(
                 "--expires and --not-before cannot be used with bulk set operation",
             ));
         }
-        execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await
+        execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await?;
     }
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_get_direct(
@@ -1932,14 +1960,22 @@ async fn execute_secret_delete_direct(
 
     // Check if this is a group delete operation
     if let Some(group_name) = group {
-        execute_secret_delete_group(&secret_manager, &group_name, force, &config).await
+        execute_secret_delete_group(&secret_manager, &group_name, force, &config).await?;
     } else if let Some(secret_name) = name {
-        execute_secret_delete(&secret_manager, &secret_name, None, force, &config).await
+        execute_secret_delete(&secret_manager, &secret_name, None, force, &config).await?;
     } else {
-        Err(CrosstacheError::invalid_argument(
+        return Err(CrosstacheError::invalid_argument(
             "Either secret name or --group must be specified",
-        ))
+        ));
     }
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_history_direct(name: &str, config: Config) -> Result<()> {
@@ -1986,7 +2022,15 @@ async fn execute_secret_rollback_direct(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_rollback(&secret_manager, name, None, version, force, &config).await
+    execute_secret_rollback(&secret_manager, name, None, version, force, &config).await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_rotate_direct(
@@ -2026,7 +2070,15 @@ async fn execute_secret_rotate_direct(
         force,
         &config,
     )
-    .await
+    .await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_run_direct(
@@ -2135,7 +2187,15 @@ async fn execute_secret_update_direct(
         clear_not_before,
         &config,
     )
-    .await
+    .await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_purge_direct(name: &str, force: bool, config: Config) -> Result<()> {
@@ -2156,7 +2216,15 @@ async fn execute_secret_purge_direct(name: &str, force: bool, config: Config) ->
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_purge(&secret_manager, name, None, force, &config).await
+    execute_secret_purge(&secret_manager, name, None, force, &config).await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()> {
@@ -2177,7 +2245,15 @@ async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()>
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_restore(&secret_manager, name, None, &config).await
+    execute_secret_restore(&secret_manager, name, None, &config).await?;
+
+    // Invalidate the secrets list cache for the resolved vault
+    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    }
+
+    Ok(())
 }
 
 async fn execute_diff_command(
@@ -2363,7 +2439,14 @@ async fn execute_secret_copy_direct(
         new_name,
         &config,
     )
-    .await
+    .await?;
+
+    // Invalidate the secrets list cache for both source and destination vaults
+    let cache_manager = crate::cache::CacheManager::from_config(&config);
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name: from_vault.to_string() });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name: to_vault.to_string() });
+
+    Ok(())
 }
 
 async fn execute_secret_move_direct(
@@ -2400,7 +2483,14 @@ async fn execute_secret_move_direct(
         force,
         &config,
     )
-    .await
+    .await?;
+
+    // Invalidate the secrets list cache for both source and destination vaults
+    let cache_manager = crate::cache::CacheManager::from_config(&config);
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name: from_vault.to_string() });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name: to_vault.to_string() });
+
+    Ok(())
 }
 
 async fn execute_secret_parse_direct(
@@ -6906,6 +6996,14 @@ async fn execute_vault_import(
     output::success(&format!(
         "Import completed: {imported_count} imported, {skipped_count} skipped"
     ));
+
+    // Invalidate the secrets list cache for the target vault
+    if imported_count > 0 {
+        let cache_manager = crate::cache::CacheManager::from_config(config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            vault_name: name.to_string(),
+        });
+    }
 
     Ok(())
 }
