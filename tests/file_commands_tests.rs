@@ -4,7 +4,7 @@
 //! with both the full command syntax and the quick aliases.
 
 use crosstache::{
-    cli::commands::{Commands, FileCommands},
+    cli::commands::{Commands, FileCommands, SyncDirection},
     config::{BlobConfig, Config},
     error::Result,
 };
@@ -50,7 +50,6 @@ async fn test_file_upload_command_basic() -> Result<()> {
         ],
         tag: vec![("environment".to_string(), "test".to_string())],
         content_type: Some("text/plain".to_string()),
-        progress: true,
         continue_on_error: false,
     };
 
@@ -65,7 +64,6 @@ async fn test_file_upload_command_basic() -> Result<()> {
             metadata,
             tag,
             content_type,
-            progress,
             continue_on_error,
         } => {
             assert_eq!(files, vec![temp_file.path().to_string_lossy().to_string()]);
@@ -75,7 +73,6 @@ async fn test_file_upload_command_basic() -> Result<()> {
             assert_eq!(metadata.len(), 2);
             assert_eq!(tag.len(), 1);
             assert_eq!(content_type, Some("text/plain".to_string()));
-            assert!(progress);
             assert!(!continue_on_error);
         }
         _ => panic!("Expected Upload command"),
@@ -110,7 +107,6 @@ async fn test_file_upload_command_with_multiple_groups() -> Result<()> {
             ("project".to_string(), "crosstache".to_string()),
         ],
         content_type: None,
-        progress: false,
         continue_on_error: false,
     };
 
@@ -125,7 +121,6 @@ async fn test_file_upload_command_with_multiple_groups() -> Result<()> {
             metadata,
             tag,
             content_type,
-            progress,
             continue_on_error: _,
         } => {
             assert_eq!(files, vec![temp_file.path().to_string_lossy().to_string()]);
@@ -137,7 +132,6 @@ async fn test_file_upload_command_with_multiple_groups() -> Result<()> {
             assert_eq!(metadata.len(), 2);
             assert_eq!(tag.len(), 2);
             assert!(content_type.is_none());
-            assert!(!progress);
         }
         _ => panic!("Expected Upload command"),
     }
@@ -156,7 +150,6 @@ async fn test_file_download_command_basic() -> Result<()> {
         rename: None,
         recursive: false,
         flatten: false,
-        stream: false,
         force: false,
         continue_on_error: false,
     };
@@ -168,14 +161,12 @@ async fn test_file_download_command_basic() -> Result<()> {
             rename,
             recursive: _,
             flatten: _,
-            stream,
             force,
             continue_on_error: _,
         } => {
             assert_eq!(files, vec!["test-file.txt"]);
             assert_eq!(output, Some(output_path.to_string_lossy().to_string()));
             assert!(rename.is_none());
-            assert!(!stream);
             assert!(!force);
         }
         _ => panic!("Expected Download command"),
@@ -185,14 +176,13 @@ async fn test_file_download_command_basic() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_file_download_command_with_streaming() -> Result<()> {
+async fn test_file_download_command_force_overwrite() -> Result<()> {
     let download_command = FileCommands::Download {
         files: vec!["large-file.bin".to_string()],
         output: None,
         rename: None,
         recursive: false,
         flatten: false,
-        stream: true,
         force: true,
         continue_on_error: false,
     };
@@ -204,13 +194,11 @@ async fn test_file_download_command_with_streaming() -> Result<()> {
             rename: _,
             recursive: _,
             flatten: _,
-            stream,
             force,
             continue_on_error: _,
         } => {
             assert_eq!(files, vec!["large-file.bin"]);
             assert!(output.is_none());
-            assert!(stream);
             assert!(force);
         }
         _ => panic!("Expected Download command"),
@@ -309,7 +297,6 @@ async fn test_file_upload_validation() -> Result<()> {
         metadata: vec![],
         tag: vec![],
         content_type: None,
-        progress: false,
         continue_on_error: false,
     };
 
@@ -324,7 +311,6 @@ async fn test_file_upload_validation() -> Result<()> {
             metadata,
             tag,
             content_type,
-            progress,
             continue_on_error,
         } => {
             assert_eq!(files, vec![non_existent_file]);
@@ -334,7 +320,6 @@ async fn test_file_upload_validation() -> Result<()> {
             assert!(metadata.is_empty());
             assert!(tag.is_empty());
             assert!(content_type.is_none());
-            assert!(!progress);
             assert!(!continue_on_error);
         }
         _ => panic!("Expected Upload command"),
@@ -364,7 +349,6 @@ async fn test_metadata_and_tag_parsing() -> Result<()> {
             ("project".to_string(), "crosstache".to_string()),
         ],
         content_type: Some("text/plain".to_string()),
-        progress: true,
         continue_on_error: false,
     };
 
@@ -379,7 +363,6 @@ async fn test_metadata_and_tag_parsing() -> Result<()> {
             metadata,
             tag,
             content_type: _,
-            progress: _,
             continue_on_error: _,
         } => {
             assert_eq!(metadata.len(), 2);
@@ -458,6 +441,36 @@ async fn test_file_info_command() -> Result<()> {
             assert_eq!(name, "info-file.txt");
         }
         _ => panic!("Expected Info command"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_file_sync_command() -> Result<()> {
+    let sync_command = FileCommands::Sync {
+        local_path: "./data".to_string(),
+        prefix: Some("backup/".to_string()),
+        direction: SyncDirection::Both,
+        dry_run: true,
+        delete: false,
+    };
+
+    match sync_command {
+        FileCommands::Sync {
+            local_path,
+            prefix,
+            direction,
+            dry_run,
+            delete,
+        } => {
+            assert_eq!(local_path, "./data");
+            assert_eq!(prefix, Some("backup/".to_string()));
+            assert!(matches!(direction, SyncDirection::Both));
+            assert!(dry_run);
+            assert!(!delete);
+        }
+        _ => panic!("Expected Sync command"),
     }
 
     Ok(())

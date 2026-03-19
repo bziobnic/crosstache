@@ -53,11 +53,8 @@ Features shipped and verified in the codebase.
 
 ## 🔜 Open — High Priority
 
-### 1. File Sync (`xv file sync`)
-**Impact:** Listed in `xv file --help` but prints "not yet implemented."
-**Current state:** Fully stubbed — no sync logic exists.
-**Effort:** Medium-High
-**Scope:** Start with one-way `sync up` and `sync down` before bidirectional.
+### 1. ~~File Sync (`xv file sync`)~~ — shipped
+**Current state:** Implemented: `up` / `down` / `both`, size + mtime comparison with epsilon, `--dry-run`, `--delete` (scoped; confirmation), cache invalidation. Helpers in `src/blob/sync.rs`.
 
 ### 2. Progress Indicators for File Operations
 **Impact:** Large file uploads/downloads give no feedback until completion.

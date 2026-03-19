@@ -32,9 +32,8 @@ Unsupported `--format` values print an error via `output::error()` but then retu
 
 ## P1 — High Priority (User-Facing Feature Gaps)
 
-### 6. File sync (`xv file sync`) — fully stubbed
-**File:** `src/cli/commands.rs:7941`
-Command struct is fully defined with `local_path`, `prefix`, `direction`, `dry_run`, and `delete` flags. The execute function discards all parameters and returns a hard error. 0% implemented.
+### 6. ~~File sync (`xv file sync`)~~ — implemented
+**Files:** `src/cli/commands.rs` (`execute_file_sync`), `src/blob/sync.rs` (change detection helpers).
 
 ### 7. Blob metadata and tags silently dropped on upload
 **File:** `src/blob/manager.rs:80–94`

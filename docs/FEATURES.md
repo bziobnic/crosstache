@@ -102,6 +102,7 @@ Requires blob storage setup via `xv init`. Gated behind the `file-ops` feature f
 | `xv file list` | List files (hierarchical by default; `--recursive` for flat) |
 | `xv file delete` | Delete files (`-r`, `-f`, `-i`, `--dry-run`, `--verbose`, `--force`, `--continue-on-error`, glob patterns) |
 | `xv file info` | File metadata |
+| `xv file sync` | Sync local directory with blob prefix (`--direction` up/down/both, `--dry-run`, `--delete`) |
 
 ---
 
