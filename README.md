@@ -216,7 +216,11 @@ xv file upload ./docs --recursive              # Preserves directory structure
 xv file download "docs" --recursive --output ./local
 xv file upload ./src --recursive --prefix "backup/2024-01-15"
 xv file delete config.json                     # Delete a file
-xv file sync                                   # Sync local and remote files
+xv file sync ./mydir --direction up            # Upload changed/missing files (default)
+xv file sync ./mydir --direction down          # Download changed/missing files
+xv file sync ./mydir --direction both          # Bidirectional (mtime + size)
+xv file sync ./mydir --dry-run                 # Show planned transfers
+xv file sync ./mydir --prefix backup/ --delete # Mirror local to remote; remove extra remote blobs
 ```
 
 ### Identity & Access

@@ -208,7 +208,7 @@ Implemented features:
 - **Configurable Clipboard Timeout**: `clipboard_timeout` config key (default 30s, 0 to disable)
 
 Features partially implemented or stubbed:
-- **File Sync** (`xv file sync`): Command structure exists but prints "not yet implemented"
+- **File Sync** (`xv file sync`): Implemented (`--direction` up/down/both, `--dry-run`, `--delete`); see `src/blob/sync.rs` and `execute_file_sync` in `commands.rs`
 - **Vault Sharing**: Commands defined (grant/revoke/list) — implemented via RBAC
 - **Secret Backup/Restore**: Methods stubbed in `secret/manager.rs`
 - **Blob Metadata/Tags**: Stubbed with warnings ("not yet implemented for Azure SDK v0.21")

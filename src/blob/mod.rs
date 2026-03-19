@@ -6,5 +6,6 @@
 pub mod manager;
 pub mod models;
 pub mod operations;
+pub mod sync;
 
 // Re-export commonly used types
