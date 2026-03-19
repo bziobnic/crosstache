@@ -137,9 +137,10 @@ impl std::fmt::Display for ResourceType {
 }
 
 /// Character set type for secret rotation
-#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, ValueEnum)]
 pub enum CharsetType {
     /// Alphanumeric characters (A-Z, a-z, 0-9)
+    #[default]
     Alphanumeric,
     /// Alphanumeric with symbols
     AlphanumericSymbols,
@@ -166,6 +167,39 @@ impl CharsetType {
             CharsetType::Numeric => "0123456789",
             CharsetType::Uppercase => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
             CharsetType::Lowercase => "abcdefghijklmnopqrstuvwxyz",
+        }
+    }
+}
+
+impl std::fmt::Display for CharsetType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Alphanumeric => write!(f, "alphanumeric"),
+            Self::AlphanumericSymbols => write!(f, "alphanumeric-symbols"),
+            Self::Hex => write!(f, "hex"),
+            Self::Base64 => write!(f, "base64"),
+            Self::Numeric => write!(f, "numeric"),
+            Self::Uppercase => write!(f, "uppercase"),
+            Self::Lowercase => write!(f, "lowercase"),
+        }
+    }
+}
+
+impl std::str::FromStr for CharsetType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "alphanumeric" => Ok(Self::Alphanumeric),
+            "alphanumeric-symbols" | "alphanumeric_symbols" => Ok(Self::AlphanumericSymbols),
+            "hex" => Ok(Self::Hex),
+            "base64" => Ok(Self::Base64),
+            "numeric" => Ok(Self::Numeric),
+            "uppercase" => Ok(Self::Uppercase),
+            "lowercase" => Ok(Self::Lowercase),
+            _ => Err(format!(
+                "Invalid charset: '{s}'. Valid options: alphanumeric, alphanumeric-symbols, hex, base64, numeric, uppercase, lowercase"
+            )),
         }
     }
 }
@@ -278,6 +312,24 @@ pub enum Commands {
         /// Force rotation without confirmation
         #[arg(short, long)]
         force: bool,
+    },
+    /// Generate a random password and copy it to the clipboard
+    Gen {
+        /// Password length — must be between 6 and 100 (default: 15)
+        #[arg(short, long, default_value = "15")]
+        length: usize,
+        /// Character set to use (default: alphanumeric, or gen_default_charset config)
+        #[arg(short, long, value_enum)]
+        charset: Option<CharsetType>,
+        /// Save the generated password as a secret in the vault
+        #[arg(long)]
+        save: Option<String>,
+        /// Target vault for --save (overrides context/config default)
+        #[arg(long)]
+        vault: Option<String>,
+        /// Print to stdout instead of copying to clipboard
+        #[arg(long)]
+        raw: bool,
     },
     /// Run a command with secrets injected as environment variables
     Run {
@@ -1005,6 +1057,13 @@ impl Cli {
                 )
                 .await
             }
+            Commands::Gen {
+                length,
+                charset,
+                save,
+                vault,
+                raw,
+            } => execute_gen_command(length, charset, save, vault, raw, config).await,
             Commands::Run {
                 group,
                 no_masking,
@@ -4013,9 +4072,13 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
                 ))
             })?;
         }
+        "gen_default_charset" => {
+            let charset = value.parse::<CharsetType>().map_err(CrosstacheError::config)?;
+            config.gen_default_charset = Some(charset.to_string());
+        }
         _ => {
             return Err(CrosstacheError::config(format!(
-                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout"
+                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_ttl, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout, gen_default_charset"
             )));
         }
     }
@@ -4645,7 +4708,7 @@ async fn execute_secret_rollback(
 }
 
 /// Generate a random value using the specified parameters
-fn generate_random_value(
+pub(crate) fn generate_random_value(
     length: usize,
     charset: CharsetType,
     custom_generator: Option<String>,
@@ -8272,4 +8335,243 @@ async fn execute_file_download_quick(
     }
 
     Ok(())
+}
+
+async fn execute_gen_command(
+    length: usize,
+    charset: Option<CharsetType>,
+    save: Option<String>,
+    vault: Option<String>,
+    raw: bool,
+    config: Config,
+) -> Result<()> {
+    // Validate length
+    if !(6..=100).contains(&length) {
+        return Err(CrosstacheError::invalid_argument(
+            "Length must be between 6 and 100",
+        ));
+    }
+
+    // Resolve charset: CLI flag → config default → Alphanumeric
+    let resolved_charset = if let Some(c) = charset {
+        c
+    } else if let Some(ref s) = config.gen_default_charset {
+        s.parse::<CharsetType>().map_err(|e| {
+            CrosstacheError::config(format!(
+                "Invalid value for config key 'gen_default_charset': {e}"
+            ))
+        })?
+    } else {
+        CharsetType::Alphanumeric
+    };
+
+    // Generate the password
+    let password = generate_random_value(length, resolved_charset, None)?;
+
+    // Handle --save
+    if let Some(ref name) = save {
+        use crate::auth::provider::DefaultAzureCredentialProvider;
+        use crate::secret::manager::SecretManager;
+        use std::sync::Arc;
+
+        let auth_provider = Arc::new(
+            DefaultAzureCredentialProvider::with_credential_priority(
+                config.azure_credential_priority.clone(),
+            )
+            .map_err(|e| {
+                CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+            })?,
+        );
+        let secret_manager = SecretManager::new(auth_provider, config.no_color);
+        let vault_name = config.resolve_vault_name(vault).await?;
+
+        match secret_manager
+            .set_secret_safe(&vault_name, name, password.as_str(), None)
+            .await
+        {
+            Ok(_) => {
+                if raw {
+                    println!("{}", password.as_str());
+                    output::success(&format!("Secret '{name}' saved."));
+                } else {
+                    match copy_to_clipboard(password.as_str()) {
+                        Ok(()) => {
+                            let timeout = config.clipboard_timeout;
+                            if timeout > 0 {
+                                output::success(&format!(
+                                    "Secret '{name}' saved and copied to clipboard (auto-clears in {timeout}s)"
+                                ));
+                                schedule_clipboard_clear(timeout);
+                            } else {
+                                output::success(&format!(
+                                    "Secret '{name}' saved and copied to clipboard"
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            output::warn(&format!("Failed to copy to clipboard: {e}"));
+                            println!("{}", password.as_str());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                output::warn(&format!("Failed to save secret '{name}': {e}"));
+                output::warn("Generated password (save this now):");
+                println!("{}", password.as_str());
+            }
+        }
+        return Ok(());
+    }
+
+    // No --save — just output
+    if raw {
+        println!("{}", password.as_str());
+    } else {
+        match copy_to_clipboard(password.as_str()) {
+            Ok(()) => {
+                let timeout = config.clipboard_timeout;
+                if timeout > 0 {
+                    output::success(&format!(
+                        "Password copied to clipboard (auto-clears in {timeout}s)"
+                    ));
+                    schedule_clipboard_clear(timeout);
+                } else {
+                    output::success("Password copied to clipboard");
+                }
+            }
+            Err(e) => {
+                output::warn(&format!("Failed to copy to clipboard: {e}"));
+                output::hint("Use --raw to print the value to stdout instead.");
+                println!("{}", password.as_str());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_charset_default_is_alphanumeric() {
+        assert_eq!(CharsetType::default(), CharsetType::Alphanumeric);
+    }
+
+    #[test]
+    fn test_charset_display() {
+        assert_eq!(CharsetType::Alphanumeric.to_string(), "alphanumeric");
+        assert_eq!(CharsetType::AlphanumericSymbols.to_string(), "alphanumeric-symbols");
+        assert_eq!(CharsetType::Hex.to_string(), "hex");
+        assert_eq!(CharsetType::Base64.to_string(), "base64");
+        assert_eq!(CharsetType::Numeric.to_string(), "numeric");
+        assert_eq!(CharsetType::Uppercase.to_string(), "uppercase");
+        assert_eq!(CharsetType::Lowercase.to_string(), "lowercase");
+    }
+
+    #[test]
+    fn test_charset_from_str_valid() {
+        assert_eq!("alphanumeric".parse::<CharsetType>().unwrap(), CharsetType::Alphanumeric);
+        assert_eq!("alphanumeric-symbols".parse::<CharsetType>().unwrap(), CharsetType::AlphanumericSymbols);
+        assert_eq!("alphanumeric_symbols".parse::<CharsetType>().unwrap(), CharsetType::AlphanumericSymbols);
+        assert_eq!("hex".parse::<CharsetType>().unwrap(), CharsetType::Hex);
+        assert_eq!("base64".parse::<CharsetType>().unwrap(), CharsetType::Base64);
+        assert_eq!("numeric".parse::<CharsetType>().unwrap(), CharsetType::Numeric);
+        assert_eq!("uppercase".parse::<CharsetType>().unwrap(), CharsetType::Uppercase);
+        assert_eq!("lowercase".parse::<CharsetType>().unwrap(), CharsetType::Lowercase);
+        assert_eq!("ALPHANUMERIC".parse::<CharsetType>().unwrap(), CharsetType::Alphanumeric);
+    }
+
+    #[test]
+    fn test_charset_from_str_invalid() {
+        assert!("alpha".parse::<CharsetType>().is_err());
+        assert!("unknown".parse::<CharsetType>().is_err());
+        assert!("".parse::<CharsetType>().is_err());
+    }
+
+    // ── gen command unit tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_gen_length_validation_lower_bound() {
+        let result = generate_random_value(6, CharsetType::Alphanumeric, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 6);
+    }
+
+    #[test]
+    fn test_gen_length_validation_upper_bound() {
+        let result = generate_random_value(100, CharsetType::Alphanumeric, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 100);
+    }
+
+    #[test]
+    fn test_gen_default_length_is_15() {
+        let result = generate_random_value(15, CharsetType::Alphanumeric, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 15);
+    }
+
+    #[test]
+    fn test_gen_alphanumeric_chars_only() {
+        let value = generate_random_value(200, CharsetType::Alphanumeric, None).unwrap();
+        let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        for ch in value.chars() {
+            assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric output");
+        }
+    }
+
+    #[test]
+    fn test_gen_numeric_chars_only() {
+        let value = generate_random_value(200, CharsetType::Numeric, None).unwrap();
+        for ch in value.chars() {
+            assert!(ch.is_ascii_digit(), "Unexpected char '{ch}' in numeric output");
+        }
+    }
+
+    #[test]
+    fn test_gen_uppercase_chars_only() {
+        let value = generate_random_value(200, CharsetType::Uppercase, None).unwrap();
+        for ch in value.chars() {
+            assert!(ch.is_ascii_uppercase(), "Unexpected char '{ch}' in uppercase output");
+        }
+    }
+
+    #[test]
+    fn test_gen_lowercase_chars_only() {
+        let value = generate_random_value(200, CharsetType::Lowercase, None).unwrap();
+        for ch in value.chars() {
+            assert!(ch.is_ascii_lowercase(), "Unexpected char '{ch}' in lowercase output");
+        }
+    }
+
+    #[test]
+    fn test_gen_hex_chars_only() {
+        let value = generate_random_value(200, CharsetType::Hex, None).unwrap();
+        let valid = "0123456789ABCDEF";
+        for ch in value.chars() {
+            assert!(valid.contains(ch), "Unexpected char '{ch}' in hex output");
+        }
+    }
+
+    #[test]
+    fn test_gen_alphanumeric_symbols_chars_only() {
+        let value = generate_random_value(500, CharsetType::AlphanumericSymbols, None).unwrap();
+        let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?";
+        for ch in value.chars() {
+            assert!(valid.contains(ch), "Unexpected char '{ch}' in alphanumeric-symbols output");
+        }
+    }
+
+    #[test]
+    fn test_gen_base64_chars_only() {
+        let value = generate_random_value(200, CharsetType::Base64, None).unwrap();
+        let valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for ch in value.chars() {
+            assert!(valid.contains(ch), "Unexpected char '{ch}' in base64 output");
+        }
+    }
+
 }
