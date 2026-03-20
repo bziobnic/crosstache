@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> Updated: 2026-03-09 | Current version: **v0.4.17**
+> Last reviewed: 2026-03-19 | Current version: **v0.4.21**
 
 ---
 
@@ -42,31 +42,28 @@ Features shipped and verified in the codebase.
 - Pagination for secret listing (follows Azure `nextLink`)
 - Configurable select page size
 
-### v0.4.1–v0.4.17
+### v0.4.1–v0.4.21
 - Bug fixes, release cleanup, output consistency improvements
 - Configurable clipboard timeout (`clipboard_timeout` config key, 0 to disable)
 - Output format support: JSON, YAML, CSV, plain, raw all implemented (only `template` format remains stubbed)
-- Pagination for secret listing (follows Azure `nextLink`)
-- Configurable select page size
+- **File sync** (`xv file sync`): `up` / `down` / `both`, size + mtime comparison with epsilon, `--dry-run`, `--delete` (scoped; confirmation), cache invalidation; helpers in `src/blob/sync.rs`
+- `xv audit` accepts `--resource-group` for vault-wide audits outside the default resource group
 
 ---
 
 ## 🔜 Open — High Priority
 
-### 1. ~~File Sync (`xv file sync`)~~ — shipped
-**Current state:** Implemented: `up` / `down` / `both`, size + mtime comparison with epsilon, `--dry-run`, `--delete` (scoped; confirmation), cache invalidation. Helpers in `src/blob/sync.rs`.
-
-### 2. Progress Indicators for File Operations
+### 1. Progress Indicators for File Operations
 **Impact:** Large file uploads/downloads give no feedback until completion.
 **Current state:** No progress bars or per-file status during recursive ops.
 **Effort:** Low-Medium (`indicatif` crate or similar).
 
-### 3. Large File Chunked Upload
+### 2. Large File Chunked Upload
 **Impact:** Files over ~100MB may fail. Block-based upload with resume needed.
 **Current state:** Stubbed in `src/blob/manager.rs` and `src/blob/operations.rs` (paginated listing also stubbed).
 **Effort:** Medium
 
-### 4. Template Output Format
+### 3. Template Output Format
 **Impact:** `--format template` flag exists but returns "not yet supported."
 **Current state:** Stubbed in `src/utils/format.rs`.
 **Effort:** Low-Medium
@@ -75,16 +72,16 @@ Features shipped and verified in the codebase.
 
 ## 🔜 Open — Medium Priority
 
-### 6. Secret References / URI Scheme
+### 4. Secret References / URI Scheme
 **Impact:** Stable `xv://vault/secret` URIs for templates, env vars, and config files. Partially supported in `xv inject`.
 **Effort:** Medium — formalize the scheme, integrate with `xv run`.
 
-### 7. Interactive TUI (`xv tui`)
+### 5. Interactive TUI (`xv tui`)
 **Impact:** Browse vaults → secrets → values with keyboard navigation, fuzzy search, quick copy.
 **Current state:** Not started.
 **Effort:** High (`ratatui` or similar).
 
-### 8. Blob Metadata & Tags
+### 6. Blob Metadata & Tags
 **Impact:** File metadata and tag setting stubbed but not functional (Azure SDK limitation noted).
 **Current state:** `src/blob/manager.rs` logs warnings — "not yet implemented for Azure SDK v0.21."
 **Effort:** Medium — depends on Azure SDK support.
@@ -93,21 +90,21 @@ Features shipped and verified in the codebase.
 
 ## 🔜 Open — Low Priority / Nice to Have
 
-### 9. Self-Update (`xv update`)
+### 7. Self-Update (`xv update`)
 **Effort:** Low (`self_update` crate). Convenient but not essential.
 
-### 10. Plugin / Extension System
+### 8. Plugin / Extension System
 **Effort:** High. Premature for current user base.
 
-### 11. Webhook / Event Notifications
+### 9. Webhook / Event Notifications
 **Effort:** Medium. Niche use case — notify external systems on secret changes.
 
-### 12. AWS Secrets Manager Backend
+### 10. AWS Secrets Manager Backend
 **Impact:** Opens tool to AWS ecosystem. Architecture supports it (manager/provider patterns).
 **Effort:** High — new backend module, credential handling, feature mapping.
 **Prerequisite:** Abstract the backend trait boundary first.
 
-### 13. HashiCorp Vault Backend
+### 11. HashiCorp Vault Backend
 **Impact:** Popular in self-hosted/hybrid environments.
 **Effort:** High
 

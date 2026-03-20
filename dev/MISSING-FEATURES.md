@@ -1,8 +1,8 @@
 # Missing Features & Technical Debt
 
-> Generated: 2026-03-09 | Codebase version: v0.4.17
+> Last reviewed: 2026-03-19 | Codebase version: **v0.4.21**
 
-Comprehensive audit of missing features, stubs, bugs, and technical debt across the crosstache codebase.
+Comprehensive audit of missing features, stubs, bugs, and technical debt across the crosstache codebase. Line numbers drift as the code changes — treat them as approximate.
 
 ---
 
@@ -12,9 +12,9 @@ Comprehensive audit of missing features, stubs, bugs, and technical debt across 
 **File:** `src/secret/manager.rs:1876`
 When renaming via `xv update --rename`, the code fetches the current secret with `include_value: false`, so `current_secret.value` is always `None`. The fallback at line 1876 writes an empty string as the new secret's value. A rename without `--value` silently destroys the secret's data.
 
-### 2. `xv run` — `Stdio::inherit()` + `.output()` incompatibility
-**File:** `src/cli/commands.rs:5064`
-The `no_masking` path uses `Stdio::inherit()` with `Command::output()`. These are incompatible — `.output()` expects captured stdio, so stdout/stderr will be empty while child output goes directly to the terminal. Additionally, the masking path buffers all output in memory before printing, meaning long-running processes accumulate unbounded memory.
+### 2. `xv run` — masking path buffers full output in memory
+**File:** `src/cli/commands.rs` (`execute_secret_run`)
+The `--no-masking` path uses `Command::status()` with inherited stdio (correct). The **default** masking path uses `Command::output()`, so stdout/stderr are fully buffered before masking — long-running commands with large output can use unbounded memory. (Historical note: an older `inherit` + `output` mismatch appears resolved in current code.)
 
 ### 3. `parse_iso_datetime` — unreachable branch
 **File:** `src/utils/datetime.rs:97`
@@ -71,9 +71,8 @@ Comment says `opener` crate needed. Only prints the file path without opening it
 **File:** `src/utils/format.rs:158`
 Returns error: "Template output format is not yet supported." Users can select it via `--format=template` and get a runtime error.
 
-### 16. `--resource-group` flag missing from audit command
-**File:** `src/cli/commands.rs:3229`
-Error message at line 3233 tells users to "specify with --resource-group" but no such flag exists on the `Audit` command. Vault audits in non-default resource groups are impossible.
+### ~~16. `--resource-group` flag missing from audit command~~ — fixed
+The `Audit` command now exposes `--resource-group` (see `Commands::Audit` in `src/cli/commands.rs`). Remove this entry after the next full audit pass.
 
 ### 17. Managed Identity credential priority is a no-op
 **File:** `src/auth/provider.rs:195`
@@ -155,9 +154,9 @@ Calls progress callback at 0 bytes and then at `file_size` bytes with no interme
 **File:** `src/config/settings.rs:91`
 Stored and loaded from `FUNCTION_APP_URL` env var but no command implementation reads it.
 
-### 35. `Config.cache_ttl` — never used
-**File:** `src/config/settings.rs:93`
-Stored and loaded from `CACHE_TTL` env var but there is no caching layer. The field has no runtime effect.
+### ~~35. `Config.cache_ttl` — never used~~ — outdated
+**File:** `src/config/settings.rs` (`cache_ttl_secs`)
+TTL is read from config/env and passed into `CacheManager::from_config` (`src/cache/manager.rs`). Remove this entry after the next full audit pass.
 
 ### 36. `_collect_files_recursive` — dead code
 **File:** `src/cli/commands.rs:7254`
@@ -227,8 +226,10 @@ These `.unwrap()` calls in production code have varying levels of risk:
 | Priority | Count | Description |
 |----------|-------|-------------|
 | **P0** | 5 | Bugs — incorrect behavior, data loss, wrong exit codes |
-| **P1** | 12 | User-facing feature gaps — stubs, no-op flags, missing commands |
+| **P1** | ~11 | User-facing feature gaps — stubs, no-op flags (file sync shipped; audit RG fixed) |
 | **P2** | 14 | Quality & robustness — error handling, silent failures, missing checks |
-| **P3** | 14 | Dead code, polish, tech debt — unused structs, duplicated code |
+| **P3** | ~13 | Dead code, polish, tech debt — unused structs, duplicated code (`cache_ttl` item obsolete) |
 | **P4** | 5 | Potential panic sites in production code |
-| **Total** | **50** | |
+| **Total** | ~48 | Strikethrough items await removal on the next full audit |
+
+> **Note:** Items marked ~~fixed~~ or ~~outdated~~ should be deleted when someone re-validates line numbers and behavior across the tree.
