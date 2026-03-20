@@ -5,6 +5,7 @@
 
 #[cfg(feature = "file-ops")]
 use crate::blob::manager::{create_blob_manager, BlobManager};
+use crate::cli::helpers::parse_key_val;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 #[cfg(feature = "file-ops")]
@@ -9210,22 +9211,6 @@ async fn execute_secret_delete_group(
         ));
         Ok(())
     }
-}
-
-/// Parse a single key-value pair
-fn parse_key_val<T, U>(
-    s: &str,
-) -> std::result::Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
-where
-    T: std::str::FromStr,
-    T::Err: std::error::Error + Send + Sync + 'static,
-    U: std::str::FromStr,
-    U::Err: std::error::Error + Send + Sync + 'static,
-{
-    let pos = s
-        .find('=')
-        .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
-    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
 }
 
 /// Quick file upload command (alias for file upload)
