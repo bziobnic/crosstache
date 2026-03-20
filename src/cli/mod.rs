@@ -4,5 +4,6 @@
 //! including command definitions, argument parsing, and command execution.
 
 pub mod commands;
+pub mod file;
 
 pub use commands::*;
