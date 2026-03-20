@@ -4,6 +4,7 @@
 //! including command definitions, argument parsing, and command execution.
 
 pub mod commands;
+#[cfg(feature = "file-ops")]
 pub mod file;
 
 pub use commands::*;
