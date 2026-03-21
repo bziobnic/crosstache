@@ -1,10 +1,12 @@
 # Refactoring `src/cli/commands.rs` — Pros & Cons
 
-> Date: 2026-03-19
+> Last updated: 2026-03-20 (mirror of `REFACTOR.md` — keep in sync or delete one copy)
 
 ## Context
 
-`commands.rs` is **9,728 lines** — roughly 43% of the entire `src/` tree (22,603 lines). It contains 100 top-level functions, 21 structs/enums, 38 `#[cfg(feature)]` gates, and an inline test module starting at line 9561. The next-largest file (`secret/manager.rs`) is under 2,000 lines.
+`commands.rs` is **~9,656 lines** — a large share of the `src/` tree. It contains many top-level functions, multiple command enums, numerous `#[cfg(feature = "file-ops")]` gates, and an inline test module near the file end. The next-largest domain file (`secret/manager.rs`) is under 2,000 lines.
+
+**Partial extraction:** `FileCommands` lives in `src/cli/file.rs`; file execution remains in `commands.rs`. See `dev/FILE-BLOB-REFACTOR-PLAN.md`.
 
 The file mixes several concerns:
 
@@ -25,19 +27,19 @@ A natural split would create files per domain under `src/cli/`: `definitions.rs`
 ## Pros
 
 ### 1. Navigability
-A 9,700-line file is difficult to orient in — IDE outlines, `rg` results, and "go to definition" all return long flat lists. Smaller files with descriptive names let a contributor jump to `cli/vault.rs` instead of scrolling through thousands of unrelated lines.
+A ~9,650-line file is difficult to orient in — IDE outlines, `rg` results, and "go to definition" all return long flat lists. Smaller files with descriptive names let a contributor jump to `cli/vault.rs` instead of scrolling through thousands of unrelated lines.
 
 ### 2. Focused diffs and blame
 Feature branches that touch vault logic will not produce diffs in the same file as unrelated secret or sync work. Merge conflicts between parallel efforts become far less likely, and `git blame` becomes meaningful per-domain.
 
 ### 3. Compile-time locality
-`rustc` re-checks the entire compilation unit when any line changes. Splitting the file won't change the crate-level incremental compilation story much, but it reduces cognitive re-compilation: reviewers and tooling (clippy, rust-analyzer) can focus on the changed module without loading 9,700 lines of context.
+`rustc` re-checks the entire compilation unit when any line changes. Splitting the file won't change the crate-level incremental compilation story much, but it reduces cognitive re-compilation: reviewers and tooling (clippy, rust-analyzer) can focus on the changed module without loading the full monolith.
 
 ### 4. Feature-gate clarity
 The 38 `#[cfg(feature = "file-ops")]` blocks are scattered throughout. Extracting file/blob commands into their own module would consolidate these gates into one or two files, making the conditional compilation surface area obvious.
 
 ### 5. Test co-location
-The single `mod tests` block at line 9561 covers multiple domains. Splitting allows each module to carry its own `#[cfg(test)] mod tests`, making it clear which tests exercise which commands and encouraging better coverage per domain.
+The single `mod tests` block at the end of `commands.rs` covers multiple domains. Splitting allows each module to carry its own `#[cfg(test)] mod tests`, making it clear which tests exercise which commands and encouraging better coverage per domain.
 
 ### 6. Onboarding cost
 New contributors (human or AI) reading the project for the first time will understand the CLI surface faster when the module tree mirrors the command hierarchy (`cli/secret.rs` → `xv set`, `xv get`, …) rather than requiring them to mentally partition a monolith.
@@ -68,7 +70,7 @@ The monolithic test module references private helpers directly via `super::*`. S
 Simply chopping the file into pieces by command domain doesn't address the deeper issue: execution logic lives in the CLI layer rather than in domain modules (`secret/`, `vault/`, `blob/`). A file like `cli/vault.rs` that's still 1,500 lines of inline Azure REST calls is only marginally better than the monolith. The real win comes from pushing business logic down — but that's a much larger effort.
 
 ### 7. Churn vs. feature velocity
-The project is actively shipping features (file sync just landed, PR #110 is open). A multi-thousand-line refactor competes for the same branch/review bandwidth and can stall feature work for days. The monolith is painful but functional.
+The project ships on active branches. A multi-thousand-line refactor competes for review bandwidth. The monolith is painful but functional; incremental extraction (e.g. `cli/file.rs`) reduces risk.
 
 ---
 

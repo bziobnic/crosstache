@@ -1,8 +1,10 @@
 # Missing Features & Technical Debt
 
-> Last reviewed: 2026-03-19 | Codebase version: **v0.4.21**
+> Last reviewed: 2026-03-20 | Codebase version: **v0.4.21**
 
 Comprehensive audit of missing features, stubs, bugs, and technical debt across the crosstache codebase. Line numbers drift as the code changes — treat them as approximate.
+
+**Recent fixes (since last audit pass):** Global `--format auto` + `TableFormatter` across list paths; vault list **cached** results now respect `--format` (same as non-cached); `xv file list` JSON/YAML again emit raw `BlobListItem` schema; vault share list accepts `fmt=auto` and suppresses the human header when output is JSON. Re-validate line references below when editing code.
 
 ---
 
@@ -118,9 +120,9 @@ This void async method returns nothing. Internal failures are silently lost.
 **File:** `src/cli/commands.rs:2672`
 `--format` accepts any string but rejects everything except `"dotenv"` at runtime. Should use an enum or document limitation more clearly.
 
-### 27. `VaultShareCommands::List` format falls back silently
-**File:** `src/cli/commands.rs:6670`
-`--format` is `String` (not `OutputFormat` enum). Invalid values like `"csv"` silently fall back to table with no warning.
+### 27. `VaultShareCommands::List` format is still a loose `String`
+**File:** `src/cli/commands.rs` (`VaultShareCommands::List`, `execute_vault_share`)
+`--fmt` / format remains `String` (not the global `OutputFormat` enum). Unrecognized values log a **warning** and fall back to table (`"Unrecognized format '…', using table"`). Values like `json`, `auto`, and `table` are handled explicitly. **Remaining gap:** parity with all `OutputFormat` variants and consistent behavior vs `xv vault list --format` is still ad hoc.
 
 ### 28. Hardcoded emojis bypass `--no-color`/pipe detection
 **Files:** `src/cli/commands.rs:5000` (`🔗`), `:3623` (`📝`)

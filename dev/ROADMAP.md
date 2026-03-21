@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> Last reviewed: 2026-03-19 | Current version: **v0.4.21**
+> Last reviewed: 2026-03-20 | Current version: **v0.4.21**
 
 ---
 
@@ -45,9 +45,15 @@ Features shipped and verified in the codebase.
 ### v0.4.1–v0.4.21
 - Bug fixes, release cleanup, output consistency improvements
 - Configurable clipboard timeout (`clipboard_timeout` config key, 0 to disable)
+- **Global `--format` default is `auto`:** resolves to styled table on a TTY and JSON when stdout is not a terminal (`OutputFormat::resolve_for_stdout()`). `Config.runtime_output_format` stores the resolved value for command handlers; `config.output_json` stays in sync for legacy checks.
+- **Table output:** `TableFormatter` drives list/table output for secrets, cached lists, vault share assignments, and file listings; human styles (`table` / `plain` / `raw`) avoid ANSI where appropriate.
+- **Vault list cache:** Cached vault list path uses `TableFormatter` (same as live API path) so `--format yaml|csv|json|…` is honored instead of only table vs JSON.
+- **File list machine output:** `xv file list` JSON/YAML serializes raw `BlobListItem` / `FileInfo` (numeric sizes, ISO timestamps, group arrays). CSV uses machine-oriented columns; table/plain remain display-oriented.
 - Output format support: JSON, YAML, CSV, plain, raw all implemented (only `template` format remains stubbed)
 - **File sync** (`xv file sync`): `up` / `down` / `both`, size + mtime comparison with epsilon, `--dry-run`, `--delete` (scoped; confirmation), cache invalidation; helpers in `src/blob/sync.rs`
 - `xv audit` accepts `--resource-group` for vault-wide audits outside the default resource group
+- **Integration tests:** `tests/cli_integration_tests.rs` exercises the `xv` binary (help, version, config path/show, gen, format flags, completion) without Azure.
+- **Clipboard tests:** `tests/clipboard_tests.rs` uses read retries and graceful skips when the OS clipboard is unavailable (CI/headless).
 
 ---
 
@@ -155,7 +161,7 @@ The `xv file delete` enhancement is **largely complete**. Implemented:
 
 Still open:
 - ❌ Double-confirmation for large deletions (>10 files or >100MB)
-- ❌ Unit and integration tests
+- ❌ Deeper unit/integration coverage for delete flows (CLI integration tests now cover general binary smoke tests; file delete-specific tests still thin)
 - ❌ Empty directory marker edge cases (cleanup/recreation)
 - ❌ Performance optimization (concurrent deletion, caching)
 - ❌ Documentation updates (README examples)

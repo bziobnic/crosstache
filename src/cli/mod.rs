@@ -6,6 +6,8 @@
 pub mod commands;
 #[cfg(feature = "file-ops")]
 pub mod file;
+#[cfg(feature = "file-ops")]
+pub mod file_ops;
 pub(crate) mod helpers;
 
 pub use commands::*;
