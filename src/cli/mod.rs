@@ -8,6 +8,7 @@ pub mod commands;
 pub mod file;
 #[cfg(feature = "file-ops")]
 pub mod file_ops;
+pub(crate) mod config_ops;
 pub(crate) mod helpers;
 pub(crate) mod vault_ops;
 
