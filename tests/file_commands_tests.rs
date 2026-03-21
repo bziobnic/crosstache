@@ -4,7 +4,8 @@
 //! with both the full command syntax and the quick aliases.
 
 use crosstache::{
-    cli::commands::{Commands, FileCommands, SyncDirection},
+    cli::commands::Commands,
+    cli::file::{FileCommands, SyncDirection},
     config::{BlobConfig, Config},
     error::Result,
 };
