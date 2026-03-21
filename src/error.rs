@@ -69,6 +69,9 @@ pub enum CrosstacheError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error("Upgrade error: {0}")]
+    Upgrade(String),
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -135,6 +138,10 @@ impl CrosstacheError {
 
     pub fn invalid_argument<S: Into<String>>(msg: S) -> Self {
         Self::InvalidArgument(msg.into())
+    }
+
+    pub fn upgrade<S: Into<String>>(msg: S) -> Self {
+        Self::Upgrade(msg.into())
     }
 
     pub fn unknown<S: Into<String>>(msg: S) -> Self {

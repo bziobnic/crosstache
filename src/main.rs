@@ -167,6 +167,10 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             output::error("Invalid Argument");
             eprintln!("{msg}");
         }
+        Upgrade(msg) => {
+            output::error("Upgrade Error");
+            eprintln!("{msg}");
+        }
         _ => {
             output::error(&format!("{error}"));
         }
