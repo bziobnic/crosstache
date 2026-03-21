@@ -88,7 +88,7 @@ All moved functions: `pub(crate)`.
 
 Add to `cli/mod.rs`:
 ```rust
-pub mod vault_ops;
+pub(crate) mod vault_ops;
 ```
 
 ### Exit criteria
