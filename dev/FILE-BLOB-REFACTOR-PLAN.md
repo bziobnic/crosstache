@@ -10,6 +10,19 @@
 
 ---
 
+## Status (2026-03-20)
+
+| Item | State |
+|------|--------|
+| `src/cli/file.rs` with `FileCommands` + clap args | **Done** — wired from `commands.rs` under `#[cfg(feature = "file-ops")]` |
+| `src/cli/helpers.rs` shared helpers | **Done** (exists independently of this plan) |
+| `src/cli/file_ops.rs` + moved `execute_file_*` | **Done** — upload/list/delete/info/sync, quick upload/download, `display_file_list_items`, cache `refresh_file_list` |
+| Integration tests import `cli::file::{FileCommands, …}` | **Done** (`tests/file_commands_tests.rs`) |
+| Exit criterion: no file/blob ops in `commands.rs` | **Done** — only `crate::cli::file_ops::…` dispatch + `FileCommands` import for clap |
+
+---
+
+
 ## Planned file structure
 
 ### New files

@@ -1,10 +1,12 @@
 # Refactoring `src/cli/commands.rs` — Pros & Cons
 
-> Date: 2026-03-19
+> Last updated: 2026-03-20
 
 ## Context
 
-`commands.rs` is **9,728 lines** — roughly 43% of the entire `src/` tree (22,603 lines). It contains 100 top-level functions, 21 structs/enums, 38 `#[cfg(feature)]` gates, and an inline test module starting at line 9561. The next-largest file (`secret/manager.rs`) is under 2,000 lines.
+`commands.rs` is **~9,656 lines** — a large share of the `src/` tree. It contains many top-level functions, multiple command enums, numerous `#[cfg(feature = "file-ops")]` gates, and an inline `#[cfg(test)] mod tests` block near the file end. The next-largest domain file (`secret/manager.rs`) is under 2,000 lines.
+
+**Partial extraction:** `FileCommands` and related clap types live in `src/cli/file.rs` (feature `file-ops`); execution and `execute_file_*` handlers remain in `commands.rs`. See `dev/FILE-BLOB-REFACTOR-PLAN.md` for the full split plan and exit criteria.
 
 The file mixes several concerns:
 
@@ -28,7 +30,7 @@ A natural split would create files per domain under `src/cli/`: `definitions.rs`
 
 ### 1. Navigability
 
-A 9,700-line file is difficult to orient in — IDE outlines, `rg` results, and "go to definition" all return long flat lists. Smaller files with descriptive names let a contributor jump to `cli/vault.rs` instead of scrolling through thousands of unrelated lines.
+A ~9,650-line file is difficult to orient in — IDE outlines, `rg` results, and "go to definition" all return long flat lists. Smaller files with descriptive names let a contributor jump to `cli/vault.rs` instead of scrolling through thousands of unrelated lines.
 
 ### 2. Focused diffs and blame
 
@@ -36,7 +38,7 @@ Feature branches that touch vault logic will not produce diffs in the same file 
 
 ### 3. Compile-time locality
 
-`rustc` re-checks the entire compilation unit when any line changes. Splitting the file won't change the crate-level incremental compilation story much, but it reduces cognitive re-compilation: reviewers and tooling (clippy, rust-analyzer) can focus on the changed module without loading 9,700 lines of context.
+`rustc` re-checks the entire compilation unit when any line changes. Splitting the file won't change the crate-level incremental compilation story much, but it reduces cognitive re-compilation: reviewers and tooling (clippy, rust-analyzer) can focus on the changed module without loading the full monolith.
 
 ### 4. Feature-gate clarity
 
@@ -44,7 +46,7 @@ The 38 `#[cfg(feature = "file-ops")]` blocks are scattered throughout. Extractin
 
 ### 5. Test co-location
 
-The single `mod tests` block at line 9561 covers multiple domains. Splitting allows each module to carry its own `#[cfg(test)] mod tests`, making it clear which tests exercise which commands and encouraging better coverage per domain.
+The single `mod tests` block at the end of `commands.rs` covers multiple domains. Splitting allows each module to carry its own `#[cfg(test)] mod tests`, making it clear which tests exercise which commands and encouraging better coverage per domain.
 
 ### 6. Onboarding cost
 
@@ -84,7 +86,7 @@ Simply chopping the file into pieces by command domain doesn't address the deepe
 
 ### 7. Churn vs. feature velocity
 
-The project is actively shipping features (file sync just landed, PR #110 is open). A multi-thousand-line refactor competes for the same branch/review bandwidth and can stall feature work for days. The monolith is painful but functional.
+The project ships features on active branches. A multi-thousand-line refactor competes for review bandwidth and can stall feature work. The monolith is painful but functional; incremental extraction (e.g. `cli/file.rs` for definitions) reduces risk.
 
 ---
 

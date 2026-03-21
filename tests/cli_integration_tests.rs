@@ -12,10 +12,17 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_xv(args: &[&str]) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_xv");
-    Command::new(bin).args(args).output().expect("xv binary failed to run")
+    Command::new(bin)
+        .args(args)
+        .output()
+        .expect("xv binary failed to run")
 }
 
-fn run_xv_with_env(args: &[&str], env_clear: &[&str], env_set: &[(&str, &str)]) -> std::process::Output {
+fn run_xv_with_env(
+    args: &[&str],
+    env_clear: &[&str],
+    env_set: &[(&str, &str)],
+) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_xv");
     let mut cmd = Command::new(bin);
     cmd.args(args);
@@ -35,7 +42,11 @@ fn run_xv_with_env(args: &[&str], env_clear: &[&str], env_set: &[(&str, &str)]) 
 #[test]
 fn test_help_succeeds() {
     let out = run_xv(&["--help"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("crosstache") || stdout.contains("xv"));
     assert!(stdout.contains("Commands"));
@@ -120,7 +131,11 @@ fn test_config_path_succeeds() {
         &[],
         &[("XDG_CONFIG_HOME", "/tmp/xv-integration-test-config-path")],
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("xv.conf") || stdout.contains(".config"));
 }
@@ -135,9 +150,17 @@ fn test_config_show_succeeds_with_isolated_config() {
         &["AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID"],
         &[("XDG_CONFIG_HOME", config_home.as_ref())],
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("subscription") || stdout.contains("Subscription") || stdout.contains("default_vault"));
+    assert!(
+        stdout.contains("subscription")
+            || stdout.contains("Subscription")
+            || stdout.contains("default_vault")
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -151,14 +174,26 @@ fn test_gen_raw_produces_correct_length() {
         &["gen", "--length", "20", "--raw"],
         &[],
         &[
-            ("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000"),
+            (
+                "AZURE_SUBSCRIPTION_ID",
+                "00000000-0000-0000-0000-000000000000",
+            ),
             ("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000"),
         ],
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let line = stdout.trim().lines().next().unwrap_or("");
-    assert_eq!(line.len(), 20, "expected 20 chars, got {} chars", line.len());
+    assert_eq!(
+        line.len(),
+        20,
+        "expected 20 chars, got {} chars",
+        line.len()
+    );
 }
 
 #[test]
@@ -168,7 +203,10 @@ fn test_gen_numeric_charset() {
         &["gen", "--length", "10", "--charset", "numeric", "--raw"],
         &[],
         &[
-            ("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000"),
+            (
+                "AZURE_SUBSCRIPTION_ID",
+                "00000000-0000-0000-0000-000000000000",
+            ),
             ("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000"),
         ],
     );
@@ -176,7 +214,11 @@ fn test_gen_numeric_charset() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let line = stdout.trim().lines().next().unwrap_or("");
     assert_eq!(line.len(), 10);
-    assert!(line.chars().all(|c| c.is_ascii_digit()), "expected numeric, got: {}", line);
+    assert!(
+        line.chars().all(|c| c.is_ascii_digit()),
+        "expected numeric, got: {}",
+        line
+    );
 }
 
 #[test]
@@ -186,7 +228,10 @@ fn test_gen_invalid_length_fails() {
         &["gen", "--length", "3", "--raw"],
         &[],
         &[
-            ("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000"),
+            (
+                "AZURE_SUBSCRIPTION_ID",
+                "00000000-0000-0000-0000-000000000000",
+            ),
             ("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000"),
         ],
     );
@@ -225,7 +270,10 @@ fn test_vault_list_fails_without_config() {
         &["AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID", "DEFAULT_VAULT"],
         &[("XDG_CONFIG_HOME", config_home.as_ref())],
     );
-    assert!(!out.status.success(), "vault list without config should fail");
+    assert!(
+        !out.status.success(),
+        "vault list without config should fail"
+    );
 }
 
 #[test]
@@ -238,7 +286,10 @@ fn test_list_fails_without_vault() {
         &["DEFAULT_VAULT"],
         &[
             ("XDG_CONFIG_HOME", config_home.as_ref()),
-            ("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000"),
+            (
+                "AZURE_SUBSCRIPTION_ID",
+                "00000000-0000-0000-0000-000000000000",
+            ),
             ("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000"),
         ],
     );
@@ -258,5 +309,8 @@ fn test_unknown_subcommand_fails() {
 #[test]
 fn test_vault_list_json_format_flag() {
     let out = run_xv(&["vault", "list", "--format", "json", "--no-cache", "--help"]);
-    assert!(out.status.success(), "vault list --format json --help should work");
+    assert!(
+        out.status.success(),
+        "vault list --format json --help should work"
+    );
 }
