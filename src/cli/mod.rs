@@ -10,6 +10,7 @@ pub mod file;
 pub mod file_ops;
 pub(crate) mod config_ops;
 pub(crate) mod helpers;
+pub(crate) mod system_ops;
 pub(crate) mod vault_ops;
 
 pub use commands::*;
