@@ -23,6 +23,10 @@ use crate::error::{CrosstacheError, Result};
 
 #[tokio::main]
 async fn main() {
+    // Reset SIGPIPE to default behavior so piping to commands like `head` or
+    // `echo` doesn't cause a panic when the reader closes the pipe early.
+    reset_sigpipe();
+
     // Initialize logging
     init_logging();
 
@@ -73,6 +77,20 @@ fn init_logging() {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+}
+
+/// Reset SIGPIPE to default so the process terminates cleanly when a pipe reader
+/// (e.g., `head`, `echo`) closes early, instead of panicking on write.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {
+    // No-op on non-Unix platforms
 }
 
 fn print_user_friendly_error(error: &CrosstacheError) {
