@@ -596,10 +596,16 @@ async fn execute_vault_import(
                     .and_then(|n| n.as_str())
                     .ok_or_else(|| CrosstacheError::serialization("Missing secret name"))?;
 
-                let value = secret_obj
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CrosstacheError::serialization("Missing secret value"))?;
+                let value = match secret_obj.get("value").and_then(|v| v.as_str()) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!(
+                            "Warning: Skipping secret '{}' — no value in export (was it exported with --include-values?)",
+                            name
+                        );
+                        continue;
+                    }
+                };
 
                 let content_type = secret_obj
                     .get("content_type")

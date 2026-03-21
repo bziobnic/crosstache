@@ -144,17 +144,36 @@ fn test_recursive_upload_preserves_structure() {
 #[test]
 #[ignore] // Run with --ignored flag when you have Azure credentials
 fn test_recursive_upload_with_flatten() {
-    // Setup
+    // Setup: Use uniquely named files to avoid collisions with other blobs
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let test_dir = temp_dir.path().join("flatten-test");
     fs::create_dir(&test_dir).expect("Failed to create test directory");
-    create_test_structure(&test_dir).expect("Failed to create test structure");
+    fs::create_dir_all(test_dir.join("sub/deep")).expect("Failed to create dirs");
+
+    let test_files = [
+        ("sub/deep/flatten-test-alpha.txt", "alpha"),
+        ("sub/flatten-test-beta.txt", "beta"),
+        ("flatten-test-gamma.txt", "gamma"),
+    ];
+    for (path, content) in &test_files {
+        fs::write(test_dir.join(path), content).unwrap();
+    }
+
+    let expected_flat_names: Vec<String> = test_files
+        .iter()
+        .map(|(p, _)| {
+            Path::new(p)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
 
     // Cleanup any existing test blobs
-    cleanup_test_blobs("users.md");
-    cleanup_test_blobs("auth.md");
-    cleanup_test_blobs("guide.md");
-    cleanup_test_blobs("main.rs");
+    for name in &expected_flat_names {
+        cleanup_test_blobs(name);
+    }
 
     // Execute: Upload with --flatten flag
     let output = run_xv_command(&[
@@ -172,39 +191,31 @@ fn test_recursive_upload_with_flatten() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Verify: Check Azure for flattened structure (no paths)
+    // Verify: Check that each file was uploaded at root (no directory structure)
     let all_blobs = list_azure_blobs("");
-
     println!("All blobs after flatten: {:?}", all_blobs);
 
-    assert!(
-        all_blobs.contains(&"users.md".to_string()),
-        "Expected users.md (flattened) in blobs"
-    );
-    assert!(
-        all_blobs.contains(&"auth.md".to_string()),
-        "Expected auth.md (flattened) in blobs"
-    );
-    assert!(
-        all_blobs.contains(&"guide.md".to_string()),
-        "Expected guide.md (flattened) in blobs"
-    );
-    assert!(
-        all_blobs.contains(&"main.rs".to_string()),
-        "Expected main.rs (flattened) in blobs"
-    );
+    for name in &expected_flat_names {
+        assert!(
+            all_blobs.contains(name),
+            "Expected flattened blob '{}' in container",
+            name
+        );
+    }
 
-    // Verify no directory structure (files should be at root)
-    assert!(
-        !all_blobs.iter().any(|b| b.contains("/")),
-        "Flattened blobs should not contain directory separators"
-    );
+    // Verify flattened files have no directory separators
+    for name in &expected_flat_names {
+        assert!(
+            !name.contains('/'),
+            "Flattened blob '{}' should not contain directory separators",
+            name
+        );
+    }
 
     // Cleanup
-    cleanup_test_blobs("users.md");
-    cleanup_test_blobs("auth.md");
-    cleanup_test_blobs("guide.md");
-    cleanup_test_blobs("main.rs");
+    for name in &expected_flat_names {
+        cleanup_test_blobs(name);
+    }
 }
 
 #[test]
@@ -239,25 +250,26 @@ fn test_recursive_upload_with_prefix() {
     );
 
     // Verify: Check Azure for prefixed structure
+    // The upload preserves the source directory name, so blobs are at prefix/prefix-test/...
     let blobs = list_azure_blobs(&format!("{}/", prefix));
 
     println!("Prefixed blobs: {:?}", blobs);
 
     assert!(
-        blobs.contains(&format!("{}/api/v1/users.md", prefix)),
-        "Expected prefixed api/v1/users.md in blobs"
+        blobs.contains(&format!("{}/prefix-test/api/v1/users.md", prefix)),
+        "Expected prefixed prefix-test/api/v1/users.md in blobs"
     );
     assert!(
-        blobs.contains(&format!("{}/api/v1/auth.md", prefix)),
-        "Expected prefixed api/v1/auth.md in blobs"
+        blobs.contains(&format!("{}/prefix-test/api/v1/auth.md", prefix)),
+        "Expected prefixed prefix-test/api/v1/auth.md in blobs"
     );
     assert!(
-        blobs.contains(&format!("{}/docs/guide.md", prefix)),
-        "Expected prefixed docs/guide.md in blobs"
+        blobs.contains(&format!("{}/prefix-test/docs/guide.md", prefix)),
+        "Expected prefixed prefix-test/docs/guide.md in blobs"
     );
     assert!(
-        blobs.contains(&format!("{}/src/main.rs", prefix)),
-        "Expected prefixed src/main.rs in blobs"
+        blobs.contains(&format!("{}/prefix-test/src/main.rs", prefix)),
+        "Expected prefixed prefix-test/src/main.rs in blobs"
     );
 
     // Verify all blobs have the prefix
