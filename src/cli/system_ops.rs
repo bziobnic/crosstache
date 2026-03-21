@@ -792,14 +792,18 @@ pub(crate) async fn execute_gen_command(
         let secret_manager = SecretManager::new(auth_provider, config.no_color);
         let vault_name = config.resolve_vault_name(vault).await?;
 
+        // Print raw password first so it appears before set_secret_safe's info messages
+        if raw {
+            println!("{}", password.as_str());
+        }
+
         match secret_manager
             .set_secret_safe(&vault_name, name, password.as_str(), None)
             .await
         {
             Ok(_) => {
                 if raw {
-                    println!("{}", password.as_str());
-                    output::success(&format!("Secret '{name}' saved."));
+                    // Password already printed above
                 } else {
                     match copy_to_clipboard(password.as_str()) {
                         Ok(()) => {
