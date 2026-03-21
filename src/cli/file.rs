@@ -131,4 +131,3 @@ pub enum SyncDirection {
     Down,
     Both,
 }
-

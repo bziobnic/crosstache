@@ -11,14 +11,18 @@ use crossterm::{
 };
 use serde::Serialize;
 use std::io::stdout;
+use std::io::IsTerminal;
 use tabled::{
     settings::{object::Rows, Alignment, Color, Modify, Padding, Style, Width},
     Table, Tabled,
 };
 
 /// Output format options
-#[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum OutputFormat {
+    /// Automatic format selection (table on TTY, JSON for pipes/redirects)
+    #[default]
+    Auto,
     /// Human-readable table format
     Table,
     /// Machine-readable JSON output
@@ -33,6 +37,22 @@ pub enum OutputFormat {
     Template,
     /// Raw text without formatting
     Raw,
+}
+
+impl OutputFormat {
+    /// Resolve auto format based on stdout TTY status.
+    pub fn resolve_for_stdout(self) -> Self {
+        match self {
+            Self::Auto => {
+                if std::io::stdout().is_terminal() {
+                    Self::Table
+                } else {
+                    Self::Json
+                }
+            }
+            explicit => explicit,
+        }
+    }
 }
 
 /// Color theme for console output
@@ -74,7 +94,7 @@ impl TableFormatter {
     pub fn new(format: OutputFormat, no_color: bool) -> Self {
         Self {
             _theme: ColorTheme::default(),
-            format,
+            format: format.resolve_for_stdout(),
             no_color,
         }
     }
@@ -82,10 +102,22 @@ impl TableFormatter {
     /// Create a formatted table from data
     pub fn format_table<T: Tabled + Serialize>(&self, data: &[T]) -> Result<String> {
         if data.is_empty() {
-            return Ok("No results found. If this is unexpected, check your vault permissions or filter criteria.".to_string());
+            // Machine-readable formats must stay valid (e.g. `[]` for JSON) for pipes/jq.
+            return match self.format {
+                OutputFormat::Auto => self.format_as_json(data),
+                OutputFormat::Json => self.format_as_json(data),
+                OutputFormat::Yaml => self.format_as_yaml(data),
+                OutputFormat::Csv => self.format_as_csv(data),
+                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => Ok(
+                    "No results found. If this is unexpected, check your vault permissions or filter criteria."
+                        .to_string(),
+                ),
+                OutputFormat::Template => self.format_as_template(data, ""),
+            };
         }
 
         match self.format {
+            OutputFormat::Auto => self.format_as_json(data),
             OutputFormat::Table => self.format_as_table(data),
             OutputFormat::Json => self.format_as_json(data),
             OutputFormat::Yaml => self.format_as_yaml(data),
@@ -331,6 +363,14 @@ mod tests {
         let formatter = TableFormatter::new(OutputFormat::Table, true);
         let result = formatter.format_table(&data);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn empty_json_is_valid_array() {
+        let data: Vec<TestData> = vec![];
+        let formatter = TableFormatter::new(OutputFormat::Json, true);
+        let out = formatter.format_table(&data).expect("format");
+        assert_eq!(out.trim(), "[]");
     }
 
     #[test]

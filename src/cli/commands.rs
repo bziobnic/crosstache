@@ -5,11 +5,11 @@
 
 #[cfg(feature = "file-ops")]
 use crate::blob::manager::{create_blob_manager, BlobManager};
+#[cfg(feature = "file-ops")]
+use crate::cli::file::{FileCommands, SyncDirection};
 use crate::cli::helpers::parse_key_val;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
-#[cfg(feature = "file-ops")]
-use crate::cli::file::{FileCommands, SyncDirection};
 use crate::utils::format::OutputFormat;
 use crate::utils::output;
 use crate::vault::{VaultCreateRequest, VaultManager};
@@ -85,8 +85,8 @@ pub struct Cli {
     #[arg(long, global = true, hide = should_hide_options())]
     pub debug: bool,
 
-    /// Output format
-    #[arg(long, global = true, value_enum, default_value = "table", hide = should_hide_options())]
+    /// Output format (default: auto = table on TTY, json for pipes/redirects)
+    #[arg(long, global = true, value_enum, default_value = "auto", hide = should_hide_options())]
     pub format: OutputFormat,
 
     /// Custom template string for template format
@@ -606,8 +606,8 @@ pub enum VaultCommands {
         /// Resource group
         #[arg(short, long)]
         resource_group: Option<String>,
-        /// Output format
-        #[arg(long, value_enum, default_value = "table")]
+        /// Output format (default: auto = table on TTY, json for pipes/redirects)
+        #[arg(long, value_enum, default_value = "auto")]
         format: OutputFormat,
         /// Bypass the local cache and fetch fresh data
         #[arg(long)]
@@ -770,7 +770,7 @@ pub enum VaultShareCommands {
         #[arg(
             short = 'f',
             long = "fmt",
-            default_value = "table",
+            default_value = "auto",
             id = "share_list_format"
         )]
         format: String,
@@ -929,6 +929,10 @@ pub enum EnvCommands {
 
 impl Cli {
     pub async fn execute(self, mut config: Config) -> Result<()> {
+        let resolved = self.format.resolve_for_stdout();
+        config.runtime_output_format = resolved;
+        config.output_json = matches!(resolved, OutputFormat::Json);
+
         // Apply CLI credential type if specified (CLI flag overrides config/env)
         if let Some(cred_type) = self.credential_type {
             use crate::config::settings::AzureCredentialType;
@@ -1545,28 +1549,21 @@ async fn execute_vault_list(
     config: &Config,
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
+    use crate::utils::format::TableFormatter;
     use crate::vault::models::VaultSummary;
 
     let cache_manager = CacheManager::from_config(config);
     let cache_key = CacheKey::VaultList;
     let use_cache = cache_manager.is_enabled() && !no_cache;
+    let output_format = format.resolve_for_stdout();
 
     if use_cache && resource_group.is_none() {
         if let Some(cached) = cache_manager.get::<Vec<VaultSummary>>(&cache_key) {
             if cached.is_empty() {
                 output::info("No vaults found.");
             } else {
-                use crate::utils::format::format_table;
-                use tabled::Table;
-                if format == OutputFormat::Table {
-                    let table = Table::new(&cached);
-                    println!("{}", format_table(table, config.no_color));
-                } else {
-                    let json = serde_json::to_string_pretty(&cached).map_err(|e| {
-                        CrosstacheError::serialization(format!("Failed to serialize: {e}"))
-                    })?;
-                    println!("{json}");
-                }
+                let formatter = TableFormatter::new(output_format, config.no_color);
+                println!("{}", formatter.format_table(&cached)?);
             }
             return Ok(());
         }
@@ -1576,7 +1573,7 @@ async fn execute_vault_list(
         .list_vaults_formatted(
             Some(&config.subscription_id),
             resource_group.as_deref(),
-            format,
+            output_format,
         )
         .await?;
 
@@ -1729,8 +1726,7 @@ fn display_cached_secret_list(
     vault_name: &str,
     config: &Config,
 ) -> Result<()> {
-    use crate::utils::format::format_table;
-    use tabled::Table;
+    use crate::utils::format::TableFormatter;
 
     let mut filtered = secrets;
 
@@ -1746,18 +1742,19 @@ fn display_cached_secret_list(
         });
     }
 
-    let output_format = if config.output_json {
-        crate::utils::format::OutputFormat::Json
-    } else {
-        crate::utils::format::OutputFormat::Table
-    };
+    let fmt = config.runtime_output_format;
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
 
-    if output_format == crate::utils::format::OutputFormat::Table {
+    if human_table_like {
         println!();
-        if config.no_color {
-            println!("Vault: {}", vault_name);
-        } else {
+        // Color only for styled table; plain/raw must not emit ANSI escapes
+        if !config.no_color && fmt == OutputFormat::Table {
             println!("\x1b[36mVault: {}\x1b[0m", vault_name);
+        } else {
+            println!("Vault: {}", vault_name);
         }
         println!();
 
@@ -1767,17 +1764,17 @@ fn display_cached_secret_list(
             } else {
                 "No enabled secrets found in vault. Use --all to show disabled secrets."
             });
-        } else {
-            let table = Table::new(&filtered);
-            println!("{}", format_table(table, config.no_color));
-            println!("\n{} secret(s) in vault '{}'", filtered.len(), vault_name);
+            return Ok(());
         }
-    } else {
-        let json = serde_json::to_string_pretty(&filtered).map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to serialize secrets: {e}"))
-        })?;
-        println!("{json}");
+
+        let formatter = TableFormatter::new(fmt, config.no_color);
+        println!("{}", formatter.format_table(&filtered)?);
+        println!("\n{} secret(s) in vault '{}'", filtered.len(), vault_name);
+        return Ok(());
     }
+
+    let formatter = TableFormatter::new(fmt, config.no_color);
+    println!("{}", formatter.format_table(&filtered)?);
 
     Ok(())
 }
@@ -5786,19 +5783,18 @@ async fn execute_secret_list(
     config: &Config,
 ) -> Result<Vec<crate::secret::manager::SecretSummary>> {
     use crate::config::ContextManager;
-    use crate::utils::format::format_table;
-    use tabled::Table;
+    use crate::utils::format::TableFormatter;
 
     let vault_name = config.resolve_vault_name(vault).await?;
 
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
-    let output_format = if config.output_json {
-        crate::utils::format::OutputFormat::Json
-    } else {
-        crate::utils::format::OutputFormat::Table
-    };
+    let fmt = config.runtime_output_format;
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
 
     // Always fetch the complete unfiltered list so the caller can cache
     // the full dataset. Filters are applied in-memory below.
@@ -5864,12 +5860,13 @@ async fn execute_secret_list(
     }
 
     // Display results
-    if output_format == crate::utils::format::OutputFormat::Table {
+    if human_table_like {
         println!();
-        if config.no_color {
-            println!("Vault: {}", vault_name);
-        } else {
+        // Color only for styled table; plain/raw must not emit ANSI escapes
+        if !config.no_color && fmt == OutputFormat::Table {
             println!("\x1b[36mVault: {}\x1b[0m", vault_name);
+        } else {
+            println!("Vault: {}", vault_name);
         }
         println!();
 
@@ -5887,8 +5884,8 @@ async fn execute_secret_list(
             };
             output::info(&msg);
         } else {
-            let table = Table::new(&secrets);
-            println!("{}", format_table(table, config.no_color));
+            let formatter = TableFormatter::new(fmt, config.no_color);
+            println!("{}", formatter.format_table(&secrets)?);
 
             let count_label = if expired {
                 format!("{} expired secret(s)", secrets.len())
@@ -5900,10 +5897,8 @@ async fn execute_secret_list(
             println!("\n{} in vault '{}'", count_label, vault_name);
         }
     } else {
-        let json = serde_json::to_string_pretty(&secrets).map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to serialize secrets: {e}"))
-        })?;
-        println!("{json}");
+        let formatter = TableFormatter::new(fmt, config.no_color);
+        println!("{}", formatter.format_table(&secrets)?);
     }
 
     Ok(all_secrets)
@@ -7078,15 +7073,18 @@ async fn execute_vault_share(
                     "No access assignments found for vault '{vault_name}'"
                 ));
             } else {
-                println!("Access assignments for vault '{vault_name}':");
                 let output_format = match format.to_lowercase().as_str() {
                     "json" => crate::utils::format::OutputFormat::Json,
+                    "auto" => crate::utils::format::OutputFormat::Auto,
                     "table" | "" => crate::utils::format::OutputFormat::Table,
                     other => {
                         output::warn(&format!("Unrecognized format '{}', using table", other));
                         crate::utils::format::OutputFormat::Table
                     }
                 };
+                if output_format.resolve_for_stdout() == crate::utils::format::OutputFormat::Table {
+                    println!("Access assignments for vault '{vault_name}':");
+                }
                 let formatter =
                     crate::utils::format::TableFormatter::new(output_format, config.no_color);
                 let table_output = formatter.format_table(&roles)?;
@@ -7417,74 +7415,146 @@ fn display_file_list_items(
 ) -> Result<()> {
     use crate::blob::manager::format_size;
     use crate::blob::models::BlobListItem;
-    use crate::utils::format::format_table;
-    use tabled::{Table, Tabled};
+    use crate::utils::format::TableFormatter;
+    use serde::Serialize;
+    use tabled::Tabled;
 
     if items.is_empty() {
         output::info("No files found");
         return Ok(());
     }
 
-    if config.output_json {
-        let json_output = serde_json::to_string_pretty(&items).map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to serialize items: {e}"))
-        })?;
-        println!("{json_output}");
-    } else {
-        #[derive(Tabled)]
-        struct ListItem {
-            #[tabled(rename = "Name")]
-            name: String,
-            #[tabled(rename = "Size")]
-            size: String,
-            #[tabled(rename = "Content-Type")]
-            content_type: String,
-            #[tabled(rename = "Modified")]
-            modified: String,
-            #[tabled(rename = "Groups")]
-            groups: String,
+    let fmt = config.runtime_output_format.resolve_for_stdout();
+
+    // Rows for `--format csv`: machine-oriented fields (not `format_size()` / joined strings).
+    #[derive(Tabled, Serialize)]
+    struct FileListCsvRow {
+        #[tabled(rename = "type")]
+        kind: String,
+        name: String,
+        size: u64,
+        #[tabled(rename = "content_type")]
+        content_type: String,
+        #[tabled(rename = "last_modified")]
+        last_modified: String,
+        etag: String,
+        groups: String,
+        #[tabled(rename = "full_path")]
+        full_path: String,
+        #[tabled(rename = "metadata")]
+        metadata: String,
+        #[tabled(rename = "tags")]
+        tags: String,
+    }
+
+    #[derive(Tabled, Serialize)]
+    struct ListItem {
+        #[tabled(rename = "Name")]
+        name: String,
+        #[tabled(rename = "Size")]
+        size: String,
+        #[tabled(rename = "Content-Type")]
+        content_type: String,
+        #[tabled(rename = "Modified")]
+        modified: String,
+        #[tabled(rename = "Groups")]
+        groups: String,
+    }
+
+    match fmt {
+        OutputFormat::Json => {
+            let json_output = serde_json::to_string_pretty(items).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize items: {e}"))
+            })?;
+            println!("{json_output}");
         }
-
-        let display_items: Vec<ListItem> = items
-            .iter()
-            .map(|item| match item {
-                BlobListItem::Directory { name, .. } => ListItem {
-                    name: name.clone(),
-                    size: "<DIR>".to_string(),
-                    content_type: "-".to_string(),
-                    modified: "-".to_string(),
-                    groups: "-".to_string(),
-                },
-                BlobListItem::File(file) => ListItem {
-                    name: file.name.clone(),
-                    size: format_size(file.size),
-                    content_type: file.content_type.clone(),
-                    modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    groups: file.groups.join(", "),
-                },
-            })
-            .collect();
-
-        let table = Table::new(&display_items);
-        println!("{}", format_table(table, config.no_color));
-
-        // Count files and directories separately
-        let file_count = items
-            .iter()
-            .filter(|i| matches!(i, BlobListItem::File(_)))
-            .count();
-        let dir_count = items
-            .iter()
-            .filter(|i| matches!(i, BlobListItem::Directory { .. }))
-            .count();
-
-        if recursive {
-            println!("\nTotal files: {}", file_count);
-        } else if dir_count > 0 {
-            println!("\nTotal: {} directories, {} files", dir_count, file_count);
-        } else {
-            println!("\nTotal files: {}", file_count);
+        OutputFormat::Yaml => {
+            let yaml_output = serde_yaml::to_string(items).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize items: {e}"))
+            })?;
+            println!("{yaml_output}");
         }
+        OutputFormat::Csv => {
+            let csv_rows: Vec<FileListCsvRow> = items
+                .iter()
+                .map(|item| match item {
+                    BlobListItem::Directory { name, full_path } => FileListCsvRow {
+                        kind: "directory".to_string(),
+                        name: name.clone(),
+                        size: 0,
+                        content_type: String::new(),
+                        last_modified: String::new(),
+                        etag: String::new(),
+                        groups: "[]".to_string(),
+                        full_path: full_path.clone(),
+                        metadata: "{}".to_string(),
+                        tags: "{}".to_string(),
+                    },
+                    BlobListItem::File(file) => FileListCsvRow {
+                        kind: "file".to_string(),
+                        name: file.name.clone(),
+                        size: file.size,
+                        content_type: file.content_type.clone(),
+                        last_modified: file.last_modified.to_rfc3339(),
+                        etag: file.etag.clone(),
+                        groups: serde_json::to_string(&file.groups).unwrap_or_else(|_| "[]".into()),
+                        full_path: String::new(),
+                        metadata: serde_json::to_string(&file.metadata)
+                            .unwrap_or_else(|_| "{}".into()),
+                        tags: serde_json::to_string(&file.tags).unwrap_or_else(|_| "{}".into()),
+                    },
+                })
+                .collect();
+            let formatter = TableFormatter::new(fmt, config.no_color);
+            println!("{}", formatter.format_table(&csv_rows)?);
+        }
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => {
+            let display_items: Vec<ListItem> = items
+                .iter()
+                .map(|item| match item {
+                    BlobListItem::Directory { name, .. } => ListItem {
+                        name: name.clone(),
+                        size: "<DIR>".to_string(),
+                        content_type: "-".to_string(),
+                        modified: "-".to_string(),
+                        groups: "-".to_string(),
+                    },
+                    BlobListItem::File(file) => ListItem {
+                        name: file.name.clone(),
+                        size: format_size(file.size),
+                        content_type: file.content_type.clone(),
+                        modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        groups: file.groups.join(", "),
+                    },
+                })
+                .collect();
+
+            let formatter = TableFormatter::new(fmt, config.no_color);
+            println!("{}", formatter.format_table(&display_items)?);
+
+            let file_count = items
+                .iter()
+                .filter(|i| matches!(i, BlobListItem::File(_)))
+                .count();
+            let dir_count = items
+                .iter()
+                .filter(|i| matches!(i, BlobListItem::Directory { .. }))
+                .count();
+
+            if recursive {
+                println!("\nTotal files: {}", file_count);
+            } else if dir_count > 0 {
+                println!("\nTotal: {} directories, {} files", dir_count, file_count);
+            } else {
+                println!("\nTotal files: {}", file_count);
+            }
+        }
+        OutputFormat::Template => {
+            let formatter = TableFormatter::new(fmt, config.no_color);
+            let empty: Vec<ListItem> = vec![];
+            println!("{}", formatter.format_table(&empty)?);
+        }
+        OutputFormat::Auto => unreachable!("resolve_for_stdout must not return Auto"),
     }
 
     Ok(())

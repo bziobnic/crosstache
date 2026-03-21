@@ -4,6 +4,7 @@
 //! validation, and persistence.
 
 use crate::error::{CrosstacheError, Result};
+use crate::utils::format::OutputFormat;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
@@ -98,6 +99,10 @@ pub struct Config {
     pub cache_ttl_secs: u64,
     #[tabled(rename = "JSON Output")]
     pub output_json: bool,
+    /// Resolved global `--format` after `auto` / TTY handling (set in `Cli::execute`, not persisted).
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub runtime_output_format: OutputFormat,
     #[tabled(rename = "No Color")]
     pub no_color: bool,
     #[tabled(skip)]
@@ -144,6 +149,7 @@ impl Default for Config {
             cache_enabled: default_cache_enabled(),
             cache_ttl_secs: default_cache_ttl_secs(),
             output_json: false,
+            runtime_output_format: OutputFormat::Auto,
             no_color: false,
             blob_config: None,
             azure_credential_priority: AzureCredentialType::Default,
