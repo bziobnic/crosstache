@@ -11,14 +11,18 @@ use crossterm::{
 };
 use serde::Serialize;
 use std::io::stdout;
+use std::io::IsTerminal;
 use tabled::{
     settings::{object::Rows, Alignment, Color, Modify, Padding, Style, Width},
     Table, Tabled,
 };
 
 /// Output format options
-#[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum OutputFormat {
+    /// Automatic format selection (table on TTY, JSON for pipes/redirects)
+    #[default]
+    Auto,
     /// Human-readable table format
     Table,
     /// Machine-readable JSON output
@@ -33,6 +37,22 @@ pub enum OutputFormat {
     Template,
     /// Raw text without formatting
     Raw,
+}
+
+impl OutputFormat {
+    /// Resolve auto format based on stdout TTY status.
+    pub fn resolve_for_stdout(self) -> Self {
+        match self {
+            Self::Auto => {
+                if std::io::stdout().is_terminal() {
+                    Self::Table
+                } else {
+                    Self::Json
+                }
+            }
+            explicit => explicit,
+        }
+    }
 }
 
 /// Color theme for console output
@@ -74,7 +94,7 @@ impl TableFormatter {
     pub fn new(format: OutputFormat, no_color: bool) -> Self {
         Self {
             _theme: ColorTheme::default(),
-            format,
+            format: format.resolve_for_stdout(),
             no_color,
         }
     }
@@ -86,6 +106,7 @@ impl TableFormatter {
         }
 
         match self.format {
+            OutputFormat::Auto => self.format_as_json(data),
             OutputFormat::Table => self.format_as_table(data),
             OutputFormat::Json => self.format_as_json(data),
             OutputFormat::Yaml => self.format_as_yaml(data),
