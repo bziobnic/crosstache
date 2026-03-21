@@ -102,7 +102,18 @@ impl TableFormatter {
     /// Create a formatted table from data
     pub fn format_table<T: Tabled + Serialize>(&self, data: &[T]) -> Result<String> {
         if data.is_empty() {
-            return Ok("No results found. If this is unexpected, check your vault permissions or filter criteria.".to_string());
+            // Machine-readable formats must stay valid (e.g. `[]` for JSON) for pipes/jq.
+            return match self.format {
+                OutputFormat::Auto => self.format_as_json(data),
+                OutputFormat::Json => self.format_as_json(data),
+                OutputFormat::Yaml => self.format_as_yaml(data),
+                OutputFormat::Csv => self.format_as_csv(data),
+                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => Ok(
+                    "No results found. If this is unexpected, check your vault permissions or filter criteria."
+                        .to_string(),
+                ),
+                OutputFormat::Template => self.format_as_template(data, ""),
+            };
         }
 
         match self.format {
@@ -352,6 +363,14 @@ mod tests {
         let formatter = TableFormatter::new(OutputFormat::Table, true);
         let result = formatter.format_table(&data);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn empty_json_is_valid_array() {
+        let data: Vec<TestData> = vec![];
+        let formatter = TableFormatter::new(OutputFormat::Json, true);
+        let out = formatter.format_table(&data).expect("format");
+        assert_eq!(out.trim(), "[]");
     }
 
     #[test]

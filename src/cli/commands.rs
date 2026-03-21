@@ -1549,6 +1549,7 @@ async fn execute_vault_list(
     config: &Config,
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
+    use crate::utils::format::TableFormatter;
     use crate::vault::models::VaultSummary;
 
     let cache_manager = CacheManager::from_config(config);
@@ -1561,17 +1562,8 @@ async fn execute_vault_list(
             if cached.is_empty() {
                 output::info("No vaults found.");
             } else {
-                use crate::utils::format::format_table;
-                use tabled::Table;
-                if output_format == OutputFormat::Table {
-                    let table = Table::new(&cached);
-                    println!("{}", format_table(table, config.no_color));
-                } else {
-                    let json = serde_json::to_string_pretty(&cached).map_err(|e| {
-                        CrosstacheError::serialization(format!("Failed to serialize: {e}"))
-                    })?;
-                    println!("{json}");
-                }
+                let formatter = TableFormatter::new(output_format, config.no_color);
+                println!("{}", formatter.format_table(&cached)?);
             }
             return Ok(());
         }
@@ -7432,6 +7424,29 @@ fn display_file_list_items(
         return Ok(());
     }
 
+    let fmt = config.runtime_output_format.resolve_for_stdout();
+
+    // Rows for `--format csv`: machine-oriented fields (not `format_size()` / joined strings).
+    #[derive(Tabled, Serialize)]
+    struct FileListCsvRow {
+        #[tabled(rename = "type")]
+        kind: String,
+        name: String,
+        size: u64,
+        #[tabled(rename = "content_type")]
+        content_type: String,
+        #[tabled(rename = "last_modified")]
+        last_modified: String,
+        etag: String,
+        groups: String,
+        #[tabled(rename = "full_path")]
+        full_path: String,
+        #[tabled(rename = "metadata")]
+        metadata: String,
+        #[tabled(rename = "tags")]
+        tags: String,
+    }
+
     #[derive(Tabled, Serialize)]
     struct ListItem {
         #[tabled(rename = "Name")]
@@ -7446,51 +7461,100 @@ fn display_file_list_items(
         groups: String,
     }
 
-    let display_items: Vec<ListItem> = items
-        .iter()
-        .map(|item| match item {
-            BlobListItem::Directory { name, .. } => ListItem {
-                name: name.clone(),
-                size: "<DIR>".to_string(),
-                content_type: "-".to_string(),
-                modified: "-".to_string(),
-                groups: "-".to_string(),
-            },
-            BlobListItem::File(file) => ListItem {
-                name: file.name.clone(),
-                size: format_size(file.size),
-                content_type: file.content_type.clone(),
-                modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
-                groups: file.groups.join(", "),
-            },
-        })
-        .collect();
-
-    let fmt = config.runtime_output_format;
-    let formatter = TableFormatter::new(fmt, config.no_color);
-    println!("{}", formatter.format_table(&display_items)?);
-
-    // Footer totals for human-oriented table styles only
-    if matches!(
-        fmt,
-        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
-    ) {
-        let file_count = items
-            .iter()
-            .filter(|i| matches!(i, BlobListItem::File(_)))
-            .count();
-        let dir_count = items
-            .iter()
-            .filter(|i| matches!(i, BlobListItem::Directory { .. }))
-            .count();
-
-        if recursive {
-            println!("\nTotal files: {}", file_count);
-        } else if dir_count > 0 {
-            println!("\nTotal: {} directories, {} files", dir_count, file_count);
-        } else {
-            println!("\nTotal files: {}", file_count);
+    match fmt {
+        OutputFormat::Json => {
+            let json_output = serde_json::to_string_pretty(items).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize items: {e}"))
+            })?;
+            println!("{json_output}");
         }
+        OutputFormat::Yaml => {
+            let yaml_output = serde_yaml::to_string(items).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize items: {e}"))
+            })?;
+            println!("{yaml_output}");
+        }
+        OutputFormat::Csv => {
+            let csv_rows: Vec<FileListCsvRow> = items
+                .iter()
+                .map(|item| match item {
+                    BlobListItem::Directory { name, full_path } => FileListCsvRow {
+                        kind: "directory".to_string(),
+                        name: name.clone(),
+                        size: 0,
+                        content_type: String::new(),
+                        last_modified: String::new(),
+                        etag: String::new(),
+                        groups: "[]".to_string(),
+                        full_path: full_path.clone(),
+                        metadata: "{}".to_string(),
+                        tags: "{}".to_string(),
+                    },
+                    BlobListItem::File(file) => FileListCsvRow {
+                        kind: "file".to_string(),
+                        name: file.name.clone(),
+                        size: file.size,
+                        content_type: file.content_type.clone(),
+                        last_modified: file.last_modified.to_rfc3339(),
+                        etag: file.etag.clone(),
+                        groups: serde_json::to_string(&file.groups).unwrap_or_else(|_| "[]".into()),
+                        full_path: String::new(),
+                        metadata: serde_json::to_string(&file.metadata)
+                            .unwrap_or_else(|_| "{}".into()),
+                        tags: serde_json::to_string(&file.tags).unwrap_or_else(|_| "{}".into()),
+                    },
+                })
+                .collect();
+            let formatter = TableFormatter::new(fmt, config.no_color);
+            println!("{}", formatter.format_table(&csv_rows)?);
+        }
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => {
+            let display_items: Vec<ListItem> = items
+                .iter()
+                .map(|item| match item {
+                    BlobListItem::Directory { name, .. } => ListItem {
+                        name: name.clone(),
+                        size: "<DIR>".to_string(),
+                        content_type: "-".to_string(),
+                        modified: "-".to_string(),
+                        groups: "-".to_string(),
+                    },
+                    BlobListItem::File(file) => ListItem {
+                        name: file.name.clone(),
+                        size: format_size(file.size),
+                        content_type: file.content_type.clone(),
+                        modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        groups: file.groups.join(", "),
+                    },
+                })
+                .collect();
+
+            let formatter = TableFormatter::new(fmt, config.no_color);
+            println!("{}", formatter.format_table(&display_items)?);
+
+            let file_count = items
+                .iter()
+                .filter(|i| matches!(i, BlobListItem::File(_)))
+                .count();
+            let dir_count = items
+                .iter()
+                .filter(|i| matches!(i, BlobListItem::Directory { .. }))
+                .count();
+
+            if recursive {
+                println!("\nTotal files: {}", file_count);
+            } else if dir_count > 0 {
+                println!("\nTotal: {} directories, {} files", dir_count, file_count);
+            } else {
+                println!("\nTotal files: {}", file_count);
+            }
+        }
+        OutputFormat::Template => {
+            let formatter = TableFormatter::new(fmt, config.no_color);
+            let empty: Vec<ListItem> = vec![];
+            println!("{}", formatter.format_table(&empty)?);
+        }
+        OutputFormat::Auto => unreachable!("resolve_for_stdout must not return Auto"),
     }
 
     Ok(())
