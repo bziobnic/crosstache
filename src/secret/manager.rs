@@ -1607,7 +1607,7 @@ impl SecretManager {
         }
 
         // Display formatted table
-        let formatter = TableFormatter::new(OutputFormat::Table, self.no_color);
+        let formatter = TableFormatter::new(OutputFormat::Table, self.no_color, None);
         let table_output = formatter.format_table(&result)?;
         println!("{table_output}");
 
@@ -1730,7 +1730,7 @@ impl SecretManager {
         secrets: &[SecretSummary],
         output_format: OutputFormat,
     ) -> Result<()> {
-        let formatter = TableFormatter::new(output_format, self.no_color);
+        let formatter = TableFormatter::new(output_format, self.no_color, None);
         let table_output = formatter.format_table(secrets)?;
         println!("{table_output}");
         Ok(())
@@ -1780,7 +1780,7 @@ impl SecretManager {
                 group_secrets.len()
             ))?;
 
-            let formatter = TableFormatter::new(output_format.clone(), self.no_color);
+            let formatter = TableFormatter::new(output_format.clone(), self.no_color, None);
             let table_output = formatter.format_table(&group_secrets)?;
             println!("{table_output}");
 

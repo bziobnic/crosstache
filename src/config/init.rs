@@ -751,6 +751,7 @@ impl ConfigInitializer {
             default_location: init_config.default_location,
             output_json: false,
             runtime_output_format: crate::utils::format::OutputFormat::Auto,
+            template: None,
             no_color: false,
             debug: false,
             cache_enabled: true,

@@ -935,6 +935,16 @@ impl Cli {
         config.runtime_output_format = resolved;
         config.output_json = matches!(resolved, OutputFormat::Json);
 
+        // Wire template string
+        config.template = self.template.clone();
+
+        // Warn if --template given without --format template
+        if config.template.is_some() && resolved != OutputFormat::Template {
+            crate::utils::output::warn(
+                "--template flag has no effect without --format template",
+            );
+        }
+
         // Apply CLI credential type if specified (CLI flag overrides config/env)
         if let Some(cred_type) = self.credential_type {
             use crate::config::settings::AzureCredentialType;
