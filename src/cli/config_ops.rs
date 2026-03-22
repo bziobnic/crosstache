@@ -429,6 +429,7 @@ async fn refresh_vault_list(config: Config) -> Result<()> {
             Some(&config.subscription_id),
             None,
             crate::utils::format::OutputFormat::Json,
+            None,
         )
         .await?;
 

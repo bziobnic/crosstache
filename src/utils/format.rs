@@ -9,13 +9,20 @@ use crossterm::{
     style::{Color as CrosstermColor, Stylize},
     terminal::{size, Clear, ClearType},
 };
+use regex::Regex;
 use serde::Serialize;
 use std::io::stdout;
 use std::io::IsTerminal;
+use std::sync::LazyLock;
 use tabled::{
     settings::{object::Rows, Alignment, Color, Modify, Padding, Style, Width},
     Table, Tabled,
 };
+
+/// Regex for template placeholders: {{field_name}} with optional whitespace.
+/// Field names may contain word characters and spaces.
+static TEMPLATE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\{\{\s*([\w\s]+?)\s*\}\}").unwrap());
 
 /// Output format options
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -87,15 +94,17 @@ pub struct TableFormatter {
     _theme: ColorTheme,
     format: OutputFormat,
     no_color: bool,
+    template: Option<String>,
 }
 
 impl TableFormatter {
     /// Create a new table formatter
-    pub fn new(format: OutputFormat, no_color: bool) -> Self {
+    pub fn new(format: OutputFormat, no_color: bool, template: Option<String>) -> Self {
         Self {
             _theme: ColorTheme::default(),
             format: format.resolve_for_stdout(),
             no_color,
+            template,
         }
     }
 
@@ -112,7 +121,7 @@ impl TableFormatter {
                     "No results found. If this is unexpected, check your vault permissions or filter criteria."
                         .to_string(),
                 ),
-                OutputFormat::Template => self.format_as_template(data, ""),
+                OutputFormat::Template => self.format_as_template(data),
             };
         }
 
@@ -123,7 +132,7 @@ impl TableFormatter {
             OutputFormat::Yaml => self.format_as_yaml(data),
             OutputFormat::Csv => self.format_as_csv(data),
             OutputFormat::Plain => self.format_as_plain(data),
-            OutputFormat::Template => self.format_as_template(data, ""),
+            OutputFormat::Template => self.format_as_template(data),
             OutputFormat::Raw => self.format_as_raw(data),
         }
     }
@@ -186,11 +195,48 @@ impl TableFormatter {
         Ok(table.to_string())
     }
 
-    /// Format data using a template
-    fn format_as_template<T: Tabled>(&self, _data: &[T], _template: &str) -> Result<String> {
-        Err(crate::error::CrosstacheError::config(
-            "Template output format is not yet supported. Use --format=json, --format=yaml, or --format=csv instead.".to_string(),
-        ))
+    /// Format data using a template with {{field_name}} substitution
+    fn format_as_template<T: Tabled>(&self, data: &[T]) -> Result<String> {
+        if data.is_empty() {
+            return Ok(String::new());
+        }
+
+        let template_str = self.template.as_deref().ok_or_else(|| {
+            crate::error::CrosstacheError::config(
+                "Template format requires --template flag with a format string. Example: --template '{{name}}: {{value}}'".to_string(),
+            )
+        })?;
+
+        // Build case-insensitive header → index map
+        let headers = T::headers();
+        let header_map: std::collections::HashMap<String, usize> = headers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.as_ref().to_lowercase(), i))
+            .collect();
+
+        // Apply template to each row
+        let mut lines = Vec::with_capacity(data.len());
+        for item in data {
+            let fields = item.fields();
+            let line = TEMPLATE_REGEX
+                .replace_all(template_str, |caps: &regex::Captures| {
+                    let field_name = caps[1].trim().to_lowercase();
+                    if let Some(&idx) = header_map.get(&field_name) {
+                        fields
+                            .get(idx)
+                            .map(|f| f.as_ref().to_string())
+                            .unwrap_or_default()
+                    } else {
+                        // Unknown field — leave placeholder as-is
+                        caps[0].to_string()
+                    }
+                })
+                .to_string();
+            lines.push(line);
+        }
+
+        Ok(lines.join("\n"))
     }
 
     /// Format data as raw text
@@ -360,7 +406,7 @@ mod tests {
             },
         ];
 
-        let formatter = TableFormatter::new(OutputFormat::Table, true);
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None);
         let result = formatter.format_table(&data);
         assert!(result.is_ok());
     }
@@ -368,7 +414,7 @@ mod tests {
     #[test]
     fn empty_json_is_valid_array() {
         let data: Vec<TestData> = vec![];
-        let formatter = TableFormatter::new(OutputFormat::Json, true);
+        let formatter = TableFormatter::new(OutputFormat::Json, true, None);
         let out = formatter.format_table(&data).expect("format");
         assert_eq!(out.trim(), "[]");
     }
@@ -385,5 +431,81 @@ mod tests {
         let result = display.format_key_value_pairs(&pairs);
         assert!(result.contains("Name"));
         assert!(result.contains("Test Vault"));
+    }
+
+    #[test]
+    fn test_template_basic_substitution() {
+        let data = vec![
+            TestData { name: "secret1".to_string(), value: "abc123".to_string(), status: "active".to_string() },
+            TestData { name: "secret2".to_string(), value: "xyz789".to_string(), status: "inactive".to_string() },
+        ];
+        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("export {{Name}}={{Value}}".to_string()));
+        let result = formatter.format_table(&data).unwrap();
+        assert_eq!(result, "export secret1=abc123\nexport secret2=xyz789");
+    }
+
+    #[test]
+    fn test_template_case_insensitive() {
+        let data = vec![TestData { name: "mykey".to_string(), value: "myval".to_string(), status: "active".to_string() }];
+        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{name}} {{NAME}} {{Name}}".to_string()));
+        let result = formatter.format_table(&data).unwrap();
+        assert_eq!(result, "mykey mykey mykey");
+    }
+
+    #[test]
+    fn test_template_unknown_field_left_as_is() {
+        let data = vec![TestData { name: "key".to_string(), value: "val".to_string(), status: "ok".to_string() }];
+        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{Name}}: {{nonexistent}}".to_string()));
+        let result = formatter.format_table(&data).unwrap();
+        assert_eq!(result, "key: {{nonexistent}}");
+    }
+
+    #[test]
+    fn test_template_missing_template_flag_errors() {
+        let data = vec![TestData { name: "key".to_string(), value: "val".to_string(), status: "ok".to_string() }];
+        let formatter = TableFormatter::new(OutputFormat::Template, true, None);
+        let result = formatter.format_table(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("--template"), "Error should mention --template flag");
+    }
+
+    #[test]
+    fn test_template_empty_data_returns_empty() {
+        let data: Vec<TestData> = vec![];
+        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{Name}}".to_string()));
+        let result = formatter.format_table(&data).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_template_whitespace_in_braces() {
+        let data = vec![TestData { name: "key".to_string(), value: "val".to_string(), status: "ok".to_string() }];
+        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{ Name }} = {{  Value  }}".to_string()));
+        let result = formatter.format_table(&data).unwrap();
+        assert_eq!(result, "key = val");
+    }
+
+    #[test]
+    fn test_template_multiple_fields() {
+        let data = vec![TestData { name: "db_pass".to_string(), value: "secret".to_string(), status: "active".to_string() }];
+        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{Name}}={{Value}} ({{Status}})".to_string()));
+        let result = formatter.format_table(&data).unwrap();
+        assert_eq!(result, "db_pass=secret (active)");
+    }
+
+    #[test]
+    fn test_template_multi_word_field_name() {
+        #[derive(Tabled, Serialize)]
+        struct MultiWordData {
+            #[tabled(rename = "Secret Name")]
+            secret_name: String,
+            #[tabled(rename = "Created By")]
+            created_by: String,
+        }
+
+        let data = vec![MultiWordData { secret_name: "api-key".to_string(), created_by: "admin".to_string() }];
+        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{Secret Name}} by {{Created By}}".to_string()));
+        let result = formatter.format_table(&data).unwrap();
+        assert_eq!(result, "api-key by admin");
     }
 }

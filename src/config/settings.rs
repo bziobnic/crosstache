@@ -103,6 +103,10 @@ pub struct Config {
     #[serde(skip)]
     #[tabled(skip)]
     pub runtime_output_format: OutputFormat,
+    /// Custom template string for `--format template` (set in `Cli::execute`, not persisted).
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub template: Option<String>,
     #[tabled(rename = "No Color")]
     pub no_color: bool,
     #[tabled(skip)]
@@ -150,6 +154,7 @@ impl Default for Config {
             cache_ttl_secs: default_cache_ttl_secs(),
             output_json: false,
             runtime_output_format: OutputFormat::Auto,
+            template: None,
             no_color: false,
             blob_config: None,
             azure_credential_priority: AzureCredentialType::Default,

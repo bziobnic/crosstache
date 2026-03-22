@@ -148,13 +148,13 @@ pub(crate) fn display_cached_secret_list(
             return Ok(());
         }
 
-        let formatter = TableFormatter::new(fmt, config.no_color);
+        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
         println!("{}", formatter.format_table(&filtered)?);
         println!("\n{} secret(s) in vault '{}'", filtered.len(), vault_name);
         return Ok(());
     }
 
-    let formatter = TableFormatter::new(fmt, config.no_color);
+    let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
     println!("{}", formatter.format_table(&filtered)?);
 
     Ok(())
@@ -2011,7 +2011,7 @@ async fn execute_secret_list(
             };
             output::info(&msg);
         } else {
-            let formatter = TableFormatter::new(fmt, config.no_color);
+            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
             println!("{}", formatter.format_table(&secrets)?);
 
             let count_label = if expired {
@@ -2024,7 +2024,7 @@ async fn execute_secret_list(
             println!("\n{} in vault '{}'", count_label, vault_name);
         }
     } else {
-        let formatter = TableFormatter::new(fmt, config.no_color);
+        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
         println!("{}", formatter.format_table(&secrets)?);
     }
 
@@ -2634,6 +2634,7 @@ async fn execute_secret_share(
                 let formatter = crate::utils::format::TableFormatter::new(
                     crate::utils::format::OutputFormat::Table,
                     config.no_color,
+                    None,
                 );
                 let table_output = formatter.format_table(&roles)?;
                 println!("{table_output}");

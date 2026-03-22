@@ -221,7 +221,7 @@ async fn execute_vault_list(
             if cached.is_empty() {
                 output::info("No vaults found.");
             } else {
-                let formatter = TableFormatter::new(output_format, config.no_color);
+                let formatter = TableFormatter::new(output_format, config.no_color, config.template.clone());
                 println!("{}", formatter.format_table(&cached)?);
             }
             return Ok(());
@@ -233,6 +233,7 @@ async fn execute_vault_list(
             Some(&config.subscription_id),
             resource_group.as_deref(),
             output_format,
+            config.template.clone(),
         )
         .await?;
 
@@ -882,7 +883,7 @@ async fn execute_vault_share(
                     println!("Access assignments for vault '{vault_name}':");
                 }
                 let formatter =
-                    crate::utils::format::TableFormatter::new(output_format, config.no_color);
+                    crate::utils::format::TableFormatter::new(output_format, config.no_color, config.template.clone());
                 let table_output = formatter.format_table(&roles)?;
                 println!("{table_output}");
             }

@@ -501,7 +501,7 @@ fn display_file_list_items(
                     },
                 })
                 .collect();
-            let formatter = TableFormatter::new(fmt, config.no_color);
+            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
             println!("{}", formatter.format_table(&csv_rows)?);
         }
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => {
@@ -525,7 +525,7 @@ fn display_file_list_items(
                 })
                 .collect();
 
-            let formatter = TableFormatter::new(fmt, config.no_color);
+            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
             println!("{}", formatter.format_table(&display_items)?);
 
             let file_count = items
@@ -546,9 +546,27 @@ fn display_file_list_items(
             }
         }
         OutputFormat::Template => {
-            let formatter = TableFormatter::new(fmt, config.no_color);
-            let empty: Vec<ListItem> = vec![];
-            println!("{}", formatter.format_table(&empty)?);
+            let display_items: Vec<ListItem> = items
+                .iter()
+                .map(|item| match item {
+                    BlobListItem::Directory { name, .. } => ListItem {
+                        name: name.clone(),
+                        size: "<DIR>".to_string(),
+                        content_type: "-".to_string(),
+                        modified: "-".to_string(),
+                        groups: "-".to_string(),
+                    },
+                    BlobListItem::File(file) => ListItem {
+                        name: file.name.clone(),
+                        size: format_size(file.size),
+                        content_type: file.content_type.clone(),
+                        modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        groups: file.groups.join(", "),
+                    },
+                })
+                .collect();
+            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+            println!("{}", formatter.format_table(&display_items)?);
         }
         OutputFormat::Auto => unreachable!("resolve_for_stdout must not return Auto"),
     }
