@@ -1,34 +1,26 @@
 # Missing Features & Technical Debt
 
-> Last reviewed: 2026-03-20 | Codebase version: **v0.4.21**
+> Last reviewed: 2026-03-21 | Codebase version: **v0.5.1**
 
 Comprehensive audit of missing features, stubs, bugs, and technical debt across the crosstache codebase. Line numbers drift as the code changes — treat them as approximate.
 
-**Recent fixes (since last audit pass):** Global `--format auto` + `TableFormatter` across list paths; vault list **cached** results now respect `--format` (same as non-cached); `xv file list` JSON/YAML again emit raw `BlobListItem` schema; vault share list accepts `fmt=auto` and suppresses the human header when output is JSON. Re-validate line references below when editing code.
+**Recent fixes (v0.5.0–v0.5.1):** CLI decomposition complete (`commands.rs` reduced from ~9,656 to ~1,301 lines); `xv upgrade` self-update command added; secret rename empty value fixed; `parse_iso_datetime` unreachable branch fixed; `created_timestamp` hardcoded-to-0 fixed; `xv parse` bad format exit code fixed; vault import skip-on-missing-value fixed; `--progress`/`--stream`/`--metadata` flags removed from CLI. Re-validate line references below when editing code.
 
 ---
 
 ## P0 — Bugs (Incorrect Behavior)
 
-### 1. Secret rename silently writes empty value
-**File:** `src/secret/manager.rs:1876`
-When renaming via `xv update --rename`, the code fetches the current secret with `include_value: false`, so `current_secret.value` is always `None`. The fallback at line 1876 writes an empty string as the new secret's value. A rename without `--value` silently destroys the secret's data.
+### ~~1. Secret rename silently writes empty value~~ — fixed (v0.5.0)
 
 ### 2. `xv run` — masking path buffers full output in memory
-**File:** `src/cli/commands.rs` (`execute_secret_run`)
-The `--no-masking` path uses `Command::status()` with inherited stdio (correct). The **default** masking path uses `Command::output()`, so stdout/stderr are fully buffered before masking — long-running commands with large output can use unbounded memory. (Historical note: an older `inherit` + `output` mismatch appears resolved in current code.)
+**File:** `src/cli/secret_ops.rs` (`execute_secret_run`)
+The `--no-masking` path uses `Command::status()` with inherited stdio (correct). The **default** masking path uses `Command::output()`, so stdout/stderr are fully buffered before masking — long-running commands with large output can use unbounded memory.
 
-### 3. `parse_iso_datetime` — unreachable branch
-**File:** `src/utils/datetime.rs:97`
-The condition `!input.contains('-')` is impossible for ISO dates since date components are separated by `-` (e.g., `2024-12-31T23:59:59`). This branch is dead code and datetime-without-timezone inputs will always error.
+### ~~3. `parse_iso_datetime` — unreachable branch~~ — fixed (v0.5.0)
 
-### 4. `created_timestamp` hardcoded to 0
-**File:** `src/secret/manager.rs:563, 699, 993`
-In `get_secret`, `get_secret_version`, and `restore_secret`, `created_timestamp` is always `0`. This field drives sorting and version numbering in `get_secret_versions`, producing incorrect ordering. The value is available in the REST response (`attributes.created`) but not assigned.
+### ~~4. `created_timestamp` hardcoded to 0~~ — fixed (v0.5.0)
 
-### 5. `xv parse` — bad format returns exit code 0
-**File:** `src/cli/commands.rs:6015`
-Unsupported `--format` values print an error via `output::error()` but then return `Ok(())`, so the process exits with code 0 instead of signaling failure.
+### ~~5. `xv parse` — bad format returns exit code 0~~ — fixed (v0.5.0)
 
 ---
 
@@ -45,17 +37,11 @@ After `put_block_blob`, metadata and tag setting both no-op with `tracing::warn!
 **File:** `src/blob/manager.rs:181, 296, 455`
 In `list_files`, `list_files_hierarchical`, and `get_file_info`, tags are always `HashMap::new()`. File group information is invisible to users.
 
-### 9. `--progress` flag on file upload is a no-op
-**File:** `src/cli/commands.rs:6944`
-Both branches of `if progress { ... } else { ... }` execute identical code. TODO comment at line 6945 acknowledges this.
+### ~~9. `--progress` flag on file upload~~ — removed (v0.5.0, flags removed from CLI)
 
-### 10. `--stream` flag on file download is a no-op
-**File:** `src/cli/commands.rs:6998`
-Both branches execute identical code. `download_file_stream` in `blob/manager.rs` buffers the entire file in memory anyway — functionally identical to `download_file`.
+### ~~10. `--stream` flag on file download~~ — removed (v0.5.0, flags removed from CLI)
 
-### 11. `--metadata` flag on file list is ignored
-**File:** `src/cli/commands.rs:7033`
-Parameter bound as `_include_metadata: bool` (underscore prefix). Flag accepted by parser but has zero effect on output.
+### ~~11. `--metadata` flag on file list~~ — removed (v0.5.0, flags removed from CLI)
 
 ### 12. Large file upload is a stub
 **File:** `src/blob/manager.rs:541`
@@ -225,13 +211,13 @@ These `.unwrap()` calls in production code have varying levels of risk:
 
 ## Summary
 
-| Priority | Count | Description |
-|----------|-------|-------------|
-| **P0** | 5 | Bugs — incorrect behavior, data loss, wrong exit codes |
-| **P1** | ~11 | User-facing feature gaps — stubs, no-op flags (file sync shipped; audit RG fixed) |
-| **P2** | 14 | Quality & robustness — error handling, silent failures, missing checks |
-| **P3** | ~13 | Dead code, polish, tech debt — unused structs, duplicated code (`cache_ttl` item obsolete) |
-| **P4** | 5 | Potential panic sites in production code |
-| **Total** | ~48 | Strikethrough items await removal on the next full audit |
+| Priority | Count | Open | Description |
+|----------|-------|------|-------------|
+| **P0** | 5 | 1 | Bugs — incorrect behavior, data loss, wrong exit codes |
+| **P1** | ~11 | 7 | User-facing feature gaps — stubs, no-op flags |
+| **P2** | 14 | 14 | Quality & robustness — error handling, silent failures, missing checks |
+| **P3** | ~13 | ~12 | Dead code, polish, tech debt |
+| **P4** | 5 | 5 | Potential panic sites in production code |
+| **Total** | ~48 | ~39 | Strikethrough items fixed or removed in v0.5.0–v0.5.1 |
 
-> **Note:** Items marked ~~fixed~~ or ~~outdated~~ should be deleted when someone re-validates line numbers and behavior across the tree.
+> **Note:** Items marked ~~fixed~~ or ~~removed~~ should be deleted on the next full audit pass. File paths updated for CLI decomposition (commands moved to `secret_ops.rs`, `system_ops.rs`, `vault_ops.rs`, etc.).
