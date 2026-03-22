@@ -159,6 +159,7 @@ impl From<azure_core::Error> for CrosstacheError {
     }
 }
 
-// TODO: Convert Azure Identity errors to CrosstacheError
-// Note: Azure Identity crate doesn't expose a specific Error type in v0.21
-// We'll implement this when we integrate with actual Azure Identity APIs
+// Note: azure_identity v0.21 does not expose a standalone public Error type.
+// Authentication failures from azure_identity surface as azure_core::Error,
+// which is already converted via the From<azure_core::Error> impl above.
+// No separate From<azure_identity::Error> impl is needed.

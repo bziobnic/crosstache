@@ -1462,8 +1462,12 @@ impl SecretManager {
             folder,
             note,
             vault_uri,
-            // version_count requires an additional API call to get_secret_versions; left as None to avoid extra network overhead
-            version_count: None,
+            version_count: self
+                .secret_ops
+                .get_secret_versions(vault_name, secret_name)
+                .await
+                .map(|versions| versions.len())
+                .ok(),
         };
 
         Ok(info)

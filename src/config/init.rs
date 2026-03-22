@@ -424,7 +424,18 @@ impl ConfigInitializer {
         .await;
 
         let create_storage_cmd = match create_storage_cmd {
-            Ok(result) => result?,
+            Ok(result) => match result {
+                Ok(output) => output,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(CrosstacheError::azure_api(
+                        "Azure CLI ('az') is not installed or not found in PATH. \
+                         Storage account creation requires Azure CLI. \
+                         Install it from https://docs.microsoft.com/cli/azure/install-azure-cli \
+                         or create the storage account manually and set AZURE_STORAGE_ACCOUNT.".to_string()
+                    ));
+                }
+                Err(e) => return Err(CrosstacheError::IoError(e)),
+            },
             Err(_) => {
                 return Err(CrosstacheError::azure_api(
                     "Storage account creation timed out after 3 minutes. Please check your Azure CLI authentication and network connection.".to_string()
@@ -469,6 +480,12 @@ impl ConfigInitializer {
         let command_succeeded = match &create_container_cmd {
             Ok(result) => match result {
                 Ok(output) => output.status.success(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(CrosstacheError::azure_api(
+                        "Azure CLI ('az') is not installed or not found in PATH. \
+                         Install it from https://docs.microsoft.com/cli/azure/install-azure-cli".to_string()
+                    ));
+                }
                 Err(_) => false,
             },
             Err(_) => {
@@ -571,6 +588,12 @@ impl ConfigInitializer {
         let command_succeeded = match &create_container_cmd {
             Ok(result) => match result {
                 Ok(output) => output.status.success(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(CrosstacheError::azure_api(
+                        "Azure CLI ('az') is not installed or not found in PATH. \
+                         Install it from https://docs.microsoft.com/cli/azure/install-azure-cli".to_string()
+                    ));
+                }
                 Err(_) => false,
             },
             Err(_) => {

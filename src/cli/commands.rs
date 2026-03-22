@@ -775,7 +775,7 @@ pub enum VaultShareCommands {
             default_value = "auto",
             id = "share_list_format"
         )]
-        format: String,
+        format: crate::utils::format::OutputFormat,
         /// Include service accounts in output
         #[arg(long)]
         all: bool,
@@ -907,11 +907,11 @@ pub enum EnvCommands {
     },
     /// Show current environment profile
     Show,
-    /// Pull secrets to .env file format
+    /// Pull secrets to a file format
     Pull {
-        /// Output format (currently only 'dotenv' is supported)
-        #[arg(long = "fmt", default_value = "dotenv", id = "pull_format")]
-        format: String,
+        /// Output format: plain (dotenv), json, yaml, csv, table
+        #[arg(long = "fmt", default_value = "plain", id = "pull_format")]
+        format: crate::utils::format::OutputFormat,
         /// Filter secrets by group (can be specified multiple times)
         #[arg(short, long)]
         group: Vec<String>,

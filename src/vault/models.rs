@@ -50,6 +50,10 @@ pub struct VaultProperties {
     pub created_at: DateTime<Utc>,
     #[tabled(skip)]
     pub tags: HashMap<String, String>,
+    /// Whether the vault uses RBAC authorization (true) or access policies (false/None)
+    #[tabled(skip)]
+    #[serde(default)]
+    pub enable_rbac_authorization: Option<bool>,
 }
 
 /// Access policy for a Key Vault

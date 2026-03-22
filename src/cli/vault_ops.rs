@@ -660,9 +660,48 @@ async fn execute_vault_import(
 
             secrets
         }
+        "txt" => {
+            // txt format: one KEY=VALUE or KEY: VALUE per line, comments (#) and blank lines ignored
+            let mut secrets = Vec::new();
+            for line in import_data.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+
+                let (key, value) = if let Some(pos) = line.find('=') {
+                    // KEY=VALUE format
+                    (line[..pos].trim().to_lowercase().replace("_", "-"), line[pos + 1..].trim())
+                } else if let Some(pos) = line.find(':') {
+                    // KEY: VALUE format
+                    (line[..pos].trim().to_lowercase().replace("_", "-"), line[pos + 1..].trim())
+                } else {
+                    continue; // Skip lines without a separator
+                };
+
+                if key.is_empty() || value.is_empty() {
+                    continue;
+                }
+
+                secrets.push(SecretRequest {
+                    name: key,
+                    value: Zeroizing::new(value.to_string()),
+                    content_type: Some("text/plain".to_string()),
+                    enabled: Some(true),
+                    expires_on: None,
+                    not_before: None,
+                    tags: None,
+                    groups: None,
+                    note: None,
+                    folder: None,
+                });
+            }
+
+            secrets
+        }
         _ => {
             return Err(CrosstacheError::invalid_argument(format!(
-                "Unsupported import format: {format}"
+                "Unsupported import format: '{format}'. Supported formats: json, env, txt"
             )));
         }
     };
@@ -787,6 +826,25 @@ async fn execute_vault_update(
     Ok(())
 }
 
+/// Check that a vault is in RBAC authorization mode before performing share operations.
+async fn check_vault_rbac_mode(
+    vault_manager: &VaultManager,
+    vault_name: &str,
+    resource_group: &str,
+) -> Result<()> {
+    let props = vault_manager
+        .get_vault_properties(vault_name, resource_group)
+        .await?;
+    if props.enable_rbac_authorization != Some(true) {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "Vault '{vault_name}' uses access policy authorization mode. \
+             Vault sharing (RBAC role assignments) requires RBAC authorization mode. \
+             Enable it with: az keyvault update --name {vault_name} --enable-rbac-authorization true"
+        )));
+    }
+    Ok(())
+}
+
 async fn execute_vault_share(
     vault_manager: &VaultManager,
     auth_provider: &Arc<dyn AzureAuthProvider>,
@@ -804,6 +862,8 @@ async fn execute_vault_share(
         } => {
             let resource_group =
                 resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+
+            check_vault_rbac_mode(vault_manager, &vault_name, &resource_group).await?;
 
             let object_id = auth_provider.resolve_user_to_object_id(&user).await?;
             if object_id != user {
@@ -839,6 +899,8 @@ async fn execute_vault_share(
             let resource_group =
                 resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
+            check_vault_rbac_mode(vault_manager, &vault_name, &resource_group).await?;
+
             let object_id = auth_provider.resolve_user_to_object_id(&user).await?;
             if object_id != user {
                 println!("Resolved '{}' to object ID '{}'", user, object_id);
@@ -857,33 +919,26 @@ async fn execute_vault_share(
             let resource_group =
                 resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
+            check_vault_rbac_mode(vault_manager, &vault_name, &resource_group).await?;
+
             let mut roles = vault_manager
                 .list_vault_access_raw(&vault_name, &resource_group)
                 .await?;
 
             vault_manager
                 .resolve_and_filter_roles(&mut roles, all)
-                .await;
+                .await?;
 
             if roles.is_empty() {
                 output::info(&format!(
                     "No access assignments found for vault '{vault_name}'"
                 ));
             } else {
-                let output_format = match format.to_lowercase().as_str() {
-                    "json" => crate::utils::format::OutputFormat::Json,
-                    "auto" => crate::utils::format::OutputFormat::Auto,
-                    "table" | "" => crate::utils::format::OutputFormat::Table,
-                    other => {
-                        output::warn(&format!("Unrecognized format '{}', using table", other));
-                        crate::utils::format::OutputFormat::Table
-                    }
-                };
-                if output_format.resolve_for_stdout() == crate::utils::format::OutputFormat::Table {
+                if format.resolve_for_stdout() == crate::utils::format::OutputFormat::Table {
                     println!("Access assignments for vault '{vault_name}':");
                 }
                 let formatter =
-                    crate::utils::format::TableFormatter::new(output_format, config.no_color, config.template.clone());
+                    crate::utils::format::TableFormatter::new(format, config.no_color, config.template.clone());
                 let table_output = formatter.format_table(&roles)?;
                 println!("{table_output}");
             }

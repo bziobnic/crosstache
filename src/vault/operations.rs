@@ -309,7 +309,26 @@ impl VaultOperations for AzureVaultOperations {
                 CrosstacheError::serialization(format!("Failed to parse vault response: {e}"))
             })?;
 
-            self.parse_vault_properties(&vault_data)
+            let mut vault = self.parse_vault_properties(&vault_data)?;
+
+            // Resolve user emails for access policies via Graph API
+            let object_ids: Vec<String> = vault
+                .access_policies
+                .iter()
+                .map(|p| p.object_id.clone())
+                .collect();
+            if !object_ids.is_empty() {
+                let resolved = self.resolve_principal_ids(&object_ids).await;
+                for policy in vault.access_policies.iter_mut() {
+                    if let Some((_name, email)) = resolved.get(&policy.object_id) {
+                        if !email.is_empty() {
+                            policy.user_email = Some(email.clone());
+                        }
+                    }
+                }
+            }
+
+            Ok(vault)
         };
 
         self.execute_with_retry(operation).await
@@ -484,11 +503,19 @@ impl VaultOperations for AzureVaultOperations {
                 return Err(self.parse_azure_error(status_code, &error_body));
             }
 
-            // After restore, wait a bit and then get the vault details
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            // Azure returns the vault object in the body for a successful recover (200 OK).
+            // Parse it if present; fall back to fabricated properties if the body is empty (202 Accepted).
+            let response_body = response.text().await.unwrap_or_default();
+            if !response_body.is_empty() {
+                if let Ok(vault_data) = serde_json::from_str::<Value>(&response_body) {
+                    if let Ok(props) = self.parse_vault_properties(&vault_data) {
+                        return Ok(props);
+                    }
+                }
+            }
 
-            // We need to find the resource group - this is a limitation of the restore API
-            // For now, we'll return a basic vault properties structure
+            // Fall back: wait briefly then return best-effort properties
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             Ok(VaultProperties {
                 id: format!(
                     "/subscriptions/{}/providers/Microsoft.KeyVault/vaults/{}",
@@ -496,7 +523,7 @@ impl VaultOperations for AzureVaultOperations {
                 ),
                 name: vault_name.to_string(),
                 location: location.to_string(),
-                resource_group: "restored".to_string(), // Placeholder
+                resource_group: String::new(), // unknown without a separate lookup
                 subscription_id: self.subscription_id.clone(),
                 tenant_id: self.auth_provider.get_tenant_id().await?,
                 uri: format!("https://{vault_name}.vault.azure.net/"),
@@ -509,6 +536,7 @@ impl VaultOperations for AzureVaultOperations {
                 access_policies: Vec::new(),
                 created_at: chrono::Utc::now(),
                 tags: HashMap::new(),
+                enable_rbac_authorization: None,
             })
         };
 
@@ -1135,6 +1163,9 @@ impl AzureVaultOperations {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(chrono::Utc::now),
             tags,
+            enable_rbac_authorization: properties
+                .get("enableRbacAuthorization")
+                .and_then(|v| v.as_bool()),
         })
     }
 
@@ -1211,7 +1242,7 @@ impl AzureVaultOperations {
                 certificates,
                 storage,
             },
-            user_email: None, // This would need to be resolved via Graph API
+            user_email: None, // Resolved asynchronously by the caller via resolve_principal_ids
         })
     }
 
