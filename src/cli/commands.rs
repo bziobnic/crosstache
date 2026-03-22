@@ -545,6 +545,15 @@ pub enum Commands {
     },
     /// Show authenticated identity and context information
     Whoami,
+    /// Check for and install new versions
+    Upgrade {
+        /// Only check if an update is available (exit code 0 = up-to-date, 1 = update available)
+        #[arg(long)]
+        check: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
     /// Cache management commands
     Cache {
         #[command(subcommand)]
@@ -1106,6 +1115,10 @@ impl Cli {
             Commands::Version => crate::cli::system_ops::execute_version_command().await,
             Commands::Completion { shell } => crate::cli::system_ops::execute_completion_command(shell).await,
             Commands::Whoami => crate::cli::system_ops::execute_whoami_command(config).await,
+            // Upgrade does not need Azure config — only talks to GitHub API
+            Commands::Upgrade { check, force } => {
+                crate::cli::upgrade_ops::execute_upgrade_command(check, force).await
+            }
             Commands::Cache { command } => {
                 crate::cli::config_ops::execute_cache_command(command, config).await
             }

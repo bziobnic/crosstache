@@ -46,7 +46,9 @@ async fn run(cli: Cli) -> Result<()> {
 
     // Load configuration differently based on command
     let config = match &cli.command {
-        crate::cli::Commands::Config { .. } | crate::cli::Commands::Init => {
+        crate::cli::Commands::Config { .. }
+        | crate::cli::Commands::Init
+        | crate::cli::Commands::Upgrade { .. } => {
             // For config and init commands, load without validation
             load_config_without_validation().await?
         }
@@ -165,6 +167,10 @@ fn print_user_friendly_error(error: &CrosstacheError) {
         }
         InvalidArgument(msg) => {
             output::error("Invalid Argument");
+            eprintln!("{msg}");
+        }
+        Upgrade(msg) => {
+            output::error("Upgrade Error");
             eprintln!("{msg}");
         }
         _ => {
