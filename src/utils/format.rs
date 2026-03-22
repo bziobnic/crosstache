@@ -197,15 +197,15 @@ impl TableFormatter {
 
     /// Format data using a template with {{field_name}} substitution
     fn format_as_template<T: Tabled>(&self, data: &[T]) -> Result<String> {
+        if data.is_empty() {
+            return Ok(String::new());
+        }
+
         let template_str = self.template.as_deref().ok_or_else(|| {
             crate::error::CrosstacheError::config(
                 "Template format requires --template flag with a format string. Example: --template '{{name}}: {{value}}'".to_string(),
             )
         })?;
-
-        if data.is_empty() {
-            return Ok(String::new());
-        }
 
         // Build case-insensitive header → index map
         let headers = T::headers();

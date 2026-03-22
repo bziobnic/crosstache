@@ -233,6 +233,7 @@ async fn execute_vault_list(
             Some(&config.subscription_id),
             resource_group.as_deref(),
             output_format,
+            config.template.clone(),
         )
         .await?;
 

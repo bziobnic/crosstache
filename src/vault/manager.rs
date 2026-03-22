@@ -101,6 +101,7 @@ impl VaultManager {
         subscription_id: Option<&str>,
         resource_group: Option<&str>,
         output_format: OutputFormat,
+        template: Option<String>,
     ) -> Result<Vec<VaultSummary>> {
         let vaults = self
             .vault_ops
@@ -113,7 +114,7 @@ impl VaultManager {
         }
 
         // Format and display results
-        let formatter = TableFormatter::new(output_format, self.no_color, None);
+        let formatter = TableFormatter::new(output_format, self.no_color, template);
         let table_output = formatter.format_table(&vaults)?;
         println!("{table_output}");
 
