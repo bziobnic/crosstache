@@ -2058,11 +2058,18 @@ pub(crate) async fn execute_file_download_quick(
     )
     .await?;
 
-    // Handle --open flag: print the full absolute path of the downloaded file
+    // Handle --open flag: open the downloaded file with the system's default application
     if open {
         let final_output_path = output_path.unwrap_or_else(|| name.to_string());
-        if let Ok(path) = std::fs::canonicalize(&final_output_path) {
-            println!("Downloaded to: {}", path.display());
+        match std::fs::canonicalize(&final_output_path) {
+            Ok(path) => {
+                if let Err(e) = opener::open(&path) {
+                    eprintln!("Warning: could not open file '{}': {}", path.display(), e);
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: could not resolve path '{}': {}", final_output_path, e);
+            }
         }
     }
 

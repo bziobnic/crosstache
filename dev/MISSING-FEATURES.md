@@ -1,6 +1,6 @@
 # Missing Features & Technical Debt
 
-> Last reviewed: 2026-03-21 | Codebase version: **v0.5.1**
+> Last reviewed: 2026-03-22 | Codebase version: **v0.5.1**
 
 Comprehensive audit of missing features, stubs, bugs, and technical debt across the crosstache codebase. Line numbers drift as the code changes — treat them as approximate.
 
@@ -12,9 +12,9 @@ Comprehensive audit of missing features, stubs, bugs, and technical debt across 
 
 ### ~~1. Secret rename silently writes empty value~~ — fixed (v0.5.0)
 
-### 2. `xv run` — masking path buffers full output in memory
-**File:** `src/cli/secret_ops.rs` (`execute_secret_run`)
-The `--no-masking` path uses `Command::status()` with inherited stdio (correct). The **default** masking path uses `Command::output()`, so stdout/stderr are fully buffered before masking — long-running commands with large output can use unbounded memory.
+### ~~2. `xv run` — masking path buffers full output in memory~~ — fixed (v0.5.1)
+**File:** `src/cli/secret_ops.rs` (`execute_secret_run`, `stream_and_mask`)
+The masking path now spawns the child with `Stdio::piped()` and streams stdout/stderr line-by-line via two `BufReader` threads, masking secrets per line before printing. `Command::output()` is no longer used. Fixed in commit `b96e046`.
 
 ### ~~3. `parse_iso_datetime` — unreachable branch~~ — fixed (v0.5.0)
 
@@ -29,13 +29,13 @@ The `--no-masking` path uses `Command::status()` with inherited stdio (correct).
 ### 6. ~~File sync (`xv file sync`)~~ — implemented
 **Files:** `src/cli/commands.rs` (`execute_file_sync`), `src/blob/sync.rs` (change detection helpers).
 
-### 7. Blob metadata and tags silently dropped on upload
-**File:** `src/blob/manager.rs:80–94`
-After `put_block_blob`, metadata and tag setting both no-op with `tracing::warn!()`. Every uploaded file silently loses its metadata, tags, and group assignments. This is the primary upload path.
+### ~~7. Blob metadata and tags silently dropped on upload~~ — fixed
+**File:** `src/blob/manager.rs` (`upload_file`)
+Metadata is now built as an `azure_core::request_options::Metadata` object and tags as `azure_storage_blobs::prelude::Tags` (via `From<HashMap<String,String>>`). Both are passed to `put_block_blob` via `.metadata()` and `.tags()` chaining in a single API call. The `tracing::warn!` stubs are gone.
 
-### 8. Blob tags never retrieved in list/get operations
-**File:** `src/blob/manager.rs:181, 296, 455`
-In `list_files`, `list_files_hierarchical`, and `get_file_info`, tags are always `HashMap::new()`. File group information is invisible to users.
+### ~~8. Blob tags never retrieved in list/get operations~~ — fixed
+**File:** `src/blob/manager.rs` (`list_files`, `list_files_hierarchical`, `get_file_info`)
+`list_files` and `list_files_hierarchical` now pass `.include_tags(true)` to the list builder so tags are returned inline with each blob (no extra round-trips). `get_file_info` calls `blob_client.get_tags().await` since `get_properties` does not return tags. All three extract tags into `HashMap<String, String>` via `Tags::into()`.
 
 ### ~~9. `--progress` flag on file upload~~ — removed (v0.5.0, flags removed from CLI)
 
@@ -43,28 +43,27 @@ In `list_files`, `list_files_hierarchical`, and `get_file_info`, tags are always
 
 ### ~~11. `--metadata` flag on file list~~ — removed (v0.5.0, flags removed from CLI)
 
-### 12. Large file upload is a stub
-**File:** `src/blob/manager.rs:541`
-`upload_large_file` prints a debug message and returns a fake `FileInfo` with a generated UUID. `BlobConfig.enable_large_file_support`, `chunk_size_mb`, and `max_concurrent_uploads` are configured but never consulted.
+### ~~12. Large file upload is a stub~~ — fixed (v0.5.2)
+**File:** `src/blob/manager.rs` (`upload_large_file`)
+Implemented real Azure block blob upload: reads the file in `chunk_size_mb`-sized chunks, stages each with `put_block`, commits the full list with `put_block_list`, then fetches blob properties for an accurate `FileInfo`. `BlobManager` now carries `chunk_size_mb` and `max_concurrent_uploads` (populated from `BlobConfig` via the `with_blob_config` builder) and a `tokio::sync::Semaphore` bounds concurrency to `max_concurrent_uploads` in-flight requests. Unit tests for the `generate_block_id` and `read_chunk` helpers are in `src/blob/manager.rs`.
 
-### 13. `--open` flag on file download is a no-op
-**File:** `src/cli/commands.rs:8356`
-Comment says `opener` crate needed. Only prints the file path without opening it.
+### ~~13. `--open` flag on file download is a no-op~~ — fixed (v0.5.1)
+Added `opener = "0.7"` dependency and replaced the no-op path-print with `opener::open(&path)` in `src/cli/file_ops.rs`.
 
-### 14. Vault list missing pagination
-**File:** `src/vault/operations.rs:318`
-`list_vaults` does not follow Azure ARM `nextLink` for large subscriptions. Compare with `list_secrets` in `secret/manager.rs` which correctly implements pagination.
+### ~~14. Vault list missing pagination~~ — fixed (v0.5.1)
+**File:** `src/vault/operations.rs`
+`list_vaults` now follows Azure ARM `nextLink` pagination for large subscriptions, matching the pattern used by `list_secrets` in `secret/manager.rs`.
 
-### 15. Template output format (`--format template`) not implemented
-**File:** `src/utils/format.rs:158`
-Returns error: "Template output format is not yet supported." Users can select it via `--format=template` and get a runtime error.
+### ~~15. Template output format (`--format template`) not implemented~~ — fixed
+**File:** `src/utils/format.rs`
+Implemented `{{field_name}}` substitution (case-insensitive, whitespace-tolerant) via `format_as_template`. Requires `--template` flag with a format string, e.g. `--format template --template 'export {{Name}}={{Value}}'`. Unknown placeholders are left as-is. Full unit test coverage added.
 
 ### ~~16. `--resource-group` flag missing from audit command~~ — fixed
 The `Audit` command now exposes `--resource-group` (see `Commands::Audit` in `src/cli/commands.rs`). Remove this entry after the next full audit pass.
 
-### 17. Managed Identity credential priority is a no-op
-**File:** `src/auth/provider.rs:195`
-`AzureCredentialType::ManagedIdentity` falls back to `DefaultAzureCredential` with no customization, identical to `Default`. Users who set `azure_credential_priority = "managed_identity"` get no different behavior.
+### ~~17. Managed Identity credential priority is a no-op~~ — fixed
+**File:** `src/auth/provider.rs`
+`AzureCredentialType::ManagedIdentity` now uses `AppServiceManagedIdentityCredential` (when `IDENTITY_ENDPOINT` is set) or `VirtualMachineManagedIdentityCredential` (IMDS) instead of `DefaultAzureCredential`. No CLI or environment-variable fallback — fails fast if not running in an Azure-managed environment.
 
 ---
 
@@ -213,11 +212,11 @@ These `.unwrap()` calls in production code have varying levels of risk:
 
 | Priority | Count | Open | Description |
 |----------|-------|------|-------------|
-| **P0** | 5 | 1 | Bugs — incorrect behavior, data loss, wrong exit codes |
-| **P1** | ~11 | 7 | User-facing feature gaps — stubs, no-op flags |
+| **P0** | 5 | 0 | Bugs — incorrect behavior, data loss, wrong exit codes |
+| **P1** | ~11 | 0 | User-facing feature gaps — stubs, no-op flags |
 | **P2** | 14 | 14 | Quality & robustness — error handling, silent failures, missing checks |
 | **P3** | ~13 | ~12 | Dead code, polish, tech debt |
 | **P4** | 5 | 5 | Potential panic sites in production code |
-| **Total** | ~48 | ~39 | Strikethrough items fixed or removed in v0.5.0–v0.5.1 |
+| **Total** | ~48 | ~31 | Strikethrough items fixed or removed in v0.5.0–v0.5.2 |
 
 > **Note:** Items marked ~~fixed~~ or ~~removed~~ should be deleted on the next full audit pass. File paths updated for CLI decomposition (commands moved to `secret_ops.rs`, `system_ops.rs`, `vault_ops.rs`, etc.).

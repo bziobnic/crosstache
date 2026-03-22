@@ -320,24 +320,27 @@ impl VaultOperations for AzureVaultOperations {
         subscription_id: Option<&str>,
         resource_group: Option<&str>,
     ) -> Result<Vec<VaultSummary>> {
-        let operation = || async {
-            let headers = self.create_headers().await?;
-            let sub_id = subscription_id.unwrap_or(&self.subscription_id);
+        let headers = self.create_headers().await?;
+        let sub_id = subscription_id.unwrap_or(&self.subscription_id);
 
-            let url = if let Some(rg) = resource_group {
-                self.build_arm_url(&format!(
-                    "/subscriptions/{sub_id}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01"
-                ))
-            } else {
-                self.build_arm_url(&format!(
-                    "/subscriptions/{sub_id}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01"
-                ))
-            };
+        let first_url = if let Some(rg) = resource_group {
+            self.build_arm_url(&format!(
+                "/subscriptions/{sub_id}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01"
+            ))
+        } else {
+            self.build_arm_url(&format!(
+                "/subscriptions/{sub_id}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01"
+            ))
+        };
 
+        let mut vaults = Vec::new();
+        let mut next_url: Option<String> = Some(first_url);
+
+        while let Some(current_url) = next_url.take() {
             let response = self
                 .http_client
-                .get(&url)
-                .headers(headers)
+                .get(&current_url)
+                .headers(headers.clone())
                 .send()
                 .await
                 .map_err(|e| CrosstacheError::network(format!("Failed to list vaults: {e}")))?;
@@ -352,7 +355,6 @@ impl VaultOperations for AzureVaultOperations {
                 CrosstacheError::serialization(format!("Failed to parse vaults response: {e}"))
             })?;
 
-            let mut vaults = Vec::new();
             if let Some(vault_array) = response_data.get("value").and_then(|v| v.as_array()) {
                 for vault_value in vault_array {
                     if let Ok(vault_props) = self.parse_vault_properties(vault_value) {
@@ -361,10 +363,13 @@ impl VaultOperations for AzureVaultOperations {
                 }
             }
 
-            Ok(vaults)
-        };
+            next_url = response_data
+                .get("nextLink")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+        }
 
-        self.execute_with_retry(operation).await
+        Ok(vaults)
     }
 
     async fn update_vault(
