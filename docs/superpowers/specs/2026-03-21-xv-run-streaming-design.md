@@ -16,17 +16,18 @@ Replace `Command::output()` with `Command::spawn()` + `BufReader::read_until(b'\
 
 1. Spawn child with `Stdio::piped()` for both stdout and stderr (same as today)
 2. Take ownership of `child.stdout` and `child.stderr` handles
-3. Wrap `secret_values` in `Arc<Vec<Zeroizing<String>>>` for sharing across threads
+3. Inside the `else` (masking) branch, wrap `secret_values` in `Arc::new(secret_values)` for sharing across threads
 4. Spawn thread 1: `BufReader::new(stdout).read_until(b'\n')` loop → `from_utf8_lossy` → `mask_secrets()` → `print!`
 5. Spawn thread 2: `BufReader::new(stderr).read_until(b'\n')` loop → `from_utf8_lossy` → `mask_secrets()` → `eprint!`
-6. `child.wait()` for exit status (safe to call while threads are still draining — child closing pipe write-ends signals EOF to readers)
-7. Join both threads (threads exit when they hit EOF, i.e., child's pipe write-end is closed)
-8. Drop `env_vars`, `uri_values` (zeroization). The main thread's `Arc<Vec<Zeroizing<String>>>` is the last reference after threads have joined — dropping it triggers `Zeroizing::drop` on each secret value.
-9. `std::process::exit(child_exit_code)`
+6. `child.wait()` for exit status. Both `child.wait()` and thread joins are independently safe in either order — threads reach EOF only after the child exits and the OS closes the child's pipe write-ends. `wait()` first is conventional to avoid zombie accumulation.
+7. Join both threads (ignore `Err` from panics — child exit code is already captured)
+8. Flush stdout and stderr (`std::io::stdout().flush()` / `std::io::stderr().flush()`) — required because `std::process::exit()` does not flush stdio buffers
+9. Drop `env_vars`, `uri_values` (zeroization). The main thread's `Arc` is the last reference after threads have joined — dropping it triggers `Zeroizing::drop` on each secret value.
+10. `std::process::exit(child_exit_code)`
 
 ## File Changes
 
-- **Modified:** `src/cli/secret_ops.rs` — replace the `else` block (lines ~1567–1594) in `execute_secret_run`
+- **Modified:** `src/cli/secret_ops.rs` — replace the `else` branch of the `if no_masking` block in `execute_secret_run`
 - **No changes:** `src/cli/helpers.rs` (`mask_secrets` reused as-is)
 - **No changes:** `--no-masking` path, secret fetching, env injection, URI resolution
 
@@ -34,7 +35,7 @@ Replace `Command::output()` with `Command::spawn()` + `BufReader::read_until(b'\
 
 ### Thread Safety
 
-`secret_values: Vec<Zeroizing<String>>` is cloned into an `Arc` and shared read-only across two threads. `Zeroizing<String>` is `Send + Sync`, so `Arc<Vec<Zeroizing<String>>>` is safe to share.
+`secret_values: Vec<Zeroizing<String>>` is moved into an `Arc::new()` inside the `else` (masking) branch and shared read-only across two threads via `Arc::clone()`. `Zeroizing<String>` is `Send + Sync`, so `Arc<Vec<Zeroizing<String>>>` is safe to share. The `Arc` is constructed only in the masking path — the `--no-masking` path never touches it.
 
 ### Line Buffering
 
@@ -65,8 +66,9 @@ Uses only `std::sync::Arc`, `std::thread`, `std::io::BufReader`, `std::io::BufRe
 
 ## Testing
 
-- Integration test: spawn `echo "hello SECRET world"` with masking, verify stdout contains `[MASKED]`
-- Integration test: spawn a shell command writing to both stdout and stderr, verify both streams are masked
+- `#[cfg(test)]` subprocess tests in `secret_ops.rs` (no Azure credentials needed):
+  - Spawn `echo "hello SECRET world"` with masking, verify stdout contains `[MASKED]`
+  - Spawn a shell command writing to both stdout and stderr, verify both streams are masked
 - Existing `mask_secrets` unit tests in `helpers.rs` unchanged
 - `mask_secrets` is already unit-tested independently; the new tests focus on the threading/streaming plumbing
 
