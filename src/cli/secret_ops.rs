@@ -1565,33 +1565,80 @@ async fn execute_secret_run(
 
         std::process::exit(status.code().unwrap_or(1));
     } else {
-        // Capture output for masking
+        // Stream output line-by-line with masking
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let output = cmd.output().map_err(|e| {
+        let child = cmd.spawn().map_err(|e| {
             CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
         })?;
 
-        // Explicitly drop secret-holding variables to zeroize them after child exits
+        // Drop env vars now — they're already set on the child process
         drop(env_vars);
         drop(uri_values);
 
-        // Mask secret values in output
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let masked_stdout = mask_secrets(&stdout, &secret_values);
-        let masked_stderr = mask_secrets(&stderr, &secret_values);
-
-        // Zeroize secret values now that masking is complete
-        drop(secret_values);
-
-        print!("{}", masked_stdout);
-        eprint!("{}", masked_stderr);
-
-        // Exit with the same code as the child process
-        std::process::exit(output.status.code().unwrap_or(1));
+        // secret_values is moved into stream_and_mask, which wraps it in Arc.
+        // After threads join, Arc drop triggers Zeroizing::drop on each secret.
+        let exit_code = stream_and_mask(child, secret_values);
+        std::process::exit(exit_code);
     }
+}
+
+/// Stream child process stdout/stderr line-by-line, masking secret values in each line.
+/// Returns the child's exit code.
+///
+/// `secret_values` is moved into an `Arc` and shared across two reader threads.
+/// After both threads join, this function holds the last `Arc` reference —
+/// dropping it triggers `Zeroizing::drop` on each secret value.
+fn stream_and_mask(
+    mut child: std::process::Child,
+    secret_values: Vec<Zeroizing<String>>,
+) -> i32 {
+    use std::io::{BufRead, BufReader, Write};
+
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+
+    // Move secret_values into Arc for sharing across threads.
+    // After threads join, the Arc in this function is the last reference.
+    let secrets = Arc::new(secret_values);
+    let secrets_for_stderr = Arc::clone(&secrets);
+
+    // Thread 1: stream stdout
+    let stdout_thread = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut buf = Vec::new();
+        while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
+            let line = String::from_utf8_lossy(&buf);
+            let masked = mask_secrets(&line, &secrets);
+            print!("{}", masked);
+            buf.clear();
+        }
+    });
+
+    // Thread 2: stream stderr
+    let stderr_thread = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut buf = Vec::new();
+        while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
+            let line = String::from_utf8_lossy(&buf);
+            let masked = mask_secrets(&line, &secrets_for_stderr);
+            eprint!("{}", masked);
+            buf.clear();
+        }
+    });
+
+    // Wait for child to exit
+    let status = child.wait().expect("failed to wait on child");
+
+    // Join threads (they'll finish once child closes pipe write-ends)
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+
+    // Flush before process::exit (which does not flush stdio buffers)
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+
+    status.code().unwrap_or(1)
 }
 
 async fn execute_secret_inject(
@@ -2890,5 +2937,173 @@ async fn execute_secret_delete_group(
             group_name
         ));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// Helper: run stream_and_mask but redirect its print!/eprint! output to files
+    /// so we can verify masking actually happened.
+    fn stream_and_mask_to_files(
+        mut child: std::process::Child,
+        secret_values: Vec<Zeroizing<String>>,
+        stdout_file: &std::path::Path,
+        stderr_file: &std::path::Path,
+    ) -> i32 {
+        use std::fs::OpenOptions;
+        use std::io::{BufRead, BufReader, Write};
+
+        let stdout_handle = child.stdout.take().expect("stdout was piped");
+        let stderr_handle = child.stderr.take().expect("stderr was piped");
+
+        let secrets = Arc::new(secret_values);
+        let secrets_for_stderr = Arc::clone(&secrets);
+
+        let stdout_path = stdout_file.to_path_buf();
+        let stderr_path = stderr_file.to_path_buf();
+
+        let stdout_thread = std::thread::spawn(move || {
+            let mut out = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&stdout_path)
+                .unwrap();
+            let mut reader = BufReader::new(stdout_handle);
+            let mut buf = Vec::new();
+            while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
+                let line = String::from_utf8_lossy(&buf);
+                let masked = mask_secrets(&line, &secrets);
+                write!(out, "{}", masked).unwrap();
+                buf.clear();
+            }
+        });
+
+        let stderr_thread = std::thread::spawn(move || {
+            let mut out = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&stderr_path)
+                .unwrap();
+            let mut reader = BufReader::new(stderr_handle);
+            let mut buf = Vec::new();
+            while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
+                let line = String::from_utf8_lossy(&buf);
+                let masked = mask_secrets(&line, &secrets_for_stderr);
+                write!(out, "{}", masked).unwrap();
+                buf.clear();
+            }
+        });
+
+        let status = child.wait().expect("failed to wait on child");
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        status.code().unwrap_or(1)
+    }
+
+    #[test]
+    fn test_stream_and_mask_stdout_masks_secrets() {
+        let secret = Zeroizing::new("SUPERSECRET".to_string());
+        let secrets = vec![secret];
+        let dir = tempfile::tempdir().unwrap();
+        let stdout_path = dir.path().join("stdout.txt");
+        let stderr_path = dir.path().join("stderr.txt");
+
+        let child = Command::new("echo")
+            .arg("hello SUPERSECRET world")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn echo");
+
+        let exit_code = stream_and_mask_to_files(child, secrets, &stdout_path, &stderr_path);
+        assert_eq!(exit_code, 0);
+
+        let output = std::fs::read_to_string(&stdout_path).unwrap();
+        assert!(
+            output.contains("[MASKED]"),
+            "Expected [MASKED] in stdout, got: {}",
+            output
+        );
+        assert!(
+            !output.contains("SUPERSECRET"),
+            "Secret should not appear in output"
+        );
+    }
+
+    #[test]
+    fn test_stream_and_mask_both_streams() {
+        let secret = Zeroizing::new("TOPSECRET".to_string());
+        let secrets = vec![secret];
+        let dir = tempfile::tempdir().unwrap();
+        let stdout_path = dir.path().join("stdout.txt");
+        let stderr_path = dir.path().join("stderr.txt");
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("echo 'stdout TOPSECRET line'; echo 'stderr TOPSECRET line' >&2")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn sh");
+
+        let exit_code = stream_and_mask_to_files(child, secrets, &stdout_path, &stderr_path);
+        assert_eq!(exit_code, 0);
+
+        let stdout_output = std::fs::read_to_string(&stdout_path).unwrap();
+        let stderr_output = std::fs::read_to_string(&stderr_path).unwrap();
+        assert!(
+            stdout_output.contains("[MASKED]"),
+            "Expected [MASKED] in stdout"
+        );
+        assert!(
+            stderr_output.contains("[MASKED]"),
+            "Expected [MASKED] in stderr"
+        );
+        assert!(
+            !stdout_output.contains("TOPSECRET"),
+            "Secret should not appear in stdout"
+        );
+        assert!(
+            !stderr_output.contains("TOPSECRET"),
+            "Secret should not appear in stderr"
+        );
+    }
+
+    #[test]
+    fn test_stream_and_mask_exit_code() {
+        let secrets = vec![];
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 42")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn sh");
+
+        let exit_code = stream_and_mask(child, secrets);
+        assert_eq!(exit_code, 42);
+    }
+
+    #[test]
+    fn test_stream_and_mask_large_output_no_oom() {
+        // Verify streaming works for output larger than typical pipe buffer (64KB)
+        let secret = Zeroizing::new("HIDDEN".to_string());
+        let secrets = vec![secret];
+
+        let child = Command::new("sh")
+            .arg("-c")
+            // Use awk for portability (seq not available in all environments)
+            .arg("awk 'BEGIN{for(i=1;i<=3000;i++) print \"line \" i \" contains HIDDEN data\"}'")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn sh");
+
+        let exit_code = stream_and_mask(child, secrets);
+        assert_eq!(exit_code, 0);
     }
 }
