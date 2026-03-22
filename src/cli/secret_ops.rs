@@ -1565,32 +1565,21 @@ async fn execute_secret_run(
 
         std::process::exit(status.code().unwrap_or(1));
     } else {
-        // Capture output for masking
+        // Stream output line-by-line with masking
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let output = cmd.output().map_err(|e| {
+        let child = cmd.spawn().map_err(|e| {
             CrosstacheError::config(format!("Failed to execute command '{}': {}", command[0], e))
         })?;
 
-        // Explicitly drop secret-holding variables to zeroize them after child exits
+        // Drop env vars now — they're already set on the child process
         drop(env_vars);
         drop(uri_values);
 
-        // Mask secret values in output
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let masked_stdout = mask_secrets(&stdout, &secret_values);
-        let masked_stderr = mask_secrets(&stderr, &secret_values);
-
-        // Zeroize secret values now that masking is complete
-        drop(secret_values);
-
-        print!("{}", masked_stdout);
-        eprint!("{}", masked_stderr);
-
-        // Exit with the same code as the child process
-        std::process::exit(output.status.code().unwrap_or(1));
+        // secret_values is moved into stream_and_mask, which wraps it in Arc.
+        // After threads join, Arc drop triggers Zeroizing::drop on each secret.
+        let exit_code = stream_and_mask(child, secret_values);
+        std::process::exit(exit_code);
     }
 }
 
