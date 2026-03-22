@@ -8,8 +8,9 @@ use crate::utils::network::{classify_network_error, create_http_client, NetworkC
 use async_trait::async_trait;
 use azure_core::auth::{AccessToken, TokenCredential};
 use azure_identity::{
-    AzureCliCredential, ClientSecretCredential, DefaultAzureCredential, EnvironmentCredential,
-    TokenCredentialOptions,
+    AppServiceManagedIdentityCredential, AzureCliCredential, ClientSecretCredential,
+    DefaultAzureCredential, EnvironmentCredential, TokenCredentialOptions,
+    VirtualMachineManagedIdentityCredential,
 };
 use base64::Engine;
 use reqwest::{header::HeaderMap, Client};
@@ -193,13 +194,28 @@ impl DefaultAzureCredentialProvider {
                 Ok(Arc::new(AzureCliCredential::new()) as Arc<dyn TokenCredential>)
             }
             AzureCredentialType::ManagedIdentity => {
-                // For managed identity, we use DefaultAzureCredential which will prioritize
-                // managed identity when running in Azure
-                // Note: The Azure SDK for Rust doesn't expose individual managed identity credentials publicly
-                Ok(Arc::new(
-                    DefaultAzureCredential::create(TokenCredentialOptions::default())
-                        .map_err(create_user_friendly_credential_error)?,
-                ) as Arc<dyn TokenCredential>)
+                // Use a specific managed identity credential rather than the full DefaultAzureCredential
+                // chain. App Service / Azure Functions expose IDENTITY_ENDPOINT; VMs use IMDS.
+                if std::env::var("IDENTITY_ENDPOINT").is_ok() {
+                    // Running in App Service or Azure Functions
+                    match AppServiceManagedIdentityCredential::create(
+                        TokenCredentialOptions::default(),
+                    ) {
+                        Ok(cred) => Ok(Arc::new(cred) as Arc<dyn TokenCredential>),
+                        Err(_) => {
+                            // IDENTITY_ENDPOINT was set but credential creation failed; fall back
+                            // to the VM IMDS endpoint as a best-effort.
+                            Ok(Arc::new(VirtualMachineManagedIdentityCredential::new(
+                                TokenCredentialOptions::default(),
+                            )) as Arc<dyn TokenCredential>)
+                        }
+                    }
+                } else {
+                    // Running on a VM, ACI, AKS node, or similar — use the IMDS endpoint.
+                    Ok(Arc::new(VirtualMachineManagedIdentityCredential::new(
+                        TokenCredentialOptions::default(),
+                    )) as Arc<dyn TokenCredential>)
+                }
             }
             AzureCredentialType::Environment => {
                 // Try Environment credentials with proper create method

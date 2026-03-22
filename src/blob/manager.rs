@@ -10,6 +10,7 @@
 use crate::auth::provider::AzureAuthProvider;
 use crate::blob::models::*;
 use crate::error::{CrosstacheError, Result};
+use azure_core::request_options::Metadata;
 use azure_storage_blobs::prelude::*;
 // use azure_core::auth::TokenCredential; // Not needed for current implementation
 use chrono::Utc;
@@ -23,10 +24,14 @@ pub struct BlobManager {
     storage_account: String,
     container_name: String,
     auth_provider: Arc<dyn AzureAuthProvider>,
+    /// Chunk size for block-based large file uploads (megabytes).
+    chunk_size_mb: usize,
+    /// Maximum number of concurrent block uploads.
+    max_concurrent_uploads: usize,
 }
 
 impl BlobManager {
-    /// Create a new BlobManager instance
+    /// Create a new BlobManager instance with default chunk/concurrency settings.
     pub fn new(
         auth_provider: Arc<dyn AzureAuthProvider>,
         storage_account: String,
@@ -36,7 +41,17 @@ impl BlobManager {
             storage_account,
             container_name,
             auth_provider,
+            chunk_size_mb: 4,
+            max_concurrent_uploads: 3,
         })
+    }
+
+    /// Override the chunk size (MB) and maximum concurrent uploads used by
+    /// `upload_large_file`.  Returns `self` for builder-style chaining.
+    pub fn with_blob_config(mut self, chunk_size_mb: usize, max_concurrent_uploads: usize) -> Self {
+        self.chunk_size_mb = chunk_size_mb.max(1);
+        self.max_concurrent_uploads = max_concurrent_uploads.max(1);
+        self
     }
 
     /// Upload a file to blob storage
@@ -70,28 +85,23 @@ impl BlobManager {
         // Store content length before moving request.content
         let content_length = request.content.len() as u64;
 
-        // Perform the upload
+        // Build SDK Metadata from our HashMap
+        let mut sdk_metadata = Metadata::new();
+        for (k, v) in &metadata {
+            sdk_metadata.insert(k.clone(), v.clone());
+        }
+
+        // Build Tags from our HashMap (Tags: From<HashMap<String,String>> is implemented)
+        let sdk_tags = Tags::from(request.tags.clone());
+
+        // Perform the upload, setting metadata and tags in a single API call
         let response = blob_client
             .put_block_blob(request.content)
             .content_type(&content_type)
+            .metadata(sdk_metadata)
+            .tags(sdk_tags)
             .await
             .map_err(|e| CrosstacheError::azure_api(format!("Failed to upload blob: {e}")))?;
-
-        // TODO: Set metadata (requires separate API call)
-        // Azure SDK v0.21 API for metadata is not yet stable
-        // Will implement when the API stabilizes
-        if !metadata.is_empty() {
-            // The metadata setting requires investigation of the exact API in v0.21
-            tracing::warn!("Metadata setting not yet implemented for Azure SDK v0.21");
-        }
-
-        // TODO: Set tags if provided (requires separate API call)
-        // Azure SDK v0.21 API for tags is not yet stable
-        // Will implement when the API stabilizes
-        if !request.tags.is_empty() {
-            // The tag setting requires investigation of the exact API in v0.21
-            tracing::warn!("Tag setting not yet implemented for Azure SDK v0.21");
-        }
 
         // Extract response data and build FileInfo
         let etag = response.etag.to_string();
@@ -131,8 +141,8 @@ impl BlobManager {
             list_builder = list_builder.prefix(prefix);
         }
 
-        // Enable metadata inclusion
-        list_builder = list_builder.include_metadata(true);
+        // Enable metadata and tags inclusion
+        list_builder = list_builder.include_metadata(true).include_tags(true);
 
         // Execute the list request - collect all pages
         let mut stream = list_builder.into_stream();
@@ -176,9 +186,12 @@ impl BlobManager {
                     }
                 }
 
-                // For now, skip tags retrieval (requires separate API call)
-                // TODO: Implement tags retrieval strategy
-                let tags = HashMap::new();
+                // Extract tags returned inline by include_tags(true)
+                let tags: HashMap<String, String> = blob_item
+                    .tags
+                    .clone()
+                    .map(HashMap::from)
+                    .unwrap_or_default();
 
                 // Build FileInfo struct
                 let file_info = FileInfo {
@@ -227,8 +240,8 @@ impl BlobManager {
             list_builder = list_builder.delimiter(delimiter);
         }
 
-        // Enable metadata inclusion for files
-        list_builder = list_builder.include_metadata(true);
+        // Enable metadata and tags inclusion for files
+        list_builder = list_builder.include_metadata(true).include_tags(true);
 
         // Execute the list request - collect all pages
         let mut stream = list_builder.into_stream();
@@ -292,8 +305,12 @@ impl BlobManager {
                     }
                 }
 
-                // For now, skip tags retrieval (requires separate API call)
-                let tags = HashMap::new();
+                // Extract tags returned inline by include_tags(true)
+                let tags: HashMap<String, String> = blob_item
+                    .tags
+                    .clone()
+                    .map(HashMap::from)
+                    .unwrap_or_default();
 
                 // Build FileInfo struct
                 let file_info = FileInfo {
@@ -450,9 +467,12 @@ impl BlobManager {
             .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
-        // For now, skip tags retrieval (requires separate API call)
-        // TODO: Implement tags retrieval if needed
-        let tags = HashMap::new();
+        // Fetch tags via a separate API call (get_properties does not include them)
+        let tags: HashMap<String, String> = blob_client
+            .get_tags()
+            .await
+            .map(|r| HashMap::from(r.tags))
+            .unwrap_or_default();
 
         // Build complete FileInfo with all available data
         Ok(FileInfo {
@@ -537,35 +557,136 @@ impl BlobManager {
         Ok(())
     }
 
-    /// Upload large file with block-based chunking
-    #[allow(dead_code)]
+    /// Upload a large file to blob storage using Azure block blob chunked upload.
+    ///
+    /// The file is read in `chunk_size_mb`-sized blocks. Each block is uploaded
+    /// with [`BlobClient::put_block`] and, once all blocks are staged, committed
+    /// with [`BlobClient::put_block_list`].  Up to `max_concurrent_uploads`
+    /// block uploads run in parallel, controlled by a [`tokio::sync::Semaphore`].
+    ///
+    /// After the commit, blob properties are fetched so that the returned
+    /// [`FileInfo`] contains the real server-side `size`, `etag`, and
+    /// `last_modified` values.
     pub async fn upload_large_file<R: tokio::io::AsyncRead + Unpin>(
         &self,
         name: &str,
-        mut _reader: R,
-        file_size: u64,
+        mut reader: R,
+        _file_size: u64,
         metadata: HashMap<String, String>,
         tags: HashMap<String, String>,
     ) -> Result<FileInfo> {
-        // TODO: Implement actual large file upload using Azure Blob Storage SDK
-        println!(
-            "Would upload large file '{}' ({} bytes) to storage account '{}'",
-            name, file_size, self.storage_account
-        );
+        use tokio::sync::Semaphore;
 
-        let groups = metadata
+        let content_type = mime_guess::from_path(name)
+            .first_or_octet_stream()
+            .to_string();
+        let chunk_size = self.chunk_size_mb * 1024 * 1024;
+
+        // Build blob client.
+        let token_credential = self.auth_provider.get_token_credential();
+        let blob_service = BlobServiceClient::new(&self.storage_account, token_credential);
+        let container_client = blob_service.container_client(&self.container_name);
+        let blob_client = container_client.blob_client(name);
+
+        let semaphore = Arc::new(Semaphore::new(self.max_concurrent_uploads));
+        let mut block_list = BlockList::default();
+        let mut block_idx: u32 = 0;
+        let mut upload_tasks: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+
+        // Read chunks and spawn concurrent block uploads.
+        loop {
+            let chunk = read_chunk(&mut reader, chunk_size)
+                .await
+                .map_err(|e| CrosstacheError::unknown(format!("Failed to read file data: {e}")))?;
+            if chunk.is_empty() {
+                break;
+            }
+
+            let block_id = generate_block_id(block_idx);
+            block_list
+                .blocks
+                .push(BlobBlockType::new_uncommitted(block_id.clone()));
+            block_idx += 1;
+
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|e| CrosstacheError::unknown(format!("Semaphore error: {e}")))?;
+            let blob_client = blob_client.clone();
+            let chunk_bytes = chunk; // Vec<u8> satisfies Into<azure_core::Body>
+
+            upload_tasks.push(tokio::spawn(async move {
+                let _permit = permit; // held for the duration of the upload
+                blob_client
+                    .put_block(block_id, chunk_bytes)
+                    .await
+                    .map_err(|e| {
+                        CrosstacheError::azure_api(format!("Failed to upload block: {e}"))
+                    })?;
+                Ok(())
+            }));
+        }
+
+        // Wait for all block uploads to finish.
+        for task in upload_tasks {
+            task.await
+                .map_err(|e| CrosstacheError::unknown(format!("Upload task panicked: {e}")))?
+                .map_err(|e: CrosstacheError| e)?;
+        }
+
+        if block_list.blocks.is_empty() {
+            // Zero-byte file: fall back to a simple put_block_blob so the blob
+            // actually exists before we query its properties.
+            blob_client
+                .put_block_blob(vec![])
+                .content_type(&content_type)
+                .await
+                .map_err(|e| {
+                    CrosstacheError::azure_api(format!("Failed to upload empty blob: {e}"))
+                })?;
+        } else {
+            // Commit the staged blocks.
+            blob_client
+                .put_block_list(block_list)
+                .content_type(&content_type)
+                .await
+                .map_err(|e| {
+                    CrosstacheError::azure_api(format!("Failed to commit block list: {e}"))
+                })?;
+        }
+
+        // Fetch the committed blob's server-side properties for an accurate FileInfo.
+        let properties = blob_client
+            .get_properties()
+            .await
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to get blob properties after upload: {e}")))?;
+
+        let size = properties.blob.properties.content_length;
+        let last_modified = {
+            let ts = properties.blob.properties.last_modified.unix_timestamp();
+            chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
+        };
+        let etag = properties.blob.properties.etag.to_string();
+
+        let groups: Vec<String> = metadata
             .get("groups")
             .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
+        tracing::info!(
+            name = name,
+            blocks = block_idx,
+            bytes = size,
+            "Large file upload committed"
+        );
+
         Ok(FileInfo {
             name: name.to_string(),
-            size: file_size,
-            content_type: mime_guess::from_path(name)
-                .first_or_octet_stream()
-                .to_string(),
-            last_modified: Utc::now(),
-            etag: format!("etag-large-{}", uuid::Uuid::new_v4()),
+            size,
+            content_type,
+            last_modified,
+            etag,
             groups,
             metadata,
             tags,
@@ -623,6 +744,36 @@ fn sort_blob_items(items: &mut [BlobListItem]) {
     });
 }
 
+/// Generate a fixed-length block ID for the given zero-based block index.
+///
+/// Azure requires all block IDs within a block list to have the same length.
+/// We encode the 4-byte big-endian representation of `index`, giving a
+/// constant 4-byte payload for every index value.
+fn generate_block_id(index: u32) -> azure_storage_blobs::prelude::BlockId {
+    // to_be_bytes() gives a fixed 4-byte array; Vec<u8> satisfies Into<bytes::Bytes>.
+    azure_storage_blobs::prelude::BlockId::new(index.to_be_bytes().to_vec())
+}
+
+/// Read up to `chunk_size` bytes from `reader`, returning however many bytes
+/// were actually available (may be less at EOF, zero when already at EOF).
+async fn read_chunk<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    chunk_size: usize,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut chunk = vec![0u8; chunk_size];
+    let mut bytes_read = 0;
+    while bytes_read < chunk_size {
+        let n = reader.read(&mut chunk[bytes_read..]).await?;
+        if n == 0 {
+            break;
+        }
+        bytes_read += n;
+    }
+    chunk.truncate(bytes_read);
+    Ok(chunk)
+}
+
 /// Format file size in human-readable format
 pub fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
@@ -662,11 +813,12 @@ pub fn create_blob_manager(config: &crate::config::Config) -> Result<BlobManager
         config.azure_credential_priority.clone(),
     )?) as Arc<dyn AzureAuthProvider>;
 
-    BlobManager::new(
+    Ok(BlobManager::new(
         auth_provider,
         blob_config.storage_account,
         blob_config.container_name,
-    )
+    )?
+    .with_blob_config(blob_config.chunk_size_mb, blob_config.max_concurrent_uploads))
 }
 
 /// Create a blob manager with context-aware container selection
@@ -698,5 +850,93 @@ pub fn create_context_aware_blob_manager(
         config.azure_credential_priority.clone(),
     )?) as Arc<dyn AzureAuthProvider>;
 
-    BlobManager::new(auth_provider, blob_config.storage_account, container_name)
+    Ok(BlobManager::new(auth_provider, blob_config.storage_account, container_name)?
+        .with_blob_config(blob_config.chunk_size_mb, blob_config.max_concurrent_uploads))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── generate_block_id ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_block_id_fixed_length() {
+        let id0 = generate_block_id(0);
+        let id1 = generate_block_id(1);
+        let id_max = generate_block_id(u32::MAX);
+        // Azure requires every block ID in a list to have the same byte length.
+        assert_eq!(id0.bytes().len(), id1.bytes().len());
+        assert_eq!(id0.bytes().len(), id_max.bytes().len());
+    }
+
+    #[test]
+    fn test_generate_block_id_unique() {
+        let id0 = generate_block_id(0);
+        let id1 = generate_block_id(1);
+        let id2 = generate_block_id(2);
+        assert_ne!(id0.bytes(), id1.bytes());
+        assert_ne!(id1.bytes(), id2.bytes());
+        assert_ne!(id0.bytes(), id2.bytes());
+    }
+
+    #[test]
+    fn test_generate_block_id_within_azure_limit() {
+        // Azure: block ID must not exceed 64 bytes before base64 encoding.
+        let id = generate_block_id(u32::MAX);
+        assert!(id.bytes().len() <= 64);
+    }
+
+    // ── read_chunk ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_read_chunk_returns_full_chunk_when_data_available() {
+        let data = vec![0u8; 100];
+        let mut cursor = std::io::Cursor::new(data.clone());
+        let chunk = read_chunk(&mut cursor, 50).await.unwrap();
+        assert_eq!(chunk.len(), 50);
+        assert_eq!(chunk, &data[..50]);
+    }
+
+    #[tokio::test]
+    async fn test_read_chunk_returns_partial_at_eof() {
+        let data = vec![1u8; 30];
+        let mut cursor = std::io::Cursor::new(data.clone());
+        let chunk = read_chunk(&mut cursor, 50).await.unwrap();
+        assert_eq!(chunk.len(), 30);
+        assert_eq!(chunk, data);
+    }
+
+    #[tokio::test]
+    async fn test_read_chunk_returns_empty_at_eof() {
+        let data: Vec<u8> = vec![];
+        let mut cursor = std::io::Cursor::new(data);
+        let chunk = read_chunk(&mut cursor, 50).await.unwrap();
+        assert!(chunk.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_chunk_splitting_produces_correct_count_and_sizes() {
+        // 250 bytes / 100-byte chunks → 3 chunks: 100, 100, 50
+        let data = (0u8..=249).collect::<Vec<_>>();
+        let mut cursor = std::io::Cursor::new(data.clone());
+
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        loop {
+            let chunk = read_chunk(&mut cursor, 100).await.unwrap();
+            if chunk.is_empty() {
+                break;
+            }
+            chunks.push(chunk);
+        }
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), 100);
+        assert_eq!(chunks[1].len(), 100);
+        assert_eq!(chunks[2].len(), 50);
+        // Verify content integrity
+        assert_eq!(chunks[0], &data[..100]);
+        assert_eq!(chunks[1], &data[100..200]);
+        assert_eq!(chunks[2], &data[200..]);
+    }
 }
