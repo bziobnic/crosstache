@@ -528,4 +528,15 @@ mod tests {
     fn test_verify_checksum_invalid() {
         assert!(verify_checksum(b"hello world", "0000000000000000000000000000000000000000000000000000000000000000").is_err());
     }
+
+    #[tokio::test]
+    #[ignore] // Requires internet access
+    async fn test_fetch_latest_release_from_github() {
+        let release = fetch_latest_release().await.unwrap();
+        assert!(!release.tag_name.is_empty(), "Should have a tag name");
+        assert!(!release.assets.is_empty(), "Should have release assets");
+        // Verify we can parse the version
+        let version = parse_tag_version(&release.tag_name).unwrap();
+        assert!(version.major > 0 || version.minor > 0, "Should be a non-zero version");
+    }
 }
