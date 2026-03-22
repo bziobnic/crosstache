@@ -331,3 +331,199 @@ impl AccessPolicy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_vault_properties(name: &str, uri: &str, purge: bool, retention: i32) -> VaultProperties {
+        VaultProperties {
+            id: format!("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/{name}"),
+            name: name.to_string(),
+            location: "eastus".to_string(),
+            resource_group: "rg".to_string(),
+            subscription_id: "sub-id".to_string(),
+            tenant_id: "tenant-id".to_string(),
+            uri: uri.to_string(),
+            enabled_for_deployment: false,
+            enabled_for_disk_encryption: false,
+            enabled_for_template_deployment: false,
+            soft_delete_retention_in_days: retention,
+            purge_protection: purge,
+            sku: "standard".to_string(),
+            access_policies: Vec::new(),
+            created_at: chrono::Utc::now(),
+            tags: HashMap::new(),
+            enable_rbac_authorization: None,
+        }
+    }
+
+    // --- AccessLevel::to_secret_permissions ---
+
+    #[test]
+    fn test_reader_secret_permissions() {
+        let perms = AccessLevel::Reader.to_secret_permissions();
+        assert_eq!(perms, vec!["get", "list"]);
+    }
+
+    #[test]
+    fn test_contributor_secret_permissions() {
+        let perms = AccessLevel::Contributor.to_secret_permissions();
+        assert!(perms.contains(&"get".to_string()));
+        assert!(perms.contains(&"set".to_string()));
+        assert!(perms.contains(&"delete".to_string()));
+        assert!(!perms.contains(&"purge".to_string()));
+    }
+
+    #[test]
+    fn test_admin_secret_permissions_includes_purge() {
+        let perms = AccessLevel::Admin.to_secret_permissions();
+        assert!(perms.contains(&"purge".to_string()));
+        assert!(perms.contains(&"get".to_string()));
+        assert!(perms.contains(&"set".to_string()));
+    }
+
+    // --- AccessLevel::to_key_permissions ---
+
+    #[test]
+    fn test_reader_key_permissions() {
+        let perms = AccessLevel::Reader.to_key_permissions();
+        assert_eq!(perms, vec!["get", "list"]);
+    }
+
+    #[test]
+    fn test_contributor_key_permissions() {
+        let perms = AccessLevel::Contributor.to_key_permissions();
+        assert!(perms.contains(&"create".to_string()));
+        assert!(perms.contains(&"decrypt".to_string()));
+        assert!(!perms.contains(&"purge".to_string()));
+        assert!(!perms.contains(&"import".to_string()));
+    }
+
+    #[test]
+    fn test_admin_key_permissions_includes_purge_and_import() {
+        let perms = AccessLevel::Admin.to_key_permissions();
+        assert!(perms.contains(&"purge".to_string()));
+        assert!(perms.contains(&"import".to_string()));
+        assert!(perms.contains(&"update".to_string()));
+    }
+
+    // --- VaultProperties methods ---
+
+    #[test]
+    fn test_get_vault_uri_returns_stored_uri() {
+        let vp = make_vault_properties(
+            "myvault",
+            "https://myvault.vault.azure.net/",
+            false,
+            90,
+        );
+        assert_eq!(vp.get_vault_uri(), "https://myvault.vault.azure.net/");
+    }
+
+    #[test]
+    fn test_get_vault_uri_constructs_when_empty() {
+        let vp = make_vault_properties("myvault", "", false, 90);
+        assert_eq!(vp.get_vault_uri(), "https://myvault.vault.azure.net/");
+    }
+
+    #[test]
+    fn test_has_purge_protection_true() {
+        let vp = make_vault_properties("myvault", "", true, 90);
+        assert!(vp.has_purge_protection());
+    }
+
+    #[test]
+    fn test_has_purge_protection_false() {
+        let vp = make_vault_properties("myvault", "", false, 90);
+        assert!(!vp.has_purge_protection());
+    }
+
+    #[test]
+    fn test_get_retention_days() {
+        let vp = make_vault_properties("myvault", "", false, 7);
+        assert_eq!(vp.get_retention_days(), 7);
+    }
+
+    #[test]
+    fn test_to_summary_active_status() {
+        let vp = make_vault_properties(
+            "myvault",
+            "https://myvault.vault.azure.net/",
+            false,
+            90,
+        );
+        let summary = vp.to_summary();
+        assert_eq!(summary.name, "myvault");
+        assert_eq!(summary.status, "Active");
+        assert_eq!(summary.location, "eastus");
+        assert_eq!(summary.resource_group, "rg");
+    }
+
+    // --- VaultCreateRequest::default ---
+
+    #[test]
+    fn test_vault_create_request_default_location() {
+        let req = VaultCreateRequest::default();
+        assert_eq!(req.location, "eastus");
+    }
+
+    #[test]
+    fn test_vault_create_request_default_sku() {
+        let req = VaultCreateRequest::default();
+        assert_eq!(req.sku, Some("standard".to_string()));
+    }
+
+    #[test]
+    fn test_vault_create_request_default_retention() {
+        let req = VaultCreateRequest::default();
+        assert_eq!(req.soft_delete_retention_in_days, Some(90));
+    }
+
+    #[test]
+    fn test_vault_create_request_default_no_purge_protection() {
+        let req = VaultCreateRequest::default();
+        assert_eq!(req.purge_protection, Some(false));
+    }
+
+    // --- AccessPolicy::new ---
+
+    #[test]
+    fn test_access_policy_new_reader_has_minimal_perms() {
+        let policy = AccessPolicy::new(
+            "tenant".to_string(),
+            "oid".to_string(),
+            AccessLevel::Reader,
+            None,
+            Some("user@example.com".to_string()),
+        );
+        assert_eq!(policy.object_id, "oid");
+        assert_eq!(policy.tenant_id, "tenant");
+        assert_eq!(policy.user_email, Some("user@example.com".to_string()));
+        assert_eq!(policy.permissions.secrets, vec!["get", "list"]);
+        assert!(policy.permissions.certificates.is_empty());
+        assert!(policy.permissions.storage.is_empty());
+    }
+
+    #[test]
+    fn test_access_policy_new_admin_has_purge() {
+        let policy = AccessPolicy::new(
+            "tenant".to_string(),
+            "oid".to_string(),
+            AccessLevel::Admin,
+            None,
+            None,
+        );
+        assert!(policy.permissions.secrets.contains(&"purge".to_string()));
+        assert!(policy.permissions.keys.contains(&"purge".to_string()));
+    }
+
+    // --- AccessLevel PartialEq ---
+
+    #[test]
+    fn test_access_level_equality() {
+        assert_eq!(AccessLevel::Reader, AccessLevel::Reader);
+        assert_ne!(AccessLevel::Reader, AccessLevel::Admin);
+        assert_ne!(AccessLevel::Contributor, AccessLevel::Admin);
+    }
+}

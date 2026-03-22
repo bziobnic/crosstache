@@ -90,6 +90,32 @@ impl SecretInfo {
     }
 }
 
+// Exists only to give tests a way to build a minimal SecretInfo without filling every field.
+#[cfg(test)]
+impl SecretInfo {
+    fn test_minimal(name: &str, vault_uri: &str) -> Self {
+        SecretInfo {
+            name: name.to_string(),
+            original_name: None,
+            id: format!("{vault_uri}secrets/{name}"),
+            version: None,
+            enabled: true,
+            created: None,
+            updated: None,
+            expires: None,
+            not_before: None,
+            recovery_level: None,
+            content_type: None,
+            tags: HashMap::new(),
+            groups: Vec::new(),
+            folder: None,
+            note: None,
+            vault_uri: vault_uri.to_string(),
+            version_count: None,
+        }
+    }
+}
+
 impl std::fmt::Display for SecretInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Secret Information:")?;
@@ -172,5 +198,199 @@ impl std::fmt::Display for SecretInfo {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- extract_groups ---
+
+    #[test]
+    fn test_extract_groups_empty_tags() {
+        let tags = HashMap::new();
+        assert_eq!(SecretInfo::extract_groups(&tags), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_extract_groups_single_group() {
+        let mut tags = HashMap::new();
+        tags.insert("groups".to_string(), "production".to_string());
+        assert_eq!(SecretInfo::extract_groups(&tags), vec!["production"]);
+    }
+
+    #[test]
+    fn test_extract_groups_multiple_groups() {
+        let mut tags = HashMap::new();
+        tags.insert("groups".to_string(), "prod,staging,dev".to_string());
+        let groups = SecretInfo::extract_groups(&tags);
+        assert_eq!(groups, vec!["prod", "staging", "dev"]);
+    }
+
+    #[test]
+    fn test_extract_groups_trims_whitespace() {
+        let mut tags = HashMap::new();
+        tags.insert("groups".to_string(), " prod , staging , dev ".to_string());
+        let groups = SecretInfo::extract_groups(&tags);
+        assert_eq!(groups, vec!["prod", "staging", "dev"]);
+    }
+
+    #[test]
+    fn test_extract_groups_filters_empty_entries() {
+        let mut tags = HashMap::new();
+        // e.g. trailing comma leaves an empty segment
+        tags.insert("groups".to_string(), "prod,,dev,".to_string());
+        let groups = SecretInfo::extract_groups(&tags);
+        assert_eq!(groups, vec!["prod", "dev"]);
+    }
+
+    // --- extract_folder ---
+
+    #[test]
+    fn test_extract_folder_missing() {
+        let tags = HashMap::new();
+        assert_eq!(SecretInfo::extract_folder(&tags), None);
+    }
+
+    #[test]
+    fn test_extract_folder_present() {
+        let mut tags = HashMap::new();
+        tags.insert("folder".to_string(), "infra/db".to_string());
+        assert_eq!(
+            SecretInfo::extract_folder(&tags),
+            Some("infra/db".to_string())
+        );
+    }
+
+    // --- extract_note ---
+
+    #[test]
+    fn test_extract_note_missing() {
+        let tags = HashMap::new();
+        assert_eq!(SecretInfo::extract_note(&tags), None);
+    }
+
+    #[test]
+    fn test_extract_note_present() {
+        let mut tags = HashMap::new();
+        tags.insert("note".to_string(), "rotate monthly".to_string());
+        assert_eq!(
+            SecretInfo::extract_note(&tags),
+            Some("rotate monthly".to_string())
+        );
+    }
+
+    // --- extract_original_name ---
+
+    #[test]
+    fn test_extract_original_name_missing() {
+        let tags = HashMap::new();
+        assert_eq!(SecretInfo::extract_original_name(&tags), None);
+    }
+
+    #[test]
+    fn test_extract_original_name_present() {
+        let mut tags = HashMap::new();
+        tags.insert(
+            "original_name".to_string(),
+            "my very long secret name".to_string(),
+        );
+        assert_eq!(
+            SecretInfo::extract_original_name(&tags),
+            Some("my very long secret name".to_string())
+        );
+    }
+
+    // --- Display ---
+
+    #[test]
+    fn test_display_contains_name_and_vault() {
+        let info = SecretInfo::test_minimal("api-key", "https://myvault.vault.azure.net/");
+        let output = info.to_string();
+        assert!(output.contains("api-key"), "output: {output}");
+        assert!(
+            output.contains("https://myvault.vault.azure.net/"),
+            "output: {output}"
+        );
+    }
+
+    #[test]
+    fn test_display_shows_enabled_yes() {
+        let mut info =
+            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        info.enabled = true;
+        let output = info.to_string();
+        assert!(output.contains("Enabled: Yes"), "output: {output}");
+    }
+
+    #[test]
+    fn test_display_shows_enabled_no() {
+        let mut info =
+            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        info.enabled = false;
+        let output = info.to_string();
+        assert!(output.contains("Enabled: No"), "output: {output}");
+    }
+
+    #[test]
+    fn test_display_shows_original_name_when_different() {
+        let mut info =
+            SecretInfo::test_minimal("hashed-name-abc123", "https://myvault.vault.azure.net/");
+        info.original_name = Some("my very long original secret name".to_string());
+        let output = info.to_string();
+        assert!(
+            output.contains("Original Name: my very long original secret name"),
+            "output: {output}"
+        );
+    }
+
+    #[test]
+    fn test_display_hides_original_name_when_same() {
+        let mut info =
+            SecretInfo::test_minimal("api-key", "https://myvault.vault.azure.net/");
+        info.original_name = Some("api-key".to_string());
+        let output = info.to_string();
+        assert!(
+            !output.contains("Original Name"),
+            "should not show original name when same: {output}"
+        );
+    }
+
+    #[test]
+    fn test_display_shows_groups() {
+        let mut info =
+            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        info.groups = vec!["prod".to_string(), "infra".to_string()];
+        let output = info.to_string();
+        assert!(output.contains("Groups: prod, infra"), "output: {output}");
+    }
+
+    #[test]
+    fn test_display_shows_additional_tags() {
+        let mut info =
+            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        info.tags
+            .insert("owner".to_string(), "team-platform".to_string());
+        let output = info.to_string();
+        assert!(output.contains("Additional Tags"), "output: {output}");
+        assert!(output.contains("owner"), "output: {output}");
+        assert!(output.contains("team-platform"), "output: {output}");
+    }
+
+    #[test]
+    fn test_display_excludes_system_tags_from_additional() {
+        let mut info =
+            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        // System tags should not appear in the "Additional Tags" section
+        info.tags.insert("groups".to_string(), "prod".to_string());
+        info.tags
+            .insert("created_by".to_string(), "xv-cli".to_string());
+        // No non-system tags, so "Additional Tags" header should not appear
+        let output = info.to_string();
+        assert!(
+            !output.contains("Additional Tags"),
+            "system tags should not appear in additional: {output}"
+        );
     }
 }
