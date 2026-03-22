@@ -1020,20 +1020,14 @@ async fn execute_env_show(_config: &Config) -> Result<()> {
 }
 
 async fn execute_env_pull(
-    format: &str,
+    format: &crate::utils::format::OutputFormat,
     groups: Vec<String>,
     output: Option<String>,
     config: &Config,
 ) -> Result<()> {
-    if format != "dotenv" {
-        return Err(CrosstacheError::invalid_argument(format!(
-            "Unsupported format '{}'. Only 'dotenv' is currently supported.",
-            format
-        )));
-    }
-
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
+    use crate::utils::format::OutputFormat;
     use std::sync::Arc;
 
     // Create authentication provider and secret manager
@@ -1050,8 +1044,8 @@ async fn execute_env_pull(
     // Determine vault name
     let vault_name = config.resolve_vault_name(None).await?;
 
-    println!(
-        "Pulling secrets from vault '{}' to dotenv format...",
+    eprintln!(
+        "Pulling secrets from vault '{}'...",
         vault_name
     );
 
@@ -1107,38 +1101,77 @@ async fn execute_env_pull(
         }
     }
 
-    // Convert to dotenv format
-    let mut dotenv_content = String::new();
-    for secret in &all_secrets {
-        if let Some(ref value) = secret.value {
-            // Use original name if available, otherwise use sanitized name
-            let key = &secret.original_name;
-
-            // Escape value if it contains special characters
-            let escaped_value =
-                if value.contains('\n') || value.contains('"') || value.contains('\\') {
-                    format!(
-                        "\"{}\"",
-                        value
-                            .replace('\\', "\\\\")
-                            .replace('"', "\\\"")
-                            .replace('\n', "\\n")
-                    )
-                } else if value.contains(' ') || value.starts_with('#') {
-                    format!("\"{}\"", value.as_str())
-                } else {
-                    value.to_string()
-                };
-
-            dotenv_content.push_str(&format!("{}={}\n", key, escaped_value));
+    // Format the secrets based on the requested output format
+    let content = match format.resolve_for_stdout() {
+        OutputFormat::Json => {
+            // Build a simple JSON array of {name, value} objects
+            let entries: Vec<serde_json::Value> = all_secrets
+                .iter()
+                .filter_map(|s| {
+                    s.value.as_ref().map(|v| {
+                        serde_json::json!({ "name": s.original_name, "value": v.as_str() })
+                    })
+                })
+                .collect();
+            serde_json::to_string_pretty(&entries).map_err(|e| {
+                CrosstacheError::serialization(format!("JSON serialization failed: {e}"))
+            })?
         }
-    }
+        OutputFormat::Yaml => {
+            let entries: Vec<serde_json::Value> = all_secrets
+                .iter()
+                .filter_map(|s| {
+                    s.value.as_ref().map(|v| {
+                        serde_json::json!({ "name": s.original_name, "value": v.as_str() })
+                    })
+                })
+                .collect();
+            serde_yaml::to_string(&entries).map_err(|e| {
+                CrosstacheError::serialization(format!("YAML serialization failed: {e}"))
+            })?
+        }
+        OutputFormat::Csv => {
+            let mut csv = String::from("name,value\n");
+            for s in &all_secrets {
+                if let Some(ref v) = s.value {
+                    let escaped = v.replace('"', "\"\"");
+                    csv.push_str(&format!("{},\"{}\"\n", s.original_name, escaped));
+                }
+            }
+            csv
+        }
+        // Plain / Auto / Table / Template / Raw: use dotenv format
+        _ => {
+            let mut dotenv_content = String::new();
+            for secret in &all_secrets {
+                if let Some(ref value) = secret.value {
+                    let key = &secret.original_name;
+                    let escaped_value =
+                        if value.contains('\n') || value.contains('"') || value.contains('\\') {
+                            format!(
+                                "\"{}\"",
+                                value
+                                    .replace('\\', "\\\\")
+                                    .replace('"', "\\\"")
+                                    .replace('\n', "\\n")
+                            )
+                        } else if value.contains(' ') || value.starts_with('#') {
+                            format!("\"{}\"", value.as_str())
+                        } else {
+                            value.to_string()
+                        };
+                    dotenv_content.push_str(&format!("{}={}\n", key, escaped_value));
+                }
+            }
+            dotenv_content
+        }
+    };
 
     // Output to file or stdout
     if let Some(output_path) = output {
         crate::utils::helpers::write_sensitive_file(
             std::path::Path::new(&output_path),
-            dotenv_content.as_bytes(),
+            content.as_bytes(),
         )?;
         output::success(&format!(
             "Successfully exported {} secret(s) to '{}' (permissions: owner-only)",
@@ -1146,11 +1179,7 @@ async fn execute_env_pull(
             output_path
         ));
     } else {
-        print!("{}", dotenv_content);
-    }
-
-    if !groups.is_empty() {
-        println!("# Filtered by groups: {}", groups.join(", "));
+        print!("{}", content);
     }
 
     Ok(())

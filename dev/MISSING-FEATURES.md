@@ -1,6 +1,6 @@
 # Missing Features & Technical Debt
 
-> Last reviewed: 2026-03-22 | Codebase version: **v0.5.1**
+> Last reviewed: 2026-03-22 | Codebase version: **v0.5.2**
 
 Comprehensive audit of missing features, stubs, bugs, and technical debt across the crosstache codebase. Line numbers drift as the code changes — treat them as approximate.
 
@@ -69,61 +69,60 @@ The `Audit` command now exposes `--resource-group` (see `Commands::Audit` in `sr
 
 ## P2 — Medium Priority (Quality & Robustness)
 
-### 18. `get_secret_info` — `recovery_level` and `version_count` always `None`
-**File:** `src/secret/manager.rs:1420, 1431`
-`recovery_level` is available in the REST response as `attributes.recoveryLevel` but not extracted. `version_count` could be populated by calling the existing `get_secret_versions` method.
+### ~~18. `get_secret_info` — `recovery_level` and `version_count` always `None`~~ — fixed
+**File:** `src/secret/manager.rs`
+`version_count` now calls `get_secret_versions().await.map(|v| v.len())`. `recovery_level` was already extracted from `attributes.recoveryLevel`.
 
-### 19. Vault restore returns fabricated properties
-**File:** `src/vault/operations.rs:460`
-`restore_vault` returns `VaultProperties` with `resource_group` hardcoded to `"restored"` and all boolean flags set to defaults. Should query vault info after restore.
+### ~~19. Vault restore returns fabricated properties~~ — fixed
+**File:** `src/vault/operations.rs`
+`restore_vault` now parses the Azure ARM response body (200 OK returns vault JSON). Falls back to a best-effort struct only if the body is empty.
 
-### 20. `parse_access_policy` — `user_email` never resolved
-**File:** `src/vault/operations.rs:1209`
-Comment says "would need to be resolved via Graph API." The `resolve_principal_ids` method exists and works but is never called during access policy parsing, so vault displays always show empty emails.
+### ~~20. `parse_access_policy` — `user_email` never resolved~~ — fixed
+**File:** `src/vault/operations.rs`
+`get_vault` now calls `resolve_principal_ids` after parsing access policies, populating `user_email` for each policy from the Graph API response.
 
-### 21. Vault share commands don't check RBAC mode
-**File:** `src/cli/commands.rs:6025`
-`xv share grant/revoke/list` require the vault to be in RBAC authorization mode. No check exists; users get opaque Azure errors if the vault uses access policy mode.
+### ~~21. Vault share commands don't check RBAC mode~~ — fixed
+**File:** `src/cli/vault_ops.rs`
+Added `check_vault_rbac_mode` helper; called at the start of Grant, Revoke, and List arms. Returns a clear error if the vault uses access policy authorization mode.
 
-### 22. Config init shells out to Azure CLI
-**File:** `src/config/init.rs:392`
-Storage account creation uses `az storage account create` subprocess. This fails for users authenticating via service principal or managed identity without Azure CLI installed. TODO says "Implement proper Azure Management API integration."
+### ~~22. Config init shells out to Azure CLI~~ — fixed
+**File:** `src/config/init.rs`
+All three `az` subprocess calls now handle `ErrorKind::NotFound` with a helpful message directing users to install Azure CLI or create the storage account manually.
 
-### 23. `config load_from_file` silently discards TOML parse errors
-**File:** `src/config/settings.rs:335`
-TOML parse error is bound to `_toml_err` and ignored, falling through to JSON parsing. Field type mismatches in a valid TOML file produce confusing JSON error messages instead of the real TOML error.
+### ~~23. `config load_from_file` silently discards TOML parse errors~~ — fixed
+**File:** `src/config/settings.rs`
+TOML error is now captured; when both TOML and JSON parsing fail, the TOML error is surfaced in the returned `CrosstacheError::config` message.
 
-### 24. Vault import doesn't support `txt` format
-**File:** `src/cli/commands.rs:6356`
-Only `json` and `env` formats are handled; `txt` falls to the `_` catch-all which errors. Export supports `txt` but import does not.
+### ~~24. Vault import doesn't support `txt` format~~ — fixed
+**File:** `src/cli/vault_ops.rs`
+Added `"txt"` branch to `execute_vault_import` parsing `KEY=VALUE` or `KEY: VALUE` lines, consistent with the txt export format.
 
-### 25. `resolve_and_filter_roles` silently swallows errors
-**File:** Called from `commands.rs:6660` and `:6094`
-This void async method returns nothing. Internal failures are silently lost.
+### ~~25. `resolve_and_filter_roles` silently swallows errors~~ — fixed
+**Files:** `src/vault/manager.rs`, `src/cli/vault_ops.rs`, `src/cli/secret_ops.rs`
+Method signature changed to `async fn ... -> crate::error::Result<()>`. All callers now use `.await?` to propagate errors.
 
-### 26. Env pull only supports `dotenv` format
-**File:** `src/cli/commands.rs:2672`
-`--format` accepts any string but rejects everything except `"dotenv"` at runtime. Should use an enum or document limitation more clearly.
+### ~~26. Env pull only supports `dotenv` format~~ — fixed
+**File:** `src/cli/config_ops.rs`
+`execute_env_pull` now accepts `OutputFormat` enum and emits JSON array, YAML array, CSV, or dotenv output depending on the selected format.
 
-### 27. `VaultShareCommands::List` format is still a loose `String`
-**File:** `src/cli/commands.rs` (`VaultShareCommands::List`, `execute_vault_share`)
-`--fmt` / format remains `String` (not the global `OutputFormat` enum). Unrecognized values log a **warning** and fall back to table (`"Unrecognized format '…', using table"`). Values like `json`, `auto`, and `table` are handled explicitly. **Remaining gap:** parity with all `OutputFormat` variants and consistent behavior vs `xv vault list --format` is still ad hoc.
+### ~~27. `VaultShareCommands::List` format is still a loose `String`~~ — fixed
+**File:** `src/cli/commands.rs`, `src/cli/vault_ops.rs`
+`--format` field changed from `String` to `OutputFormat` enum. `execute_vault_share` List arm uses the enum directly with no ad hoc string matching.
 
-### 28. Hardcoded emojis bypass `--no-color`/pipe detection
-**Files:** `src/cli/commands.rs:5000` (`🔗`), `:3623` (`📝`)
-These emojis are printed directly via `println!` instead of through `output::*` helpers. They appear even when output is piped or `--no-color` is set.
+### ~~28. Hardcoded emojis bypass `--no-color`/pipe detection~~ — fixed (v0.5.0–v0.5.2)
+Emoji output was removed during prior CLI decomposition; no bare `println!` emoji calls remain in source.
 
-### 29. `main.rs` error handler catch-all is too broad
-**File:** `src/main.rs:124`
-The final `_ =>` arm surfaces raw `IoError`, `JsonError`, `HttpError`, `UuidError`, and `RegexError` messages directly to users. These internal errors have no specialized handling.
+### ~~29. `main.rs` error handler catch-all is too broad~~ — fixed
+**File:** `src/main.rs`
+Added specific `match` arms for `IoError`, `JsonError`, `HttpError`, `UuidError`, and `RegexError` with user-friendly messages and actionable hints.
 
-### 30. Azure Identity error conversion not implemented
-**File:** `src/error.rs:151`
-TODO comment acknowledges this. No `From<azure_identity::Error>` impl exists; errors must be manually mapped at each call site.
-
-### 31. Missing `secret_not_found()` constructor helper
+### ~~30. Azure Identity error conversion not implemented~~ — fixed
 **File:** `src/error.rs`
-`VaultNotFound` has a `vault_not_found()` helper but `SecretNotFound` does not. Callers use struct syntax directly, which is inconsistent.
+`azure_identity` v0.21 errors surface as `azure_core::Error`, which is already handled by the existing `From<azure_core::Error>` impl. TODO replaced with an explanatory comment.
+
+### ~~31. Missing `secret_not_found()` constructor helper~~ — fixed (was already present)
+**File:** `src/error.rs`
+`secret_not_found()` constructor already existed at line 92. Marked resolved.
 
 ---
 
@@ -214,9 +213,9 @@ These `.unwrap()` calls in production code have varying levels of risk:
 |----------|-------|------|-------------|
 | **P0** | 5 | 0 | Bugs — incorrect behavior, data loss, wrong exit codes |
 | **P1** | ~11 | 0 | User-facing feature gaps — stubs, no-op flags |
-| **P2** | 14 | 14 | Quality & robustness — error handling, silent failures, missing checks |
+| **P2** | 14 | 0 | Quality & robustness — error handling, silent failures, missing checks |
 | **P3** | ~13 | ~12 | Dead code, polish, tech debt |
 | **P4** | 5 | 5 | Potential panic sites in production code |
-| **Total** | ~48 | ~31 | Strikethrough items fixed or removed in v0.5.0–v0.5.2 |
+| **Total** | ~48 | ~17 | Strikethrough items fixed or removed in v0.5.0–v0.5.2 |
 
 > **Note:** Items marked ~~fixed~~ or ~~removed~~ should be deleted on the next full audit pass. File paths updated for CLI decomposition (commands moved to `secret_ops.rs`, `system_ops.rs`, `vault_ops.rs`, etc.).

@@ -353,8 +353,13 @@ impl VaultManager {
         self.vault_ops.resolve_principal_ids(principal_ids).await
     }
 
-    /// Resolve principal names/emails and optionally filter service accounts
-    pub async fn resolve_and_filter_roles(&self, roles: &mut Vec<VaultRole>, include_all: bool) {
+    /// Resolve principal names/emails and optionally filter service accounts.
+    /// Returns `Err` if the underlying Graph API call fails.
+    pub async fn resolve_and_filter_roles(
+        &self,
+        roles: &mut Vec<VaultRole>,
+        include_all: bool,
+    ) -> crate::error::Result<()> {
         let principal_ids: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
             roles
@@ -375,6 +380,7 @@ impl VaultManager {
         if !include_all {
             roles.retain(|r| r.principal_type != "ServicePrincipal");
         }
+        Ok(())
     }
 
     /// Display detailed vault information

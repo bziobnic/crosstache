@@ -2619,7 +2619,7 @@ async fn execute_secret_share(
 
             vault_manager
                 .resolve_and_filter_roles(&mut roles, all)
-                .await;
+                .await?;
 
             if roles.is_empty() {
                 println!(

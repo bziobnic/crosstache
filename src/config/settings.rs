@@ -362,19 +362,21 @@ pub async fn load_config_no_validation() -> Result<Config> {
 async fn load_from_file(path: &PathBuf) -> Result<Config> {
     let contents = tokio::fs::read_to_string(path).await?;
 
-    // Try to parse as TOML first, then JSON as fallback
-    match toml::from_str::<Config>(&contents) {
+    // Try to parse as TOML first, then JSON as fallback.
+    // If both fail, return the TOML error — the file is likely TOML with a syntax error.
+    let toml_err = match toml::from_str::<Config>(&contents) {
         Ok(config) => return Ok(config),
-        Err(toml_err) => {
-            tracing::debug!("TOML parse failed: {}, trying JSON", toml_err);
+        Err(e) => {
+            tracing::debug!("TOML parse failed: {}, trying JSON", e);
+            e
         }
-    }
+    };
 
-    serde_json::from_str::<Config>(&contents).map_err(|e| {
+    serde_json::from_str::<Config>(&contents).map_err(|_json_err| {
         CrosstacheError::config(format!(
             "Failed to parse config file '{}': {}. Run 'xv init' to create a valid configuration.",
             path.display(),
-            e
+            toml_err
         ))
     })
 }

@@ -173,6 +173,30 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             output::error("Upgrade Error");
             eprintln!("{msg}");
         }
+        IoError(e) => {
+            output::error("I/O Error");
+            eprintln!("{e}");
+            eprintln!("\nPlease check file permissions and available disk space.");
+        }
+        JsonError(e) => {
+            output::error("JSON Parse Error");
+            eprintln!("{e}");
+            eprintln!("\nThe response or data could not be parsed. This may indicate a corrupt file or unexpected API response.");
+        }
+        HttpError(e) => {
+            output::error("HTTP Error");
+            eprintln!("{e}");
+            eprintln!("\nPlease check your network connection and Azure service status.");
+        }
+        UuidError(e) => {
+            output::error("Invalid UUID");
+            eprintln!("{e}");
+            eprintln!("\nA resource identifier is in an unexpected format.");
+        }
+        RegexError(e) => {
+            output::error("Invalid Pattern");
+            eprintln!("{e}");
+        }
         _ => {
             output::error(&format!("{error}"));
         }

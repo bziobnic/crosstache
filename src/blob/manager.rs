@@ -126,6 +126,24 @@ impl BlobManager {
 
     /// List files in the container
     pub async fn list_files(&self, request: FileListRequest) -> Result<Vec<FileInfo>> {
+        match self.list_files_inner(&request, true).await {
+            Ok(files) => Ok(files),
+            Err(e) if is_tag_permission_error(&e) => {
+                tracing::warn!(
+                    "Tag listing requires additional permissions (Storage Blob Data Owner or \
+                     't' SAS permission); retrying without tags"
+                );
+                self.list_files_inner(&request, false).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn list_files_inner(
+        &self,
+        request: &FileListRequest,
+        include_tags: bool,
+    ) -> Result<Vec<FileInfo>> {
         // Create BlobServiceClient using token credential
         let token_credential = self.auth_provider.get_token_credential();
         let blob_service = BlobServiceClient::new(&self.storage_account, token_credential);
@@ -141,8 +159,11 @@ impl BlobManager {
             list_builder = list_builder.prefix(prefix);
         }
 
-        // Enable metadata and tags inclusion
-        list_builder = list_builder.include_metadata(true).include_tags(true);
+        // Enable metadata and conditionally tags
+        list_builder = list_builder.include_metadata(true);
+        if include_tags {
+            list_builder = list_builder.include_tags(true);
+        }
 
         // Execute the list request - collect all pages
         let mut stream = list_builder.into_stream();
@@ -186,7 +207,7 @@ impl BlobManager {
                     }
                 }
 
-                // Extract tags returned inline by include_tags(true)
+                // Extract tags if they were requested and returned inline
                 let tags: HashMap<String, String> = blob_item
                     .tags
                     .clone()
@@ -217,6 +238,24 @@ impl BlobManager {
         &self,
         request: FileListRequest,
     ) -> Result<Vec<BlobListItem>> {
+        match self.list_files_hierarchical_inner(&request, true).await {
+            Ok(items) => Ok(items),
+            Err(e) if is_tag_permission_error(&e) => {
+                tracing::warn!(
+                    "Tag listing requires additional permissions (Storage Blob Data Owner or \
+                     't' SAS permission); retrying without tags"
+                );
+                self.list_files_hierarchical_inner(&request, false).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn list_files_hierarchical_inner(
+        &self,
+        request: &FileListRequest,
+        include_tags: bool,
+    ) -> Result<Vec<BlobListItem>> {
         use crate::blob::models::BlobListItem;
 
         // Create BlobServiceClient using token credential
@@ -236,12 +275,15 @@ impl BlobManager {
         }
 
         // Apply delimiter for hierarchical listing
-        if let Some(delimiter) = request.delimiter {
+        if let Some(delimiter) = request.delimiter.clone() {
             list_builder = list_builder.delimiter(delimiter);
         }
 
-        // Enable metadata and tags inclusion for files
-        list_builder = list_builder.include_metadata(true).include_tags(true);
+        // Enable metadata and conditionally tags
+        list_builder = list_builder.include_metadata(true);
+        if include_tags {
+            list_builder = list_builder.include_tags(true);
+        }
 
         // Execute the list request - collect all pages
         let mut stream = list_builder.into_stream();
@@ -305,7 +347,7 @@ impl BlobManager {
                     }
                 }
 
-                // Extract tags returned inline by include_tags(true)
+                // Extract tags if they were requested and returned inline
                 let tags: HashMap<String, String> = blob_item
                     .tags
                     .clone()
@@ -467,12 +509,25 @@ impl BlobManager {
             .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
-        // Fetch tags via a separate API call (get_properties does not include them)
-        let tags: HashMap<String, String> = blob_client
-            .get_tags()
-            .await
-            .map(|r| HashMap::from(r.tags))
-            .unwrap_or_default();
+        // Fetch tags via a separate API call (get_properties does not include them).
+        // Silently falls back to empty tags on 403 (requires Storage Blob Data Owner
+        // role or 't' SAS permission).
+        let tags: HashMap<String, String> = match blob_client.get_tags().await {
+            Ok(r) => HashMap::from(r.tags),
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("403") || msg.contains("authorizationpermissionmismatch") {
+                    tracing::debug!(
+                        "Tag read for '{}' returned 403; tags will be empty. \
+                         Grant Storage Blob Data Owner or add 't' to the SAS token.",
+                        name
+                    );
+                } else {
+                    tracing::warn!("Failed to fetch tags for '{}': {}", name, e);
+                }
+                HashMap::new()
+            }
+        };
 
         // Build complete FileInfo with all available data
         Ok(FileInfo {
@@ -704,6 +759,16 @@ impl BlobManager {
     pub fn storage_account(&self) -> &str {
         &self.storage_account
     }
+}
+
+/// Returns true if the error is a tag-read permission failure (HTTP 403).
+///
+/// Azure Blob Storage tag operations require the `Storage Blob Data Owner` role
+/// or a SAS token with the `t` (tag) permission.  When neither is present the
+/// list request returns 403 and we should silently retry without tag inclusion.
+fn is_tag_permission_error(err: &CrosstacheError) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("403") || msg.contains("authorizationpermissionmismatch") || msg.contains("not permitted")
 }
 
 /// Normalize a prefix by ensuring it ends with '/' if non-empty
