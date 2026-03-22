@@ -126,24 +126,6 @@ impl BlobManager {
 
     /// List files in the container
     pub async fn list_files(&self, request: FileListRequest) -> Result<Vec<FileInfo>> {
-        match self.list_files_inner(&request, true).await {
-            Ok(files) => Ok(files),
-            Err(e) if is_tag_permission_error(&e) => {
-                tracing::warn!(
-                    "Tag listing requires additional permissions (Storage Blob Data Owner or \
-                     't' SAS permission); retrying without tags"
-                );
-                self.list_files_inner(&request, false).await
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn list_files_inner(
-        &self,
-        request: &FileListRequest,
-        include_tags: bool,
-    ) -> Result<Vec<FileInfo>> {
         // Create BlobServiceClient using token credential
         let token_credential = self.auth_provider.get_token_credential();
         let blob_service = BlobServiceClient::new(&self.storage_account, token_credential);
@@ -159,11 +141,9 @@ impl BlobManager {
             list_builder = list_builder.prefix(prefix);
         }
 
-        // Enable metadata and conditionally tags
+        // Enable metadata inclusion (tags are omitted: include=tags requires
+        // Storage Blob Data Owner, which exceeds the typical Contributor role)
         list_builder = list_builder.include_metadata(true);
-        if include_tags {
-            list_builder = list_builder.include_tags(true);
-        }
 
         // Execute the list request - collect all pages
         let mut stream = list_builder.into_stream();
@@ -238,24 +218,6 @@ impl BlobManager {
         &self,
         request: FileListRequest,
     ) -> Result<Vec<BlobListItem>> {
-        match self.list_files_hierarchical_inner(&request, true).await {
-            Ok(items) => Ok(items),
-            Err(e) if is_tag_permission_error(&e) => {
-                tracing::warn!(
-                    "Tag listing requires additional permissions (Storage Blob Data Owner or \
-                     't' SAS permission); retrying without tags"
-                );
-                self.list_files_hierarchical_inner(&request, false).await
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn list_files_hierarchical_inner(
-        &self,
-        request: &FileListRequest,
-        include_tags: bool,
-    ) -> Result<Vec<BlobListItem>> {
         use crate::blob::models::BlobListItem;
 
         // Create BlobServiceClient using token credential
@@ -279,11 +241,8 @@ impl BlobManager {
             list_builder = list_builder.delimiter(delimiter);
         }
 
-        // Enable metadata and conditionally tags
+        // Enable metadata inclusion for files (tags omitted: requires Storage Blob Data Owner)
         list_builder = list_builder.include_metadata(true);
-        if include_tags {
-            list_builder = list_builder.include_tags(true);
-        }
 
         // Execute the list request - collect all pages
         let mut stream = list_builder.into_stream();
@@ -759,16 +718,6 @@ impl BlobManager {
     pub fn storage_account(&self) -> &str {
         &self.storage_account
     }
-}
-
-/// Returns true if the error is a tag-read permission failure (HTTP 403).
-///
-/// Azure Blob Storage tag operations require the `Storage Blob Data Owner` role
-/// or a SAS token with the `t` (tag) permission.  When neither is present the
-/// list request returns 403 and we should silently retry without tag inclusion.
-fn is_tag_permission_error(err: &CrosstacheError) -> bool {
-    let msg = err.to_string().to_lowercase();
-    msg.contains("403") || msg.contains("authorizationpermissionmismatch") || msg.contains("not permitted")
 }
 
 /// Normalize a prefix by ensuring it ends with '/' if non-empty
