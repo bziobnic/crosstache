@@ -139,15 +139,6 @@ pub struct ConnectionComponent {
     pub description: String,
 }
 
-/// Secret group information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct SecretGroup {
-    pub name: String,
-    pub secrets: Vec<SecretSummary>,
-    pub total_count: usize,
-}
-
 /// Trait for secret operations
 #[async_trait]
 pub trait SecretOperations: Send + Sync {
@@ -381,7 +372,7 @@ impl SecretOperations for AzureSecretOperations {
         if let Some(not_before) = request.not_before {
             attributes["nbf"] = serde_json::json!(not_before.timestamp());
         }
-        if !attributes.as_object().unwrap().is_empty() {
+        if !attributes.as_object().expect("json!({}) always produces an Object").is_empty() {
             body["attributes"] = attributes;
         }
 
@@ -397,7 +388,7 @@ impl SecretOperations for AzureSecretOperations {
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
+            reqwest::header::HeaderValue::from_static("application/json"),
         );
 
         // Make the REST API call
@@ -919,7 +910,7 @@ impl SecretOperations for AzureSecretOperations {
         );
         headers.insert(
             reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
+            reqwest::header::HeaderValue::from_static("application/json"),
         );
 
         // Make the REST API call to restore the secret
@@ -1614,48 +1605,6 @@ impl SecretManager {
         let formatter = TableFormatter::new(OutputFormat::Table, self.no_color, None);
         let table_output = formatter.format_table(&result)?;
         println!("{table_output}");
-
-        Ok(result)
-    }
-
-    /// Get secrets by group
-    #[allow(dead_code)]
-    pub async fn get_secrets_by_group(&self, vault_name: &str) -> Result<Vec<SecretGroup>> {
-        let secrets = self.secret_ops.list_secrets(vault_name, None).await?;
-        let mut groups: HashMap<String, Vec<SecretSummary>> = HashMap::new();
-
-        // Group secrets by group name (handling comma-separated groups)
-        for secret in secrets {
-            match &secret.groups {
-                Some(groups_str) => {
-                    // Split comma-separated groups and add secret to each group
-                    for group in groups_str.split(',') {
-                        let group_name = group.trim().to_string();
-                        if !group_name.is_empty() {
-                            groups.entry(group_name).or_default().push(secret.clone());
-                        }
-                    }
-                }
-                None => {
-                    groups
-                        .entry("(No Groups)".to_string())
-                        .or_default()
-                        .push(secret);
-                }
-            }
-        }
-
-        let mut result = Vec::new();
-        for (group_name, group_secrets) in groups {
-            result.push(SecretGroup {
-                name: group_name,
-                total_count: group_secrets.len(),
-                secrets: group_secrets,
-            });
-        }
-
-        // Sort groups by name
-        result.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(result)
     }

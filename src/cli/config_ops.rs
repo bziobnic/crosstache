@@ -85,15 +85,6 @@ async fn execute_config_show(config: &Config) -> Result<()> {
             source: "config".to_string(),
         },
         ConfigItem {
-            key: "function_app_url".to_string(),
-            value: if config.function_app_url.is_empty() {
-                "<not set>".to_string()
-            } else {
-                config.function_app_url.clone()
-            },
-            source: "config".to_string(),
-        },
-        ConfigItem {
             key: "cache_enabled".to_string(),
             value: config.cache_enabled.to_string(),
             source: "config".to_string(),
@@ -203,9 +194,6 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         "tenant_id" => {
             config.tenant_id = value.to_string();
         }
-        "function_app_url" => {
-            config.function_app_url = value.to_string();
-        }
         "cache_enabled" => {
             config.cache_enabled = value.to_lowercase() == "true" || value == "1";
         }
@@ -280,7 +268,7 @@ async fn execute_config_set(key: &str, value: &str, mut config: Config) -> Resul
         }
         _ => {
             return Err(CrosstacheError::config(format!(
-                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, function_app_url, cache_enabled, cache_ttl_secs, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout, gen_default_charset"
+                "Unknown configuration key: {key}. Available keys: debug, subscription_id, default_vault, default_resource_group, default_location, tenant_id, cache_enabled, cache_ttl_secs, output_json, no_color, azure_credential_priority, storage_account, storage_container, storage_endpoint, blob_chunk_size_mb, blob_max_concurrent_uploads, clipboard_timeout, gen_default_charset"
             )));
         }
     }

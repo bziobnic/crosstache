@@ -268,7 +268,6 @@ pub(crate) async fn refresh_file_list(vault_name: String, recursive: bool, confi
         } else {
             Some("/".to_string())
         },
-        recursive,
     };
 
     let items: Vec<BlobListItem> = if recursive {
@@ -390,8 +389,6 @@ async fn execute_file_download(
     // Create download request
     let download_request = FileDownloadRequest {
         name: name.to_string(),
-        output_path: Some(output_path.clone()),
-        stream: false,
     };
 
     println!("Downloading file '{name}' to '{output_path}'...");
@@ -612,7 +609,6 @@ async fn execute_file_list(
         } else {
             Some("/".to_string())
         },
-        recursive,
     };
 
     // Get items based on recursive flag
@@ -1118,7 +1114,6 @@ async fn execute_file_download_recursive(
             groups: None,
             limit: None,
             delimiter: None,
-            recursive: true,
         };
 
         let files = blob_manager.list_files(list_request).await?;
@@ -1559,8 +1554,6 @@ async fn file_sync_perform_download(
     }
     let download_request = FileDownloadRequest {
         name: blob_name.to_string(),
-        output_path: Some(target.display().to_string()),
-        stream: false,
     };
     let content = blob_manager.download_file(download_request).await?;
     fs::write(&target, content).map_err(|e| {
@@ -1639,7 +1632,6 @@ async fn execute_file_sync(
         groups: None,
         limit: None,
         delimiter: None,
-        recursive: true,
     };
     let remote_list = blob_manager.list_files(list_request).await?;
     let mut remote_by_name: HashMap<String, crate::blob::models::FileInfo> = HashMap::new();
@@ -1895,7 +1887,6 @@ async fn execute_file_sync(
                         groups: None,
                         limit: None,
                         delimiter: None,
-                        recursive: true,
                     })
                     .await?;
                 let mut remote_map_after: HashMap<String, crate::blob::models::FileInfo> =

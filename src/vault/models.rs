@@ -231,36 +231,6 @@ pub struct VaultUpdateRequest {
     pub access_policies: Option<Vec<AccessPolicy>>,
 }
 
-/// Role definition for Azure RBAC
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct RoleDefinition {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub role_type: String,
-    pub permissions: Vec<RolePermission>,
-}
-
-/// Role permission definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct RolePermission {
-    pub actions: Vec<String>,
-    pub not_actions: Vec<String>,
-    pub data_actions: Vec<String>,
-    pub not_data_actions: Vec<String>,
-}
-
-/// Role assignment request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct RoleAssignmentRequest {
-    pub role_definition_id: String,
-    pub principal_id: String,
-    pub scope: String,
-}
-
 /// Vault summary for list operations
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct VaultSummary {

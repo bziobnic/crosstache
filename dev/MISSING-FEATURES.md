@@ -128,82 +128,66 @@ Added specific `match` arms for `IoError`, `JsonError`, `HttpError`, `UuidError`
 
 ## P3 — Low Priority (Dead Code, Polish, Tech Debt)
 
-### 32. Paginated blob listing always returns empty
-**File:** `src/blob/operations.rs:91`
-`list_files_paginated` immediately returns `Ok((Vec::new(), None))`. Parameters are all underscore-prefixed and unused.
+### ~~32. Paginated blob listing always returns empty~~ — fixed
+**File:** `src/blob/operations.rs` (deleted)
+`list_files_paginated` and `upload_file_with_progress` (and all other dead extension methods) removed along with `src/blob/operations.rs`. `pub mod operations` removed from `blob/mod.rs`.
 
-### 33. `upload_file_with_progress` — fake progress callback
-**File:** `src/blob/operations.rs:41`
-Calls progress callback at 0 bytes and then at `file_size` bytes with no intermediate updates. Delegates directly to `upload_file`.
+### ~~33. `upload_file_with_progress` — fake progress callback~~ — fixed (see #32)
 
-### 34. `Config.function_app_url` — never used
-**File:** `src/config/settings.rs:91`
-Stored and loaded from `FUNCTION_APP_URL` env var but no command implementation reads it.
+### ~~34. `Config.function_app_url` — never used~~ — fixed
+Removed field from `Config` struct, `Default` impl, `load_from_env`, `config_ops.rs` (display, set handler, help string), and `init.rs` struct literal.
 
 ### ~~35. `Config.cache_ttl` — never used~~ — outdated
 **File:** `src/config/settings.rs` (`cache_ttl_secs`)
 TTL is read from config/env and passed into `CacheManager::from_config` (`src/cache/manager.rs`). Remove this entry after the next full audit pass.
 
-### 36. `_collect_files_recursive` — dead code
-**File:** `src/cli/commands.rs:7254`
-Never called. Superseded by `collect_files_with_structure`. Leading underscore suppresses the unused warning.
+### ~~36. `_collect_files_recursive` — dead code~~ — already removed
+Already removed during CLI decomposition; not present in codebase.
 
-### 37. `EnvironmentProfileManager::current_profile()` — dead code
-**File:** `src/cli/commands.rs:2440`
-`#[allow(dead_code)]`. The `EnvCommands::Show` command manually looks up the current profile instead of calling this method.
+### ~~37. `EnvironmentProfileManager::current_profile()` — dead code~~ — already removed
+The dead `current_profile()` method was already removed during CLI decomposition; `current_profile` is now a field used throughout `config_ops.rs`.
 
-### 38. `VaultStatus` enum — dead code
-**File:** `src/vault/models.rs:261`
-Defines `Active`, `SoftDeleted`, `PendingDeletion`, etc. but is never used. `to_summary()` hardcodes `"Active"`.
+### ~~38. `VaultStatus` enum — dead code~~ — already removed
+Not present in `vault/models.rs`; removed in a prior cleanup pass.
 
-### 39. Dead model scaffolding
-**Files:**
-- `src/vault/models.rs:232` — `RoleDefinition`, `RolePermission`, `RoleAssignmentRequest`
-- `src/secret/name_manager.rs:13, 35` — `NameMapping`, `NameMappingStats`
-- `src/secret/manager.rs:1931` — `SecretManagerBuilder`
-- `src/secret/manager.rs:142, 1583` — `SecretGroup`, `get_secrets_by_group`
+### ~~39. Dead model scaffolding~~ — fixed
+- `RoleDefinition`, `RolePermission`, `RoleAssignmentRequest` removed from `vault/models.rs`
+- `SecretGroup` struct and `get_secrets_by_group` method removed from `secret/manager.rs`
+- `NameMapping`/`NameMappingStats` and `SecretManagerBuilder` were already absent
 
-All marked `#[allow(dead_code)]`, never used anywhere.
+### ~~40. Dead auth infrastructure~~ — fixed
+`ClientSecretProvider` and `AuthProviderFactory` removed from `auth/provider.rs`. `sign_out()` and `get_client_id()` removed from the `AzureAuthProvider` trait and `DefaultAzureCredentialProvider`. Unused imports (`ClientSecretCredential`, `HashMap`) cleaned up.
 
-### 40. Dead auth infrastructure
-**File:** `src/auth/provider.rs:469, 657`
-`ClientSecretProvider` and `AuthProviderFactory` are fully defined but never wired into any command path. `sign_out()` is a no-op on both providers. `get_client_id()` always returns `None` for `DefaultAzureCredentialProvider`.
+### ~~41. Dead blob infrastructure~~ — fixed
+- `create_context_aware_blob_manager` removed from `blob/manager.rs`
+- `output_path` and `stream` removed from `FileDownloadRequest`; `recursive` removed from `FileListRequest` in `blob/models.rs`; all struct literals in `file_ops.rs` updated accordingly
 
-### 41. Dead blob infrastructure
-**Files:**
-- `src/blob/manager.rs:676` — `create_context_aware_blob_manager` (never called)
-- `src/blob/operations.rs` — All six extension methods are `#[allow(dead_code)]`
-- `src/blob/models.rs:48, 50, 61` — `output_path`, `stream`, `recursive` fields all dead
+### ~~42. `resolve_user_to_object_id` duplicated verbatim~~ — fixed (see #40)
+`ClientSecretProvider` removed; only one implementation remains in `DefaultAzureCredentialProvider`.
 
-### 42. `resolve_user_to_object_id` duplicated verbatim
-**File:** `src/auth/provider.rs:411` and `:594`
-Identical implementation in both `DefaultAzureCredentialProvider` and `ClientSecretProvider`. Should be a shared free function.
+### ~~43. Regex compiled without caching~~ — fixed
+Added `static UUID_REGEX: std::sync::LazyLock<regex::Regex>` at module level; `resolve_user_to_object_id` now uses the cached static.
 
-### 43. Regex compiled without caching
-**File:** `src/auth/provider.rs:413, 596`
-`Regex::new(...)` called on every invocation of `resolve_user_to_object_id`. Literal regex, so `unwrap()` is safe, but wastes compile time on repeated calls.
+### ~~44. `is_valid_file_name` — trivially incomplete~~ — fixed
+Removed `is_valid_file_name` from `src/utils/resource_detector.rs` and its tests.
 
-### 44. `is_valid_file_name` — trivially incomplete
-**File:** `src/utils/resource_detector.rs:205`
-Only does two length checks then returns `true`. Never checks for reserved names, invalid characters, or leading dots. Also `#[allow(dead_code)]`.
-
-### 45. `resource_group` creation timing gap in init
-**File:** `src/config/init.rs:253`
-`configure_resource_group` prints that the resource group "will be created" but only actually creates it later during `create_test_vault`. If the user skips vault creation, the resource group is never created.
+### ~~45. `resource_group` creation timing gap in init~~ — fixed
+In `run_interactive_setup`, the resource group is now created immediately after `configure_location` returns (before blob storage and vault steps), ensuring it exists even if vault creation is skipped.
 
 ---
 
 ## P4 — Backlog (Potential Panic Sites)
 
-These `.unwrap()` calls in production code have varying levels of risk:
+### ~~All P4 items~~ — fixed
 
-| Location | Line | Risk | Notes |
-|----------|------|------|-------|
-| `cli/commands.rs` | 6738 | Medium | `ContextManager::new_global().unwrap()` — panics if config dir can't be created |
-| `cli/commands.rs` | 6858 | Low | `.current_vault().unwrap()` — guarded by `is_none()` check, but fragile |
-| `cli/commands.rs` | 5698, 5715 | Low | `.unwrap()` on `.tags`/`.groups` inside `is_some()` guards |
-| `config/context.rs` | 120, 144 | Medium | `context_file.as_ref().unwrap()` in debug log paths |
-| `secret/manager.rs` | 382 | Low | `as_object().unwrap()` on a `serde_json::json!({})` literal |
+| Location | Risk | Fix |
+|----------|------|-----|
+| `cli/commands.rs` (was 6738) | Medium | `ContextManager::new_global().unwrap()` — already using `?` after CLI decomposition (`config_ops.rs:515`) |
+| `cli/commands.rs` (was 6858) | Low | `.current_vault().unwrap()` — already removed by CLI decomposition |
+| `cli/commands.rs` (was 5698, 5715) | Low | `.unwrap()` on `.tags`/`.groups` — already removed by CLI decomposition |
+| `config/context.rs` (was 120, 144) | Medium | `context_file.as_ref().unwrap()` — already using `if let` in current code |
+| `secret/manager.rs` (was 382) | Low | `as_object().unwrap()` → `.as_object().expect("json!({}) always produces an Object")` |
+| `secret/manager.rs` (was multiple) | Low | `"application/json".parse().unwrap()` → `HeaderValue::from_static(...)` |
 
 ---
 
@@ -214,6 +198,12 @@ These `.unwrap()` calls in production code have varying levels of risk:
 | **P0** | 5 | 0 | Bugs — incorrect behavior, data loss, wrong exit codes |
 | **P1** | ~11 | 0 | User-facing feature gaps — stubs, no-op flags |
 | **P2** | 14 | 0 | Quality & robustness — error handling, silent failures, missing checks |
+| **P3** | ~13 | 0 | Dead code, polish, tech debt |
+| **P4** | 5 | 0 | Potential panic sites in production code |
+| **Total** | ~48 | 0 | All items fixed or confirmed removed as of v0.5.3 |
+
+> **Note:** Items marked ~~fixed~~ or ~~removed~~ should be deleted on the next full audit pass. File paths updated for CLI decomposition (commands moved to `secret_ops.rs`, `system_ops.rs`, `vault_ops.rs`, etc.).
+es, missing checks |
 | **P3** | ~13 | ~12 | Dead code, polish, tech debt |
 | **P4** | 5 | 5 | Potential panic sites in production code |
 | **Total** | ~48 | ~17 | Strikethrough items fixed or removed in v0.5.0–v0.5.2 |
