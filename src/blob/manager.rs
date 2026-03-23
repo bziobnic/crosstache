@@ -91,15 +91,15 @@ impl BlobManager {
             sdk_metadata.insert(k.clone(), v.clone());
         }
 
-        // Build Tags from our HashMap (Tags: From<HashMap<String,String>> is implemented)
-        let sdk_tags = Tags::from(request.tags.clone());
+        // Note: blob tags are omitted intentionally — setting tags requires the
+        // Storage Blob Data Owner role, which exceeds the typical Contributor role.
+        // Group membership and metadata are stored in blob metadata instead.
 
-        // Perform the upload, setting metadata and tags in a single API call
+        // Perform the upload, setting metadata in a single API call
         let response = blob_client
             .put_block_blob(request.content)
             .content_type(&content_type)
             .metadata(sdk_metadata)
-            .tags(sdk_tags)
             .await
             .map_err(|e| CrosstacheError::azure_api(format!("Failed to upload blob: {e}")))?;
 
