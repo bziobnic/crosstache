@@ -87,8 +87,6 @@ pub struct Config {
     pub default_location: String,
     #[tabled(skip)]
     pub tenant_id: String,
-    #[tabled(skip)]
-    pub function_app_url: String,
     /// Whether client-side caching is enabled for listing operations
     #[tabled(rename = "Cache Enabled")]
     #[serde(default = "default_cache_enabled")]
@@ -149,7 +147,6 @@ impl Default for Config {
             default_resource_group: "Vaults".to_string(),
             default_location: "eastus".to_string(),
             tenant_id: String::new(),
-            function_app_url: String::new(),
             cache_enabled: default_cache_enabled(),
             cache_ttl_secs: default_cache_ttl_secs(),
             output_json: false,
@@ -402,10 +399,6 @@ fn load_from_env(config: &mut Config) {
         config.tenant_id = value;
     }
 
-    if let Ok(value) = std::env::var("FUNCTION_APP_URL") {
-        config.function_app_url = value;
-    }
-
     if let Ok(value) = std::env::var("CACHE_ENABLED") {
         config.cache_enabled = value.to_lowercase() == "true" || value == "1";
     }
@@ -619,7 +612,7 @@ mod tests {
             default_resource_group = "Vaults"
             default_location = "eastus"
             tenant_id = ""
-            function_app_url = ""
+
             output_json = false
             no_color = false
         "#;
@@ -658,7 +651,7 @@ mod tests {
             default_resource_group = "Vaults"
             default_location = "eastus"
             tenant_id = ""
-            function_app_url = ""
+
             output_json = false
             no_color = false
         "#;

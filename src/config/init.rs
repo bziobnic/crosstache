@@ -66,6 +66,27 @@ impl ConfigInitializer {
         output::step("Step 4/6: Configuring Default Location");
         let location = self.configure_location(&subscription).await?;
 
+        // Create resource group now that we have the location. This ensures the
+        // group exists even if the user skips optional vault creation in step 6.
+        let rg_exists =
+            crate::utils::azure_detect::AzureDetector::resource_group_exists(
+                &subscription.id,
+                &resource_group,
+            )
+            .await
+            .unwrap_or(false);
+        if !rg_exists {
+            let progress =
+                crate::utils::interactive::ProgressIndicator::new("Creating resource group...");
+            crate::utils::azure_detect::AzureDetector::create_resource_group(
+                &subscription.id,
+                &resource_group,
+                &location,
+            )
+            .await?;
+            progress.finish_success(&format!("Created resource group '{resource_group}'"));
+        }
+
         // Step 5: Configure blob storage
         println!();
         output::step("Step 5/6: Configuring Blob Storage");
@@ -779,7 +800,6 @@ impl ConfigInitializer {
             debug: false,
             cache_enabled: true,
             cache_ttl_secs: 900,
-            function_app_url: String::new(),
             blob_config,
             azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
             clipboard_timeout: 30,

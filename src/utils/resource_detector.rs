@@ -200,21 +200,6 @@ impl ResourceDetector {
         true
     }
 
-    /// Check if a name is a valid file name
-    #[allow(dead_code)]
-    pub fn is_valid_file_name(name: &str) -> bool {
-        // Basic file name validation
-        // Azure Blob Storage naming rules are quite permissive
-
-        if name.is_empty() || name.len() > 1024 {
-            return false;
-        }
-
-        // Check for invalid characters in blob names
-        // Blob names can contain any URL-safe characters
-        true
-    }
-
     /// Get a user-friendly description of why a resource was detected as a certain type
     pub fn get_detection_reason(
         resource: &str,
@@ -323,9 +308,5 @@ mod tests {
         assert!(ResourceDetector::is_valid_secret_name("secret123"));
         assert!(!ResourceDetector::is_valid_secret_name("my_secret")); // underscore not allowed
         assert!(!ResourceDetector::is_valid_secret_name("")); // empty not allowed
-
-        // File names are generally valid
-        assert!(ResourceDetector::is_valid_file_name("file.txt"));
-        assert!(ResourceDetector::is_valid_file_name("my-file"));
     }
 }

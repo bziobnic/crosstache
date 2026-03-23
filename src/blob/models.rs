@@ -45,10 +45,6 @@ pub struct FileUploadRequest {
 #[derive(Debug, Clone)]
 pub struct FileDownloadRequest {
     pub name: String,
-    #[allow(dead_code)]
-    pub output_path: Option<String>,
-    #[allow(dead_code)]
-    pub stream: bool,
 }
 
 /// Request for listing files
@@ -58,8 +54,6 @@ pub struct FileListRequest {
     pub groups: Option<Vec<String>>,
     pub limit: Option<usize>,
     pub delimiter: Option<String>,
-    #[allow(dead_code)]
-    pub recursive: bool,
 }
 
 #[cfg(test)]
@@ -186,7 +180,6 @@ mod tests {
             groups: None,
             limit: Some(100),
             delimiter: Some("/".to_string()),
-            recursive: false,
         };
         assert!(req.prefix.is_none());
         assert!(req.groups.is_none());

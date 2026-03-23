@@ -835,39 +835,6 @@ pub fn create_blob_manager(config: &crate::config::Config) -> Result<BlobManager
     .with_blob_config(blob_config.chunk_size_mb, blob_config.max_concurrent_uploads))
 }
 
-/// Create a blob manager with context-aware container selection
-///
-/// This function uses the storage_container from the current vault context if available,
-/// otherwise falls back to the global blob configuration container.
-#[allow(dead_code)]
-pub fn create_context_aware_blob_manager(
-    config: &crate::config::Config,
-    context_manager: &crate::config::context::ContextManager,
-) -> Result<BlobManager> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
-
-    let blob_config = config.get_blob_config();
-
-    if blob_config.storage_account.is_empty() {
-        return Err(CrosstacheError::config(
-            "No blob storage configured. Run 'xv init' to set up blob storage.",
-        ));
-    }
-
-    // Use context storage container if available, otherwise use config default
-    let container_name = context_manager
-        .current_storage_container()
-        .unwrap_or(&blob_config.container_name)
-        .to_string();
-
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::with_credential_priority(
-        config.azure_credential_priority.clone(),
-    )?) as Arc<dyn AzureAuthProvider>;
-
-    Ok(BlobManager::new(auth_provider, blob_config.storage_account, container_name)?
-        .with_blob_config(blob_config.chunk_size_mb, blob_config.max_concurrent_uploads))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
