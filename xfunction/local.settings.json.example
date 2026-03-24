@@ -1,0 +1,11 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "AZURE_TENANT_ID": "<your-tenant-id>",
+    "AZURE_CLIENT_ID": "<your-app-registration-client-id>",
+    "AZURE_CLIENT_SECRET": "<your-app-registration-client-secret>",
+    "EXPECTED_AUDIENCE": "<optional-audience-for-jwt-validation>"
+  }
+}
