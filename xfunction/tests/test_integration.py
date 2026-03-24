@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import argparse
+import pytest
 import msal
 from datetime import datetime
 
@@ -14,9 +15,9 @@ def get_azure_token(tenant_id, client_id, client_secret, scope):
         client_credential=client_secret,
         authority=f"https://login.microsoftonline.com/{tenant_id}"
     )
-    
+
     result = app.acquire_token_for_client(scopes=[scope])
-    
+
     if "access_token" in result:
         return result["access_token"]
     else:
@@ -24,6 +25,10 @@ def get_azure_token(tenant_id, client_id, client_secret, scope):
         return None
 
 
+@pytest.mark.skipif(
+    not all(os.environ.get(v) for v in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET")),
+    reason="Integration test requires Azure credentials (AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET)"
+)
 def test_direct_rbac_assignment(function_url, token, subscription_id, vault_name):
     """Test the direct RBAC assignment endpoint with a real request."""
     # Construct the resource URI for the vault
