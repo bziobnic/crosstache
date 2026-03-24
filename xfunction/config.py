@@ -33,7 +33,7 @@ STORAGE_ACCOUNT_CONTRIBUTOR_ROLE_ID = "17d1049b-9a84-46fb-8f53-869881c3d3ab"
 
 # Storage Blob Data Owner: Full access to Azure Storage blob containers and
 # data, including assigning POSIX access control.
-STORAGE_BLOB_DATA_OWNER_ROLE_ID = "b7e6dc6d-f1e8-4753-8033-0f276bb0955c"
+STORAGE_BLOB_DATA_OWNER_ROLE_ID = "b7e6dc6d-f1e8-4753-8033-0f276bb0955b"
 
 # Storage Blob Data Contributor: Read, write, and delete Azure Storage
 # containers and blobs.

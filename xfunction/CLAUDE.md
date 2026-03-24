@@ -27,7 +27,7 @@ This is an Azure Function application that provides automated RBAC (Role-Based A
 - `VaultRbacProcessor/vault_role_manager.py`: Core RBAC logic, principal resolution, and vault role management
 - `StorageRoleManager/storage_role_manager.py`: Storage account discovery and storage role management
 - **Vault Role IDs**: Owner (`8e3af657-a8ff-443c-a75c-2fe8c4bcb635`) and Key Vault Administrator (`00482a5a-887f-4fb3-b363-3b7fe8e74483`)
-- **Storage Role IDs**: Storage Account Contributor (`17d1049b-9a84-46fb-8f53-869881c3d3ab`), Storage Blob Data Owner (`b7e6dc6d-f1e8-4753-8033-0f276bb0955c`), Storage Blob Data Contributor (`ba92f5b4-2d11-453d-a403-e96b0029c9fe`)
+- **Storage Role IDs**: Storage Account Contributor (`17d1049b-9a84-46fb-8f53-869881c3d3ab`), Storage Blob Data Owner (`b7e6dc6d-f1e8-4753-8033-0f276bb0955b`), Storage Blob Data Contributor (`ba92f5b4-2d11-453d-a403-e96b0029c9fe`)
 
 ## Development Commands
 
