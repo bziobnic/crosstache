@@ -1,14 +1,199 @@
 import json
 import logging
+import os
+import time
 import traceback
 import jwt
-from datetime import datetime
-from typing import Dict, Any
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional, Tuple
 
-
+import requests as http_requests
 import azure.functions as func
 from VaultRbacProcessor.vault_role_manager import VaultRoleManager
 from StorageRoleManager.storage_role_manager import StorageRoleManager
+from config import OWNER_ROLE_ID, KEY_VAULT_ADMINISTRATOR_ROLE_ID
+
+
+# ---------------------------------------------------------------------------
+# Azure AD JWT validation helpers
+# ---------------------------------------------------------------------------
+
+# Module-level JWKS cache: { "keys": [...], "fetched_at": <epoch>, "jwks_uri": <str> }
+_jwks_cache: Dict[str, Any] = {}
+_JWKS_CACHE_TTL_SECONDS = 3600  # 1 hour
+
+
+def _get_tenant_id() -> Optional[str]:
+    """Return the Azure AD tenant ID from environment variables."""
+    return os.environ.get("AZURE_TENANT_ID") or os.environ.get("AZURE_AD_TENANT_ID")
+
+
+def _get_expected_issuer(tenant_id: Optional[str]) -> Optional[str]:
+    """Return the expected token issuer.
+
+    Priority:
+    1. AZURE_AD_ISSUER env var (explicit override)
+    2. Constructed from AZURE_TENANT_ID (v2 endpoint)
+    """
+    explicit = os.environ.get("AZURE_AD_ISSUER")
+    if explicit:
+        return explicit
+    if tenant_id:
+        return f"https://sts.windows.net/{tenant_id}/"
+    return None
+
+
+def _get_openid_config_url(tenant_id: Optional[str]) -> str:
+    """Return the OpenID Connect metadata URL for the tenant."""
+    tid = tenant_id or "common"
+    return f"https://login.microsoftonline.com/{tid}/v2.0/.well-known/openid-configuration"
+
+
+def _fetch_jwks_uri(tenant_id: Optional[str]) -> str:
+    """Fetch the JWKS URI from the OpenID Connect metadata endpoint."""
+    url = _get_openid_config_url(tenant_id)
+    resp = http_requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()["jwks_uri"]
+
+
+def _fetch_signing_keys(jwks_uri: str) -> Dict[str, Any]:
+    """Fetch the JSON Web Key Set from the JWKS URI."""
+    resp = http_requests.get(jwks_uri, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _get_signing_keys(force_refresh: bool = False) -> Tuple[Dict[str, Any], str]:
+    """Return cached signing keys, refreshing if stale or forced.
+
+    Returns (jwks_dict, jwks_uri).
+    """
+    global _jwks_cache
+
+    now = time.time()
+    cache_valid = (
+        _jwks_cache
+        and not force_refresh
+        and (now - _jwks_cache.get("fetched_at", 0)) < _JWKS_CACHE_TTL_SECONDS
+    )
+
+    if cache_valid:
+        return _jwks_cache["keys"], _jwks_cache["jwks_uri"]
+
+    tenant_id = _get_tenant_id()
+    jwks_uri = _fetch_jwks_uri(tenant_id)
+    jwks_data = _fetch_signing_keys(jwks_uri)
+
+    _jwks_cache = {
+        "keys": jwks_data,
+        "fetched_at": now,
+        "jwks_uri": jwks_uri,
+    }
+    return jwks_data, jwks_uri
+
+
+def _find_key_by_kid(jwks_data: Dict[str, Any], kid: str) -> Optional[Dict[str, Any]]:
+    """Find a key in the JWKS by its key ID."""
+    for key in jwks_data.get("keys", []):
+        if key.get("kid") == kid:
+            return key
+    return None
+
+
+def _validate_jwt(token: str) -> Dict[str, Any]:
+    """Validate a JWT token against Azure AD public keys.
+
+    Returns the decoded claims dict on success.
+    Raises jwt.PyJWTError (or subclass) on any validation failure.
+    """
+    tenant_id = _get_tenant_id()
+    expected_issuer = _get_expected_issuer(tenant_id)
+    expected_audience = os.environ.get("EXPECTED_AUDIENCE")
+
+    # Read unverified header to get kid and algorithm
+    unverified_header = jwt.get_unverified_header(token)
+    kid = unverified_header.get("kid")
+    algorithm = unverified_header.get("alg", "RS256")
+
+    if not kid:
+        raise jwt.InvalidTokenError("Token header missing 'kid' claim")
+
+    # Fetch signing keys (from cache if available)
+    jwks_data, _jwks_uri = _get_signing_keys()
+
+    key_data = _find_key_by_kid(jwks_data, kid)
+
+    # If kid not found, force-refresh keys (handle key rotation)
+    if key_data is None:
+        logging.info(f"Key ID '{kid}' not found in cached JWKS, refreshing keys")
+        jwks_data, _jwks_uri = _get_signing_keys(force_refresh=True)
+        key_data = _find_key_by_kid(jwks_data, kid)
+
+    if key_data is None:
+        raise jwt.InvalidTokenError(f"Unable to find signing key with kid '{kid}'")
+
+    # Build the public key from JWK
+    public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+
+    # Build decode options
+    decode_options: Dict[str, Any] = {
+        "verify_signature": True,
+        "verify_exp": True,
+        "verify_aud": bool(expected_audience),
+        "verify_iss": bool(expected_issuer),
+    }
+
+    decode_kwargs: Dict[str, Any] = {
+        "algorithms": [algorithm],
+        "options": decode_options,
+    }
+
+    if expected_issuer:
+        decode_kwargs["issuer"] = expected_issuer
+    if expected_audience:
+        decode_kwargs["audience"] = expected_audience
+
+    decoded = jwt.decode(token, public_key, **decode_kwargs)
+    return decoded
+
+
+def _parse_bearer_token(auth_header: Optional[str]) -> Tuple[Optional[str], Optional[func.HttpResponse]]:
+    """Parse and validate the Authorization header.
+
+    Returns (token, None) on success or (None, error_response) on failure.
+    """
+    if not auth_header:
+        return None, func.HttpResponse(
+            json.dumps({"error": "Missing Authorization header"}),
+            status_code=401,
+            mimetype="application/json",
+        )
+
+    parts = auth_header.split()
+    if len(parts) != 2:
+        return None, func.HttpResponse(
+            json.dumps({"error": "Malformed Authorization header: expected 'Bearer <token>'"}),
+            status_code=401,
+            mimetype="application/json",
+        )
+
+    scheme, token = parts
+    if scheme.lower() != "bearer":
+        return None, func.HttpResponse(
+            json.dumps({"error": f"Unsupported authentication scheme '{scheme}': expected 'Bearer'"}),
+            status_code=401,
+            mimetype="application/json",
+        )
+
+    if not token:
+        return None, func.HttpResponse(
+            json.dumps({"error": "Empty bearer token"}),
+            status_code=401,
+            mimetype="application/json",
+        )
+
+    return token, None
 
 app = func.FunctionApp()
 
@@ -29,45 +214,27 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
     logging.info("===== Direct RBAC assignment request received =====")
     
     try:
-        # Extract and validate JWT token from Authorization header
+        # Extract and validate bearer token from Authorization header
         auth_header = req.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            logging.error("Missing or invalid Authorization header")
-            return func.HttpResponse(
-                json.dumps({"error": "Missing or invalid Authorization header"}),
-                status_code=401,
-                mimetype="application/json"
-            )
-        
-        token = auth_header.split(' ')[1]
-        logging.info("Token extracted from Authorization header")
-        
-        # Validate the token and extract user identity
+        token, auth_error = _parse_bearer_token(auth_header)
+        if auth_error:
+            logging.error("Missing or malformed Authorization header")
+            return auth_error
+
+        logging.info("Bearer token extracted from Authorization header")
+
+        # Validate the JWT signature and claims against Azure AD
         try:
-            # Decode token without verification first to get claims
-            # This is safe because we'll verify the token in the next step
-            decoded_token = jwt.decode(token, options={"verify_signature": False})
-            logging.info(f"Token claims extracted: {json.dumps({k: v for k, v in decoded_token.items() if k not in ['aud', 'iss', 'sub']})}") 
-            
-            # Verify token is not expired
-            if 'exp' in decoded_token:
-                expiry = datetime.fromtimestamp(decoded_token['exp'])
-                if expiry < datetime.now():
-                    logging.error(f"Token expired at {expiry}")
-                    return func.HttpResponse(
-                        json.dumps({"error": "Token expired"}),
-                        status_code=401,
-                        mimetype="application/json"
-                    )
-            
+            decoded_token = _validate_jwt(token)
+            logging.info(
+                "Token validated with signature verification. Claims: %s",
+                json.dumps({k: v for k, v in decoded_token.items() if k not in ('aud', 'iss', 'sub')}),
+            )
+
             # Extract user ID from token claims
             # Try different claim types that might contain the user's object ID
-            user_id = None
-            if 'oid' in decoded_token:
-                user_id = decoded_token['oid']
-            elif 'sub' in decoded_token:
-                user_id = decoded_token['sub']
-            
+            user_id = decoded_token.get('oid') or decoded_token.get('sub')
+
             if not user_id:
                 logging.error("User identity not found in token claims")
                 return func.HttpResponse(
@@ -75,13 +242,41 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
                     status_code=401,
                     mimetype="application/json"
                 )
-            
+
             logging.info(f"User identified from token: {user_id}")
-            
-        except Exception as ex:
-            logging.error(f"Error validating token: {str(ex)}")
+
+        except jwt.ExpiredSignatureError:
+            logging.error("Token has expired")
             return func.HttpResponse(
-                json.dumps({"error": f"Invalid token: {str(ex)}"}),
+                json.dumps({"error": "Token expired"}),
+                status_code=401,
+                mimetype="application/json"
+            )
+        except jwt.InvalidIssuerError as ex:
+            logging.error(f"Token issuer validation failed: {ex}")
+            return func.HttpResponse(
+                json.dumps({"error": f"Invalid token issuer: {ex}"}),
+                status_code=401,
+                mimetype="application/json"
+            )
+        except jwt.InvalidAudienceError as ex:
+            logging.error(f"Token audience validation failed: {ex}")
+            return func.HttpResponse(
+                json.dumps({"error": f"Invalid token audience: {ex}"}),
+                status_code=401,
+                mimetype="application/json"
+            )
+        except (jwt.InvalidTokenError, jwt.PyJWTError) as ex:
+            logging.error(f"JWT validation failed: {ex}")
+            return func.HttpResponse(
+                json.dumps({"error": f"Invalid token: {ex}"}),
+                status_code=401,
+                mimetype="application/json"
+            )
+        except Exception as ex:
+            logging.error(f"Unexpected error during token validation: {ex}")
+            return func.HttpResponse(
+                json.dumps({"error": f"Token validation error: {ex}"}),
                 status_code=401,
                 mimetype="application/json"
             )
@@ -118,7 +313,7 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
         logging.info("VaultRoleManager and StorageRoleManager initialized")
         
         # Get vault information including tags
-        vault_info = vault_manager.get_vault_info(resource_uri)
+        vault_info = await vault_manager.get_vault_info(resource_uri)
         logging.info(f"Vault info type: {type(vault_info)}")
         logging.info(f"Vault info content: {vault_info}")
         
@@ -164,11 +359,9 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
                 mimetype="application/json"
             )
         
-        # Define the Owner role ID
-        owner_role_id = "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"  # Azure Owner role ID
-        admin_role_id = "00482a5a-887f-4fb3-b363-3b7fe8e74483"  # Azure Key Vault Administrator role ID
-        owner_role_definition_id = f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleDefinitions/{owner_role_id}"
-        admin_role_definition_id = f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleDefinitions/{admin_role_id}"
+        # Build fully-qualified role definition IDs from centralized constants
+        owner_role_definition_id = f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleDefinitions/{OWNER_ROLE_ID}"
+        admin_role_definition_id = f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleDefinitions/{KEY_VAULT_ADMINISTRATOR_ROLE_ID}"
         
         # Assign the Owner role to the user
         logging.info(f"Attempting to assign Owner role to user {user_id}")

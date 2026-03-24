@@ -131,5 +131,4 @@ def main():
             print(f"Response: {response.text}")
 
 if __name__ == "__main__":
-    main() if __name__ == "__main__":
-    main() 
+    main()
