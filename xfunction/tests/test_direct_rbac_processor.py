@@ -77,13 +77,17 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         """Helper method to run an async test function."""
         return self.loop.run_until_complete(coro)
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
+    @patch('function_app.StorageRoleManager')
     @patch('function_app.VaultRoleManager')
-    def test_valid_request(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_valid_request(self, mock_vault_role_manager_class, mock_storage_role_manager_class, mock_validate_jwt):
         """Test with valid token and request body."""
         # Setup mocks
         mock_vault_role_manager_class.return_value = self.mock_manager
-        mock_jwt_decode.return_value = self.valid_token_payload
+        mock_storage_manager = AsyncMock()
+        mock_storage_manager.discover_associated_storage_accounts = AsyncMock(return_value=[])
+        mock_storage_role_manager_class.return_value = mock_storage_manager
+        mock_validate_jwt.return_value = self.valid_token_payload
         
         # Create request
         req = func.HttpRequest(
@@ -125,17 +129,17 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         self.assertEqual(resp.status_code, 401)
         resp_body = json.loads(resp.get_body())
         self.assertIn('error', resp_body)
-        self.assertIn('Missing or invalid Authorization header', resp_body['error'])
+        self.assertIn('Authorization', resp_body['error'])
         
         # Assert manager was not called
         mock_vault_role_manager_class.assert_not_called()
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
     @patch('function_app.VaultRoleManager')
-    def test_invalid_token_format(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_invalid_token_format(self, mock_vault_role_manager_class, mock_validate_jwt):
         """Test with invalid token format."""
-        # Setup mock to raise exception
-        mock_jwt_decode.side_effect = Exception("Invalid token format")
+        # _validate_jwt raises InvalidTokenError for malformed tokens
+        mock_validate_jwt.side_effect = jwt.InvalidTokenError("Invalid token format")
         
         # Create request with invalid token format
         req = func.HttpRequest(
@@ -157,14 +161,12 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert manager was not called
         mock_vault_role_manager_class.assert_not_called()
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
     @patch('function_app.VaultRoleManager')
-    def test_expired_token(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_expired_token(self, mock_vault_role_manager_class, mock_validate_jwt):
         """Test with expired token."""
-        # Create expired token and setup mock
-        expired_token_payload = self.valid_token_payload.copy()
-        expired_token_payload['exp'] = int((datetime.now() - timedelta(hours=1)).timestamp())
-        mock_jwt_decode.return_value = expired_token_payload
+        # _validate_jwt raises ExpiredSignatureError for expired tokens
+        mock_validate_jwt.side_effect = jwt.ExpiredSignatureError("Token expired")
         
         # Create request with expired token
         req = func.HttpRequest(
@@ -186,14 +188,13 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert manager was not called
         mock_vault_role_manager_class.assert_not_called()
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
     @patch('function_app.VaultRoleManager')
-    def test_missing_user_id(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_missing_user_id(self, mock_vault_role_manager_class, mock_validate_jwt):
         """Test with token missing user ID."""
-        # Create token without user ID and setup mock
-        no_user_id_payload = self.valid_token_payload.copy()
-        del no_user_id_payload['oid']
-        mock_jwt_decode.return_value = no_user_id_payload
+        # Create token without user ID (no oid or sub claims)
+        no_user_id_payload = {k: v for k, v in self.valid_token_payload.items() if k != 'oid'}
+        mock_validate_jwt.return_value = no_user_id_payload
         
         # Create request with token missing user ID
         req = func.HttpRequest(
@@ -215,12 +216,12 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert manager was not called
         mock_vault_role_manager_class.assert_not_called()
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
     @patch('function_app.VaultRoleManager')
-    def test_invalid_request_body(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_invalid_request_body(self, mock_vault_role_manager_class, mock_validate_jwt):
         """Test with invalid JSON in request body."""
         # Setup mock
-        mock_jwt_decode.return_value = self.valid_token_payload
+        mock_validate_jwt.return_value = self.valid_token_payload
         
         # Create request with invalid JSON
         req = func.HttpRequest(
@@ -242,12 +243,12 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert manager was not called
         mock_vault_role_manager_class.assert_not_called()
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
     @patch('function_app.VaultRoleManager')
-    def test_missing_required_parameters(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_missing_required_parameters(self, mock_vault_role_manager_class, mock_validate_jwt):
         """Test with missing required parameters in request body."""
         # Setup mock
-        mock_jwt_decode.return_value = self.valid_token_payload
+        mock_validate_jwt.return_value = self.valid_token_payload
         
         # Create request with missing parameters
         req = func.HttpRequest(
@@ -269,15 +270,19 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert manager was not called
         mock_vault_role_manager_class.assert_not_called()
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
+    @patch('function_app.StorageRoleManager')
     @patch('function_app.VaultRoleManager')
-    def test_role_assignment_failure(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_role_assignment_failure(self, mock_vault_role_manager_class, mock_storage_role_manager_class, mock_validate_jwt):
         """Test role assignment failure."""
         # Setup mocks
-        mock_jwt_decode.return_value = self.valid_token_payload
+        mock_validate_jwt.return_value = self.valid_token_payload
         mock_manager = AsyncMock()
         mock_manager.assign_role_to_user = AsyncMock(side_effect=[False, True])
         mock_vault_role_manager_class.return_value = mock_manager
+        mock_storage_manager = AsyncMock()
+        mock_storage_manager.discover_associated_storage_accounts = AsyncMock(return_value=[])
+        mock_storage_role_manager_class.return_value = mock_storage_manager
         
         # Create request
         req = func.HttpRequest(
@@ -301,13 +306,17 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         self.assertEqual(mock_vault_role_manager_class.call_count, 1)
         self.assertEqual(mock_manager.assign_role_to_user.call_count, 2)
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
+    @patch('function_app.StorageRoleManager')
     @patch('function_app.VaultRoleManager')
-    def test_vault_creator_verification_success(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_vault_creator_verification_success(self, mock_vault_role_manager_class, mock_storage_role_manager_class, mock_validate_jwt):
         """Test successful verification of vault creator."""
         # Setup mocks
         mock_vault_role_manager_class.return_value = self.mock_manager
-        mock_jwt_decode.return_value = self.valid_token_payload
+        mock_storage_manager = AsyncMock()
+        mock_storage_manager.discover_associated_storage_accounts = AsyncMock(return_value=[])
+        mock_storage_role_manager_class.return_value = mock_storage_manager
+        mock_validate_jwt.return_value = self.valid_token_payload
         
         # Create request
         req = func.HttpRequest(
@@ -329,13 +338,15 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert get_vault_info was called
         self.mock_manager.get_vault_info.assert_called_once_with(self.valid_request_body['resourceUri'])
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
+    @patch('function_app.StorageRoleManager')
     @patch('function_app.VaultRoleManager')
-    def test_vault_creator_verification_failure(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_vault_creator_verification_failure(self, mock_vault_role_manager_class, mock_storage_role_manager_class, mock_validate_jwt):
         """Test failure when user is not the vault creator."""
         # Setup mocks
         mock_vault_role_manager_class.return_value = self.mock_manager
-        mock_jwt_decode.return_value = self.valid_token_payload
+        mock_storage_role_manager_class.return_value = AsyncMock()
+        mock_validate_jwt.return_value = self.valid_token_payload
         
         # Create vault info with different creator ID
         different_creator_vault_info = self.mock_vault_info.copy()
@@ -368,13 +379,17 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert role assignment was not attempted
         self.mock_manager.assign_role_to_user.assert_not_called()
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
+    @patch('function_app.StorageRoleManager')
     @patch('function_app.VaultRoleManager')
-    def test_vault_missing_creator_tag(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_vault_missing_creator_tag(self, mock_vault_role_manager_class, mock_storage_role_manager_class, mock_validate_jwt):
         """Test when vault doesn't have a CreatedByID tag."""
         # Setup mocks
         mock_vault_role_manager_class.return_value = self.mock_manager
-        mock_jwt_decode.return_value = self.valid_token_payload
+        mock_storage_manager = AsyncMock()
+        mock_storage_manager.discover_associated_storage_accounts = AsyncMock(return_value=[])
+        mock_storage_role_manager_class.return_value = mock_storage_manager
+        mock_validate_jwt.return_value = self.valid_token_payload
         
         # Create vault info without CreatedByID tag
         no_creator_vault_info = self.mock_vault_info.copy()
@@ -403,13 +418,15 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert role assignment was attempted
         self.assertEqual(self.mock_manager.assign_role_to_user.call_count, 2)
 
-    @patch('jwt.decode')
+    @patch('function_app._validate_jwt')
+    @patch('function_app.StorageRoleManager')
     @patch('function_app.VaultRoleManager')
-    def test_vault_info_not_found(self, mock_vault_role_manager_class, mock_jwt_decode):
+    def test_vault_info_not_found(self, mock_vault_role_manager_class, mock_storage_role_manager_class, mock_validate_jwt):
         """Test when vault info cannot be retrieved."""
         # Setup mocks
         mock_vault_role_manager_class.return_value = self.mock_manager
-        mock_jwt_decode.return_value = self.valid_token_payload
+        mock_storage_role_manager_class.return_value = AsyncMock()
+        mock_validate_jwt.return_value = self.valid_token_payload
         self.mock_manager.get_vault_info = AsyncMock(return_value=None)
         
         # Create request

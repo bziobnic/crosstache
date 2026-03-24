@@ -13,6 +13,14 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from StorageRoleManager.storage_role_manager import StorageRoleManager
+from utils.azure_helpers import is_guid, normalize_guid
+from config import (
+    OWNER_ROLE_ID,
+    KEY_VAULT_ADMINISTRATOR_ROLE_ID,
+    STORAGE_ACCOUNT_CONTRIBUTOR_ROLE_ID,
+    STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID,
+    STORAGE_BLOB_DATA_OWNER_ROLE_ID,
+)
 
 class TestStorageRoleManager(unittest.TestCase):
     """Test cases for StorageRoleManager functionality."""
@@ -47,24 +55,24 @@ class TestStorageRoleManager(unittest.TestCase):
     def test_vault_role_to_storage_role_mapping(self):
         """Test mapping of vault roles to storage roles."""
         # Test Owner role mapping
-        owner_role_id = "/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
+        owner_role_def = f"/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/{OWNER_ROLE_ID}"
         owner_storage_roles = asyncio.run(
-            self.storage_manager.get_storage_role_assignments_for_vault_role(owner_role_id)
+            self.storage_manager.get_storage_role_assignments_for_vault_role(owner_role_def)
         )
-        
+
         expected_owner_roles = [
-            StorageRoleManager.STORAGE_ACCOUNT_CONTRIBUTOR_ROLE_ID,
-            StorageRoleManager.STORAGE_BLOB_DATA_OWNER_ROLE_ID
+            STORAGE_ACCOUNT_CONTRIBUTOR_ROLE_ID,
+            STORAGE_BLOB_DATA_OWNER_ROLE_ID,
         ]
         self.assertEqual(owner_storage_roles, expected_owner_roles)
-        
+
         # Test Administrator role mapping
-        admin_role_id = "/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/00482a5a-887f-4fb3-b363-3b7fe8e74483"
+        admin_role_def = f"/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/{KEY_VAULT_ADMINISTRATOR_ROLE_ID}"
         admin_storage_roles = asyncio.run(
-            self.storage_manager.get_storage_role_assignments_for_vault_role(admin_role_id)
+            self.storage_manager.get_storage_role_assignments_for_vault_role(admin_role_def)
         )
-        
-        expected_admin_roles = [StorageRoleManager.STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID]
+
+        expected_admin_roles = [STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID]
         self.assertEqual(admin_storage_roles, expected_admin_roles)
         
         # Test unknown role
@@ -78,15 +86,15 @@ class TestStorageRoleManager(unittest.TestCase):
         """Test GUID validation and normalization."""
         # Test valid GUID
         valid_guid = "12345678-1234-1234-1234-123456789abc"
-        self.assertTrue(self.storage_manager._is_guid(valid_guid))
-        
+        self.assertTrue(is_guid(valid_guid))
+
         # Test invalid GUID
         invalid_guid = "not-a-guid"
-        self.assertFalse(self.storage_manager._is_guid(invalid_guid))
-        
+        self.assertFalse(is_guid(invalid_guid))
+
         # Test GUID normalization
         guid_without_hyphens = "12345678123412341234123456789abc"
-        normalized = self.storage_manager._normalize_guid(guid_without_hyphens)
+        normalized = normalize_guid(guid_without_hyphens)
         expected = "12345678-1234-1234-1234-123456789abc"
         self.assertEqual(normalized, expected)
     
