@@ -119,15 +119,17 @@ def test_endpoint(url: str, token: str, payload: dict, label: str = "Test") -> d
             storage = body.get("storageAccounts", {})
             if storage.get("discovered", 0) > 0:
                 print(f"  Storage: {storage['discovered']} accounts, success={storage.get('success')}")
+        elif response.status_code == 400:
+            print(f"\nRESULT (400): {body.get('error', 'Bad request')}")
         elif response.status_code == 401:
-            print("\nFAIL: Authentication failed - check your token and EXPECTED_AUDIENCE setting")
+            print(f"\nRESULT (401): Authentication rejected — {body.get('error', 'Unauthorized')}")
         elif response.status_code == 403:
-            print(f"\nFAIL: Not authorized - user is not the vault creator")
+            print(f"\nRESULT (403): Not authorized — user is not the vault creator")
             print(f"  Your ID: {body.get('userId')}, Creator ID: {body.get('creatorId')}")
         elif response.status_code == 404:
-            print(f"\nFAIL: Vault not found - check resourceUri")
+            print(f"\nRESULT (404): Vault not found — check resourceUri")
         else:
-            print(f"\nFAIL: {body.get('error', 'Unknown error')}")
+            print(f"\nFAIL ({response.status_code}): {body.get('error', 'Unknown error')}")
 
         return body
 
