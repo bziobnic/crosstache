@@ -47,9 +47,11 @@ xfunction/installer/
 ### Execution Flow
 
 ```
-prerequisites → resource_group → storage_account → function_app →
-app_registration → rbac → deployment → verification
+prerequisites → resource_group → storage_account → app_registration →
+function_app → rbac → deployment → verification
 ```
+
+Note: `app_registration` runs before `function_app` because the Function App's settings require the App Registration's client ID and secret (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `EXPECTED_AUDIENCE`).
 
 Each step module exports:
 - `run(config, az_client) → dict` — Execute the step
@@ -164,7 +166,32 @@ az storage account create --name {sa} --resource-group {rg} --sku Standard_LRS -
 
 Idempotent: search for storage accounts in rg tagged with `xfunction-installer=true`.
 
-### 4. Function App (`function_app.py`)
+### 4. App Registration (`app_registration.py`)
+
+```
+az ad app create --display-name {app_name}
+az ad sp create --id {app_id}
+az ad app credential reset --id {app_id} --years 2
+```
+
+Post-creation:
+- Add Microsoft Graph API permissions (application type):
+  - `User.Read.All` (ID: `df021288-bdef-4463-88db-98f22de89214`)
+  - `Application.Read.All` (ID: `9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30`)
+  ```
+  az ad app permission add --id {app_id} \
+    --api 00000003-0000-0000-c000-000000000000 \
+    --api-permissions df021288-bdef-4463-88db-98f22de89214=Role 9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30=Role
+  ```
+- Grant admin consent: `az ad app permission admin-consent --id {app_id}`
+
+Note: `00000003-0000-0000-c000-000000000000` is the Microsoft Graph API ID. `User.Read.All` is needed for principal type detection. `Application.Read.All` is needed for service principal lookups.
+
+Idempotent: search by display name; skip if exists; optionally rotate secret.
+
+### 5. Function App (`function_app.py`)
+
+Depends on: Step 4 (App Registration) for client ID/secret.
 
 ```
 az functionapp create \
@@ -190,29 +217,6 @@ az functionapp config appsettings set --name {fa} --resource-group {rg} --settin
 Note: `EXPECTED_AUDIENCE` is set to the App Registration's client ID. This is used by the function's JWT validation to verify the token audience claim. It must match the application ID that tokens are issued for.
 
 Idempotent: `az functionapp show` check; skip creation but update settings if exists.
-
-### 5. App Registration (`app_registration.py`)
-
-```
-az ad app create --display-name {app_name}
-az ad sp create --id {app_id}
-az ad app credential reset --id {app_id} --years 2
-```
-
-Post-creation:
-- Add Microsoft Graph API permissions (application type):
-  - `User.Read.All` (ID: `df021288-bdef-4463-88db-98f22de89214`)
-  - `Application.Read.All` (ID: `9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30`)
-  ```
-  az ad app permission add --id {app_id} \
-    --api 00000003-0000-0000-c000-000000000000 \
-    --api-permissions df021288-bdef-4463-88db-98f22de89214=Role 9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30=Role
-  ```
-- Grant admin consent: `az ad app permission admin-consent --id {app_id}`
-
-Note: `00000003-0000-0000-c000-000000000000` is the Microsoft Graph API ID. `User.Read.All` is needed for principal type detection. `Application.Read.All` is needed for service principal lookups.
-
-Idempotent: search by display name; skip if exists; optionally rotate secret.
 
 ### 6. RBAC (`rbac.py`)
 
@@ -279,9 +283,10 @@ az functionapp deployment source config-zip --resource-group {rg} --name {fa} --
   xv set azure-client-secret --value {client_secret} --group xfunction
   xv set function-app-url --value https://{fa}.azurewebsites.net/api --group xfunction
   ```
-- Also update the crosstache config to set `FUNCTION_APP_URL`:
+- Print the Function App URL for manual configuration:
   ```
-  xv config set function_app_url https://{fa}.azurewebsites.net/api
+  Function App URL: https://{fa}.azurewebsites.net/api
+  Set this in your xv config: FUNCTION_APP_URL=https://{fa}.azurewebsites.net/api
   ```
 - Check if `xv` is available; skip with info message if not installed
 
@@ -297,6 +302,13 @@ Reverse order:
 - Each step checks resource existence before deletion
 - Confirmation prompt listing all resources to be deleted
 - `--non-interactive` skips confirmation (for CI/CD)
+- If `xv` is available, offer to remove stored credentials:
+  ```
+  xv delete azure-tenant-id --group xfunction
+  xv delete azure-client-id --group xfunction
+  xv delete azure-client-secret --group xfunction
+  xv delete function-app-url --group xfunction
+  ```
 - Deletes `.xfunction-installer-state.json` on successful teardown
 - Note: Event Grid subscriptions are out of scope (the function uses HTTP triggers, not Event Grid). If Event Grid was configured separately, it must be cleaned up manually.
 
@@ -304,12 +316,11 @@ Reverse order:
 
 The installer writes intermediate state to `.xfunction-installer-state.json` in the working directory. This file tracks:
 - Which steps have completed
-- Resource names and IDs created in each step (storage account name, app registration client ID, managed identity principal ID, etc.)
-- The App Registration client secret (encrypted or omitted — see below)
+- Resource names and IDs created in each step (storage account name, app registration client ID, service principal object ID, etc.)
 
-The state file is used by `--resume` to skip completed steps and recover values needed by later steps (e.g., the client secret generated in step 5 is needed by step 4's app settings configuration).
+The state file is used by `--resume` to skip completed steps and recover resource identifiers needed by later steps.
 
-**Security:** The client secret is NOT stored in the state file. If `--resume` is used after step 5 (App Registration) but before step 4 (app settings), the installer prompts for the secret or offers to rotate it. The state file is added to `.gitignore`.
+**Security:** The App Registration client secret is **never** stored in the state file. If `--resume` needs the secret (e.g., resuming at the function_app step which sets app settings), the installer offers to rotate the secret via `az ad app credential reset`. The state file is added to `.gitignore`.
 
 The `status` command reads this state file (and validates against Azure) to show current resource state.
 
@@ -348,7 +359,7 @@ Storage Account   | xfuncab12cd34     | Created
 Function App      | fa-xfunction      | Deployed
 App Registration  | xfunction-rbac    | Created
 Managed Identity  | (system-assigned) | Configured
-RBAC Assignments  | 2 roles           | Assigned
+RBAC Assignments  | 3 roles           | Assigned
 ```
 
 ### Credential Output
