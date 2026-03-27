@@ -10,7 +10,7 @@ A Python-based installer for the xfunction Azure Function that configures all re
 
 ## Requirements
 
-- **Language:** Python
+- **Language:** Python 3.10+ (uses `X | None` union syntax)
 - **Interaction:** Interactive by default, `--non-interactive` flag for automation
 - **Scope:** Full end-to-end (infrastructure + app registration + RBAC + deployment + verification + xv credential storage)
 - **Audience:** General public / open-source users
@@ -79,7 +79,7 @@ python -m installer verify [options]      # Health check only
 | `--non-interactive` | No prompts | `false` |
 | `--verbose` | Print az commands | `false` |
 | `--skip-deploy` | Infrastructure only | `false` |
-| `--config-file` | Load from JSON/YAML | None |
+| `--config-file` | Load from JSON file | None |
 | `--resume` | Skip completed steps | `false` |
 | `--output` | Output format (text/json) | `text` |
 
@@ -154,9 +154,11 @@ Idempotent: `az group exists` check before creation.
 ### 3. Storage Account (`storage_account.py`)
 
 - Auto-generate globally unique name: `xfunc{random8chars}` (lowercase alphanumeric, 3-24 chars)
+- Check name availability first: `az storage account check-name --name {sa}` — retry with new random suffix if taken
 - Tag with `xfunction-installer=true` for idempotent detection
 
 ```
+az storage account check-name --name {sa}
 az storage account create --name {sa} --resource-group {rg} --sku Standard_LRS --tags xfunction-installer=true
 ```
 
@@ -169,12 +171,23 @@ az functionapp create \
   --name {fa} --resource-group {rg} --storage-account {sa} \
   --consumption-plan-location {location} \
   --runtime python --runtime-version 3.11 \
-  --functions-version 4 --os-type Linux
+  --functions-version 4 --os-type Linux \
+  --assign-identity "[system]"
 ```
 
-Post-creation:
-- Enable system-assigned managed identity
-- Set app settings: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `FUNCTIONS_WORKER_RUNTIME=python`
+Note: `--assign-identity "[system]"` enables the system-assigned managed identity at creation time rather than as a separate step. Python 3.11 is used as the target runtime; Azure Functions v4 supports 3.9-3.12. The `--storage-account` flag automatically configures `AzureWebJobsStorage` with the storage account's connection string.
+
+Post-creation app settings:
+```
+az functionapp config appsettings set --name {fa} --resource-group {rg} --settings \
+  AZURE_TENANT_ID={tenant_id} \
+  AZURE_CLIENT_ID={app_registration_client_id} \
+  AZURE_CLIENT_SECRET={app_registration_client_secret} \
+  FUNCTIONS_WORKER_RUNTIME=python \
+  EXPECTED_AUDIENCE={app_registration_client_id}
+```
+
+Note: `EXPECTED_AUDIENCE` is set to the App Registration's client ID. This is used by the function's JWT validation to verify the token audience claim. It must match the application ID that tokens are issued for.
 
 Idempotent: `az functionapp show` check; skip creation but update settings if exists.
 
@@ -187,28 +200,58 @@ az ad app credential reset --id {app_id} --years 2
 ```
 
 Post-creation:
-- Add Microsoft Graph API permission: `User.Read.All` (application type)
+- Add Microsoft Graph API permissions (application type):
+  - `User.Read.All` (ID: `df021288-bdef-4463-88db-98f22de89214`)
+  - `Application.Read.All` (ID: `9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30`)
+  ```
+  az ad app permission add --id {app_id} \
+    --api 00000003-0000-0000-c000-000000000000 \
+    --api-permissions df021288-bdef-4463-88db-98f22de89214=Role 9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30=Role
+  ```
 - Grant admin consent: `az ad app permission admin-consent --id {app_id}`
+
+Note: `00000003-0000-0000-c000-000000000000` is the Microsoft Graph API ID. `User.Read.All` is needed for principal type detection. `Application.Read.All` is needed for service principal lookups.
 
 Idempotent: search by display name; skip if exists; optionally rotate secret.
 
 ### 6. RBAC (`rbac.py`)
 
-Assign to Function App's managed identity:
+The xfunction authenticates to Azure using the **App Registration's ClientSecretCredential** (not managed identity). Therefore, RBAC roles must be assigned to the **App Registration's service principal**.
 
-| Role | Scope |
-|------|-------|
-| RBAC Administrator | Subscription |
-| Key Vault Administrator | Subscription |
+Assign to the App Registration's service principal:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| Role Based Access Control Administrator | Subscription | Create/manage role assignments for vault users |
+| Key Vault Administrator | Subscription | Read vault tags (CreatedByID) for creator verification |
+| Reader | Subscription | List storage accounts for discovery |
 
 ```
+# Get the service principal object ID for the App Registration
+sp_object_id=$(az ad sp show --id {app_registration_client_id} --query id -o tsv)
+
 az role assignment create \
-  --assignee {managed_identity_principal_id} \
+  --assignee-object-id {sp_object_id} \
+  --assignee-principal-type ServicePrincipal \
   --role "Role Based Access Control Administrator" \
+  --scope /subscriptions/{sub}
+
+az role assignment create \
+  --assignee-object-id {sp_object_id} \
+  --assignee-principal-type ServicePrincipal \
+  --role "Key Vault Administrator" \
+  --scope /subscriptions/{sub}
+
+az role assignment create \
+  --assignee-object-id {sp_object_id} \
+  --assignee-principal-type ServicePrincipal \
+  --role "Reader" \
   --scope /subscriptions/{sub}
 ```
 
-Idempotent: `az role assignment list` to check existing before creation.
+Note: Using `--assignee-object-id` with `--assignee-principal-type ServicePrincipal` avoids ambiguity and the extra Graph API lookup that `--assignee` triggers.
+
+Idempotent: `az role assignment list --assignee {sp_object_id}` to check existing before creation.
 
 ### 7. Deployment (`deployment.py`)
 
@@ -234,6 +277,11 @@ az functionapp deployment source config-zip --resource-group {rg} --name {fa} --
   xv set azure-tenant-id --value {tenant_id} --group xfunction
   xv set azure-client-id --value {client_id} --group xfunction
   xv set azure-client-secret --value {client_secret} --group xfunction
+  xv set function-app-url --value https://{fa}.azurewebsites.net/api --group xfunction
+  ```
+- Also update the crosstache config to set `FUNCTION_APP_URL`:
+  ```
+  xv config set function_app_url https://{fa}.azurewebsites.net/api
   ```
 - Check if `xv` is available; skip with info message if not installed
 
@@ -249,13 +297,28 @@ Reverse order:
 - Each step checks resource existence before deletion
 - Confirmation prompt listing all resources to be deleted
 - `--non-interactive` skips confirmation (for CI/CD)
+- Deletes `.xfunction-installer-state.json` on successful teardown
+- Note: Event Grid subscriptions are out of scope (the function uses HTTP triggers, not Event Grid). If Event Grid was configured separately, it must be cleaned up manually.
+
+## State Persistence
+
+The installer writes intermediate state to `.xfunction-installer-state.json` in the working directory. This file tracks:
+- Which steps have completed
+- Resource names and IDs created in each step (storage account name, app registration client ID, managed identity principal ID, etc.)
+- The App Registration client secret (encrypted or omitted — see below)
+
+The state file is used by `--resume` to skip completed steps and recover values needed by later steps (e.g., the client secret generated in step 5 is needed by step 4's app settings configuration).
+
+**Security:** The client secret is NOT stored in the state file. If `--resume` is used after step 5 (App Registration) but before step 4 (app settings), the installer prompts for the secret or offers to rotate it. The state file is added to `.gitignore`.
+
+The `status` command reads this state file (and validates against Azure) to show current resource state.
 
 ## Error Handling
 
 - Each step wrapped in try/except with clear error messages
 - On failure: print what succeeded, what failed, and how to resume
-- `--resume` flag: detect completed steps via existence checks, skip them
-- Ctrl+C handler: graceful shutdown with state summary
+- `--resume` flag: uses state file + existence checks to skip completed steps
+- Ctrl+C handler: graceful shutdown, write current state, print summary
 - Non-zero exit code on any failure
 
 ## Output
@@ -298,10 +361,13 @@ Print client ID and secret with reminder to store securely. Offer xv storage int
 
 ## Dependencies
 
-No additional Python packages required beyond the standard library. The installer relies entirely on:
-- `az` CLI (Azure CLI)
+- **Python 3.10+** (for `X | None` union type syntax)
+- No additional Python packages required beyond the standard library
+
+External CLI tools:
+- `az` CLI (Azure CLI) — **required**
 - `func` CLI (Azure Functions Core Tools) — optional, falls back to az for deployment
-- `xv` CLI (crosstache) — optional, for credential storage
+- `xv` CLI (crosstache) — optional, for credential storage and config
 
 ## Testing Strategy
 
