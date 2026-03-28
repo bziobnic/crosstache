@@ -42,6 +42,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Installer state file
+.xfunction-installer-state.json
+
 # Azurite artifacts
 __blobstorage__
 __queuestorage__
