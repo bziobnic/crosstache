@@ -124,42 +124,53 @@ def run_install(config: InstallerConfig) -> int:
     app_reg_data = state.get_step_data("app_registration") if config.resume else {}
     sa_data = state.get_step_data("storage_account") if config.resume else {}
     prereq_data = state.get_step_data("prerequisites") if config.resume else {}
+    _secret_rotated = False  # track if secret was rotated so function_app settings can be re-applied
 
     for step_name in INSTALL_STEPS:
         if step_name == "deployment" and config.skip_deploy:
             continue
         step_num += 1
 
+        # When resuming, skip already-completed steps — but if the client secret was just
+        # rotated, don't skip function_app: we must re-apply settings or the deployed
+        # function will silently fail to authenticate with the invalidated old secret.
         if config.resume and state.is_completed(step_name) and step_name != "verification":
-            warning(f"Step '{step_name}' already completed — skipping")
-            if step_name == "app_registration":
-                app_reg_data = state.get_step_data(step_name)
-                # Secret not in state file — offer rotation if needed
-                if not app_reg_data.get("client_secret"):
-                    app_id = app_reg_data.get("app_id", "")
-                    if app_id:
-                        warning("Client secret not available (not stored in state file)")
-                        if not config.non_interactive:
-                            if confirm("Rotate the App Registration secret?", default=True):
-                                cred = az.run("ad", "app", "credential", "reset", "--id", app_id, "--years", "2")
-                                app_reg_data["client_secret"] = cred.get("password", "")
-                                success("Client secret rotated")
-                            if not app_reg_data.get("client_secret"):
-                                app_reg_data["client_secret"] = prompt("Enter client secret manually", required=True)
-                        else:
-                            # In non-interactive mode, auto-rotate the secret
-                            try:
-                                cred = az.run("ad", "app", "credential", "reset", "--id", app_id, "--years", "2")
-                                app_reg_data["client_secret"] = cred.get("password", "")
-                                success("Client secret auto-rotated (non-interactive)")
-                            except Exception as ex:
-                                error(f"Cannot obtain client secret in non-interactive mode: {ex}")
-                                return 1
-            elif step_name == "storage_account":
-                sa_data = state.get_step_data(step_name)
-            elif step_name == "prerequisites":
-                prereq_data = state.get_step_data(step_name)
-            continue
+            if step_name == "function_app" and _secret_rotated:
+                warning("Client secret was rotated — re-applying function app settings...")
+                # fall through to re-run this step with the new secret
+            else:
+                warning(f"Step '{step_name}' already completed — skipping")
+                if step_name == "app_registration":
+                    app_reg_data = state.get_step_data(step_name)
+                    # Secret not in state file — offer rotation if needed
+                    if not app_reg_data.get("client_secret"):
+                        app_id = app_reg_data.get("app_id", "")
+                        if app_id:
+                            warning("Client secret not available (not stored in state file)")
+                            if not config.non_interactive:
+                                if confirm("Rotate the App Registration secret?", default=True):
+                                    cred = az.run("ad", "app", "credential", "reset", "--id", app_id, "--years", "2")
+                                    app_reg_data["client_secret"] = cred.get("password", "")
+                                    success("Client secret rotated")
+                                    _secret_rotated = True
+                                if not app_reg_data.get("client_secret"):
+                                    app_reg_data["client_secret"] = prompt("Enter client secret manually", required=True)
+                                    _secret_rotated = True
+                            else:
+                                # In non-interactive mode, auto-rotate the secret
+                                try:
+                                    cred = az.run("ad", "app", "credential", "reset", "--id", app_id, "--years", "2")
+                                    app_reg_data["client_secret"] = cred.get("password", "")
+                                    success("Client secret auto-rotated (non-interactive)")
+                                    _secret_rotated = True
+                                except Exception as ex:
+                                    error(f"Cannot obtain client secret in non-interactive mode: {ex}")
+                                    return 1
+                elif step_name == "storage_account":
+                    sa_data = state.get_step_data(step_name)
+                elif step_name == "prerequisites":
+                    prereq_data = state.get_step_data(step_name)
+                continue
 
         module = _STEP_MODULES[step_name]
         step_header(step_num, total_steps, f"{step_name.replace('_', ' ').title()}...")

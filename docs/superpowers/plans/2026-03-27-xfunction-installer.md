@@ -212,7 +212,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_az_cli.py -v`
+Run: `cd xfunction && python -m pytest tests/test_az_cli.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'installer'`
 
 - [ ] **Step 3: Implement AzCli wrapper**
@@ -362,13 +362,13 @@ class AzCli:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_az_cli.py -v`
+Run: `cd xfunction && python -m pytest tests/test_az_cli.py -v`
 Expected: All 12 tests PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/installer/__init__.py xfunction/installer/az.py xfunction/tests/test_az_cli.py
 git commit -m "feat(installer): add AzCli wrapper with error types and secret redaction"
 ```
@@ -492,7 +492,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_installer_config.py -v`
+Run: `cd xfunction && python -m pytest tests/test_installer_config.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'installer.config'`
 
 - [ ] **Step 3: Implement InstallerConfig and InstallerState**
@@ -585,13 +585,13 @@ class InstallerState:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_installer_config.py -v`
+Run: `cd xfunction && python -m pytest tests/test_installer_config.py -v`
 Expected: All 8 tests PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/installer/config.py xfunction/tests/test_installer_config.py
 git commit -m "feat(installer): add InstallerConfig dataclass and state persistence"
 ```
@@ -725,7 +725,7 @@ def confirm(message: str, default: bool = True) -> bool:
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/installer/utils/__init__.py xfunction/installer/utils/output.py xfunction/installer/utils/prompts.py
 git commit -m "feat(installer): add output utilities and interactive prompts"
 ```
@@ -795,7 +795,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_installer_steps.py::TestPrerequisites -v`
+Run: `cd xfunction && python -m pytest tests/test_installer_steps.py::TestPrerequisites -v`
 Expected: FAIL — `ModuleNotFoundError`
 
 - [ ] **Step 3: Implement prerequisites step**
@@ -918,13 +918,13 @@ def teardown(config: InstallerConfig, az: AzCli) -> None:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_installer_steps.py::TestPrerequisites -v`
+Run: `cd xfunction && python -m pytest tests/test_installer_steps.py::TestPrerequisites -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/installer/steps/__init__.py xfunction/installer/steps/prerequisites.py xfunction/tests/test_installer_steps.py
 git commit -m "feat(installer): add prerequisites check step"
 ```
@@ -1042,7 +1042,7 @@ class TestAppRegistration(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_installer_steps.py -v`
+Run: `cd xfunction && python -m pytest tests/test_installer_steps.py -v`
 Expected: FAIL — import errors
 
 - [ ] **Step 3: Implement resource_group step**
@@ -1274,13 +1274,13 @@ def teardown(config: InstallerConfig, az: AzCli) -> None:
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_installer_steps.py -v`
+Run: `cd xfunction && python -m pytest tests/test_installer_steps.py -v`
 Expected: All tests PASS
 
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/installer/steps/resource_group.py xfunction/installer/steps/storage_account.py xfunction/installer/steps/app_registration.py xfunction/tests/test_installer_steps.py
 git commit -m "feat(installer): add resource_group, storage_account, and app_registration steps"
 ```
@@ -1643,7 +1643,7 @@ def teardown(config: InstallerConfig, az: AzCli) -> None:
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/installer/steps/function_app.py xfunction/installer/steps/rbac.py xfunction/installer/steps/deployment.py xfunction/installer/steps/verification.py
 git commit -m "feat(installer): add function_app, rbac, deployment, and verification steps"
 ```
@@ -1786,7 +1786,7 @@ def run(config: InstallerConfig, az: AzCli, state: InstallerState) -> None:
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/installer/steps/teardown.py
 git commit -m "feat(installer): add teardown orchestrator"
 ```
@@ -1861,7 +1861,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_installer_cli.py -v`
+Run: `cd xfunction && python -m pytest tests/test_installer_cli.py -v`
 Expected: FAIL — import error
 
 - [ ] **Step 3: Implement CLI and orchestration**
@@ -2254,18 +2254,18 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run CLI tests to verify they pass**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_installer_cli.py -v`
+Run: `cd xfunction && python -m pytest tests/test_installer_cli.py -v`
 Expected: All 5 tests PASS
 
 - [ ] **Step 5: Run all installer tests**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/test_az_cli.py tests/test_installer_config.py tests/test_installer_steps.py tests/test_installer_cli.py -v`
+Run: `cd xfunction && python -m pytest tests/test_az_cli.py tests/test_installer_config.py tests/test_installer_steps.py tests/test_installer_cli.py -v`
 Expected: All tests PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/installer/__main__.py xfunction/installer/cli.py xfunction/tests/test_installer_cli.py
 git commit -m "feat(installer): add CLI entry point and install/uninstall orchestration"
 ```
@@ -2288,7 +2288,7 @@ Add the following line to `xfunction/.gitignore`:
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add xfunction/.gitignore
 git commit -m "chore: add installer state file to .gitignore"
 ```
@@ -2303,21 +2303,21 @@ git commit -m "chore: add installer state file to .gitignore"
 
 - [ ] **Step 1: Run all xfunction tests together**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m pytest tests/ -v --ignore=tests/test_integration.py`
+Run: `cd xfunction && python -m pytest tests/ -v --ignore=tests/test_integration.py`
 Expected: All tests PASS (unit tests for az_cli, config, steps, cli, plus existing tests)
 
 - [ ] **Step 2: Manual smoke test of --help output**
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m installer install --help`
+Run: `cd xfunction && python -m installer install --help`
 Expected: Shows usage with all install options
 
-Run: `cd /Users/scottzionic/crosstache/xfunction && python -m installer uninstall --help`
+Run: `cd xfunction && python -m installer uninstall --help`
 Expected: Shows usage with uninstall options
 
 - [ ] **Step 3: Commit any final fixes**
 
 ```bash
-cd /Users/scottzionic/crosstache
+cd .
 git add -A xfunction/installer/ xfunction/tests/test_az_cli.py xfunction/tests/test_installer_config.py xfunction/tests/test_installer_steps.py xfunction/tests/test_installer_cli.py
 git commit -m "feat(installer): complete xfunction installer implementation"
 ```
