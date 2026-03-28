@@ -12,8 +12,10 @@ class TestParseArgs(unittest.TestCase):
     def test_install_defaults(self):
         args = parse_args(["install"])
         self.assertEqual(args.command, "install")
-        self.assertEqual(args.resource_group, "rg-xfunction")
-        self.assertEqual(args.location, "eastus")
+        # String args default to None so build_config can distinguish "not provided"
+        # from "explicitly set to the same value as the dataclass default".
+        self.assertIsNone(args.resource_group)
+        self.assertIsNone(args.location)
         self.assertFalse(args.non_interactive)
         self.assertFalse(args.verbose)
 

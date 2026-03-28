@@ -31,46 +31,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # Install
     install_p = subparsers.add_parser("install", help="Set up all Azure resources")
-    install_p.add_argument("--subscription-id", default="")
-    install_p.add_argument("--resource-group", default="rg-xfunction")
-    install_p.add_argument("--location", default="eastus")
-    install_p.add_argument("--function-app-name", default="fa-xfunction")
-    install_p.add_argument("--storage-account", default="")
-    install_p.add_argument("--app-name", default="xfunction-rbac")
+    install_p.add_argument("--subscription-id", default=None)
+    install_p.add_argument("--resource-group", default=None)
+    install_p.add_argument("--location", default=None)
+    install_p.add_argument("--function-app-name", default=None)
+    install_p.add_argument("--storage-account", default=None)
+    install_p.add_argument("--app-name", default=None)
     install_p.add_argument("--non-interactive", action="store_true")
     install_p.add_argument("--verbose", action="store_true")
     install_p.add_argument("--skip-deploy", action="store_true")
-    install_p.add_argument("--config-file", default="")
+    install_p.add_argument("--config-file", default=None)
     install_p.add_argument("--resume", action="store_true")
-    install_p.add_argument("--output", dest="output_format", default="text", choices=["text", "json"])
+    install_p.add_argument("--output", dest="output_format", default=None, choices=["text", "json"])
 
     # Uninstall
     uninstall_p = subparsers.add_parser("uninstall", help="Remove all Azure resources")
-    uninstall_p.add_argument("--subscription-id", default="")
-    uninstall_p.add_argument("--resource-group", default="rg-xfunction")
-    uninstall_p.add_argument("--function-app-name", default="fa-xfunction")
-    uninstall_p.add_argument("--app-name", default="xfunction-rbac")
+    uninstall_p.add_argument("--subscription-id", default=None)
+    uninstall_p.add_argument("--resource-group", default=None)
+    uninstall_p.add_argument("--function-app-name", default=None)
+    uninstall_p.add_argument("--app-name", default=None)
     uninstall_p.add_argument("--non-interactive", action="store_true")
     uninstall_p.add_argument("--verbose", action="store_true")
     uninstall_p.add_argument("--keep-resource-group", action="store_true")
-    uninstall_p.add_argument("--output", dest="output_format", default="text", choices=["text", "json"])
+    uninstall_p.add_argument("--output", dest="output_format", default=None, choices=["text", "json"])
 
     # Status
     status_p = subparsers.add_parser("status", help="Show resource state")
-    status_p.add_argument("--subscription-id", default="")
-    status_p.add_argument("--resource-group", default="rg-xfunction")
-    status_p.add_argument("--function-app-name", default="fa-xfunction")
-    status_p.add_argument("--app-name", default="xfunction-rbac")
+    status_p.add_argument("--subscription-id", default=None)
+    status_p.add_argument("--resource-group", default=None)
+    status_p.add_argument("--function-app-name", default=None)
+    status_p.add_argument("--app-name", default=None)
     status_p.add_argument("--verbose", action="store_true")
-    status_p.add_argument("--output", dest="output_format", default="text", choices=["text", "json"])
+    status_p.add_argument("--output", dest="output_format", default=None, choices=["text", "json"])
 
     # Verify
     verify_p = subparsers.add_parser("verify", help="Run health check")
-    verify_p.add_argument("--subscription-id", default="")
-    verify_p.add_argument("--resource-group", default="rg-xfunction")
-    verify_p.add_argument("--function-app-name", default="fa-xfunction")
+    verify_p.add_argument("--subscription-id", default=None)
+    verify_p.add_argument("--resource-group", default=None)
+    verify_p.add_argument("--function-app-name", default=None)
     verify_p.add_argument("--verbose", action="store_true")
-    verify_p.add_argument("--output", dest="output_format", default="text", choices=["text", "json"])
+    verify_p.add_argument("--output", dest="output_format", default=None, choices=["text", "json"])
 
     return parser.parse_args(argv)
 
@@ -79,16 +79,21 @@ def build_config(args: argparse.Namespace) -> InstallerConfig:
         config = InstallerConfig.from_json_file(args.config_file)
     else:
         config = InstallerConfig()
-    # Only override config with CLI args that were explicitly provided by the user.
-    # Compare against dataclass defaults to avoid clobbering config-file values.
+    # Apply CLI args over config-file values using type-aware logic:
+    #   - String args default to None in parse_args; None means "not provided" → don't override.
+    #     Any non-None value (including one that matches the dataclass default) was explicit → override.
+    #   - Boolean flags use action="store_true" so False means "not passed" → only override when True.
     defaults = InstallerConfig()
     for field_name in InstallerConfig.__dataclass_fields__:
         arg_name = field_name.replace("-", "_")
         if hasattr(args, arg_name):
             val = getattr(args, arg_name)
-            default_val = getattr(defaults, field_name)
-            if val and val != default_val:
-                setattr(config, field_name, val)
+            if isinstance(getattr(defaults, field_name), bool):
+                if val:  # True means user explicitly passed the flag
+                    setattr(config, field_name, val)
+            else:
+                if val is not None:  # non-None means user explicitly provided a value
+                    setattr(config, field_name, val)
     return config
 
 def prompt_config(config: InstallerConfig, az: AzCli) -> InstallerConfig:
@@ -193,6 +198,24 @@ def run_install(config: InstallerConfig) -> int:
 
             if step_name == "app_registration":
                 app_reg_data = result
+                # app_registration.run() returns client_secret=None when the app already existed
+                # (no new credential was created). If we proceed without a secret, function_app
+                # will silently skip setting AZURE_CLIENT_SECRET and auth will fail.
+                if not app_reg_data.get("client_secret"):
+                    app_id = app_reg_data.get("app_id", "")
+                    if app_id:
+                        warning("App registration already existed — a new client secret is needed")
+                        if not config.non_interactive:
+                            if confirm("Generate a new client secret for the existing app?", default=True):
+                                cred = az.run("ad", "app", "credential", "reset", "--id", app_id, "--years", "2")
+                                app_reg_data["client_secret"] = cred.get("password", "")
+                                success("Client secret generated")
+                            if not app_reg_data.get("client_secret"):
+                                app_reg_data["client_secret"] = prompt("Enter client secret manually", required=True)
+                        else:
+                            cred = az.run("ad", "app", "credential", "reset", "--id", app_id, "--years", "2")
+                            app_reg_data["client_secret"] = cred.get("password", "")
+                            success("Client secret generated (non-interactive)")
             elif step_name == "storage_account":
                 sa_data = result
                 config.storage_account = result.get("name", "")
