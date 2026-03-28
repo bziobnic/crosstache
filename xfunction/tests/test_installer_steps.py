@@ -108,6 +108,18 @@ class TestStorageAccount(unittest.TestCase):
         config = InstallerConfig(subscription_id="sub-123")
         self.assertFalse(sa_exists(config, az))
 
+    @patch("subprocess.run")
+    def test_check_exists_returns_false_when_resource_group_not_found(self, mock_subprocess):
+        # Regression: when resource group was externally deleted, az.run() raised
+        # AzNotFoundError and crashed teardown before the confirmation prompt.
+        mock_subprocess.return_value = MagicMock(
+            returncode=3, stdout="", stderr="ResourceGroupNotFound: Resource group not found"
+        )
+        az = AzCli(verbose=False)
+        config = InstallerConfig(subscription_id="sub-123", resource_group="deleted-rg")
+        # Must return False, not raise
+        self.assertFalse(sa_exists(config, az))
+
 
 class TestAppRegistration(unittest.TestCase):
 

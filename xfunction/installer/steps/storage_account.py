@@ -10,7 +10,9 @@ def _generate_name() -> str:
     return f"xfunc{suffix}"
 
 def _find_tagged_account(config: InstallerConfig, az: AzCli) -> dict | None:
-    accounts = az.run("storage", "account", "list", "--resource-group", config.resource_group, "--query", "[?tags.\"xfunction-installer\"=='true']")
+    # Use run_or_none so AzNotFoundError (e.g. resource group already deleted) returns None
+    # gracefully instead of crashing teardown before the confirmation prompt.
+    accounts = az.run_or_none("storage", "account", "list", "--resource-group", config.resource_group, "--query", "[?tags.\"xfunction-installer\"=='true']")
     if isinstance(accounts, list) and accounts:
         return accounts[0]
     return None
