@@ -16,9 +16,10 @@ def check_exists(config: InstallerConfig, az: AzCli) -> bool:
         return False
 
 def _find_xfunction_dir() -> str:
-    installer_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.path.exists(os.path.join(installer_dir, "function_app.py")):
-        return installer_dir
+    # __file__ is xfunction/installer/steps/deployment.py — need 3 dirname() to reach xfunction/
+    xfunction_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if os.path.exists(os.path.join(xfunction_dir, "function_app.py")):
+        return xfunction_dir
     raise FileNotFoundError("Cannot find xfunction directory. Run the installer from the xfunction/ directory.")
 
 def _create_deployment_zip(source_dir: str, zip_path: str) -> None:
