@@ -929,17 +929,31 @@ async fn execute_file_upload_recursive(
                 println!("Uploading: {}", local_path_str);
             }
         }
-        let result = execute_file_upload(
-            blob_manager,
-            &local_path_str,
-            Some(file_info.blob_name.clone()), // Use the calculated blob name
-            group.clone(),
-            metadata.clone(),
-            tag.clone(),
-            None, // No content type override for batch uploads
-            config,
-        )
-        .await;
+
+        // Call blob manager directly (not execute_file_upload) to avoid
+        // per-file output that conflicts with MultiProgress rendering.
+        let result = {
+            use crate::blob::models::FileUploadRequest;
+            use std::collections::HashMap;
+
+            let content = std::fs::read(&file_info.local_path).map_err(|e| {
+                CrosstacheError::config(format!(
+                    "Failed to read {}: {e}",
+                    file_info.local_path.display()
+                ))
+            })?;
+            let upload_request = FileUploadRequest {
+                name: file_info.blob_name.clone(),
+                content,
+                content_type: None,
+                groups: group.clone(),
+                metadata: metadata.iter().cloned().collect::<HashMap<_, _>>(),
+                tags: tag.iter().cloned().collect::<HashMap<_, _>>(),
+            };
+            blob_manager
+                .upload_file(upload_request, &NoopReporter)
+                .await
+        };
 
         match result {
             Ok(_) => {
@@ -1275,15 +1289,21 @@ async fn execute_file_download_recursive(
             }
         }
 
-        // Download the file
-        let result = execute_file_download(
-            blob_manager,
-            blob_name,
-            Some(local_path_str.clone()),
-            force,
-            config,
-        )
-        .await;
+        // Call blob manager directly (not execute_file_download) to avoid
+        // per-file output that conflicts with MultiProgress rendering.
+        let result = {
+            use crate::blob::models::FileDownloadRequest;
+
+            let download_request = FileDownloadRequest {
+                name: blob_name.to_string(),
+            };
+            let content = blob_manager
+                .download_file(download_request, &NoopReporter)
+                .await?;
+            std::fs::write(&local_path, content).map_err(|e| {
+                CrosstacheError::config(format!("Failed to write file {}: {e}", local_path_str))
+            })
+        };
 
         match result {
             Ok(_) => {
