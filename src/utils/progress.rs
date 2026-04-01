@@ -25,6 +25,7 @@ fn spinner_style() -> ProgressStyle {
 /// Trait for reporting progress during file operations.
 /// All methods are no-ops by default so that callers can pass a `NoopReporter`
 /// when progress display is unwanted (e.g., non-TTY or tests).
+#[allow(dead_code)]
 pub trait ProgressReporter: Send + Sync {
     fn set_total(&self, total: u64);
     fn advance(&self, amount: u64);
@@ -191,6 +192,8 @@ impl MultiProgressContext {
     }
 
     /// Create a per-file reporter inserted above the overall bar.
+    /// Currently unused — reserved for future per-file byte-level progress in batch ops.
+    #[allow(dead_code)]
     pub fn create_child(&self, file_size: u64, name: &str) -> Box<dyn ProgressReporter> {
         if !self.is_tty {
             return Box::new(NoopReporter);

@@ -616,7 +616,7 @@ impl BlobManager {
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent_uploads));
         let mut block_list = BlockList::default();
         let mut block_idx: u32 = 0;
-        let mut upload_tasks: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+        let mut upload_tasks: Vec<(tokio::task::JoinHandle<Result<()>>, u64)> = Vec::new();
 
         // Read chunks and spawn concurrent block uploads.
         loop {
@@ -639,9 +639,10 @@ impl BlobManager {
                 .await
                 .map_err(|e| CrosstacheError::unknown(format!("Semaphore error: {e}")))?;
             let blob_client = blob_client.clone();
+            let actual_chunk_size = chunk.len() as u64;
             let chunk_bytes = chunk; // Vec<u8> satisfies Into<azure_core::Body>
 
-            upload_tasks.push(tokio::spawn(async move {
+            upload_tasks.push((tokio::spawn(async move {
                 let _permit = permit; // held for the duration of the upload
                 blob_client
                     .put_block(block_id, chunk_bytes)
@@ -650,15 +651,15 @@ impl BlobManager {
                         CrosstacheError::azure_api(format!("Failed to upload block: {e}"))
                     })?;
                 Ok(())
-            }));
+            }), actual_chunk_size));
         }
 
-        // Wait for all block uploads to finish.
-        for task in upload_tasks {
+        // Wait for all block uploads to finish and report progress.
+        for (task, bytes) in upload_tasks {
             task.await
                 .map_err(|e| CrosstacheError::unknown(format!("Upload task panicked: {e}")))?
                 .map_err(|e: CrosstacheError| e)?;
-            reporter.advance(chunk_size as u64);
+            reporter.advance(bytes);
         }
         reporter.finish_clear();
 
