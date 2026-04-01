@@ -5,6 +5,23 @@
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
+// ---------------------------------------------------------------------------
+// Private style helpers
+// ---------------------------------------------------------------------------
+
+fn bar_style() -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .expect("valid template")
+        .progress_chars("#>-")
+}
+
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::default_spinner()
+        .template("{spinner:.green} {msg}")
+        .expect("valid template")
+}
+
 /// Trait for reporting progress during file operations.
 /// All methods are no-ops by default so that callers can pass a `NoopReporter`
 /// when progress display is unwanted (e.g., non-TTY or tests).
@@ -43,24 +60,14 @@ pub struct BarReporter {
 impl BarReporter {
     pub fn new(total: u64) -> Self {
         let bar = ProgressBar::new(total);
-        bar.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                .expect("valid template")
-                .progress_chars("#>-"),
-        );
+        bar.set_style(bar_style());
         Self { bar }
     }
 
     /// Create a BarReporter managed by a `MultiProgress`.
     pub fn new_in(mp: &MultiProgress, total: u64) -> Self {
         let bar = mp.add(ProgressBar::new(total));
-        bar.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                .expect("valid template")
-                .progress_chars("#>-"),
-        );
+        bar.set_style(bar_style());
         Self { bar }
     }
 }
@@ -95,11 +102,7 @@ pub struct SpinnerReporter {
 impl SpinnerReporter {
     pub fn new(message: &str) -> Self {
         let bar = ProgressBar::new_spinner();
-        bar.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .expect("valid template"),
-        );
+        bar.set_style(spinner_style());
         bar.set_message(message.to_string());
         bar.enable_steady_tick(std::time::Duration::from_millis(100));
         Self { bar }
@@ -108,11 +111,7 @@ impl SpinnerReporter {
     /// Create a SpinnerReporter managed by a `MultiProgress`.
     pub fn new_in(mp: &MultiProgress, message: &str) -> Self {
         let bar = mp.add(ProgressBar::new_spinner());
-        bar.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .expect("valid template"),
-        );
+        bar.set_style(spinner_style());
         bar.set_message(message.to_string());
         bar.enable_steady_tick(std::time::Duration::from_millis(100));
         Self { bar }
