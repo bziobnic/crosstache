@@ -14,6 +14,7 @@ pub mod network;
 pub mod output;
 pub mod pager;
 pub mod pagination;
+pub mod progress;
 pub mod resource_detector;
 pub mod retry;
 pub mod sanitizer;
