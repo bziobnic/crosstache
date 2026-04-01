@@ -25,6 +25,7 @@ fn create_test_config() -> Config {
             enable_large_file_support: true,
             chunk_size_mb: 4,
             max_concurrent_uploads: 3,
+            progress_threshold_mb: 5,
         }),
         ..Default::default()
     }

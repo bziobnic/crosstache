@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use crate::utils::output;
+use crate::utils::progress::NoopReporter;
 use std::path::{Path, PathBuf};
 
 pub(crate) async fn execute_file_command(command: FileCommands, config: Config) -> Result<()> {
@@ -354,7 +355,7 @@ async fn execute_file_upload(
     // Upload file
     println!("Uploading file '{file_path}' as '{remote_name}'...");
 
-    let file_info = blob_manager.upload_file(upload_request).await?;
+    let file_info = blob_manager.upload_file(upload_request, &NoopReporter).await?;
     output::success(&format!("Successfully uploaded file '{}'", file_info.name));
     println!("   Size: {} bytes", file_info.size);
     println!("   Content-Type: {}", file_info.content_type);
@@ -393,7 +394,7 @@ async fn execute_file_download(
 
     println!("Downloading file '{name}' to '{output_path}'...");
 
-    let content = blob_manager.download_file(download_request).await?;
+    let content = blob_manager.download_file(download_request, &NoopReporter).await?;
     fs::write(&output_path, content)
         .map_err(|e| CrosstacheError::config(format!("Failed to write file {output_path}: {e}")))?;
     output::success(&format!("Successfully downloaded file '{name}'"));
@@ -1529,7 +1530,7 @@ async fn file_sync_perform_upload(
     if !output_json {
         println!("upload: {} → {blob_name}", info.local_path.display());
     }
-    let uploaded_info = blob_manager.upload_file(upload_request).await?;
+    let uploaded_info = blob_manager.upload_file(upload_request, &NoopReporter).await?;
     sync::set_file_mtime_utc(&info.local_path, uploaded_info.last_modified)?;
     Ok(())
 }
@@ -1555,7 +1556,7 @@ async fn file_sync_perform_download(
     let download_request = FileDownloadRequest {
         name: blob_name.to_string(),
     };
-    let content = blob_manager.download_file(download_request).await?;
+    let content = blob_manager.download_file(download_request, &NoopReporter).await?;
     fs::write(&target, content).map_err(|e| {
         CrosstacheError::config(format!("Failed to write {}: {e}", target.display()))
     })?;
