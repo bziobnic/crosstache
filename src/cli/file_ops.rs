@@ -8,8 +8,18 @@ use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use crate::utils::output;
-use crate::utils::progress::NoopReporter;
+use crate::utils::progress::{self, MultiProgressContext, NoopReporter};
 use std::path::{Path, PathBuf};
+
+fn progress_threshold_bytes(config: &Config) -> u64 {
+    let blob_config = config.get_blob_config();
+    (blob_config.progress_threshold_mb as u64) * 1024 * 1024
+}
+
+fn is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
 
 pub(crate) async fn execute_file_command(command: FileCommands, config: Config) -> Result<()> {
     // Create blob manager
@@ -296,7 +306,7 @@ async fn execute_file_upload(
     metadata: Vec<(String, String)>,
     tags: Vec<(String, String)>,
     content_type: Option<String>,
-    _config: &Config,
+    config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileUploadRequest;
     use std::collections::HashMap;
@@ -313,6 +323,7 @@ async fn execute_file_upload(
     // Read file content
     let content = fs::read(file_path)
         .map_err(|e| CrosstacheError::config(format!("Failed to read file {file_path}: {e}")))?;
+    let file_size = content.len() as u64;
 
     if content.is_empty() {
         output::warn(&format!(
@@ -353,9 +364,15 @@ async fn execute_file_upload(
     };
 
     // Upload file
-    println!("Uploading file '{file_path}' as '{remote_name}'...");
+    let threshold = progress_threshold_bytes(config);
+    let tty = is_tty();
+    if !tty {
+        println!("Uploading file '{file_path}' as '{remote_name}'...");
+    }
+    let reporter = progress::create_file_reporter(file_size, threshold, tty);
+    reporter.set_message(format!("Uploading '{remote_name}'..."));
 
-    let file_info = blob_manager.upload_file(upload_request, &NoopReporter).await?;
+    let file_info = blob_manager.upload_file(upload_request, reporter.as_ref()).await?;
     output::success(&format!("Successfully uploaded file '{}'", file_info.name));
     println!("   Size: {} bytes", file_info.size);
     println!("   Content-Type: {}", file_info.content_type);
@@ -371,7 +388,7 @@ async fn execute_file_download(
     name: &str,
     output: Option<String>,
     force: bool,
-    _config: &Config,
+    config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileDownloadRequest;
     use std::fs;
@@ -392,9 +409,15 @@ async fn execute_file_download(
         name: name.to_string(),
     };
 
-    println!("Downloading file '{name}' to '{output_path}'...");
+    let threshold = progress_threshold_bytes(config);
+    let tty = is_tty();
+    if !tty {
+        println!("Downloading file '{name}' to '{output_path}'...");
+    }
+    let reporter = progress::create_file_reporter(0, threshold, tty);
+    reporter.set_message(format!("Downloading '{name}'..."));
 
-    let content = blob_manager.download_file(download_request, &NoopReporter).await?;
+    let content = blob_manager.download_file(download_request, reporter.as_ref()).await?;
     fs::write(&output_path, content)
         .map_err(|e| CrosstacheError::config(format!("Failed to write file {output_path}: {e}")))?;
     output::success(&format!("Successfully downloaded file '{name}'"));
@@ -874,6 +897,9 @@ async fn execute_file_upload_recursive(
 
     let mut success_count = 0;
     let mut failure_count = 0;
+    let threshold = progress_threshold_bytes(config);
+    let tty = is_tty();
+    let mp = MultiProgressContext::new(all_files.len() as u64, threshold, tty);
 
     // Validate blob name lengths
     for file_info in &all_files {
@@ -896,10 +922,12 @@ async fn execute_file_upload_recursive(
     for file_info in &all_files {
         let local_path_str = file_info.local_path.to_string_lossy();
 
-        if !flatten {
-            println!("Uploading: {} → {}", local_path_str, file_info.blob_name);
-        } else {
-            println!("Uploading: {}", local_path_str);
+        if !tty {
+            if !flatten {
+                println!("Uploading: {} → {}", local_path_str, file_info.blob_name);
+            } else {
+                println!("Uploading: {}", local_path_str);
+            }
         }
         let result = execute_file_upload(
             blob_manager,
@@ -916,16 +944,21 @@ async fn execute_file_upload_recursive(
         match result {
             Ok(_) => {
                 success_count += 1;
+                mp.log(&format!("Uploaded: {}", file_info.blob_name));
+                mp.advance_overall(&file_info.blob_name);
             }
             Err(e) => {
                 output::error(&format!("Failed to upload '{}': {}", local_path_str, e));
                 failure_count += 1;
+                mp.advance_overall(&file_info.blob_name);
                 if !continue_on_error {
                     return Err(e);
                 }
             }
         }
     }
+
+    mp.finish();
 
     // Print summary
     println!();
@@ -1143,6 +1176,9 @@ async fn execute_file_download_recursive(
 
     let mut success_count = 0;
     let mut failure_count = 0;
+    let threshold = progress_threshold_bytes(config);
+    let tty = is_tty();
+    let mp = MultiProgressContext::new(all_files_to_download.len() as u64, threshold, tty);
 
     for file_info in &all_files_to_download {
         let blob_name = &file_info.name;
@@ -1231,10 +1267,12 @@ async fn execute_file_download_recursive(
             continue;
         }
 
-        if !flatten {
-            println!("Downloading: {} → {}", blob_name, local_path_str);
-        } else {
-            println!("Downloading: {}", blob_name);
+        if !tty {
+            if !flatten {
+                println!("Downloading: {} → {}", blob_name, local_path_str);
+            } else {
+                println!("Downloading: {}", blob_name);
+            }
         }
 
         // Download the file
@@ -1250,16 +1288,21 @@ async fn execute_file_download_recursive(
         match result {
             Ok(_) => {
                 success_count += 1;
+                mp.log(&format!("Downloaded: {}", blob_name));
+                mp.advance_overall(blob_name);
             }
             Err(e) => {
                 output::error(&format!("Failed to download '{}': {}", blob_name, e));
                 failure_count += 1;
+                mp.advance_overall(blob_name);
                 if !continue_on_error {
                     return Err(e);
                 }
             }
         }
     }
+
+    mp.finish();
 
     // Print summary
     println!();
@@ -1511,6 +1554,7 @@ async fn file_sync_perform_upload(
     info: &FileUploadInfo,
     blob_name: &str,
     output_json: bool,
+    reporter: &dyn crate::utils::progress::ProgressReporter,
 ) -> Result<()> {
     use crate::blob::models::FileUploadRequest;
     use crate::blob::sync;
@@ -1530,7 +1574,7 @@ async fn file_sync_perform_upload(
     if !output_json {
         println!("upload: {} → {blob_name}", info.local_path.display());
     }
-    let uploaded_info = blob_manager.upload_file(upload_request, &NoopReporter).await?;
+    let uploaded_info = blob_manager.upload_file(upload_request, reporter).await?;
     sync::set_file_mtime_utc(&info.local_path, uploaded_info.last_modified)?;
     Ok(())
 }
@@ -1543,6 +1587,7 @@ async fn file_sync_perform_download(
     blob_name: &str,
     remote_info: &crate::blob::models::FileInfo,
     output_json: bool,
+    reporter: &dyn crate::utils::progress::ProgressReporter,
 ) -> Result<()> {
     use crate::blob::models::FileDownloadRequest;
     use crate::blob::sync;
@@ -1556,7 +1601,7 @@ async fn file_sync_perform_download(
     let download_request = FileDownloadRequest {
         name: blob_name.to_string(),
     };
-    let content = blob_manager.download_file(download_request, &NoopReporter).await?;
+    let content = blob_manager.download_file(download_request, reporter).await?;
     fs::write(&target, content).map_err(|e| {
         CrosstacheError::config(format!("Failed to write {}: {e}", target.display()))
     })?;
@@ -1647,23 +1692,29 @@ async fn execute_file_sync(
         ..Default::default()
     };
     let mut mutated = false;
+    let threshold = progress_threshold_bytes(config);
+    let tty = is_tty() && !dry_run;
 
     match direction {
         SyncDirection::Up => {
             let mut sorted_names: Vec<String> = local_names.iter().cloned().collect();
             sorted_names.sort();
-            for blob_name in sorted_names {
-                let info = local_by_blob.get(&blob_name).unwrap();
-                let (size, mtime) = *local_meta.get(&blob_name).unwrap();
-                let need = match remote_by_name.get(&blob_name) {
+            let mp = MultiProgressContext::new(sorted_names.len() as u64, threshold, tty);
+            for blob_name in &sorted_names {
+                let info = local_by_blob.get(blob_name).unwrap();
+                let (size, mtime) = *local_meta.get(blob_name).unwrap();
+                let need = match remote_by_name.get(blob_name) {
                     None => true,
                     Some(r) => !sync::should_skip_sync_up(size, mtime, r),
                 };
                 if !need {
                     summary.skipped += 1;
-                    if !config.output_json {
+                    if tty {
+                        mp.log(&format!("skip (up to date): {blob_name}"));
+                    } else if !config.output_json {
                         println!("skip (up to date): {blob_name}");
                     }
+                    mp.advance_overall(blob_name);
                     continue;
                 }
                 if dry_run {
@@ -1674,13 +1725,17 @@ async fn execute_file_sync(
                         );
                     }
                     summary.uploaded += 1;
+                    mp.advance_overall(blob_name);
                     continue;
                 }
-                file_sync_perform_upload(blob_manager, info, &blob_name, config.output_json)
+                file_sync_perform_upload(blob_manager, info, blob_name, config.output_json, &NoopReporter)
                     .await?;
                 summary.uploaded += 1;
+                mp.log(&format!("upload: {} → {blob_name}", info.local_path.display()));
+                mp.advance_overall(blob_name);
                 mutated = true;
             }
+            mp.finish();
             file_sync_delete_remote_not_local(
                 blob_manager,
                 direction,
@@ -1698,10 +1753,11 @@ async fn execute_file_sync(
         SyncDirection::Down => {
             let mut remote_names: Vec<String> = remote_by_name.keys().cloned().collect();
             remote_names.sort();
-            for blob_name in remote_names {
-                let remote_info = remote_by_name.get(&blob_name).unwrap();
-                let target = sync::local_path_from_blob(base_path, prefix_ref, &blob_name);
-                sync_assert_safe_local_path(base_path, &target, &blob_name)?;
+            let mp = MultiProgressContext::new(remote_names.len() as u64, threshold, tty);
+            for blob_name in &remote_names {
+                let remote_info = remote_by_name.get(blob_name).unwrap();
+                let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name);
+                sync_assert_safe_local_path(base_path, &target, blob_name)?;
 
                 let need = if !target.exists() {
                     true
@@ -1726,10 +1782,13 @@ async fn execute_file_sync(
                 };
 
                 if !need {
-                    if !config.output_json {
+                    if tty {
+                        mp.log(&format!("skip (up to date): {blob_name}"));
+                    } else if !config.output_json {
                         println!("skip (up to date): {blob_name}");
                     }
                     summary.skipped += 1;
+                    mp.advance_overall(blob_name);
                     continue;
                 }
 
@@ -1738,6 +1797,7 @@ async fn execute_file_sync(
                         println!("download (dry-run): {blob_name} → {}", target.display());
                     }
                     summary.downloaded += 1;
+                    mp.advance_overall(blob_name);
                     continue;
                 }
 
@@ -1745,28 +1805,33 @@ async fn execute_file_sync(
                     blob_manager,
                     base_path,
                     prefix_ref,
-                    &blob_name,
+                    blob_name,
                     remote_info,
                     config.output_json,
+                    &NoopReporter,
                 )
                 .await?;
                 summary.downloaded += 1;
+                mp.log(&format!("download: {blob_name} → {}", target.display()));
+                mp.advance_overall(blob_name);
                 mutated = true;
             }
+            mp.finish();
         }
         SyncDirection::Both => {
             let remote_keys: HashSet<String> = remote_by_name.keys().cloned().collect();
             let all_names: HashSet<String> = local_names.union(&remote_keys).cloned().collect();
             let mut ordered: Vec<String> = all_names.into_iter().collect();
             ordered.sort();
+            let mp = MultiProgressContext::new(ordered.len() as u64, threshold, tty);
 
-            for blob_name in ordered {
-                let local_present = local_meta.contains_key(&blob_name);
-                let remote_present = remote_by_name.contains_key(&blob_name);
+            for blob_name in &ordered {
+                let local_present = local_meta.contains_key(blob_name);
+                let remote_present = remote_by_name.contains_key(blob_name);
 
                 match (local_present, remote_present) {
                     (true, false) => {
-                        let info = local_by_blob.get(&blob_name).unwrap();
+                        let info = local_by_blob.get(blob_name).unwrap();
                         if dry_run {
                             if !config.output_json {
                                 println!(
@@ -1775,51 +1840,62 @@ async fn execute_file_sync(
                                 );
                             }
                             summary.uploaded += 1;
+                            mp.advance_overall(blob_name);
                             continue;
                         }
                         file_sync_perform_upload(
                             blob_manager,
                             info,
-                            &blob_name,
+                            blob_name,
                             config.output_json,
+                            &NoopReporter,
                         )
                         .await?;
                         summary.uploaded += 1;
+                        mp.log(&format!("upload: {} → {blob_name}", info.local_path.display()));
+                        mp.advance_overall(blob_name);
                         mutated = true;
                     }
                     (false, true) => {
-                        let remote_info = remote_by_name.get(&blob_name).unwrap();
-                        let target = sync::local_path_from_blob(base_path, prefix_ref, &blob_name);
-                        sync_assert_safe_local_path(base_path, &target, &blob_name)?;
+                        let remote_info = remote_by_name.get(blob_name).unwrap();
+                        let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name);
+                        sync_assert_safe_local_path(base_path, &target, blob_name)?;
                         if dry_run {
                             if !config.output_json {
                                 println!("download (dry-run): {blob_name} → {}", target.display());
                             }
                             summary.downloaded += 1;
+                            mp.advance_overall(blob_name);
                             continue;
                         }
                         file_sync_perform_download(
                             blob_manager,
                             base_path,
                             prefix_ref,
-                            &blob_name,
+                            blob_name,
                             remote_info,
                             config.output_json,
+                            &NoopReporter,
                         )
                         .await?;
                         summary.downloaded += 1;
+                        mp.log(&format!("download: {blob_name} → {}", target.display()));
+                        mp.advance_overall(blob_name);
                         mutated = true;
                     }
                     (true, true) => {
-                        let info = local_by_blob.get(&blob_name).unwrap();
-                        let (size, mtime) = *local_meta.get(&blob_name).unwrap();
-                        let remote_info = remote_by_name.get(&blob_name).unwrap();
+                        let info = local_by_blob.get(blob_name).unwrap();
+                        let (size, mtime) = *local_meta.get(blob_name).unwrap();
+                        let remote_info = remote_by_name.get(blob_name).unwrap();
                         match sync::resolve_both(size, mtime, remote_info) {
                             BothAction::Skip => {
-                                if !config.output_json {
+                                if tty {
+                                    mp.log(&format!("skip: {blob_name}"));
+                                } else if !config.output_json {
                                     println!("skip: {blob_name}");
                                 }
                                 summary.skipped += 1;
+                                mp.advance_overall(blob_name);
                             }
                             BothAction::Upload => {
                                 if dry_run {
@@ -1830,22 +1906,26 @@ async fn execute_file_sync(
                                         );
                                     }
                                     summary.uploaded += 1;
+                                    mp.advance_overall(blob_name);
                                     continue;
                                 }
                                 file_sync_perform_upload(
                                     blob_manager,
                                     info,
-                                    &blob_name,
+                                    blob_name,
                                     config.output_json,
+                                    &NoopReporter,
                                 )
                                 .await?;
                                 summary.uploaded += 1;
+                                mp.log(&format!("upload: {} → {blob_name}", info.local_path.display()));
+                                mp.advance_overall(blob_name);
                                 mutated = true;
                             }
                             BothAction::Download => {
                                 let target =
-                                    sync::local_path_from_blob(base_path, prefix_ref, &blob_name);
-                                sync_assert_safe_local_path(base_path, &target, &blob_name)?;
+                                    sync::local_path_from_blob(base_path, prefix_ref, blob_name);
+                                sync_assert_safe_local_path(base_path, &target, blob_name)?;
                                 if dry_run {
                                     if !config.output_json {
                                         println!(
@@ -1854,18 +1934,22 @@ async fn execute_file_sync(
                                         );
                                     }
                                     summary.downloaded += 1;
+                                    mp.advance_overall(blob_name);
                                     continue;
                                 }
                                 file_sync_perform_download(
                                     blob_manager,
                                     base_path,
                                     prefix_ref,
-                                    &blob_name,
+                                    blob_name,
                                     remote_info,
                                     config.output_json,
+                                    &NoopReporter,
                                 )
                                 .await?;
                                 summary.downloaded += 1;
+                                mp.log(&format!("download: {blob_name} → {}", target.display()));
+                                mp.advance_overall(blob_name);
                                 mutated = true;
                             }
                         }
@@ -1873,6 +1957,7 @@ async fn execute_file_sync(
                     (false, false) => {}
                 }
             }
+            mp.finish();
 
             if delete {
                 let local_names_after: HashSet<String> = {
