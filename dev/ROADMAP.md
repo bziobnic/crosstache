@@ -54,15 +54,11 @@ Features shipped and verified in the codebase.
 - `xv audit` accepts `--resource-group` for vault-wide audits outside the default resource group
 - **Integration tests:** `tests/cli_integration_tests.rs` exercises the `xv` binary (help, version, config path/show, gen, format flags, completion) without Azure.
 - **Clipboard tests:** `tests/clipboard_tests.rs` uses read retries and graceful skips when the OS clipboard is unavailable (CI/headless).
+- **Progress indicators** for file operations (upload, download, sync): `ProgressReporter` trait with bar/spinner/noop implementations, configurable size threshold (`progress_threshold_mb`, default 5 MB), TTY-aware (suppressed when piped), `MultiProgressContext` for batch operations with per-file log + overall file-count bar
 
 ---
 
 ## 🔜 Open — High Priority
-
-### 1. Progress Indicators for File Operations
-**Impact:** Large file uploads/downloads give no feedback until completion.
-**Current state:** No progress bars or per-file status during recursive ops.
-**Effort:** Low-Medium (`indicatif` crate or similar).
 
 ### 2. Large File Chunked Upload
 **Impact:** Files over ~100MB may fail. Block-based upload with resume needed.
