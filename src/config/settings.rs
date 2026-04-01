@@ -51,6 +51,7 @@ impl std::str::FromStr for AzureCredentialType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BlobConfig {
     pub storage_account: String,
     pub container_name: String,
