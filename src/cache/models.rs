@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A cached response stored on disk as JSON.
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,6 +19,7 @@ pub struct CacheEntry<T: Serialize + DeserializeOwned> {
 }
 
 /// The type of listing operation that produced this cache entry.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CacheEntryType {
     SecretsList,
@@ -27,6 +28,7 @@ pub enum CacheEntryType {
 }
 
 /// Identifies a cache entry and determines its file path.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 pub enum CacheKey {
     SecretsList { vault_name: String },
@@ -36,7 +38,7 @@ pub enum CacheKey {
 
 impl CacheKey {
     /// Resolve this key to its file path under the given cache directory.
-    pub fn to_path(&self, cache_dir: &PathBuf) -> PathBuf {
+    pub fn to_path(&self, cache_dir: &Path) -> PathBuf {
         match self {
             CacheKey::SecretsList { vault_name } => {
                 cache_dir.join(vault_name).join("secrets-list.json")
@@ -151,6 +153,7 @@ pub struct CacheEntryInfo {
     pub key: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    #[allow(dead_code)]
     pub size_bytes: u64,
     pub is_stale: bool,
 }

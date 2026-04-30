@@ -60,14 +60,14 @@ pub fn parse_relative_duration(input: &str) -> Result<DateTime<Utc>> {
                 return Err(CrosstacheError::invalid_argument(format!(
                     "Unknown duration unit: {}",
                     unit
-                )))
+                )));
             }
         };
 
         Ok(future_time)
     } else {
         Err(CrosstacheError::invalid_argument(format!(
-            "Invalid relative duration format: '{}'. Expected format like '30d', '7d', '1h', '30min', '1y'", 
+            "Invalid relative duration format: '{}'. Expected format like '30d', '7d', '1h', '30min', '1y'",
             input
         )))
     }
@@ -106,7 +106,7 @@ pub fn parse_iso_datetime(input: &str) -> Result<DateTime<Utc>> {
     }
 
     Err(CrosstacheError::invalid_argument(format!(
-        "Invalid date format: '{}'. Expected ISO 8601 format (YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS, or YYYY-MM-DDTHH:MM:SSZ) or relative duration (30d, 7d, 1h, etc.)", 
+        "Invalid date format: '{}'. Expected ISO 8601 format (YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS, or YYYY-MM-DDTHH:MM:SSZ) or relative duration (30d, 7d, 1h, etc.)",
         input
     )))
 }

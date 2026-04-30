@@ -10,6 +10,7 @@ use crate::error::{CrosstacheError, Result};
 use crate::secret::manager::SecretManager;
 use crate::utils::format::OutputFormat;
 use crate::utils::output;
+use crate::utils::pagination::Pagination;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -97,14 +98,47 @@ pub(crate) async fn execute_secret_get_direct(
     execute_secret_get(&secret_manager, name, None, raw, version, &config).await
 }
 
+fn secret_summary_matches_group(
+    secret: &crate::secret::manager::SecretSummary,
+    group: &str,
+) -> bool {
+    secret
+        .groups
+        .as_ref()
+        .map(|groups| groups.split(',').any(|grp| grp.trim() == group))
+        .unwrap_or(false)
+}
+
+fn secret_count_label(
+    displayed: usize,
+    total: usize,
+    qualifier: Option<&str>,
+    paginated: bool,
+) -> String {
+    let noun = match qualifier {
+        Some(q) => format!("{q} secret(s)"),
+        None => "secret(s)".to_string(),
+    };
+
+    if paginated {
+        format!("Showing {displayed} of {total} {noun}")
+    } else {
+        format!("{displayed} {noun}")
+    }
+}
+
 pub(crate) fn display_cached_secret_list(
     secrets: Vec<crate::secret::manager::SecretSummary>,
     group: Option<String>,
     all: bool,
+    pagination: Pagination,
+    pager: bool,
     vault_name: &str,
     config: &Config,
 ) -> Result<()> {
     use crate::utils::format::TableFormatter;
+    use crate::utils::pagination::{paginate_slice, pagination_footer_text};
+    use std::fmt::Write as _;
 
     let mut filtered = secrets;
 
@@ -112,13 +146,10 @@ pub(crate) fn display_cached_secret_list(
         filtered.retain(|s| s.enabled);
     }
     if let Some(ref g) = group {
-        filtered.retain(|s| {
-            s.groups
-                .as_ref()
-                .map(|groups| groups.contains(g))
-                .unwrap_or(false)
-        });
+        filtered.retain(|s| secret_summary_matches_group(s, g));
     }
+
+    let page = paginate_slice(&filtered, pagination);
 
     let fmt = config.runtime_output_format;
     let human_table_like = matches!(
@@ -127,32 +158,56 @@ pub(crate) fn display_cached_secret_list(
     );
 
     if human_table_like {
-        println!();
+        let mut output = String::new();
+        output.push('\n');
         // Color only for styled table; plain/raw must not emit ANSI escapes
         if !config.no_color && fmt == OutputFormat::Table {
-            println!("\x1b[36mVault: {}\x1b[0m", vault_name);
+            let _ = writeln!(output, "\x1b[36mVault: {}\x1b[0m", vault_name);
         } else {
-            println!("Vault: {}", vault_name);
+            let _ = writeln!(output, "Vault: {}", vault_name);
         }
-        println!();
+        output.push('\n');
 
-        if filtered.is_empty() {
-            output::info(if all {
+        if page.total_items == 0 {
+            let msg = if all {
                 "No secrets found in vault."
             } else {
                 "No enabled secrets found in vault. Use --all to show disabled secrets."
-            });
+            };
+            output.push_str(&output::format_line(
+                output::Level::Info,
+                msg,
+                output::should_use_rich_stdout(),
+            ));
+            crate::utils::pager::print_output(&output, pager)?;
             return Ok(());
         }
 
         let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-        println!("{}", formatter.format_table(&filtered)?);
-        println!("\n{} secret(s) in vault '{}'", filtered.len(), vault_name);
+        output.push_str(&formatter.format_table(&page.items)?);
+        output.push('\n');
+        let _ = writeln!(
+            output,
+            "{} in vault '{}'",
+            secret_count_label(
+                page.items.len(),
+                page.total_items,
+                None,
+                page.page_size.is_some(),
+            ),
+            vault_name
+        );
+        if let Some(footer) = pagination_footer_text(&page, "secret", fmt) {
+            output.push('\n');
+            output.push_str(&footer);
+        }
+        crate::utils::pager::print_output(&output, pager)?;
         return Ok(());
     }
 
     let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-    println!("{}", formatter.format_table(&filtered)?);
+    let output = formatter.format_table(&page.items)?;
+    crate::utils::pager::print_output(&output, pager)?;
 
     Ok(())
 }
@@ -163,6 +218,8 @@ pub(crate) async fn execute_secret_list_direct(
     expiring: Option<String>,
     expired: bool,
     no_cache: bool,
+    pagination: Pagination,
+    pager: bool,
     config: Config,
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
@@ -179,7 +236,15 @@ pub(crate) async fn execute_secret_list_direct(
         if let Some(cached) =
             cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
         {
-            return display_cached_secret_list(cached, group, all, &vault_name, &config);
+            return display_cached_secret_list(
+                cached,
+                group,
+                all,
+                pagination,
+                pager,
+                &vault_name,
+                &config,
+            );
         }
     }
 
@@ -197,11 +262,12 @@ pub(crate) async fn execute_secret_list_direct(
 
     let secrets = execute_secret_list(
         &secret_manager,
-        None,
         group,
         all,
         expiring,
         expired,
+        pagination,
+        pager,
         &config,
     )
     .await?;
@@ -1927,17 +1993,20 @@ async fn execute_secret_inject(
 
 async fn execute_secret_list(
     secret_manager: &crate::secret::manager::SecretManager,
-    vault: Option<String>,
     group: Option<String>,
     show_all: bool,
     expiring: Option<String>,
     expired: bool,
+    pagination: Pagination,
+    pager: bool,
     config: &Config,
 ) -> Result<Vec<crate::secret::manager::SecretSummary>> {
     use crate::config::ContextManager;
     use crate::utils::format::TableFormatter;
+    use crate::utils::pagination::{paginate_slice, pagination_footer_text};
+    use std::fmt::Write as _;
 
-    let vault_name = config.resolve_vault_name(vault).await?;
+    let vault_name = config.resolve_vault_name(None).await?;
 
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
@@ -1961,12 +2030,7 @@ async fn execute_secret_list(
         secrets.retain(|s| s.enabled);
     }
     if let Some(ref g) = group {
-        secrets.retain(|s| {
-            s.groups
-                .as_ref()
-                .map(|groups| groups.split(',').any(|grp| grp.trim() == g))
-                .unwrap_or(false)
-        });
+        secrets.retain(|s| secret_summary_matches_group(s, g));
     }
 
     // Apply expiry filtering if requested (requires per-secret API calls)
@@ -2011,16 +2075,20 @@ async fn execute_secret_list(
         secrets = filtered_secrets;
     }
 
+    let paged = paginate_slice(&secrets, pagination);
+    let display_secrets = paged.items.clone();
+
     // Display results
     if human_table_like {
-        println!();
+        let mut output = String::new();
+        output.push('\n');
         // Color only for styled table; plain/raw must not emit ANSI escapes
         if !config.no_color && fmt == OutputFormat::Table {
-            println!("\x1b[36mVault: {}\x1b[0m", vault_name);
+            let _ = writeln!(output, "\x1b[36mVault: {}\x1b[0m", vault_name);
         } else {
-            println!("Vault: {}", vault_name);
+            let _ = writeln!(output, "Vault: {}", vault_name);
         }
-        println!();
+        output.push('\n');
 
         if secrets.is_empty() {
             let msg = if expired || expiring.is_some() {
@@ -2034,23 +2102,61 @@ async fn execute_secret_list(
             } else {
                 "No enabled secrets found in vault. Use --all to show disabled secrets.".to_string()
             };
-            output::info(&msg);
+            output.push_str(&output::format_line(
+                output::Level::Info,
+                &msg,
+                output::should_use_rich_stdout(),
+            ));
+            crate::utils::pager::print_output(&output, pager)?;
         } else {
             let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-            println!("{}", formatter.format_table(&secrets)?);
+            output.push_str(&formatter.format_table(&display_secrets)?);
 
-            let count_label = if expired {
-                format!("{} expired secret(s)", secrets.len())
-            } else if let Some(ref duration) = expiring {
-                format!("{} secret(s) expiring within {}", secrets.len(), duration)
+            let qualifier = if expired {
+                Some("expired".to_string())
             } else {
-                format!("{} secret(s)", secrets.len())
+                expiring
+                    .as_ref()
+                    .map(|duration| format!("secret(s) expiring within {duration}"))
             };
-            println!("\n{} in vault '{}'", count_label, vault_name);
+            let count_label = if let Some(ref q) = qualifier {
+                if expired {
+                    secret_count_label(
+                        display_secrets.len(),
+                        paged.total_items,
+                        Some(q),
+                        paged.page_size.is_some(),
+                    )
+                } else if paged.page_size.is_some() {
+                    format!(
+                        "Showing {} of {} {}",
+                        display_secrets.len(),
+                        paged.total_items,
+                        q
+                    )
+                } else {
+                    format!("{} {}", display_secrets.len(), q)
+                }
+            } else {
+                secret_count_label(
+                    display_secrets.len(),
+                    paged.total_items,
+                    None,
+                    paged.page_size.is_some(),
+                )
+            };
+            output.push('\n');
+            let _ = writeln!(output, "{} in vault '{}'", count_label, vault_name);
+            if let Some(footer) = pagination_footer_text(&paged, "secret", fmt) {
+                output.push('\n');
+                output.push_str(&footer);
+            }
+            crate::utils::pager::print_output(&output, pager)?;
         }
     } else {
         let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-        println!("{}", formatter.format_table(&secrets)?);
+        let output = formatter.format_table(&display_secrets)?;
+        crate::utils::pager::print_output(&output, pager)?;
     }
 
     Ok(all_secrets)
@@ -2160,7 +2266,7 @@ async fn execute_secret_update(
         && !clear_not_before
     {
         return Err(CrosstacheError::invalid_argument(
-            "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note, expiry) or rename secrets. Use 'secret set' to update secret values."
+            "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note, expiry) or rename secrets. Use 'secret set' to update secret values.",
         ));
     }
 
@@ -2603,7 +2709,7 @@ async fn execute_secret_share(
                 _ => {
                     return Err(CrosstacheError::invalid_argument(format!(
                         "Invalid access level: {level}"
-                    )))
+                    )));
                 }
             };
 
@@ -2637,7 +2743,16 @@ async fn execute_secret_share(
                 secret_name, user, vault_name
             );
         }
-        ShareCommands::List { secret_name, all } => {
+        ShareCommands::List {
+            secret_name,
+            all,
+            page,
+            page_size,
+            pager,
+        } => {
+            use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
+            use std::fmt::Write as _;
+
             let mut roles = vault_manager
                 .list_secret_access(&vault_name, &resource_group, &secret_name)
                 .await?;
@@ -2646,13 +2761,18 @@ async fn execute_secret_share(
                 .resolve_and_filter_roles(&mut roles, all)
                 .await?;
 
+            let pagination = Pagination::from_args(page, page_size)?;
+            let paged = paginate_slice(&roles, pagination);
+
             if roles.is_empty() {
                 println!(
                     "No access assignments found for secret '{}' in vault '{}'",
                     secret_name, vault_name
                 );
             } else {
-                println!(
+                let mut output = String::new();
+                let _ = writeln!(
+                    output,
                     "Access assignments for secret '{}' in vault '{}':",
                     secret_name, vault_name
                 );
@@ -2661,8 +2781,17 @@ async fn execute_secret_share(
                     config.no_color,
                     None,
                 );
-                let table_output = formatter.format_table(&roles)?;
-                println!("{table_output}");
+                let table_output = formatter.format_table(&paged.items)?;
+                output.push_str(&table_output);
+                if let Some(footer) = pagination_footer_text(
+                    &paged,
+                    "assignment",
+                    crate::utils::format::OutputFormat::Table,
+                ) {
+                    output.push('\n');
+                    output.push_str(&footer);
+                }
+                crate::utils::pager::print_output(&output, pager)?;
             }
         }
     }
@@ -2994,6 +3123,7 @@ mod tests {
         let stdout_thread = std::thread::spawn(move || {
             let mut out = OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .truncate(true)
                 .open(&stdout_path)
@@ -3011,6 +3141,7 @@ mod tests {
         let stderr_thread = std::thread::spawn(move || {
             let mut out = OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .truncate(true)
                 .open(&stderr_path)
@@ -3029,6 +3160,48 @@ mod tests {
         let _ = stdout_thread.join();
         let _ = stderr_thread.join();
         status.code().unwrap_or(1)
+    }
+
+    fn summary_with_groups(groups: Option<&str>) -> crate::secret::manager::SecretSummary {
+        crate::secret::manager::SecretSummary {
+            name: "secret".to_string(),
+            original_name: "secret".to_string(),
+            note: None,
+            folder: None,
+            groups: groups.map(str::to_string),
+            updated_on: "2026-04-28".to_string(),
+            enabled: true,
+            content_type: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_secret_summary_group_filter_is_exact_comma_separated_match() {
+        assert!(secret_summary_matches_group(
+            &summary_with_groups(Some("prod, infra")),
+            "prod"
+        ));
+        assert!(secret_summary_matches_group(
+            &summary_with_groups(Some("prod, infra")),
+            "infra"
+        ));
+        assert!(!secret_summary_matches_group(
+            &summary_with_groups(Some("production")),
+            "prod"
+        ));
+        assert!(!secret_summary_matches_group(
+            &summary_with_groups(None),
+            "prod"
+        ));
+    }
+
+    #[test]
+    fn test_secret_count_label_distinguishes_paginated_total() {
+        assert_eq!(
+            secret_count_label(10, 137, None, true),
+            "Showing 10 of 137 secret(s)"
+        );
+        assert_eq!(secret_count_label(137, 137, None, false), "137 secret(s)");
     }
 
     #[test]

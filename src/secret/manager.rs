@@ -1196,7 +1196,7 @@ impl SecretOperations for AzureSecretOperations {
             v.version_number = Some((i + 1) as u32);
         }
         // Re-sort newest first for display
-        versions.sort_by(|a, b| b.created_timestamp.cmp(&a.created_timestamp));
+        versions.sort_by_key(|version| std::cmp::Reverse(version.created_timestamp));
         Ok(versions)
     }
 
@@ -1738,7 +1738,7 @@ impl SecretManager {
                 group_secrets.len()
             ))?;
 
-            let formatter = TableFormatter::new(output_format.clone(), self.no_color, None);
+            let formatter = TableFormatter::new(output_format, self.no_color, None);
             let table_output = formatter.format_table(&group_secrets)?;
             println!("{table_output}");
 

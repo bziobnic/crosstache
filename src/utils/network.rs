@@ -47,7 +47,9 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> CrosstacheEr
         if is_dns_resolution_error(error) {
             return CrosstacheError::dns_resolution(
                 vault_name.clone(),
-                format!("Unable to resolve vault hostname. Please check if the vault name '{vault_name}' is correct and the vault exists.")
+                format!(
+                    "Unable to resolve vault hostname. Please check if the vault name '{vault_name}' is correct and the vault exists."
+                ),
             );
         }
 
@@ -87,12 +89,16 @@ pub fn classify_network_error(error: &reqwest::Error, url: &str) -> CrosstacheEr
     // Check for specific HTTP status codes that indicate network issues
     if let Some(status) = error.status() {
         match status.as_u16() {
-            503 => return CrosstacheError::network(format!(
-                "Azure Key Vault '{vault_name}' service is temporarily unavailable. Please try again later."
-            )),
-            502 | 504 => return CrosstacheError::network(format!(
-                "Gateway error when accessing vault '{vault_name}'. The Azure service may be experiencing issues."
-            )),
+            503 => {
+                return CrosstacheError::network(format!(
+                    "Azure Key Vault '{vault_name}' service is temporarily unavailable. Please try again later."
+                ));
+            }
+            502 | 504 => {
+                return CrosstacheError::network(format!(
+                    "Gateway error when accessing vault '{vault_name}'. The Azure service may be experiencing issues."
+                ));
+            }
             _ => {}
         }
     }

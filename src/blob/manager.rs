@@ -580,6 +580,7 @@ impl BlobManager {
     /// After the commit, blob properties are fetched so that the returned
     /// [`FileInfo`] contains the real server-side `size`, `etag`, and
     /// `last_modified` values.
+    #[allow(dead_code)]
     pub async fn upload_large_file<R: tokio::io::AsyncRead + Unpin>(
         &self,
         name: &str,

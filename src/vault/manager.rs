@@ -102,6 +102,17 @@ impl VaultManager {
     }
 
     /// List vaults with formatted output
+    pub async fn list_vaults(
+        &self,
+        subscription_id: Option<&str>,
+        resource_group: Option<&str>,
+    ) -> Result<Vec<VaultSummary>> {
+        self.vault_ops
+            .list_vaults(subscription_id, resource_group)
+            .await
+    }
+
+    /// List vaults with formatted output
     pub async fn list_vaults_formatted(
         &self,
         subscription_id: Option<&str>,

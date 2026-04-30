@@ -83,6 +83,7 @@ xv find "api"                             # Fuzzy search by name pattern
 xv list                                   # List all secrets (alias: ls)
 xv list --group production                # Filter by group
 xv list --expiring 30d                    # Show secrets expiring soon
+xv list --page-size 50 --page 2           # Paginate list output
 xv update "api-key" --group prod --note "Frontend key"
 xv delete "api-key"                       # Soft-delete (alias: rm)
 xv delete --group legacy --force          # Bulk delete by group
@@ -151,6 +152,7 @@ xv rotate "api-key" --show-value          # Display the generated value
 ```bash
 xv vault create my-vault --resource-group my-rg --location eastus
 xv vault list
+xv vault list --page-size 25 --page 2
 xv vault info my-vault
 xv vault delete my-vault
 xv vault restore my-vault                 # Restore soft-deleted vault
@@ -211,6 +213,8 @@ Optional blob storage for files (requires setup via `xv init`):
 xv upload ./config.json
 xv download config.json
 xv file list
+xv file list --page-size 100 --page 3
+xv file list --limit 100                       # First page compatibility alias
 xv file info config.json                       # File metadata
 xv file upload ./docs --recursive              # Preserves directory structure
 xv file download "docs" --recursive --output ./local
@@ -231,6 +235,7 @@ xv info my-vault                          # Resource info (vault, secret, or fil
 xv share grant "api-key"                  # Grant access to a secret
 xv share revoke "api-key"                 # Revoke access to a secret
 xv share list "api-key"                   # List access permissions
+xv share list "api-key" --page-size 25    # Paginate access permissions
 xv audit "api-key"                        # Access/change history
 xv audit --vault my-vault                 # Vault-wide activity
 xv audit --vault my-vault --days 7        # Last 7 days only

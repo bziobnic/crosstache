@@ -5,8 +5,11 @@
 //! concurrent clipboard access:
 //!   cargo test --test clipboard_tests -- --test-threads=1
 
+#[cfg(target_os = "macos")]
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 /// Helper: read current clipboard text via pbcopy/pbpaste (macOS).
 /// Returns None if clipboard access fails.
@@ -275,8 +278,10 @@ fn test_config_clipboard_timeout_zero_disables() {
 
 #[test]
 fn test_config_clipboard_timeout_serialization_roundtrip() {
-    let mut config = crosstache::config::settings::Config::default();
-    config.clipboard_timeout = 45;
+    let config = crosstache::config::settings::Config {
+        clipboard_timeout: 45,
+        ..Default::default()
+    };
 
     let serialized = serde_json::to_string(&config).expect("should serialize");
     assert!(

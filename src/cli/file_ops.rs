@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use crate::utils::output;
+use crate::utils::pagination::Pagination;
 use std::path::{Path, PathBuf};
 
 pub(crate) async fn execute_file_command(command: FileCommands, config: Config) -> Result<()> {
@@ -167,14 +168,38 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             prefix,
             group,
             limit,
+            page,
+            page_size,
+            pager,
             recursive,
             no_cache,
         } => {
+            use crate::utils::pagination::Pagination;
+
+            if limit.is_some() && page_size.is_some() {
+                return Err(CrosstacheError::invalid_argument(
+                    "--limit cannot be combined with --page-size; use --page-size instead",
+                ));
+            }
+
+            if limit.is_some() && page.is_some() {
+                return Err(CrosstacheError::invalid_argument(
+                    "--limit shows the first page only and cannot be combined with --page",
+                ));
+            }
+
+            let pagination = if limit.is_some() {
+                Pagination::first_page_with_size(limit)?
+            } else {
+                Pagination::from_args(page, page_size)?
+            };
+
             execute_file_list(
                 &blob_manager,
                 prefix,
                 group,
-                limit,
+                pagination,
+                pager,
                 recursive,
                 no_cache,
                 &config,
@@ -409,19 +434,21 @@ fn display_file_list_items(
     items: &[crate::blob::models::BlobListItem],
     recursive: bool,
     config: &Config,
-) -> Result<()> {
+) -> Result<String> {
     use crate::blob::manager::format_size;
     use crate::blob::models::BlobListItem;
     use crate::utils::format::TableFormatter;
     use serde::Serialize;
+    use std::fmt::Write as _;
     use tabled::Tabled;
 
     if items.is_empty() {
         output::info("No files found");
-        return Ok(());
+        return Ok(String::new());
     }
 
     let fmt = config.runtime_output_format.resolve_for_stdout();
+    let mut output = String::new();
 
     // Rows for `--format csv`: machine-oriented fields (not `format_size()` / joined strings).
     #[derive(Tabled, Serialize)]
@@ -463,13 +490,13 @@ fn display_file_list_items(
             let json_output = serde_json::to_string_pretty(items).map_err(|e| {
                 CrosstacheError::serialization(format!("Failed to serialize items: {e}"))
             })?;
-            println!("{json_output}");
+            output.push_str(&json_output);
         }
         OutputFormat::Yaml => {
             let yaml_output = serde_yaml::to_string(items).map_err(|e| {
                 CrosstacheError::serialization(format!("Failed to serialize items: {e}"))
             })?;
-            println!("{yaml_output}");
+            output.push_str(&yaml_output);
         }
         OutputFormat::Csv => {
             let csv_rows: Vec<FileListCsvRow> = items
@@ -503,7 +530,7 @@ fn display_file_list_items(
                 })
                 .collect();
             let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-            println!("{}", formatter.format_table(&csv_rows)?);
+            output.push_str(&formatter.format_table(&csv_rows)?);
         }
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => {
             let display_items: Vec<ListItem> = items
@@ -527,7 +554,7 @@ fn display_file_list_items(
                 .collect();
 
             let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-            println!("{}", formatter.format_table(&display_items)?);
+            output.push_str(&formatter.format_table(&display_items)?);
 
             let file_count = items
                 .iter()
@@ -539,11 +566,18 @@ fn display_file_list_items(
                 .count();
 
             if recursive {
-                println!("\nTotal files: {}", file_count);
+                output.push('\n');
+                let _ = writeln!(output, "Total files: {}", file_count);
             } else if dir_count > 0 {
-                println!("\nTotal: {} directories, {} files", dir_count, file_count);
+                output.push('\n');
+                let _ = writeln!(
+                    output,
+                    "Total: {} directories, {} files",
+                    dir_count, file_count
+                );
             } else {
-                println!("\nTotal files: {}", file_count);
+                output.push('\n');
+                let _ = writeln!(output, "Total files: {}", file_count);
             }
         }
         OutputFormat::Template => {
@@ -567,25 +601,27 @@ fn display_file_list_items(
                 })
                 .collect();
             let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-            println!("{}", formatter.format_table(&display_items)?);
+            output.push_str(&formatter.format_table(&display_items)?);
         }
         OutputFormat::Auto => unreachable!("resolve_for_stdout must not return Auto"),
     }
 
-    Ok(())
+    Ok(output.trim_end_matches('\n').to_string())
 }
 
 async fn execute_file_list(
     blob_manager: &BlobManager,
     prefix: Option<String>,
     group: Option<String>,
-    limit: Option<usize>,
+    pagination: Pagination,
+    pager: bool,
     recursive: bool,
     no_cache: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::blob::models::{BlobListItem, FileListRequest};
     use crate::cache::{CacheKey, CacheManager};
+    use crate::utils::pagination::{paginate_slice, pagination_footer_text};
 
     let cache_manager = CacheManager::from_config(config);
     let vault_name = config.resolve_vault_name(None).await.unwrap_or_default();
@@ -595,11 +631,22 @@ async fn execute_file_list(
     };
     let use_cache = cache_manager.is_enabled() && !no_cache;
 
-    let is_unfiltered = prefix.is_none() && group.is_none() && limit.is_none();
+    let is_unfiltered = prefix.is_none() && group.is_none();
 
     if use_cache && is_unfiltered {
         if let Some(cached) = cache_manager.get::<Vec<BlobListItem>>(&cache_key) {
-            return display_file_list_items(&cached, recursive, config);
+            let page = paginate_slice(&cached, pagination);
+            let mut output = display_file_list_items(&page.items, recursive, config)?;
+            if !output.is_empty() {
+                output.push('\n');
+                if let Some(footer) =
+                    pagination_footer_text(&page, "item", config.runtime_output_format)
+                {
+                    output.push_str(&footer);
+                }
+                crate::utils::pager::print_output(&output, pager)?;
+            }
+            return Ok(());
         }
     }
 
@@ -607,7 +654,7 @@ async fn execute_file_list(
     let list_request = FileListRequest {
         prefix: prefix.clone(),
         groups: group.map(|g| vec![g]),
-        limit,
+        limit: None,
         delimiter: if recursive {
             None
         } else {
@@ -632,7 +679,16 @@ async fn execute_file_list(
         cache_manager.set(&cache_key, &items);
     }
 
-    display_file_list_items(&items, recursive, config)
+    let page = paginate_slice(&items, pagination);
+    let mut output = display_file_list_items(&page.items, recursive, config)?;
+    if !output.is_empty() {
+        output.push('\n');
+        if let Some(footer) = pagination_footer_text(&page, "item", config.runtime_output_format) {
+            output.push_str(&footer);
+        }
+        crate::utils::pager::print_output(&output, pager)?;
+    }
+    Ok(())
 }
 
 async fn execute_file_delete(
