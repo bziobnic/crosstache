@@ -652,6 +652,26 @@ pub enum Commands {
         #[arg(long)]
         open: bool,
     },
+    /// Scan files for leaked secret values or known-token patterns.
+    Scan {
+        /// Paths to scan (default: current directory).
+        #[arg(default_value = ".", num_args = 1..)]
+        paths: Vec<std::path::PathBuf>,
+        /// Scan only files staged for commit (`git diff --cached`).
+        #[arg(long)]
+        staged: bool,
+        /// Scan the full HEAD tree.
+        #[arg(long)]
+        all: bool,
+        /// Pre-commit hook mode: quiet on no findings, exit 50 on findings.
+        #[arg(long)]
+        hook: bool,
+        /// Search every vault you can list.
+        #[arg(long)]
+        all_vaults: bool,
+        #[command(subcommand)]
+        command: Option<ScanCommands>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1040,6 +1060,17 @@ pub enum EnvCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ScanCommands {
+    /// Install a pre-commit hook that runs `xv scan --staged --hook`.
+    Install {
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the xv-managed pre-commit hook.
+    Uninstall,
+}
+
 impl Cli {
     pub async fn execute(self, mut config: Config) -> Result<()> {
         let resolved = self.format.resolve_for_stdout();
@@ -1349,6 +1380,19 @@ impl Cli {
             Commands::Download { name, output, open } => {
                 crate::cli::file_ops::execute_file_download_quick(&name, output, open, &config)
                     .await
+            }
+            Commands::Scan {
+                paths,
+                staged,
+                all,
+                hook,
+                all_vaults,
+                command,
+            } => {
+                crate::cli::scan_ops::execute_scan_command(
+                    paths, staged, all, hook, all_vaults, command, self.format, config,
+                )
+                .await
             }
         }
     }

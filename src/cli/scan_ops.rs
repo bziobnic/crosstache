@@ -1,0 +1,170 @@
+//! CLI executors for `xv scan` and its subcommands.
+
+use crate::cli::commands::ScanCommands;
+use crate::config::Config;
+use crate::error::{CrosstacheError, Result};
+use crate::scan::engine::MatchEngine;
+use crate::scan::finding::Finding;
+use crate::scan::orchestrator::{fetch_secret_values, scan_paths};
+use crate::scan::patterns::builtin_patterns;
+use crate::scan::walker::{walk, WalkConfig};
+use std::path::PathBuf;
+
+pub(crate) async fn execute_scan_command(
+    paths: Vec<PathBuf>,
+    staged: bool,
+    _all: bool,
+    hook: bool,
+    all_vaults: bool,
+    command: Option<ScanCommands>,
+    format: crate::utils::format::OutputFormat,
+    config: Config,
+) -> Result<()> {
+    if let Some(cmd) = command {
+        return match cmd {
+            ScanCommands::Install { force } => execute_scan_install(force, &config).await,
+            ScanCommands::Uninstall => execute_scan_uninstall(&config).await,
+        };
+    }
+    if staged {
+        return execute_scan_staged(hook, all_vaults, format, &config).await;
+    }
+    execute_scan_paths(paths, hook, all_vaults, format, &config).await
+}
+
+async fn execute_scan_paths(
+    paths: Vec<PathBuf>,
+    hook: bool,
+    all_vaults: bool,
+    format: crate::utils::format::OutputFormat,
+    config: &Config,
+) -> Result<()> {
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+
+    let auth_provider = std::sync::Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone(),
+        )
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        })?,
+    );
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    // Pick which vaults to fetch from.
+    let vault_names: Vec<String> = if all_vaults {
+        let auth = std::sync::Arc::new(
+            DefaultAzureCredentialProvider::with_credential_priority(
+                config.azure_credential_priority.clone(),
+            )
+            .map_err(|e| {
+                CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+            })?,
+        );
+        let vault_manager = crate::vault::manager::VaultManager::new(
+            auth,
+            config.subscription_id.clone(),
+            config.no_color,
+        )?;
+        vault_manager
+            .vault_ops()
+            .list_vaults(Some(&config.subscription_id), None)
+            .await?
+            .into_iter()
+            .map(|v| v.name)
+            .collect()
+    } else {
+        vec![config.resolve_vault_name(None).await?]
+    };
+
+    let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");
+    let secrets = fetch_secret_values(&secret_manager, &vault_names, 10).await?;
+    progress.finish_clear();
+
+    let patterns = builtin_patterns();
+    let engine = MatchEngine::new(&secrets, &patterns);
+
+    // Build the path list. Apply [scan].exclude from .xv.toml if found.
+    let mut walk_cfg = WalkConfig::default();
+    if let Ok(Some((_, project))) =
+        crate::config::project::find_project_config(&std::env::current_dir()?).await
+    {
+        if let Some(scan) = &project.scan {
+            walk_cfg.extra_excludes = scan.exclude.clone();
+        }
+    }
+    let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+    let walked = walk(&path_refs, &walk_cfg)?;
+    let findings = scan_paths(&walked, &engine)?;
+
+    render_findings(&findings, hook, format)
+}
+
+async fn execute_scan_staged(
+    _hook: bool,
+    _all_vaults: bool,
+    _format: crate::utils::format::OutputFormat,
+    _config: &Config,
+) -> Result<()> {
+    Err(CrosstacheError::config(
+        "xv scan --staged is implemented in Task 9",
+    ))
+}
+
+async fn execute_scan_install(_force: bool, _config: &Config) -> Result<()> {
+    Err(CrosstacheError::config(
+        "xv scan install is implemented in Task 11",
+    ))
+}
+
+async fn execute_scan_uninstall(_config: &Config) -> Result<()> {
+    Err(CrosstacheError::config(
+        "xv scan uninstall is implemented in Task 12",
+    ))
+}
+
+fn render_findings(
+    findings: &[Finding],
+    hook: bool,
+    format: crate::utils::format::OutputFormat,
+) -> Result<()> {
+    use crate::utils::format::OutputFormat;
+    let resolved = format.resolve_for_stdout();
+
+    if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
+        let rendered = match resolved {
+            OutputFormat::Json => serde_json::to_string_pretty(findings).unwrap_or_default(),
+            OutputFormat::Yaml => serde_yaml::to_string(findings).unwrap_or_default(),
+            _ => unreachable!(),
+        };
+        println!("{rendered}");
+    } else {
+        for f in findings {
+            let secret = f.secret_name.as_deref().unwrap_or("(no secret)");
+            let vault = f.vault.as_deref().unwrap_or("");
+            eprintln!(
+                "{}:{}:{}: matches {} (kind={:?}, severity={:?}{})",
+                f.file.display(),
+                f.line,
+                f.col,
+                secret,
+                f.kind,
+                f.severity,
+                if vault.is_empty() {
+                    String::new()
+                } else {
+                    format!(", vault={vault}")
+                }
+            );
+        }
+    }
+
+    if !findings.is_empty() {
+        return Err(CrosstacheError::scan_leak_detected(findings.len()));
+    }
+    if !hook {
+        eprintln!("xv scan: no findings.");
+    }
+    Ok(())
+}
