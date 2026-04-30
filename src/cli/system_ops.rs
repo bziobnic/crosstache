@@ -459,7 +459,13 @@ pub(crate) async fn execute_info_command(
     // Route to the appropriate handler
     match detected_type {
         ResourceType::Vault => {
-            crate::cli::vault_ops::execute_vault_info_from_root(&resource, resource_group, subscription, &config).await
+            crate::cli::vault_ops::execute_vault_info_from_root(
+                &resource,
+                resource_group,
+                subscription,
+                &config,
+            )
+            .await
         }
         ResourceType::Secret => execute_secret_info_from_root(&resource, &config).await,
         #[cfg(feature = "file-ops")]

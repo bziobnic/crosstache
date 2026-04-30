@@ -940,9 +940,7 @@ impl Cli {
 
         // Warn if --template given without --format template
         if config.template.is_some() && resolved != OutputFormat::Template {
-            crate::utils::output::warn(
-                "--template flag has no effect without --format template",
-            );
+            crate::utils::output::warn("--template flag has no effect without --format template");
         }
 
         // Apply CLI credential type if specified (CLI flag overrides config/env)
@@ -963,29 +961,46 @@ impl Cli {
                 expires,
                 not_before,
             } => {
-                crate::cli::secret_ops::execute_secret_set_direct(args, stdin, note, folder, expires, not_before, config)
-                    .await
+                crate::cli::secret_ops::execute_secret_set_direct(
+                    args, stdin, note, folder, expires, not_before, config,
+                )
+                .await
             }
             Commands::Get { name, raw, version } => {
                 crate::cli::secret_ops::execute_secret_get_direct(&name, raw, version, config).await
             }
-            Commands::Find { term, raw } => crate::cli::secret_ops::execute_secret_find_direct(term, raw, config).await,
+            Commands::Find { term, raw } => {
+                crate::cli::secret_ops::execute_secret_find_direct(term, raw, config).await
+            }
             Commands::List {
                 group,
                 all,
                 expiring,
                 expired,
                 no_cache,
-            } => crate::cli::secret_ops::execute_secret_list_direct(group, all, expiring, expired, no_cache, config).await,
-            Commands::Delete { name, group, force } => {
-                crate::cli::secret_ops::execute_secret_delete_direct(name, group, force, config).await
+            } => {
+                crate::cli::secret_ops::execute_secret_list_direct(
+                    group, all, expiring, expired, no_cache, config,
+                )
+                .await
             }
-            Commands::History { name } => crate::cli::secret_ops::execute_secret_history_direct(&name, config).await,
+            Commands::Delete { name, group, force } => {
+                crate::cli::secret_ops::execute_secret_delete_direct(name, group, force, config)
+                    .await
+            }
+            Commands::History { name } => {
+                crate::cli::secret_ops::execute_secret_history_direct(&name, config).await
+            }
             Commands::Rollback {
                 name,
                 version,
                 force,
-            } => crate::cli::secret_ops::execute_secret_rollback_direct(&name, &version, force, config).await,
+            } => {
+                crate::cli::secret_ops::execute_secret_rollback_direct(
+                    &name, &version, force, config,
+                )
+                .await
+            }
             Commands::Rotate {
                 name,
                 length,
@@ -1005,17 +1020,30 @@ impl Cli {
                 save,
                 vault,
                 raw,
-            } => crate::cli::system_ops::execute_gen_command(length, charset, save, vault, raw, config).await,
+            } => {
+                crate::cli::system_ops::execute_gen_command(
+                    length, charset, save, vault, raw, config,
+                )
+                .await
+            }
             Commands::Run {
                 group,
                 no_masking,
                 command,
-            } => crate::cli::secret_ops::execute_secret_run_direct(group, no_masking, command, config).await,
+            } => {
+                crate::cli::secret_ops::execute_secret_run_direct(
+                    group, no_masking, command, config,
+                )
+                .await
+            }
             Commands::Inject {
                 template,
                 out,
                 group,
-            } => crate::cli::secret_ops::execute_secret_inject_direct(template, out, group, config).await,
+            } => {
+                crate::cli::secret_ops::execute_secret_inject_direct(template, out, group, config)
+                    .await
+            }
             Commands::Update {
                 name,
                 value,
@@ -1056,29 +1084,59 @@ impl Cli {
                 vault2,
                 show_values,
                 group,
-            } => crate::cli::secret_ops::execute_diff_command(&vault1, &vault2, show_values, group, config).await,
+            } => {
+                crate::cli::secret_ops::execute_diff_command(
+                    &vault1,
+                    &vault2,
+                    show_values,
+                    group,
+                    config,
+                )
+                .await
+            }
             Commands::Copy {
                 name,
                 from,
                 to,
                 new_name,
-            } => crate::cli::secret_ops::execute_secret_copy_direct(&name, &from, &to, new_name, config).await,
+            } => {
+                crate::cli::secret_ops::execute_secret_copy_direct(
+                    &name, &from, &to, new_name, config,
+                )
+                .await
+            }
             Commands::Move {
                 name,
                 from,
                 to,
                 new_name,
                 force,
-            } => crate::cli::secret_ops::execute_secret_move_direct(&name, &from, &to, new_name, force, config).await,
+            } => {
+                crate::cli::secret_ops::execute_secret_move_direct(
+                    &name, &from, &to, new_name, force, config,
+                )
+                .await
+            }
             Commands::Purge { name, force } => {
                 crate::cli::secret_ops::execute_secret_purge_direct(&name, force, config).await
             }
-            Commands::Restore { name } => crate::cli::secret_ops::execute_secret_restore_direct(&name, config).await,
+            Commands::Restore { name } => {
+                crate::cli::secret_ops::execute_secret_restore_direct(&name, config).await
+            }
             Commands::Parse {
                 connection_string,
                 format,
-            } => crate::cli::secret_ops::execute_secret_parse_direct(&connection_string, &format, config).await,
-            Commands::Share { command } => crate::cli::secret_ops::execute_secret_share_direct(command, config).await,
+            } => {
+                crate::cli::secret_ops::execute_secret_parse_direct(
+                    &connection_string,
+                    &format,
+                    config,
+                )
+                .await
+            }
+            Commands::Share { command } => {
+                crate::cli::secret_ops::execute_secret_share_direct(command, config).await
+            }
             Commands::Vault { command } => {
                 crate::cli::vault_ops::execute_vault_command(command, config).await
             }
@@ -1103,8 +1161,16 @@ impl Cli {
                 resource_group,
                 raw,
             } => {
-                crate::cli::system_ops::execute_audit_command(name, vault, days, operation, resource_group, raw, config)
-                    .await
+                crate::cli::system_ops::execute_audit_command(
+                    name,
+                    vault,
+                    days,
+                    operation,
+                    resource_group,
+                    raw,
+                    config,
+                )
+                .await
             }
             Commands::Init => crate::cli::system_ops::execute_init_command(config).await,
             Commands::Info {
@@ -1123,7 +1189,9 @@ impl Cli {
                 .await
             }
             Commands::Version => crate::cli::system_ops::execute_version_command().await,
-            Commands::Completion { shell } => crate::cli::system_ops::execute_completion_command(shell).await,
+            Commands::Completion { shell } => {
+                crate::cli::system_ops::execute_completion_command(shell).await
+            }
             Commands::Whoami => crate::cli::system_ops::execute_whoami_command(config).await,
             // Upgrade does not need Azure config — only talks to GitHub API
             Commands::Upgrade { check, force } => {

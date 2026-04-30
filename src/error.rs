@@ -138,7 +138,6 @@ impl CrosstacheError {
             Self::AzureApiError(_) => 40,
 
             // Reserve 50–59 for the scanner feature (lands in plan 4).
-
             Self::SerializationError(_)
             | Self::IoError(_)
             | Self::JsonError(_)
@@ -323,9 +322,7 @@ mod tests {
     #[test]
     fn test_permission_denied_constructor() {
         let err = CrosstacheError::permission_denied("read not allowed");
-        assert!(
-            matches!(err, CrosstacheError::PermissionDenied(ref s) if s == "read not allowed")
-        );
+        assert!(matches!(err, CrosstacheError::PermissionDenied(ref s) if s == "read not allowed"));
         assert_eq!(err.to_string(), "Permission denied: read not allowed");
     }
 
@@ -352,18 +349,14 @@ mod tests {
     #[test]
     fn test_connection_timeout_constructor() {
         let err = CrosstacheError::connection_timeout("30s elapsed");
-        assert!(
-            matches!(err, CrosstacheError::ConnectionTimeout(ref s) if s == "30s elapsed")
-        );
+        assert!(matches!(err, CrosstacheError::ConnectionTimeout(ref s) if s == "30s elapsed"));
         assert_eq!(err.to_string(), "Connection timeout: 30s elapsed");
     }
 
     #[test]
     fn test_connection_refused_constructor() {
         let err = CrosstacheError::connection_refused("port 443 closed");
-        assert!(
-            matches!(err, CrosstacheError::ConnectionRefused(ref s) if s == "port 443 closed")
-        );
+        assert!(matches!(err, CrosstacheError::ConnectionRefused(ref s) if s == "port 443 closed"));
         assert_eq!(err.to_string(), "Connection refused: port 443 closed");
     }
 
@@ -384,18 +377,14 @@ mod tests {
     #[test]
     fn test_serialization_constructor() {
         let err = CrosstacheError::serialization("bad JSON");
-        assert!(
-            matches!(err, CrosstacheError::SerializationError(ref s) if s == "bad JSON")
-        );
+        assert!(matches!(err, CrosstacheError::SerializationError(ref s) if s == "bad JSON"));
         assert_eq!(err.to_string(), "Serialization error: bad JSON");
     }
 
     #[test]
     fn test_invalid_argument_constructor() {
         let err = CrosstacheError::invalid_argument("--format missing");
-        assert!(
-            matches!(err, CrosstacheError::InvalidArgument(ref s) if s == "--format missing")
-        );
+        assert!(matches!(err, CrosstacheError::InvalidArgument(ref s) if s == "--format missing"));
         assert_eq!(err.to_string(), "Invalid argument: --format missing");
     }
 
@@ -409,9 +398,7 @@ mod tests {
     #[test]
     fn test_unknown_constructor() {
         let err = CrosstacheError::unknown("something went wrong");
-        assert!(
-            matches!(err, CrosstacheError::Unknown(ref s) if s == "something went wrong")
-        );
+        assert!(matches!(err, CrosstacheError::Unknown(ref s) if s == "something went wrong"));
         assert_eq!(err.to_string(), "Unknown error: something went wrong");
     }
 
@@ -461,18 +448,36 @@ mod tests {
             (CrosstacheError::authentication("x"), "xv-auth-failed"),
             (CrosstacheError::azure_api("x"), "xv-azure-api"),
             (CrosstacheError::config("x"), "xv-config-invalid"),
-            (CrosstacheError::secret_not_found("x"), "xv-secret-not-found"),
+            (
+                CrosstacheError::secret_not_found("x"),
+                "xv-secret-not-found",
+            ),
             (CrosstacheError::vault_not_found("x"), "xv-vault-not-found"),
-            (CrosstacheError::invalid_secret_name("x"), "xv-invalid-secret-name"),
-            (CrosstacheError::permission_denied("x"), "xv-permission-denied"),
+            (
+                CrosstacheError::invalid_secret_name("x"),
+                "xv-invalid-secret-name",
+            ),
+            (
+                CrosstacheError::permission_denied("x"),
+                "xv-permission-denied",
+            ),
             (CrosstacheError::network("x"), "xv-network"),
             (CrosstacheError::dns_resolution("x", "y"), "xv-network-dns"),
-            (CrosstacheError::connection_timeout("x"), "xv-network-timeout"),
-            (CrosstacheError::connection_refused("x"), "xv-network-refused"),
+            (
+                CrosstacheError::connection_timeout("x"),
+                "xv-network-timeout",
+            ),
+            (
+                CrosstacheError::connection_refused("x"),
+                "xv-network-refused",
+            ),
             (CrosstacheError::ssl_error("x"), "xv-network-ssl"),
             (CrosstacheError::invalid_url("x"), "xv-invalid-url"),
             (CrosstacheError::serialization("x"), "xv-serialization"),
-            (CrosstacheError::invalid_argument("x"), "xv-invalid-argument"),
+            (
+                CrosstacheError::invalid_argument("x"),
+                "xv-invalid-argument",
+            ),
             (CrosstacheError::upgrade("x"), "xv-upgrade"),
             (CrosstacheError::unknown("x"), "xv-unknown"),
             (
@@ -528,10 +533,8 @@ mod tests {
     #[test]
     fn test_exit_code_is_stable_for_unknown_variants() {
         // From-converted errors that don't have a clear family fall back to 1.
-        let io_err = CrosstacheError::IoError(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "x",
-        ));
+        let io_err =
+            CrosstacheError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, "x"));
         assert_eq!(io_err.exit_code(), 1);
 
         let json_err = CrosstacheError::JsonError(

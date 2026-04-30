@@ -68,13 +68,12 @@ impl ConfigInitializer {
 
         // Create resource group now that we have the location. This ensures the
         // group exists even if the user skips optional vault creation in step 6.
-        let rg_exists =
-            crate::utils::azure_detect::AzureDetector::resource_group_exists(
-                &subscription.id,
-                &resource_group,
-            )
-            .await
-            .unwrap_or(false);
+        let rg_exists = crate::utils::azure_detect::AzureDetector::resource_group_exists(
+            &subscription.id,
+            &resource_group,
+        )
+        .await
+        .unwrap_or(false);
         if !rg_exists {
             let progress =
                 crate::utils::interactive::ProgressIndicator::new("Creating resource group...");
@@ -452,7 +451,8 @@ impl ConfigInitializer {
                         "Azure CLI ('az') is not installed or not found in PATH. \
                          Storage account creation requires Azure CLI. \
                          Install it from https://docs.microsoft.com/cli/azure/install-azure-cli \
-                         or create the storage account manually and set AZURE_STORAGE_ACCOUNT.".to_string()
+                         or create the storage account manually and set AZURE_STORAGE_ACCOUNT."
+                            .to_string(),
                     ));
                 }
                 Err(e) => return Err(CrosstacheError::IoError(e)),
@@ -504,7 +504,8 @@ impl ConfigInitializer {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(CrosstacheError::azure_api(
                         "Azure CLI ('az') is not installed or not found in PATH. \
-                         Install it from https://docs.microsoft.com/cli/azure/install-azure-cli".to_string()
+                         Install it from https://docs.microsoft.com/cli/azure/install-azure-cli"
+                            .to_string(),
                     ));
                 }
                 Err(_) => false,
@@ -612,7 +613,8 @@ impl ConfigInitializer {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(CrosstacheError::azure_api(
                         "Azure CLI ('az') is not installed or not found in PATH. \
-                         Install it from https://docs.microsoft.com/cli/azure/install-azure-cli".to_string()
+                         Install it from https://docs.microsoft.com/cli/azure/install-azure-cli"
+                            .to_string(),
                     ));
                 }
                 Err(_) => false,

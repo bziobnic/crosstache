@@ -670,10 +670,9 @@ impl BlobManager {
         }
 
         // Fetch the committed blob's server-side properties for an accurate FileInfo.
-        let properties = blob_client
-            .get_properties()
-            .await
-            .map_err(|e| CrosstacheError::azure_api(format!("Failed to get blob properties after upload: {e}")))?;
+        let properties = blob_client.get_properties().await.map_err(|e| {
+            CrosstacheError::azure_api(format!("Failed to get blob properties after upload: {e}"))
+        })?;
 
         let size = properties.blob.properties.content_length;
         let last_modified = {
@@ -831,7 +830,10 @@ pub fn create_blob_manager(config: &crate::config::Config) -> Result<BlobManager
         blob_config.storage_account,
         blob_config.container_name,
     )?
-    .with_blob_config(blob_config.chunk_size_mb, blob_config.max_concurrent_uploads))
+    .with_blob_config(
+        blob_config.chunk_size_mb,
+        blob_config.max_concurrent_uploads,
+    ))
 }
 
 #[cfg(test)]

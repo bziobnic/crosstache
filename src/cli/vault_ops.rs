@@ -221,7 +221,8 @@ async fn execute_vault_list(
             if cached.is_empty() {
                 output::info("No vaults found.");
             } else {
-                let formatter = TableFormatter::new(output_format, config.no_color, config.template.clone());
+                let formatter =
+                    TableFormatter::new(output_format, config.no_color, config.template.clone());
                 println!("{}", formatter.format_table(&cached)?);
             }
             return Ok(());
@@ -709,10 +710,16 @@ async fn execute_vault_import(
 
                 let (key, value) = if let Some(pos) = line.find('=') {
                     // KEY=VALUE format
-                    (line[..pos].trim().to_lowercase().replace("_", "-"), line[pos + 1..].trim())
+                    (
+                        line[..pos].trim().to_lowercase().replace("_", "-"),
+                        line[pos + 1..].trim(),
+                    )
                 } else if let Some(pos) = line.find(':') {
                     // KEY: VALUE format
-                    (line[..pos].trim().to_lowercase().replace("_", "-"), line[pos + 1..].trim())
+                    (
+                        line[..pos].trim().to_lowercase().replace("_", "-"),
+                        line[pos + 1..].trim(),
+                    )
                 } else {
                     continue; // Skip lines without a separator
                 };
@@ -975,8 +982,11 @@ async fn execute_vault_share(
                 if format.resolve_for_stdout() == crate::utils::format::OutputFormat::Table {
                     println!("Access assignments for vault '{vault_name}':");
                 }
-                let formatter =
-                    crate::utils::format::TableFormatter::new(format, config.no_color, config.template.clone());
+                let formatter = crate::utils::format::TableFormatter::new(
+                    format,
+                    config.no_color,
+                    config.template.clone(),
+                );
                 let table_output = formatter.format_table(&roles)?;
                 println!("{table_output}");
             }

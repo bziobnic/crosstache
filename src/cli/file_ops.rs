@@ -254,7 +254,11 @@ pub(crate) async fn execute_file_info_from_root(file_name: &str, config: &Config
     // Call the existing file info function
     execute_file_info(&blob_manager, file_name, config).await
 }
-pub(crate) async fn refresh_file_list(vault_name: String, recursive: bool, config: Config) -> Result<()> {
+pub(crate) async fn refresh_file_list(
+    vault_name: String,
+    recursive: bool,
+    config: Config,
+) -> Result<()> {
     use crate::blob::models::{BlobListItem, FileListRequest};
     use crate::cache::{CacheKey, CacheManager};
 
@@ -2059,7 +2063,10 @@ pub(crate) async fn execute_file_download_quick(
                 }
             }
             Err(e) => {
-                eprintln!("Warning: could not resolve path '{}': {}", final_output_path, e);
+                eprintln!(
+                    "Warning: could not resolve path '{}': {}",
+                    final_output_path, e
+                );
             }
         }
     }

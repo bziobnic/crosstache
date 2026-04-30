@@ -306,9 +306,16 @@ impl AccessPolicy {
 mod tests {
     use super::*;
 
-    fn make_vault_properties(name: &str, uri: &str, purge: bool, retention: i32) -> VaultProperties {
+    fn make_vault_properties(
+        name: &str,
+        uri: &str,
+        purge: bool,
+        retention: i32,
+    ) -> VaultProperties {
         VaultProperties {
-            id: format!("/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/{name}"),
+            id: format!(
+                "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/{name}"
+            ),
             name: name.to_string(),
             location: "eastus".to_string(),
             resource_group: "rg".to_string(),
@@ -382,12 +389,7 @@ mod tests {
 
     #[test]
     fn test_get_vault_uri_returns_stored_uri() {
-        let vp = make_vault_properties(
-            "myvault",
-            "https://myvault.vault.azure.net/",
-            false,
-            90,
-        );
+        let vp = make_vault_properties("myvault", "https://myvault.vault.azure.net/", false, 90);
         assert_eq!(vp.get_vault_uri(), "https://myvault.vault.azure.net/");
     }
 
@@ -417,12 +419,7 @@ mod tests {
 
     #[test]
     fn test_to_summary_active_status() {
-        let vp = make_vault_properties(
-            "myvault",
-            "https://myvault.vault.azure.net/",
-            false,
-            90,
-        );
+        let vp = make_vault_properties("myvault", "https://myvault.vault.azure.net/", false, 90);
         let summary = vp.to_summary();
         assert_eq!(summary.name, "myvault");
         assert_eq!(summary.status, "Active");

@@ -10,11 +10,15 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         "xv-secret-not-found" => "Run 'xv list' to see secrets in the active vault.",
         "xv-invalid-secret-name" => "Names must be alphanumeric + hyphens; see 'xv help set'.",
         "xv-permission-denied" => "Check your role with 'xv whoami'; see 'xv vault share list'.",
-        "xv-auth-failed" => "Try 'az login' or set AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID.",
+        "xv-auth-failed" => {
+            "Try 'az login' or set AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID."
+        }
         "xv-network-dns" => "Check the vault name and your DNS settings.",
         "xv-network-timeout" => "Check your network connection or proxy settings.",
         "xv-network-refused" => "Verify the vault exists and is reachable from this network.",
-        "xv-network-ssl" => "Check TLS configuration and any corporate proxy with TLS interception.",
+        "xv-network-ssl" => {
+            "Check TLS configuration and any corporate proxy with TLS interception."
+        }
         "xv-config-invalid" => "Run 'xv config show' to inspect, or 'xv init' to reinitialize.",
         "xv-azure-api" => "Check Azure service status and your subscription quotas.",
         _ => return None,
@@ -50,7 +54,10 @@ mod tests {
             "xv-config-invalid",
         ] {
             let hint = hint_for(code).unwrap();
-            assert!(!hint.contains('\n'), "hint for {code} contains newline: {hint:?}");
+            assert!(
+                !hint.contains('\n'),
+                "hint for {code} contains newline: {hint:?}"
+            );
             assert!(!hint.is_empty(), "hint for {code} is empty");
         }
     }

@@ -436,59 +436,111 @@ mod tests {
     #[test]
     fn test_template_basic_substitution() {
         let data = vec![
-            TestData { name: "secret1".to_string(), value: "abc123".to_string(), status: "active".to_string() },
-            TestData { name: "secret2".to_string(), value: "xyz789".to_string(), status: "inactive".to_string() },
+            TestData {
+                name: "secret1".to_string(),
+                value: "abc123".to_string(),
+                status: "active".to_string(),
+            },
+            TestData {
+                name: "secret2".to_string(),
+                value: "xyz789".to_string(),
+                status: "inactive".to_string(),
+            },
         ];
-        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("export {{Name}}={{Value}}".to_string()));
+        let formatter = TableFormatter::new(
+            OutputFormat::Template,
+            true,
+            Some("export {{Name}}={{Value}}".to_string()),
+        );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "export secret1=abc123\nexport secret2=xyz789");
     }
 
     #[test]
     fn test_template_case_insensitive() {
-        let data = vec![TestData { name: "mykey".to_string(), value: "myval".to_string(), status: "active".to_string() }];
-        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{name}} {{NAME}} {{Name}}".to_string()));
+        let data = vec![TestData {
+            name: "mykey".to_string(),
+            value: "myval".to_string(),
+            status: "active".to_string(),
+        }];
+        let formatter = TableFormatter::new(
+            OutputFormat::Template,
+            true,
+            Some("{{name}} {{NAME}} {{Name}}".to_string()),
+        );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "mykey mykey mykey");
     }
 
     #[test]
     fn test_template_unknown_field_left_as_is() {
-        let data = vec![TestData { name: "key".to_string(), value: "val".to_string(), status: "ok".to_string() }];
-        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{Name}}: {{nonexistent}}".to_string()));
+        let data = vec![TestData {
+            name: "key".to_string(),
+            value: "val".to_string(),
+            status: "ok".to_string(),
+        }];
+        let formatter = TableFormatter::new(
+            OutputFormat::Template,
+            true,
+            Some("{{Name}}: {{nonexistent}}".to_string()),
+        );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "key: {{nonexistent}}");
     }
 
     #[test]
     fn test_template_missing_template_flag_errors() {
-        let data = vec![TestData { name: "key".to_string(), value: "val".to_string(), status: "ok".to_string() }];
+        let data = vec![TestData {
+            name: "key".to_string(),
+            value: "val".to_string(),
+            status: "ok".to_string(),
+        }];
         let formatter = TableFormatter::new(OutputFormat::Template, true, None);
         let result = formatter.format_table(&data);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("--template"), "Error should mention --template flag");
+        assert!(
+            result.unwrap_err().to_string().contains("--template"),
+            "Error should mention --template flag"
+        );
     }
 
     #[test]
     fn test_template_empty_data_returns_empty() {
         let data: Vec<TestData> = vec![];
-        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{Name}}".to_string()));
+        let formatter =
+            TableFormatter::new(OutputFormat::Template, true, Some("{{Name}}".to_string()));
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "");
     }
 
     #[test]
     fn test_template_whitespace_in_braces() {
-        let data = vec![TestData { name: "key".to_string(), value: "val".to_string(), status: "ok".to_string() }];
-        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{ Name }} = {{  Value  }}".to_string()));
+        let data = vec![TestData {
+            name: "key".to_string(),
+            value: "val".to_string(),
+            status: "ok".to_string(),
+        }];
+        let formatter = TableFormatter::new(
+            OutputFormat::Template,
+            true,
+            Some("{{ Name }} = {{  Value  }}".to_string()),
+        );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "key = val");
     }
 
     #[test]
     fn test_template_multiple_fields() {
-        let data = vec![TestData { name: "db_pass".to_string(), value: "secret".to_string(), status: "active".to_string() }];
-        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{Name}}={{Value}} ({{Status}})".to_string()));
+        let data = vec![TestData {
+            name: "db_pass".to_string(),
+            value: "secret".to_string(),
+            status: "active".to_string(),
+        }];
+        let formatter = TableFormatter::new(
+            OutputFormat::Template,
+            true,
+            Some("{{Name}}={{Value}} ({{Status}})".to_string()),
+        );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "db_pass=secret (active)");
     }
@@ -503,8 +555,15 @@ mod tests {
             created_by: String,
         }
 
-        let data = vec![MultiWordData { secret_name: "api-key".to_string(), created_by: "admin".to_string() }];
-        let formatter = TableFormatter::new(OutputFormat::Template, true, Some("{{Secret Name}} by {{Created By}}".to_string()));
+        let data = vec![MultiWordData {
+            secret_name: "api-key".to_string(),
+            created_by: "admin".to_string(),
+        }];
+        let formatter = TableFormatter::new(
+            OutputFormat::Template,
+            true,
+            Some("{{Secret Name}} by {{Created By}}".to_string()),
+        );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "api-key by admin");
     }

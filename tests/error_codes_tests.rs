@@ -18,7 +18,10 @@ fn invalid_argument_exits_2() {
 
 #[test]
 fn unknown_subcommand_exits_2() {
-    let out = xv().args(["this-subcommand-does-not-exist"]).output().unwrap();
+    let out = xv()
+        .args(["this-subcommand-does-not-exist"])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     assert_eq!(out.status.code(), Some(2));
 }
@@ -35,8 +38,7 @@ fn secret_not_found_includes_suggestion_when_close_match_exists() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(10));
-    let body: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("stdout must be JSON");
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout must be JSON");
     assert_eq!(body["error"]["code"], "xv-secret-not-found");
     assert_eq!(body["error"]["suggestion"], "DB_PASSWORD");
 }
@@ -47,9 +49,11 @@ fn json_format_emits_error_envelope() {
     // Triggers a vault-not-found by passing a vault name that cannot exist.
     let out = xv()
         .args([
-            "vault", "info",
+            "vault",
+            "info",
             "definitely-does-not-exist-zzzzzzzz",
-            "--format", "json",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -63,6 +67,12 @@ fn json_format_emits_error_envelope() {
 
 #[test]
 fn plain_format_writes_error_to_stderr() {
-    let out = xv().args(["this-subcommand-does-not-exist"]).output().unwrap();
-    assert!(!out.stderr.is_empty(), "stderr should contain clap parse error");
+    let out = xv()
+        .args(["this-subcommand-does-not-exist"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.stderr.is_empty(),
+        "stderr should contain clap parse error"
+    );
 }

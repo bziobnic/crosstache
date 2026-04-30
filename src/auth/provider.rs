@@ -111,10 +111,8 @@ fn create_user_friendly_token_error(error: azure_core::Error) -> CrosstacheError
 
 /// Pre-compiled UUID regex, reused across all resolve_user_to_object_id calls.
 static UUID_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(
-        r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-    )
-    .expect("UUID regex is valid")
+    regex::Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        .expect("UUID regex is valid")
 });
 
 /// Trait for Azure authentication providers

@@ -3,8 +3,7 @@
 use crate::auth::provider::DefaultAzureCredentialProvider;
 use crate::cli::commands::{CharsetType, ShareCommands};
 use crate::cli::helpers::{
-    copy_to_clipboard, generate_random_value, mask_secrets,
-    schedule_clipboard_clear,
+    copy_to_clipboard, generate_random_value, mask_secrets, schedule_clipboard_clear,
 };
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
@@ -23,7 +22,6 @@ pub(crate) async fn execute_secret_set_direct(
     not_before: Option<String>,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -83,7 +81,6 @@ pub(crate) async fn execute_secret_get_direct(
     version: Option<String>,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -222,7 +219,6 @@ pub(crate) async fn execute_secret_delete_direct(
     force: bool,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -257,7 +253,6 @@ pub(crate) async fn execute_secret_delete_direct(
 }
 
 pub(crate) async fn execute_secret_history_direct(name: &str, config: Config) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -280,7 +275,6 @@ pub(crate) async fn execute_secret_rollback_direct(
     force: bool,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -314,7 +308,6 @@ pub(crate) async fn execute_secret_rotate_direct(
     force: bool,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -356,7 +349,6 @@ pub(crate) async fn execute_secret_run_direct(
     command: Vec<String>,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -379,7 +371,6 @@ pub(crate) async fn execute_secret_inject_direct(
     group: Vec<String>,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -414,7 +405,6 @@ pub(crate) async fn execute_secret_update_direct(
     clear_not_before: bool,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -458,8 +448,11 @@ pub(crate) async fn execute_secret_update_direct(
     Ok(())
 }
 
-pub(crate) async fn execute_secret_purge_direct(name: &str, force: bool, config: Config) -> Result<()> {
-
+pub(crate) async fn execute_secret_purge_direct(
+    name: &str,
+    force: bool,
+    config: Config,
+) -> Result<()> {
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -485,7 +478,6 @@ pub(crate) async fn execute_secret_purge_direct(name: &str, force: bool, config:
 }
 
 pub(crate) async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -665,7 +657,6 @@ pub(crate) async fn execute_secret_copy_direct(
     new_name: Option<String>,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -709,7 +700,6 @@ pub(crate) async fn execute_secret_move_direct(
     force: bool,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -751,7 +741,6 @@ pub(crate) async fn execute_secret_parse_direct(
     format: &str,
     config: Config,
 ) -> Result<()> {
-
     // Create authentication provider
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -768,7 +757,10 @@ pub(crate) async fn execute_secret_parse_direct(
     execute_secret_parse(&secret_manager, connection_string, format, &config).await
 }
 
-pub(crate) async fn execute_secret_share_direct(command: ShareCommands, config: Config) -> Result<()> {
+pub(crate) async fn execute_secret_share_direct(
+    command: ShareCommands,
+    config: Config,
+) -> Result<()> {
     use crate::auth::provider::AzureAuthProvider;
     use crate::vault::manager::VaultManager;
 
@@ -914,7 +906,11 @@ async fn execute_secret_get(
         Err(CrosstacheError::SecretNotFound { name: missing, .. }) => {
             // Best-effort suggestion: list secrets and find a close match.
             // Failures here must NOT change the original error path.
-            let suggestion = match secret_manager.secret_ops().list_secrets(&vault_name, None).await {
+            let suggestion = match secret_manager
+                .secret_ops()
+                .list_secrets(&vault_name, None)
+                .await
+            {
                 Ok(summaries) => {
                     let candidates: Vec<String> = summaries
                         .into_iter()
@@ -934,9 +930,7 @@ async fn execute_secret_get(
                     None
                 }
             };
-            return Err(
-                CrosstacheError::secret_not_found(missing).with_suggestion(suggestion),
-            );
+            return Err(CrosstacheError::secret_not_found(missing).with_suggestion(suggestion));
         }
         Err(e) => return Err(e),
     };
@@ -974,8 +968,11 @@ async fn execute_secret_get(
     Ok(())
 }
 
-pub(crate) async fn execute_secret_find_direct(term: Option<String>, raw: bool, config: Config) -> Result<()> {
-
+pub(crate) async fn execute_secret_find_direct(
+    term: Option<String>,
+    raw: bool,
+    config: Config,
+) -> Result<()> {
     let auth_provider = Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
             config.azure_credential_priority.clone(),
@@ -1620,10 +1617,7 @@ async fn execute_secret_run(
 /// `secret_values` is moved into an `Arc` and shared across two reader threads.
 /// After both threads join, this function holds the last `Arc` reference —
 /// dropping it triggers `Zeroizing::drop` on each secret value.
-fn stream_and_mask(
-    mut child: std::process::Child,
-    secret_values: Vec<Zeroizing<String>>,
-) -> i32 {
+fn stream_and_mask(mut child: std::process::Child, secret_values: Vec<Zeroizing<String>>) -> i32 {
     use std::io::{BufRead, BufReader, Write};
 
     let stdout = child.stdout.take().expect("stdout was piped");
@@ -3001,6 +2995,7 @@ mod tests {
             let mut out = OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(true)
                 .open(&stdout_path)
                 .unwrap();
             let mut reader = BufReader::new(stdout_handle);
@@ -3017,6 +3012,7 @@ mod tests {
             let mut out = OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(true)
                 .open(&stderr_path)
                 .unwrap();
             let mut reader = BufReader::new(stderr_handle);
