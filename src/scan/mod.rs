@@ -5,3 +5,4 @@
 pub mod engine;
 pub mod finding;
 pub mod patterns;
+pub mod walker;

@@ -30,6 +30,10 @@ pub struct ProjectConfig {
     /// deterministic serialization order and stable test snapshots.
     #[serde(default, rename = "env", skip_serializing_if = "BTreeMap::is_empty")]
     pub envs: BTreeMap<String, EnvProfile>,
+
+    /// Optional scanner configuration for leak detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<ScanConfig>,
 }
 
 /// One environment's defaults. All fields optional; a missing field
@@ -45,6 +49,22 @@ pub struct EnvProfile {
     pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+}
+
+/// Scanner configuration block for leak detection settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScanConfig {
+    /// Glob patterns excluded from scanning, on top of .gitignore +
+    /// the built-in defaults (`.git/**`, `target/**`, etc.).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Override the default 8-char minimum. Smaller values produce
+    /// more matches; consider with care.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_value_length: Option<usize>,
+    /// Allowlist of pattern names to enable. Empty = all built-ins enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<String>,
 }
 
 /// Parse a `.xv.toml` blob into a [`ProjectConfig`].
@@ -377,6 +397,7 @@ resource_group = "rg"
         ProjectConfig {
             default_env: default_env.map(String::from),
             envs: envs_map,
+            scan: None,
         }
     }
 
@@ -478,5 +499,24 @@ resource_group = "rg"
             Some("using config from /path/a/.xv.toml (env: dev)".to_string()),
         );
         assert_eq!(captured2, None, "second call must be no-op");
+    }
+
+    #[test]
+    fn parse_str_with_scan_block() {
+        let toml = r#"
+[scan]
+exclude = ["dist/**", "*.lock"]
+min_value_length = 12
+patterns = ["aws", "github"]
+
+[env.dev]
+vault = "v"
+resource_group = "rg"
+"#;
+        let cfg = parse_str(toml).expect("must parse");
+        let scan = cfg.scan.as_ref().expect("must have [scan]");
+        assert_eq!(scan.exclude, vec!["dist/**", "*.lock"]);
+        assert_eq!(scan.min_value_length, Some(12));
+        assert_eq!(scan.patterns, vec!["aws", "github"]);
     }
 }
