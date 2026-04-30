@@ -213,3 +213,36 @@ fn render_findings(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan::finding::{FindingKind, Severity};
+    use crate::utils::format::OutputFormat;
+
+    #[test]
+    fn render_no_findings_returns_ok() {
+        let result = render_findings(&[], true, OutputFormat::Plain);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn render_findings_returns_scan_leak_detected() {
+        let f = Finding {
+            file: std::path::PathBuf::from("x"),
+            line: 1,
+            col: 1,
+            secret_name: Some("S".to_string()),
+            vault: Some("v".to_string()),
+            kind: FindingKind::SecretValue,
+            severity: Severity::Critical,
+        };
+        let result = render_findings(&[f], true, OutputFormat::Json);
+        match result {
+            Err(crate::error::CrosstacheError::ScanLeakDetected { count }) => {
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected ScanLeakDetected, got {other:?}"),
+        }
+    }
+}
