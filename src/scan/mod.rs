@@ -3,3 +3,4 @@
 //! See `docs/scan.md` for the user-facing contract.
 
 pub mod finding;
+pub mod patterns;
