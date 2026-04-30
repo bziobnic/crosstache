@@ -246,15 +246,40 @@ pub enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Interactively find and copy a secret by name pattern (alias: search)
+    /// Ranked fuzzy search over secrets (alias: search). Non-interactive;
+    /// pipe the output through fzf or similar for an interactive picker.
+    /// Default search field is the secret name; opt in to other fields
+    /// via repeated `--in <field>`.
     #[command(alias = "search")]
     Find {
-        /// Search term — substring match, or prefix with trailing * (e.g. claude-*)
-        /// Omit to browse all secrets interactively.
-        term: Option<String>,
-        /// Print value to stdout instead of copying to clipboard
-        #[arg(short, long)]
-        raw: bool,
+        /// Pattern to score every secret against. Omit to list all
+        /// secrets unranked (score 0); flags still apply.
+        pattern: Option<String>,
+
+        /// Search additional fields alongside the name. Repeatable.
+        /// Allowed: name, folder, groups, note, tags.
+        #[arg(long = "in", value_name = "FIELD", num_args = 1..)]
+        in_fields: Vec<String>,
+
+        /// Maximum rows to print (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        /// Drop matches scoring below this fraction of the top match
+        /// (0.0..=1.0). Default 0.3.
+        #[arg(long, default_value_t = 0.3)]
+        min_score: f32,
+
+        /// Search every vault the caller has list rights on. Slow on
+        /// cold cache. Mutually exclusive with vault-resolved context.
+        #[arg(long)]
+        all_vaults: bool,
+
+        /// Print one name per line, no headers, no ANSI. Pipe-friendly.
+        /// Overrides `--format` and disables auto-format-resolution to
+        /// JSON when stdout is not a TTY.
+        #[arg(long)]
+        names_only: bool,
     },
     /// List secrets in the current vault context (alias: ls)
     #[command(alias = "ls")]
