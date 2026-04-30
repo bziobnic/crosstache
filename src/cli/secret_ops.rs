@@ -1035,11 +1035,16 @@ async fn execute_secret_get(
 }
 
 pub(crate) async fn execute_secret_find_direct(
-    term: Option<String>,
-    raw: bool,
+    pattern: Option<String>,
+    in_fields: Vec<String>,
+    limit: usize,
+    min_score: f32,
+    all_vaults: bool,
+    names_only: bool,
+    format: crate::utils::format::OutputFormat,
     config: Config,
 ) -> Result<()> {
-    let auth_provider = Arc::new(
+    let auth_provider = std::sync::Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
             config.azure_credential_priority.clone(),
         )
@@ -1047,26 +1052,62 @@ pub(crate) async fn execute_secret_find_direct(
             CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
         })?,
     );
-
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    execute_secret_find(&secret_manager, term.as_deref(), raw, &config).await
+    execute_secret_find(
+        &secret_manager,
+        pattern.as_deref(),
+        in_fields,
+        limit,
+        min_score,
+        all_vaults,
+        names_only,
+        format,
+        &config,
+    )
+    .await
 }
 
 async fn execute_secret_find(
     secret_manager: &crate::secret::manager::SecretManager,
-    term: Option<&str>,
-    raw: bool,
+    pattern: Option<&str>,
+    in_fields: Vec<String>,
+    limit: usize,
+    min_score: f32,
+    _all_vaults: bool, // wired in Task 8
+    names_only: bool,
+    format: crate::utils::format::OutputFormat,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    use dialoguer::{theme::ColorfulTheme, FuzzySelect};
+    use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
 
     let vault_name = config.resolve_vault_name(None).await?;
 
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
-    // Fetch all secrets from the vault
+    // Parse --in fields. Default: just Name. Always include Name even if
+    // user supplied other fields (so a name match still counts).
+    let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
+    for raw in &in_fields {
+        let parsed = match raw.to_ascii_lowercase().as_str() {
+            "name" => FuzzyField::Name,
+            "folder" => FuzzyField::Folder,
+            "groups" => FuzzyField::Groups,
+            "note" => FuzzyField::Note,
+            "tags" => FuzzyField::Tags,
+            other => {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "unknown --in field: '{other}' (allowed: name, folder, groups, note, tags)"
+                )));
+            }
+        };
+        if !fields.contains(&parsed) {
+            fields.push(parsed);
+        }
+    }
+
+    // Fetch secrets (full list — pagination is on the display side).
     let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
     let all_secrets = secret_manager
         .secret_ops()
@@ -1075,127 +1116,74 @@ async fn execute_secret_find(
     progress.finish_clear();
     let all_secrets = all_secrets?;
 
-    if all_secrets.is_empty() {
-        output::info(&format!("No secrets found in vault '{vault_name}'"));
+    // Adapt to CandidateItems and score.
+    let items: Vec<CandidateItem> = all_secrets
+        .iter()
+        .map(CandidateItem::from_secret_summary)
+        .collect();
+    let pattern_str = pattern.unwrap_or("");
+    let mut matches = score_matches(pattern_str, &items, &fields);
+
+    // Apply min_score (relative to the top score, so 0.3 means 30% of
+    // top). Empty pattern → every score is 0; skip filtering.
+    if !pattern_str.is_empty() && !matches.is_empty() {
+        let top = matches[0].score as f32;
+        if top > 0.0 {
+            let cutoff = (top * min_score).ceil() as u32;
+            matches.retain(|m| m.score >= cutoff);
+        }
+    }
+
+    // Apply limit.
+    matches.truncate(limit);
+
+    // Render: --names-only beats everything (pipe-friendly).
+    if names_only {
+        for m in &matches {
+            println!("{}", m.item.name);
+        }
         return Ok(());
     }
 
-    // Filter by term if provided
-    let filtered: Vec<_> = if let Some(term) = term {
-        // Support simple glob prefix (e.g. "claude-*" → prefix match on "claude-")
-        let (prefix_only, search_term) = if term.ends_with('*') {
-            (true, term.trim_end_matches('*'))
-        } else {
-            (false, term)
-        };
-        let term_lower = search_term.to_lowercase();
-
-        all_secrets
+    // Format-aware rendering.
+    let resolved = format.resolve_for_stdout();
+    use crate::utils::format::OutputFormat;
+    if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
+        let envelope: Vec<serde_json::Value> = matches
             .iter()
-            .filter(|s| {
-                let name = s.name.to_lowercase();
-                let orig = s.original_name.to_lowercase();
-                if prefix_only {
-                    name.starts_with(&term_lower) || orig.starts_with(&term_lower)
-                } else {
-                    name.contains(&term_lower) || orig.contains(&term_lower)
-                }
-            })
-            .collect()
-    } else {
-        all_secrets.iter().collect()
-    };
-
-    if filtered.is_empty() {
-        let msg = term.map_or_else(
-            || format!("No secrets found in vault '{vault_name}'"),
-            |t| format!("No secrets match '{t}' in vault '{vault_name}'"),
-        );
-        return Err(CrosstacheError::invalid_argument(msg));
-    }
-
-    // Resolve which secret to use
-    let secret_name = if filtered.len() == 1 {
-        // Single match — skip the TUI
-        let s = &filtered[0];
-        let display = if !s.original_name.is_empty() && s.original_name != s.name {
-            &s.original_name
-        } else {
-            &s.name
-        };
-        println!("Found: {display}");
-        s.name.clone()
-    } else {
-        // Multiple matches — interactive fuzzy selector
-        let display_names: Vec<String> = filtered
-            .iter()
-            .map(|s| {
-                let base = if !s.original_name.is_empty() && s.original_name != s.name {
-                    s.original_name.clone()
-                } else {
-                    s.name.clone()
-                };
-                // Annotate with folder and groups for extra context
-                let mut label = base;
-                if let Some(folder) = &s.folder {
-                    label = format!("{folder}/{label}");
-                }
-                if let Some(groups) = &s.groups {
-                    label = format!("{label}  [{groups}]");
-                }
-                label
+            .map(|m| {
+                serde_json::json!({
+                    "name": m.item.name,
+                    "score": m.score,
+                    "folder": m.item.folder,
+                    "groups": m.item.groups,
+                })
             })
             .collect();
-
-        let prompt = term.map_or_else(
-            || format!("Select a secret from '{vault_name}'"),
-            |t| format!("Select a secret matching '{t}'"),
-        );
-
-        let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
-            .with_prompt(prompt)
-            .items(&display_names)
-            .default(0)
-            .interact()
-            .map_err(|_| CrosstacheError::config("Selection cancelled"))?;
-
-        filtered[selection].name.clone()
-    };
-
-    // Fetch the secret value
-    let secret = secret_manager
-        .get_secret_with_version(&vault_name, &secret_name, None, true, true)
-        .await?;
-
-    if raw {
-        if let Some(value) = secret.value {
-            print!("{}", value.as_str());
-        }
-    } else if let Some(ref value) = secret.value {
-        match copy_to_clipboard(value) {
-            Ok(()) => {
-                let timeout = config.clipboard_timeout;
-                if timeout > 0 {
-                    output::success(&format!(
-                        "Secret '{secret_name}' copied to clipboard (auto-clears in {timeout}s)"
-                    ));
-                    schedule_clipboard_clear(timeout);
-                } else {
-                    output::success(&format!("Secret '{secret_name}' copied to clipboard"));
-                }
-            }
-            Err(e) => {
-                output::warn(&format!("Failed to copy to clipboard: {e}"));
-                eprintln!(
-                    "Use 'xv find --raw {term_hint}' to print to stdout instead.",
-                    term_hint = term.unwrap_or("")
-                );
-            }
-        }
-    } else {
-        output::warn(&format!("Secret '{secret_name}' has no value"));
+        let rendered = match resolved {
+            OutputFormat::Json => serde_json::to_string_pretty(&envelope).unwrap_or_default(),
+            OutputFormat::Yaml => serde_yaml::to_string(&envelope).unwrap_or_default(),
+            _ => unreachable!(),
+        };
+        println!("{rendered}");
+        return Ok(());
     }
 
+    // Plain/table fallback (Task 7 polishes the score-bar column).
+    if matches.is_empty() {
+        if let Some(p) = pattern {
+            output::info(&format!("No secrets match '{p}' in vault '{vault_name}'"));
+        } else {
+            output::info(&format!("No secrets in vault '{vault_name}'"));
+        }
+        return Ok(());
+    }
+    println!("{:<40}  {:<8}  {:<24}  {}", "NAME", "SCORE", "FOLDER", "GROUPS");
+    for m in &matches {
+        let folder = m.item.folder.as_deref().unwrap_or("");
+        let groups = m.item.groups.as_deref().unwrap_or("");
+        println!("{:<40}  {:<8}  {:<24}  {}", m.item.name, m.score, folder, groups);
+    }
     Ok(())
 }
 

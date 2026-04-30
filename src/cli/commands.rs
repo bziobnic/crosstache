@@ -1061,8 +1061,25 @@ impl Cli {
             Commands::Get { name, raw, version } => {
                 crate::cli::secret_ops::execute_secret_get_direct(&name, raw, version, config).await
             }
-            Commands::Find { term, raw } => {
-                crate::cli::secret_ops::execute_secret_find_direct(term, raw, config).await
+            Commands::Find {
+                pattern,
+                in_fields,
+                limit,
+                min_score,
+                all_vaults,
+                names_only,
+            } => {
+                crate::cli::secret_ops::execute_secret_find_direct(
+                    pattern,
+                    in_fields,
+                    limit,
+                    min_score,
+                    all_vaults,
+                    names_only,
+                    self.format,
+                    config,
+                )
+                .await
             }
             Commands::List {
                 group,
