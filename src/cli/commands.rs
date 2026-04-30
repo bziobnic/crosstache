@@ -82,6 +82,11 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value = "auto", hide = should_hide_options())]
     pub format: OutputFormat,
 
+    /// Active environment from the resolved .xv.toml (overrides default_env).
+    /// Lower priority than the XV_ENV env var.
+    #[arg(long, global = true, hide = should_hide_options())]
+    pub env: Option<String>,
+
     /// Custom template string for template format
     #[arg(long, global = true, hide = should_hide_options())]
     pub template: Option<String>,
