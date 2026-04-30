@@ -6,7 +6,22 @@
 use crate::error::{CrosstacheError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info};
+
+static LEGACY_CONTEXT_WARN_EMITTED: AtomicBool = AtomicBool::new(false);
+
+fn maybe_warn_legacy_context(path: &std::path::Path) {
+    if LEGACY_CONTEXT_WARN_EMITTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        eprintln!(
+            "warning: legacy .xv/context loaded from {}; consider migrating to .xv.toml — see docs/env-profiles.md",
+            path.display()
+        );
+    }
+}
 
 /// Represents a vault context with associated metadata
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -112,6 +127,7 @@ impl ContextManager {
 
         let content = tokio::fs::read_to_string(&context_path).await?;
         let mut context: ContextManager = serde_json::from_str(&content)?;
+        maybe_warn_legacy_context(&context_path);
         context.context_file = Some(context_path);
         context.is_local = true;
 
