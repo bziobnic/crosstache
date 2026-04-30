@@ -5,6 +5,7 @@
 
 pub mod azure_detect;
 pub mod datetime;
+pub mod error_hints;
 pub mod format;
 pub mod helpers;
 pub mod interactive;
