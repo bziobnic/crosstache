@@ -124,6 +124,12 @@ pub struct Config {
     #[tabled(skip)]
     #[serde(default)]
     pub gen_default_charset: Option<String>,
+    /// CLI `--env` flag override for active env in `.xv.toml`. Set
+    /// once in main.rs from `cli.env`. Lower priority than the
+    /// `XV_ENV` env var.
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub env_flag: Option<String>,
 }
 
 fn default_clipboard_timeout() -> u64 {
@@ -157,6 +163,7 @@ impl Default for Config {
             azure_credential_priority: AzureCredentialType::Default,
             clipboard_timeout: default_clipboard_timeout(),
             gen_default_charset: None,
+            env_flag: None,
         }
     }
 }
@@ -214,22 +221,35 @@ impl Config {
     }
 
     /// Resolve vault name with context awareness
-    /// Priority: CLI argument > context > config default
+    /// Priority: CLI argument > .xv.toml env profile > context > config default
     pub async fn resolve_vault_name(&self, vault_arg: Option<String>) -> Result<String> {
-        use crate::config::ContextManager;
+        use crate::config::{project, ContextManager};
 
         // 1. Command line argument takes precedence
         if let Some(vault) = vault_arg {
             return Ok(vault);
         }
 
-        // 2. Check local/global context
+        // 2. Project config (.xv.toml) — walk up from cwd
+        let cwd = std::env::current_dir()?;
+        if let Ok(Some((_path, cfg))) = project::find_project_config(&cwd).await {
+            // resolve_env returns Err on unknown-env — propagate so the
+            // user sees the helpful EnvNotDefined message with the list
+            // of available envs.
+            let (_name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
+            if let Some(v) = profile.vault.as_deref() {
+                return Ok(v.to_string());
+            }
+            // Profile defines no vault — fall through to context/config.
+        }
+
+        // 3. Check local/global context
         let context_manager = ContextManager::load().await.unwrap_or_default();
         if let Some(vault_name) = context_manager.current_vault() {
             return Ok(vault_name.to_string());
         }
 
-        // 3. Fall back to config default
+        // 4. Fall back to config default
         if !self.default_vault.is_empty() {
             return Ok(self.default_vault.clone());
         }
@@ -240,23 +260,32 @@ impl Config {
     }
 
     /// Resolve resource group with context awareness
-    /// Priority: CLI argument > context > config default
+    /// Priority: CLI argument > .xv.toml env profile > context > config default
     #[allow(dead_code)]
     pub async fn resolve_resource_group(&self, rg_arg: Option<String>) -> Result<String> {
-        use crate::config::ContextManager;
+        use crate::config::{project, ContextManager};
 
         // 1. Command line argument takes precedence
         if let Some(rg) = rg_arg {
             return Ok(rg);
         }
 
-        // 2. Check context
+        // 2. Project config (.xv.toml) — walk up from cwd
+        let cwd = std::env::current_dir()?;
+        if let Ok(Some((_path, cfg))) = project::find_project_config(&cwd).await {
+            let (_name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
+            if let Some(rg) = profile.resource_group.as_deref() {
+                return Ok(rg.to_string());
+            }
+        }
+
+        // 3. Check context
         let context_manager = ContextManager::load().await.unwrap_or_default();
         if let Some(rg) = context_manager.current_resource_group() {
             return Ok(rg.to_string());
         }
 
-        // 3. Fall back to config default
+        // 4. Fall back to config default
         if !self.default_resource_group.is_empty() {
             return Ok(self.default_resource_group.clone());
         }

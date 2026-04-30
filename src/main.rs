@@ -46,7 +46,7 @@ async fn run(cli: Cli) -> Result<()> {
     info!("Starting crosstache");
 
     // Load configuration differently based on command
-    let config = match &cli.command {
+    let mut config = match &cli.command {
         crate::cli::Commands::Config { .. }
         | crate::cli::Commands::Init
         | crate::cli::Commands::Upgrade { .. } => {
@@ -58,6 +58,10 @@ async fn run(cli: Cli) -> Result<()> {
             config::load_config().await?
         }
     };
+
+    // Apply CLI --env flag to config (used by resolve_vault_name and
+    // resolve_resource_group when consulting .xv.toml).
+    config.env_flag = cli.env.clone();
 
     // Execute the command
     cli.execute(config).await?;
