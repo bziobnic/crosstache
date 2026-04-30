@@ -70,21 +70,9 @@ pub fn score_matches<'a>(
             // Collect the string(s) to score for this field.
             let field_strings: Vec<&str> = match field {
                 FuzzyField::Name => vec![item.name.as_str()],
-                FuzzyField::Folder => item
-                    .folder
-                    .as_deref()
-                    .map(|s| vec![s])
-                    .unwrap_or_default(),
-                FuzzyField::Groups => item
-                    .groups
-                    .as_deref()
-                    .map(|s| vec![s])
-                    .unwrap_or_default(),
-                FuzzyField::Note => item
-                    .note
-                    .as_deref()
-                    .map(|s| vec![s])
-                    .unwrap_or_default(),
+                FuzzyField::Folder => item.folder.as_deref().map(|s| vec![s]).unwrap_or_default(),
+                FuzzyField::Groups => item.groups.as_deref().map(|s| vec![s]).unwrap_or_default(),
+                FuzzyField::Note => item.note.as_deref().map(|s| vec![s]).unwrap_or_default(),
                 FuzzyField::Tags => item.tags.iter().map(String::as_str).collect(),
             };
             for hay_str in field_strings {
@@ -103,12 +91,9 @@ pub fn score_matches<'a>(
 
     // Sort: score desc, then name asc (case-insensitive) for tie-break.
     out.sort_by(|a, b| {
-        b.score.cmp(&a.score).then_with(|| {
-            a.item
-                .name
-                .to_lowercase()
-                .cmp(&b.item.name.to_lowercase())
-        })
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.item.name.to_lowercase().cmp(&b.item.name.to_lowercase()))
     });
     out
 }
@@ -168,11 +153,7 @@ mod tests {
 
     #[test]
     fn ranks_close_match_first() {
-        let items = vec![
-            item("DB_PASSWORD"),
-            item("API_TOKEN"),
-            item("DB_HOSTNAME"),
-        ];
+        let items = vec![item("DB_PASSWORD"), item("API_TOKEN"), item("DB_HOSTNAME")];
         let matches = score_matches("dbpw", &items, &[FuzzyField::Name]);
         assert!(!matches.is_empty(), "must produce matches");
         assert_eq!(matches[0].item.name, "DB_PASSWORD");
@@ -210,8 +191,14 @@ mod tests {
         // assert determinism: running again returns identical order.
         let again = score_matches("a", &items, &[FuzzyField::Name]);
         assert_eq!(
-            matches.iter().map(|m| m.item.name.clone()).collect::<Vec<_>>(),
-            again.iter().map(|m| m.item.name.clone()).collect::<Vec<_>>(),
+            matches
+                .iter()
+                .map(|m| m.item.name.clone())
+                .collect::<Vec<_>>(),
+            again
+                .iter()
+                .map(|m| m.item.name.clone())
+                .collect::<Vec<_>>(),
             "scoring must be deterministic"
         );
     }
@@ -227,7 +214,10 @@ mod tests {
         }];
         // pattern matches the folder, but we asked for name-only → no match
         let matches = score_matches("data", &items, &[FuzzyField::Name]);
-        assert!(matches.is_empty(), "name-only field selector ignores folder");
+        assert!(
+            matches.is_empty(),
+            "name-only field selector ignores folder"
+        );
     }
 
     #[test]

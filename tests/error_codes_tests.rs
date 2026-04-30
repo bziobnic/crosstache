@@ -129,8 +129,7 @@ fn find_json_envelope_is_array_of_records() {
         .output()
         .unwrap();
     assert!(out.status.success(), "ok exit when vault reachable");
-    let body: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("stdout must be JSON");
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout must be JSON");
     assert!(body.is_array(), "envelope is a top-level array");
     if let Some(first) = body.as_array().and_then(|a| a.first()) {
         assert!(first.get("name").is_some());

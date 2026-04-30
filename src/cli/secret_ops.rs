@@ -1124,8 +1124,8 @@ async fn execute_secret_find(
         }
     }
 
-    use crate::vault::manager::VaultManager;
     use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::vault::manager::VaultManager;
 
     let items: Vec<CandidateItem> = if all_vaults {
         // Build a VaultManager from the same credential priority used
@@ -1251,7 +1251,10 @@ async fn execute_secret_find(
     }
     use crate::utils::fuzzy::score_bar;
     let top = matches.iter().map(|m| m.score).max().unwrap_or(1).max(1) as f32;
-    println!("{:<40}  {:<10}  {:<24}  {}", "NAME", "SCORE", "FOLDER", "GROUPS");
+    println!(
+        "{:<40}  {:<10}  {:<24}  {}",
+        "NAME", "SCORE", "FOLDER", "GROUPS"
+    );
     for m in &matches {
         let folder = m.item.folder.as_deref().unwrap_or("");
         let groups = m.item.groups.as_deref().unwrap_or("");
