@@ -22,6 +22,7 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
         "xv-config-invalid" => "Run 'xv config show' to inspect, or 'xv init' to reinitialize.",
         "xv-env-not-defined" => "Run 'xv context envs' to see defined environments.",
         "xv-azure-api" => "Check Azure service status and your subscription quotas.",
+        "xv-scan-leak-detected" => "Findings printed to stderr; review and remove the leak before committing. Use 'xv scan --hook' for CI integration.",
         _ => return None,
     })
 }
@@ -38,6 +39,7 @@ mod tests {
         assert!(hint_for("xv-network-dns").is_some());
         assert!(hint_for("xv-config-invalid").is_some());
         assert!(hint_for("xv-env-not-defined").is_some());
+        assert!(hint_for("xv-scan-leak-detected").is_some());
     }
 
     #[test]
@@ -55,6 +57,7 @@ mod tests {
             "xv-network-timeout",
             "xv-config-invalid",
             "xv-env-not-defined",
+            "xv-scan-leak-detected",
         ] {
             let hint = hint_for(code).unwrap();
             assert!(
