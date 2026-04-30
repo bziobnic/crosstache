@@ -28,6 +28,17 @@ fn should_hide_options() -> bool {
     !std::env::args().any(|arg| arg == "--show-options")
 }
 
+/// Parse and validate `--min-score` is in [0.0, 1.0].
+fn parse_min_score(s: &str) -> std::result::Result<f32, String> {
+    let f: f32 = s
+        .parse()
+        .map_err(|e: std::num::ParseFloatError| format!("not a float: {e}"))?;
+    if !(0.0..=1.0).contains(&f) {
+        return Err(format!("must be in 0.0..=1.0, got {f}"));
+    }
+    Ok(f)
+}
+
 /// Get the help template based on whether options should be shown
 fn get_help_template() -> &'static str {
     if std::env::args().any(|arg| arg == "--show-options") {
@@ -267,7 +278,11 @@ pub enum Commands {
 
         /// Drop matches scoring below this fraction of the top match
         /// (0.0..=1.0). Default 0.3.
-        #[arg(long, default_value_t = 0.3)]
+        #[arg(
+            long,
+            default_value_t = 0.3,
+            value_parser = parse_min_score,
+        )]
         min_score: f32,
 
         /// Search every vault the caller has list rights on. Slow on
