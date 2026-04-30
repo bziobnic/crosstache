@@ -77,6 +77,37 @@ pub enum CrosstacheError {
 }
 
 impl CrosstacheError {
+    /// Stable, kebab-case error code. Part of the public scripting contract.
+    /// New variants must add a code; the exhaustive match keeps this honest.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::AuthenticationError(_) => "xv-auth-failed",
+            Self::AzureApiError(_) => "xv-azure-api",
+            Self::ConfigError(_) => "xv-config-invalid",
+            Self::ConfigLoadError(_) => "xv-config-invalid",
+            Self::SecretNotFound { .. } => "xv-secret-not-found",
+            Self::VaultNotFound { .. } => "xv-vault-not-found",
+            Self::InvalidSecretName { .. } => "xv-invalid-secret-name",
+            Self::PermissionDenied(_) => "xv-permission-denied",
+            Self::NetworkError(_) => "xv-network",
+            Self::DnsResolutionError { .. } => "xv-network-dns",
+            Self::ConnectionTimeout(_) => "xv-network-timeout",
+            Self::ConnectionRefused(_) => "xv-network-refused",
+            Self::SslError(_) => "xv-network-ssl",
+            Self::InvalidUrl(_) => "xv-invalid-url",
+            Self::SerializationError(_) => "xv-serialization",
+            Self::IoError(_) => "xv-io",
+            Self::JsonError(_) => "xv-json",
+            Self::YamlError(_) => "xv-yaml",
+            Self::HttpError(_) => "xv-http",
+            Self::UuidError(_) => "xv-uuid",
+            Self::RegexError(_) => "xv-regex",
+            Self::InvalidArgument(_) => "xv-invalid-argument",
+            Self::Upgrade(_) => "xv-upgrade",
+            Self::Unknown(_) => "xv-unknown",
+        }
+    }
+
     pub fn authentication<S: Into<String>>(msg: S) -> Self {
         Self::AuthenticationError(msg.into())
     }
@@ -350,5 +381,46 @@ mod tests {
         let msg = String::from("owned message");
         let err = CrosstacheError::network(msg);
         assert_eq!(err.to_string(), "Network error: owned message");
+    }
+
+    // --- Stable error codes ---
+
+    #[test]
+    fn test_code_for_every_variant() {
+        use std::collections::HashSet;
+        let cases: Vec<(CrosstacheError, &str)> = vec![
+            (CrosstacheError::authentication("x"), "xv-auth-failed"),
+            (CrosstacheError::azure_api("x"), "xv-azure-api"),
+            (CrosstacheError::config("x"), "xv-config-invalid"),
+            (CrosstacheError::secret_not_found("x"), "xv-secret-not-found"),
+            (CrosstacheError::vault_not_found("x"), "xv-vault-not-found"),
+            (CrosstacheError::invalid_secret_name("x"), "xv-invalid-secret-name"),
+            (CrosstacheError::permission_denied("x"), "xv-permission-denied"),
+            (CrosstacheError::network("x"), "xv-network"),
+            (CrosstacheError::dns_resolution("x", "y"), "xv-network-dns"),
+            (CrosstacheError::connection_timeout("x"), "xv-network-timeout"),
+            (CrosstacheError::connection_refused("x"), "xv-network-refused"),
+            (CrosstacheError::ssl_error("x"), "xv-network-ssl"),
+            (CrosstacheError::invalid_url("x"), "xv-invalid-url"),
+            (CrosstacheError::serialization("x"), "xv-serialization"),
+            (CrosstacheError::invalid_argument("x"), "xv-invalid-argument"),
+            (CrosstacheError::upgrade("x"), "xv-upgrade"),
+            (CrosstacheError::unknown("x"), "xv-unknown"),
+            (
+                CrosstacheError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, "x")),
+                "xv-io",
+            ),
+            (
+                CrosstacheError::JsonError(
+                    serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+                ),
+                "xv-json",
+            ),
+        ];
+        let mut seen = HashSet::new();
+        for (err, expected_code) in cases {
+            assert_eq!(err.code(), expected_code, "wrong code for {err:?}");
+            assert!(seen.insert(expected_code), "duplicate code {expected_code}");
+        }
     }
 }
