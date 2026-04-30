@@ -906,9 +906,37 @@ async fn execute_secret_get(
     };
 
     // Get the secret (specific version or current)
-    let secret = secret_manager
+    let secret = match secret_manager
         .get_secret_with_version(&vault_name, name, resolved_version.as_deref(), true, true)
-        .await?;
+        .await
+    {
+        Ok(s) => s,
+        Err(CrosstacheError::SecretNotFound { name: missing, .. }) => {
+            // Best-effort suggestion: list secrets and find a close match.
+            // Failures here must NOT change the original error path.
+            let suggestion = match secret_manager.secret_ops().list_secrets(&vault_name, None).await {
+                Ok(summaries) => {
+                    let candidates: Vec<String> = summaries
+                        .into_iter()
+                        .map(|s| {
+                            if s.original_name.is_empty() {
+                                s.name
+                            } else {
+                                s.original_name
+                            }
+                        })
+                        .collect();
+                    crate::utils::suggestions::closest_match(&missing, &candidates)
+                        .map(|s| s.to_string())
+                }
+                Err(_) => None,
+            };
+            return Err(
+                CrosstacheError::secret_not_found(missing).with_suggestion(suggestion),
+            );
+        }
+        Err(e) => return Err(e),
+    };
 
     if raw {
         // Raw output - print the value

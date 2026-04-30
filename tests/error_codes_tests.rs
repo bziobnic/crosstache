@@ -22,3 +22,21 @@ fn unknown_subcommand_exits_2() {
     assert!(!out.status.success());
     assert_eq!(out.status.code(), Some(2));
 }
+
+// Note: this test depends on a configured xv environment with a known
+// vault. We mark it ignored by default; CI runs it via XV_TEST_VAULT.
+#[test]
+#[ignore = "requires XV_TEST_VAULT and credentials"]
+fn secret_not_found_includes_suggestion_when_close_match_exists() {
+    let vault = std::env::var("XV_TEST_VAULT").expect("XV_TEST_VAULT must be set");
+    // Assumes a secret named "DB_PASSWORD" exists in XV_TEST_VAULT.
+    let out = xv()
+        .args(["get", "DB_PASSWURD", "--vault", &vault, "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(10));
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be JSON");
+    assert_eq!(body["error"]["code"], "xv-secret-not-found");
+    assert_eq!(body["error"]["suggestion"], "DB_PASSWORD");
+}
