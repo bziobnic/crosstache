@@ -13,10 +13,16 @@ pub enum CrosstacheError {
     ConfigError(String),
 
     #[error("Secret not found: {name}")]
-    SecretNotFound { name: String },
+    SecretNotFound {
+        name: String,
+        suggestion: Option<String>,
+    },
 
     #[error("Vault not found: {name}")]
-    VaultNotFound { name: String },
+    VaultNotFound {
+        name: String,
+        suggestion: Option<String>,
+    },
 
     #[error("Invalid secret name: {name}")]
     InvalidSecretName { name: String },
@@ -157,12 +163,19 @@ impl CrosstacheError {
         Self::ConfigError(msg.into())
     }
 
+    #[allow(dead_code)]
     pub fn secret_not_found<S: Into<String>>(name: S) -> Self {
-        Self::SecretNotFound { name: name.into() }
+        Self::SecretNotFound {
+            name: name.into(),
+            suggestion: None,
+        }
     }
 
     pub fn vault_not_found<S: Into<String>>(name: S) -> Self {
-        Self::VaultNotFound { name: name.into() }
+        Self::VaultNotFound {
+            name: name.into(),
+            suggestion: None,
+        }
     }
 
     pub fn invalid_secret_name<S: Into<String>>(name: S) -> Self {
@@ -215,6 +228,26 @@ impl CrosstacheError {
     pub fn unknown<S: Into<String>>(msg: S) -> Self {
         Self::Unknown(msg.into())
     }
+
+    /// Attach a "did you mean...?" suggestion to a variant that supports one.
+    /// No-op for variants without a `suggestion` field.
+    pub fn with_suggestion(mut self, candidate: Option<String>) -> Self {
+        match &mut self {
+            Self::SecretNotFound { suggestion, .. } => *suggestion = candidate,
+            Self::VaultNotFound { suggestion, .. } => *suggestion = candidate,
+            _ => {}
+        }
+        self
+    }
+
+    /// Return the attached suggestion, if any.
+    pub fn suggestion(&self) -> Option<&str> {
+        match self {
+            Self::SecretNotFound { suggestion, .. } => suggestion.as_deref(),
+            Self::VaultNotFound { suggestion, .. } => suggestion.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// Result type alias for crosstache operations
@@ -265,7 +298,7 @@ mod tests {
     fn test_secret_not_found_constructor() {
         let err = CrosstacheError::secret_not_found("my-secret");
         assert!(
-            matches!(err, CrosstacheError::SecretNotFound { ref name } if name == "my-secret")
+            matches!(err, CrosstacheError::SecretNotFound { ref name, .. } if name == "my-secret")
         );
         assert_eq!(err.to_string(), "Secret not found: my-secret");
     }
@@ -274,7 +307,7 @@ mod tests {
     fn test_vault_not_found_constructor() {
         let err = CrosstacheError::vault_not_found("prod-vault");
         assert!(
-            matches!(err, CrosstacheError::VaultNotFound { ref name } if name == "prod-vault")
+            matches!(err, CrosstacheError::VaultNotFound { ref name, .. } if name == "prod-vault")
         );
         assert_eq!(err.to_string(), "Vault not found: prod-vault");
     }
@@ -506,5 +539,42 @@ mod tests {
             serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
         );
         assert_eq!(json_err.exit_code(), 1);
+    }
+
+    // --- Suggestions ---
+
+    #[test]
+    fn secret_not_found_suggestion_round_trip() {
+        let err = CrosstacheError::secret_not_found("DB_PASSWURD")
+            .with_suggestion(Some("DB_PASSWORD".to_string()));
+        assert_eq!(err.suggestion(), Some("DB_PASSWORD"));
+    }
+
+    #[test]
+    fn vault_not_found_suggestion_round_trip() {
+        let err = CrosstacheError::vault_not_found("myproj-prood")
+            .with_suggestion(Some("myproj-prod".to_string()));
+        assert_eq!(err.suggestion(), Some("myproj-prod"));
+    }
+
+    #[test]
+    fn variants_without_suggestion_field_return_none() {
+        let err = CrosstacheError::network("dropped");
+        assert_eq!(err.suggestion(), None);
+    }
+
+    #[test]
+    fn with_suggestion_on_variant_without_field_is_noop() {
+        // Calling .with_suggestion on a variant that has no slot must not panic.
+        let err = CrosstacheError::network("dropped").with_suggestion(Some("hint".into()));
+        assert_eq!(err.suggestion(), None);
+        // Still the same kind of error.
+        assert_eq!(err.code(), "xv-network");
+    }
+
+    #[test]
+    fn secret_not_found_default_suggestion_is_none() {
+        let err = CrosstacheError::secret_not_found("X");
+        assert_eq!(err.suggestion(), None);
     }
 }

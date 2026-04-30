@@ -116,7 +116,7 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             output::error("Configuration Error");
             eprintln!("{msg}");
         }
-        VaultNotFound { name } => {
+        VaultNotFound { name, .. } => {
             output::error("Vault Not Found");
             eprintln!("The Azure Key Vault '{name}' was not found.");
             eprintln!("\nPlease verify:");
@@ -125,7 +125,7 @@ fn print_user_friendly_error(error: &CrosstacheError) {
             eprintln!("3. You have access to the vault");
             eprintln!("4. You're using the correct subscription");
         }
-        SecretNotFound { name } => {
+        SecretNotFound { name, .. } => {
             output::error("Secret Not Found");
             eprintln!("The secret '{name}' was not found in the vault.");
             eprintln!("\nPlease verify:");

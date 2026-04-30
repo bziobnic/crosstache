@@ -460,6 +460,7 @@ impl SecretOperations for AzureSecretOperations {
             if status == 404 {
                 return Err(CrosstacheError::SecretNotFound {
                     name: secret_name.to_string(),
+                    suggestion: None,
                 });
             }
             let error_text = response.text().await.unwrap_or_default();
