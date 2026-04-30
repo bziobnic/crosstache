@@ -27,6 +27,12 @@ pub enum CrosstacheError {
     #[error("Invalid secret name: {name}")]
     InvalidSecretName { name: String },
 
+    #[error("Environment '{name}' not defined in .xv.toml; available: {}", available.join(", "))]
+    EnvNotDefined {
+        name: String,
+        available: Vec<String>,
+    },
+
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
 
@@ -94,6 +100,7 @@ impl CrosstacheError {
             Self::SecretNotFound { .. } => "xv-secret-not-found",
             Self::VaultNotFound { .. } => "xv-vault-not-found",
             Self::InvalidSecretName { .. } => "xv-invalid-secret-name",
+            Self::EnvNotDefined { .. } => "xv-env-not-defined",
             Self::PermissionDenied(_) => "xv-permission-denied",
             Self::NetworkError(_) => "xv-network",
             Self::DnsResolutionError { .. } => "xv-network-dns",
@@ -119,7 +126,9 @@ impl CrosstacheError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::InvalidArgument(_) => 2,
-            Self::ConfigError(_) | Self::ConfigLoadError(_) => 3,
+            Self::ConfigError(_)
+            | Self::ConfigLoadError(_)
+            | Self::EnvNotDefined { .. } => 3,
 
             Self::SecretNotFound { .. } => 10,
             Self::VaultNotFound { .. } => 11,
@@ -178,6 +187,13 @@ impl CrosstacheError {
 
     pub fn invalid_secret_name<S: Into<String>>(name: S) -> Self {
         Self::InvalidSecretName { name: name.into() }
+    }
+
+    pub fn env_not_defined<S: Into<String>>(name: S, available: Vec<String>) -> Self {
+        Self::EnvNotDefined {
+            name: name.into(),
+            available,
+        }
     }
 
     pub fn permission_denied<S: Into<String>>(msg: S) -> Self {
@@ -616,6 +632,7 @@ mod tests {
             ("InvalidArgument", vec!["msg"]),
             ("Upgrade", vec!["msg"]),
             ("Unknown", vec!["msg"]),
+            ("EnvNotDefined", vec!["name", "available"]),
         ];
         let banned = ["value", "secret", "password", "token", "key"];
         for (variant, fields) in variant_field_names {
@@ -628,5 +645,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- EnvNotDefined ---
+
+    #[test]
+    fn test_env_not_defined_constructor() {
+        let err = CrosstacheError::env_not_defined(
+            "staging",
+            vec!["dev".to_string(), "prod".to_string()],
+        );
+        assert!(matches!(
+            err,
+            CrosstacheError::EnvNotDefined { ref name, ref available }
+                if name == "staging" && available == &vec!["dev".to_string(), "prod".to_string()]
+        ));
+        assert_eq!(err.code(), "xv-env-not-defined");
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn test_env_not_defined_display_lists_available() {
+        let err = CrosstacheError::env_not_defined(
+            "staging",
+            vec!["dev".to_string(), "prod".to_string()],
+        );
+        let s = err.to_string();
+        assert!(s.contains("staging"), "message must include the missing env name");
+        assert!(s.contains("dev"), "message must list 'dev' as available");
+        assert!(s.contains("prod"), "message must list 'prod' as available");
     }
 }

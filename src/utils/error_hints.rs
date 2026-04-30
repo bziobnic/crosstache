@@ -20,6 +20,7 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
             "Check TLS configuration and any corporate proxy with TLS interception."
         }
         "xv-config-invalid" => "Run 'xv config show' to inspect, or 'xv init' to reinitialize.",
+        "xv-env-not-defined" => "Run 'xv context envs' to see defined environments.",
         "xv-azure-api" => "Check Azure service status and your subscription quotas.",
         _ => return None,
     })
@@ -36,6 +37,7 @@ mod tests {
         assert!(hint_for("xv-permission-denied").is_some());
         assert!(hint_for("xv-network-dns").is_some());
         assert!(hint_for("xv-config-invalid").is_some());
+        assert!(hint_for("xv-env-not-defined").is_some());
     }
 
     #[test]
@@ -52,6 +54,7 @@ mod tests {
             "xv-network-dns",
             "xv-network-timeout",
             "xv-config-invalid",
+            "xv-env-not-defined",
         ] {
             let hint = hint_for(code).unwrap();
             assert!(
