@@ -102,14 +102,59 @@ async fn execute_scan_paths(
 }
 
 async fn execute_scan_staged(
-    _hook: bool,
-    _all_vaults: bool,
-    _format: crate::utils::format::OutputFormat,
-    _config: &Config,
+    hook: bool,
+    all_vaults: bool,
+    format: crate::utils::format::OutputFormat,
+    config: &Config,
 ) -> Result<()> {
-    Err(CrosstacheError::config(
-        "xv scan --staged is implemented in Task 9",
-    ))
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::secret::manager::SecretManager;
+    use crate::scan::staged::scan_staged;
+
+    let auth_provider = std::sync::Arc::new(
+        DefaultAzureCredentialProvider::with_credential_priority(
+            config.azure_credential_priority.clone(),
+        )
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+        })?,
+    );
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    let vault_names: Vec<String> = if all_vaults {
+        let auth = std::sync::Arc::new(
+            DefaultAzureCredentialProvider::with_credential_priority(
+                config.azure_credential_priority.clone(),
+            )
+            .map_err(|e| {
+                CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+            })?,
+        );
+        let vault_manager = crate::vault::manager::VaultManager::new(
+            auth,
+            config.subscription_id.clone(),
+            config.no_color,
+        )?;
+        vault_manager
+            .vault_ops()
+            .list_vaults(Some(&config.subscription_id), None)
+            .await?
+            .into_iter()
+            .map(|v| v.name)
+            .collect()
+    } else {
+        vec![config.resolve_vault_name(None).await?]
+    };
+
+    let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");
+    let secrets = fetch_secret_values(&secret_manager, &vault_names, 10).await?;
+    progress.finish_clear();
+
+    let patterns = builtin_patterns();
+    let engine = MatchEngine::new(&secrets, &patterns);
+    let findings = scan_staged(&engine)?;
+
+    render_findings(&findings, hook, format)
 }
 
 async fn execute_scan_install(_force: bool, _config: &Config) -> Result<()> {
