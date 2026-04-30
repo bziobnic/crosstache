@@ -232,11 +232,20 @@ impl Config {
 
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
-        if let Ok(Some((_path, cfg))) = project::find_project_config(&cwd).await {
+        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
             // resolve_env returns Err on unknown-env — propagate so the
             // user sees the helpful EnvNotDefined message with the list
             // of available envs.
-            let (_name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
+            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
+            // Emit the cross-boundary notice if the .xv.toml lives
+            // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
+            // walk-up wouldn't have reached the ancestor anyway —
+            // but keep this branch defensive.
+            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                    eprintln!("{line}");
+                }
+            }
             if let Some(v) = profile.vault.as_deref() {
                 return Ok(v.to_string());
             }
@@ -272,8 +281,17 @@ impl Config {
 
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
-        if let Ok(Some((_path, cfg))) = project::find_project_config(&cwd).await {
-            let (_name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
+        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
+            // Emit the cross-boundary notice if the .xv.toml lives
+            // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
+            // walk-up wouldn't have reached the ancestor anyway —
+            // but keep this branch defensive.
+            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                    eprintln!("{line}");
+                }
+            }
             if let Some(rg) = profile.resource_group.as_deref() {
                 return Ok(rg.to_string());
             }

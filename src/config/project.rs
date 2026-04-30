@@ -12,6 +12,7 @@ use crate::error::{CrosstacheError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// On-disk `.xv.toml` project configuration.
 ///
@@ -152,6 +153,39 @@ pub fn resolve_env<'a>(
             cfg.envs.keys().cloned().collect(),
         ))
     }
+}
+
+/// One-shot guard — flips true on the first emit. We expose a
+/// test-only reset to keep the assertion local; production code
+/// never resets it.
+static CROSS_BOUNDARY_NOTICE_EMITTED: AtomicBool = AtomicBool::new(false);
+
+/// Format the cross-boundary notice line. Returns the formatted
+/// string the *first* time it is called per process; on subsequent
+/// calls returns `None` so callers know to skip emitting.
+///
+/// Used by `Config::resolve_vault_name` (and friends) to print the
+/// line to stderr exactly once.
+pub fn capture_cross_boundary_notice(
+    config_path: impl AsRef<std::path::Path>,
+    env_name: &str,
+) -> Option<String> {
+    if CROSS_BOUNDARY_NOTICE_EMITTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        Some(format!(
+            "using config from {} (env: {env_name})",
+            config_path.as_ref().display()
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_cross_boundary_notice_for_test() {
+    CROSS_BOUNDARY_NOTICE_EMITTED.store(false, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -431,5 +465,20 @@ resource_group = "rg"
             }
             other => panic!("expected EnvNotDefined, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cross_boundary_notice_fires_once() {
+        // Reset the guard for the test (the implementation exposes a
+        // test-only reset hook).
+        reset_cross_boundary_notice_for_test();
+
+        let captured1 = capture_cross_boundary_notice("/path/a/.xv.toml", "dev");
+        let captured2 = capture_cross_boundary_notice("/path/b/.xv.toml", "prod");
+        assert_eq!(
+            captured1,
+            Some("using config from /path/a/.xv.toml (env: dev)".to_string()),
+        );
+        assert_eq!(captured2, None, "second call must be no-op");
     }
 }
