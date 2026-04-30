@@ -56,19 +56,14 @@ pub fn parse_str(s: &str) -> Result<ProjectConfig> {
     if s.trim().is_empty() {
         return Ok(ProjectConfig::default());
     }
-    toml::from_str(s).map_err(|e| {
-        CrosstacheError::config(format!(".xv.toml parse error: {e}"))
-    })
+    toml::from_str(s).map_err(|e| CrosstacheError::config(format!(".xv.toml parse error: {e}")))
 }
 
 /// Parse a `.xv.toml` file from disk asynchronously.
 pub async fn parse_file(path: &Path) -> Result<ProjectConfig> {
-    let content = tokio::fs::read_to_string(path).await.map_err(|e| {
-        CrosstacheError::config(format!(
-            "failed to read {}: {e}",
-            path.display()
-        ))
-    })?;
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| CrosstacheError::config(format!("failed to read {}: {e}", path.display())))?;
     parse_str(&content)
 }
 
@@ -86,9 +81,7 @@ use std::path::PathBuf;
 /// Returns `Ok(None)` if no `.xv.toml` was found before hitting the
 /// root (or a boundary). Returns `Err` only if a found `.xv.toml`
 /// fails to parse.
-pub async fn find_project_config(
-    start: &Path,
-) -> Result<Option<(PathBuf, ProjectConfig)>> {
+pub async fn find_project_config(start: &Path) -> Result<Option<(PathBuf, ProjectConfig)>> {
     let no_walk = std::env::var("XV_NO_PARENT_CONFIG")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -310,7 +303,9 @@ resource_group = "rg"
 
     /// Helper: create a `.xv.boundary` marker file.
     async fn write_boundary(dir: &Path) {
-        tokio::fs::write(dir.join(".xv.boundary"), "").await.unwrap();
+        tokio::fs::write(dir.join(".xv.boundary"), "")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -390,7 +385,13 @@ resource_group = "rg"
         let cfg = build_cfg(
             Some("dev"),
             &[
-                ("dev", EnvProfile { vault: Some("v".into()), ..Default::default() }),
+                (
+                    "dev",
+                    EnvProfile {
+                        vault: Some("v".into()),
+                        ..Default::default()
+                    },
+                ),
                 ("prod", EnvProfile::default()),
             ],
         );
@@ -453,10 +454,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_no_default_no_override_errors_helpfully() {
-        let cfg = build_cfg(
-            None,
-            &[("dev", EnvProfile::default())],
-        );
+        let cfg = build_cfg(None, &[("dev", EnvProfile::default())]);
         std::env::remove_var("XV_ENV");
         let err = resolve_env(&cfg, None).expect_err("must err");
         match err {

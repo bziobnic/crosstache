@@ -126,9 +126,7 @@ impl CrosstacheError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::InvalidArgument(_) => 2,
-            Self::ConfigError(_)
-            | Self::ConfigLoadError(_)
-            | Self::EnvNotDefined { .. } => 3,
+            Self::ConfigError(_) | Self::ConfigLoadError(_) | Self::EnvNotDefined { .. } => 3,
 
             Self::SecretNotFound { .. } => 10,
             Self::VaultNotFound { .. } => 11,
@@ -671,7 +669,10 @@ mod tests {
             vec!["dev".to_string(), "prod".to_string()],
         );
         let s = err.to_string();
-        assert!(s.contains("staging"), "message must include the missing env name");
+        assert!(
+            s.contains("staging"),
+            "message must include the missing env name"
+        );
         assert!(s.contains("dev"), "message must list 'dev' as available");
         assert!(s.contains("prod"), "message must list 'prod' as available");
     }

@@ -461,7 +461,8 @@ pub(crate) async fn execute_context_command(
             non_interactive,
             force,
         } => {
-            execute_context_init(env, vault, resource_group, non_interactive, force, &config).await?;
+            execute_context_init(env, vault, resource_group, non_interactive, force, &config)
+                .await?;
         }
     }
     Ok(())
@@ -690,9 +691,7 @@ async fn execute_context_envs(config: &Config) -> Result<()> {
 
     let cwd = std::env::current_dir()?;
     let Some((path, cfg)) = project::find_project_config(&cwd).await? else {
-        crate::utils::output::warn(
-            "no .xv.toml found in cwd or any ancestor (within boundary)",
-        );
+        crate::utils::output::warn("no .xv.toml found in cwd or any ancestor (within boundary)");
         crate::utils::output::info("hint: run 'xv context init' to create one");
         return Ok(());
     };
@@ -714,7 +713,11 @@ async fn execute_context_envs(config: &Config) -> Result<()> {
     }
     println!("envs:");
     for (name, profile) in &cfg.envs {
-        let marker = if active.as_deref() == Some(name.as_str()) { "*" } else { " " };
+        let marker = if active.as_deref() == Some(name.as_str()) {
+            "*"
+        } else {
+            " "
+        };
         let vault = profile.vault.as_deref().unwrap_or("(unset)");
         let rg = profile.resource_group.as_deref().unwrap_or("(unset)");
         println!("  {marker} {name}  vault={vault}  rg={rg}");
@@ -746,14 +749,10 @@ async fn execute_context_init(
     // Resolve vault/RG: explicit flag → interactive prompt → config default
     let (vault, resource_group) = if non_interactive {
         let vault = vault_arg.ok_or_else(|| {
-            CrosstacheError::invalid_argument(
-                "--non-interactive requires --vault",
-            )
+            CrosstacheError::invalid_argument("--non-interactive requires --vault")
         })?;
         let rg = rg_arg.ok_or_else(|| {
-            CrosstacheError::invalid_argument(
-                "--non-interactive requires --resource-group",
-            )
+            CrosstacheError::invalid_argument("--non-interactive requires --resource-group")
         })?;
         (vault, rg)
     } else {
@@ -800,9 +799,8 @@ async fn execute_context_init(
         envs,
     };
 
-    let body = toml::to_string_pretty(&cfg).map_err(|e| {
-        CrosstacheError::config(format!("failed to serialize .xv.toml: {e}"))
-    })?;
+    let body = toml::to_string_pretty(&cfg)
+        .map_err(|e| CrosstacheError::config(format!("failed to serialize .xv.toml: {e}")))?;
 
     // Helpful header
     let header = "# crosstache project config — see https://github.com/bziobnic/crosstache/blob/main/docs/env-profiles.md\n";
