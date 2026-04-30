@@ -157,10 +157,17 @@ async fn execute_scan_staged(
     render_findings(&findings, hook, format)
 }
 
-async fn execute_scan_install(_force: bool, _config: &Config) -> Result<()> {
-    Err(CrosstacheError::config(
-        "xv scan install is implemented in Task 11",
-    ))
+async fn execute_scan_install(force: bool, _config: &Config) -> Result<()> {
+    use crate::scan::installer::{install, HookInstallStatus};
+    match install(force)? {
+        HookInstallStatus::Installed(path) => {
+            crate::utils::output::success(&format!("Installed pre-commit hook at {}", path.display()));
+        }
+        HookInstallStatus::AlreadyInstalled(path) => {
+            crate::utils::output::info(&format!("Hook already installed at {}", path.display()));
+        }
+    }
+    Ok(())
 }
 
 async fn execute_scan_uninstall(_config: &Config) -> Result<()> {

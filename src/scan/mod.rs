@@ -4,6 +4,7 @@
 
 pub mod engine;
 pub mod finding;
+pub mod installer;
 pub mod orchestrator;
 pub mod patterns;
 pub mod staged;
