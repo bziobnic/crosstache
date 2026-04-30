@@ -20,6 +20,7 @@ mod vault;
 
 use crate::cli::Cli;
 use crate::error::{CrosstacheError, Result};
+use crate::utils::format::OutputFormat;
 
 #[tokio::main]
 async fn main() {
@@ -29,6 +30,18 @@ async fn main() {
 
     // Initialize logging
     init_logging();
+
+    // Handle special internal commands before clap parsing
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "__complete-secrets" {
+        let format = OutputFormat::Plain; // Default format for completion
+        if let Err(e) = run_complete_secrets().await {
+            error!("Error: {}", e);
+            print_user_friendly_error(&e, format);
+            std::process::exit(e.exit_code());
+        }
+        return;
+    }
 
     // Parse command-line arguments
     let cli = Cli::parse();
@@ -40,6 +53,12 @@ async fn main() {
         print_user_friendly_error(&e, format);
         std::process::exit(e.exit_code());
     }
+}
+
+async fn run_complete_secrets() -> Result<()> {
+    // Load config without validation for internal complete-secrets command
+    let config = load_config_without_validation().await?;
+    crate::cli::secret_ops::execute_complete_secrets(config).await
 }
 
 async fn run(cli: Cli) -> Result<()> {
