@@ -171,9 +171,16 @@ async fn execute_scan_install(force: bool, _config: &Config) -> Result<()> {
 }
 
 async fn execute_scan_uninstall(_config: &Config) -> Result<()> {
-    Err(CrosstacheError::config(
-        "xv scan uninstall is implemented in Task 12",
-    ))
+    use crate::scan::installer::{uninstall, HookUninstallStatus};
+    match uninstall()? {
+        HookUninstallStatus::Removed(path) => {
+            crate::utils::output::success(&format!("Removed pre-commit hook at {}", path.display()));
+        }
+        HookUninstallStatus::NotPresent => {
+            crate::utils::output::info("No pre-commit hook to remove");
+        }
+    }
+    Ok(())
 }
 
 fn render_findings(
