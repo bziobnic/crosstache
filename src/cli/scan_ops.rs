@@ -108,8 +108,8 @@ async fn execute_scan_staged(
     config: &Config,
 ) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
-    use crate::secret::manager::SecretManager;
     use crate::scan::staged::scan_staged;
+    use crate::secret::manager::SecretManager;
 
     let auth_provider = std::sync::Arc::new(
         DefaultAzureCredentialProvider::with_credential_priority(
@@ -161,7 +161,10 @@ async fn execute_scan_install(force: bool, _config: &Config) -> Result<()> {
     use crate::scan::installer::{install, HookInstallStatus};
     match install(force)? {
         HookInstallStatus::Installed(path) => {
-            crate::utils::output::success(&format!("Installed pre-commit hook at {}", path.display()));
+            crate::utils::output::success(&format!(
+                "Installed pre-commit hook at {}",
+                path.display()
+            ));
         }
         HookInstallStatus::AlreadyInstalled(path) => {
             crate::utils::output::info(&format!("Hook already installed at {}", path.display()));
@@ -174,7 +177,10 @@ async fn execute_scan_uninstall(_config: &Config) -> Result<()> {
     use crate::scan::installer::{uninstall, HookUninstallStatus};
     match uninstall()? {
         HookUninstallStatus::Removed(path) => {
-            crate::utils::output::success(&format!("Removed pre-commit hook at {}", path.display()));
+            crate::utils::output::success(&format!(
+                "Removed pre-commit hook at {}",
+                path.display()
+            ));
         }
         HookUninstallStatus::NotPresent => {
             crate::utils::output::info("No pre-commit hook to remove");

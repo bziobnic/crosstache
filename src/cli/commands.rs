@@ -1390,7 +1390,14 @@ impl Cli {
                 command,
             } => {
                 crate::cli::scan_ops::execute_scan_command(
-                    paths, staged, all, hook, all_vaults, command, self.format, config,
+                    paths,
+                    staged,
+                    all,
+                    hook,
+                    all_vaults,
+                    command,
+                    self.format,
+                    config,
                 )
                 .await
             }

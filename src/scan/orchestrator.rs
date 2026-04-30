@@ -38,11 +38,7 @@ pub async fn fetch_secret_values(
     let mut handles = Vec::new();
     for vault in vault_names {
         // List secrets for this vault.
-        let summaries = match secret_manager
-            .secret_ops()
-            .list_secrets(vault, None)
-            .await
-        {
+        let summaries = match secret_manager.secret_ops().list_secrets(vault, None).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!("list_secrets failed for vault {vault}: {e}");
@@ -68,9 +64,7 @@ pub async fn fetch_secret_values(
                         value: v.as_str().to_string(),
                     }),
                     Err(e) => {
-                        tracing::debug!(
-                            "get_secret failed for {vault}/{backend_name}: {e}"
-                        );
+                        tracing::debug!("get_secret failed for {vault}/{backend_name}: {e}");
                         None
                     }
                 }
@@ -99,11 +93,7 @@ mod tests {
         // Pure unit test: skip the SecretManager fetch and feed the
         // orchestrator a pre-built engine.
         let temp = tempdir().unwrap();
-        std::fs::write(
-            temp.path().join("a.txt"),
-            "key=hunter2-very-long-password",
-        )
-        .unwrap();
+        std::fs::write(temp.path().join("a.txt"), "key=hunter2-very-long-password").unwrap();
 
         let secrets = vec![SecretRef {
             name: "DB_PW".to_string(),

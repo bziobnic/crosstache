@@ -694,7 +694,10 @@ mod tests {
     #[test]
     fn test_scan_leak_detected_constructor() {
         let err = CrosstacheError::scan_leak_detected(3);
-        assert!(matches!(err, CrosstacheError::ScanLeakDetected { count: 3 }));
+        assert!(matches!(
+            err,
+            CrosstacheError::ScanLeakDetected { count: 3 }
+        ));
         assert_eq!(err.code(), "xv-scan-leak-detected");
         assert_eq!(err.exit_code(), 50);
     }

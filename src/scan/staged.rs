@@ -51,7 +51,9 @@ pub fn scan_staged(engine: &MatchEngine) -> Result<Vec<Finding>> {
         // Skip binary-looking paths heuristically by extension; the
         // index doesn't expose the raw bytes here.
         let lower = f.to_lowercase();
-        const BIN_EXT: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".gz", ".tar"];
+        const BIN_EXT: &[&str] = &[
+            ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".gz", ".tar",
+        ];
         if BIN_EXT.iter().any(|e| lower.ends_with(e)) {
             continue;
         }

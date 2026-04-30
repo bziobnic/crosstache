@@ -3,8 +3,8 @@
 //! these patterns are a *small* safety net for cases where the value
 //! isn't fetched (e.g., new vaults, local-only secrets).
 
-use regex::Regex;
 use crate::scan::finding::Severity;
+use regex::Regex;
 
 /// One built-in regex pattern.
 pub struct BuiltinPattern {
@@ -28,11 +28,7 @@ pub fn builtin_patterns() -> Vec<BuiltinPattern> {
     }
     vec![
         // AWS access key IDs (AKIA + 16 uppercase alphanumerics).
-        r(
-            "aws-access-key-id",
-            r"\bAKIA[0-9A-Z]{16}\b",
-            Severity::High,
-        ),
+        r("aws-access-key-id", r"\bAKIA[0-9A-Z]{16}\b", Severity::High),
         // GitHub PAT — ghp_<36 chars>; also ghs_, gho_, ghu_, ghr_.
         r(
             "github-token",
@@ -131,7 +127,8 @@ mod tests {
             .find(|p| p.name == "jwt")
             .unwrap();
         // Three base64url segments separated by '.'
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let jwt =
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
         assert_eq!(match_count(&p, jwt), 1);
     }
 

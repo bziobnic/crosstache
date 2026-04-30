@@ -57,8 +57,7 @@ impl MatchEngine {
         let needles = if filtered.is_empty() {
             None
         } else {
-            let patterns_vec: Vec<&str> =
-                filtered.iter().map(|s| s.value.as_str()).collect();
+            let patterns_vec: Vec<&str> = filtered.iter().map(|s| s.value.as_str()).collect();
             Some(
                 AhoCorasickBuilder::new()
                     .match_kind(MatchKind::LeftmostLongest)
@@ -119,10 +118,7 @@ impl MatchEngine {
 
         for p in &self.patterns {
             for m in p.regex.find_iter(content) {
-                if covered
-                    .iter()
-                    .any(|&(s, e)| m.start() < e && m.end() > s)
-                {
+                if covered.iter().any(|&(s, e)| m.start() < e && m.end() > s) {
                     // Already covered by a user-secret match.
                     continue;
                 }
@@ -213,10 +209,7 @@ mod tests {
         let secrets: Vec<SecretRef> = vec![];
         let patterns = builtin_patterns();
         let engine = MatchEngine::new(&secrets, &patterns);
-        let findings = engine.scan_text(
-            Path::new("creds.txt"),
-            "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n",
-        );
+        let findings = engine.scan_text(Path::new("creds.txt"), "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n");
         assert_eq!(findings.len(), 1);
         let f = &findings[0];
         assert_eq!(f.kind, FindingKind::Pattern);
@@ -235,10 +228,7 @@ mod tests {
         }];
         let patterns = builtin_patterns();
         let engine = MatchEngine::new(&secrets, &patterns);
-        let findings = engine.scan_text(
-            Path::new("x"),
-            "key = \"AKIAIOSFODNN7EXAMPLE\";",
-        );
+        let findings = engine.scan_text(Path::new("x"), "key = \"AKIAIOSFODNN7EXAMPLE\";");
         assert!(!findings.is_empty());
         let f = &findings[0];
         assert_eq!(f.secret_name.as_deref(), Some("API_KEY"));
