@@ -327,6 +327,11 @@ These flags work with any command:
 | `--debug` | Enable debug logging |
 | `--show-options` | Show global options in help output |
 
+## Scripting & exit codes
+
+For scripts and CI, see [`docs/exit-codes.md`](docs/exit-codes.md) for
+the stable exit-code table and the `--format json` error envelope.
+
 ## Security
 
 - Secret values are zeroized from memory after use (`zeroize` crate)
