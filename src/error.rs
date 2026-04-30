@@ -108,6 +108,43 @@ impl CrosstacheError {
         }
     }
 
+    /// Process exit code for this error. Codes group by family; see
+    /// `docs/exit-codes.md` for the public table.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::InvalidArgument(_) => 2,
+            Self::ConfigError(_) | Self::ConfigLoadError(_) => 3,
+
+            Self::SecretNotFound { .. } => 10,
+            Self::VaultNotFound { .. } => 11,
+            Self::InvalidSecretName { .. } => 12,
+
+            Self::AuthenticationError(_) => 20,
+            Self::PermissionDenied(_) => 21,
+
+            Self::NetworkError(_) => 30,
+            Self::DnsResolutionError { .. } => 31,
+            Self::ConnectionTimeout(_) => 32,
+            Self::ConnectionRefused(_) => 33,
+            Self::SslError(_) => 34,
+            Self::InvalidUrl(_) => 35,
+
+            Self::AzureApiError(_) => 40,
+
+            // Reserve 50–59 for the scanner feature (lands in plan 4).
+
+            Self::SerializationError(_)
+            | Self::IoError(_)
+            | Self::JsonError(_)
+            | Self::YamlError(_)
+            | Self::HttpError(_)
+            | Self::UuidError(_)
+            | Self::RegexError(_)
+            | Self::Upgrade(_)
+            | Self::Unknown(_) => 1,
+        }
+    }
+
     pub fn authentication<S: Into<String>>(msg: S) -> Self {
         Self::AuthenticationError(msg.into())
     }
@@ -422,5 +459,52 @@ mod tests {
             assert_eq!(err.code(), expected_code, "wrong code for {err:?}");
             assert!(seen.insert(expected_code), "duplicate code {expected_code}");
         }
+    }
+
+    // --- Exit codes ---
+
+    #[test]
+    fn test_exit_code_families() {
+        // 2 — invalid argument
+        assert_eq!(CrosstacheError::invalid_argument("x").exit_code(), 2);
+
+        // 3 — config family
+        assert_eq!(CrosstacheError::config("x").exit_code(), 3);
+
+        // 10–19 — not-found family
+        assert_eq!(CrosstacheError::secret_not_found("x").exit_code(), 10);
+        assert_eq!(CrosstacheError::vault_not_found("x").exit_code(), 11);
+
+        // 20–29 — auth/permission
+        assert_eq!(CrosstacheError::authentication("x").exit_code(), 20);
+        assert_eq!(CrosstacheError::permission_denied("x").exit_code(), 21);
+
+        // 30–39 — network
+        assert_eq!(CrosstacheError::network("x").exit_code(), 30);
+        assert_eq!(CrosstacheError::dns_resolution("x", "y").exit_code(), 31);
+        assert_eq!(CrosstacheError::connection_timeout("x").exit_code(), 32);
+        assert_eq!(CrosstacheError::connection_refused("x").exit_code(), 33);
+        assert_eq!(CrosstacheError::ssl_error("x").exit_code(), 34);
+
+        // 40–49 — Azure/backend
+        assert_eq!(CrosstacheError::azure_api("x").exit_code(), 40);
+
+        // 1 — unknown / catch-all
+        assert_eq!(CrosstacheError::unknown("x").exit_code(), 1);
+    }
+
+    #[test]
+    fn test_exit_code_is_stable_for_unknown_variants() {
+        // From-converted errors that don't have a clear family fall back to 1.
+        let io_err = CrosstacheError::IoError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "x",
+        ));
+        assert_eq!(io_err.exit_code(), 1);
+
+        let json_err = CrosstacheError::JsonError(
+            serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
+        );
+        assert_eq!(json_err.exit_code(), 1);
     }
 }
