@@ -489,6 +489,33 @@ async fn execute_context_show(config: &Config) -> Result<()> {
         }
     }
 
+    // New: project-config (.xv.toml) section.
+    let cwd = std::env::current_dir()?;
+    if let Ok(Some((path, cfg))) = crate::config::project::find_project_config(&cwd).await {
+        match crate::config::project::resolve_env(&cfg, config.env_flag.as_deref()) {
+            Ok((name, profile)) => {
+                println!();
+                println!("active env: {name} (from {})", path.display());
+                if let Some(v) = &profile.vault {
+                    println!("  vault: {v}");
+                }
+                if let Some(rg) = &profile.resource_group {
+                    println!("  resource_group: {rg}");
+                }
+                if let Some(g) = &profile.group {
+                    println!("  group: {g}");
+                }
+                if let Some(f) = &profile.folder {
+                    println!("  folder: {f}");
+                }
+            }
+            Err(e) => {
+                println!();
+                println!("project config: {} (error: {e})", path.display());
+            }
+        }
+    }
+
     Ok(())
 }
 
