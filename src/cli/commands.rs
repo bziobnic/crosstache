@@ -874,6 +874,8 @@ pub enum ContextCommands {
         #[arg(long)]
         global: bool,
     },
+    /// List environment profiles in the resolved .xv.toml
+    Envs,
 }
 
 #[derive(Subcommand)]

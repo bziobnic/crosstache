@@ -451,6 +451,9 @@ pub(crate) async fn execute_context_command(
         ContextCommands::Clear { global } => {
             execute_context_clear(global, &config).await?;
         }
+        ContextCommands::Envs => {
+            execute_context_envs(&config).await?;
+        }
     }
     Ok(())
 }
@@ -643,6 +646,43 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
         "Cleared vault context for '{vault_name}' ({scope} scope)"
     ));
 
+    Ok(())
+}
+
+async fn execute_context_envs(config: &Config) -> Result<()> {
+    use crate::config::project;
+
+    let cwd = std::env::current_dir()?;
+    let Some((path, cfg)) = project::find_project_config(&cwd).await? else {
+        crate::utils::output::warn(
+            "no .xv.toml found in cwd or any ancestor (within boundary)",
+        );
+        crate::utils::output::info("hint: run 'xv context init' to create one");
+        return Ok(());
+    };
+
+    // Resolve active env (best-effort — don't error out, just leave
+    // the active marker absent if resolution fails).
+    let active = project::resolve_env(&cfg, config.env_flag.as_deref())
+        .ok()
+        .map(|(name, _)| name.to_string());
+
+    println!("config: {}", path.display());
+    if let Some(d) = cfg.default_env.as_deref() {
+        println!("default_env: {d}");
+    }
+    println!();
+    if cfg.envs.is_empty() {
+        println!("(no envs defined)");
+        return Ok(());
+    }
+    println!("envs:");
+    for (name, profile) in &cfg.envs {
+        let marker = if active.as_deref() == Some(name.as_str()) { "*" } else { " " };
+        let vault = profile.vault.as_deref().unwrap_or("(unset)");
+        let rg = profile.resource_group.as_deref().unwrap_or("(unset)");
+        println!("  {marker} {name}  vault={vault}  rg={rg}");
+    }
     Ok(())
 }
 
