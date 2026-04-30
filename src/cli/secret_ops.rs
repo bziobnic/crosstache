@@ -929,7 +929,10 @@ async fn execute_secret_get(
                     crate::utils::suggestions::closest_match(&missing, &candidates)
                         .map(|s| s.to_string())
                 }
-                Err(_) => None,
+                Err(e) => {
+                    tracing::debug!("suggestion list-call failed: {e}");
+                    None
+                }
             };
             return Err(
                 CrosstacheError::secret_not_found(missing).with_suggestion(suggestion),
