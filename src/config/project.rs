@@ -118,6 +118,42 @@ pub async fn find_project_config(
     Ok(None)
 }
 
+/// Selection priority for active env: `XV_ENV` env var → `cli_flag`
+/// argument → `cfg.default_env` field → error.
+///
+/// Returns `(env_name, env_profile)` on success. Returns
+/// `CrosstacheError::EnvNotDefined` if the resolved name isn't a key
+/// in `cfg.envs`, OR if no name could be resolved at all (in that
+/// case the missing-name field is `"(none)"`, indicating "no
+/// default_env, no flag, no XV_ENV").
+pub fn resolve_env<'a>(
+    cfg: &'a ProjectConfig,
+    cli_flag: Option<&str>,
+) -> Result<(&'a str, &'a EnvProfile)> {
+    let candidate: String = if let Ok(env_var) = std::env::var("XV_ENV") {
+        env_var
+    } else if let Some(flag) = cli_flag {
+        flag.to_string()
+    } else if let Some(default) = cfg.default_env.as_deref() {
+        default.to_string()
+    } else {
+        // No source of truth at all.
+        return Err(CrosstacheError::env_not_defined(
+            "(none)",
+            cfg.envs.keys().cloned().collect(),
+        ));
+    };
+
+    if let Some((k, v)) = cfg.envs.get_key_value(&candidate) {
+        Ok((k.as_str(), v))
+    } else {
+        Err(CrosstacheError::env_not_defined(
+            candidate,
+            cfg.envs.keys().cloned().collect(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +338,98 @@ resource_group = "rg"
         let result = find_project_config(temp.path()).await.expect("ok");
         let (_path, cfg) = result.expect("local .xv.toml wins");
         assert_eq!(cfg.default_env.as_deref(), Some("dev"));
+    }
+
+    fn build_cfg(default_env: Option<&str>, envs: &[(&str, EnvProfile)]) -> ProjectConfig {
+        let mut envs_map = BTreeMap::new();
+        for (name, profile) in envs {
+            envs_map.insert((*name).to_string(), profile.clone());
+        }
+        ProjectConfig {
+            default_env: default_env.map(String::from),
+            envs: envs_map,
+        }
+    }
+
+    #[test]
+    fn resolve_env_uses_default_env_when_no_override() {
+        let cfg = build_cfg(
+            Some("dev"),
+            &[
+                ("dev", EnvProfile { vault: Some("v".into()), ..Default::default() }),
+                ("prod", EnvProfile::default()),
+            ],
+        );
+        // No XV_ENV, no cli flag — must pick "dev" from default_env.
+        // Force-clear XV_ENV for the test.
+        std::env::remove_var("XV_ENV");
+        let (name, _profile) = resolve_env(&cfg, None).expect("must resolve");
+        assert_eq!(name, "dev");
+    }
+
+    #[test]
+    fn resolve_env_cli_flag_overrides_default_env() {
+        let cfg = build_cfg(
+            Some("dev"),
+            &[
+                ("dev", EnvProfile::default()),
+                ("prod", EnvProfile::default()),
+            ],
+        );
+        std::env::remove_var("XV_ENV");
+        let (name, _profile) = resolve_env(&cfg, Some("prod")).expect("must resolve");
+        assert_eq!(name, "prod");
+    }
+
+    #[test]
+    fn resolve_env_xv_env_overrides_cli_flag() {
+        let cfg = build_cfg(
+            Some("dev"),
+            &[
+                ("dev", EnvProfile::default()),
+                ("prod", EnvProfile::default()),
+                ("staging", EnvProfile::default()),
+            ],
+        );
+        std::env::set_var("XV_ENV", "staging");
+        let (name, _profile) = resolve_env(&cfg, Some("prod")).expect("must resolve");
+        assert_eq!(name, "staging");
+        std::env::remove_var("XV_ENV");
+    }
+
+    #[test]
+    fn resolve_env_unknown_name_returns_env_not_defined() {
+        let cfg = build_cfg(
+            Some("dev"),
+            &[
+                ("dev", EnvProfile::default()),
+                ("prod", EnvProfile::default()),
+            ],
+        );
+        std::env::remove_var("XV_ENV");
+        let err = resolve_env(&cfg, Some("staging")).expect_err("must err");
+        match err {
+            CrosstacheError::EnvNotDefined { name, available } => {
+                assert_eq!(name, "staging");
+                assert_eq!(available, vec!["dev".to_string(), "prod".to_string()]);
+            }
+            other => panic!("expected EnvNotDefined, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_env_no_default_no_override_errors_helpfully() {
+        let cfg = build_cfg(
+            None,
+            &[("dev", EnvProfile::default())],
+        );
+        std::env::remove_var("XV_ENV");
+        let err = resolve_env(&cfg, None).expect_err("must err");
+        match err {
+            CrosstacheError::EnvNotDefined { available, .. } => {
+                assert_eq!(available, vec!["dev".to_string()]);
+            }
+            other => panic!("expected EnvNotDefined, got {other:?}"),
+        }
     }
 }
