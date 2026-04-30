@@ -1098,10 +1098,16 @@ async fn execute_secret_find(
     use crate::config::ContextManager;
     use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
 
-    let vault_name = config.resolve_vault_name(None).await?;
-
+    // Single-vault mode needs a resolved vault; `--all-vaults` lists every
+    // vault and must not require default vault context (see flags doc).
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
-    let _ = context_manager.update_usage(&vault_name).await;
+    let single_vault = if all_vaults {
+        None
+    } else {
+        let vn = config.resolve_vault_name(None).await?;
+        let _ = context_manager.update_usage(&vn).await;
+        Some(vn)
+    };
 
     // Parse --in fields. Default: just Name. Always include Name even if
     // user supplied other fields (so a name match still counts).
@@ -1180,10 +1186,13 @@ async fn execute_secret_find(
         combined
     } else {
         // Single-vault path (existing logic from Task 5).
+        let vault_name = single_vault
+            .as_ref()
+            .expect("single-vault find always resolves a vault name");
         let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
         let all_secrets = secret_manager
             .secret_ops()
-            .list_secrets(&vault_name, None)
+            .list_secrets(vault_name, None)
             .await;
         progress.finish_clear();
         let all_secrets = all_secrets?;
@@ -1242,10 +1251,21 @@ async fn execute_secret_find(
 
     // Plain/table fallback (Task 7 polishes the score-bar column).
     if matches.is_empty() {
-        if let Some(p) = pattern {
-            output::info(&format!("No secrets match '{p}' in vault '{vault_name}'"));
+        if all_vaults {
+            if let Some(p) = pattern {
+                output::info(&format!("No secrets match '{p}' across all vaults"));
+            } else {
+                output::info("No secrets found across all vaults");
+            }
         } else {
-            output::info(&format!("No secrets in vault '{vault_name}'"));
+            let vault_name = single_vault
+                .as_ref()
+                .expect("single-vault empty-result message needs vault name");
+            if let Some(p) = pattern {
+                output::info(&format!("No secrets match '{p}' in vault '{vault_name}'"));
+            } else {
+                output::info(&format!("No secrets in vault '{vault_name}'"));
+            }
         }
         return Ok(());
     }
