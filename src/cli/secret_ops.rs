@@ -1195,11 +1195,14 @@ async fn execute_secret_find(
         }
         return Ok(());
     }
-    println!("{:<40}  {:<8}  {:<24}  {}", "NAME", "SCORE", "FOLDER", "GROUPS");
+    use crate::utils::fuzzy::score_bar;
+    let top = matches.iter().map(|m| m.score).max().unwrap_or(1).max(1) as f32;
+    println!("{:<40}  {:<10}  {:<24}  {}", "NAME", "SCORE", "FOLDER", "GROUPS");
     for m in &matches {
         let folder = m.item.folder.as_deref().unwrap_or("");
         let groups = m.item.groups.as_deref().unwrap_or("");
-        println!("{:<40}  {:<8}  {:<24}  {}", m.item.name, m.score, folder, groups);
+        let bar = score_bar(m.score as f32 / top);
+        println!("{:<40}  {bar}  {:<24}  {}", m.item.name, folder, groups);
     }
     Ok(())
 }

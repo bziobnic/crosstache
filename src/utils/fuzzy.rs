@@ -139,6 +139,18 @@ impl CandidateItem {
     }
 }
 
+/// Render a 10-cell unicode bar from a relative-score fraction in 0.0..=1.0.
+/// Uses block characters; deterministic; no ANSI.
+pub fn score_bar(fraction: f32) -> String {
+    let fraction = fraction.clamp(0.0, 1.0);
+    let filled = (fraction * 10.0).round() as usize;
+    let mut s = String::with_capacity(10);
+    for i in 0..10 {
+        s.push(if i < filled { '█' } else { '░' });
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +254,32 @@ mod tests {
         // still works on existing data.
         assert!(item.tags.contains(&"backend".to_string()));
         assert!(item.tags.contains(&"prod".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod score_bar_tests {
+    use super::*;
+
+    #[test]
+    fn full_bar() {
+        assert_eq!(score_bar(1.0), "██████████");
+    }
+    #[test]
+    fn empty_bar() {
+        assert_eq!(score_bar(0.0), "░░░░░░░░░░");
+    }
+    #[test]
+    fn half_bar() {
+        // 0.5 * 10 = 5 → 5 filled
+        assert_eq!(score_bar(0.5), "█████░░░░░");
+    }
+    #[test]
+    fn clamps_above_one() {
+        assert_eq!(score_bar(1.5), "██████████");
+    }
+    #[test]
+    fn clamps_below_zero() {
+        assert_eq!(score_bar(-0.5), "░░░░░░░░░░");
     }
 }
