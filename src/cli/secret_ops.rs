@@ -1261,6 +1261,36 @@ async fn execute_secret_find(
     Ok(())
 }
 
+pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
+    use crate::cache::{CacheKey, CacheManager};
+
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Cache-only path. If cache is cold, exit silently — the user got
+    // no completions, which is the right UX for a Tab press (no Azure
+    // round-trip on every keystroke).
+    let cache_manager = CacheManager::from_config(&config);
+    if !cache_manager.is_enabled() {
+        return Ok(());
+    }
+    let cache_key = CacheKey::SecretsList {
+        vault_name: vault_name.clone(),
+    };
+    if let Some(cached) =
+        cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+    {
+        for s in &cached {
+            let display = if s.original_name.is_empty() {
+                &s.name
+            } else {
+                &s.original_name
+            };
+            println!("{display}");
+        }
+    }
+    Ok(())
+}
+
 async fn execute_secret_history(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,

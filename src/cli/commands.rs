@@ -652,6 +652,9 @@ pub enum Commands {
         #[arg(long)]
         open: bool,
     },
+    /// (internal) Emit cached secret names for shell completion
+    #[command(hide = true, name = "__complete-secrets")]
+    CompleteSecrets,
 }
 
 #[derive(Subcommand)]
@@ -1349,6 +1352,9 @@ impl Cli {
             Commands::Download { name, output, open } => {
                 crate::cli::file_ops::execute_file_download_quick(&name, output, open, &config)
                     .await
+            }
+            Commands::CompleteSecrets => {
+                crate::cli::secret_ops::execute_complete_secrets(config).await
             }
         }
     }
