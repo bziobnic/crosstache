@@ -37,7 +37,7 @@ async fn main() {
     if let Err(e) = run(cli).await {
         error!("Error: {}", e);
         print_user_friendly_error(&e);
-        std::process::exit(1);
+        std::process::exit(e.exit_code());
     }
 }
 
