@@ -73,7 +73,12 @@ impl AzureActivityLogClient {
         // Build the Azure Activity Log API URL
         let activity_url = format!(
             "https://management.azure.com/subscriptions/{}/providers/microsoft.insights/eventtypes/management/values?api-version=2015-04-01&$filter=eventTimestamp ge '{}' and eventTimestamp le '{}' and resourceUri eq '/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}'",
-            subscription_id, start_time_str, end_time_str, subscription_id, resource_group, vault_name
+            subscription_id,
+            start_time_str,
+            end_time_str,
+            subscription_id,
+            resource_group,
+            vault_name
         );
 
         // Get access token from auth provider
@@ -154,7 +159,7 @@ impl AzureActivityLogClient {
         }
 
         // Sort by timestamp (newest first)
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
 
         Ok(entries)
     }

@@ -43,8 +43,21 @@ pub(crate) async fn execute_vault_command(command: VaultCommands, config: Config
             resource_group,
             format,
             no_cache,
+            page,
+            page_size,
+            pager,
         } => {
-            execute_vault_list(&vault_manager, resource_group, format, no_cache, &config).await?;
+            execute_vault_list(
+                &vault_manager,
+                resource_group,
+                format,
+                no_cache,
+                page,
+                page_size,
+                pager,
+                &config,
+            )
+            .await?;
         }
         VaultCommands::Delete {
             name,
@@ -205,41 +218,61 @@ async fn execute_vault_list(
     resource_group: Option<String>,
     format: OutputFormat,
     no_cache: bool,
+    page: Option<usize>,
+    page_size: Option<usize>,
+    pager: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
     use crate::utils::format::TableFormatter;
+    use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
     use crate::vault::models::VaultSummary;
 
     let cache_manager = CacheManager::from_config(config);
     let cache_key = CacheKey::VaultList;
     let use_cache = cache_manager.is_enabled() && !no_cache;
     let output_format = format.resolve_for_stdout();
+    let pagination = Pagination::from_args(page, page_size)?;
 
     if use_cache && resource_group.is_none() {
         if let Some(cached) = cache_manager.get::<Vec<VaultSummary>>(&cache_key) {
             if cached.is_empty() {
                 output::info("No vaults found.");
             } else {
+                let page = paginate_slice(&cached, pagination);
                 let formatter =
                     TableFormatter::new(output_format, config.no_color, config.template.clone());
-                println!("{}", formatter.format_table(&cached)?);
+                let mut output = formatter.format_table(&page.items)?;
+                if let Some(footer) = pagination_footer_text(&page, "vault", output_format) {
+                    output.push('\n');
+                    output.push_str(&footer);
+                }
+                crate::utils::pager::print_output(&output, pager)?;
             }
             return Ok(());
         }
     }
 
     let vaults = vault_manager
-        .list_vaults_formatted(
-            Some(&config.subscription_id),
-            resource_group.as_deref(),
-            output_format,
-            config.template.clone(),
-        )
+        .list_vaults(Some(&config.subscription_id), resource_group.as_deref())
         .await?;
 
     if use_cache && resource_group.is_none() {
         cache_manager.set(&cache_key, &vaults);
+    }
+
+    if vaults.is_empty() {
+        output::info("No vaults found.");
+    } else {
+        let page = paginate_slice(&vaults, pagination);
+        let formatter =
+            TableFormatter::new(output_format, config.no_color, config.template.clone());
+        let mut output = formatter.format_table(&page.items)?;
+        if let Some(footer) = pagination_footer_text(&page, "vault", output_format) {
+            output.push('\n');
+            output.push_str(&footer);
+        }
+        crate::utils::pager::print_output(&output, pager)?;
     }
 
     Ok(())
@@ -922,7 +955,7 @@ async fn execute_vault_share(
                 _ => {
                     return Err(CrosstacheError::invalid_argument(format!(
                         "Invalid access level: {level}"
-                    )))
+                    )));
                 }
             };
 
@@ -960,7 +993,13 @@ async fn execute_vault_share(
             resource_group,
             format,
             all,
+            page,
+            page_size,
+            pager,
         } => {
+            use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
+            use std::fmt::Write as _;
+
             let resource_group =
                 resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
@@ -974,21 +1013,30 @@ async fn execute_vault_share(
                 .resolve_and_filter_roles(&mut roles, all)
                 .await?;
 
+            let pagination = Pagination::from_args(page, page_size)?;
+            let paged = paginate_slice(&roles, pagination);
+
             if roles.is_empty() {
                 output::info(&format!(
                     "No access assignments found for vault '{vault_name}'"
                 ));
             } else {
-                if format.resolve_for_stdout() == crate::utils::format::OutputFormat::Table {
-                    println!("Access assignments for vault '{vault_name}':");
-                }
                 let formatter = crate::utils::format::TableFormatter::new(
                     format,
                     config.no_color,
                     config.template.clone(),
                 );
-                let table_output = formatter.format_table(&roles)?;
-                println!("{table_output}");
+                let table_output = formatter.format_table(&paged.items)?;
+                let mut output = String::new();
+                if format.resolve_for_stdout() == crate::utils::format::OutputFormat::Table {
+                    let _ = writeln!(output, "Access assignments for vault '{vault_name}':");
+                }
+                output.push_str(&table_output);
+                if let Some(footer) = pagination_footer_text(&paged, "assignment", format) {
+                    output.push('\n');
+                    output.push_str(&footer);
+                }
+                crate::utils::pager::print_output(&output, pager)?;
             }
         }
     }

@@ -161,10 +161,16 @@ impl CharsetType {
     /// Get the character set string for this type
     pub fn chars(&self) -> &'static str {
         match self {
-            CharsetType::Alphanumeric => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
-            CharsetType::AlphanumericSymbols => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?",
+            CharsetType::Alphanumeric => {
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+            }
+            CharsetType::AlphanumericSymbols => {
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?"
+            }
             CharsetType::Hex => "0123456789ABCDEF",
-            CharsetType::Base64 => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+            CharsetType::Base64 => {
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            }
             CharsetType::Numeric => "0123456789",
             CharsetType::Uppercase => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
             CharsetType::Lowercase => "abcdefghijklmnopqrstuvwxyz",
@@ -268,6 +274,15 @@ pub enum Commands {
         /// Bypass the local cache and fetch fresh data
         #[arg(long)]
         no_cache: bool,
+        /// Page number to display (requires --page-size)
+        #[arg(long)]
+        page: Option<usize>,
+        /// Number of rows per page
+        #[arg(long)]
+        page_size: Option<usize>,
+        /// Use an interactive pager for TTY output
+        #[arg(long)]
+        pager: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -619,6 +634,15 @@ pub enum VaultCommands {
         /// Bypass the local cache and fetch fresh data
         #[arg(long)]
         no_cache: bool,
+        /// Page number to display (requires --page-size)
+        #[arg(long)]
+        page: Option<usize>,
+        /// Number of rows per page
+        #[arg(long)]
+        page_size: Option<usize>,
+        /// Use an interactive pager for TTY output
+        #[arg(long)]
+        pager: bool,
     },
     /// Delete a vault
     Delete {
@@ -784,6 +808,15 @@ pub enum VaultShareCommands {
         /// Include service accounts in output
         #[arg(long)]
         all: bool,
+        /// Page number to display (requires --page-size)
+        #[arg(long)]
+        page: Option<usize>,
+        /// Number of rows per page
+        #[arg(long)]
+        page_size: Option<usize>,
+        /// Use an interactive pager for TTY output
+        #[arg(long)]
+        pager: bool,
     },
 }
 
@@ -813,6 +846,15 @@ pub enum ShareCommands {
         /// Include service accounts in output
         #[arg(long)]
         all: bool,
+        /// Page number to display (requires --page-size)
+        #[arg(long)]
+        page: Option<usize>,
+        /// Number of rows per page
+        #[arg(long)]
+        page_size: Option<usize>,
+        /// Use an interactive pager for TTY output
+        #[arg(long)]
+        pager: bool,
     },
 }
 
@@ -1003,9 +1045,13 @@ impl Cli {
                 expiring,
                 expired,
                 no_cache,
+                page,
+                page_size,
+                pager,
             } => {
+                let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 crate::cli::secret_ops::execute_secret_list_direct(
-                    group, all, expiring, expired, no_cache, config,
+                    group, all, expiring, expired, no_cache, pagination, pager, config,
                 )
                 .await
             }
@@ -1312,6 +1358,133 @@ mod tests {
         assert!("alpha".parse::<CharsetType>().is_err());
         assert!("unknown".parse::<CharsetType>().is_err());
         assert!("".parse::<CharsetType>().is_err());
+    }
+
+    #[test]
+    fn test_secret_list_pagination_args_parse() {
+        let cli =
+            Cli::try_parse_from(["xv", "list", "--page-size", "25", "--page", "2", "--pager"])
+                .unwrap();
+
+        match cli.command {
+            Commands::List {
+                page,
+                page_size,
+                pager,
+                ..
+            } => {
+                assert_eq!(page, Some(2));
+                assert_eq!(page_size, Some(25));
+                assert!(pager);
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    #[test]
+    fn test_vault_list_pagination_args_parse() {
+        let cli = Cli::try_parse_from([
+            "xv",
+            "vault",
+            "list",
+            "--page-size",
+            "50",
+            "--page",
+            "3",
+            "--pager",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Vault {
+                command:
+                    VaultCommands::List {
+                        page,
+                        page_size,
+                        pager,
+                        ..
+                    },
+            } => {
+                assert_eq!(page, Some(3));
+                assert_eq!(page_size, Some(50));
+                assert!(pager);
+            }
+            _ => panic!("Expected vault list command"),
+        }
+    }
+
+    #[test]
+    fn test_share_list_pagination_args_parse() {
+        let cli = Cli::try_parse_from([
+            "xv",
+            "share",
+            "list",
+            "api-key",
+            "--page-size",
+            "10",
+            "--page",
+            "2",
+            "--pager",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Share {
+                command:
+                    ShareCommands::List {
+                        secret_name,
+                        page,
+                        page_size,
+                        pager,
+                        ..
+                    },
+            } => {
+                assert_eq!(secret_name, "api-key");
+                assert_eq!(page, Some(2));
+                assert_eq!(page_size, Some(10));
+                assert!(pager);
+            }
+            _ => panic!("Expected share list command"),
+        }
+    }
+
+    #[test]
+    fn test_vault_share_list_pagination_args_parse() {
+        let cli = Cli::try_parse_from([
+            "xv",
+            "vault",
+            "share",
+            "list",
+            "prod-vault",
+            "--page-size",
+            "10",
+            "--page",
+            "2",
+            "--pager",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Vault {
+                command:
+                    VaultCommands::Share {
+                        command:
+                            VaultShareCommands::List {
+                                vault_name,
+                                page,
+                                page_size,
+                                pager,
+                                ..
+                            },
+                    },
+            } => {
+                assert_eq!(vault_name, "prod-vault");
+                assert_eq!(page, Some(2));
+                assert_eq!(page_size, Some(10));
+                assert!(pager);
+            }
+            _ => panic!("Expected vault share list command"),
+        }
     }
 
     // ── gen command unit tests ───────────────────────────────────────────────

@@ -9,4 +9,5 @@ pub mod models;
 pub mod refresh;
 
 pub use manager::CacheManager;
+#[allow(unused_imports)]
 pub use models::{CacheEntry, CacheEntryType, CacheKey, CacheStatus};

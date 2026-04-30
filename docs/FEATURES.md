@@ -10,7 +10,7 @@
 |---------|-------------|
 | `xv set <name>` | Create a secret (interactive prompt, `--stdin`, or bulk `K1=v1 K2=v2`) |
 | `xv get <name>` | Retrieve a secret (clipboard by default; `--raw` for stdout) |
-| `xv list` | List secrets (`--group`, `--all`, `--expiring <period>`, `--expired`) |
+| `xv list` | List secrets (`--group`, `--all`, `--expiring <period>`, `--expired`, `--page-size`, `--page`) |
 | `xv delete <name>` | Soft-delete a secret (`--force` to skip confirmation) |
 | `xv update <name>` | Update value, groups, folder, note, tags, expiry; supports `--rename` |
 | `xv purge <name>` | Permanently delete a soft-deleted secret |
@@ -49,7 +49,7 @@ Names are automatically sanitized for backend compatibility (Azure: alphanumeric
 | Command | Description |
 |---------|-------------|
 | `xv vault create <name>` | Create a new vault (`--resource-group`, `--location`) |
-| `xv vault list` | List vaults |
+| `xv vault list` | List vaults (`--page-size`, `--page`) |
 | `xv vault info <name>` | Show vault details |
 | `xv vault delete <name>` | Soft-delete a vault |
 | `xv vault restore <name>` | Restore a soft-deleted vault |
@@ -64,10 +64,10 @@ Names are automatically sanitized for backend compatibility (Azure: alphanumeric
 |---------|-------------|
 | `xv vault share grant` | Grant vault access (reader, contributor, admin) |
 | `xv vault share revoke` | Revoke vault access |
-| `xv vault share list` | List vault access assignments |
+| `xv vault share list` | List vault access assignments (`--page-size`, `--page`) |
 | `xv share grant` | Grant secret-level access |
 | `xv share revoke` | Revoke secret-level access |
-| `xv share list` | List secret permissions |
+| `xv share list` | List secret permissions (`--page-size`, `--page`) |
 
 ---
 
@@ -99,7 +99,7 @@ Requires blob storage setup via `xv init`. Gated behind the `file-ops` feature f
 | `xv download <file>` | Quick download (alias for `xv file download`) |
 | `xv file upload` | Upload files (`--recursive`, `--prefix`, `--flatten`) |
 | `xv file download` | Download files (`--recursive`, `--flatten`, `--output`, `--force`) |
-| `xv file list` | List files (hierarchical by default; `--recursive` for flat) |
+| `xv file list` | List files (hierarchical by default; `--recursive` for flat; `--page-size`, `--page`, `--limit`) |
 | `xv file delete` | Delete files (`-r`, `-f`, `-i`, `--dry-run`, `--verbose`, `--force`, `--continue-on-error`, glob patterns) |
 | `xv file info` | File metadata |
 | `xv file sync` | Sync local directory with blob prefix (`--direction` up/down/both, `--dry-run`, `--delete`) |

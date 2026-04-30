@@ -80,6 +80,15 @@ pub enum FileCommands {
         /// Maximum number of results
         #[arg(long)]
         limit: Option<usize>,
+        /// Page number to display (requires --page-size)
+        #[arg(long)]
+        page: Option<usize>,
+        /// Number of rows per page
+        #[arg(long)]
+        page_size: Option<usize>,
+        /// Use an interactive pager for TTY output
+        #[arg(long)]
+        pager: bool,
         /// List all files recursively (show all nested files instead of directory structure)
         #[arg(short, long)]
         recursive: bool,

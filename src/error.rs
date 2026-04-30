@@ -169,6 +169,7 @@ impl CrosstacheError {
         Self::ConfigError(msg.into())
     }
 
+    #[allow(dead_code)]
     pub fn secret_not_found<S: Into<String>>(name: S) -> Self {
         Self::SecretNotFound {
             name: name.into(),

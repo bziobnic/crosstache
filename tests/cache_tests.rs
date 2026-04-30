@@ -42,7 +42,7 @@ fn test_cache_no_cache_flag_behavior() {
         vault_name: "test-vault".to_string(),
     };
     mgr.set(&key, &vec!["data".to_string()]);
-    let path = key.to_path(&dir.path().to_path_buf());
+    let path = key.to_path(dir.path());
     assert!(path.exists());
 }
 
@@ -54,7 +54,7 @@ fn test_cache_disabled_behavior() {
         vault_name: "test-vault".to_string(),
     };
     mgr.set(&key, &vec!["data".to_string()]);
-    let path = key.to_path(&dir.path().to_path_buf());
+    let path = key.to_path(dir.path());
     assert!(!path.exists());
     let result: Option<Vec<String>> = mgr.get(&key);
     assert!(result.is_none());
