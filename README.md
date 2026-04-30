@@ -343,6 +343,18 @@ For per-project vault/resource-group defaults, use a `.xv.toml`
 at the project root. See [`docs/env-profiles.md`](docs/env-profiles.md)
 for the full reference.
 
+## Fuzzy search
+
+For ranked search across secret names (and optionally folders, groups,
+notes, tags), use `xv find <pattern>`. See [`docs/find.md`](docs/find.md)
+for the full reference.
+
+Pipe-into-fzf canonical form:
+
+```bash
+xv get "$(xv ls --names-only | fzf)"
+```
+
 ## Security
 
 - Secret values are zeroized from memory after use (`zeroize` crate)

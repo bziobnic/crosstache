@@ -1,6 +1,6 @@
 [package]
 name = "crosstache"
-version = "0.6.0-rc.2"
+version = "0.6.1-rc.1"
 edition = "2021"
 authors = ["crosstache Team"]
 description = "A comprehensive command-line tool for managing Azure Key Vaults"
@@ -50,6 +50,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 rand = "0.8"
 regex = "1.0"
 dirs = "5.0"
+nucleo = "0.5"
 config = "0.14"
 
 # UI components

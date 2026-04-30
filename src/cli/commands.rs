@@ -28,6 +28,17 @@ fn should_hide_options() -> bool {
     !std::env::args().any(|arg| arg == "--show-options")
 }
 
+/// Parse and validate `--min-score` is in [0.0, 1.0].
+fn parse_min_score(s: &str) -> std::result::Result<f32, String> {
+    let f: f32 = s
+        .parse()
+        .map_err(|e: std::num::ParseFloatError| format!("not a float: {e}"))?;
+    if !(0.0..=1.0).contains(&f) {
+        return Err(format!("must be in 0.0..=1.0, got {f}"));
+    }
+    Ok(f)
+}
+
 /// Get the help template based on whether options should be shown
 fn get_help_template() -> &'static str {
     if std::env::args().any(|arg| arg == "--show-options") {
@@ -246,15 +257,44 @@ pub enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Interactively find and copy a secret by name pattern (alias: search)
+    /// Ranked fuzzy search over secrets (alias: search). Non-interactive;
+    /// pipe the output through fzf or similar for an interactive picker.
+    /// Default search field is the secret name; opt in to other fields
+    /// via repeated `--in <field>`.
     #[command(alias = "search")]
     Find {
-        /// Search term — substring match, or prefix with trailing * (e.g. claude-*)
-        /// Omit to browse all secrets interactively.
-        term: Option<String>,
-        /// Print value to stdout instead of copying to clipboard
-        #[arg(short, long)]
-        raw: bool,
+        /// Pattern to score every secret against. Omit to list all
+        /// secrets unranked (score 0); flags still apply.
+        pattern: Option<String>,
+
+        /// Search additional fields alongside the name. Repeatable.
+        /// Allowed: name, folder, groups, note, tags.
+        #[arg(long = "in", value_name = "FIELD", num_args = 1..)]
+        in_fields: Vec<String>,
+
+        /// Maximum rows to print (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        /// Drop matches scoring below this fraction of the top match
+        /// (0.0..=1.0). Default 0.3.
+        #[arg(
+            long,
+            default_value_t = 0.3,
+            value_parser = parse_min_score,
+        )]
+        min_score: f32,
+
+        /// Search every vault the caller has list rights on. Slow on
+        /// cold cache. Mutually exclusive with vault-resolved context.
+        #[arg(long)]
+        all_vaults: bool,
+
+        /// Print one name per line, no headers, no ANSI. Pipe-friendly.
+        /// Overrides `--format` and disables auto-format-resolution to
+        /// JSON when stdout is not a TTY.
+        #[arg(long)]
+        names_only: bool,
     },
     /// List secrets in the current vault context (alias: ls)
     #[command(alias = "ls")]
@@ -283,6 +323,10 @@ pub enum Commands {
         /// Use an interactive pager for TTY output
         #[arg(long)]
         pager: bool,
+        /// Print one name per line, no headers, no ANSI. Pipe-friendly.
+        /// Overrides --format and disables auto-format-resolution.
+        #[arg(long)]
+        names_only: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -1036,8 +1080,25 @@ impl Cli {
             Commands::Get { name, raw, version } => {
                 crate::cli::secret_ops::execute_secret_get_direct(&name, raw, version, config).await
             }
-            Commands::Find { term, raw } => {
-                crate::cli::secret_ops::execute_secret_find_direct(term, raw, config).await
+            Commands::Find {
+                pattern,
+                in_fields,
+                limit,
+                min_score,
+                all_vaults,
+                names_only,
+            } => {
+                crate::cli::secret_ops::execute_secret_find_direct(
+                    pattern,
+                    in_fields,
+                    limit,
+                    min_score,
+                    all_vaults,
+                    names_only,
+                    self.format,
+                    config,
+                )
+                .await
             }
             Commands::List {
                 group,
@@ -1048,10 +1109,11 @@ impl Cli {
                 page,
                 page_size,
                 pager,
+                names_only,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 crate::cli::secret_ops::execute_secret_list_direct(
-                    group, all, expiring, expired, no_cache, pagination, pager, config,
+                    group, all, expiring, expired, no_cache, pagination, pager, names_only, config,
                 )
                 .await
             }
