@@ -876,6 +876,24 @@ pub enum ContextCommands {
     },
     /// List environment profiles in the resolved .xv.toml
     Envs,
+    /// Create a new .xv.toml in the current directory
+    Init {
+        /// Env name to create (default: "dev")
+        #[arg(long, default_value = "dev")]
+        env: String,
+        /// Vault for the env (skips interactive prompt if provided)
+        #[arg(long)]
+        vault: Option<String>,
+        /// Resource group for the env (skips interactive prompt if provided)
+        #[arg(long)]
+        resource_group: Option<String>,
+        /// Skip prompts entirely; require --vault and --resource-group
+        #[arg(long)]
+        non_interactive: bool,
+        /// Overwrite an existing .xv.toml
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]

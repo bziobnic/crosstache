@@ -454,6 +454,15 @@ pub(crate) async fn execute_context_command(
         ContextCommands::Envs => {
             execute_context_envs(&config).await?;
         }
+        ContextCommands::Init {
+            env,
+            vault,
+            resource_group,
+            non_interactive,
+            force,
+        } => {
+            execute_context_init(env, vault, resource_group, non_interactive, force, &config).await?;
+        }
     }
     Ok(())
 }
@@ -710,6 +719,100 @@ async fn execute_context_envs(config: &Config) -> Result<()> {
         let rg = profile.resource_group.as_deref().unwrap_or("(unset)");
         println!("  {marker} {name}  vault={vault}  rg={rg}");
     }
+    Ok(())
+}
+
+async fn execute_context_init(
+    env_name: String,
+    vault_arg: Option<String>,
+    rg_arg: Option<String>,
+    non_interactive: bool,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::config::project::{EnvProfile, ProjectConfig};
+    use crate::error::CrosstacheError;
+    use std::collections::BTreeMap;
+
+    let cwd = std::env::current_dir()?;
+    let path = cwd.join(".xv.toml");
+    if path.exists() && !force {
+        return Err(CrosstacheError::config(format!(
+            ".xv.toml already exists at {} (use --force to overwrite)",
+            path.display()
+        )));
+    }
+
+    // Resolve vault/RG: explicit flag → interactive prompt → config default
+    let (vault, resource_group) = if non_interactive {
+        let vault = vault_arg.ok_or_else(|| {
+            CrosstacheError::invalid_argument(
+                "--non-interactive requires --vault",
+            )
+        })?;
+        let rg = rg_arg.ok_or_else(|| {
+            CrosstacheError::invalid_argument(
+                "--non-interactive requires --resource-group",
+            )
+        })?;
+        (vault, rg)
+    } else {
+        use crate::utils::interactive::InteractivePrompt;
+        let prompt = InteractivePrompt::new();
+        let vault = match vault_arg {
+            Some(v) => v,
+            None => prompt.input_text(
+                &format!("Vault for env '{env_name}'"),
+                if !config.default_vault.is_empty() {
+                    Some(config.default_vault.as_str())
+                } else {
+                    None
+                },
+            )?,
+        };
+        let rg = match rg_arg {
+            Some(r) => r,
+            None => prompt.input_text(
+                &format!("Resource group for env '{env_name}'"),
+                if !config.default_resource_group.is_empty() {
+                    Some(config.default_resource_group.as_str())
+                } else {
+                    None
+                },
+            )?,
+        };
+        (vault, rg)
+    };
+
+    let mut envs = BTreeMap::new();
+    envs.insert(
+        env_name.clone(),
+        EnvProfile {
+            vault: Some(vault),
+            resource_group: Some(resource_group),
+            group: None,
+            folder: None,
+        },
+    );
+
+    let cfg = ProjectConfig {
+        default_env: Some(env_name.clone()),
+        envs,
+    };
+
+    let body = toml::to_string_pretty(&cfg).map_err(|e| {
+        CrosstacheError::config(format!("failed to serialize .xv.toml: {e}"))
+    })?;
+
+    // Helpful header
+    let header = "# crosstache project config — see https://github.com/bziobnic/crosstache/blob/main/docs/env-profiles.md\n";
+    let full = format!("{header}{body}");
+
+    tokio::fs::write(&path, full).await?;
+    crate::utils::output::success(&format!(
+        ".xv.toml written to {} (env: {env_name})",
+        path.display()
+    ));
     Ok(())
 }
 
