@@ -71,6 +71,53 @@ pub async fn parse_file(path: &Path) -> Result<ProjectConfig> {
     parse_str(&content)
 }
 
+use std::path::PathBuf;
+
+/// Walk up from `start` to filesystem root looking for `.xv.toml`.
+///
+/// Stops early at a `.xv.boundary` marker file in any ancestor
+/// directory — useful for marking "do not cross this line" between
+/// sibling projects in a monorepo.
+///
+/// Honors `XV_NO_PARENT_CONFIG=1`: when set, only the cwd itself is
+/// inspected; no walk-up.
+///
+/// Returns `Ok(None)` if no `.xv.toml` was found before hitting the
+/// root (or a boundary). Returns `Err` only if a found `.xv.toml`
+/// fails to parse.
+pub async fn find_project_config(
+    start: &Path,
+) -> Result<Option<(PathBuf, ProjectConfig)>> {
+    let no_walk = std::env::var("XV_NO_PARENT_CONFIG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let mut current: Option<&Path> = Some(start);
+    while let Some(dir) = current {
+        // Check for .xv.toml first — local config wins even if a
+        // boundary marker is also in the same dir (boundaries only
+        // block *ancestor* discovery).
+        let candidate = dir.join(".xv.toml");
+        if tokio::fs::metadata(&candidate).await.is_ok() {
+            let cfg = parse_file(&candidate).await?;
+            return Ok(Some((candidate, cfg)));
+        }
+
+        if no_walk {
+            return Ok(None);
+        }
+
+        // Then check for boundary — if present, do not climb further.
+        let boundary = dir.join(".xv.boundary");
+        if tokio::fs::metadata(&boundary).await.is_ok() {
+            return Ok(None);
+        }
+
+        current = dir.parent();
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +220,87 @@ resource_group = "myrg"
         let cfg = parse_file(&path).await.expect("must parse from file");
         assert_eq!(cfg.default_env.as_deref(), Some("dev"));
         assert_eq!(cfg.envs.len(), 1);
+    }
+
+    use std::path::PathBuf;
+
+    /// Helper: write a minimal valid `.xv.toml` at `path/.xv.toml`.
+    async fn write_xv_toml(dir: &Path) -> PathBuf {
+        let path = dir.join(".xv.toml");
+        let toml = r#"
+default_env = "dev"
+
+[env.dev]
+vault = "v"
+resource_group = "rg"
+"#;
+        tokio::fs::write(&path, toml).await.unwrap();
+        path
+    }
+
+    /// Helper: create a `.xv.boundary` marker file.
+    async fn write_boundary(dir: &Path) {
+        tokio::fs::write(dir.join(".xv.boundary"), "").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn find_project_config_in_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let xv_path = write_xv_toml(temp.path()).await;
+        let result = find_project_config(temp.path()).await.expect("ok");
+        let (path, cfg) = result.expect("must find config in cwd");
+        assert_eq!(path, xv_path);
+        assert_eq!(cfg.default_env.as_deref(), Some("dev"));
+    }
+
+    #[tokio::test]
+    async fn find_project_config_walks_up_two_levels() {
+        let temp = tempfile::tempdir().unwrap();
+        let xv_path = write_xv_toml(temp.path()).await;
+        let nested = temp.path().join("a").join("b");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        let result = find_project_config(&nested).await.expect("ok");
+        let (path, _cfg) = result.expect("must find ancestor config");
+        assert_eq!(path, xv_path);
+    }
+
+    #[tokio::test]
+    async fn find_project_config_stops_at_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        // .xv.toml at root
+        write_xv_toml(temp.path()).await;
+        // .xv.boundary at intermediate dir — must block walk-up past it
+        let mid = temp.path().join("a");
+        tokio::fs::create_dir_all(&mid).await.unwrap();
+        write_boundary(&mid).await;
+        let nested = mid.join("b");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+
+        let result = find_project_config(&nested).await.expect("ok");
+        assert!(
+            result.is_none(),
+            "boundary at intermediate dir must block discovery of ancestor .xv.toml"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_project_config_none_when_no_xv_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("a").join("b");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        let result = find_project_config(&nested).await.expect("ok");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_project_config_xv_toml_in_cwd_wins_over_boundary() {
+        // If both .xv.toml and .xv.boundary are in the same dir, .xv.toml
+        // takes precedence — the boundary only blocks ancestor discovery.
+        let temp = tempfile::tempdir().unwrap();
+        write_xv_toml(temp.path()).await;
+        write_boundary(temp.path()).await;
+        let result = find_project_config(temp.path()).await.expect("ok");
+        let (_path, cfg) = result.expect("local .xv.toml wins");
+        assert_eq!(cfg.default_env.as_deref(), Some("dev"));
     }
 }
