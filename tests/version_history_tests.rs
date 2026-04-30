@@ -68,8 +68,8 @@ mod version_command_tests {
             "Version '{version_str}' should have at least 3 semver components"
         );
         for (i, part) in parts.iter().take(3).enumerate() {
-            // Strip any +metadata suffix from the last part
-            let clean = part.split('+').next().unwrap();
+            // Strip any +metadata or -prerelease suffix (e.g. "0-rc" → "0").
+            let clean = part.split(['+', '-']).next().unwrap();
             assert!(
                 clean.parse::<u32>().is_ok(),
                 "Version component {i} ('{clean}') should be numeric"
