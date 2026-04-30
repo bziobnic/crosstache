@@ -66,6 +66,39 @@ fn json_format_emits_error_envelope() {
 }
 
 #[test]
+fn auto_format_does_not_emit_json_error_envelope_on_stdout() {
+    let out = xv()
+        .args(["gen", "--length", "5", "--raw"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "default Auto must not print JSON (or any) error on stdout: {stdout:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("between") || stderr.contains('6'),
+        "human-readable error should be on stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn explicit_json_format_emits_error_envelope_on_stdout() {
+    let out = xv()
+        .args(["gen", "--length", "5", "--raw", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be JSON envelope");
+    assert_eq!(body["error"]["code"], "xv-invalid-argument");
+    assert_eq!(body["error"]["exit_code"], 2);
+}
+
+#[test]
 fn plain_format_writes_error_to_stderr() {
     let out = xv()
         .args(["this-subcommand-does-not-exist"])

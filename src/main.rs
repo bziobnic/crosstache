@@ -101,11 +101,11 @@ fn print_user_friendly_error(error: &CrosstacheError, format: crate::utils::form
     use crate::utils::format::OutputFormat;
     use std::io::IsTerminal;
 
-    // Resolve auto-format the same way the data-display path does.
-    let resolved = format.resolve_for_stdout();
-
-    // Machine-readable envelope on stdout for json/yaml.
-    if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
+    // Machine-readable envelope on stdout only when the user explicitly set
+    // `--format json|yaml`. Do not use `resolve_for_stdout()` here: default
+    // `Auto` becomes JSON when stdout is not a TTY, which would write errors to
+    // stdout and break pipelines (e.g. `xv get SECRET | consuming-command`).
+    if matches!(format, OutputFormat::Json | OutputFormat::Yaml) {
         let mut envelope = serde_json::json!({
             "error": {
                 "code": error.code(),
@@ -116,7 +116,7 @@ fn print_user_friendly_error(error: &CrosstacheError, format: crate::utils::form
         if let Some(s) = error.suggestion() {
             envelope["error"]["suggestion"] = serde_json::Value::String(s.to_string());
         }
-        let rendered = match resolved {
+        let rendered = match format {
             OutputFormat::Json => serde_json::to_string(&envelope).unwrap_or_default(),
             OutputFormat::Yaml => serde_yaml::to_string(&envelope).unwrap_or_default(),
             _ => unreachable!(),
