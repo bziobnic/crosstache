@@ -1090,7 +1090,7 @@ async fn execute_secret_find(
     in_fields: Vec<String>,
     limit: usize,
     min_score: f32,
-    _all_vaults: bool, // wired in Task 8
+    all_vaults: bool,
     names_only: bool,
     format: crate::utils::format::OutputFormat,
     config: &Config,
@@ -1124,20 +1124,74 @@ async fn execute_secret_find(
         }
     }
 
-    // Fetch secrets (full list — pagination is on the display side).
-    let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
-    let all_secrets = secret_manager
-        .secret_ops()
-        .list_secrets(&vault_name, None)
-        .await;
-    progress.finish_clear();
-    let all_secrets = all_secrets?;
+    use crate::vault::manager::VaultManager;
+    use crate::auth::provider::DefaultAzureCredentialProvider;
 
-    // Adapt to CandidateItems and score.
-    let items: Vec<CandidateItem> = all_secrets
-        .iter()
-        .map(CandidateItem::from_secret_summary)
-        .collect();
+    let items: Vec<CandidateItem> = if all_vaults {
+        // Build a VaultManager from the same credential priority used
+        // by the secret manager. (Re-using auth context is cheap;
+        // tokens cache underneath.)
+        let auth_provider = std::sync::Arc::new(
+            DefaultAzureCredentialProvider::with_credential_priority(
+                config.azure_credential_priority.clone(),
+            )
+            .map_err(|e| {
+                CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+            })?,
+        );
+        let vault_manager = VaultManager::new(
+            auth_provider,
+            config.subscription_id.clone(),
+            config.no_color,
+        )?;
+
+        let vaults = vault_manager
+            .vault_ops()
+            .list_vaults(Some(&config.subscription_id), None)
+            .await?;
+
+        let progress = crate::utils::interactive::ProgressIndicator::new(&format!(
+            "Searching {} vaults...",
+            vaults.len()
+        ));
+        let mut combined: Vec<CandidateItem> = Vec::new();
+        for v in &vaults {
+            // Per-vault list — failures here are non-fatal; log + skip.
+            match secret_manager
+                .secret_ops()
+                .list_secrets(&v.name, None)
+                .await
+            {
+                Ok(secrets) => {
+                    for s in &secrets {
+                        let mut item = CandidateItem::from_secret_summary(s);
+                        // Prefix the vault name into the displayed name so
+                        // results are unambiguous: e.g. "myvault/SECRET".
+                        item.name = format!("{}/{}", v.name, item.name);
+                        combined.push(item);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("list_secrets failed for vault {}: {e}", v.name);
+                }
+            }
+        }
+        progress.finish_clear();
+        combined
+    } else {
+        // Single-vault path (existing logic from Task 5).
+        let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
+        let all_secrets = secret_manager
+            .secret_ops()
+            .list_secrets(&vault_name, None)
+            .await;
+        progress.finish_clear();
+        let all_secrets = all_secrets?;
+        all_secrets
+            .iter()
+            .map(CandidateItem::from_secret_summary)
+            .collect()
+    };
     let pattern_str = pattern.unwrap_or("");
     let mut matches = score_matches(pattern_str, &items, &fields);
 
