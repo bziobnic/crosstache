@@ -1,6 +1,8 @@
 //! Config, context, cache, and environment command execution handlers.
 
-use crate::cli::commands::{CacheCommands, CharsetType, ConfigCommands, ContextCommands, EnvCommands};
+use crate::cli::commands::{
+    CacheCommands, CharsetType, ConfigCommands, ContextCommands, EnvCommands,
+};
 use crate::cli::helpers::format_cache_size;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
@@ -330,9 +332,7 @@ async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
     use crate::cache::refresh::release_lock;
     use crate::cache::{CacheKey, CacheManager};
 
-    let cache_key: CacheKey = key
-        .parse()
-        .map_err(CrosstacheError::invalid_argument)?;
+    let cache_key: CacheKey = key.parse().map_err(CrosstacheError::invalid_argument)?;
 
     let cache_manager = CacheManager::from_config(&config);
     let lock_path = cache_key
@@ -429,7 +429,10 @@ async fn refresh_vault_list(config: Config) -> Result<()> {
 
 // ── Context ──────────────────────────────────────────────────────────────────
 
-pub(crate) async fn execute_context_command(command: ContextCommands, config: Config) -> Result<()> {
+pub(crate) async fn execute_context_command(
+    command: ContextCommands,
+    config: Config,
+) -> Result<()> {
     match command {
         ContextCommands::Show => {
             execute_context_show(&config).await?;
@@ -1032,10 +1035,7 @@ async fn execute_env_pull(
     // Determine vault name
     let vault_name = config.resolve_vault_name(None).await?;
 
-    eprintln!(
-        "Pulling secrets from vault '{}'...",
-        vault_name
-    );
+    eprintln!("Pulling secrets from vault '{}'...", vault_name);
 
     // Get all secrets or filtered by group
     let mut all_secrets = Vec::new();
@@ -1096,9 +1096,9 @@ async fn execute_env_pull(
             let entries: Vec<serde_json::Value> = all_secrets
                 .iter()
                 .filter_map(|s| {
-                    s.value.as_ref().map(|v| {
-                        serde_json::json!({ "name": s.original_name, "value": v.as_str() })
-                    })
+                    s.value.as_ref().map(
+                        |v| serde_json::json!({ "name": s.original_name, "value": v.as_str() }),
+                    )
                 })
                 .collect();
             serde_json::to_string_pretty(&entries).map_err(|e| {
@@ -1109,9 +1109,9 @@ async fn execute_env_pull(
             let entries: Vec<serde_json::Value> = all_secrets
                 .iter()
                 .filter_map(|s| {
-                    s.value.as_ref().map(|v| {
-                        serde_json::json!({ "name": s.original_name, "value": v.as_str() })
-                    })
+                    s.value.as_ref().map(
+                        |v| serde_json::json!({ "name": s.original_name, "value": v.as_str() }),
+                    )
                 })
                 .collect();
             serde_yaml::to_string(&entries).map_err(|e| {

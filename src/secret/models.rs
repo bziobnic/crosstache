@@ -317,8 +317,7 @@ mod tests {
 
     #[test]
     fn test_display_shows_enabled_yes() {
-        let mut info =
-            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        let mut info = SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
         info.enabled = true;
         let output = info.to_string();
         assert!(output.contains("Enabled: Yes"), "output: {output}");
@@ -326,8 +325,7 @@ mod tests {
 
     #[test]
     fn test_display_shows_enabled_no() {
-        let mut info =
-            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        let mut info = SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
         info.enabled = false;
         let output = info.to_string();
         assert!(output.contains("Enabled: No"), "output: {output}");
@@ -347,8 +345,7 @@ mod tests {
 
     #[test]
     fn test_display_hides_original_name_when_same() {
-        let mut info =
-            SecretInfo::test_minimal("api-key", "https://myvault.vault.azure.net/");
+        let mut info = SecretInfo::test_minimal("api-key", "https://myvault.vault.azure.net/");
         info.original_name = Some("api-key".to_string());
         let output = info.to_string();
         assert!(
@@ -359,8 +356,7 @@ mod tests {
 
     #[test]
     fn test_display_shows_groups() {
-        let mut info =
-            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        let mut info = SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
         info.groups = vec!["prod".to_string(), "infra".to_string()];
         let output = info.to_string();
         assert!(output.contains("Groups: prod, infra"), "output: {output}");
@@ -368,8 +364,7 @@ mod tests {
 
     #[test]
     fn test_display_shows_additional_tags() {
-        let mut info =
-            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        let mut info = SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
         info.tags
             .insert("owner".to_string(), "team-platform".to_string());
         let output = info.to_string();
@@ -380,8 +375,7 @@ mod tests {
 
     #[test]
     fn test_display_excludes_system_tags_from_additional() {
-        let mut info =
-            SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
+        let mut info = SecretInfo::test_minimal("my-secret", "https://myvault.vault.azure.net/");
         // System tags should not appear in the "Additional Tags" section
         info.tags.insert("groups".to_string(), "prod".to_string());
         info.tags

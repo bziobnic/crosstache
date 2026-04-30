@@ -24,8 +24,13 @@ mod gen_integration_tests {
     /// Does not require Azure — just tests CLI argument validation.
     #[test]
     fn test_gen_length_too_short_fails() {
-        let (ok, _, stderr) = run_xv(&["gen", "--length", "5", "--raw"]);
+        let (ok, stdout, stderr) = run_xv(&["gen", "--length", "5", "--raw"]);
         assert!(!ok, "gen with length 5 should fail");
+        // Default `--format auto`: errors go to stderr only so stdout stays clean for pipes.
+        assert!(
+            stdout.trim().is_empty(),
+            "unexpected stdout on auto format error: {stdout:?}"
+        );
         assert!(
             stderr.contains("6") || stderr.contains("between"),
             "Error message should mention valid range: {stderr}"
@@ -35,8 +40,12 @@ mod gen_integration_tests {
     /// Does not require Azure — just tests CLI argument validation.
     #[test]
     fn test_gen_length_too_long_fails() {
-        let (ok, _, stderr) = run_xv(&["gen", "--length", "101", "--raw"]);
+        let (ok, stdout, stderr) = run_xv(&["gen", "--length", "101", "--raw"]);
         assert!(!ok, "gen with length 101 should fail");
+        assert!(
+            stdout.trim().is_empty(),
+            "unexpected stdout on auto format error: {stdout:?}"
+        );
         assert!(
             stderr.contains("100") || stderr.contains("between"),
             "Error message should mention valid range: {stderr}"

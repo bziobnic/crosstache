@@ -372,7 +372,11 @@ impl SecretOperations for AzureSecretOperations {
         if let Some(not_before) = request.not_before {
             attributes["nbf"] = serde_json::json!(not_before.timestamp());
         }
-        if !attributes.as_object().expect("json!({}) always produces an Object").is_empty() {
+        if !attributes
+            .as_object()
+            .expect("json!({}) always produces an Object")
+            .is_empty()
+        {
             body["attributes"] = attributes;
         }
 
@@ -460,6 +464,7 @@ impl SecretOperations for AzureSecretOperations {
             if status == 404 {
                 return Err(CrosstacheError::SecretNotFound {
                     name: secret_name.to_string(),
+                    suggestion: None,
                 });
             }
             let error_text = response.text().await.unwrap_or_default();

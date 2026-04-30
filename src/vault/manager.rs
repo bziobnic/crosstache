@@ -36,6 +36,12 @@ impl VaultManager {
         })
     }
 
+    /// Return the underlying vault-operations handle (used for ops that need
+    /// raw list access without the formatter side effects).
+    pub fn vault_ops(&self) -> &Arc<dyn VaultOperations> {
+        &self.vault_ops
+    }
+
     /// Create a new vault with automatic access policy setup
     pub async fn create_vault_with_setup(
         &self,

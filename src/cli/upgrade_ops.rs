@@ -43,7 +43,10 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
     // Update available
     if check {
         output::info(&format!("Update available: v{current} → v{latest}"));
-        output::hint(&format!("Run 'xv upgrade' to install, or download from {}", release.html_url));
+        output::hint(&format!(
+            "Run 'xv upgrade' to install, or download from {}",
+            release.html_url
+        ));
         // Exit with code 1 for scriptability (e.g., `xv upgrade --check && echo "up to date"`)
         // We call exit directly to avoid main.rs printing error-formatted output.
         std::process::exit(1);
@@ -102,8 +105,10 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
 
     // Download archive and checksum
     output::info(&format!("Downloading {asset_name}..."));
-    let archive_bytes = download_asset(&archive_asset.browser_download_url, archive_asset.size).await?;
-    let checksum_bytes = download_asset(&checksum_asset.browser_download_url, checksum_asset.size).await?;
+    let archive_bytes =
+        download_asset(&archive_asset.browser_download_url, archive_asset.size).await?;
+    let checksum_bytes =
+        download_asset(&checksum_asset.browser_download_url, checksum_asset.size).await?;
 
     // Verify checksum
     let checksum_text = String::from_utf8_lossy(&checksum_bytes);
@@ -118,7 +123,9 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
     // Replace current binary
     replace_binary(&binary_bytes)?;
 
-    output::success(&format!("Successfully upgraded xv from v{current} to v{latest}"));
+    output::success(&format!(
+        "Successfully upgraded xv from v{current} to v{latest}"
+    ));
     Ok(())
 }
 
@@ -146,7 +153,8 @@ async fn fetch_latest_release() -> Result<GitHubRelease> {
 
     if response.status() == reqwest::StatusCode::FORBIDDEN {
         return Err(CrosstacheError::upgrade(
-            "GitHub API rate limit reached. Try again in a few minutes, or set GITHUB_TOKEN.".to_string(),
+            "GitHub API rate limit reached. Try again in a few minutes, or set GITHUB_TOKEN."
+                .to_string(),
         ));
     }
 
@@ -219,9 +227,11 @@ async fn download_asset(url: &str, expected_size: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(total_size as usize);
     let mut stream = response;
 
-    while let Some(chunk) = stream.chunk().await.map_err(|e| {
-        CrosstacheError::upgrade(format!("Download interrupted: {e}"))
-    })? {
+    while let Some(chunk) = stream
+        .chunk()
+        .await
+        .map_err(|e| CrosstacheError::upgrade(format!("Download interrupted: {e}")))?
+    {
         bytes.extend_from_slice(&chunk);
         if let Some(ref pb) = pb {
             pb.set_position(bytes.len() as u64);
@@ -284,28 +294,25 @@ fn extract_from_tar_gz(data: &[u8]) -> Result<Vec<u8>> {
     let decoder = GzDecoder::new(data);
     let mut archive = Archive::new(decoder);
 
-    for entry in archive.entries().map_err(|e| {
-        CrosstacheError::upgrade(format!("Failed to read archive: {e}"))
-    })? {
-        let mut entry = entry.map_err(|e| {
-            CrosstacheError::upgrade(format!("Failed to read archive entry: {e}"))
-        })?;
+    for entry in archive
+        .entries()
+        .map_err(|e| CrosstacheError::upgrade(format!("Failed to read archive: {e}")))?
+    {
+        let mut entry = entry
+            .map_err(|e| CrosstacheError::upgrade(format!("Failed to read archive entry: {e}")))?;
 
-        let path = entry.path().map_err(|e| {
-            CrosstacheError::upgrade(format!("Failed to read entry path: {e}"))
-        })?;
+        let path = entry
+            .path()
+            .map_err(|e| CrosstacheError::upgrade(format!("Failed to read entry path: {e}")))?;
 
         // Look for the xv binary (might be at root or in a subdirectory)
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if file_name == "xv" || file_name == "xv.exe" {
             let mut contents = Vec::new();
-            entry.read_to_end(&mut contents).map_err(|e| {
-                CrosstacheError::upgrade(format!("Failed to extract binary: {e}"))
-            })?;
+            entry
+                .read_to_end(&mut contents)
+                .map_err(|e| CrosstacheError::upgrade(format!("Failed to extract binary: {e}")))?;
             return Ok(contents);
         }
     }
@@ -321,21 +328,19 @@ fn extract_from_zip(data: &[u8]) -> Result<Vec<u8>> {
     use std::io::{Cursor, Read};
 
     let reader = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
-        CrosstacheError::upgrade(format!("Failed to read zip archive: {e}"))
-    })?;
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| CrosstacheError::upgrade(format!("Failed to read zip archive: {e}")))?;
 
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|e| {
-            CrosstacheError::upgrade(format!("Failed to read zip entry: {e}"))
-        })?;
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| CrosstacheError::upgrade(format!("Failed to read zip entry: {e}")))?;
 
         let name = file.name().to_string();
         if name.ends_with("xv.exe") || name.ends_with("/xv.exe") {
             let mut contents = Vec::new();
-            file.read_to_end(&mut contents).map_err(|e| {
-                CrosstacheError::upgrade(format!("Failed to extract binary: {e}"))
-            })?;
+            file.read_to_end(&mut contents)
+                .map_err(|e| CrosstacheError::upgrade(format!("Failed to extract binary: {e}")))?;
             return Ok(contents);
         }
     }
@@ -368,15 +373,13 @@ fn replace_binary(new_binary: &[u8]) -> Result<()> {
     // Warn if installed via cargo
     if let Some(path_str) = current_exe.to_str() {
         if path_str.contains(".cargo/bin") {
-            output::warn(
-                "Installed via cargo — future `cargo install` may overwrite this upgrade",
-            );
+            output::warn("Installed via cargo — future `cargo install` may overwrite this upgrade");
         }
     }
 
-    let parent_dir = current_exe.parent().ok_or_else(|| {
-        CrosstacheError::upgrade("Cannot determine binary directory".to_string())
-    })?;
+    let parent_dir = current_exe
+        .parent()
+        .ok_or_else(|| CrosstacheError::upgrade("Cannot determine binary directory".to_string()))?;
 
     // Write new binary to temp file in the same directory (same filesystem for atomic rename)
     let temp_path = parent_dir.join(".xv-upgrade-tmp");
@@ -384,7 +387,8 @@ fn replace_binary(new_binary: &[u8]) -> Result<()> {
     let mut temp_file = fs::File::create(&temp_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             CrosstacheError::upgrade(
-                "Permission denied. Try running with elevated privileges (sudo on Unix).".to_string(),
+                "Permission denied. Try running with elevated privileges (sudo on Unix)."
+                    .to_string(),
             )
         } else {
             CrosstacheError::upgrade(format!("Failed to create temp file: {e}"))
@@ -401,9 +405,8 @@ fn replace_binary(new_binary: &[u8]) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let permissions = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&temp_path, permissions).map_err(|e| {
-            CrosstacheError::upgrade(format!("Failed to set permissions: {e}"))
-        })?;
+        fs::set_permissions(&temp_path, permissions)
+            .map_err(|e| CrosstacheError::upgrade(format!("Failed to set permissions: {e}")))?;
     }
 
     // Replace the binary
@@ -526,7 +529,11 @@ mod tests {
 
     #[test]
     fn test_verify_checksum_invalid() {
-        assert!(verify_checksum(b"hello world", "0000000000000000000000000000000000000000000000000000000000000000").is_err());
+        assert!(verify_checksum(
+            b"hello world",
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -537,6 +544,9 @@ mod tests {
         assert!(!release.assets.is_empty(), "Should have release assets");
         // Verify we can parse the version
         let version = parse_tag_version(&release.tag_name).unwrap();
-        assert!(version.major > 0 || version.minor > 0, "Should be a non-zero version");
+        assert!(
+            version.major > 0 || version.minor > 0,
+            "Should be a non-zero version"
+        );
     }
 }
