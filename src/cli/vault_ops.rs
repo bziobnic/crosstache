@@ -261,6 +261,37 @@ async fn execute_vault_delete(
     Ok(())
 }
 
+/// Best-effort suggestion: if the error is `VaultNotFound`, list vaults in the
+/// same resource group and find the closest name match, then return an enriched
+/// error. Failures in the list call are swallowed — they must NOT change the
+/// original error path.
+async fn attach_vault_suggestion(
+    err: CrosstacheError,
+    vault_manager: &VaultManager,
+    resource_group: &str,
+) -> CrosstacheError {
+    if let CrosstacheError::VaultNotFound { name: missing, .. } = err {
+        let suggestion = match vault_manager
+            .vault_ops()
+            .list_vaults(None, Some(resource_group))
+            .await
+        {
+            Ok(summaries) => {
+                let candidates: Vec<String> = summaries.into_iter().map(|s| s.name).collect();
+                crate::utils::suggestions::closest_match(&missing, &candidates)
+                    .map(|s| s.to_string())
+            }
+            Err(e) => {
+                tracing::debug!("suggestion list-call failed: {e}");
+                None
+            }
+        };
+        CrosstacheError::vault_not_found(missing).with_suggestion(suggestion)
+    } else {
+        err
+    }
+}
+
 async fn execute_vault_info(
     vault_manager: &VaultManager,
     name: &str,
@@ -271,15 +302,22 @@ async fn execute_vault_info(
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
     if config.output_json {
-        let vault = vault_manager
+        let vault = match vault_manager
             .get_vault_properties(name, &resource_group)
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return Err(attach_vault_suggestion(e, vault_manager, &resource_group).await),
+        };
         let json_output = serde_json::to_string_pretty(&vault).map_err(|e| {
             CrosstacheError::serialization(format!("Failed to serialize vault info: {e}"))
         })?;
         println!("{json_output}");
     } else {
-        let _vault = vault_manager.get_vault_info(name, &resource_group).await?;
+        let _vault = match vault_manager.get_vault_info(name, &resource_group).await {
+            Ok(v) => v,
+            Err(e) => return Err(attach_vault_suggestion(e, vault_manager, &resource_group).await),
+        };
         // Display will be handled by the vault manager
     }
 
