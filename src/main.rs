@@ -14,6 +14,7 @@ mod cache;
 mod cli;
 mod config;
 mod error;
+mod scan;
 mod secret;
 mod utils;
 mod vault;
