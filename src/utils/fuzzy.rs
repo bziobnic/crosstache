@@ -113,6 +113,32 @@ pub fn score_matches<'a>(
     out
 }
 
+impl CandidateItem {
+    /// Adapt a `SecretSummary` to a `CandidateItem`. Prefers
+    /// `original_name` over the sanitized `name` since users search
+    /// against what they typed, not against post-sanitization forms.
+    /// Empty `original_name` falls back to `name`.
+    pub fn from_secret_summary(s: &crate::secret::manager::SecretSummary) -> Self {
+        let name = if s.original_name.is_empty() {
+            s.name.clone()
+        } else {
+            s.original_name.clone()
+        };
+        let tags: Vec<String> = s
+            .groups
+            .as_deref()
+            .map(|g| g.split(',').map(|t| t.trim().to_string()).collect())
+            .unwrap_or_default();
+        Self {
+            name,
+            folder: s.folder.clone(),
+            groups: s.groups.clone(),
+            note: s.note.clone(),
+            tags,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +216,31 @@ mod tests {
         // pattern matches the folder, but we asked for name-only → no match
         let matches = score_matches("data", &items, &[FuzzyField::Name]);
         assert!(matches.is_empty(), "name-only field selector ignores folder");
+    }
+
+    #[test]
+    fn from_secret_summary_extracts_all_fields() {
+        use crate::secret::manager::SecretSummary;
+        let summary = SecretSummary {
+            name: "DB_PASSWORD".to_string(),
+            original_name: "DB_PASSWORD".to_string(),
+            note: Some("primary db".to_string()),
+            folder: Some("backend/database".to_string()),
+            groups: Some("backend,prod".to_string()),
+            updated_on: String::new(),
+            enabled: true,
+            content_type: String::new(),
+        };
+        let item = CandidateItem::from_secret_summary(&summary);
+        // Prefer original_name over sanitized name (matches the user-typed form).
+        assert_eq!(item.name, "DB_PASSWORD");
+        assert_eq!(item.folder.as_deref(), Some("backend/database"));
+        assert_eq!(item.groups.as_deref(), Some("backend,prod"));
+        assert_eq!(item.note.as_deref(), Some("primary db"));
+        // Tags come from groups (comma-separated). v0.6.1 has no separate
+        // tags field on SecretSummary; we map groups to tags so `--in tags`
+        // still works on existing data.
+        assert!(item.tags.contains(&"backend".to_string()));
+        assert!(item.tags.contains(&"prod".to_string()));
     }
 }
