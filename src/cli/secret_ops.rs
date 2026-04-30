@@ -135,6 +135,7 @@ pub(crate) fn display_cached_secret_list(
     pager: bool,
     vault_name: &str,
     config: &Config,
+    names_only: bool,
 ) -> Result<()> {
     use crate::utils::format::TableFormatter;
     use crate::utils::pagination::{paginate_slice, pagination_footer_text};
@@ -147,6 +148,19 @@ pub(crate) fn display_cached_secret_list(
     }
     if let Some(ref g) = group {
         filtered.retain(|s| secret_summary_matches_group(s, g));
+    }
+
+    // Early exit for names-only mode (no pagination for pipe-friendly output)
+    if names_only {
+        for s in &filtered {
+            let display = if s.original_name.is_empty() {
+                &s.name
+            } else {
+                &s.original_name
+            };
+            println!("{display}");
+        }
+        return Ok(());
     }
 
     let page = paginate_slice(&filtered, pagination);
@@ -220,6 +234,7 @@ pub(crate) async fn execute_secret_list_direct(
     no_cache: bool,
     pagination: Pagination,
     pager: bool,
+    names_only: bool,
     config: Config,
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
@@ -244,6 +259,7 @@ pub(crate) async fn execute_secret_list_direct(
                 pager,
                 &vault_name,
                 &config,
+                names_only,
             );
         }
     }
@@ -268,6 +284,7 @@ pub(crate) async fn execute_secret_list_direct(
         expired,
         pagination,
         pager,
+        names_only,
         &config,
     )
     .await?;
@@ -1987,6 +2004,7 @@ async fn execute_secret_list(
     expired: bool,
     pagination: Pagination,
     pager: bool,
+    names_only: bool,
     config: &Config,
 ) -> Result<Vec<crate::secret::manager::SecretSummary>> {
     use crate::config::ContextManager;
@@ -2061,6 +2079,19 @@ async fn execute_secret_list(
         }
 
         secrets = filtered_secrets;
+    }
+
+    // Early exit for names-only mode (no pagination for pipe-friendly output)
+    if names_only {
+        for s in &secrets {
+            let display = if s.original_name.is_empty() {
+                &s.name
+            } else {
+                &s.original_name
+            };
+            println!("{display}");
+        }
+        return Ok(all_secrets);
     }
 
     let paged = paginate_slice(&secrets, pagination);

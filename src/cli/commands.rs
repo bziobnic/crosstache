@@ -323,6 +323,10 @@ pub enum Commands {
         /// Use an interactive pager for TTY output
         #[arg(long)]
         pager: bool,
+        /// Print one name per line, no headers, no ANSI. Pipe-friendly.
+        /// Overrides --format and disables auto-format-resolution.
+        #[arg(long)]
+        names_only: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -1105,10 +1109,11 @@ impl Cli {
                 page,
                 page_size,
                 pager,
+                names_only,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 crate::cli::secret_ops::execute_secret_list_direct(
-                    group, all, expiring, expired, no_cache, pagination, pager, config,
+                    group, all, expiring, expired, no_cache, pagination, pager, names_only, config,
                 )
                 .await
             }
