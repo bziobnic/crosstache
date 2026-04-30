@@ -24,22 +24,28 @@ mod gen_integration_tests {
     /// Does not require Azure — just tests CLI argument validation.
     #[test]
     fn test_gen_length_too_short_fails() {
-        let (ok, _, stderr) = run_xv(&["gen", "--length", "5", "--raw"]);
+        let (ok, stdout, stderr) = run_xv(&["gen", "--length", "5", "--raw"]);
         assert!(!ok, "gen with length 5 should fail");
+        // When stdout is not a TTY (test runner), the error envelope is on stdout.
+        // When stdout is a TTY, the plain-text error goes to stderr.
+        let combined = stdout + &stderr;
         assert!(
-            stderr.contains("6") || stderr.contains("between"),
-            "Error message should mention valid range: {stderr}"
+            combined.contains("6") || combined.contains("between"),
+            "Error message should mention valid range: {combined}"
         );
     }
 
     /// Does not require Azure — just tests CLI argument validation.
     #[test]
     fn test_gen_length_too_long_fails() {
-        let (ok, _, stderr) = run_xv(&["gen", "--length", "101", "--raw"]);
+        let (ok, stdout, stderr) = run_xv(&["gen", "--length", "101", "--raw"]);
         assert!(!ok, "gen with length 101 should fail");
+        // When stdout is not a TTY (test runner), the error envelope is on stdout.
+        // When stdout is a TTY, the plain-text error goes to stderr.
+        let combined = stdout + &stderr;
         assert!(
-            stderr.contains("100") || stderr.contains("between"),
-            "Error message should mention valid range: {stderr}"
+            combined.contains("100") || combined.contains("between"),
+            "Error message should mention valid range: {combined}"
         );
     }
 

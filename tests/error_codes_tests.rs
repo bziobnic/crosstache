@@ -40,3 +40,29 @@ fn secret_not_found_includes_suggestion_when_close_match_exists() {
     assert_eq!(body["error"]["code"], "xv-secret-not-found");
     assert_eq!(body["error"]["suggestion"], "DB_PASSWORD");
 }
+
+#[test]
+#[ignore = "requires a working config that triggers VaultNotFound predictably"]
+fn json_format_emits_error_envelope() {
+    // Triggers a vault-not-found by passing a vault name that cannot exist.
+    let out = xv()
+        .args([
+            "vault", "info",
+            "definitely-does-not-exist-zzzzzzzz",
+            "--format", "json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(11));
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be JSON envelope");
+    assert_eq!(body["error"]["code"], "xv-vault-not-found");
+    assert_eq!(body["error"]["exit_code"], 11);
+    assert!(body["error"]["message"].is_string());
+}
+
+#[test]
+fn plain_format_writes_error_to_stderr() {
+    let out = xv().args(["this-subcommand-does-not-exist"]).output().unwrap();
+    assert!(!out.stderr.is_empty(), "stderr should contain clap parse error");
+}
