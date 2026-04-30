@@ -332,6 +332,12 @@ These flags work with any command:
 For scripts and CI, see [`docs/exit-codes.md`](docs/exit-codes.md) for
 the stable exit-code table and the `--format json` error envelope.
 
+## Env profiles
+
+For per-project vault/resource-group defaults, use a `.xv.toml`
+at the project root. See [`docs/env-profiles.md`](docs/env-profiles.md)
+for the full reference.
+
 ## Security
 
 - Secret values are zeroized from memory after use (`zeroize` crate)

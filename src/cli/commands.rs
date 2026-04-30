@@ -82,6 +82,11 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value = "auto", hide = should_hide_options())]
     pub format: OutputFormat,
 
+    /// Active environment from the resolved .xv.toml (overrides default_env).
+    /// Lower priority than the XV_ENV env var.
+    #[arg(long, global = true, hide = should_hide_options())]
+    pub env: Option<String>,
+
     /// Custom template string for template format
     #[arg(long, global = true, hide = should_hide_options())]
     pub template: Option<String>,
@@ -868,6 +873,26 @@ pub enum ContextCommands {
         /// Clear global context
         #[arg(long)]
         global: bool,
+    },
+    /// List environment profiles in the resolved .xv.toml
+    Envs,
+    /// Create a new .xv.toml in the current directory
+    Init {
+        /// Env name to create (default: "dev")
+        #[arg(long, default_value = "dev")]
+        env: String,
+        /// Vault for the env (skips interactive prompt if provided)
+        #[arg(long)]
+        vault: Option<String>,
+        /// Resource group for the env (skips interactive prompt if provided)
+        #[arg(long)]
+        resource_group: Option<String>,
+        /// Skip prompts entirely; require --vault and --resource-group
+        #[arg(long)]
+        non_interactive: bool,
+        /// Overwrite an existing .xv.toml
+        #[arg(long)]
+        force: bool,
     },
 }
 
