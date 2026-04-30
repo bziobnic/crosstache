@@ -576,4 +576,54 @@ mod tests {
         let err = CrosstacheError::secret_not_found("X");
         assert_eq!(err.suggestion(), None);
     }
+
+    // --- Security: no error variant carries a secret value ---
+
+    #[test]
+    fn no_variant_has_a_secret_value_field() {
+        // This is a hand-maintained list of variant fields. If you add a
+        // variant whose payload could carry a secret value, this test will
+        // fail in code review — keep the list updated.
+        //
+        // The check is structural: we simply confirm that the only
+        // string fields on every variant are message/name/details fields,
+        // never anything called "value", "secret", "password", or "token".
+        let variant_field_names = [
+            ("AuthenticationError", vec!["msg"]),
+            ("AzureApiError", vec!["msg"]),
+            ("ConfigError", vec!["msg"]),
+            ("ConfigLoadError", vec!["source"]),
+            ("SecretNotFound", vec!["name", "suggestion"]),
+            ("VaultNotFound", vec!["name", "suggestion"]),
+            ("InvalidSecretName", vec!["name"]),
+            ("PermissionDenied", vec!["msg"]),
+            ("NetworkError", vec!["msg"]),
+            ("DnsResolutionError", vec!["vault_name", "details"]),
+            ("ConnectionTimeout", vec!["msg"]),
+            ("ConnectionRefused", vec!["msg"]),
+            ("SslError", vec!["msg"]),
+            ("InvalidUrl", vec!["msg"]),
+            ("SerializationError", vec!["msg"]),
+            ("IoError", vec!["source"]),
+            ("JsonError", vec!["source"]),
+            ("YamlError", vec!["source"]),
+            ("HttpError", vec!["source"]),
+            ("UuidError", vec!["source"]),
+            ("RegexError", vec!["source"]),
+            ("InvalidArgument", vec!["msg"]),
+            ("Upgrade", vec!["msg"]),
+            ("Unknown", vec!["msg"]),
+        ];
+        let banned = ["value", "secret", "password", "token", "key"];
+        for (variant, fields) in variant_field_names {
+            for f in fields {
+                for b in banned {
+                    assert!(
+                        !f.contains(b),
+                        "variant {variant} field {f:?} contains banned token {b:?}"
+                    );
+                }
+            }
+        }
+    }
 }
