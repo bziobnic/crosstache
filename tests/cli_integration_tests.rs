@@ -390,3 +390,14 @@ fn every_top_level_command_supports_help() {
         );
     }
 }
+
+#[test]
+#[cfg(not(feature = "tui"))]
+fn tui_subcommand_unknown_when_feature_disabled() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .args(["tui"])
+        .output()
+        .expect("spawn");
+    // clap returns exit 2 for unknown subcommands.
+    assert_eq!(out.status.code(), Some(2));
+}
