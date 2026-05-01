@@ -22,3 +22,13 @@ the read surface small and well-known before phase 2.
 - `VaultManager::vault_ops().list_vaults(subscription_id, resource_group)` — already on checklist; reused for `--all-vaults`.
 
 The `get_secret` method is the only NEW read-surface entry this plan introduces.
+
+## v0.7.0 — `xv tui`
+
+- `SecretManager::secret_ops().list_secrets(vault, group_filter)` — already on checklist.
+- `SecretManager::secret_ops().get_secret(vault, name, include_value)` — already on checklist.
+- `SecretManager::secret_ops().get_secret_versions(vault, name)` — **new entry**. Used by the History overlay.
+- `VaultManager::vault_ops().list_vaults(...)` — already on checklist.
+- Audit-events read path — **placeholder in v0.7.0**; real integration deferred to v0.7.1.
+
+`get_secret_versions` is the only NEW read-surface entry this plan introduces. The audit-events read path is an open trait-design question for phase 2.

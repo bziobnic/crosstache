@@ -14,6 +14,8 @@ pub mod scan;
 pub mod secret;
 pub mod utils;
 pub mod vault;
+#[cfg(feature = "tui")]
+pub mod tui;
 
 // Re-export commonly used types
 pub use error::{CrosstacheError, Result};
