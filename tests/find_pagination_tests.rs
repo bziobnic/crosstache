@@ -33,7 +33,8 @@ fn find_each_valid_in_field_passes_clap() {
             .expect("spawn");
         // Should NOT exit 2 (parse error); should exit 3 (config-invalid, no vault).
         assert_ne!(
-            out.status.code(), Some(2),
+            out.status.code(),
+            Some(2),
             "field '{field}' should not be a parse error"
         );
     }
@@ -72,7 +73,12 @@ fn list_page_without_page_size_errors() {
     //   - Clap rejects at parse (exit 2)
     //   - Pagination::from_args returns InvalidArgument → exit 2
     // Either way exit 2 is the contract.
-    assert_eq!(out.status.code(), Some(2), "--page without --page-size: {}", stderr_str(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "--page without --page-size: {}",
+        stderr_str(&out)
+    );
 }
 
 #[test]
@@ -101,7 +107,10 @@ fn ls_names_only_help_documents_no_format_no_ansi() {
     let out = cmd.args(["list", "--help"]).output().expect("spawn");
     assert_eq!(out.status.code(), Some(0));
     let help = stdout_str(&out);
-    assert!(help.contains("names-only"), "list --help should document --names-only: {help}");
+    assert!(
+        help.contains("names-only"),
+        "list --help should document --names-only: {help}"
+    );
 }
 
 #[test]
@@ -110,6 +119,12 @@ fn find_help_documents_in_field() {
     let out = cmd.args(["find", "--help"]).output().expect("spawn");
     assert_eq!(out.status.code(), Some(0));
     let help = stdout_str(&out);
-    assert!(help.contains("--in"), "find --help should document --in: {help}");
-    assert!(help.contains("FIELD") || help.contains("field"), "should reference field arg: {help}");
+    assert!(
+        help.contains("--in"),
+        "find --help should document --in: {help}"
+    );
+    assert!(
+        help.contains("FIELD") || help.contains("field"),
+        "should reference field arg: {help}"
+    );
 }

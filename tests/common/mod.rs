@@ -29,7 +29,10 @@ pub fn isolate<'a>(cmd: &'a mut Command, tempdir: &Path) -> &'a mut Command {
         // non-empty before any command runs. The fake UUIDs satisfy
         // validation but never reach Azure — tested code paths exit
         // on filesystem ops or local errors, not Azure round-trips.
-        .env("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000")
+        .env(
+            "AZURE_SUBSCRIPTION_ID",
+            "00000000-0000-0000-0000-000000000000",
+        )
         .env("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000")
         // (We don't inherit other AZURE_* vars — env_clear() handles that —
         // so accidentally hitting a real subscription is impossible.)
@@ -87,11 +90,20 @@ pub fn write_xv_toml(dir: &Path, default_env: &str, envs: &[(&str, &str)]) -> st
 pub fn parse_json_envelope(stdout: &[u8]) -> serde_json::Value {
     let body: serde_json::Value =
         serde_json::from_slice(stdout).expect("stdout must be valid JSON");
-    assert!(body.get("error").is_some(), "envelope must have 'error' key: {body}");
+    assert!(
+        body.get("error").is_some(),
+        "envelope must have 'error' key: {body}"
+    );
     let err = &body["error"];
     assert!(err.get("code").is_some(), "envelope.error must have 'code'");
-    assert!(err.get("message").is_some(), "envelope.error must have 'message'");
-    assert!(err.get("exit_code").is_some(), "envelope.error must have 'exit_code'");
+    assert!(
+        err.get("message").is_some(),
+        "envelope.error must have 'message'"
+    );
+    assert!(
+        err.get("exit_code").is_some(),
+        "envelope.error must have 'exit_code'"
+    );
     body
 }
 

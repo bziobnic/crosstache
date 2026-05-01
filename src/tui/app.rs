@@ -6,10 +6,20 @@ use std::collections::HashMap;
 use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pane { Vaults, Secrets, Detail }
+pub enum Pane {
+    Vaults,
+    Secrets,
+    Detail,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Overlay { None, Help, History, Audit, ErrorDetail(String) }
+pub enum Overlay {
+    None,
+    Help,
+    History,
+    Audit,
+    ErrorDetail(String),
+}
 
 #[derive(Debug, Clone)]
 pub struct Toast {
@@ -52,37 +62,58 @@ impl App {
         Self {
             config,
             pane: Pane::Vaults,
-            vaults: Vec::new(), vault_state: ListState::default(), vaults_loading: true,
-            secrets_by_vault: HashMap::new(), secret_state: ListState::default(),
-            secret_filter: String::new(), secret_filter_active: false, secrets_loading: false,
-            values: HashMap::new(), value_revealed: false, value_loading: false,
+            vaults: Vec::new(),
+            vault_state: ListState::default(),
+            vaults_loading: true,
+            secrets_by_vault: HashMap::new(),
+            secret_state: ListState::default(),
+            secret_filter: String::new(),
+            secret_filter_active: false,
+            secrets_loading: false,
+            values: HashMap::new(),
+            value_revealed: false,
+            value_loading: false,
             value_debounce: None,
             overlay: Overlay::None,
-            history: HashMap::new(), audit: HashMap::new(),
-            toast: None, clipboard_countdown: None, quit: false,
+            history: HashMap::new(),
+            audit: HashMap::new(),
+            toast: None,
+            clipboard_countdown: None,
+            quit: false,
         }
     }
 
     pub fn selected_vault(&self) -> Option<&str> {
-        self.vault_state.selected()
+        self.vault_state
+            .selected()
             .and_then(|i| self.vaults.get(i))
             .map(|v| v.name.as_str())
     }
 
     pub fn filtered_secrets(&self) -> Vec<&SecretSummary> {
-        let Some(vault) = self.selected_vault() else { return Vec::new() };
-        let Some(secrets) = self.secrets_by_vault.get(vault) else { return Vec::new() };
+        let Some(vault) = self.selected_vault() else {
+            return Vec::new();
+        };
+        let Some(secrets) = self.secrets_by_vault.get(vault) else {
+            return Vec::new();
+        };
         if self.secret_filter.is_empty() {
             return secrets.iter().collect();
         }
         use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
-        let items: Vec<CandidateItem> = secrets.iter()
-            .map(CandidateItem::from_secret_summary).collect();
+        let items: Vec<CandidateItem> = secrets
+            .iter()
+            .map(CandidateItem::from_secret_summary)
+            .collect();
         let matches = score_matches(&self.secret_filter, &items, &[FuzzyField::Name]);
         let mut out: Vec<&SecretSummary> = Vec::new();
         for m in &matches {
             if let Some(s) = secrets.iter().find(|s| {
-                let display = if s.original_name.is_empty() { &s.name } else { &s.original_name };
+                let display = if s.original_name.is_empty() {
+                    &s.name
+                } else {
+                    &s.original_name
+                };
                 display == m.item.name.as_str()
             }) {
                 out.push(s);
@@ -93,13 +124,19 @@ impl App {
 
     pub fn selected_secret(&self) -> Option<&SecretSummary> {
         let secrets = self.filtered_secrets();
-        self.secret_state.selected().and_then(|i| secrets.get(i).copied())
+        self.secret_state
+            .selected()
+            .and_then(|i| secrets.get(i).copied())
     }
 
     pub fn selected_vault_and_name(&self) -> Option<(String, String)> {
         let vault = self.selected_vault()?.to_string();
         let s = self.selected_secret()?;
-        let name = if s.original_name.is_empty() { s.name.clone() } else { s.original_name.clone() };
+        let name = if s.original_name.is_empty() {
+            s.name.clone()
+        } else {
+            s.original_name.clone()
+        };
         Some((vault, name))
     }
 }

@@ -57,6 +57,8 @@ fn tui_help_works_when_feature_enabled() {
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("tui") || stdout.contains("Tui"),
-        "tui --help should mention tui: {stdout}");
+    assert!(
+        stdout.contains("tui") || stdout.contains("Tui"),
+        "tui --help should mention tui: {stdout}"
+    );
 }

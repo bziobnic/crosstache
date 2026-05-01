@@ -65,12 +65,23 @@ fn scan_install_writes_marker() {
     let (mut cmd, temp) = common::xv_isolated();
     common::init_git_repo(temp.path());
     let out = cmd.args(["scan", "install"]).output().expect("spawn");
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", common::stderr_str(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
     let hook = temp.path().join(".git/hooks/pre-commit");
     assert!(hook.exists(), "hook file should be created");
     let content = std::fs::read_to_string(&hook).unwrap();
-    assert!(content.contains("xv-scan-managed"), "marker missing: {content}");
-    assert!(content.contains("xv scan --staged --hook"), "hook body missing: {content}");
+    assert!(
+        content.contains("xv-scan-managed"),
+        "marker missing: {content}"
+    );
+    assert!(
+        content.contains("xv scan --staged --hook"),
+        "hook body missing: {content}"
+    );
 }
 
 #[test]
@@ -102,8 +113,10 @@ fn scan_install_refuses_unmanaged_hook_without_force() {
     let out = cmd.args(["scan", "install"]).output().expect("spawn");
     assert_eq!(out.status.code(), Some(3));
     let stderr = common::stderr_str(&out);
-    assert!(stderr.contains("not xv-managed") || stderr.contains("force"),
-        "stderr: {stderr}");
+    assert!(
+        stderr.contains("not xv-managed") || stderr.contains("force"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -114,7 +127,10 @@ fn scan_install_force_overwrites_unmanaged_hook() {
     std::fs::create_dir_all(&hooks_dir).unwrap();
     std::fs::write(hooks_dir.join("pre-commit"), "#!/bin/sh\necho hi\n").unwrap();
 
-    let out = cmd.args(["scan", "install", "--force"]).output().expect("spawn");
+    let out = cmd
+        .args(["scan", "install", "--force"])
+        .output()
+        .expect("spawn");
     assert_eq!(out.status.code(), Some(0));
     let content = std::fs::read_to_string(hooks_dir.join("pre-commit")).unwrap();
     assert!(content.contains("xv-scan-managed"));
@@ -131,8 +147,10 @@ fn scan_uninstall_refuses_unmanaged_hook() {
     let out = cmd.args(["scan", "uninstall"]).output().expect("spawn");
     assert_eq!(out.status.code(), Some(3));
     let stderr = common::stderr_str(&out);
-    assert!(stderr.contains("not xv-managed") || stderr.contains("refusing"),
-        "stderr: {stderr}");
+    assert!(
+        stderr.contains("not xv-managed") || stderr.contains("refusing"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -161,6 +179,8 @@ fn scan_install_round_trip() {
     common::isolate(&mut cmd2, temp.path());
     let out2 = cmd2.args(["scan", "uninstall"]).output().expect("spawn");
     assert_eq!(out2.status.code(), Some(0));
-    assert!(!temp.path().join(".git/hooks/pre-commit").exists(),
-        "hook should be removed");
+    assert!(
+        !temp.path().join(".git/hooks/pre-commit").exists(),
+        "hook should be removed"
+    );
 }

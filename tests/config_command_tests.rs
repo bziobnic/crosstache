@@ -20,7 +20,12 @@ fn config_show_works_on_empty_config() {
     let out = cmd.args(["config", "show"]).output().expect("spawn");
     // With XDG_CONFIG_HOME pointing at an empty tempdir, no config file
     // exists. The command should still exit 0 and show defaults.
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", common::stderr_str(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
 }
 
 #[test]
@@ -30,15 +35,22 @@ fn config_set_then_show_round_trips() {
         .args(["config", "set", "default_vault", "test-vault"])
         .output()
         .expect("spawn");
-    assert_eq!(out1.status.code(), Some(0), "set: {}", common::stderr_str(&out1));
+    assert_eq!(
+        out1.status.code(),
+        Some(0),
+        "set: {}",
+        common::stderr_str(&out1)
+    );
 
     let mut cmd2 = common::xv();
     common::isolate(&mut cmd2, temp.path());
     let out2 = cmd2.args(["config", "show"]).output().expect("spawn");
     assert_eq!(out2.status.code(), Some(0));
     let stdout = common::stdout_str(&out2);
-    assert!(stdout.contains("test-vault"),
-        "config show should display the value just set: {stdout}");
+    assert!(
+        stdout.contains("test-vault"),
+        "config show should display the value just set: {stdout}"
+    );
 }
 
 #[test]

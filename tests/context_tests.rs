@@ -15,10 +15,13 @@ fn context_init_non_interactive_writes_xv_toml() {
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
         .args([
-            "context", "init",
+            "context",
+            "init",
             "--non-interactive",
-            "--vault", "myvault",
-            "--resource-group", "myrg",
+            "--vault",
+            "myvault",
+            "--resource-group",
+            "myrg",
         ])
         .output()
         .expect("spawn");
@@ -39,10 +42,13 @@ fn context_init_refuses_existing_without_force() {
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
         .args([
-            "context", "init",
+            "context",
+            "init",
             "--non-interactive",
-            "--vault", "v2",
-            "--resource-group", "rg",
+            "--vault",
+            "v2",
+            "--resource-group",
+            "rg",
         ])
         .output()
         .expect("spawn");
@@ -59,11 +65,14 @@ fn context_init_force_overwrites() {
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
         .args([
-            "context", "init",
+            "context",
+            "init",
             "--non-interactive",
             "--force",
-            "--vault", "v2",
-            "--resource-group", "rg",
+            "--vault",
+            "v2",
+            "--resource-group",
+            "rg",
         ])
         .output()
         .expect("spawn");
@@ -78,7 +87,13 @@ fn context_init_non_interactive_requires_vault() {
     let out = cmd
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
-        .args(["context", "init", "--non-interactive", "--resource-group", "rg"])
+        .args([
+            "context",
+            "init",
+            "--non-interactive",
+            "--resource-group",
+            "rg",
+        ])
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(2), "missing required --vault");
@@ -101,7 +116,10 @@ fn context_envs_lists_envs() {
     assert!(stdout.contains("vdev"));
     assert!(stdout.contains("vprod"));
     // Default env starred:
-    assert!(stdout.contains("* dev"), "active env should be starred: {stdout}");
+    assert!(
+        stdout.contains("* dev"),
+        "active env should be starred: {stdout}"
+    );
 }
 
 #[test]
@@ -117,8 +135,10 @@ fn context_envs_no_xv_toml_warns() {
     let stderr = stderr_str(&out);
     let stdout = stdout_str(&out);
     let combined = format!("{stderr}{stdout}");
-    assert!(combined.contains(".xv.toml") || combined.contains("no .xv.toml"),
-        "must mention missing config: {combined}");
+    assert!(
+        combined.contains(".xv.toml") || combined.contains("no .xv.toml"),
+        "must mention missing config: {combined}"
+    );
 }
 
 #[test]
@@ -159,7 +179,10 @@ fn xv_env_overrides_default_env() {
     let body = parse_json_envelope(&out.stdout);
     assert_eq!(body["error"]["code"], "xv-env-not-defined");
     let msg = body["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("staging"), "XV_ENV value should appear in message: {msg}");
+    assert!(
+        msg.contains("staging"),
+        "XV_ENV value should appear in message: {msg}"
+    );
 }
 
 #[test]
@@ -183,8 +206,10 @@ fn xv_no_parent_config_disables_walkup() {
     let stdout = stdout_str(&out);
     let stderr = stderr_str(&out);
     let combined = format!("{stderr}{stdout}");
-    assert!(combined.contains("no .xv.toml") || combined.contains(".xv.toml"),
-        "should report no .xv.toml found because walk-up is disabled: {combined}");
+    assert!(
+        combined.contains("no .xv.toml") || combined.contains(".xv.toml"),
+        "should report no .xv.toml found because walk-up is disabled: {combined}"
+    );
 }
 
 #[test]
@@ -209,7 +234,10 @@ fn xv_toml_in_ancestor_emits_cross_boundary_notice() {
     // list --format json triggers resolve_vault_name, which walks up to
     // find the ancestor .xv.toml and emits the cross-boundary notice on
     // stderr before failing with an auth or network error.
-    let out = cmd.args(["list", "--format", "json"]).output().expect("spawn");
+    let out = cmd
+        .args(["list", "--format", "json"])
+        .output()
+        .expect("spawn");
     let stderr = stderr_str(&out);
     assert!(
         stderr.contains("using config from") && stderr.contains(".xv.toml"),

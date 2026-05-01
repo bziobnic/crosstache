@@ -12,10 +12,10 @@ pub mod config;
 pub mod error;
 pub mod scan;
 pub mod secret;
-pub mod utils;
-pub mod vault;
 #[cfg(feature = "tui")]
 pub mod tui;
+pub mod utils;
+pub mod vault;
 
 // Re-export commonly used types
 pub use error::{CrosstacheError, Result};
