@@ -672,6 +672,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<ScanCommands>,
     },
+    /// Open the read-only terminal browser. Requires --features tui at build time.
+    #[cfg(feature = "tui")]
+    Tui,
 }
 
 #[derive(Subcommand)]
@@ -1401,6 +1404,8 @@ impl Cli {
                 )
                 .await
             }
+            #[cfg(feature = "tui")]
+            Commands::Tui => crate::tui::run_tui(config).await,
         }
     }
 }
