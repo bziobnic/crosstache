@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::xv;
+use common::{xv, xv_isolated};
 
 #[test]
 fn invalid_argument_exits_2() {
@@ -65,7 +65,8 @@ fn json_format_emits_error_envelope() {
 
 #[test]
 fn auto_format_does_not_emit_json_error_envelope_on_stdout() {
-    let out = xv()
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
         .args(["gen", "--length", "5", "--raw"])
         .output()
         .unwrap();
@@ -84,7 +85,8 @@ fn auto_format_does_not_emit_json_error_envelope_on_stdout() {
 
 #[test]
 fn explicit_json_format_emits_error_envelope_on_stdout() {
-    let out = xv()
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
         .args(["gen", "--length", "5", "--raw", "--format", "json"])
         .output()
         .unwrap();
@@ -110,7 +112,8 @@ fn plain_format_writes_error_to_stderr() {
 
 #[test]
 fn find_unknown_in_field_exits_2() {
-    let out = xv()
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
         .args(["find", "anything", "--in", "bogus_field"])
         .output()
         .unwrap();

@@ -1102,19 +1102,7 @@ async fn execute_secret_find(
     use crate::config::ContextManager;
     use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
 
-    // Single-vault mode needs a resolved vault; `--all-vaults` lists every
-    // vault and must not require default vault context (see flags doc).
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
-    let single_vault = if all_vaults {
-        None
-    } else {
-        let vn = config.resolve_vault_name(None).await?;
-        let _ = context_manager.update_usage(&vn).await;
-        Some(vn)
-    };
-
-    // Parse --in fields. Default: just Name. Always include Name even if
-    // user supplied other fields (so a name match still counts).
+    // Parse --in fields first so argument errors fire before vault resolution.
     let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
     for raw in &in_fields {
         let parsed = match raw.to_ascii_lowercase().as_str() {
@@ -1133,6 +1121,17 @@ async fn execute_secret_find(
             fields.push(parsed);
         }
     }
+
+    // Single-vault mode needs a resolved vault; `--all-vaults` lists every
+    // vault and must not require default vault context (see flags doc).
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let single_vault = if all_vaults {
+        None
+    } else {
+        let vn = config.resolve_vault_name(None).await?;
+        let _ = context_manager.update_usage(&vn).await;
+        Some(vn)
+    };
 
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::vault::manager::VaultManager;
