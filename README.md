@@ -396,6 +396,8 @@ cargo fmt && cargo clippy       # Format + lint
 
 Build without file operations: `cargo build --no-default-features`
 
+- Tests: see [`docs/testing.md`](docs/testing.md) for the hermetic vs live track split.
+
 ### Release
 
 ```bash

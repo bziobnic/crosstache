@@ -46,3 +46,17 @@ fn help_overlay_renders_when_active() {
         .collect::<String>();
     assert!(dump.contains("keymap") || dump.contains("Help"));
 }
+
+#[test]
+fn tui_help_works_when_feature_enabled() {
+    use std::process::Command;
+    let out = Command::new(env!("CARGO_BIN_EXE_xv"))
+        .args(["tui", "--help"])
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("tui") || stdout.contains("Tui"),
+        "tui --help should mention tui: {stdout}");
+}

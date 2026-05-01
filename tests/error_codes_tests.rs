@@ -1,11 +1,9 @@
 //! Integration tests asserting the `xv` binary exits with the documented
 //! exit code per error family. These tests build and run the binary.
 
-use std::process::Command;
+mod common;
 
-fn xv() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_xv"))
-}
+use common::xv;
 
 #[test]
 fn invalid_argument_exits_2() {
@@ -151,4 +149,98 @@ fn ls_names_only_no_headers_no_ansi() {
     assert!(!stdout.contains('\x1b'), "names-only must be ANSI-free");
     // No "Name" header
     assert!(!stdout.lines().any(|l| l.trim() == "Name"));
+}
+
+// --- Hermetic exit-code matrix ---
+
+#[test]
+fn config_invalid_xv_toml_exits_3() {
+    let (mut cmd, temp) = common::xv_isolated();
+    // Malformed .xv.toml — TOML parser should fail.
+    std::fs::write(temp.path().join(".xv.toml"), "not = valid = toml [[").unwrap();
+    let out = cmd.args(["context", "envs"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", common::stderr_str(&out));
+}
+
+#[test]
+fn missing_vault_exits_3_with_config_invalid() {
+    // No .xv.toml, no env config — list command should fail at vault resolution.
+    let (mut cmd, _temp) = common::xv_isolated();
+    let out = cmd.args(["list", "--format", "json"]).output().expect("spawn");
+    // Exit 3 (config) when no vault can be resolved.
+    assert_eq!(out.status.code(), Some(3));
+    let body = common::parse_json_envelope(&out.stdout);
+    assert_eq!(body["error"]["exit_code"], 3);
+    // Code should be either xv-config-invalid or xv-env-not-defined depending on the path.
+    let code = body["error"]["code"].as_str().unwrap();
+    assert!(
+        code == "xv-config-invalid" || code == "xv-env-not-defined",
+        "unexpected code for missing-vault: {code}"
+    );
+}
+
+#[test]
+fn json_envelope_includes_required_fields() {
+    let (mut cmd, _temp) = common::xv_isolated();
+    let out = cmd.args(["list", "--format", "json"]).output().expect("spawn");
+    let body = common::parse_json_envelope(&out.stdout);
+    let err = &body["error"];
+    assert!(err["code"].is_string());
+    assert!(err["message"].is_string());
+    assert!(err["exit_code"].is_number());
+    // suggestion is optional; if present it's a string.
+    if !err["suggestion"].is_null() {
+        assert!(err["suggestion"].is_string());
+    }
+}
+
+#[test]
+fn yaml_envelope_renders_for_format_yaml() {
+    let (mut cmd, _temp) = common::xv_isolated();
+    let out = cmd.args(["list", "--format", "yaml"]).output().expect("spawn");
+    // Same exit code as JSON case.
+    let stdout = common::stdout_str(&out);
+    // YAML: should contain 'error:' as a top-level key.
+    assert!(
+        stdout.contains("error:") || stdout.contains("error :"),
+        "stdout should be YAML envelope: {stdout}"
+    );
+}
+
+#[test]
+fn plain_format_writes_error_to_stderr_not_stdout() {
+    let (mut cmd, _temp) = common::xv_isolated();
+    let out = cmd.args(["list", "--format", "plain"]).output().expect("spawn");
+    let stdout = common::stdout_str(&out);
+    let stderr = common::stderr_str(&out);
+    // Plain mode: error text on stderr, NOT in stdout's structured envelope position.
+    assert!(!stderr.is_empty(), "plain mode should write error to stderr");
+    // stdout should not be a JSON envelope:
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+    if let Ok(v) = parsed {
+        assert!(
+            v.get("error").is_none(),
+            "plain mode should NOT emit JSON envelope on stdout: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn invalid_min_score_below_zero_exits_2() {
+    let (mut cmd, _temp) = common::xv_isolated();
+    let out = cmd
+        .args(["find", "anything", "--min-score", "-0.1"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "out-of-range min-score must error at parse");
+}
+
+#[test]
+fn invalid_min_score_above_one_exits_2() {
+    let (mut cmd, _temp) = common::xv_isolated();
+    let out = cmd
+        .args(["find", "anything", "--min-score", "1.5"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2));
 }

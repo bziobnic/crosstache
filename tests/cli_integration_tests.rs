@@ -314,3 +314,90 @@ fn test_vault_list_json_format_flag() {
         "vault list --format json --help should work"
     );
 }
+
+// --- Help matrix: every top-level command supports --help ---
+
+#[test]
+fn every_top_level_command_supports_help() {
+    // The full list of top-level Commands as of v0.7.0-rc.2.
+    // If a new command is added, append it here AND ensure --help works.
+    let commands: &[&[&str]] = &[
+        &["set"],
+        &["get"],
+        &["find"],
+        &["list"],
+        &["delete"],
+        &["update"],
+        &["restore"],
+        &["purge"],
+        &["history"],
+        &["rollback"],
+        &["rotate"],
+        &["run"],
+        &["inject"],
+        &["whoami"],
+        &["info"],
+        &["audit"],
+        &["share"],
+        &["share", "grant"],
+        &["share", "revoke"],
+        &["share", "list"],
+        &["env"],
+        &["env", "list"],
+        &["env", "use"],
+        &["env", "create"],
+        &["context"],
+        &["context", "show"],
+        &["context", "use"],
+        &["context", "list"],
+        &["context", "envs"],
+        &["context", "init"],
+        &["vault"],
+        &["vault", "create"],
+        &["vault", "list"],
+        &["vault", "delete"],
+        &["vault", "info"],
+        &["vault", "share"],
+        &["config"],
+        &["config", "show"],
+        &["config", "path"],
+        &["completion"],
+        &["scan"],
+        &["scan", "install"],
+        &["scan", "uninstall"],
+        &["init"],
+        &["upgrade"],
+        &["version"],
+        &["gen"],
+        &["copy"],
+        &["move"],
+        &["diff"],
+        &["parse"],
+    ];
+    for args in commands {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_xv"));
+        cmd.args(*args).arg("--help");
+        let out = cmd.output().expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?} --help should exit 0; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.stdout.is_empty() || !out.stderr.is_empty(),
+            "{args:?} --help produced empty output"
+        );
+    }
+}
+
+#[test]
+#[cfg(not(feature = "tui"))]
+fn tui_subcommand_unknown_when_feature_disabled() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xv"))
+        .args(["tui"])
+        .output()
+        .expect("spawn");
+    // clap returns exit 2 for unknown subcommands.
+    assert_eq!(out.status.code(), Some(2));
+}
