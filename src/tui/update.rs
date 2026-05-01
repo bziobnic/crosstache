@@ -119,7 +119,39 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
                 cmds.push(Command::CopyToClipboard(n));
             }
         }
-        // Tasks 5-10 wire Space y Y R H a c d r e here.
+        KeyCode::Char('R') => {
+            match app.pane {
+                Pane::Vaults => {
+                    app.vaults.clear();
+                    app.vaults_loading = true;
+                    cmds.push(Command::LoadVaults);
+                }
+                Pane::Secrets | Pane::Detail => {
+                    if let Some(v) = app.selected_vault().map(String::from) {
+                        app.secrets_by_vault.remove(&v);
+                        app.values.retain(|(va, _), _| va != &v);
+                        app.secrets_loading = true;
+                        cmds.push(Command::LoadSecrets { vault: v });
+                    }
+                }
+            }
+        }
+        KeyCode::Char(c) if matches!(c, 'c' | 'd' | 'r') => {
+            app.toast = Some(crate::tui::app::Toast {
+                message: format!("'{c}' is reserved for v0.8 write mode"),
+                code: None,
+                ticks_left: 30,
+            });
+        }
+        KeyCode::Char('e') => {
+            if let Some(t) = &app.toast {
+                let detail = match &t.code {
+                    Some(c) => format!("error[{c}]: {}", t.message),
+                    None => t.message.clone(),
+                };
+                app.overlay = Overlay::ErrorDetail(detail);
+            }
+        }
         _ => {}
     }
     cmds
