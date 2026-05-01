@@ -4,6 +4,8 @@
 pub mod app;
 pub mod event;
 pub mod message;
+pub mod overlays;
+pub mod view;
 
 use crate::config::Config;
 use crate::error::Result;
