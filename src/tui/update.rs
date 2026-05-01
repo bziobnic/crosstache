@@ -105,6 +105,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
         KeyCode::Char('k') | KeyCode::Up => cmds.extend(move_cursor(app, -1)),
         KeyCode::Char('h') | KeyCode::Left => app.pane = prev_pane(app.pane),
         KeyCode::Char('l') | KeyCode::Right => app.pane = next_pane(app.pane),
+        KeyCode::Char('y') => {
+            if let Some((v, n)) = app.selected_vault_and_name() {
+                if let Some(val) = app.values.get(&(v.clone(), n.clone())) {
+                    cmds.push(Command::CopyToClipboard(val.as_str().to_string()));
+                    let timeout_ticks = (app.config.clipboard_timeout * 10) as u32;
+                    if timeout_ticks > 0 { app.clipboard_countdown = Some(timeout_ticks); }
+                }
+            }
+        }
+        KeyCode::Char('Y') => {
+            if let Some((_v, n)) = app.selected_vault_and_name() {
+                cmds.push(Command::CopyToClipboard(n));
+            }
+        }
         // Tasks 5-10 wire Space y Y R H a c d r e here.
         _ => {}
     }
