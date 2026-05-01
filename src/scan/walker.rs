@@ -111,6 +111,12 @@ fn is_binary_file(path: &Path) -> bool {
 /// Read `.xvignore` (gitignore syntax) from the given dir if present.
 /// Returns the parsed lines verbatim; the walker hands them to the
 /// `ignore` crate.
+///
+/// Currently unused — the `ignore::WalkBuilder::add_custom_ignore_filename`
+/// path in `walk()` handles `.xvignore` discovery natively, so this manual
+/// reader isn't called. Kept exposed for callers that want raw entries
+/// (e.g., a future `xv scan show-excludes` debug command).
+#[allow(dead_code)]
 pub fn read_xvignore(dir: &Path) -> Vec<String> {
     let path = dir.join(".xvignore");
     let Ok(content) = std::fs::read_to_string(&path) else {
