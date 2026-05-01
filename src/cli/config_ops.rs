@@ -797,6 +797,7 @@ async fn execute_context_init(
     let cfg = ProjectConfig {
         default_env: Some(env_name.clone()),
         envs,
+        scan: None,
     };
 
     let body = toml::to_string_pretty(&cfg)

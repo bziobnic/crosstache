@@ -10,6 +10,7 @@ pub mod file;
 #[cfg(feature = "file-ops")]
 pub mod file_ops;
 pub(crate) mod helpers;
+pub(crate) mod scan_ops;
 pub(crate) mod secret_ops;
 pub(crate) mod system_ops;
 pub(crate) mod upgrade_ops;

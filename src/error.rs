@@ -84,6 +84,9 @@ pub enum CrosstacheError {
     #[error("Upgrade error: {0}")]
     Upgrade(String),
 
+    #[error("Scan detected {count} potential leak(s)")]
+    ScanLeakDetected { count: usize },
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -117,6 +120,7 @@ impl CrosstacheError {
             Self::RegexError(_) => "xv-regex",
             Self::InvalidArgument(_) => "xv-invalid-argument",
             Self::Upgrade(_) => "xv-upgrade",
+            Self::ScanLeakDetected { .. } => "xv-scan-leak-detected",
             Self::Unknown(_) => "xv-unknown",
         }
     }
@@ -144,7 +148,9 @@ impl CrosstacheError {
 
             Self::AzureApiError(_) => 40,
 
-            // Reserve 50–59 for the scanner feature (lands in plan 4).
+            // 50–59 — policy/scan findings
+            Self::ScanLeakDetected { .. } => 50,
+
             Self::SerializationError(_)
             | Self::IoError(_)
             | Self::JsonError(_)
@@ -193,6 +199,10 @@ impl CrosstacheError {
             name: name.into(),
             available,
         }
+    }
+
+    pub fn scan_leak_detected(count: usize) -> Self {
+        Self::ScanLeakDetected { count }
     }
 
     pub fn permission_denied<S: Into<String>>(msg: S) -> Self {
@@ -630,6 +640,7 @@ mod tests {
             ("RegexError", vec!["source"]),
             ("InvalidArgument", vec!["msg"]),
             ("Upgrade", vec!["msg"]),
+            ("ScanLeakDetected", vec!["count"]),
             ("Unknown", vec!["msg"]),
             ("EnvNotDefined", vec!["name", "available"]),
         ];
@@ -676,5 +687,29 @@ mod tests {
         );
         assert!(s.contains("dev"), "message must list 'dev' as available");
         assert!(s.contains("prod"), "message must list 'prod' as available");
+    }
+
+    // --- ScanLeakDetected ---
+
+    #[test]
+    fn test_scan_leak_detected_constructor() {
+        let err = CrosstacheError::scan_leak_detected(3);
+        assert!(matches!(
+            err,
+            CrosstacheError::ScanLeakDetected { count: 3 }
+        ));
+        assert_eq!(err.code(), "xv-scan-leak-detected");
+        assert_eq!(err.exit_code(), 50);
+    }
+
+    #[test]
+    fn test_scan_leak_detected_display_includes_count() {
+        let err = CrosstacheError::scan_leak_detected(7);
+        let s = err.to_string();
+        assert!(s.contains("7"), "message must include finding count");
+        assert!(
+            s.to_lowercase().contains("leak") || s.to_lowercase().contains("finding"),
+            "message must say 'leak' or 'finding'"
+        );
     }
 }

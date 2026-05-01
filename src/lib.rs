@@ -10,6 +10,7 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod scan;
 pub mod secret;
 pub mod utils;
 pub mod vault;

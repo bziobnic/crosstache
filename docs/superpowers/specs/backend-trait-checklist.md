@@ -14,3 +14,11 @@ into the spec for phase 2 ("Backend Pluggability Initiative").
 
 These are read-only and align with the soft-commitment goal of keeping
 the read surface small and well-known before phase 2.
+
+## v0.7.0 — `xv scan`
+
+- `SecretManager::secret_ops().list_secrets(vault, group_filter)` — already on checklist; reused.
+- `SecretManager::secret_ops().get_secret(vault, name, include_value)` — **new entry**. Used to fetch values into the scan engine. Per-call; concurrency bounded by tokio Semaphore (default 10).
+- `VaultManager::vault_ops().list_vaults(subscription_id, resource_group)` — already on checklist; reused for `--all-vaults`.
+
+The `get_secret` method is the only NEW read-surface entry this plan introduces.

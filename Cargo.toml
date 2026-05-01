@@ -1,6 +1,6 @@
 [package]
 name = "crosstache"
-version = "0.6.1-rc.1"
+version = "0.7.0-rc.1"
 edition = "2021"
 authors = ["crosstache Team"]
 description = "A comprehensive command-line tool for managing Azure Key Vaults"
@@ -49,6 +49,9 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 uuid = { version = "1.0", features = ["v4", "serde"] }
 rand = "0.8"
 regex = "1.0"
+aho-corasick = "1.1"
+globset = "0.4"
+ignore = "0.4"
 dirs = "5.0"
 nucleo = "0.5"
 config = "0.14"

@@ -355,6 +355,16 @@ Pipe-into-fzf canonical form:
 xv get "$(xv ls --names-only | fzf)"
 ```
 
+## Pre-commit leak scanner
+
+For pre-commit secret-leak scanning, use `xv scan`. It matches files
+against your actual vault values, not just generic regex patterns.
+See [`docs/scan.md`](docs/scan.md) for full reference.
+
+```bash
+xv scan install   # write pre-commit hook
+```
+
 ## Security
 
 - Secret values are zeroized from memory after use (`zeroize` crate)
