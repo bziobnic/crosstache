@@ -6,6 +6,12 @@ pub fn spawn_event_reader(tx: Sender<Message>) -> tokio::task::JoinHandle<()> {
         loop {
             match crossterm::event::read() {
                 Ok(crossterm::event::Event::Key(key)) => {
+                    // Windows emits Press, Repeat, AND Release for every
+                    // keystroke; Unix only emits Press. Without this guard,
+                    // each arrow press moved the cursor twice on Windows.
+                    if !matches!(key.kind, crossterm::event::KeyEventKind::Press) {
+                        continue;
+                    }
                     if tx.blocking_send(Message::KeyPress(key)).is_err() {
                         break;
                     }
