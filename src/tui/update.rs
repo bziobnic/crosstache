@@ -152,6 +152,23 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
                 app.overlay = Overlay::ErrorDetail(detail);
             }
         }
+        KeyCode::Char('H') => {
+            if let Some((v, n)) = app.selected_vault_and_name() {
+                app.overlay = Overlay::History;
+                if !app.history.contains_key(&(v.clone(), n.clone())) {
+                    cmds.push(Command::LoadHistory { vault: v, name: n });
+                }
+            }
+        }
+        KeyCode::Char('a') => {
+            if let Some((v, n)) = app.selected_vault_and_name() {
+                app.overlay = Overlay::Audit;
+                let key = (v.clone(), Some(n.clone()));
+                if !app.audit.contains_key(&key) {
+                    cmds.push(Command::LoadAudit { vault: v, name: Some(n) });
+                }
+            }
+        }
         _ => {}
     }
     cmds

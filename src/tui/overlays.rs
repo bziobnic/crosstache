@@ -10,7 +10,8 @@ pub fn render_active_overlay(app: &App, frame: &mut Frame) {
         Overlay::None => {}
         Overlay::Help => render_help(frame),
         Overlay::ErrorDetail(msg) => render_error_detail(msg, frame),
-        Overlay::History | Overlay::Audit => {} // Task 10
+        Overlay::History => render_history(app, frame),
+        Overlay::Audit => render_audit(app, frame),
     }
 }
 
@@ -72,4 +73,44 @@ pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
             Constraint::Percentage(percent_x),
             Constraint::Percentage((100 - percent_x) / 2),
         ]).split(popup[1])[1]
+}
+
+fn render_history(app: &App, frame: &mut Frame) {
+    let area = centered_rect(60, 50, frame.area());
+    frame.render_widget(Clear, area);
+    let lines: Vec<Line> = if let Some((v, n)) = app.selected_vault_and_name() {
+        if let Some(versions) = app.history.get(&(v, n)) {
+            if versions.is_empty() {
+                vec![Line::raw("(no versions)")]
+            } else {
+                versions.iter().map(|p| {
+                    Line::raw(format!("{}  enabled={}  {}",
+                        p.version,
+                        p.enabled,
+                        p.updated_on))
+                }).collect()
+            }
+        } else { vec![Line::raw("(loading versions…)")] }
+    } else { vec![Line::raw("(no secret selected)")] };
+    let p = Paragraph::new(lines).block(
+        Block::default().title("History (H) — secret versions").borders(Borders::ALL));
+    frame.render_widget(p, area);
+}
+
+fn render_audit(app: &App, frame: &mut Frame) {
+    let area = centered_rect(60, 50, frame.area());
+    frame.render_widget(Clear, area);
+    let lines: Vec<Line> = if let Some((v, n)) = app.selected_vault_and_name() {
+        let key = (v, Some(n));
+        if let Some(events) = app.audit.get(&key) {
+            if events.is_empty() {
+                vec![Line::raw("(no events)")]
+            } else {
+                events.iter().map(|e| Line::raw(e.as_str())).collect()
+            }
+        } else { vec![Line::raw("(loading events…)")] }
+    } else { vec![Line::raw("(no secret selected)")] };
+    let p = Paragraph::new(lines).block(
+        Block::default().title("Audit (a) — recent events").borders(Borders::ALL));
+    frame.render_widget(p, area);
 }

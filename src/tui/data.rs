@@ -75,10 +75,33 @@ pub fn spawn_load_value(config: Config, vault: String, name: String, tx: Sender<
     })
 }
 
-pub fn spawn_load_history(_config: Config, _vault: String, _name: String, _tx: Sender<Message>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async {})
+pub fn spawn_load_history(config: Config, vault: String, name: String, tx: Sender<Message>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use crate::auth::provider::DefaultAzureCredentialProvider;
+        use crate::secret::manager::SecretManager;
+        let result: Result<_, CrosstacheError> = async {
+            let auth = std::sync::Arc::new(
+                DefaultAzureCredentialProvider::with_credential_priority(
+                    config.azure_credential_priority.clone()
+                ).map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?
+            );
+            let sm = SecretManager::new(auth, config.no_color);
+            sm.secret_ops().get_secret_versions(&vault, &name).await
+        }.await;
+        let msg = match result {
+            Ok(versions) => Message::HistoryLoaded { vault, name, versions },
+            Err(e) => Message::Error(e),
+        };
+        let _ = tx.send(msg).await;
+    })
 }
 
-pub fn spawn_load_audit(_config: Config, _vault: String, _name: Option<String>, _tx: Sender<Message>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async {})
+/// Audit is a placeholder for v0.7.0; real Activity Log access lands in v0.7.1.
+pub fn spawn_load_audit(_config: Config, vault: String, name: Option<String>, tx: Sender<Message>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let _ = tx.send(Message::AuditLoaded {
+            vault, name,
+            events: vec!["Audit log integration is not yet wired up — see docs/tui.md".to_string()],
+        }).await;
+    })
 }
