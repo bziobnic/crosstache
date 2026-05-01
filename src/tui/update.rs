@@ -98,6 +98,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
                 app.secret_filter.clear();
             }
         }
+        KeyCode::Char(' ') => app.value_revealed = !app.value_revealed,
         KeyCode::Tab => app.pane = next_pane(app.pane),
         KeyCode::BackTab => app.pane = prev_pane(app.pane),
         KeyCode::Char('j') | KeyCode::Down => cmds.extend(move_cursor(app, 1)),
@@ -127,7 +128,12 @@ fn move_cursor(app: &mut App, delta: i32) -> Vec<Command> {
         Pane::Secrets => {
             let n = app.filtered_secrets().len();
             move_list(&mut app.secret_state, n, delta);
-            // Task 6 wires value-fetch debounce here.
+            // Schedule debounced value fetch.
+            if let Some((v, n)) = app.selected_vault_and_name() {
+                if !app.values.contains_key(&(v.clone(), n.clone())) {
+                    app.value_debounce = Some((v, n, 2)); // 2 ticks @ 100ms = 200ms
+                }
+            }
         }
         Pane::Detail => {}
     }
