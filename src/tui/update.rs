@@ -1,6 +1,6 @@
 use crate::tui::app::{App, Overlay, Pane};
 use crate::tui::message::Message;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug)]
 pub enum Command {
@@ -79,6 +79,14 @@ pub fn update(app: &mut App, msg: Message) -> Vec<Command> {
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
     let mut cmds = Vec::new();
+    // Ctrl+C is a universal quit shortcut and must take precedence over
+    // any per-character handler (including the reserved-key 'c' toast and
+    // filter-mode character capture).
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        app.quit = true;
+        cmds.push(Command::Quit);
+        return cmds;
+    }
     // Filter mode intercepts most keys.
     if app.secret_filter_active {
         match key.code {
@@ -110,7 +118,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
         return cmds;
     }
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => cmds.push(Command::Quit),
+        KeyCode::Char('q') | KeyCode::Esc => {
+            app.quit = true;
+            cmds.push(Command::Quit);
+        }
         KeyCode::Char('?') => app.overlay = Overlay::Help,
         KeyCode::Char('/') => {
             if app.pane == crate::tui::app::Pane::Secrets {
@@ -156,7 +167,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
                 }
             }
         },
-        KeyCode::Char(c) if matches!(c, 'c' | 'd' | 'r') => {
+        KeyCode::Char(c) if matches!(c, 'c' | 'd' | 'r') && key.modifiers.is_empty() => {
             app.toast = Some(crate::tui::app::Toast {
                 message: format!("'{c}' is reserved for v0.8 write mode"),
                 code: None,
