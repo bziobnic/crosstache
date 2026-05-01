@@ -1,6 +1,10 @@
 //! Read-only Terminal UI for crosstache. Feature-gated on `tui`.
 //! See `docs/tui.md` for the user-facing contract.
 
+pub mod app;
+pub mod event;
+pub mod message;
+
 use crate::config::Config;
 use crate::error::Result;
 
