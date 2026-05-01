@@ -43,3 +43,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose
+
+      - name: Test (with TUI feature)
+        run: cargo test --features tui --verbose
