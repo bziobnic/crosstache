@@ -10,10 +10,19 @@ mod gen_integration_tests {
 
     /// Helper: run the compiled `xv` binary with the given args.
     /// Returns (exit_success, stdout, stderr).
+    ///
+    /// Injects fake Azure creds so config validation passes without a
+    /// real subscription configured (CI runs with a clean env).
     fn run_xv(args: &[&str]) -> (bool, String, String) {
         let binary = env!("CARGO_BIN_EXE_xv");
         let output = Command::new(binary)
             .args(args)
+            .env(
+                "AZURE_SUBSCRIPTION_ID",
+                "00000000-0000-0000-0000-000000000000",
+            )
+            .env("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000")
+            .env("XV_NO_PARENT_CONFIG", "1")
             .output()
             .expect("failed to execute xv binary");
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
