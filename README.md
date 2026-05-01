@@ -365,6 +365,17 @@ See [`docs/scan.md`](docs/scan.md) for full reference.
 xv scan install   # write pre-commit hook
 ```
 
+## Terminal UI
+
+For an interactive read-only browser, build with `--features tui`:
+
+```bash
+cargo install crosstache --features tui
+xv tui
+```
+
+See [`docs/tui.md`](docs/tui.md) for the keymap.
+
 ## Security
 
 - Secret values are zeroized from memory after use (`zeroize` crate)
