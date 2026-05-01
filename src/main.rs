@@ -16,10 +16,10 @@ mod config;
 mod error;
 mod scan;
 mod secret;
-mod utils;
-mod vault;
 #[cfg(feature = "tui")]
 mod tui;
+mod utils;
+mod vault;
 
 use crate::cli::Cli;
 use crate::error::{CrosstacheError, Result};
@@ -71,8 +71,10 @@ async fn run(cli: Cli) -> Result<()> {
     let mut config = match &cli.command {
         crate::cli::Commands::Config { .. }
         | crate::cli::Commands::Init
-        | crate::cli::Commands::Upgrade { .. } => {
-            // For config and init commands, load without validation
+        | crate::cli::Commands::Upgrade { .. }
+        | crate::cli::Commands::Version
+        | crate::cli::Commands::Completion { .. } => {
+            // These commands don't talk to Azure — skip credential validation.
             load_config_without_validation().await?
         }
         _ => {

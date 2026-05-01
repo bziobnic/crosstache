@@ -1,9 +1,9 @@
 use crate::tui::app::{App, Overlay};
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
 
 pub fn render_active_overlay(app: &App, frame: &mut Frame) {
     match &app.overlay {
@@ -19,8 +19,10 @@ fn render_help(frame: &mut Frame) {
     let area = centered_rect(60, 70, frame.area());
     frame.render_widget(Clear, area);
     let lines: Vec<Line> = vec![
-        Line::from(Span::styled("xv tui — keymap (read-only v0.7)",
-            Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "xv tui — keymap (read-only v0.7)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::raw(""),
         Line::raw("Navigation:"),
         Line::raw("  h j k l / arrows   move within / between panes"),
@@ -38,15 +40,18 @@ fn render_help(frame: &mut Frame) {
         Line::raw("  ?                  this help"),
         Line::raw("  q / Esc            quit (or close overlay)"),
         Line::raw(""),
-        Line::from(Span::styled("Reserved for v0.8 (write mode):",
-            Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(
+            "Reserved for v0.8 (write mode):",
+            Style::default().fg(Color::Yellow),
+        )),
         Line::raw("  c   create new secret"),
         Line::raw("  d   delete current secret"),
         Line::raw("  r   rename / rotate"),
         Line::raw(""),
         Line::raw("Press q or Esc to close."),
     ];
-    let p = Paragraph::new(lines).alignment(Alignment::Left)
+    let p = Paragraph::new(lines)
+        .alignment(Alignment::Left)
         .block(Block::default().title("Help (?)").borders(Borders::ALL));
     frame.render_widget(p, area);
 }
@@ -61,18 +66,22 @@ fn render_error_detail(msg: &str, frame: &mut Frame) {
 }
 
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let popup = Layout::default().direction(Direction::Vertical)
+    let popup = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage((100 - percent_y) / 2),
             Constraint::Percentage(percent_y),
             Constraint::Percentage((100 - percent_y) / 2),
-        ]).split(area);
-    Layout::default().direction(Direction::Horizontal)
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage((100 - percent_x) / 2),
             Constraint::Percentage(percent_x),
             Constraint::Percentage((100 - percent_x) / 2),
-        ]).split(popup[1])[1]
+        ])
+        .split(popup[1])[1]
 }
 
 fn render_history(app: &App, frame: &mut Frame) {
@@ -83,17 +92,27 @@ fn render_history(app: &App, frame: &mut Frame) {
             if versions.is_empty() {
                 vec![Line::raw("(no versions)")]
             } else {
-                versions.iter().map(|p| {
-                    Line::raw(format!("{}  enabled={}  {}",
-                        p.version,
-                        p.enabled,
-                        p.updated_on))
-                }).collect()
+                versions
+                    .iter()
+                    .map(|p| {
+                        Line::raw(format!(
+                            "{}  enabled={}  {}",
+                            p.version, p.enabled, p.updated_on
+                        ))
+                    })
+                    .collect()
             }
-        } else { vec![Line::raw("(loading versions…)")] }
-    } else { vec![Line::raw("(no secret selected)")] };
+        } else {
+            vec![Line::raw("(loading versions…)")]
+        }
+    } else {
+        vec![Line::raw("(no secret selected)")]
+    };
     let p = Paragraph::new(lines).block(
-        Block::default().title("History (H) — secret versions").borders(Borders::ALL));
+        Block::default()
+            .title("History (H) — secret versions")
+            .borders(Borders::ALL),
+    );
     frame.render_widget(p, area);
 }
 
@@ -108,9 +127,16 @@ fn render_audit(app: &App, frame: &mut Frame) {
             } else {
                 events.iter().map(|e| Line::raw(e.as_str())).collect()
             }
-        } else { vec![Line::raw("(loading events…)")] }
-    } else { vec![Line::raw("(no secret selected)")] };
+        } else {
+            vec![Line::raw("(loading events…)")]
+        }
+    } else {
+        vec![Line::raw("(no secret selected)")]
+    };
     let p = Paragraph::new(lines).block(
-        Block::default().title("Audit (a) — recent events").borders(Borders::ALL));
+        Block::default()
+            .title("Audit (a) — recent events")
+            .borders(Borders::ALL),
+    );
     frame.render_widget(p, area);
 }

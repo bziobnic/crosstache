@@ -127,6 +127,7 @@ fn secret_count_label(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn display_cached_secret_list(
     secrets: Vec<crate::secret::manager::SecretSummary>,
     group: Option<String>,
@@ -226,6 +227,7 @@ pub(crate) fn display_cached_secret_list(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_list_direct(
     group: Option<String>,
     all: bool,
@@ -1051,6 +1053,7 @@ async fn execute_secret_get(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_find_direct(
     pattern: Option<String>,
     in_fields: Vec<String>,
@@ -1084,6 +1087,7 @@ pub(crate) async fn execute_secret_find_direct(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_find(
     secret_manager: &crate::secret::manager::SecretManager,
     pattern: Option<&str>,
@@ -1098,19 +1102,7 @@ async fn execute_secret_find(
     use crate::config::ContextManager;
     use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
 
-    // Single-vault mode needs a resolved vault; `--all-vaults` lists every
-    // vault and must not require default vault context (see flags doc).
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
-    let single_vault = if all_vaults {
-        None
-    } else {
-        let vn = config.resolve_vault_name(None).await?;
-        let _ = context_manager.update_usage(&vn).await;
-        Some(vn)
-    };
-
-    // Parse --in fields. Default: just Name. Always include Name even if
-    // user supplied other fields (so a name match still counts).
+    // Parse --in fields first so argument errors fire before vault resolution.
     let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
     for raw in &in_fields {
         let parsed = match raw.to_ascii_lowercase().as_str() {
@@ -1129,6 +1121,17 @@ async fn execute_secret_find(
             fields.push(parsed);
         }
     }
+
+    // Single-vault mode needs a resolved vault; `--all-vaults` lists every
+    // vault and must not require default vault context (see flags doc).
+    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let single_vault = if all_vaults {
+        None
+    } else {
+        let vn = config.resolve_vault_name(None).await?;
+        let _ = context_manager.update_usage(&vn).await;
+        Some(vn)
+    };
 
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::vault::manager::VaultManager;
@@ -1271,10 +1274,7 @@ async fn execute_secret_find(
     }
     use crate::utils::fuzzy::score_bar;
     let top = matches.iter().map(|m| m.score).max().unwrap_or(1).max(1) as f32;
-    println!(
-        "{:<40}  {:<10}  {:<24}  {}",
-        "NAME", "SCORE", "FOLDER", "GROUPS"
-    );
+    println!("{:<40}  {:<10}  {:<24}  GROUPS", "NAME", "SCORE", "FOLDER");
     for m in &matches {
         let folder = m.item.folder.as_deref().unwrap_or("");
         let groups = m.item.groups.as_deref().unwrap_or("");
@@ -1284,6 +1284,7 @@ async fn execute_secret_find(
     Ok(())
 }
 
+#[allow(dead_code)] // called from src/main.rs::run_complete_secrets (binary-only path)
 pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
 
@@ -2106,6 +2107,7 @@ async fn execute_secret_inject(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_list(
     secret_manager: &crate::secret::manager::SecretManager,
     group: Option<String>,
@@ -3254,7 +3256,6 @@ mod tests {
                 .create(true)
                 .truncate(true)
                 .write(true)
-                .truncate(true)
                 .open(&stdout_path)
                 .unwrap();
             let mut reader = BufReader::new(stdout_handle);
@@ -3272,7 +3273,6 @@ mod tests {
                 .create(true)
                 .truncate(true)
                 .write(true)
-                .truncate(true)
                 .open(&stderr_path)
                 .unwrap();
             let mut reader = BufReader::new(stderr_handle);

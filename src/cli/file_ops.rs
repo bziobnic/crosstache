@@ -609,6 +609,7 @@ fn display_file_list_items(
     Ok(output.trim_end_matches('\n').to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_file_list(
     blob_manager: &BlobManager,
     prefix: Option<String>,

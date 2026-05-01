@@ -10,6 +10,7 @@ use crate::scan::patterns::builtin_patterns;
 use crate::scan::walker::{walk, WalkConfig};
 use std::path::PathBuf;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_scan_command(
     paths: Vec<PathBuf>,
     staged: bool,

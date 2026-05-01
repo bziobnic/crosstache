@@ -40,10 +40,18 @@ pub fn update(app: &mut App, msg: Message) -> Vec<Command> {
             app.values.insert((vault, name), value);
             app.value_loading = false;
         }
-        Message::HistoryLoaded { vault, name, versions } => {
+        Message::HistoryLoaded {
+            vault,
+            name,
+            versions,
+        } => {
             app.history.insert((vault, name), versions);
         }
-        Message::AuditLoaded { vault, name, events } => {
+        Message::AuditLoaded {
+            vault,
+            name,
+            events,
+        } => {
             app.audit.insert((vault, name), events);
         }
         Message::Tick => {
@@ -74,10 +82,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
     // Filter mode intercepts most keys.
     if app.secret_filter_active {
         match key.code {
-            KeyCode::Esc => { app.secret_filter_active = false; app.secret_filter.clear(); app.secret_state.select(Some(0)); }
-            KeyCode::Enter => { app.secret_filter_active = false; }
-            KeyCode::Backspace => { app.secret_filter.pop(); app.secret_state.select(Some(0)); }
-            KeyCode::Char(c) => { app.secret_filter.push(c); app.secret_state.select(Some(0)); }
+            KeyCode::Esc => {
+                app.secret_filter_active = false;
+                app.secret_filter.clear();
+                app.secret_state.select(Some(0));
+            }
+            KeyCode::Enter => {
+                app.secret_filter_active = false;
+            }
+            KeyCode::Backspace => {
+                app.secret_filter.pop();
+                app.secret_state.select(Some(0));
+            }
+            KeyCode::Char(c) => {
+                app.secret_filter.push(c);
+                app.secret_state.select(Some(0));
+            }
             _ => {}
         }
         return cmds;
@@ -110,7 +130,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
                 if let Some(val) = app.values.get(&(v.clone(), n.clone())) {
                     cmds.push(Command::CopyToClipboard(val.as_str().to_string()));
                     let timeout_ticks = (app.config.clipboard_timeout * 10) as u32;
-                    if timeout_ticks > 0 { app.clipboard_countdown = Some(timeout_ticks); }
+                    if timeout_ticks > 0 {
+                        app.clipboard_countdown = Some(timeout_ticks);
+                    }
                 }
             }
         }
@@ -119,23 +141,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
                 cmds.push(Command::CopyToClipboard(n));
             }
         }
-        KeyCode::Char('R') => {
-            match app.pane {
-                Pane::Vaults => {
-                    app.vaults.clear();
-                    app.vaults_loading = true;
-                    cmds.push(Command::LoadVaults);
-                }
-                Pane::Secrets | Pane::Detail => {
-                    if let Some(v) = app.selected_vault().map(String::from) {
-                        app.secrets_by_vault.remove(&v);
-                        app.values.retain(|(va, _), _| va != &v);
-                        app.secrets_loading = true;
-                        cmds.push(Command::LoadSecrets { vault: v });
-                    }
+        KeyCode::Char('R') => match app.pane {
+            Pane::Vaults => {
+                app.vaults.clear();
+                app.vaults_loading = true;
+                cmds.push(Command::LoadVaults);
+            }
+            Pane::Secrets | Pane::Detail => {
+                if let Some(v) = app.selected_vault().map(String::from) {
+                    app.secrets_by_vault.remove(&v);
+                    app.values.retain(|(va, _), _| va != &v);
+                    app.secrets_loading = true;
+                    cmds.push(Command::LoadSecrets { vault: v });
                 }
             }
-        }
+        },
         KeyCode::Char(c) if matches!(c, 'c' | 'd' | 'r') => {
             app.toast = Some(crate::tui::app::Toast {
                 message: format!("'{c}' is reserved for v0.8 write mode"),
@@ -165,7 +185,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
                 app.overlay = Overlay::Audit;
                 let key = (v.clone(), Some(n.clone()));
                 if !app.audit.contains_key(&key) {
-                    cmds.push(Command::LoadAudit { vault: v, name: Some(n) });
+                    cmds.push(Command::LoadAudit {
+                        vault: v,
+                        name: Some(n),
+                    });
                 }
             }
         }
@@ -204,14 +227,28 @@ fn move_cursor(app: &mut App, delta: i32) -> Vec<Command> {
 }
 
 fn move_list(state: &mut ratatui::widgets::ListState, len: usize, delta: i32) {
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
     let cur = state.selected().unwrap_or(0) as i32;
     let new = (cur + delta).rem_euclid(len as i32) as usize;
     state.select(Some(new));
 }
 
-fn next_pane(p: Pane) -> Pane { match p { Pane::Vaults => Pane::Secrets, Pane::Secrets => Pane::Detail, Pane::Detail => Pane::Vaults } }
-fn prev_pane(p: Pane) -> Pane { match p { Pane::Vaults => Pane::Detail, Pane::Secrets => Pane::Vaults, Pane::Detail => Pane::Secrets } }
+fn next_pane(p: Pane) -> Pane {
+    match p {
+        Pane::Vaults => Pane::Secrets,
+        Pane::Secrets => Pane::Detail,
+        Pane::Detail => Pane::Vaults,
+    }
+}
+fn prev_pane(p: Pane) -> Pane {
+    match p {
+        Pane::Vaults => Pane::Detail,
+        Pane::Secrets => Pane::Vaults,
+        Pane::Detail => Pane::Secrets,
+    }
+}
 
 fn tick_clipboard(app: &mut App) -> Vec<Command> {
     let mut cmds = Vec::new();
@@ -228,7 +265,11 @@ fn tick_clipboard(app: &mut App) -> Vec<Command> {
 
 fn tick_toast(app: &mut App) {
     if let Some(t) = app.toast.as_mut() {
-        if t.ticks_left == 0 { app.toast = None; } else { t.ticks_left -= 1; }
+        if t.ticks_left == 0 {
+            app.toast = None;
+        } else {
+            t.ticks_left -= 1;
+        }
     }
 }
 

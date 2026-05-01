@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::xv;
+use common::{xv, xv_isolated};
 
 #[test]
 fn invalid_argument_exits_2() {
@@ -65,7 +65,8 @@ fn json_format_emits_error_envelope() {
 
 #[test]
 fn auto_format_does_not_emit_json_error_envelope_on_stdout() {
-    let out = xv()
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
         .args(["gen", "--length", "5", "--raw"])
         .output()
         .unwrap();
@@ -84,7 +85,8 @@ fn auto_format_does_not_emit_json_error_envelope_on_stdout() {
 
 #[test]
 fn explicit_json_format_emits_error_envelope_on_stdout() {
-    let out = xv()
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
         .args(["gen", "--length", "5", "--raw", "--format", "json"])
         .output()
         .unwrap();
@@ -110,7 +112,8 @@ fn plain_format_writes_error_to_stderr() {
 
 #[test]
 fn find_unknown_in_field_exits_2() {
-    let out = xv()
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
         .args(["find", "anything", "--in", "bogus_field"])
         .output()
         .unwrap();
@@ -159,14 +162,22 @@ fn config_invalid_xv_toml_exits_3() {
     // Malformed .xv.toml — TOML parser should fail.
     std::fs::write(temp.path().join(".xv.toml"), "not = valid = toml [[").unwrap();
     let out = cmd.args(["context", "envs"]).output().expect("spawn");
-    assert_eq!(out.status.code(), Some(3), "stderr: {}", common::stderr_str(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
 }
 
 #[test]
 fn missing_vault_exits_3_with_config_invalid() {
     // No .xv.toml, no env config — list command should fail at vault resolution.
     let (mut cmd, _temp) = common::xv_isolated();
-    let out = cmd.args(["list", "--format", "json"]).output().expect("spawn");
+    let out = cmd
+        .args(["list", "--format", "json"])
+        .output()
+        .expect("spawn");
     // Exit 3 (config) when no vault can be resolved.
     assert_eq!(out.status.code(), Some(3));
     let body = common::parse_json_envelope(&out.stdout);
@@ -182,7 +193,10 @@ fn missing_vault_exits_3_with_config_invalid() {
 #[test]
 fn json_envelope_includes_required_fields() {
     let (mut cmd, _temp) = common::xv_isolated();
-    let out = cmd.args(["list", "--format", "json"]).output().expect("spawn");
+    let out = cmd
+        .args(["list", "--format", "json"])
+        .output()
+        .expect("spawn");
     let body = common::parse_json_envelope(&out.stdout);
     let err = &body["error"];
     assert!(err["code"].is_string());
@@ -197,7 +211,10 @@ fn json_envelope_includes_required_fields() {
 #[test]
 fn yaml_envelope_renders_for_format_yaml() {
     let (mut cmd, _temp) = common::xv_isolated();
-    let out = cmd.args(["list", "--format", "yaml"]).output().expect("spawn");
+    let out = cmd
+        .args(["list", "--format", "yaml"])
+        .output()
+        .expect("spawn");
     // Same exit code as JSON case.
     let stdout = common::stdout_str(&out);
     // YAML: should contain 'error:' as a top-level key.
@@ -210,11 +227,17 @@ fn yaml_envelope_renders_for_format_yaml() {
 #[test]
 fn plain_format_writes_error_to_stderr_not_stdout() {
     let (mut cmd, _temp) = common::xv_isolated();
-    let out = cmd.args(["list", "--format", "plain"]).output().expect("spawn");
+    let out = cmd
+        .args(["list", "--format", "plain"])
+        .output()
+        .expect("spawn");
     let stdout = common::stdout_str(&out);
     let stderr = common::stderr_str(&out);
     // Plain mode: error text on stderr, NOT in stdout's structured envelope position.
-    assert!(!stderr.is_empty(), "plain mode should write error to stderr");
+    assert!(
+        !stderr.is_empty(),
+        "plain mode should write error to stderr"
+    );
     // stdout should not be a JSON envelope:
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
     if let Ok(v) = parsed {
@@ -232,7 +255,11 @@ fn invalid_min_score_below_zero_exits_2() {
         .args(["find", "anything", "--min-score", "-0.1"])
         .output()
         .expect("spawn");
-    assert_eq!(out.status.code(), Some(2), "out-of-range min-score must error at parse");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "out-of-range min-score must error at parse"
+    );
 }
 
 #[test]

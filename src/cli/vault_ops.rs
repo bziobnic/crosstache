@@ -213,6 +213,7 @@ async fn execute_vault_create(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_vault_list(
     vault_manager: &VaultManager,
     resource_group: Option<String>,
