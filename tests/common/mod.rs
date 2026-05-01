@@ -25,7 +25,14 @@ pub fn isolate<'a>(cmd: &'a mut Command, tempdir: &Path) -> &'a mut Command {
         .env("HOME", tempdir)
         .env("XDG_CONFIG_HOME", tempdir.join(".config"))
         .env("XV_NO_PARENT_CONFIG", "1")
-        // Don't inherit AZURE_* — prevents accidentally hitting a real subscription.
+        // Fake Azure creds: config validation requires these to be
+        // non-empty before any command runs. The fake UUIDs satisfy
+        // validation but never reach Azure — tested code paths exit
+        // on filesystem ops or local errors, not Azure round-trips.
+        .env("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000")
+        .env("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000")
+        // (We don't inherit other AZURE_* vars — env_clear() handles that —
+        // so accidentally hitting a real subscription is impossible.)
         .current_dir(tempdir)
 }
 
