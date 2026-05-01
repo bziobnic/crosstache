@@ -18,6 +18,8 @@ mod scan;
 mod secret;
 mod utils;
 mod vault;
+#[cfg(feature = "tui")]
+mod tui;
 
 use crate::cli::Cli;
 use crate::error::{CrosstacheError, Result};
