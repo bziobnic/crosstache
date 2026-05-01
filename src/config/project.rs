@@ -204,6 +204,11 @@ pub(crate) fn reset_cross_boundary_notice_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Guards tests that read or write the global `XV_ENV` env var so they
+    /// don't race each other under cargo's default parallel test runner.
+    static XV_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn project_config_default_is_empty() {
@@ -403,6 +408,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_uses_default_env_when_no_override() {
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -425,6 +431,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_cli_flag_overrides_default_env() {
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -439,6 +446,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_xv_env_overrides_cli_flag() {
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -455,6 +463,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_unknown_name_returns_env_not_defined() {
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = build_cfg(
             Some("dev"),
             &[
@@ -475,6 +484,7 @@ resource_group = "rg"
 
     #[test]
     fn resolve_env_no_default_no_override_errors_helpfully() {
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = build_cfg(None, &[("dev", EnvProfile::default())]);
         std::env::remove_var("XV_ENV");
         let err = resolve_env(&cfg, None).expect_err("must err");
