@@ -92,13 +92,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => cmds.push(Command::Quit),
         KeyCode::Char('?') => app.overlay = Overlay::Help,
+        KeyCode::Char('/') => {
+            if app.pane == crate::tui::app::Pane::Secrets {
+                app.secret_filter_active = true;
+                app.secret_filter.clear();
+            }
+        }
         KeyCode::Tab => app.pane = next_pane(app.pane),
         KeyCode::BackTab => app.pane = prev_pane(app.pane),
         KeyCode::Char('j') | KeyCode::Down => cmds.extend(move_cursor(app, 1)),
         KeyCode::Char('k') | KeyCode::Up => cmds.extend(move_cursor(app, -1)),
         KeyCode::Char('h') | KeyCode::Left => app.pane = prev_pane(app.pane),
         KeyCode::Char('l') | KeyCode::Right => app.pane = next_pane(app.pane),
-        // Tasks 5-10 wire / Space y Y R H a c d r e here.
+        // Tasks 5-10 wire Space y Y R H a c d r e here.
         _ => {}
     }
     cmds
