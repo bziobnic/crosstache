@@ -1,409 +1,1107 @@
 # crosstache
 
-A cross-platform secrets manager for the command line. Currently backed by Azure Key Vault, with plans to support additional backends (AWS Secrets Manager, HashiCorp Vault, etc.).
-
-The binary is called `xv`.
-
-## Why crosstache?
-
-Most cloud secret managers have clunky CLIs or force you into their ecosystem. crosstache gives you a clean, consistent interface for everyday secret operations — with features like group organization, secret injection, template rendering, and automatic name sanitization that the native tools lack.
-
-## Quick Start
+A cross-platform secrets manager for the command line, currently backed by Azure Key Vault. The binary is `xv`.
 
 ```bash
-# Install (macOS/Linux)
+xv set DB_PASSWORD                     # store a secret (prompts for value)
+xv get DB_PASSWORD                     # copy to clipboard (auto-clears in 30s)
+xv get DB_PASSWORD --raw                # print to stdout (for scripts)
+xv run -- npm start                    # run a process with all secrets injected as env vars
+xv find db --names-only | fzf          # interactive picker, pipe-friendly
+xv scan install                        # block secret leaks before commit
+```
+
+**Phase 1 (v0.7) highlights:** structured exit codes for scripting · `.xv.toml` env profiles with walk-up resolution · ranked fuzzy `xv find` · pre-commit leak scanner that matches files against your *actual* vault values · optional read-only TUI behind a feature flag.
+
+---
+
+## Table of contents
+
+- [Quick start](#quick-start)
+- [Installation](#installation)
+- [Common workflows](#common-workflows) — end-to-end recipes
+- [Secrets — CRUD](#secrets--crud)
+- [Reading secrets — clipboard, stdout, JSON](#reading-secrets--clipboard-stdout-json)
+- [Search & filter](#search--filter) — `xv find`, `xv ls --names-only`, fzf integration
+- [Secret injection — `xv run`](#secret-injection--xv-run)
+- [Template rendering — `xv inject`](#template-rendering--xv-inject)
+- [Project env profiles — `.xv.toml`](#project-env-profiles--xvtoml)
+- [Vault management](#vault-management)
+- [Cross-vault operations — diff, copy, move](#cross-vault-operations--diff-copy-move)
+- [Files (blob storage)](#files-blob-storage)
+- [Pre-commit leak scanner — `xv scan`](#pre-commit-leak-scanner--xv-scan)
+- [Terminal UI — `xv tui`](#terminal-ui--xv-tui)
+- [Scripting & CI](#scripting--ci) — exit codes, JSON envelope, examples
+- [Configuration](#configuration)
+- [Authentication](#authentication)
+- [Troubleshooting](#troubleshooting)
+- [Security model](#security-model)
+- [Development](#development)
+
+---
+
+## Quick start
+
+```bash
+# 1. Install
 curl -sSL https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/install.sh | bash
 
-# Set up your first vault
+# 2. Set up your first vault (interactive)
 xv init
 
-# Store a secret
-xv set "db-password"
+# 3. Store and retrieve a secret
+xv set DB_PASSWORD                       # prompts for value (won't echo)
+xv get DB_PASSWORD                       # copies to clipboard, auto-clears in 30s
+xv get DB_PASSWORD --raw                 # prints to stdout (scripts)
 
-# Retrieve it
-xv get "db-password"
+# 4. Inject secrets into a process
+xv run -- ./my-app                       # all secrets in active vault → env vars
 
-# Run a process with secrets injected as env vars
-xv run -- ./my-app
+# 5. Browse interactively (optional TUI)
+cargo install crosstache --features tui
+xv tui
 ```
+
+That's the 5-minute path. The rest of this doc shows what's possible once you've got the basics.
+
+---
 
 ## Installation
 
-### Quick Install
+### Quick install
 
-**macOS/Linux:**
+**macOS / Linux:**
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell):**
+
 ```powershell
 iwr -useb https://raw.githubusercontent.com/bziobnic/crosstache/main/scripts/install.ps1 | iex
 ```
 
-### Pre-built Binaries
+### Pre-built binaries
 
-Download from the [releases page](https://github.com/bziobnic/crosstache/releases):
+[Releases page](https://github.com/bziobnic/crosstache/releases) — choose the right archive:
 
-| Platform | Binary |
-|----------|--------|
+| Platform | File |
+|----------|------|
 | Windows x64 | `xv-windows-x64.zip` |
 | macOS Intel | `xv-macos-intel.tar.gz` |
 | macOS Apple Silicon | `xv-macos-apple-silicon.tar.gz` |
 | Linux x64 | `xv-linux-x64.tar.gz` |
 
-### From Source
+### Build from source
 
 ```bash
 git clone https://github.com/bziobnic/crosstache.git
 cd crosstache
 cargo install --path .
+# With the read-only TUI:
+cargo install --path . --features tui
 ```
 
-### macOS Security Note
+### macOS Gatekeeper note
 
-If macOS blocks the binary ("developer cannot be verified"), run:
+If macOS blocks the binary ("developer cannot be verified"):
+
 ```bash
 xattr -d com.apple.quarantine ~/.local/bin/xv
 ```
 
-## Core Concepts
+---
 
-### Secrets
+## Common workflows
+
+### Setting up a new project
 
 ```bash
-xv set "api-key"                          # Create (prompts for value)
-xv set "api-key" --stdin < key.txt        # Create from stdin
-xv set K1=val1 K2=val2 K3=@file.pem       # Bulk create
-xv get "api-key"                          # Copy to clipboard (auto-clears)
-xv get "api-key" --raw                    # Print to stdout
-xv get "api-key" --version v1             # Get a specific version
-xv find                                   # Browse all secrets interactively
-xv find "api"                             # Fuzzy search by name pattern
-xv list                                   # List all secrets (alias: ls)
-xv list --group production                # Filter by group
-xv list --expiring 30d                    # Show secrets expiring soon
-xv list --page-size 50 --page 2           # Paginate list output
-xv update "api-key" --group prod --note "Frontend key"
-xv delete "api-key"                       # Soft-delete (alias: rm)
-xv delete --group legacy --force          # Bulk delete by group
-xv restore "api-key"                      # Restore soft-deleted
-xv purge "api-key" --force                # Permanently delete
+# 1. Create the vault and grant yourself access
+xv vault create myproj-dev-kv --resource-group myproj-rg --location eastus
+
+# 2. Drop a project config so collaborators don't need --vault on every command
+cd ~/code/myproj
+xv context init --non-interactive --vault myproj-dev-kv --resource-group myproj-rg
+
+# 3. Bulk-import existing .env file
+xv env push .env
+
+# 4. Verify
+xv list
 ```
 
-### Secret Injection
-
-Run processes with secrets available as environment variables:
+### Onboarding a new developer
 
 ```bash
-# Inject all secrets from current vault
+# Clone the repo (which now contains .xv.toml)
+git clone https://github.com/myorg/myproj.git
+cd myproj
+
+# Authenticate
+az login
+
+# Run — vault and env auto-resolve from the .xv.toml in the repo
+xv list                                  # works without --vault
 xv run -- npm start
-
-# Inject only a specific group
-xv run --group production -- ./deploy.sh
-
-# Secret values are masked in stdout/stderr by default
-xv run --no-masking -- ./debug.sh
 ```
 
-### Template Injection
-
-Render config files with secret references resolved:
+### Secret rotation with zero downtime
 
 ```bash
-# Template uses {{ secret:name }} syntax
-xv inject --template app.config.tmpl --out app.config
+# Generate a new value (32 chars alphanumeric by default; configurable)
+xv rotate DB_PASSWORD --length 64
 
-# Also supports cross-vault references: xv://vault-name/secret-name
-cat template.yml | xv inject > resolved.yml
+# Verify history
+xv history DB_PASSWORD
+
+# If something goes wrong, roll back
+xv rollback DB_PASSWORD --version 2 --force
 ```
 
-### Organization
-
-**Folders** — hierarchical organization:
-```bash
-xv set "host" --folder "myapp/database"
-xv set "port" --folder "myapp/database"
-```
-
-**Groups** — tag-based, assigned via update:
-```bash
-xv update "db-host" --group "production" --group "database"
-xv list --group production
-```
-
-See [docs/GROUPS.md](docs/GROUPS.md) for details.
-
-### Secret History & Rotation
+### Branching by environment
 
 ```bash
-xv history "api-key"                      # Version history
-xv rollback "api-key" --version 2         # Restore previous version (--version required)
-xv rollback "api-key" --version 2 --force # Skip confirmation
-xv rotate "api-key"                       # Generate new random value (32 chars)
-xv rotate "api-key" --length 64 --charset alphanumeric
-xv rotate "api-key" --charset hex         # Also: base64, numeric, uppercase, lowercase
-xv rotate "api-key" --generator ./gen.sh  # Custom generator script
-xv rotate "api-key" --show-value          # Display the generated value
+# .xv.toml in repo:
+#
+#   default_env = "dev"
+#
+#   [env.dev]
+#   vault = "myproj-dev-kv"
+#   resource_group = "myproj-rg"
+#
+#   [env.prod]
+#   vault = "myproj-prod-kv"
+#   resource_group = "myproj-prod-rg"
+
+xv list                                  # uses dev (default)
+xv --env prod list                       # explicit override
+XV_ENV=prod xv list                      # via env var (highest priority)
+xv --env staging list                    # error: xv-env-not-defined; lists available envs; exit 3
 ```
 
-### Vault Management
+### Pre-commit leak prevention
+
+```bash
+xv scan install                          # writes .git/hooks/pre-commit
+git commit -m "..."                      # hook scans staged files; exit 50 blocks commit on findings
+```
+
+---
+
+## Secrets — CRUD
+
+### Create
+
+```bash
+xv set API_KEY                           # interactive — prompts (no echo)
+xv set API_KEY --stdin < key.txt         # from stdin (e.g. piped from openssl)
+xv set API_KEY --value "literal-value"   # inline (avoid; appears in shell history)
+xv set DB_HOST=db.prod DB_PORT=5432 DB_PASSWORD=@/etc/secret/db-pw  # bulk + file refs
+xv set CONFIG --folder myapp/database    # organize hierarchically
+xv set DB_USER --note "primary db reader" --tag owner=team-data --tag env=prod
+```
+
+The `@filepath` syntax loads from a file at create time — useful for keys, certs, JWT signing material:
+
+```bash
+xv set TLS_CERT=@/etc/ssl/cert.pem JWT_PRIVATE_KEY=@./jwt.key
+```
+
+### Update
+
+```bash
+xv update API_KEY --note "rotated 2026-04-30 by ops"
+xv update API_KEY --group production --group api-tier   # repeatable
+xv update API_KEY --folder myapp/edge                    # move to another folder
+xv update API_KEY --tag rotated-by=alice                 # custom tag
+```
+
+### Delete and recover
+
+```bash
+xv delete API_KEY                        # soft-delete (alias: rm)
+xv list                                  # gone from default list
+xv list --all                            # see soft-deleted ones too
+xv restore API_KEY                       # bring it back
+
+xv delete API_KEY --force                # skip confirmation
+xv delete --group legacy --force         # bulk delete every secret in 'legacy' group
+xv purge API_KEY --force                 # permanent delete (irreversible)
+```
+
+### History and rollback
+
+```bash
+xv history API_KEY                       # all versions, newest first
+xv history API_KEY --format json         # for scripts
+
+xv get API_KEY --version v3              # read a specific historical version
+xv rollback API_KEY --version 2 --force  # restore as new latest version
+```
+
+### Rotation
+
+```bash
+xv rotate API_KEY                            # new 32-char alphanumeric value
+xv rotate API_KEY --length 64                # longer
+xv rotate API_KEY --charset hex              # hex / base64 / numeric / uppercase / lowercase / alphanumeric / alphanumeric-symbols
+xv rotate API_KEY --generator ./mygen.sh     # custom generator (validated for ownership + 0700 perms)
+xv rotate API_KEY --show-value               # echo the new value to stdout (otherwise silent)
+```
+
+---
+
+## Reading secrets — clipboard, stdout, JSON
+
+### Default — clipboard with auto-clear
+
+```bash
+xv get DB_PASSWORD                       # copies to clipboard, auto-clears in 30s
+```
+
+The countdown is configurable (`xv config set clipboard_timeout 60`; `0` disables).
+
+### Pipe-friendly raw
+
+```bash
+xv get DB_PASSWORD --raw                 # to stdout, no trailing newline noise
+psql -U me -h db.prod -d main -W <<< "$(xv get DB_PASSWORD --raw)"
+DB_PW=$(xv get DB_PASSWORD --raw); export DB_PW
+```
+
+### Structured JSON (for scripts)
+
+```bash
+xv get DB_PASSWORD --format json
+# {"name":"DB_PASSWORD","value":"hunter2","groups":["backend","prod"], ...}
+
+# Pipe into jq:
+xv get DB_PASSWORD --format json | jq -r '.value'
+```
+
+### When the secret doesn't exist
+
+```bash
+xv get DB_PASSWURD                       # typo
+# error[xv-secret-not-found]: Secret not found: DB_PASSWURD
+#   did you mean: DB_PASSWORD?
+#   hint: Run 'xv list' to see secrets in the active vault.
+# Exit 10
+```
+
+The "did you mean" suggestion uses fuzzy matching (Levenshtein, distance ≤ 2). With `--format json`:
+
+```json
+{
+  "error": {
+    "code": "xv-secret-not-found",
+    "message": "Secret not found: DB_PASSWURD",
+    "exit_code": 10,
+    "suggestion": "DB_PASSWORD"
+  }
+}
+```
+
+---
+
+## Search & filter
+
+### List
+
+```bash
+xv list                                  # default table; also alias: xv ls
+xv list --group production               # filter by group
+xv list --all                            # include disabled / soft-deleted
+xv list --expiring 30d                   # secrets with expiry in next 30 days
+xv list --expired                        # already expired
+xv list --no-cache                       # bypass local cache
+```
+
+### Pagination
+
+```bash
+xv list --page-size 50                   # first 50 rows
+xv list --page-size 50 --page 2          # next 50
+xv list --pager auto                     # pipe through pager when output is a TTY
+xv list --format json --page-size 50     # JSON: array of exactly 50 items, no envelope
+```
+
+Pagination footer (table format only):
+
+```
+Showing 51-100 of 137 item(s) — page 2 of 3
+Next page: xv list --page 3 --page-size 50
+```
+
+`xv vault list`, `xv file list`, `xv share list`, and `xv vault share list` all accept `--page` / `--page-size` / `--pager` too.
+
+### Names-only — for piping
+
+```bash
+xv ls --names-only                       # one name per line, no headers, no ANSI
+xv ls --names-only | wc -l               # count secrets
+xv ls --names-only --group production    # filter still applies
+```
+
+`--names-only` overrides `--format` and writes to stdout regardless of TTY status. Designed for scripts and pipes.
+
+### Fuzzy — `xv find`
+
+Ranked search using `nucleo` (the same matcher Helix uses):
+
+```bash
+xv find db                               # rank by name
+xv find db --in folder                   # also search folder field
+xv find db --in folder --in groups       # multiple fields
+xv find db --in tags                     # search custom tags
+xv find db --limit 10                    # cap rows (default 50)
+xv find db --min-score 0.5               # tighter threshold (0.0..=1.0; default 0.3)
+xv find db --all-vaults                  # search every vault you can list
+xv find db --names-only                  # pipe-friendly
+xv find db --format json                 # [{name, score, folder, groups}]
+```
+
+### Pipe into fzf — interactive picker
+
+```bash
+# By name only
+xv get "$(xv ls --names-only | fzf)"
+
+# By fuzzy match
+xv get "$(xv find db --names-only | fzf)"
+
+# Run a process with whichever secret you pick
+selected=$(xv ls --names-only | fzf)
+xv run --include "$selected" -- ./debug.sh
+```
+
+The previous interactive `xv find` was replaced in v0.6.1; see [`docs/find.md`](docs/find.md) for the migration table.
+
+---
+
+## Secret injection — `xv run`
+
+Run a process with secrets available as environment variables:
+
+```bash
+xv run -- npm start                              # all secrets in active vault → env
+xv run --group production -- ./deploy.sh          # only one group
+xv run --include DB_PASSWORD --include API_KEY -- ./script.sh
+xv run --exclude LEGACY_TOKEN -- ./script.sh
+xv run --no-masking -- ./debug.sh                 # don't mask values in stdout/stderr
+xv run --vault other-vault -- env                 # one-off vault override
+```
+
+Values are masked in stdout/stderr by default — accidental `echo $DB_PASSWORD` shows `[REDACTED]`. Use `--no-masking` only when you understand the consequences.
+
+---
+
+## Template rendering — `xv inject`
+
+Render config files with `{{ secret:NAME }}` references resolved:
+
+```bash
+# template.yml:
+#   db_password: "{{ secret:DB_PASSWORD }}"
+#   api_key:     "{{ secret:STRIPE_KEY }}"
+#   cross_vault: "{{ xv://other-vault/SHARED_TOKEN }}"
+
+xv inject --template template.yml --out app.config
+cat template.yml | xv inject > resolved.yml          # also reads stdin
+
+# Cross-vault references (xv://vault-name/secret-name) work without context switching.
+```
+
+---
+
+## Project env profiles — `.xv.toml`
+
+Drop a `.xv.toml` at your project root and `xv` resolves vault, resource group, group, and folder defaults from it. Walks up from cwd to find the nearest one.
+
+### Schema
+
+```toml
+default_env = "dev"
+
+[env.dev]
+vault = "myproj-dev-kv"
+resource_group = "myproj-rg"
+group = "backend"          # optional
+folder = "app/database"    # optional
+
+[env.prod]
+vault = "myproj-prod-kv"
+resource_group = "myproj-prod-rg"
+```
+
+### Scaffold one interactively
+
+```bash
+xv context init                              # interactive prompts (seeded from your global config)
+xv context init --non-interactive \
+                --vault myproj-dev-kv \
+                --resource-group myproj-rg   # CI-friendly
+xv context init --force                      # overwrite an existing .xv.toml
+```
+
+### Active env selection (priority)
+
+1. `XV_ENV` env var
+2. `--env <name>` CLI flag
+3. `default_env` in `.xv.toml`
+4. Error `xv-env-not-defined` (exit 3) listing available envs
+
+```bash
+xv list                                  # uses default_env (dev)
+xv --env prod list                       # one-off override
+XV_ENV=staging xv list                   # session override
+```
+
+### Inspect
+
+```bash
+xv context envs                          # lists envs with * on the active one
+# config: /code/myproj/.xv.toml
+# default_env: dev
+#
+# envs:
+#   * dev   vault=myproj-dev-kv  rg=myproj-rg
+#     prod  vault=myproj-prod-kv rg=myproj-prod-rg
+
+xv context show                          # full context, including resolved env defaults
+```
+
+### Walk-up boundaries
+
+When a `.xv.toml` is found in an ancestor directory, you'll see a one-time stderr line per process:
+
+```
+using config from /code/myproj/.xv.toml (env: dev)
+```
+
+To **stop the walk-up** (e.g., in a monorepo to prevent leaking parent config into a sibling project), drop a `.xv.boundary` file:
+
+```bash
+touch /code/monorepo/services/checkout/.xv.boundary
+```
+
+To **disable walk-up entirely**, set `XV_NO_PARENT_CONFIG=1`.
+
+See [`docs/env-profiles.md`](docs/env-profiles.md) for the full reference.
+
+> **Note:** `xv context init/envs/show` (project-scoped via `.xv.toml`) is separate from `xv env create/use/list/...` (global, user-scoped named profiles). They coexist; project config wins where present.
+
+---
+
+## Vault management
+
+### Lifecycle
 
 ```bash
 xv vault create my-vault --resource-group my-rg --location eastus
-xv vault list
-xv vault list --page-size 25 --page 2
-xv vault info my-vault
-xv vault delete my-vault
-xv vault restore my-vault                 # Restore soft-deleted vault
-xv vault purge my-vault                   # Permanently delete vault
-xv vault update my-vault                  # Update vault properties
-xv vault export my-vault --output secrets.json
-xv vault import my-vault --input secrets.json --dry-run
-xv vault share grant my-vault             # Vault-level access management
+xv vault list                                  # all vaults you can see
+xv vault list --resource-group my-rg
+xv vault list --page-size 25 --page 2          # pagination
+xv vault info my-vault                         # detail
+xv vault info my-vault --format json
+xv vault delete my-vault                       # soft-delete
+xv vault restore my-vault                      # within retention period
+xv vault purge my-vault --force                # permanent delete
 ```
 
-### Vault Context
-
-Switch between vaults without repeating `--vault` on every command:
+### Update properties
 
 ```bash
-xv context use my-vault         # Switch active vault
-xv cx use my-vault              # Alias
-xv context show                 # Current context
-xv context list                 # Recent contexts
-xv context clear                # Clear current context
+xv vault update my-vault --enable-purge-protection
+xv vault update my-vault --retention-days 90
+xv vault update my-vault --tag owner=platform-team
 ```
 
-### Environment Profiles
-
-Named profiles that map to different vaults:
+### Export and import
 
 ```bash
-xv env create prod --vault prod-vault --group my-rg
-xv env list                     # List available profiles
-xv env use prod
-xv env show                     # Show current profile
-xv env pull --output .env       # Download as .env file
-xv env pull --group production  # Filter by group
-xv env push .env                # Upload .env contents as secrets
-xv env push .env --overwrite    # Overwrite existing secrets
-xv env delete prod              # Remove a profile
+xv vault export my-vault --output secrets.json --format json
+xv vault export my-vault --include-values --output backup.yaml --format yaml
+xv vault export my-vault --group production --output prod-only.json
+
+xv vault import target-vault --input secrets.json
+xv vault import target-vault --input secrets.json --dry-run     # preview
+xv vault import target-vault --input secrets.json --overwrite   # replace existing
 ```
 
-Note: `--group` here refers to the Azure resource group, not a secret group.
-
-### Cross-Vault Operations
+### RBAC sharing (vault-level)
 
 ```bash
-xv diff vault-a vault-b                   # Compare secrets between vaults
-xv diff vault-a vault-b --show-values     # Include values in comparison
-xv diff vault-a vault-b --group prod      # Filter by group in both vaults
-xv copy "api-key" --from vault-a --to vault-b
-xv copy "api-key" --from vault-a --to vault-b --new-name "api-key-v2"
-xv move "api-key" --from vault-a --to vault-b
-xv move "api-key" --from vault-a --to vault-b --force
+xv vault share grant my-vault --principal alice@example.com --role secrets-user
+xv vault share revoke my-vault --principal alice@example.com
+xv vault share list my-vault
+xv vault share list my-vault --page-size 50 --page 2
 ```
 
-### File Storage
+---
 
-Optional blob storage for files (requires setup via `xv init`):
+## Cross-vault operations — diff, copy, move
+
+### Diff
+
+```bash
+xv diff vault-a vault-b                            # name+metadata-only
+xv diff vault-a vault-b --show-values              # include values (be careful)
+xv diff vault-a vault-b --group production         # filter both vaults
+xv diff vault-a vault-b --format json              # script-friendly
+```
+
+### Copy / move
+
+```bash
+xv copy API_KEY --from vault-a --to vault-b
+xv copy API_KEY --from vault-a --to vault-b --new-name API_KEY_V2
+xv copy --group production --from vault-a --to vault-b   # bulk
+
+xv move API_KEY --from vault-a --to vault-b
+xv move API_KEY --from vault-a --to vault-b --force      # skip confirmation
+```
+
+### Find across vaults
+
+```bash
+xv find db --all-vaults                          # rows prefixed 'vaultname/SECRET'
+# myproj-dev-kv/DB_PASSWORD   ██████████   backend/database  backend,dev
+# myproj-prod-kv/DB_PASSWORD  ████░░░░░░   backend/database  backend,prod
+```
+
+---
+
+## Files (blob storage)
+
+Optional blob storage. Set up via `xv init` (creates a storage account + container).
+
+### Single files
 
 ```bash
 xv upload ./config.json
 xv download config.json
+xv download config.json --output ./local-name.json
+xv file info config.json                         # metadata
+xv file delete config.json
+```
+
+### Directories
+
+```bash
+xv file upload ./docs --recursive                                # preserves dir structure
+xv file upload ./src --recursive --prefix backup/2026-04-30
+xv file download docs --recursive --output ./local
+```
+
+### List + paginate
+
+```bash
 xv file list
+xv file list --prefix backup/
 xv file list --page-size 100 --page 3
-xv file list --limit 100                       # First page compatibility alias
-xv file info config.json                       # File metadata
-xv file upload ./docs --recursive              # Preserves directory structure
-xv file download "docs" --recursive --output ./local
-xv file upload ./src --recursive --prefix "backup/2024-01-15"
-xv file delete config.json                     # Delete a file
-xv file sync ./mydir --direction up            # Upload changed/missing files (default)
-xv file sync ./mydir --direction down          # Download changed/missing files
-xv file sync ./mydir --direction both          # Bidirectional (mtime + size)
-xv file sync ./mydir --dry-run                 # Show planned transfers
-xv file sync ./mydir --prefix backup/ --delete # Mirror local to remote; remove extra remote blobs
+xv file list --limit 100                         # legacy alias for first-page page-size 100
 ```
 
-### Identity & Access
+### Sync
 
 ```bash
-xv whoami                                 # Show authenticated identity
-xv info my-vault                          # Resource info (vault, secret, or file)
-xv share grant "api-key"                  # Grant access to a secret
-xv share revoke "api-key"                 # Revoke access to a secret
-xv share list "api-key"                   # List access permissions
-xv share list "api-key" --page-size 25    # Paginate access permissions
-xv audit "api-key"                        # Access/change history
-xv audit --vault my-vault                 # Vault-wide activity
-xv audit --vault my-vault --days 7        # Last 7 days only
-xv audit "api-key" --operation get        # Filter by operation type
+xv file sync ./mydir                             # default direction: up
+xv file sync ./mydir --direction up              # local → remote (changed/missing)
+xv file sync ./mydir --direction down            # remote → local
+xv file sync ./mydir --direction both            # bidirectional (mtime + size)
+xv file sync ./mydir --dry-run                   # show planned transfers
+xv file sync ./mydir --prefix backup/ --delete   # mirror; remove extra remote blobs
 ```
 
-### Utilities
+---
+
+## Pre-commit leak scanner — `xv scan`
+
+`xv scan` is unique because it matches files against your **actual vault values**, not just generic regex patterns. When you accidentally paste `DB_PASSWORD`'s real value into a config file, it tells you *"this file contains the value of secret DB_PASSWORD from vault dev-kv"* — not just "high-entropy string."
+
+### Scan modes
 
 ```bash
-xv parse "Server=db;User=admin;Pass=secret"    # Parse connection strings
-xv version                                     # Detailed build info
-xv completion bash                             # Generate shell completions
-xv completion zsh > ~/.zfunc/_xv               # Install zsh completions
+xv scan                                          # current directory
+xv scan src/ tests/                              # specific paths
+xv scan --staged                                 # only files staged for commit (git diff --cached)
+xv scan --all                                    # full HEAD tree
+xv scan --hook                                   # quiet on success, exit 50 on findings (for CI)
+xv scan --all-vaults                             # match against every vault you can list
+xv scan --format json                            # JSON envelope on stdout
 ```
 
-## Configuration
-
-### Hierarchy (highest → lowest priority)
-
-1. CLI flags (e.g., `--credential-type cli`)
-2. Environment variables
-3. Config file (`~/.config/xv/xv.conf`)
-4. Defaults
-
-### Setup
+### Pre-commit hook
 
 ```bash
-xv init                                   # Interactive setup
-xv config show                            # View current config
-xv config set default_vault my-vault      # Set a value
-xv config path                            # Show config file location
+xv scan install                                  # writes .git/hooks/pre-commit (idempotent)
+xv scan install --force                          # overwrite an existing non-managed hook
+xv scan uninstall                                # removes the managed hook only
 ```
 
-### Key Environment Variables
-
-| Variable | Purpose |
-|----------|---------|
-| `AZURE_SUBSCRIPTION_ID` | Azure subscription |
-| `AZURE_TENANT_ID` | Azure tenant |
-| `AZURE_CREDENTIAL_PRIORITY` | Auth method priority (`cli`, `managed_identity`, `environment`, `default`) |
-| `DEFAULT_VAULT` | Default vault name |
-| `DEFAULT_RESOURCE_GROUP` | Default resource group |
-
-### Authentication
-
-crosstache uses Azure's credential chain. You can control priority:
+The installed hook is just:
 
 ```bash
-xv list --credential-type cli                # Prefer Azure CLI
-export AZURE_CREDENTIAL_PRIORITY=cli         # For all commands
-xv config set azure_credential_priority cli  # Persistent
+#!/usr/bin/env bash
+# xv-scan-managed
+set -e
+xv scan --staged --hook
 ```
 
-Supported methods: Azure CLI, environment variables, managed identity, VS Code, PowerShell.
+### What it finds
 
-## Name Sanitization
+- **User secret values** (Critical) — verbatim values from your vault.
+- **Built-in patterns** (High / Medium): AWS access keys, GitHub tokens (ghp/ghs/gho/ghr/ghu prefixes), Stripe live+test keys, Slack tokens, JWTs, SSH/PEM private-key headers, high-entropy fallback.
 
-Azure Key Vault only allows alphanumeric characters and hyphens. crosstache handles this transparently:
+User-secret matches always win over pattern matches at the same offset.
+
+### Output
+
+Plain-text findings always go to **stderr**, never the value itself:
+
+```
+src/config.js:42:10: matches DB_PASSWORD (kind=SecretValue, severity=Critical, vault=dev-kv)
+```
+
+JSON envelope (`--format json`) on **stdout**:
+
+```json
+[
+  {"file":"src/config.js","line":42,"col":10,"secret_name":"DB_PASSWORD","vault":"dev-kv","kind":"secret-value","severity":"critical"}
+]
+```
+
+### Tuning — `[scan]` block in `.xv.toml`
+
+```toml
+[scan]
+exclude = ["dist/**", "*.lock", "vendor/**"]
+min_value_length = 12
+patterns = ["aws", "github", "stripe"]
+```
+
+Plus `.xvignore` (gitignore syntax, scanner-specific):
+
+```
+node_modules/
+*.snap
+test/fixtures/**
+```
+
+### Composition with gitleaks
+
+`xv scan` ships ~7 patterns by design — broader coverage layers gitleaks alongside:
 
 ```bash
-xv set "my-app/database:connection@prod"
-# Stored as: my-app-database-connection-prod
-# Original name preserved in tags for lookup
+gitleaks protect --staged && xv scan --staged --hook
 ```
 
-Names longer than 127 characters are SHA256-hashed.
+See [`docs/scan.md`](docs/scan.md) for the full reference.
 
-## Output Formats
+---
 
-Most commands support a global `--format` flag:
+## Terminal UI — `xv tui`
 
-```bash
-xv list                         # Table (default)
-xv list --format json           # JSON
-xv list --format yaml           # YAML
-xv list --format csv            # CSV
-xv list --format plain          # Simple text
-xv list --columns name,groups   # Select specific columns
-xv get "key" --raw              # Raw value (for scripting)
-```
-
-Available formats: `table`, `json`, `yaml`, `csv`, `plain`, `raw`, `template`.
-
-## Global Options
-
-These flags work with any command:
-
-| Flag | Purpose |
-|------|---------|
-| `--format <FORMAT>` | Output format (`table`, `json`, `yaml`, `csv`, `plain`, `raw`, `template`) |
-| `--columns <COLS>` | Select specific columns for table output (comma-separated) |
-| `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
-| `--template <TEMPLATE>` | Custom template string for template format |
-| `--debug` | Enable debug logging |
-| `--show-options` | Show global options in help output |
-
-## Scripting & exit codes
-
-For scripts and CI, see [`docs/exit-codes.md`](docs/exit-codes.md) for
-the stable exit-code table and the `--format json` error envelope.
-
-## Env profiles
-
-For per-project vault/resource-group defaults, use a `.xv.toml`
-at the project root. See [`docs/env-profiles.md`](docs/env-profiles.md)
-for the full reference.
-
-## Fuzzy search
-
-For ranked search across secret names (and optionally folders, groups,
-notes, tags), use `xv find <pattern>`. See [`docs/find.md`](docs/find.md)
-for the full reference.
-
-Pipe-into-fzf canonical form:
-
-```bash
-xv get "$(xv ls --names-only | fzf)"
-```
-
-## Pre-commit leak scanner
-
-For pre-commit secret-leak scanning, use `xv scan`. It matches files
-against your actual vault values, not just generic regex patterns.
-See [`docs/scan.md`](docs/scan.md) for full reference.
-
-```bash
-xv scan install   # write pre-commit hook
-```
-
-## Terminal UI
-
-For an interactive read-only browser, build with `--features tui`:
+Read-only three-pane browser. Behind a `tui` feature flag (default off) so the scripting binary stays lean.
 
 ```bash
 cargo install crosstache --features tui
 xv tui
 ```
 
-See [`docs/tui.md`](docs/tui.md) for the keymap.
+### Layout
 
-## Security
+```
+┌──────────────┬────────────────────────────┬──────────────────┐
+│ Vaults       │ Secrets (filter: /db_)     │ Detail           │
+│ > dev-kv     │ > DB_PASSWORD              │ name: DB_PASSWORD│
+│   stage-kv   │   DB_HOST                  │ value: ●●●●●●    │
+│   prod-kv    │   DB_PORT                  │ groups: backend  │
+└──────────────┴────────────────────────────┴──────────────────┘
+status: dev-kv · 24 secrets · clipboard: 12s              ?:help
+```
 
-- Secret values are zeroized from memory after use (`zeroize` crate)
-- Clipboard auto-clears 30 seconds after copy
-- Config and export files are written with restricted permissions (0600)
-- Recursive downloads are protected against path traversal
-- Generator scripts are validated for ownership and permissions
-- Secret values in `xv run` output are masked by default
+### Keymap
+
+| Key | Action |
+|-----|--------|
+| `h j k l` / arrows | move within / between panes |
+| `Tab` / `Shift-Tab` | cycle panes |
+| `/` | live fuzzy filter on Secrets pane (uses the `xv find` matcher) |
+| `Space` | toggle value reveal |
+| `y` | copy value (clipboard countdown shows in status) |
+| `Y` | copy secret name |
+| `R` | refresh — invalidate cache and reload current scope |
+| `H` | history (versions) overlay |
+| `a` | audit log overlay |
+| `?` | help overlay (full keymap) |
+| `e` | expand error toast into modal |
+| `q` / `Esc` | quit (or close current overlay) |
+
+`c`, `d`, `r` are reserved for v0.8 (write mode); pressing one shows a "coming in v0.8" toast.
+
+Values load on demand: settle the cursor on a row for ~200 ms and the value fetches in the background, lands in an in-memory `Zeroizing` cache (cleared on quit), and the detail pane shows `●●●●●●` until you press `Space`.
+
+> **Audit overlay:** ships as a placeholder in v0.7.0 — real Azure Activity Log integration lands in v0.7.1. Use `xv audit` from the CLI in the meantime.
+
+See [`docs/tui.md`](docs/tui.md) for the full reference.
+
+---
+
+## Scripting & CI
+
+### Exit codes
+
+Stable across releases — part of the public scripting contract.
+
+| Code  | Family                | Examples |
+|-------|-----------------------|----------|
+| `0`   | Success | command completed |
+| `1`   | Unknown / catch-all | unrecoverable I/O, JSON parse, regex |
+| `2`   | Invalid argument | bad CLI flag; clap parse failure |
+| `3`   | Configuration error | missing config; invalid `.xv.toml`; env not defined |
+| `10`  | Secret not found | `xv get` on a missing secret |
+| `11`  | Vault not found | `xv vault info` on a missing vault |
+| `12`  | Invalid secret name | name fails sanitization |
+| `20`  | Authentication failed | bad token, expired credential |
+| `21`  | Permission denied | RBAC check failed |
+| `30`  | Network error | generic transport failure |
+| `31`  | DNS resolution failed | vault hostname did not resolve |
+| `32`  | Connection timeout | TCP connect or request timeout |
+| `33`  | Connection refused | TCP refused |
+| `34`  | SSL/TLS error | certificate or handshake failure |
+| `35`  | Invalid URL | malformed URL |
+| `40`  | Azure API error | Azure returned an error response |
+| `50`  | Scan: leak detected | `xv scan` found a finding |
+
+### Stable error codes
+
+Every error has a stable kebab-case code (`xv-vault-not-found`, `xv-network-dns`, `xv-env-not-defined`, `xv-scan-leak-detected`, …) for scripting:
+
+```bash
+if ! out=$(xv get DB_PASSWORD --format json 2>/dev/null); then
+  code=$(echo "$out" | jq -r '.error.code')
+  case "$code" in
+    xv-secret-not-found)  echo "secret missing — provisioning…"   ; provision_secret ;;
+    xv-permission-denied) echo "RBAC: ask the platform team"      ; exit 1 ;;
+    xv-network-dns)       echo "DNS — check vault name spelling"  ; exit 2 ;;
+    *)                    echo "unexpected: $code"                ; exit 1 ;;
+  esac
+fi
+```
+
+### JSON error envelope
+
+When `--format json` or `--format yaml` is in effect, errors render to **stdout** (not stderr) as a structured envelope:
+
+```json
+{
+  "error": {
+    "code": "xv-vault-not-found",
+    "message": "Vault not found: myproj-prood",
+    "exit_code": 11,
+    "suggestion": "myproj-prod"
+  }
+}
+```
+
+`suggestion` is omitted when no near-match was found. The plain-text rendering for non-JSON outputs is:
+
+```
+error[xv-vault-not-found]: Vault not found: myproj-prood
+  did you mean: myproj-prod?
+  hint: Run 'xv vault list' to see available vaults.
+```
+
+The `hint:` line is TTY-only (suppressed in piped/captured output).
+
+### CI examples
+
+#### GitHub Actions — fetch a secret into the build
+
+```yaml
+- name: Authenticate to Azure
+  uses: azure/login@v2
+  with:
+    client-id: ${{ secrets.AZURE_CLIENT_ID }}
+    tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+    subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+- name: Fetch deploy token
+  run: |
+    DEPLOY_TOKEN=$(xv get DEPLOY_TOKEN --raw --vault myproj-prod-kv)
+    echo "::add-mask::$DEPLOY_TOKEN"
+    echo "DEPLOY_TOKEN=$DEPLOY_TOKEN" >> "$GITHUB_ENV"
+```
+
+#### GitLab CI — pre-deploy leak scan
+
+```yaml
+leak_scan:
+  stage: test
+  script:
+    - xv scan --hook
+  # Exits 50 on findings → job fails. Pipe-friendly JSON if you want to surface findings to a dashboard.
+```
+
+#### Generic shell — handle missing secret
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+token=$(xv get DEPLOY_TOKEN --raw 2>&1) || {
+  case $? in
+    10) echo "secret not in vault — provisioning…"; ./scripts/provision.sh ;;
+    20) echo "auth failed — re-running az login"; az login --use-device-code ;;
+    *)  echo "unexpected: $token"; exit 1 ;;
+  esac
+}
+```
+
+### `xv scan` in CI
+
+```bash
+xv scan --hook                  # exit 50 on findings; quiet on clean
+xv scan --hook --format json    # findings as JSON array on stdout
+xv scan --hook --all-vaults     # broaden the secret-value match set
+```
+
+See [`docs/exit-codes.md`](docs/exit-codes.md) for the full table.
+
+---
+
+## Configuration
+
+### Hierarchy (highest → lowest priority)
+
+1. CLI flags (`--credential-type cli`, `--vault foo`)
+2. Environment variables (`XV_ENV`, `AZURE_SUBSCRIPTION_ID`)
+3. Project config (`.xv.toml`, walk-up from cwd)
+4. Legacy `.xv/context` (deprecated; prints one-time warning per process; removed in v0.8)
+5. User config file (`$XDG_CONFIG_HOME/xv/xv.conf` or `~/.config/xv/xv.conf`)
+6. Defaults
+
+### Setup
+
+```bash
+xv init                                  # interactive — vault + storage account
+xv config show                           # full effective config
+xv config show --format json
+xv config set default_vault my-vault
+xv config set clipboard_timeout 60
+xv config set azure_credential_priority cli
+xv config path                           # path to the config file
+xv config unset clipboard_timeout
+```
+
+### Key environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription |
+| `AZURE_TENANT_ID` | Azure tenant |
+| `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | Service-principal auth |
+| `AZURE_CREDENTIAL_PRIORITY` | `cli` / `managed_identity` / `environment` / `default` |
+| `DEFAULT_VAULT` | Default vault name |
+| `DEFAULT_RESOURCE_GROUP` | Default resource group |
+| `DEFAULT_LOCATION` | Default Azure location (e.g., `eastus`) |
+| `XV_ENV` | Active env from `.xv.toml` (highest priority for env selection) |
+| `XV_NO_PARENT_CONFIG` | `1` disables `.xv.toml` walk-up |
+| `CACHE_TTL` | Cache TTL in seconds |
+| `DEBUG` | `true` / `1` enables debug logging |
+| `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_CONTAINER` | Blob storage destination |
+| `BLOB_CHUNK_SIZE_MB` | Upload chunk size |
+| `BLOB_MAX_CONCURRENT_UPLOADS` | Upload concurrency |
+
+### Global CLI flags
+
+These work with any command:
+
+| Flag | Purpose |
+|------|---------|
+| `--format <FORMAT>` | `table` / `json` / `yaml` / `csv` / `plain` / `raw` / `template` (default: `auto` — table on TTY, json for pipes) |
+| `--columns <COLS>` | Select specific columns for table output (comma-separated) |
+| `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
+| `--template <TEMPLATE>` | Custom template string for template format |
+| `--env <NAME>` | Active env from `.xv.toml` (overridden by `XV_ENV`) |
+| `--debug` | Enable debug logging |
+| `--show-options` | Show global options in `--help` output |
+
+---
+
+## Authentication
+
+crosstache uses Azure's `DefaultAzureCredential` chain. You can control the order:
+
+```bash
+# Per-command
+xv list --credential-type cli
+
+# Per-shell-session
+export AZURE_CREDENTIAL_PRIORITY=cli
+
+# Persistent
+xv config set azure_credential_priority cli
+```
+
+Supported priorities: `cli` (Azure CLI), `environment` (env vars), `managed_identity` (for Azure-hosted workloads), `default` (the full chain).
+
+The chain tries (in priority order):
+1. Environment variables (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`)
+2. Managed Identity (when running on Azure VMs / App Service / AKS / etc.)
+3. Azure CLI (`az login`)
+4. Visual Studio Code
+5. Azure PowerShell
+
+For service-principal auth from a script:
+
+```bash
+export AZURE_CLIENT_ID=...
+export AZURE_CLIENT_SECRET=...
+export AZURE_TENANT_ID=...
+export AZURE_CREDENTIAL_PRIORITY=environment
+xv list
+```
+
+---
+
+## Troubleshooting
+
+The structured-error layer makes most failures self-explanatory. A few common ones:
+
+### `error[xv-secret-not-found]: Secret not found: X`
+
+```bash
+xv list                                  # see what's actually in the vault
+xv list --all                            # include disabled / soft-deleted
+xv find X --names-only                   # fuzzy search
+```
+
+The error often suggests a near-match (`did you mean: X-other?`).
+
+### `error[xv-vault-not-found]: Vault not found: X`
+
+```bash
+xv vault list                            # confirm the name
+xv whoami                                # confirm you're authenticated
+xv config show | grep subscription_id    # confirm correct subscription
+```
+
+### `error[xv-permission-denied]`
+
+You're authenticated but lack the RBAC role.
+
+```bash
+xv whoami                                # who am I?
+xv vault share list my-vault             # current grants on the vault
+# Ask an admin to grant you 'Key Vault Secrets User' or 'Key Vault Administrator'
+```
+
+### `error[xv-network-dns]`
+
+The vault hostname didn't resolve. Either the vault name is wrong, or your DNS is misconfigured (corporate VPN, custom resolver, etc.):
+
+```bash
+nslookup my-vault.vault.azure.net
+xv vault list                            # if this works, DNS is fine — typo in vault name
+```
+
+### `error[xv-env-not-defined]: Environment 'X' not defined in .xv.toml`
+
+```bash
+xv context envs                          # see what's defined
+xv context show                          # see which .xv.toml is being used
+```
+
+### `error[xv-auth-failed]`
+
+```bash
+az login                                 # re-authenticate with Azure CLI
+xv config show | grep credential         # check current priority
+xv list --credential-type cli            # try Azure CLI explicitly
+```
+
+### Debug logging
+
+```bash
+xv list --debug                          # one-shot
+RUST_LOG=crosstache=debug xv list        # also enables tracing-subscriber output
+DEBUG=1 xv list                          # crosstache-specific shorthand
+```
+
+### Bypass `.xv.toml` discovery
+
+```bash
+XV_NO_PARENT_CONFIG=1 xv list            # only the cwd's .xv.toml is considered (no walk-up)
+```
+
+---
+
+## Security model
+
+- **Memory hygiene.** Secret values are wrapped in `Zeroizing<String>` and zeroed on drop. The TUI's value cache, the scanner's match-engine, and the run-time injection layer all use this.
+- **Clipboard auto-clear.** Default 30 s; configurable via `clipboard_timeout` (`0` to disable).
+- **File permissions.** Config and export files are written `0600` (owner-only).
+- **Path traversal.** Recursive downloads validate paths to prevent `../../../etc/passwd` shenanigans.
+- **Generator scripts.** `xv rotate --generator <script>` validates the script is owned by you and `0700`.
+- **`xv run` masking.** Secret values are masked in stdout/stderr by default; use `--no-masking` only when you understand the consequences.
+- **`xv scan` value-never-leaked invariant.** The `Finding` struct never contains the matched value — only file/line/col + the secret's *name*. Enforced by a hand-maintained banned-key test on the on-disk schema.
+- **Secret-name handling.** Names are sanitized for Azure (alphanumeric + hyphens; original preserved in tags); names > 127 chars are SHA256-hashed.
+
+---
+
+## Name sanitization
+
+Azure Key Vault only allows alphanumeric characters and hyphens, but you can use anything:
+
+```bash
+xv set "my-app/database:connection@prod"
+# Stored as: my-app-database-connection-prod
+# Original preserved in the 'original_name' tag for round-trip lookup
+```
+
+Names longer than 127 chars are SHA256-hashed; the full original is still stored in the tag.
+
+---
 
 ## Development
 
 ```bash
-cargo build                     # Debug build
-cargo build --release           # Release build
-cargo test                      # Run tests
-cargo fmt && cargo clippy       # Format + lint
+cargo build                              # debug build
+cargo build --release                    # release build
+cargo build --features tui               # include the TUI
+cargo test                               # full suite
+cargo test --features tui                # also include TUI snapshot tests
+cargo test -- --test-threads=1           # required for some env-var-mutating tests
+cargo fmt --all                          # format
+cargo clippy --all-targets               # lint
 ```
 
-Build without file operations: `cargo build --no-default-features`
+Build without file operations: `cargo build --no-default-features`.
 
 - Tests: see [`docs/testing.md`](docs/testing.md) for the hermetic vs live track split.
 
-### Release
+### Release process
 
 ```bash
-cargo release patch             # 0.1.0 → 0.1.1
-cargo release minor             # 0.1.0 → 0.2.0
+cargo release patch                      # 0.7.0 → 0.7.1
+cargo release minor                      # 0.7.0 → 0.8.0
 ```
+
+### Documentation
+
+- [`docs/exit-codes.md`](docs/exit-codes.md) — exit-code table and JSON error envelope
+- [`docs/env-profiles.md`](docs/env-profiles.md) — `.xv.toml` walk-up reference
+- [`docs/find.md`](docs/find.md) — `xv find` ranked search
+- [`docs/scan.md`](docs/scan.md) — pre-commit leak scanner
+- [`docs/tui.md`](docs/tui.md) — terminal UI keymap
+- [`docs/GROUPS.md`](docs/GROUPS.md) — group-based organization
+
+---
 
 ## License
 
