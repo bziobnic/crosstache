@@ -396,7 +396,7 @@ main() {
     if ! check_azure_cli; then
         warning "Azure CLI is not installed. crosstache requires Azure CLI for authentication."
         echo "Would you like to install Azure CLI now? (y/N)"
-        read -r response
+        read -r response </dev/tty
         case "$response" in
             [yY][eE][sS]|[yY])
                 install_azure_cli
