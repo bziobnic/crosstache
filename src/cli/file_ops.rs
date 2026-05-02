@@ -445,7 +445,16 @@ async fn execute_file_download(
     if !tty {
         println!("Downloading file '{name}' to '{output_path}'...");
     }
-    let reporter = progress::create_file_reporter(0, threshold, tty);
+    let file_size = if tty {
+        blob_manager
+            .get_file_info(name)
+            .await
+            .map(|info| info.size)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let reporter = progress::create_file_reporter(file_size, threshold, tty);
     reporter.set_message(format!("Downloading '{name}'..."));
 
     let content = blob_manager
@@ -1362,12 +1371,17 @@ async fn execute_file_download_recursive(
             let download_request = FileDownloadRequest {
                 name: blob_name.to_string(),
             };
-            let content = blob_manager
+            blob_manager
                 .download_file(download_request, &NoopReporter)
-                .await?;
-            std::fs::write(&local_path, content).map_err(|e| {
-                CrosstacheError::config(format!("Failed to write file {}: {e}", local_path_str))
-            })
+                .await
+                .and_then(|content| {
+                    std::fs::write(&local_path, content).map_err(|e| {
+                        CrosstacheError::config(format!(
+                            "Failed to write file {}: {e}",
+                            local_path_str
+                        ))
+                    })
+                })
         };
 
         match result {
@@ -1656,7 +1670,7 @@ async fn file_sync_perform_upload(
         metadata: HashMap::new(),
         tags: HashMap::new(),
     };
-    if !output_json {
+    if !output_json && !is_tty() {
         println!("upload: {} → {blob_name}", info.local_path.display());
     }
     let uploaded_info = blob_manager.upload_file(upload_request, reporter).await?;
@@ -1680,7 +1694,7 @@ async fn file_sync_perform_download(
     let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name);
     sync_assert_safe_local_path(base_path, &target, blob_name)?;
     file_sync_ensure_parent_dirs(&target)?;
-    if !output_json {
+    if !output_json && !is_tty() {
         println!("download: {blob_name} → {}", target.display());
     }
     let download_request = FileDownloadRequest {
