@@ -918,7 +918,7 @@ dependencies = [
  "mockall",
  "nucleo",
  "opener",
- "rand 0.8.5",
+ "rand 0.9.1",
  "ratatui",
  "regex",
  "reqwest",

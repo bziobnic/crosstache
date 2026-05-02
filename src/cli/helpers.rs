@@ -258,10 +258,10 @@ pub(crate) fn generate_random_value(
         ));
     }
 
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let random_value: String = (0..length)
         .map(|_| {
-            let idx = rng.gen_range(0..charset_bytes.len());
+            let idx = rng.random_range(0..charset_bytes.len());
             charset_bytes[idx] as char
         })
         .collect();
