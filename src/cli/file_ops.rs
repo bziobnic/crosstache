@@ -401,7 +401,9 @@ async fn execute_file_upload(
     let reporter = progress::create_file_reporter(file_size, threshold, tty);
     reporter.set_message(format!("Uploading '{remote_name}'..."));
 
-    let file_info = blob_manager.upload_file(upload_request, reporter.as_ref()).await?;
+    let file_info = blob_manager
+        .upload_file(upload_request, reporter.as_ref())
+        .await?;
     output::success(&format!("Successfully uploaded file '{}'", file_info.name));
     println!("   Size: {} bytes", file_info.size);
     println!("   Content-Type: {}", file_info.content_type);
@@ -446,7 +448,9 @@ async fn execute_file_download(
     let reporter = progress::create_file_reporter(0, threshold, tty);
     reporter.set_message(format!("Downloading '{name}'..."));
 
-    let content = blob_manager.download_file(download_request, reporter.as_ref()).await?;
+    let content = blob_manager
+        .download_file(download_request, reporter.as_ref())
+        .await?;
     fs::write(&output_path, content)
         .map_err(|e| CrosstacheError::config(format!("Failed to write file {output_path}: {e}")))?;
     output::success(&format!("Successfully downloaded file '{name}'"));
@@ -1682,7 +1686,9 @@ async fn file_sync_perform_download(
     let download_request = FileDownloadRequest {
         name: blob_name.to_string(),
     };
-    let content = blob_manager.download_file(download_request, reporter).await?;
+    let content = blob_manager
+        .download_file(download_request, reporter)
+        .await?;
     fs::write(&target, content).map_err(|e| {
         CrosstacheError::config(format!("Failed to write {}: {e}", target.display()))
     })?;
@@ -1809,10 +1815,19 @@ async fn execute_file_sync(
                     mp.advance_overall(blob_name);
                     continue;
                 }
-                file_sync_perform_upload(blob_manager, info, blob_name, config.output_json, &NoopReporter)
-                    .await?;
+                file_sync_perform_upload(
+                    blob_manager,
+                    info,
+                    blob_name,
+                    config.output_json,
+                    &NoopReporter,
+                )
+                .await?;
                 summary.uploaded += 1;
-                mp.log(&format!("upload: {} → {blob_name}", info.local_path.display()));
+                mp.log(&format!(
+                    "upload: {} → {blob_name}",
+                    info.local_path.display()
+                ));
                 mp.advance_overall(blob_name);
                 mutated = true;
             }
@@ -1933,7 +1948,10 @@ async fn execute_file_sync(
                         )
                         .await?;
                         summary.uploaded += 1;
-                        mp.log(&format!("upload: {} → {blob_name}", info.local_path.display()));
+                        mp.log(&format!(
+                            "upload: {} → {blob_name}",
+                            info.local_path.display()
+                        ));
                         mp.advance_overall(blob_name);
                         mutated = true;
                     }
@@ -1999,7 +2017,10 @@ async fn execute_file_sync(
                                 )
                                 .await?;
                                 summary.uploaded += 1;
-                                mp.log(&format!("upload: {} → {blob_name}", info.local_path.display()));
+                                mp.log(&format!(
+                                    "upload: {} → {blob_name}",
+                                    info.local_path.display()
+                                ));
                                 mp.advance_overall(blob_name);
                                 mutated = true;
                             }

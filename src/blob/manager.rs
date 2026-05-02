@@ -57,7 +57,11 @@ impl BlobManager {
     }
 
     /// Upload a file to blob storage
-    pub async fn upload_file(&self, request: FileUploadRequest, reporter: &dyn ProgressReporter) -> Result<FileInfo> {
+    pub async fn upload_file(
+        &self,
+        request: FileUploadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<FileInfo> {
         // Determine content type
         let content_type = request.content_type.unwrap_or_else(|| {
             mime_guess::from_path(&request.name)
@@ -345,7 +349,11 @@ impl BlobManager {
     }
 
     /// Download a file from blob storage
-    pub async fn download_file(&self, request: FileDownloadRequest, reporter: &dyn ProgressReporter) -> Result<Vec<u8>> {
+    pub async fn download_file(
+        &self,
+        request: FileDownloadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<Vec<u8>> {
         // Validate download request parameters
         if request.name.trim().is_empty() {
             return Err(CrosstacheError::config(
@@ -642,16 +650,19 @@ impl BlobManager {
             let actual_chunk_size = chunk.len() as u64;
             let chunk_bytes = chunk; // Vec<u8> satisfies Into<azure_core::Body>
 
-            upload_tasks.push((tokio::spawn(async move {
-                let _permit = permit; // held for the duration of the upload
-                blob_client
-                    .put_block(block_id, chunk_bytes)
-                    .await
-                    .map_err(|e| {
-                        CrosstacheError::azure_api(format!("Failed to upload block: {e}"))
-                    })?;
-                Ok(())
-            }), actual_chunk_size));
+            upload_tasks.push((
+                tokio::spawn(async move {
+                    let _permit = permit; // held for the duration of the upload
+                    blob_client
+                        .put_block(block_id, chunk_bytes)
+                        .await
+                        .map_err(|e| {
+                            CrosstacheError::azure_api(format!("Failed to upload block: {e}"))
+                        })?;
+                    Ok(())
+                }),
+                actual_chunk_size,
+            ));
         }
 
         // Wait for all block uploads to finish and report progress.
