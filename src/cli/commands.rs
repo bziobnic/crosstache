@@ -1127,7 +1127,10 @@ impl Cli {
                 .await
             }
             Commands::Get { name, raw, version } => {
-                crate::cli::secret_ops::execute_secret_get_direct(&name, raw, version, config, registry).await
+                crate::cli::secret_ops::execute_secret_get_direct(
+                    &name, raw, version, config, registry,
+                )
+                .await
             }
             Commands::Find {
                 pattern,
@@ -1169,8 +1172,10 @@ impl Cli {
                 .await
             }
             Commands::Delete { name, group, force } => {
-                crate::cli::secret_ops::execute_secret_delete_direct(name, group, force, config, registry)
-                    .await
+                crate::cli::secret_ops::execute_secret_delete_direct(
+                    name, group, force, config, registry,
+                )
+                .await
             }
             Commands::History { name } => {
                 crate::cli::secret_ops::execute_secret_history_direct(&name, config, registry).await
@@ -1225,8 +1230,10 @@ impl Cli {
                 out,
                 group,
             } => {
-                crate::cli::secret_ops::execute_secret_inject_direct(template, out, group, config, registry)
-                    .await
+                crate::cli::secret_ops::execute_secret_inject_direct(
+                    template, out, group, config, registry,
+                )
+                .await
             }
             Commands::Update {
                 name,
@@ -1304,7 +1311,8 @@ impl Cli {
                 .await
             }
             Commands::Purge { name, force } => {
-                crate::cli::secret_ops::execute_secret_purge_direct(&name, force, config, registry).await
+                crate::cli::secret_ops::execute_secret_purge_direct(&name, force, config, registry)
+                    .await
             }
             Commands::Restore { name } => {
                 crate::cli::secret_ops::execute_secret_restore_direct(&name, config, registry).await
@@ -1381,7 +1389,9 @@ impl Cli {
             Commands::Completion { shell } => {
                 crate::cli::system_ops::execute_completion_command(shell).await
             }
-            Commands::Whoami => crate::cli::system_ops::execute_whoami_command(config, registry).await,
+            Commands::Whoami => {
+                crate::cli::system_ops::execute_whoami_command(config, registry).await
+            }
             // Upgrade does not need Azure config — only talks to GitHub API
             Commands::Upgrade { check, force } => {
                 crate::cli::upgrade_ops::execute_upgrade_command(check, force).await

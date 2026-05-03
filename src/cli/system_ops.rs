@@ -782,8 +782,7 @@ pub(crate) async fn execute_gen_command(
     if let Some(ref name) = save {
         use crate::secret::manager::SecretManager;
 
-        let auth_provider =
-            crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
+        let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
         let secret_manager = SecretManager::new(auth_provider, config.no_color);
         let vault_name = config.resolve_vault_name(vault).await?;
 

@@ -316,7 +316,11 @@ pub(crate) async fn execute_secret_delete_direct(
     Ok(())
 }
 
-pub(crate) async fn execute_secret_history_direct(name: &str, config: Config, registry: Option<&BackendRegistry>) -> Result<()> {
+pub(crate) async fn execute_secret_history_direct(
+    name: &str,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
     // TODO(backend-trait): Use registry.active().secrets().get_secret_versions() directly.
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
@@ -492,7 +496,11 @@ pub(crate) async fn execute_secret_purge_direct(
     Ok(())
 }
 
-pub(crate) async fn execute_secret_restore_direct(name: &str, config: Config, registry: Option<&BackendRegistry>) -> Result<()> {
+pub(crate) async fn execute_secret_restore_direct(
+    name: &str,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -952,8 +960,7 @@ pub(crate) async fn execute_secret_find_direct(
     config: Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    let auth_provider =
-        crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
     execute_secret_find(
         &secret_manager,

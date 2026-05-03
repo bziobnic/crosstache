@@ -122,9 +122,7 @@ impl BackendRegistry {
     /// the registry was built from config.
     ///
     /// Returns `None` if the active backend is not Azure.
-    pub fn azure_auth_provider(
-        &self,
-    ) -> Option<Arc<dyn crate::auth::provider::AzureAuthProvider>> {
+    pub fn azure_auth_provider(&self) -> Option<Arc<dyn crate::auth::provider::AzureAuthProvider>> {
         self.azure_auth.clone()
     }
 }

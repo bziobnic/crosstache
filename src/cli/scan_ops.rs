@@ -44,14 +44,12 @@ async fn execute_scan_paths(
 ) -> Result<()> {
     use crate::secret::manager::SecretManager;
 
-    let auth_provider =
-        crate::cli::helpers::get_azure_auth_provider(registry, config)?;
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     // Pick which vaults to fetch from.
     let vault_names: Vec<String> = if all_vaults {
-        let auth =
-            crate::cli::helpers::get_azure_auth_provider(registry, config)?;
+        let auth = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
         let vault_manager = crate::vault::manager::VaultManager::new(
             auth,
             config.subscription_id.clone(),
@@ -101,13 +99,11 @@ async fn execute_scan_staged(
     use crate::scan::staged::scan_staged;
     use crate::secret::manager::SecretManager;
 
-    let auth_provider =
-        crate::cli::helpers::get_azure_auth_provider(registry, config)?;
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     let vault_names: Vec<String> = if all_vaults {
-        let auth =
-            crate::cli::helpers::get_azure_auth_provider(registry, config)?;
+        let auth = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
         let vault_manager = crate::vault::manager::VaultManager::new(
             auth,
             config.subscription_id.clone(),

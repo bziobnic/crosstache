@@ -18,8 +18,7 @@ pub(crate) async fn execute_vault_command(
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     // Create authentication provider — reuse from registry when available
-    let auth_provider: Arc<dyn AzureAuthProvider> =
-        get_azure_auth_provider(registry, &config)?;
+    let auth_provider: Arc<dyn AzureAuthProvider> = get_azure_auth_provider(registry, &config)?;
 
     // Create vault manager
     let vault_manager = VaultManager::new(
