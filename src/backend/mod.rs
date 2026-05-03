@@ -19,6 +19,7 @@ pub mod azure;
 pub mod error;
 #[cfg(feature = "file-ops")]
 pub mod file;
+pub mod local;
 pub mod registry;
 pub mod secret;
 pub mod vault;

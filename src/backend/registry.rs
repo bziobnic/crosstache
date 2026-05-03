@@ -59,9 +59,10 @@ impl BackendRegistry {
                 registry.azure_auth = Some(auth_provider);
                 Ok(registry)
             }
-            BackendKind::Local => Err(BackendError::Unsupported(
-                "local backend is not yet implemented — coming in a future release".into(),
-            )),
+            BackendKind::Local => {
+                let backend = super::local::LocalBackend::new(config.local.as_ref())?;
+                Ok(Self::new(Arc::new(backend)))
+            }
         }
     }
 
@@ -132,18 +133,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_config_local_returns_unsupported() {
+    fn from_config_local_creates_backend() {
+        let tmp = tempfile::TempDir::new().unwrap();
         let config = Config {
             backend: Some("local".to_string()),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+            }),
             ..Default::default()
         };
         let result = BackendRegistry::from_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, BackendError::Unsupported(_)),
-            "expected Unsupported, got: {err:?}"
-        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        let registry = result.unwrap();
+        assert_eq!(registry.active().name(), "local");
     }
 
     #[test]
