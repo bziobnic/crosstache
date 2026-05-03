@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWrite;
 
+use crate::utils::progress::ProgressReporter;
+
 /// Core blob storage manager
 pub struct BlobManager {
     storage_account: String,
@@ -55,7 +57,11 @@ impl BlobManager {
     }
 
     /// Upload a file to blob storage
-    pub async fn upload_file(&self, request: FileUploadRequest) -> Result<FileInfo> {
+    pub async fn upload_file(
+        &self,
+        request: FileUploadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<FileInfo> {
         // Determine content type
         let content_type = request.content_type.unwrap_or_else(|| {
             mime_guess::from_path(&request.name)
@@ -84,6 +90,7 @@ impl BlobManager {
 
         // Store content length before moving request.content
         let content_length = request.content.len() as u64;
+        reporter.set_total(content_length);
 
         // Build SDK Metadata from our HashMap
         let mut sdk_metadata = Metadata::new();
@@ -101,6 +108,8 @@ impl BlobManager {
             .metadata(sdk_metadata)
             .await
             .map_err(|e| CrosstacheError::azure_api(format!("Failed to upload blob: {e}")))?;
+        reporter.advance(content_length);
+        reporter.finish_clear();
 
         // Extract response data and build FileInfo
         let etag = response.etag.to_string();
@@ -340,7 +349,11 @@ impl BlobManager {
     }
 
     /// Download a file from blob storage
-    pub async fn download_file(&self, request: FileDownloadRequest) -> Result<Vec<u8>> {
+    pub async fn download_file(
+        &self,
+        request: FileDownloadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<Vec<u8>> {
         // Validate download request parameters
         if request.name.trim().is_empty() {
             return Err(CrosstacheError::config(
@@ -369,8 +382,10 @@ impl BlobManager {
         // Handle empty files specially to avoid HTTP 416 error
         // Azure's get_content() fails with 416 Range Not Satisfiable for 0-byte blobs
         let content_length = properties.blob.properties.content_length;
+        reporter.set_total(content_length);
         if content_length == 0 {
             // Return empty vec for 0-byte files
+            reporter.finish_clear();
             return Ok(Vec::new());
         }
 
@@ -379,6 +394,8 @@ impl BlobManager {
             .get_content()
             .await
             .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {e}")))?;
+        reporter.advance(content_length);
+        reporter.finish_clear();
 
         Ok(blob_content)
     }
@@ -585,9 +602,10 @@ impl BlobManager {
         &self,
         name: &str,
         mut reader: R,
-        _file_size: u64,
+        file_size: u64,
         metadata: HashMap<String, String>,
         tags: HashMap<String, String>,
+        reporter: &dyn ProgressReporter,
     ) -> Result<FileInfo> {
         use tokio::sync::Semaphore;
 
@@ -595,6 +613,7 @@ impl BlobManager {
             .first_or_octet_stream()
             .to_string();
         let chunk_size = self.chunk_size_mb * 1024 * 1024;
+        reporter.set_total(file_size);
 
         // Build blob client.
         let token_credential = self.auth_provider.get_token_credential();
@@ -605,7 +624,7 @@ impl BlobManager {
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent_uploads));
         let mut block_list = BlockList::default();
         let mut block_idx: u32 = 0;
-        let mut upload_tasks: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+        let mut upload_tasks: Vec<(tokio::task::JoinHandle<Result<()>>, u64)> = Vec::new();
 
         // Read chunks and spawn concurrent block uploads.
         loop {
@@ -628,26 +647,32 @@ impl BlobManager {
                 .await
                 .map_err(|e| CrosstacheError::unknown(format!("Semaphore error: {e}")))?;
             let blob_client = blob_client.clone();
+            let actual_chunk_size = chunk.len() as u64;
             let chunk_bytes = chunk; // Vec<u8> satisfies Into<azure_core::Body>
 
-            upload_tasks.push(tokio::spawn(async move {
-                let _permit = permit; // held for the duration of the upload
-                blob_client
-                    .put_block(block_id, chunk_bytes)
-                    .await
-                    .map_err(|e| {
-                        CrosstacheError::azure_api(format!("Failed to upload block: {e}"))
-                    })?;
-                Ok(())
-            }));
+            upload_tasks.push((
+                tokio::spawn(async move {
+                    let _permit = permit; // held for the duration of the upload
+                    blob_client
+                        .put_block(block_id, chunk_bytes)
+                        .await
+                        .map_err(|e| {
+                            CrosstacheError::azure_api(format!("Failed to upload block: {e}"))
+                        })?;
+                    Ok(())
+                }),
+                actual_chunk_size,
+            ));
         }
 
-        // Wait for all block uploads to finish.
-        for task in upload_tasks {
+        // Wait for all block uploads to finish and report progress.
+        for (task, bytes) in upload_tasks {
             task.await
                 .map_err(|e| CrosstacheError::unknown(format!("Upload task panicked: {e}")))?
                 .map_err(|e: CrosstacheError| e)?;
+            reporter.advance(bytes);
         }
+        reporter.finish_clear();
 
         if block_list.blocks.is_empty() {
             // Zero-byte file: fall back to a simple put_block_blob so the blob

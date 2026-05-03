@@ -58,6 +58,12 @@ pub struct BlobConfig {
     pub enable_large_file_support: bool,
     pub chunk_size_mb: usize,
     pub max_concurrent_uploads: usize,
+    #[serde(default = "default_progress_threshold_mb")]
+    pub progress_threshold_mb: usize,
+}
+
+fn default_progress_threshold_mb() -> usize {
+    5
 }
 
 impl Default for BlobConfig {
@@ -69,6 +75,7 @@ impl Default for BlobConfig {
             enable_large_file_support: true,
             chunk_size_mb: 4,
             max_concurrent_uploads: 3,
+            progress_threshold_mb: default_progress_threshold_mb(),
         }
     }
 }
@@ -495,6 +502,13 @@ fn load_from_env(config: &mut Config) {
     if let Ok(value) = std::env::var("BLOB_MAX_CONCURRENT_UPLOADS") {
         if let Ok(max_uploads) = value.parse::<usize>() {
             blob_config.max_concurrent_uploads = max_uploads;
+            blob_config_updated = true;
+        }
+    }
+
+    if let Ok(value) = std::env::var("PROGRESS_THRESHOLD_MB") {
+        if let Ok(threshold) = value.parse::<usize>() {
+            blob_config.progress_threshold_mb = threshold;
             blob_config_updated = true;
         }
     }
