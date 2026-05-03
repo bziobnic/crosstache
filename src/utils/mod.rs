@@ -3,7 +3,11 @@
 //! This module contains various utility functions including name sanitization,
 //! retry logic, connection string parsing, table formatting, and other helpers.
 
-pub mod azure_detect;
+/// Re-export Azure detection at the legacy path for backward compatibility.
+/// New code should import from `crate::backend::azure::detect`.
+pub mod azure_detect {
+    pub use crate::backend::azure::detect::*;
+}
 pub mod datetime;
 pub mod error_hints;
 pub mod format;
