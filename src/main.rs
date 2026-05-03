@@ -87,6 +87,11 @@ async fn run(cli: Cli) -> Result<()> {
     // resolve_resource_group when consulting .xv.toml).
     config.env_flag = cli.env.clone();
 
+    // Apply CLI --backend flag to config (overrides config file and env var).
+    if let Some(ref backend) = cli.backend {
+        config.backend = Some(backend.clone());
+    }
+
     // Execute the command
     cli.execute(config).await?;
 

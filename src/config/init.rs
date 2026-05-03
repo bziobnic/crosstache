@@ -791,6 +791,7 @@ impl ConfigInitializer {
         };
 
         Ok(Config {
+            backend: None,
             subscription_id: init_config.subscription_id,
             tenant_id: init_config.tenant_id,
             default_vault: init_config.default_vault.unwrap_or_default(),
@@ -805,6 +806,7 @@ impl ConfigInitializer {
             cache_ttl_secs: 900,
             blob_config,
             azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
+            local: None,
             clipboard_timeout: 30,
             gen_default_charset: None,
             env_flag: None,
