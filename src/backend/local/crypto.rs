@@ -48,6 +48,40 @@ pub fn encrypt_to_file(
     Ok(())
 }
 
+/// Read and decrypt the age file at `path`, returning the plaintext bytes.
+///
+/// Used for file/blob storage where the content may not be valid UTF-8.
+pub fn decrypt_bytes_from_file(
+    path: &Path,
+    identity: &age::x25519::Identity,
+) -> Result<Vec<u8>, BackendError> {
+    let file = File::open(path)
+        .map_err(|e| BackendError::Internal(format!("open {}: {e}", path.display())))?;
+    let reader = BufReader::new(file);
+
+    let decryptor = match age::Decryptor::new_buffered(reader)
+        .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
+    {
+        age::Decryptor::Recipients(d) => d,
+        _ => {
+            return Err(BackendError::Internal(
+                "unexpected passphrase-encrypted file".into(),
+            ));
+        }
+    };
+
+    let mut decrypted = decryptor
+        .decrypt(std::iter::once(identity as &dyn age::Identity))
+        .map_err(|e| BackendError::Internal(format!("decrypt: {e}")))?;
+
+    let mut buf = Vec::new();
+    decrypted
+        .read_to_end(&mut buf)
+        .map_err(|e| BackendError::Internal(format!("read plaintext: {e}")))?;
+
+    Ok(buf)
+}
+
 /// Read and decrypt the age file at `path`, returning the plaintext as a
 /// `Zeroizing<String>`.
 pub fn decrypt_from_file(

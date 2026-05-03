@@ -89,6 +89,19 @@ fn versions_dir(store_path: &Path, vault: &str, name: &str) -> PathBuf {
     secrets_dir(store_path, vault).join(".versions").join(enc)
 }
 
+fn trash_dir(store_path: &Path, vault: &str, name: &str) -> PathBuf {
+    let enc = encode_name(name);
+    store_path
+        .join("vaults")
+        .join(vault)
+        .join(".trash")
+        .join(enc)
+}
+
+fn trash_base_dir(store_path: &Path, vault: &str) -> PathBuf {
+    store_path.join("vaults").join(vault).join(".trash")
+}
+
 // ---------------------------------------------------------------------------
 // Conversion helpers
 // ---------------------------------------------------------------------------
@@ -407,21 +420,35 @@ impl SecretBackend for LocalSecretBackend {
             });
         }
 
-        // Remove current files
+        // Soft delete: move files to .trash/{encoded_name}/
+        let tdir = trash_dir(&self.store_path, vault, name);
+        fs::create_dir_all(&tdir)
+            .map_err(|e| BackendError::Internal(format!("mkdir trash: {e}")))?;
+
+        let enc = encode_name(name);
         if ap.exists() {
-            fs::remove_file(&ap).map_err(|e| BackendError::Internal(format!("remove age: {e}")))?;
+            let dest = tdir.join(format!("{enc}.age"));
+            fs::rename(&ap, &dest)
+                .map_err(|e| BackendError::Internal(format!("move age to trash: {e}")))?;
         }
         if mp.exists() {
-            fs::remove_file(&mp)
-                .map_err(|e| BackendError::Internal(format!("remove meta: {e}")))?;
+            let dest = tdir.join(format!("{enc}.meta.json"));
+            fs::rename(&mp, &dest)
+                .map_err(|e| BackendError::Internal(format!("move meta to trash: {e}")))?;
         }
 
-        // Remove version history
-        let vdir = versions_dir(&self.store_path, vault, name);
-        if vdir.exists() {
-            fs::remove_dir_all(&vdir)
-                .map_err(|e| BackendError::Internal(format!("remove versions: {e}")))?;
-        }
+        // Write deletion metadata
+        let deleted_meta = serde_json::json!({
+            "deleted_at": Utc::now().to_rfc3339(),
+            "original_name": name,
+        });
+        let deleted_path = tdir.join(".deleted.json");
+        fs::write(
+            &deleted_path,
+            serde_json::to_string_pretty(&deleted_meta)
+                .map_err(|e| BackendError::Internal(format!("serialize deleted meta: {e}")))?,
+        )
+        .map_err(|e| BackendError::Internal(format!("write deleted meta: {e}")))?;
 
         Ok(())
     }
@@ -554,6 +581,146 @@ impl SecretBackend for LocalSecretBackend {
     async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
         let mp = meta_path(&self.store_path, vault, name);
         Ok(mp.exists())
+    }
+
+    async fn rollback(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        // Find the target version in .versions/
+        let vdir = versions_dir(&self.store_path, vault, name);
+        let ver_age = vdir.join(format!("{version}.age"));
+        let ver_meta = vdir.join(format!("{version}.meta.json"));
+
+        if !ver_meta.exists() {
+            return Err(BackendError::NotFound {
+                name: format!("{name}@{version}"),
+                suggestion: None,
+            });
+        }
+
+        // Archive current as the next version
+        archive_current(&self.store_path, vault, name)?;
+
+        // Copy the target version files to current
+        let ap = age_path(&self.store_path, vault, name);
+        let mp = meta_path(&self.store_path, vault, name);
+
+        if ver_age.exists() {
+            fs::copy(&ver_age, &ap)
+                .map_err(|e| BackendError::Internal(format!("restore age: {e}")))?;
+        }
+        fs::copy(&ver_meta, &mp)
+            .map_err(|e| BackendError::Internal(format!("restore meta: {e}")))?;
+
+        // Update the version label to the next version number
+        let mut meta = read_meta(&mp)?;
+        let next_ver = next_version(&self.store_path, vault, name);
+        meta.version = format!("v{next_ver}");
+        meta.updated_at = Utc::now();
+        write_meta(&mp, &meta)?;
+
+        Ok(meta_to_properties(&meta, None))
+    }
+
+    async fn restore_secret(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        let tdir = trash_dir(&self.store_path, vault, name);
+        if !tdir.exists() {
+            return Err(BackendError::NotFound {
+                name: format!("{name} (deleted)"),
+                suggestion: Some("Secret is not in the trash".into()),
+            });
+        }
+
+        let enc = encode_name(name);
+        let trash_age = tdir.join(format!("{enc}.age"));
+        let trash_meta = tdir.join(format!("{enc}.meta.json"));
+
+        if !trash_meta.exists() {
+            return Err(BackendError::NotFound {
+                name: format!("{name} (deleted)"),
+                suggestion: Some("Trash metadata not found".into()),
+            });
+        }
+
+        // Move files back to secrets/
+        let sdir = secrets_dir(&self.store_path, vault);
+        fs::create_dir_all(&sdir)
+            .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
+
+        let ap = age_path(&self.store_path, vault, name);
+        let mp = meta_path(&self.store_path, vault, name);
+
+        if trash_age.exists() {
+            fs::rename(&trash_age, &ap)
+                .map_err(|e| BackendError::Internal(format!("restore age from trash: {e}")))?;
+        }
+        fs::rename(&trash_meta, &mp)
+            .map_err(|e| BackendError::Internal(format!("restore meta from trash: {e}")))?;
+
+        // Remove the trash entry
+        fs::remove_dir_all(&tdir)
+            .map_err(|e| BackendError::Internal(format!("remove trash dir: {e}")))?;
+
+        let meta = read_meta(&mp)?;
+        Ok(meta_to_properties(&meta, None))
+    }
+
+    async fn purge_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        // Permanently remove from .trash/
+        let tdir = trash_dir(&self.store_path, vault, name);
+        if tdir.exists() {
+            fs::remove_dir_all(&tdir)
+                .map_err(|e| BackendError::Internal(format!("purge trash: {e}")))?;
+        }
+
+        // Also remove any .versions/ for that secret
+        let vdir = versions_dir(&self.store_path, vault, name);
+        if vdir.exists() {
+            fs::remove_dir_all(&vdir)
+                .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+        }
+
+        Ok(())
+    }
+
+    async fn list_deleted_secrets(&self, vault: &str) -> Result<Vec<SecretSummary>, BackendError> {
+        let tbase = trash_base_dir(&self.store_path, vault);
+        if !tbase.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        let entries = fs::read_dir(&tbase)
+            .map_err(|e| BackendError::Internal(format!("read trash dir: {e}")))?;
+
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+
+            // Look for .meta.json files in this trash entry
+            let dir_path = entry.path();
+            if let Ok(inner_entries) = fs::read_dir(&dir_path) {
+                for inner in inner_entries.flatten() {
+                    let fname = inner.file_name().to_string_lossy().to_string();
+                    if fname.ends_with(".meta.json") {
+                        if let Ok(meta) = read_meta(&inner.path()) {
+                            results.push(meta_to_summary(&meta));
+                        }
+                    }
+                }
+            }
+        }
+
+        results.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(results)
     }
 }
 
@@ -696,7 +863,165 @@ mod tests {
 
         backend.delete_secret("default", "to-delete").await.unwrap();
 
+        // After soft-delete, secret should not exist in active secrets
         assert!(!backend.secret_exists("default", "to-delete").await.unwrap());
+
+        // But should appear in deleted secrets list
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].name, "to-delete");
+    }
+
+    #[tokio::test]
+    async fn soft_delete_and_restore() {
+        let (backend, _tmp) = test_backend();
+
+        backend
+            .set_secret("default", make_request("restore-me", "original-value"))
+            .await
+            .unwrap();
+
+        // Delete
+        backend
+            .delete_secret("default", "restore-me")
+            .await
+            .unwrap();
+        assert!(!backend
+            .secret_exists("default", "restore-me")
+            .await
+            .unwrap());
+
+        // Restore
+        let restored = backend
+            .restore_secret("default", "restore-me")
+            .await
+            .unwrap();
+        assert_eq!(restored.name, "restore-me");
+
+        // Should exist again
+        assert!(backend
+            .secret_exists("default", "restore-me")
+            .await
+            .unwrap());
+
+        // Value should be recoverable
+        let got = backend
+            .get_secret("default", "restore-me", true)
+            .await
+            .unwrap();
+        assert_eq!(&*got.value.unwrap(), "original-value");
+
+        // Deleted list should be empty
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert!(deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn soft_delete_and_purge() {
+        let (backend, _tmp) = test_backend();
+
+        backend
+            .set_secret("default", make_request("purge-me", "val"))
+            .await
+            .unwrap();
+
+        // Create a version first
+        backend
+            .set_secret("default", make_request("purge-me", "val-v2"))
+            .await
+            .unwrap();
+
+        // Delete
+        backend.delete_secret("default", "purge-me").await.unwrap();
+
+        // Purge permanently
+        backend.purge_secret("default", "purge-me").await.unwrap();
+
+        // Should not be in trash anymore
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert!(deleted.is_empty());
+
+        // Should not exist
+        assert!(!backend.secret_exists("default", "purge-me").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rollback_to_previous_version() {
+        let (backend, _tmp) = test_backend();
+
+        // Create v1
+        backend
+            .set_secret("default", make_request("rb-test", "v1-value"))
+            .await
+            .unwrap();
+
+        // Create v2
+        backend
+            .set_secret("default", make_request("rb-test", "v2-value"))
+            .await
+            .unwrap();
+
+        // Current should be v2
+        let current = backend
+            .get_secret("default", "rb-test", true)
+            .await
+            .unwrap();
+        assert_eq!(&*current.value.unwrap(), "v2-value");
+
+        // Rollback to v1
+        let rolled = backend.rollback("default", "rb-test", "v1").await.unwrap();
+        assert!(rolled.version.starts_with('v'));
+
+        // Current should now have v1's encrypted value
+        let after = backend
+            .get_secret("default", "rb-test", true)
+            .await
+            .unwrap();
+        assert_eq!(&*after.value.unwrap(), "v1-value");
+    }
+
+    #[tokio::test]
+    async fn list_versions_returns_all() {
+        let (backend, _tmp) = test_backend();
+
+        backend
+            .set_secret("default", make_request("ver-test", "v1"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("ver-test", "v2"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("ver-test", "v3"))
+            .await
+            .unwrap();
+
+        let versions = backend.list_versions("default", "ver-test").await.unwrap();
+        assert_eq!(versions.len(), 3);
+
+        // Version numbers should be sequential
+        assert_eq!(versions[0].version_number, Some(1));
+        assert_eq!(versions[1].version_number, Some(2));
+        assert_eq!(versions[2].version_number, Some(3));
+    }
+
+    #[tokio::test]
+    async fn secret_exists_for_existing_and_missing() {
+        let (backend, _tmp) = test_backend();
+
+        // Missing secret
+        assert!(!backend.secret_exists("default", "nope").await.unwrap());
+
+        // Create and check
+        backend
+            .set_secret("default", make_request("exists-test", "val"))
+            .await
+            .unwrap();
+        assert!(backend
+            .secret_exists("default", "exists-test")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

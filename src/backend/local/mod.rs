@@ -23,6 +23,8 @@
 
 pub mod config;
 pub mod crypto;
+#[cfg(feature = "file-ops")]
+pub mod files;
 pub mod secrets;
 pub mod vaults;
 
@@ -33,7 +35,12 @@ use async_trait::async_trait;
 use super::error::BackendError;
 use super::{Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend, VaultBackend};
 
+#[cfg(feature = "file-ops")]
+use super::FileBackend;
+
 use self::config::ResolvedLocalConfig;
+#[cfg(feature = "file-ops")]
+use self::files::LocalFileBackend;
 use self::secrets::LocalSecretBackend;
 use self::vaults::LocalVaultBackend;
 
@@ -42,6 +49,8 @@ pub struct LocalBackend {
     config: ResolvedLocalConfig,
     secret_backend: LocalSecretBackend,
     vault_backend: LocalVaultBackend,
+    #[cfg(feature = "file-ops")]
+    file_backend: LocalFileBackend,
 }
 
 impl LocalBackend {
@@ -98,14 +107,27 @@ impl LocalBackend {
             .map_err(|e| BackendError::Internal(format!("write default vault meta: {e}")))?;
         }
 
-        let secret_backend =
-            LocalSecretBackend::new(config.store_path.clone(), identity, recipients);
+        let secret_backend = LocalSecretBackend::new(
+            config.store_path.clone(),
+            identity.clone(),
+            recipients.clone(),
+        );
         let vault_backend = LocalVaultBackend::new(config.store_path.clone());
+
+        #[cfg(feature = "file-ops")]
+        let file_backend = LocalFileBackend::new(
+            config.store_path.clone(),
+            config.default_vault.clone(),
+            identity,
+            recipients,
+        );
 
         Ok(Self {
             config,
             secret_backend,
             vault_backend,
+            #[cfg(feature = "file-ops")]
+            file_backend,
         })
     }
 
@@ -165,11 +187,11 @@ impl Backend for LocalBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             has_vaults: true,
-            has_file_storage: false, // Deferred to PR 7
+            has_file_storage: cfg!(feature = "file-ops"),
             has_rbac: false,
             has_audit: false,
             has_versioning: true,
-            has_soft_delete: false, // Deferred to PR 7
+            has_soft_delete: true,
             has_secret_rotation: false,
             has_groups: true,
             has_folders: true,
@@ -187,6 +209,11 @@ impl Backend for LocalBackend {
 
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         Some(&self.vault_backend)
+    }
+
+    #[cfg(feature = "file-ops")]
+    fn files(&self) -> Option<&dyn FileBackend> {
+        Some(&self.file_backend)
     }
 
     async fn health_check(&self) -> Result<(), BackendError> {
@@ -249,10 +276,11 @@ mod tests {
         assert!(caps.has_folders);
         assert!(caps.has_notes);
         assert!(caps.has_expiry);
-        assert!(!caps.has_file_storage);
+        assert!(caps.has_soft_delete);
         assert!(!caps.has_rbac);
-        assert!(!caps.has_soft_delete);
         assert_eq!(caps.max_name_length, Some(255));
+        #[cfg(feature = "file-ops")]
+        assert!(caps.has_file_storage);
     }
 
     #[tokio::test]
