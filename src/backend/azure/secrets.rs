@@ -10,10 +10,11 @@ use async_trait::async_trait;
 
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
-use crate::error::CrosstacheError;
 use crate::secret::manager::{
     SecretOperations, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
 };
+
+use super::map_error;
 
 /// Adapter that implements [`SecretBackend`] by delegating to an existing
 /// [`SecretOperations`] implementation (i.e. `AzureSecretOperations`).
@@ -27,38 +28,6 @@ impl AzureSecretBackend {
     #[allow(dead_code)]
     pub fn new(inner: Arc<dyn SecretOperations>) -> Self {
         Self { inner }
-    }
-}
-
-/// Map [`CrosstacheError`] → [`BackendError`].
-///
-/// This is a best-effort mapping; variants without a direct BackendError
-/// equivalent are mapped to `BackendError::Internal`.
-fn map_error(err: CrosstacheError) -> BackendError {
-    match err {
-        CrosstacheError::SecretNotFound { name, suggestion } => {
-            BackendError::NotFound { name, suggestion }
-        }
-        CrosstacheError::VaultNotFound { name, suggestion } => {
-            BackendError::VaultNotFound { name, suggestion }
-        }
-        CrosstacheError::AuthenticationError(msg) => BackendError::AuthenticationFailed(msg),
-        CrosstacheError::PermissionDenied(msg) => BackendError::PermissionDenied(msg),
-        CrosstacheError::Conflict(msg) => BackendError::Conflict(msg),
-        CrosstacheError::RateLimited(_msg) => BackendError::RateLimited {
-            retry_after_secs: None,
-        },
-        CrosstacheError::NetworkError(msg) => BackendError::Network(msg),
-        CrosstacheError::DnsResolutionError {
-            vault_name,
-            details,
-        } => BackendError::Network(format!(
-            "DNS resolution failed for '{vault_name}': {details}"
-        )),
-        CrosstacheError::ConnectionTimeout(msg) => BackendError::Network(msg),
-        CrosstacheError::ConnectionRefused(msg) => BackendError::Network(msg),
-        CrosstacheError::SslError(msg) => BackendError::Network(msg),
-        other => BackendError::Internal(other.to_string()),
     }
 }
 
@@ -127,17 +96,76 @@ impl SecretBackend for AzureSecretBackend {
         // The old SecretOperations::update_secret takes &SecretRequest, but
         // the new trait takes SecretUpdateRequest. Translate by building a
         // SecretRequest from the update request fields.
+
+        // Determine whether we need to read the current secret.
+        // We need it when:
+        //  - value is None (to avoid overwriting with empty string)
+        //  - replace_tags is false and new tags are provided (to merge)
+        //  - replace_groups is false and new groups are provided (to merge)
+        let needs_current = request.value.is_none()
+            || (!request.replace_tags && request.tags.is_some())
+            || (!request.replace_groups && request.groups.is_some());
+
+        let current = if needs_current {
+            Some(
+                self.inner
+                    .get_secret(vault, name, true)
+                    .await
+                    .map_err(map_error)?,
+            )
+        } else {
+            None
+        };
+
+        // Resolve the value: use the provided value, or fall back to the current one.
+        let value = match request.value {
+            Some(v) => v,
+            None => current
+                .as_ref()
+                .and_then(|c| c.value.clone())
+                .unwrap_or_else(|| zeroize::Zeroizing::new(String::new())),
+        };
+
+        // Resolve tags: honor replace_tags semantics.
+        let tags = match request.tags {
+            Some(new_tags) if !request.replace_tags => {
+                // Merge: start with existing tags, then overlay new ones.
+                let mut merged = current.as_ref().map(|c| c.tags.clone()).unwrap_or_default();
+                merged.extend(new_tags);
+                Some(merged)
+            }
+            other => other,
+        };
+
+        // Resolve groups: honor replace_groups semantics.
+        let groups = match request.groups {
+            Some(new_groups) if !request.replace_groups => {
+                // Merge: start with existing groups (stored in tags as comma-separated),
+                // then add any new groups that aren't already present.
+                let mut existing: Vec<String> = current
+                    .as_ref()
+                    .and_then(|c| c.tags.get("groups"))
+                    .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_default();
+                for g in new_groups {
+                    if !existing.contains(&g) {
+                        existing.push(g);
+                    }
+                }
+                Some(existing)
+            }
+            other => other,
+        };
+
         let compat_request = SecretRequest {
             name: request.new_name.unwrap_or_else(|| request.name.clone()),
-            value: request
-                .value
-                .unwrap_or_else(|| zeroize::Zeroizing::new(String::new())),
+            value,
             content_type: request.content_type,
             enabled: request.enabled,
             expires_on: request.expires_on,
             not_before: request.not_before,
-            tags: request.tags,
-            groups: request.groups,
+            tags,
+            groups,
             note: request.note,
             folder: request.folder,
         };

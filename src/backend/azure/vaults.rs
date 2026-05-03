@@ -11,11 +11,12 @@ use async_trait::async_trait;
 use crate::backend::error::BackendError;
 use crate::backend::vault::VaultBackend;
 use crate::config::settings::Config;
-use crate::error::CrosstacheError;
 use crate::vault::models::{
     AccessLevel, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary, VaultUpdateRequest,
 };
 use crate::vault::operations::VaultOperations;
+
+use super::map_error;
 
 /// Adapter that implements [`VaultBackend`] by delegating to an existing
 /// [`VaultOperations`] implementation (i.e. `AzureVaultOperations`).
@@ -60,35 +61,6 @@ impl AzureVaultBackend {
             subscription_id: config.subscription_id.clone(),
             default_location: config.default_location.clone(),
         }
-    }
-}
-
-/// Map [`CrosstacheError`] → [`BackendError`].
-fn map_error(err: CrosstacheError) -> BackendError {
-    match err {
-        CrosstacheError::VaultNotFound { name, suggestion } => {
-            BackendError::VaultNotFound { name, suggestion }
-        }
-        CrosstacheError::SecretNotFound { name, suggestion } => {
-            BackendError::NotFound { name, suggestion }
-        }
-        CrosstacheError::AuthenticationError(msg) => BackendError::AuthenticationFailed(msg),
-        CrosstacheError::PermissionDenied(msg) => BackendError::PermissionDenied(msg),
-        CrosstacheError::Conflict(msg) => BackendError::Conflict(msg),
-        CrosstacheError::RateLimited(_msg) => BackendError::RateLimited {
-            retry_after_secs: None,
-        },
-        CrosstacheError::NetworkError(msg) => BackendError::Network(msg),
-        CrosstacheError::DnsResolutionError {
-            vault_name,
-            details,
-        } => BackendError::Network(format!(
-            "DNS resolution failed for '{vault_name}': {details}"
-        )),
-        CrosstacheError::ConnectionTimeout(msg) => BackendError::Network(msg),
-        CrosstacheError::ConnectionRefused(msg) => BackendError::Network(msg),
-        CrosstacheError::SslError(msg) => BackendError::Network(msg),
-        other => BackendError::Internal(other.to_string()),
     }
 }
 

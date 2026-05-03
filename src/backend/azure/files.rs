@@ -12,8 +12,9 @@ use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
 use crate::blob::manager::BlobManager;
 use crate::blob::models::{FileDownloadRequest, FileInfo, FileListRequest, FileUploadRequest};
-use crate::error::CrosstacheError;
 use crate::utils::progress::{NoopReporter, ProgressReporter};
+
+use super::map_error;
 
 /// Adapter that implements [`FileBackend`] by delegating to an existing
 /// [`BlobManager`] instance.
@@ -27,36 +28,6 @@ impl AzureFileBackend {
     #[allow(dead_code)]
     pub fn new(inner: Arc<BlobManager>) -> Self {
         Self { inner }
-    }
-}
-
-/// Map [`CrosstacheError`] → [`BackendError`].
-fn map_error(err: CrosstacheError) -> BackendError {
-    match err {
-        CrosstacheError::VaultNotFound { name, suggestion } => {
-            // BlobManager reuses VaultNotFound for "file not found"
-            BackendError::NotFound { name, suggestion }
-        }
-        CrosstacheError::SecretNotFound { name, suggestion } => {
-            BackendError::NotFound { name, suggestion }
-        }
-        CrosstacheError::AuthenticationError(msg) => BackendError::AuthenticationFailed(msg),
-        CrosstacheError::PermissionDenied(msg) => BackendError::PermissionDenied(msg),
-        CrosstacheError::Conflict(msg) => BackendError::Conflict(msg),
-        CrosstacheError::RateLimited(_msg) => BackendError::RateLimited {
-            retry_after_secs: None,
-        },
-        CrosstacheError::NetworkError(msg) => BackendError::Network(msg),
-        CrosstacheError::DnsResolutionError {
-            vault_name,
-            details,
-        } => BackendError::Network(format!(
-            "DNS resolution failed for '{vault_name}': {details}"
-        )),
-        CrosstacheError::ConnectionTimeout(msg) => BackendError::Network(msg),
-        CrosstacheError::ConnectionRefused(msg) => BackendError::Network(msg),
-        CrosstacheError::SslError(msg) => BackendError::Network(msg),
-        other => BackendError::Internal(other.to_string()),
     }
 }
 

@@ -22,8 +22,43 @@ use super::error::BackendError;
 use super::{Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend, VaultBackend};
 use crate::auth::provider::AzureAuthProvider;
 use crate::config::settings::Config;
+use crate::error::CrosstacheError;
 use crate::secret::manager::AzureSecretOperations;
 use crate::vault::operations::AzureVaultOperations;
+
+/// Map [`CrosstacheError`] → [`BackendError`].
+///
+/// This is a best-effort mapping; variants without a direct BackendError
+/// equivalent are mapped to `BackendError::Internal`.
+///
+/// Shared by all Azure sub-backends (secrets, vaults, files).
+pub fn map_error(err: CrosstacheError) -> BackendError {
+    match err {
+        CrosstacheError::SecretNotFound { name, suggestion } => {
+            BackendError::NotFound { name, suggestion }
+        }
+        CrosstacheError::VaultNotFound { name, suggestion } => {
+            BackendError::VaultNotFound { name, suggestion }
+        }
+        CrosstacheError::AuthenticationError(msg) => BackendError::AuthenticationFailed(msg),
+        CrosstacheError::PermissionDenied(msg) => BackendError::PermissionDenied(msg),
+        CrosstacheError::Conflict(msg) => BackendError::Conflict(msg),
+        CrosstacheError::RateLimited(_msg) => BackendError::RateLimited {
+            retry_after_secs: None,
+        },
+        CrosstacheError::NetworkError(msg) => BackendError::Network(msg),
+        CrosstacheError::DnsResolutionError {
+            vault_name,
+            details,
+        } => BackendError::Network(format!(
+            "DNS resolution failed for '{vault_name}': {details}"
+        )),
+        CrosstacheError::ConnectionTimeout(msg) => BackendError::Network(msg),
+        CrosstacheError::ConnectionRefused(msg) => BackendError::Network(msg),
+        CrosstacheError::SslError(msg) => BackendError::Network(msg),
+        other => BackendError::Internal(other.to_string()),
+    }
+}
 
 use self::secrets::AzureSecretBackend;
 use self::vaults::AzureVaultBackend;
@@ -114,7 +149,16 @@ impl Backend for AzureBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             has_vaults: true,
-            has_file_storage: cfg!(feature = "file-ops"),
+            has_file_storage: {
+                #[cfg(feature = "file-ops")]
+                {
+                    self.file_backend.is_some()
+                }
+                #[cfg(not(feature = "file-ops"))]
+                {
+                    false
+                }
+            },
             has_rbac: true,
             has_audit: false,
             has_versioning: true,
