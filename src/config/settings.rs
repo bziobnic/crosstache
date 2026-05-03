@@ -10,6 +10,30 @@ use std::fmt;
 use std::path::PathBuf;
 use tabled::Tabled;
 
+// ---------------------------------------------------------------------------
+// Local backend configuration (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Configuration for the local age-encrypted file backend.
+///
+/// Lives under `[local]` in `xv.conf`. Only relevant when `backend = "local"`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalConfig {
+    /// Root directory for the encrypted secret store.
+    /// Defaults to `$XDG_DATA_HOME/xv/store` (or `~/.local/share/xv/store`).
+    #[serde(default)]
+    pub store_path: Option<String>,
+
+    /// Path to the age identity (private key) file.
+    /// Defaults to `$XDG_CONFIG_HOME/xv/age-key.txt`.
+    #[serde(default)]
+    pub key_file: Option<String>,
+
+    /// Default vault name used when no `--vault` / context is set.
+    #[serde(default)]
+    pub default_vault: Option<String>,
+}
+
 /// Azure credential type priority for authentication
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +106,12 @@ impl Default for BlobConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct Config {
+    /// Active backend: `"azure"` (default) or `"local"`.
+    /// Missing / `None` is treated as `"azure"` for backward compatibility.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub backend: Option<String>,
+
     #[tabled(rename = "Debug")]
     pub debug: bool,
     #[tabled(rename = "Subscription ID")]
@@ -121,6 +151,11 @@ pub struct Config {
     #[tabled(rename = "Credential Priority")]
     #[serde(default)]
     pub azure_credential_priority: AzureCredentialType,
+    /// Configuration for the local age-encrypted file backend.
+    /// Only relevant when `backend = "local"`.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub local: Option<LocalConfig>,
     /// Seconds before clipboard is automatically cleared (0 to disable)
     #[tabled(rename = "Clipboard Timeout")]
     #[serde(default = "default_clipboard_timeout")]
@@ -154,6 +189,7 @@ fn default_cache_ttl_secs() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            backend: None,
             debug: false,
             subscription_id: String::new(),
             default_vault: String::new(),
@@ -168,6 +204,7 @@ impl Default for Config {
             no_color: false,
             blob_config: None,
             azure_credential_priority: AzureCredentialType::Default,
+            local: None,
             clipboard_timeout: default_clipboard_timeout(),
             gen_default_charset: None,
             env_flag: None,
@@ -225,6 +262,15 @@ impl Config {
 
     pub async fn save(&self) -> Result<()> {
         save_config(self).await
+    }
+
+    /// Return the effective backend name as a string.
+    ///
+    /// Resolves `self.backend` (an `Option<String>`) to a definite value.
+    /// `None` is treated as `"azure"` for backward compatibility.
+    #[allow(dead_code)]
+    pub fn effective_backend_name(&self) -> &str {
+        self.backend.as_deref().unwrap_or("azure")
     }
 
     /// Resolve vault name with context awareness
@@ -433,6 +479,11 @@ async fn load_from_file(path: &PathBuf) -> Result<Config> {
 }
 
 fn load_from_env(config: &mut Config) {
+    // Backend override from environment variable
+    if let Ok(value) = std::env::var("XV_BACKEND") {
+        config.backend = Some(value);
+    }
+
     if let Ok(value) = std::env::var("DEBUG") {
         config.debug = value.to_lowercase() == "true" || value == "1";
     }

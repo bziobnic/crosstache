@@ -98,6 +98,17 @@ pub struct Cli {
     #[arg(long, global = true, hide = should_hide_options())]
     pub env: Option<String>,
 
+    /// Secrets backend to use (overrides config file and XV_BACKEND env var).
+    /// Valid values: azure, local.
+    #[arg(
+        long,
+        global = true,
+        value_name = "BACKEND",
+        env = "XV_BACKEND",
+        hide = should_hide_options()
+    )]
+    pub backend: Option<String>,
+
     /// Custom template string for template format
     #[arg(long, global = true, hide = should_hide_options())]
     pub template: Option<String>,
