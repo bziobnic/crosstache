@@ -15,6 +15,7 @@ use crate::utils::pagination::Pagination;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_set_direct(
     args: Vec<String>,
     stdin: bool,
@@ -353,6 +354,7 @@ pub(crate) async fn execute_secret_rollback_direct(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_rotate_direct(
     name: &str,
     length: usize,

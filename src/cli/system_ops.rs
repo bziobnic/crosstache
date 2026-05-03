@@ -251,6 +251,7 @@ impl AzureActivityLogClient {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_audit_command(
     name: Option<String>,
     vault: Option<String>,
