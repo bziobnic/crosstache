@@ -4,7 +4,7 @@
 //! including Azure environment detection, configuration building, and vault creation.
 
 use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
-use crate::config::settings::Config;
+use crate::config::settings::{Config, LocalConfig};
 use crate::error::{CrosstacheError, Result};
 use crate::utils::azure_detect::{AzureDetector, AzureEnvironment, AzureSubscription};
 use crate::utils::interactive::{InteractivePrompt, ProgressIndicator, SetupHelper};
@@ -45,6 +45,25 @@ impl ConfigInitializer {
     /// Run the complete interactive initialization process
     pub async fn run_interactive_setup(&self) -> Result<Config> {
         self.prompt.welcome()?;
+
+        // Step 0: Choose backend
+        println!();
+        output::step("Backend Selection");
+        let backend_options = vec![
+            "Azure Key Vault (cloud-based, requires Azure subscription)".to_string(),
+            "Local (age-encrypted files, offline, no cloud account needed)".to_string(),
+        ];
+        let backend_index = self.prompt.select(
+            "Which secrets backend would you like to use?",
+            &backend_options,
+            Some(0),
+        )?;
+
+        if backend_index == 1 {
+            return self.run_local_setup().await;
+        }
+
+        // Azure flow (unchanged)
 
         // Step 1: Detect Azure environment
         println!();
@@ -119,6 +138,100 @@ impl ConfigInitializer {
 
         output::success("Setup completed successfully!");
         output::info("You can now start using crosstache with your configured defaults.");
+
+        Ok(config)
+    }
+
+    /// Run the simplified local backend setup (3 steps).
+    async fn run_local_setup(&self) -> Result<Config> {
+        // Step 1: Store path
+        println!();
+        output::step("Step 1/3: Store Location");
+        let default_store = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".xv")
+            .join("store");
+        let store_path = self.prompt.input_text(
+            "Store path for encrypted secrets",
+            Some(&default_store.to_string_lossy()),
+        )?;
+
+        // Step 2: Key file path
+        println!();
+        output::step("Step 2/3: Key File");
+        let default_key = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".xv")
+            .join("key.txt");
+        let key_file = self
+            .prompt
+            .input_text("Age key file path", Some(&default_key.to_string_lossy()))?;
+
+        // Step 3: Default vault name
+        println!();
+        output::step("Step 3/3: Default Vault");
+        let default_vault = self
+            .prompt
+            .input_text("Default vault name", Some("default"))?;
+
+        // Create the local backend (generates keys and directories automatically)
+        let local_config = LocalConfig {
+            store_path: Some(store_path.clone()),
+            key_file: Some(key_file.clone()),
+            default_vault: Some(default_vault.clone()),
+        };
+
+        let progress = ProgressIndicator::new("Setting up local backend...");
+        crate::backend::local::LocalBackend::new(Some(&local_config))
+            .map_err(|e| CrosstacheError::config(format!("Failed to create local backend: {e}")))?;
+        progress.finish_success("Local backend initialized");
+
+        // Read the public key for the summary
+        let resolved =
+            crate::backend::local::config::ResolvedLocalConfig::from_raw(Some(&local_config));
+        let public_key = if resolved.recipients_file.exists() {
+            std::fs::read_to_string(&resolved.recipients_file)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        // Build and save config
+        let config = Config {
+            backend: Some("local".to_string()),
+            local: Some(local_config),
+            // Azure fields get sensible empty defaults
+            subscription_id: String::new(),
+            tenant_id: String::new(),
+            default_vault: default_vault.clone(),
+            default_resource_group: String::new(),
+            default_location: String::new(),
+            output_json: false,
+            runtime_output_format: crate::utils::format::OutputFormat::Auto,
+            template: None,
+            no_color: false,
+            debug: false,
+            cache_enabled: true,
+            cache_ttl_secs: 900,
+            blob_config: None,
+            azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
+            clipboard_timeout: 30,
+            gen_default_charset: None,
+            env_flag: None,
+        };
+
+        self.save_config(&config).await?;
+
+        output::success("Local backend setup completed!");
+        println!();
+        println!("  Store path:    {store_path}");
+        println!("  Key file:      {key_file}");
+        println!("  Default vault: {default_vault}");
+        if !public_key.is_empty() {
+            println!("  Public key:    {public_key}");
+        }
 
         Ok(config)
     }
@@ -842,6 +955,17 @@ impl ConfigInitializer {
 
     /// Show setup summary
     pub fn show_setup_summary(&self, config: &Config) -> Result<()> {
+        // Local backend shows its own summary in run_local_setup()
+        if config.backend.as_deref() == Some("local") {
+            println!();
+            output::info("Next steps:");
+            output::hint("Set a secret: xv set my-secret");
+            output::hint("Get a secret: xv get my-secret --raw");
+            output::hint("List secrets: xv list");
+            output::hint("Get help: xv --help");
+            return Ok(());
+        }
+
         println!();
         output::success("Setup Summary");
         println!();
