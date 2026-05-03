@@ -219,12 +219,15 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.subscription_id.is_empty() {
-            return Err(CrosstacheError::config("Subscription ID is required"));
-        }
+        // Azure-specific fields are only required when using the Azure backend.
+        if self.effective_backend_name() == "azure" {
+            if self.subscription_id.is_empty() {
+                return Err(CrosstacheError::config("Subscription ID is required"));
+            }
 
-        if self.tenant_id.is_empty() {
-            return Err(CrosstacheError::config("Tenant ID is required"));
+            if self.tenant_id.is_empty() {
+                return Err(CrosstacheError::config("Tenant ID is required"));
+            }
         }
 
         Ok(())
