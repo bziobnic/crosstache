@@ -15,6 +15,7 @@
 //! See also: [`BackendError`] for the backend-agnostic error type, and
 //! [`BackendRegistry`] for runtime backend resolution.
 
+pub mod azure;
 pub mod error;
 #[cfg(feature = "file-ops")]
 pub mod file;
