@@ -74,7 +74,8 @@ async fn run(cli: Cli) -> Result<()> {
         | crate::cli::Commands::Init
         | crate::cli::Commands::Upgrade { .. }
         | crate::cli::Commands::Version
-        | crate::cli::Commands::Completion { .. } => {
+        | crate::cli::Commands::Completion { .. }
+        | crate::cli::Commands::Migrate { .. } => {
             // These commands don't talk to Azure — skip credential validation.
             load_config_without_validation().await?
         }
@@ -110,6 +111,7 @@ async fn run(cli: Cli) -> Result<()> {
             | crate::cli::Commands::Cache { .. }
             | crate::cli::Commands::Context { .. }
             | crate::cli::Commands::Env { .. }
+            | crate::cli::Commands::Migrate { .. }
             | crate::cli::Commands::Scan {
                 command: Some(crate::cli::commands::ScanCommands::Install { .. }),
                 ..

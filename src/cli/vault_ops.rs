@@ -155,6 +155,16 @@ pub(crate) async fn execute_vault_command(
             vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Share { command } => {
+            // Capability check: vault sharing requires RBAC support
+            if let Some(registry) = registry {
+                let caps = registry.active().capabilities();
+                if !caps.has_rbac {
+                    return Err(CrosstacheError::InvalidArgument(format!(
+                        "The {} backend does not support vault sharing. Use the azure backend for RBAC.",
+                        registry.active().name()
+                    )));
+                }
+            }
             execute_vault_share(&vault_manager, &auth_provider, command, &config).await?;
         }
     }

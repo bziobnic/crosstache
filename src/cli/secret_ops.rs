@@ -322,6 +322,17 @@ pub(crate) async fn execute_secret_history_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Capability check: history requires versioning support
+    if let Some(registry) = registry {
+        let caps = registry.active().capabilities();
+        if !caps.has_versioning {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support version history.",
+                registry.active().name()
+            )));
+        }
+    }
+
     // TODO(backend-trait): Use registry.active().secrets().get_secret_versions() directly.
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
@@ -338,6 +349,17 @@ pub(crate) async fn execute_secret_rollback_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Capability check: rollback requires versioning support
+    if let Some(registry) = registry {
+        let caps = registry.active().capabilities();
+        if !caps.has_versioning {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support version rollback.",
+                registry.active().name()
+            )));
+        }
+    }
+
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -482,6 +504,17 @@ pub(crate) async fn execute_secret_purge_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Capability check: purge requires soft-delete support
+    if let Some(registry) = registry {
+        let caps = registry.active().capabilities();
+        if !caps.has_soft_delete {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support purge (soft-delete not available).",
+                registry.active().name()
+            )));
+        }
+    }
+
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -503,6 +536,17 @@ pub(crate) async fn execute_secret_restore_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Capability check: restore requires soft-delete support
+    if let Some(registry) = registry {
+        let caps = registry.active().capabilities();
+        if !caps.has_soft_delete {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support restore (soft-delete not available).",
+                registry.active().name()
+            )));
+        }
+    }
+
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -753,6 +797,17 @@ pub(crate) async fn execute_secret_share_direct(
 ) -> Result<()> {
     use crate::auth::provider::AzureAuthProvider;
     use crate::vault::manager::VaultManager;
+
+    // Capability check: sharing requires RBAC support
+    if let Some(registry) = registry {
+        let caps = registry.active().capabilities();
+        if !caps.has_rbac {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support access sharing. Use the azure backend for RBAC.",
+                registry.active().name()
+            )));
+        }
+    }
 
     let auth_provider: Arc<dyn AzureAuthProvider> = get_azure_auth_provider(registry, &config)?;
 
