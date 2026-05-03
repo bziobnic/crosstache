@@ -67,7 +67,7 @@ impl BackendRegistry {
     }
 
     /// Create an Azure auth provider from the config's credential priority.
-    fn create_azure_auth_provider(
+    pub fn create_azure_auth_provider(
         config: &Config,
     ) -> Result<Arc<dyn crate::auth::provider::AzureAuthProvider>, BackendError> {
         use crate::auth::provider::DefaultAzureCredentialProvider;

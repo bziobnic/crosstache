@@ -683,6 +683,27 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<ScanCommands>,
     },
+    /// Migrate secrets between backends
+    Migrate {
+        /// Source backend (azure, local)
+        #[arg(long)]
+        from: String,
+        /// Target backend (azure, local)
+        #[arg(long)]
+        to: String,
+        /// Only migrate secrets from this vault
+        #[arg(long)]
+        vault: Option<String>,
+        /// Filter secrets by glob pattern (e.g., "db-*", "api-*")
+        #[arg(long)]
+        filter: Option<String>,
+        /// Preview what would be migrated without making changes
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite secrets that already exist in the target
+        #[arg(long)]
+        overwrite: bool,
+    },
     /// Open the read-only terminal browser. Requires --features tui at build time.
     #[cfg(feature = "tui")]
     Tui,
@@ -1437,6 +1458,19 @@ impl Cli {
                 )
                 .await
             }
+            Commands::Migrate {
+                from,
+                to,
+                vault,
+                filter,
+                dry_run,
+                overwrite,
+            } => {
+                crate::cli::migrate_ops::execute_migrate(
+                    from, to, vault, filter, dry_run, overwrite, config,
+                )
+                .await
+            }
             #[cfg(feature = "tui")]
             Commands::Tui => crate::tui::run_tui(config, registry).await,
         }
@@ -1639,6 +1673,69 @@ mod tests {
     }
 
     // ── gen command unit tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_migrate_command_parses() {
+        let cli = Cli::try_parse_from([
+            "xv",
+            "migrate",
+            "--from",
+            "azure",
+            "--to",
+            "local",
+            "--vault",
+            "my-vault",
+            "--filter",
+            "db-*",
+            "--dry-run",
+            "--overwrite",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Migrate {
+                from,
+                to,
+                vault,
+                filter,
+                dry_run,
+                overwrite,
+            } => {
+                assert_eq!(from, "azure");
+                assert_eq!(to, "local");
+                assert_eq!(vault, Some("my-vault".to_string()));
+                assert_eq!(filter, Some("db-*".to_string()));
+                assert!(dry_run);
+                assert!(overwrite);
+            }
+            _ => panic!("Expected Migrate command"),
+        }
+    }
+
+    #[test]
+    fn test_migrate_command_minimal_parses() {
+        let cli =
+            Cli::try_parse_from(["xv", "migrate", "--from", "local", "--to", "azure"]).unwrap();
+
+        match cli.command {
+            Commands::Migrate {
+                from,
+                to,
+                vault,
+                filter,
+                dry_run,
+                overwrite,
+            } => {
+                assert_eq!(from, "local");
+                assert_eq!(to, "azure");
+                assert_eq!(vault, None);
+                assert_eq!(filter, None);
+                assert!(!dry_run);
+                assert!(!overwrite);
+            }
+            _ => panic!("Expected Migrate command"),
+        }
+    }
 
     #[test]
     fn test_gen_length_validation_lower_bound() {

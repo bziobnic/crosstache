@@ -264,6 +264,17 @@ pub(crate) async fn execute_audit_command(
 ) -> Result<()> {
     use std::sync::Arc;
 
+    // Capability check: audit requires audit log support
+    if let Some(registry) = registry {
+        let caps = registry.active().capabilities();
+        if !caps.has_audit {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support audit logs.",
+                registry.active().name()
+            )));
+        }
+    }
+
     // Create authentication provider — reuse from registry when available
     let auth_provider: Arc<dyn crate::auth::provider::AzureAuthProvider> =
         crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
