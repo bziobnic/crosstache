@@ -76,15 +76,13 @@ impl From<BackendError> for CrosstacheError {
             BackendError::Unsupported(feature) => {
                 CrosstacheError::InvalidArgument(format!("operation not supported: {feature}"))
             }
-            BackendError::Conflict(msg) => {
-                CrosstacheError::AzureApiError(format!("conflict: {msg}"))
-            }
+            BackendError::Conflict(msg) => CrosstacheError::Conflict(msg),
             BackendError::RateLimited { retry_after_secs } => {
                 let detail = match retry_after_secs {
                     Some(secs) => format!("rate limited — retry after {secs}s"),
                     None => "rate limited".to_string(),
                 };
-                CrosstacheError::AzureApiError(detail)
+                CrosstacheError::RateLimited(detail)
             }
             BackendError::Network(msg) => CrosstacheError::NetworkError(msg),
             BackendError::Internal(msg) => CrosstacheError::Unknown(msg),
@@ -135,5 +133,30 @@ mod tests {
         let be = BackendError::Network("timeout".into());
         let ce: CrosstacheError = be.into();
         assert!(matches!(ce, CrosstacheError::NetworkError(_)));
+    }
+
+    #[test]
+    fn conflict_converts_to_conflict() {
+        let be = BackendError::Conflict("already exists".into());
+        let ce: CrosstacheError = be.into();
+        assert!(matches!(ce, CrosstacheError::Conflict(ref s) if s == "already exists"));
+    }
+
+    #[test]
+    fn rate_limited_converts_to_rate_limited() {
+        let be = BackendError::RateLimited {
+            retry_after_secs: Some(30),
+        };
+        let ce: CrosstacheError = be.into();
+        assert!(matches!(ce, CrosstacheError::RateLimited(_)));
+    }
+
+    #[test]
+    fn rate_limited_without_retry_converts_to_rate_limited() {
+        let be = BackendError::RateLimited {
+            retry_after_secs: None,
+        };
+        let ce: CrosstacheError = be.into();
+        assert!(matches!(ce, CrosstacheError::RateLimited(ref s) if s == "rate limited"));
     }
 }
