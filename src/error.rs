@@ -9,6 +9,14 @@ pub enum CrosstacheError {
     #[error("Azure API error: {0}")]
     AzureApiError(String),
 
+    #[error("Conflict: {0}")]
+    #[allow(dead_code)]
+    Conflict(String),
+
+    #[error("Rate limited: {0}")]
+    #[allow(dead_code)]
+    RateLimited(String),
+
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
@@ -98,6 +106,8 @@ impl CrosstacheError {
         match self {
             Self::AuthenticationError(_) => "xv-auth-failed",
             Self::AzureApiError(_) => "xv-azure-api",
+            Self::Conflict(_) => "xv-conflict",
+            Self::RateLimited(_) => "xv-rate-limited",
             Self::ConfigError(_) => "xv-config-invalid",
             Self::ConfigLoadError(_) => "xv-config-invalid",
             Self::SecretNotFound { .. } => "xv-secret-not-found",
@@ -147,6 +157,8 @@ impl CrosstacheError {
             Self::InvalidUrl(_) => 35,
 
             Self::AzureApiError(_) => 40,
+            Self::Conflict(_) => 41,
+            Self::RateLimited(_) => 42,
 
             // 50–59 — policy/scan findings
             Self::ScanLeakDetected { .. } => 50,
@@ -169,6 +181,16 @@ impl CrosstacheError {
 
     pub fn azure_api<S: Into<String>>(msg: S) -> Self {
         Self::AzureApiError(msg.into())
+    }
+
+    #[allow(dead_code)]
+    pub fn conflict<S: Into<String>>(msg: S) -> Self {
+        Self::Conflict(msg.into())
+    }
+
+    #[allow(dead_code)]
+    pub fn rate_limited<S: Into<String>>(msg: S) -> Self {
+        Self::RateLimited(msg.into())
     }
 
     pub fn config<S: Into<String>>(msg: S) -> Self {
@@ -472,6 +494,8 @@ mod tests {
         let cases: Vec<(CrosstacheError, &str)> = vec![
             (CrosstacheError::authentication("x"), "xv-auth-failed"),
             (CrosstacheError::azure_api("x"), "xv-azure-api"),
+            (CrosstacheError::conflict("x"), "xv-conflict"),
+            (CrosstacheError::rate_limited("x"), "xv-rate-limited"),
             (CrosstacheError::config("x"), "xv-config-invalid"),
             (
                 CrosstacheError::secret_not_found("x"),
@@ -550,6 +574,8 @@ mod tests {
 
         // 40–49 — Azure/backend
         assert_eq!(CrosstacheError::azure_api("x").exit_code(), 40);
+        assert_eq!(CrosstacheError::conflict("x").exit_code(), 41);
+        assert_eq!(CrosstacheError::rate_limited("x").exit_code(), 42);
 
         // 1 — unknown / catch-all
         assert_eq!(CrosstacheError::unknown("x").exit_code(), 1);
@@ -619,6 +645,8 @@ mod tests {
         let variant_field_names = [
             ("AuthenticationError", vec!["msg"]),
             ("AzureApiError", vec!["msg"]),
+            ("Conflict", vec!["msg"]),
+            ("RateLimited", vec!["msg"]),
             ("ConfigError", vec!["msg"]),
             ("ConfigLoadError", vec!["source"]),
             ("SecretNotFound", vec!["name", "suggestion"]),
