@@ -3,7 +3,7 @@
 use crate::auth::provider::AzureAuthProvider;
 use crate::backend::BackendRegistry;
 use crate::cli::commands::{VaultCommands, VaultShareCommands};
-use crate::cli::helpers::get_azure_auth_provider;
+use crate::cli::helpers::{get_azure_auth_provider, use_trait_path};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
@@ -17,6 +17,112 @@ pub(crate) async fn execute_vault_command(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // ── Trait-based path (non-Azure backends) ──────────────────────────
+    if use_trait_path(registry) {
+        let reg = registry.expect("use_trait_path guarantees Some");
+        let vaults_backend = reg.active().vaults().ok_or_else(|| {
+            CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support vault operations.",
+                reg.active().name()
+            ))
+        })?;
+
+        match command {
+            VaultCommands::Create { name, .. } => {
+                let request = crate::vault::models::VaultCreateRequest {
+                    name: name.clone(),
+                    location: String::new(),
+                    resource_group: String::new(),
+                    subscription_id: String::new(),
+                    sku: None,
+                    enabled_for_deployment: None,
+                    enabled_for_disk_encryption: None,
+                    enabled_for_template_deployment: None,
+                    soft_delete_retention_in_days: None,
+                    purge_protection: None,
+                    tags: None,
+                    access_policies: None,
+                };
+                let vault = vaults_backend.create_vault(request).await?;
+                output::success(&format!("Successfully created vault '{}'", vault.name));
+            }
+            VaultCommands::List {
+                format,
+                page,
+                page_size,
+                pager,
+                ..
+            } => {
+                use crate::utils::format::TableFormatter;
+                use crate::utils::pagination::{
+                    paginate_slice, pagination_footer_text, Pagination,
+                };
+
+                let vaults = vaults_backend.list_vaults().await?;
+                let output_format = format.resolve_for_stdout();
+                let pagination = Pagination::from_args(page, page_size)?;
+
+                if vaults.is_empty() {
+                    output::info("No vaults found.");
+                } else {
+                    let page_data = paginate_slice(&vaults, pagination);
+                    let formatter = TableFormatter::new(
+                        output_format,
+                        config.no_color,
+                        config.template.clone(),
+                    );
+                    let mut out = formatter.format_table(&page_data.items)?;
+                    if let Some(footer) = pagination_footer_text(&page_data, "vault", output_format)
+                    {
+                        out.push('\n');
+                        out.push_str(&footer);
+                    }
+                    crate::utils::pager::print_output(&out, pager)?;
+                }
+            }
+            VaultCommands::Delete { name, force, .. } => {
+                if !force {
+                    output::warn(&format!(
+                        "About to delete vault '{name}'. Use --force to confirm."
+                    ));
+                    return Ok(());
+                }
+                vaults_backend.delete_vault(&name).await?;
+                output::success(&format!("Successfully deleted vault '{name}'"));
+            }
+            VaultCommands::Info { name, .. } => {
+                let vault = vaults_backend.get_vault(&name).await?;
+                if config.output_json {
+                    let json = serde_json::to_string_pretty(&vault).map_err(|e| {
+                        CrosstacheError::serialization(format!(
+                            "Failed to serialize vault info: {e}"
+                        ))
+                    })?;
+                    println!("{json}");
+                } else {
+                    use crate::utils::format::TableFormatter;
+                    let formatter = TableFormatter::new(
+                        config.runtime_output_format,
+                        config.no_color,
+                        config.template.clone(),
+                    );
+                    let table = formatter.format_table(&[vault])?;
+                    println!("{table}");
+                }
+            }
+            _other => {
+                // Commands not yet supported on non-Azure backends
+                // (Restore, Purge, Export, Import, Update, Share)
+                return Err(CrosstacheError::InvalidArgument(format!(
+                    "The {} backend does not support this vault command yet.",
+                    reg.active().name(),
+                )));
+            }
+        }
+        return Ok(());
+    }
+
+    // ── Azure legacy path (unchanged) ─────────────────────────────────
     // Create authentication provider — reuse from registry when available
     let auth_provider: Arc<dyn AzureAuthProvider> = get_azure_auth_provider(registry, &config)?;
 
