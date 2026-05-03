@@ -18,6 +18,7 @@ xv scan install                        # block secret leaks before commit
 ## Table of contents
 
 - [Quick start](#quick-start)
+- [Local Backend (age-encrypted files)](#local-backend-age-encrypted-files)
 - [Installation](#installation)
 - [Common workflows](#common-workflows) — end-to-end recipes
 - [Secrets — CRUD](#secrets--crud)
@@ -63,6 +64,73 @@ xv tui
 ```
 
 That's the 5-minute path. The rest of this doc shows what's possible once you've got the basics.
+
+---
+
+## Local Backend (age-encrypted files)
+
+The local backend stores secrets as age-encrypted files on your machine — no cloud account needed.
+
+### Quick start
+
+```bash
+# Initialize with local backend
+xv init
+# → Choose "Local" when prompted
+
+# Or set backend via env
+export XV_BACKEND=local
+
+# Basic secret operations
+xv set DB_PASSWORD
+xv get DB_PASSWORD --raw
+xv list
+```
+
+### How it works
+
+Secrets are encrypted with [age](https://age-encryption.org/) and stored as individual files:
+
+```
+~/.xv/
+├── key.txt              # Your age private key (0600 permissions)
+├── recipients.txt       # Public key for encryption
+└── store/
+    └── vaults/
+        └── default/
+            ├── .vault.json
+            └── secrets/
+                ├── DB_PASSWORD.age          # Encrypted value
+                └── DB_PASSWORD.meta.json    # Metadata (name, groups, tags)
+```
+
+### Migrating between backends
+
+```bash
+# Copy all secrets from Azure to local
+xv migrate --from azure --to local
+
+# Copy from local to Azure
+xv migrate --from local --to azure --vault my-keyvault
+
+# Preview what would be migrated
+xv migrate --from azure --to local --dry-run
+
+# Filter by pattern
+xv migrate --from azure --to local --filter "db-*"
+```
+
+### Configuration
+
+```toml
+# ~/.config/xv/xv.conf
+backend = "local"
+
+[local]
+store_path = "~/.xv/store"
+key_file = "~/.xv/key.txt"
+default_vault = "default"
+```
 
 ---
 
