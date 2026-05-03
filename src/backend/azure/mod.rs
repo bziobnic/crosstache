@@ -32,6 +32,7 @@ use crate::vault::operations::AzureVaultOperations;
 /// equivalent are mapped to `BackendError::Internal`.
 ///
 /// Shared by all Azure sub-backends (secrets, vaults, files).
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — called by future trait impls.
 pub fn map_error(err: CrosstacheError) -> BackendError {
     match err {
         CrosstacheError::SecretNotFound { name, suggestion } => {
@@ -72,7 +73,7 @@ use crate::blob::manager::BlobManager;
 
 /// Azure Key Vault backend — wraps all existing Azure implementations
 /// behind the new [`Backend`] trait.
-#[allow(dead_code)]
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — fields read via trait impls.
 pub struct AzureBackend {
     secret_backend: AzureSecretBackend,
     vault_backend: AzureVaultBackend,
@@ -86,7 +87,6 @@ impl AzureBackend {
     ///
     /// This wires up the three sub-backends using the existing Azure
     /// implementation types.
-    #[allow(dead_code)]
     pub fn new(
         config: &Config,
         auth_provider: Arc<dyn AzureAuthProvider>,
@@ -133,6 +133,16 @@ impl AzureBackend {
             file_backend,
             auth_provider,
         })
+    }
+
+    /// Return the auth provider used by this backend.
+    ///
+    /// Used by the CLI layer during migration: handlers that still rely on
+    /// Azure-specific managers (`SecretManager`, `VaultManager`) can extract
+    /// the already-created auth provider instead of constructing a new one.
+    #[allow(dead_code)] // Used during migration — will be removed once all handlers use backend traits.
+    pub fn auth_provider(&self) -> &Arc<dyn AzureAuthProvider> {
+        &self.auth_provider
     }
 }
 

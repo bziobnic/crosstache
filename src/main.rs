@@ -8,6 +8,7 @@ use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod auth;
+mod backend;
 #[cfg(feature = "file-ops")]
 mod blob;
 mod cache;
@@ -92,8 +93,36 @@ async fn run(cli: Cli) -> Result<()> {
         config.backend = Some(backend.clone());
     }
 
+    // Build the backend registry for commands that talk to a secrets backend.
+    // Commands that don't need a backend (Config, Init, etc.) skip this.
+    let needs_backend = !matches!(
+        cli.command,
+        crate::cli::Commands::Config { .. }
+            | crate::cli::Commands::Init
+            | crate::cli::Commands::Upgrade { .. }
+            | crate::cli::Commands::Version
+            | crate::cli::Commands::Completion { .. }
+            | crate::cli::Commands::Parse { .. }
+    );
+
+    let registry = if needs_backend {
+        match backend::BackendRegistry::from_config(&config) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                // If the backend is unsupported or auth fails, surface a
+                // clear error instead of silently falling back.
+                return Err(CrosstacheError::config(format!(
+                    "Failed to initialize '{}' backend: {e}",
+                    config.effective_backend_name()
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
     // Execute the command
-    cli.execute(config).await?;
+    cli.execute(config, registry.as_ref()).await?;
 
     Ok(())
 }

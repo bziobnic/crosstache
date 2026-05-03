@@ -1,9 +1,10 @@
 //! Secret command execution handlers.
 
-use crate::auth::provider::DefaultAzureCredentialProvider;
+use crate::backend::BackendRegistry;
 use crate::cli::commands::{CharsetType, ShareCommands};
 use crate::cli::helpers::{
-    copy_to_clipboard, generate_random_value, mask_secrets, schedule_clipboard_clear,
+    copy_to_clipboard, generate_random_value, get_azure_auth_provider, mask_secrets,
+    schedule_clipboard_clear,
 };
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
@@ -22,16 +23,11 @@ pub(crate) async fn execute_secret_set_direct(
     expires: Option<String>,
     not_before: Option<String>,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    // TODO(backend-trait): Use registry.active().secrets().set_secret() directly
+    // once SecretBackend supports all set options (notes, folders, expiry).
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -81,16 +77,10 @@ pub(crate) async fn execute_secret_get_direct(
     raw: bool,
     version: Option<String>,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    // TODO(backend-trait): Use registry.active().secrets().get_secret() directly.
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -238,6 +228,7 @@ pub(crate) async fn execute_secret_list_direct(
     pager: bool,
     names_only: bool,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
 
@@ -266,15 +257,9 @@ pub(crate) async fn execute_secret_list_direct(
         }
     }
 
-    // Cache miss — create auth provider and secret manager
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    // Cache miss — get auth provider from registry
+    // TODO(backend-trait): Use registry.active().secrets().list_secrets() directly.
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
@@ -303,16 +288,10 @@ pub(crate) async fn execute_secret_delete_direct(
     group: Option<String>,
     force: bool,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    // TODO(backend-trait): Use registry.active().secrets().delete_secret() directly.
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -337,16 +316,9 @@ pub(crate) async fn execute_secret_delete_direct(
     Ok(())
 }
 
-pub(crate) async fn execute_secret_history_direct(name: &str, config: Config) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+pub(crate) async fn execute_secret_history_direct(name: &str, config: Config, registry: Option<&BackendRegistry>) -> Result<()> {
+    // TODO(backend-trait): Use registry.active().secrets().get_secret_versions() directly.
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -359,16 +331,9 @@ pub(crate) async fn execute_secret_rollback_direct(
     version: &str,
     force: bool,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -392,16 +357,9 @@ pub(crate) async fn execute_secret_rotate_direct(
     show_value: bool,
     force: bool,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -433,16 +391,9 @@ pub(crate) async fn execute_secret_run_direct(
     no_masking: bool,
     command: Vec<String>,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -455,16 +406,9 @@ pub(crate) async fn execute_secret_inject_direct(
     out: Option<String>,
     group: Vec<String>,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -489,16 +433,9 @@ pub(crate) async fn execute_secret_update_direct(
     clear_expires: bool,
     clear_not_before: bool,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -537,16 +474,9 @@ pub(crate) async fn execute_secret_purge_direct(
     name: &str,
     force: bool,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -562,16 +492,8 @@ pub(crate) async fn execute_secret_purge_direct(
     Ok(())
 }
 
-pub(crate) async fn execute_secret_restore_direct(name: &str, config: Config) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+pub(crate) async fn execute_secret_restore_direct(name: &str, config: Config, registry: Option<&BackendRegistry>) -> Result<()> {
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -593,18 +515,11 @@ pub(crate) async fn execute_diff_command(
     show_values: bool,
     group: Option<String>,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use std::collections::BTreeSet;
 
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
@@ -741,16 +656,9 @@ pub(crate) async fn execute_secret_copy_direct(
     to_vault: &str,
     new_name: Option<String>,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -784,16 +692,9 @@ pub(crate) async fn execute_secret_move_direct(
     new_name: Option<String>,
     force: bool,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -825,16 +726,9 @@ pub(crate) async fn execute_secret_parse_direct(
     connection_string: &str,
     format: &str,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -845,19 +739,12 @@ pub(crate) async fn execute_secret_parse_direct(
 pub(crate) async fn execute_secret_share_direct(
     command: ShareCommands,
     config: Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::auth::provider::AzureAuthProvider;
     use crate::vault::manager::VaultManager;
 
-    // Create authentication provider
-    let auth_provider: Arc<dyn AzureAuthProvider> = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider: Arc<dyn AzureAuthProvider> = get_azure_auth_provider(registry, &config)?;
 
     // Create vault manager for secret-level RBAC
     let vault_manager = VaultManager::new(
@@ -1063,15 +950,10 @@ pub(crate) async fn execute_secret_find_direct(
     names_only: bool,
     format: crate::utils::format::OutputFormat,
     config: Config,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    let auth_provider = std::sync::Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider =
+        crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
     execute_secret_find(
         &secret_manager,

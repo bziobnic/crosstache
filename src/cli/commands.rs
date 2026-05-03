@@ -1086,7 +1086,11 @@ pub enum ScanCommands {
 }
 
 impl Cli {
-    pub async fn execute(self, mut config: Config) -> Result<()> {
+    pub async fn execute(
+        self,
+        mut config: Config,
+        registry: Option<&crate::backend::BackendRegistry>,
+    ) -> Result<()> {
         let resolved = self.format.resolve_for_stdout();
         config.runtime_output_format = resolved;
         config.output_json = matches!(resolved, OutputFormat::Json);
@@ -1118,12 +1122,12 @@ impl Cli {
                 not_before,
             } => {
                 crate::cli::secret_ops::execute_secret_set_direct(
-                    args, stdin, note, folder, expires, not_before, config,
+                    args, stdin, note, folder, expires, not_before, config, registry,
                 )
                 .await
             }
             Commands::Get { name, raw, version } => {
-                crate::cli::secret_ops::execute_secret_get_direct(&name, raw, version, config).await
+                crate::cli::secret_ops::execute_secret_get_direct(&name, raw, version, config, registry).await
             }
             Commands::Find {
                 pattern,
@@ -1142,6 +1146,7 @@ impl Cli {
                     names_only,
                     self.format,
                     config,
+                    registry,
                 )
                 .await
             }
@@ -1159,15 +1164,16 @@ impl Cli {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 crate::cli::secret_ops::execute_secret_list_direct(
                     group, all, expiring, expired, no_cache, pagination, pager, names_only, config,
+                    registry,
                 )
                 .await
             }
             Commands::Delete { name, group, force } => {
-                crate::cli::secret_ops::execute_secret_delete_direct(name, group, force, config)
+                crate::cli::secret_ops::execute_secret_delete_direct(name, group, force, config, registry)
                     .await
             }
             Commands::History { name } => {
-                crate::cli::secret_ops::execute_secret_history_direct(&name, config).await
+                crate::cli::secret_ops::execute_secret_history_direct(&name, config, registry).await
             }
             Commands::Rollback {
                 name,
@@ -1175,7 +1181,7 @@ impl Cli {
                 force,
             } => {
                 crate::cli::secret_ops::execute_secret_rollback_direct(
-                    &name, &version, force, config,
+                    &name, &version, force, config, registry,
                 )
                 .await
             }
@@ -1188,7 +1194,7 @@ impl Cli {
                 force,
             } => {
                 crate::cli::secret_ops::execute_secret_rotate_direct(
-                    &name, length, charset, generator, show_value, force, config,
+                    &name, length, charset, generator, show_value, force, config, registry,
                 )
                 .await
             }
@@ -1200,7 +1206,7 @@ impl Cli {
                 raw,
             } => {
                 crate::cli::system_ops::execute_gen_command(
-                    length, charset, save, vault, raw, config,
+                    length, charset, save, vault, raw, config, registry,
                 )
                 .await
             }
@@ -1210,7 +1216,7 @@ impl Cli {
                 command,
             } => {
                 crate::cli::secret_ops::execute_secret_run_direct(
-                    group, no_masking, command, config,
+                    group, no_masking, command, config, registry,
                 )
                 .await
             }
@@ -1219,7 +1225,7 @@ impl Cli {
                 out,
                 group,
             } => {
-                crate::cli::secret_ops::execute_secret_inject_direct(template, out, group, config)
+                crate::cli::secret_ops::execute_secret_inject_direct(template, out, group, config, registry)
                     .await
             }
             Commands::Update {
@@ -1254,6 +1260,7 @@ impl Cli {
                     clear_expires,
                     clear_not_before,
                     config,
+                    registry,
                 )
                 .await
             }
@@ -1269,6 +1276,7 @@ impl Cli {
                     show_values,
                     group,
                     config,
+                    registry,
                 )
                 .await
             }
@@ -1279,7 +1287,7 @@ impl Cli {
                 new_name,
             } => {
                 crate::cli::secret_ops::execute_secret_copy_direct(
-                    &name, &from, &to, new_name, config,
+                    &name, &from, &to, new_name, config, registry,
                 )
                 .await
             }
@@ -1291,15 +1299,15 @@ impl Cli {
                 force,
             } => {
                 crate::cli::secret_ops::execute_secret_move_direct(
-                    &name, &from, &to, new_name, force, config,
+                    &name, &from, &to, new_name, force, config, registry,
                 )
                 .await
             }
             Commands::Purge { name, force } => {
-                crate::cli::secret_ops::execute_secret_purge_direct(&name, force, config).await
+                crate::cli::secret_ops::execute_secret_purge_direct(&name, force, config, registry).await
             }
             Commands::Restore { name } => {
-                crate::cli::secret_ops::execute_secret_restore_direct(&name, config).await
+                crate::cli::secret_ops::execute_secret_restore_direct(&name, config, registry).await
             }
             Commands::Parse {
                 connection_string,
@@ -1309,14 +1317,15 @@ impl Cli {
                     &connection_string,
                     &format,
                     config,
+                    registry,
                 )
                 .await
             }
             Commands::Share { command } => {
-                crate::cli::secret_ops::execute_secret_share_direct(command, config).await
+                crate::cli::secret_ops::execute_secret_share_direct(command, config, registry).await
             }
             Commands::Vault { command } => {
-                crate::cli::vault_ops::execute_vault_command(command, config).await
+                crate::cli::vault_ops::execute_vault_command(command, config, registry).await
             }
             #[cfg(feature = "file-ops")]
             Commands::File { command } => {
@@ -1347,6 +1356,7 @@ impl Cli {
                     resource_group,
                     raw,
                     config,
+                    registry,
                 )
                 .await
             }
@@ -1363,6 +1373,7 @@ impl Cli {
                     resource_group,
                     subscription,
                     config,
+                    registry,
                 )
                 .await
             }
@@ -1370,7 +1381,7 @@ impl Cli {
             Commands::Completion { shell } => {
                 crate::cli::system_ops::execute_completion_command(shell).await
             }
-            Commands::Whoami => crate::cli::system_ops::execute_whoami_command(config).await,
+            Commands::Whoami => crate::cli::system_ops::execute_whoami_command(config, registry).await,
             // Upgrade does not need Azure config — only talks to GitHub API
             Commands::Upgrade { check, force } => {
                 crate::cli::upgrade_ops::execute_upgrade_command(check, force).await
@@ -1412,11 +1423,12 @@ impl Cli {
                     command,
                     self.format,
                     config,
+                    registry,
                 )
                 .await
             }
             #[cfg(feature = "tui")]
-            Commands::Tui => crate::tui::run_tui(config).await,
+            Commands::Tui => crate::tui::run_tui(config, registry).await,
         }
     }
 }

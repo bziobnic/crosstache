@@ -4,6 +4,33 @@ use crate::cli::commands::CharsetType;
 use crate::error::{CrosstacheError, Result};
 use zeroize::Zeroizing;
 
+/// Obtain the Azure auth provider, preferring the one from the
+/// [`BackendRegistry`] (which was built once at startup) and falling back
+/// to creating a fresh provider from the config when the registry is absent.
+///
+/// This is a transitional helper: once all commands go through the backend
+/// trait layer directly, this function will be removed.
+pub(crate) fn get_azure_auth_provider(
+    registry: Option<&crate::backend::BackendRegistry>,
+    config: &crate::config::Config,
+) -> Result<std::sync::Arc<dyn crate::auth::provider::AzureAuthProvider>> {
+    // Fast path: reuse the provider the registry already created.
+    if let Some(reg) = registry {
+        if let Some(provider) = reg.azure_auth_provider() {
+            return Ok(provider);
+        }
+    }
+
+    // Fallback: create a fresh provider (e.g. for commands invoked without
+    // a registry, or if the active backend is not Azure).
+    use crate::auth::provider::DefaultAzureCredentialProvider;
+    let provider = DefaultAzureCredentialProvider::with_credential_priority(
+        config.azure_credential_priority.clone(),
+    )
+    .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?;
+    Ok(std::sync::Arc::new(provider))
+}
+
 /// Parse a single key-value pair from `KEY=value` format.
 pub(crate) fn parse_key_val<T, U>(
     s: &str,

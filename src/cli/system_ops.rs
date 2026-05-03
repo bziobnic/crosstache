@@ -259,19 +259,13 @@ pub(crate) async fn execute_audit_command(
     resource_group_override: Option<String>,
     raw: bool,
     config: Config,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
     use std::sync::Arc;
 
-    // Create authentication provider
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {}", e))
-        })?,
-    );
+    // Create authentication provider — reuse from registry when available
+    let auth_provider: Arc<dyn crate::auth::provider::AzureAuthProvider> =
+        crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
 
     // Create audit log client
     let audit_client = AzureActivityLogClient::new(auth_provider);
@@ -444,6 +438,7 @@ pub(crate) async fn execute_info_command(
     resource_group: Option<String>,
     subscription: Option<String>,
     config: Config,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
     use crate::utils::resource_detector::ResourceDetector;
 
@@ -469,6 +464,7 @@ pub(crate) async fn execute_info_command(
                 resource_group,
                 subscription,
                 &config,
+                registry,
             )
             .await
         }
@@ -482,9 +478,7 @@ pub(crate) async fn execute_info_command(
 
 /// Execute secret info from root info command
 async fn execute_secret_info_from_root(secret_name: &str, config: &Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
-    use std::sync::Arc;
 
     // Check if we have a vault context
     let vault_name = if !config.default_vault.is_empty() {
@@ -496,9 +490,7 @@ async fn execute_secret_info_from_root(secret_name: &str, config: &Config) -> Re
     };
 
     // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::with_credential_priority(
-        config.azure_credential_priority.clone(),
-    )?);
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(None, config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -545,17 +537,16 @@ pub(crate) async fn execute_completion_command(shell: Shell) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn execute_whoami_command(config: Config) -> Result<()> {
-    use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
+pub(crate) async fn execute_whoami_command(
+    config: Config,
+    registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<()> {
     use crate::config::ContextManager;
 
     output::step("Checking authentication and context...\n");
 
-    // Create authentication provider
-    let auth_provider = DefaultAzureCredentialProvider::with_credential_priority(
-        config.azure_credential_priority.clone(),
-    )
-    .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?;
+    // Create authentication provider — reuse from registry when available
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
 
     // Get access token to validate authentication
     let token = match auth_provider
@@ -762,6 +753,7 @@ pub(crate) async fn execute_gen_command(
     vault: Option<String>,
     raw: bool,
     config: Config,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
     // Validate length
     if !(6..=100).contains(&length) {
@@ -788,18 +780,10 @@ pub(crate) async fn execute_gen_command(
 
     // Handle --save
     if let Some(ref name) = save {
-        use crate::auth::provider::DefaultAzureCredentialProvider;
         use crate::secret::manager::SecretManager;
-        use std::sync::Arc;
 
-        let auth_provider = Arc::new(
-            DefaultAzureCredentialProvider::with_credential_priority(
-                config.azure_credential_priority.clone(),
-            )
-            .map_err(|e| {
-                CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-            })?,
-        );
+        let auth_provider =
+            crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
         let secret_manager = SecretManager::new(auth_provider, config.no_color);
         let vault_name = config.resolve_vault_name(vault).await?;
 

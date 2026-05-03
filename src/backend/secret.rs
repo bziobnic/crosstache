@@ -15,6 +15,7 @@ use super::error::BackendError;
 /// All backends must implement the required methods. Optional methods
 /// return `Err(BackendError::Unsupported(...))` by default so that
 /// backends can opt-in to features incrementally.
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 #[async_trait]
 pub trait SecretBackend: Send + Sync {
     /// Create or update a secret. Returns the new version's properties.

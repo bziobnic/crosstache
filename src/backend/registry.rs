@@ -18,6 +18,13 @@ use crate::config::settings::Config;
 pub struct BackendRegistry {
     backends: HashMap<&'static str, Arc<dyn Backend>>,
     default: &'static str,
+    /// The Azure auth provider, if the active backend is Azure.
+    ///
+    /// Stored separately because many CLI handlers still need the raw
+    /// provider to construct `SecretManager` / `VaultManager` during the
+    /// migration period. Will be removed once all handlers use the
+    /// backend trait layer exclusively.
+    azure_auth: Option<Arc<dyn crate::auth::provider::AzureAuthProvider>>,
 }
 
 impl std::fmt::Debug for BackendRegistry {
@@ -47,8 +54,10 @@ impl BackendRegistry {
         match kind {
             BackendKind::Azure => {
                 let auth_provider = Self::create_azure_auth_provider(config)?;
-                let backend = super::azure::AzureBackend::new(config, auth_provider)?;
-                Ok(Self::new(Arc::new(backend)))
+                let backend = super::azure::AzureBackend::new(config, auth_provider.clone())?;
+                let mut registry = Self::new(Arc::new(backend));
+                registry.azure_auth = Some(auth_provider);
+                Ok(registry)
             }
             BackendKind::Local => Err(BackendError::Unsupported(
                 "local backend is not yet implemented — coming in a future release".into(),
@@ -77,27 +86,46 @@ impl BackendRegistry {
         Self {
             backends,
             default: name,
+            azure_auth: None,
         }
     }
 
     /// Get the currently-active backend.
+    #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — called once dispatch is migrated.
     pub fn active(&self) -> &dyn Backend {
         self.backends[self.default].as_ref()
     }
 
     /// Get a backend by name.
+    #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — used for multi-backend dispatch.
     pub fn get(&self, name: &str) -> Option<&dyn Backend> {
         self.backends.get(name).map(|b| b.as_ref())
     }
 
     /// List all registered backend names.
+    #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — used for multi-backend dispatch.
     pub fn names(&self) -> Vec<&'static str> {
         self.backends.keys().copied().collect()
     }
 
     /// The name of the default (active) backend.
+    #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — used for multi-backend dispatch.
     pub fn default_name(&self) -> &'static str {
         self.default
+    }
+
+    /// Try to extract the Azure auth provider from the active backend.
+    ///
+    /// During the migration period, many CLI handlers still need the raw
+    /// `AzureAuthProvider` to construct `SecretManager` / `VaultManager`.
+    /// This convenience method returns the provider that was created when
+    /// the registry was built from config.
+    ///
+    /// Returns `None` if the active backend is not Azure.
+    pub fn azure_auth_provider(
+        &self,
+    ) -> Option<Arc<dyn crate::auth::provider::AzureAuthProvider>> {
+        self.azure_auth.clone()
     }
 }
 

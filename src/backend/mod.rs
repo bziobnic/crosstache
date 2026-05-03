@@ -77,6 +77,7 @@ impl std::str::FromStr for BackendKind {
 
 /// Describes what characters are valid in secret names for a backend.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 pub enum NameCharset {
     /// Only `[a-zA-Z0-9-]` — Azure Key Vault's constraint.
     AlphanumericHyphen,
@@ -92,6 +93,7 @@ pub enum NameCharset {
 
 /// Describes what a backend can do. Used by CLI/TUI for graceful degradation.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 pub struct BackendCapabilities {
     /// Multi-vault/namespace support.
     pub has_vaults: bool,
@@ -153,6 +155,7 @@ impl Default for BackendCapabilities {
 ///
 /// Provides lifecycle management (health check), capability negotiation,
 /// and access to the sub-trait objects (`secrets()`, `vaults()`, `files()`).
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 #[async_trait]
 pub trait Backend: Send + Sync {
     /// Human-readable backend name, e.g. `"azure"`, `"local"`.
