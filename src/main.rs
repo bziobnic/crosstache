@@ -94,7 +94,11 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     // Build the backend registry for commands that talk to a secrets backend.
-    // Commands that don't need a backend (Config, Init, etc.) skip this.
+    // Commands that are purely local (Config, Init, Cache, Context, etc.) skip
+    // this entirely.  For commands that *may* need the backend we attempt
+    // construction but treat failure as non-fatal: the registry becomes `None`
+    // and individual command handlers will create their own auth provider on
+    // demand via `get_azure_auth_provider(None, config)`.
     let needs_backend = !matches!(
         cli.command,
         crate::cli::Commands::Config { .. }
@@ -103,18 +107,31 @@ async fn run(cli: Cli) -> Result<()> {
             | crate::cli::Commands::Version
             | crate::cli::Commands::Completion { .. }
             | crate::cli::Commands::Parse { .. }
+            | crate::cli::Commands::Cache { .. }
+            | crate::cli::Commands::Context { .. }
+            | crate::cli::Commands::Env { .. }
+            | crate::cli::Commands::Scan {
+                command: Some(crate::cli::commands::ScanCommands::Install { .. }),
+                ..
+            }
+            | crate::cli::Commands::Scan {
+                command: Some(crate::cli::commands::ScanCommands::Uninstall),
+                ..
+            }
     );
 
     let registry = if needs_backend {
         match backend::BackendRegistry::from_config(&config) {
             Ok(r) => Some(r),
             Err(e) => {
-                // If the backend is unsupported or auth fails, surface a
-                // clear error instead of silently falling back.
-                return Err(CrosstacheError::config(format!(
-                    "Failed to initialize '{}' backend: {e}",
+                // Log but don't block — commands that genuinely need the
+                // backend will fail with their own clear error when they
+                // call `get_azure_auth_provider`.
+                tracing::debug!(
+                    "Backend '{}' init failed (non-fatal): {e}",
                     config.effective_backend_name()
-                )));
+                );
+                None
             }
         }
     } else {

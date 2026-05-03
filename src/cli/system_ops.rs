@@ -469,7 +469,7 @@ pub(crate) async fn execute_info_command(
             )
             .await
         }
-        ResourceType::Secret => execute_secret_info_from_root(&resource, &config).await,
+        ResourceType::Secret => execute_secret_info_from_root(&resource, &config, registry).await,
         #[cfg(feature = "file-ops")]
         ResourceType::File => {
             crate::cli::file_ops::execute_file_info_from_root(&resource, &config).await
@@ -478,7 +478,11 @@ pub(crate) async fn execute_info_command(
 }
 
 /// Execute secret info from root info command
-async fn execute_secret_info_from_root(secret_name: &str, config: &Config) -> Result<()> {
+async fn execute_secret_info_from_root(
+    secret_name: &str,
+    config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<()> {
     use crate::secret::manager::SecretManager;
 
     // Check if we have a vault context
@@ -491,7 +495,7 @@ async fn execute_secret_info_from_root(secret_name: &str, config: &Config) -> Re
     };
 
     // Create authentication provider
-    let auth_provider = crate::cli::helpers::get_azure_auth_provider(None, config)?;
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
 
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);

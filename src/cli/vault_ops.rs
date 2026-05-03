@@ -101,6 +101,7 @@ pub(crate) async fn execute_vault_command(
                 include_values,
                 group,
                 &config,
+                registry,
             )
             .await?;
         }
@@ -121,6 +122,7 @@ pub(crate) async fn execute_vault_command(
                 overwrite,
                 dry_run,
                 &config,
+                registry,
             )
             .await?;
             // Invalidate the secrets list for the target vault (secrets were written)
@@ -416,13 +418,14 @@ async fn execute_vault_export(
     include_values: bool,
     group: Option<String>,
     config: &Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::secret::manager::SecretManager;
 
     let _resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
     // Create secret manager to get secrets from vault
-    let auth_provider = get_azure_auth_provider(None, config)?;
+    let auth_provider = get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     // Get all secrets from vault (including disabled ones for export)
@@ -618,6 +621,7 @@ async fn execute_vault_import(
     overwrite: bool,
     dry_run: bool,
     config: &Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::secret::manager::{SecretManager, SecretRequest};
     use std::fs;
@@ -789,7 +793,7 @@ async fn execute_vault_import(
     }
 
     // Create secret manager to import secrets
-    let auth_provider = get_azure_auth_provider(None, config)?;
+    let auth_provider = get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     let mut imported_count = 0;
