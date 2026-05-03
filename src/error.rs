@@ -10,9 +10,11 @@ pub enum CrosstacheError {
     AzureApiError(String),
 
     #[error("Conflict: {0}")]
+    #[allow(dead_code)]
     Conflict(String),
 
     #[error("Rate limited: {0}")]
+    #[allow(dead_code)]
     RateLimited(String),
 
     #[error("Configuration error: {0}")]
@@ -181,10 +183,12 @@ impl CrosstacheError {
         Self::AzureApiError(msg.into())
     }
 
+    #[allow(dead_code)]
     pub fn conflict<S: Into<String>>(msg: S) -> Self {
         Self::Conflict(msg.into())
     }
 
+    #[allow(dead_code)]
     pub fn rate_limited<S: Into<String>>(msg: S) -> Self {
         Self::RateLimited(msg.into())
     }
