@@ -20,6 +20,15 @@ pub struct BackendRegistry {
     default: &'static str,
 }
 
+impl std::fmt::Debug for BackendRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackendRegistry")
+            .field("default", &self.default)
+            .field("backends", &self.backends.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 impl BackendRegistry {
     /// Build a registry from the loaded [`Config`].
     ///
