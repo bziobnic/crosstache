@@ -7,6 +7,8 @@
 //!
 //! This is a *thin adapter layer* — no business logic is duplicated.
 
+pub mod auth;
+pub mod detect;
 #[allow(clippy::module_inception)]
 pub mod secrets;
 pub mod vaults;
