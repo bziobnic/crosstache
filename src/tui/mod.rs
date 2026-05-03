@@ -23,7 +23,10 @@ use ratatui::Terminal;
 use std::io::{self, Stdout};
 use update::Command;
 
-pub async fn run_tui(config: Config) -> Result<()> {
+pub async fn run_tui(
+    config: Config,
+    _registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let result = run_loop(&mut terminal, config).await;
     teardown_terminal(&mut terminal)?;

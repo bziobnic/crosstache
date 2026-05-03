@@ -11,6 +11,7 @@ use crate::error::CrosstacheError;
 /// [`From<BackendError> for CrosstacheError`] impl converts these into the
 /// application-level error type used by CLI and TUI layers.
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — variants used by future backends.
 pub enum BackendError {
     /// A secret was not found.
     #[error("secret not found: {name}")]

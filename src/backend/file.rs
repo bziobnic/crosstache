@@ -14,6 +14,7 @@ use super::error::BackendError;
 ///
 /// All methods are required — if a backend exposes `files()`, it must
 /// support the full file lifecycle.
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 #[async_trait]
 pub trait FileBackend: Send + Sync {
     /// Upload a file. The optional [`ProgressReporter`] enables progress bars.

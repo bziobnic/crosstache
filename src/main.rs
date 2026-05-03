@@ -8,6 +8,7 @@ use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod auth;
+mod backend;
 #[cfg(feature = "file-ops")]
 mod blob;
 mod cache;
@@ -92,8 +93,53 @@ async fn run(cli: Cli) -> Result<()> {
         config.backend = Some(backend.clone());
     }
 
+    // Build the backend registry for commands that talk to a secrets backend.
+    // Commands that are purely local (Config, Init, Cache, Context, etc.) skip
+    // this entirely.  For commands that *may* need the backend we attempt
+    // construction but treat failure as non-fatal: the registry becomes `None`
+    // and individual command handlers will create their own auth provider on
+    // demand via `get_azure_auth_provider(None, config)`.
+    let needs_backend = !matches!(
+        cli.command,
+        crate::cli::Commands::Config { .. }
+            | crate::cli::Commands::Init
+            | crate::cli::Commands::Upgrade { .. }
+            | crate::cli::Commands::Version
+            | crate::cli::Commands::Completion { .. }
+            | crate::cli::Commands::Parse { .. }
+            | crate::cli::Commands::Cache { .. }
+            | crate::cli::Commands::Context { .. }
+            | crate::cli::Commands::Env { .. }
+            | crate::cli::Commands::Scan {
+                command: Some(crate::cli::commands::ScanCommands::Install { .. }),
+                ..
+            }
+            | crate::cli::Commands::Scan {
+                command: Some(crate::cli::commands::ScanCommands::Uninstall),
+                ..
+            }
+    );
+
+    let registry = if needs_backend {
+        match backend::BackendRegistry::from_config(&config) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                // Log but don't block — commands that genuinely need the
+                // backend will fail with their own clear error when they
+                // call `get_azure_auth_provider`.
+                tracing::debug!(
+                    "Backend '{}' init failed (non-fatal): {e}",
+                    config.effective_backend_name()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Execute the command
-    cli.execute(config).await?;
+    cli.execute(config, registry.as_ref()).await?;
 
     Ok(())
 }

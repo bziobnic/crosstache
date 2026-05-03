@@ -1,7 +1,9 @@
 //! Vault command execution handlers.
 
-use crate::auth::provider::{AzureAuthProvider, DefaultAzureCredentialProvider};
+use crate::auth::provider::AzureAuthProvider;
+use crate::backend::BackendRegistry;
 use crate::cli::commands::{VaultCommands, VaultShareCommands};
+use crate::cli::helpers::get_azure_auth_provider;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
@@ -10,16 +12,13 @@ use crate::vault::{VaultCreateRequest, VaultManager};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-pub(crate) async fn execute_vault_command(command: VaultCommands, config: Config) -> Result<()> {
-    // Create authentication provider with credential priority from config
-    let auth_provider: Arc<dyn AzureAuthProvider> = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+pub(crate) async fn execute_vault_command(
+    command: VaultCommands,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    // Create authentication provider — reuse from registry when available
+    let auth_provider: Arc<dyn AzureAuthProvider> = get_azure_auth_provider(registry, &config)?;
 
     // Create vault manager
     let vault_manager = VaultManager::new(
@@ -102,6 +101,7 @@ pub(crate) async fn execute_vault_command(command: VaultCommands, config: Config
                 include_values,
                 group,
                 &config,
+                registry,
             )
             .await?;
         }
@@ -122,6 +122,7 @@ pub(crate) async fn execute_vault_command(command: VaultCommands, config: Config
                 overwrite,
                 dry_run,
                 &config,
+                registry,
             )
             .await?;
             // Invalidate the secrets list for the target vault (secrets were written)
@@ -365,11 +366,10 @@ pub(crate) async fn execute_vault_info_from_root(
     resource_group: Option<String>,
     _subscription: Option<String>,
     config: &Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::with_credential_priority(
-        config.azure_credential_priority.clone(),
-    )?);
+    // Create authentication provider — reuse from registry when available
+    let auth_provider = get_azure_auth_provider(registry, config)?;
 
     // Create vault manager
     let vault_manager = VaultManager::new(
@@ -418,20 +418,14 @@ async fn execute_vault_export(
     include_values: bool,
     group: Option<String>,
     config: &Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::secret::manager::SecretManager;
 
     let _resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
     // Create secret manager to get secrets from vault
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     // Get all secrets from vault (including disabled ones for export)
@@ -627,6 +621,7 @@ async fn execute_vault_import(
     overwrite: bool,
     dry_run: bool,
     config: &Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::secret::manager::{SecretManager, SecretRequest};
     use std::fs;
@@ -798,14 +793,7 @@ async fn execute_vault_import(
     }
 
     // Create secret manager to import secrets
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     let mut imported_count = 0;

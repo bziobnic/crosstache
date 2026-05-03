@@ -15,6 +15,7 @@ use super::error::BackendError;
 ///
 /// Required methods cover basic CRUD. Optional methods (RBAC, soft-delete
 /// recovery) default to [`BackendError::Unsupported`].
+#[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 #[async_trait]
 pub trait VaultBackend: Send + Sync {
     // -----------------------------------------------------------------------

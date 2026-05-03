@@ -20,6 +20,7 @@ pub(crate) async fn execute_scan_command(
     command: Option<ScanCommands>,
     format: crate::utils::format::OutputFormat,
     config: Config,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
     if let Some(cmd) = command {
         return match cmd {
@@ -28,9 +29,9 @@ pub(crate) async fn execute_scan_command(
         };
     }
     if staged {
-        return execute_scan_staged(hook, all_vaults, format, &config).await;
+        return execute_scan_staged(hook, all_vaults, format, &config, registry).await;
     }
-    execute_scan_paths(paths, hook, all_vaults, format, &config).await
+    execute_scan_paths(paths, hook, all_vaults, format, &config, registry).await
 }
 
 async fn execute_scan_paths(
@@ -39,30 +40,16 @@ async fn execute_scan_paths(
     all_vaults: bool,
     format: crate::utils::format::OutputFormat,
     config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::secret::manager::SecretManager;
 
-    let auth_provider = std::sync::Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     // Pick which vaults to fetch from.
     let vault_names: Vec<String> = if all_vaults {
-        let auth = std::sync::Arc::new(
-            DefaultAzureCredentialProvider::with_credential_priority(
-                config.azure_credential_priority.clone(),
-            )
-            .map_err(|e| {
-                CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-            })?,
-        );
+        let auth = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
         let vault_manager = crate::vault::manager::VaultManager::new(
             auth,
             config.subscription_id.clone(),
@@ -107,30 +94,16 @@ async fn execute_scan_staged(
     all_vaults: bool,
     format: crate::utils::format::OutputFormat,
     config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::scan::staged::scan_staged;
     use crate::secret::manager::SecretManager;
 
-    let auth_provider = std::sync::Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
     let vault_names: Vec<String> = if all_vaults {
-        let auth = std::sync::Arc::new(
-            DefaultAzureCredentialProvider::with_credential_priority(
-                config.azure_credential_priority.clone(),
-            )
-            .map_err(|e| {
-                CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-            })?,
-        );
+        let auth = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
         let vault_manager = crate::vault::manager::VaultManager::new(
             auth,
             config.subscription_id.clone(),
