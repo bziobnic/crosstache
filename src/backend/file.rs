@@ -31,10 +31,7 @@ pub trait FileBackend: Send + Sync {
     ) -> Result<Vec<u8>, BackendError>;
 
     /// List files matching the request criteria.
-    async fn list_files(
-        &self,
-        request: FileListRequest,
-    ) -> Result<Vec<FileInfo>, BackendError>;
+    async fn list_files(&self, request: FileListRequest) -> Result<Vec<FileInfo>, BackendError>;
 
     /// Delete a file by name.
     async fn delete_file(&self, name: &str) -> Result<(), BackendError>;

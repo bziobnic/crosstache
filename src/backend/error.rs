@@ -65,20 +65,20 @@ pub enum BackendError {
 impl From<BackendError> for CrosstacheError {
     fn from(err: BackendError) -> Self {
         match err {
-            BackendError::NotFound { name, suggestion } => CrosstacheError::SecretNotFound {
-                name,
-                suggestion,
-            },
-            BackendError::VaultNotFound { name, suggestion } => CrosstacheError::VaultNotFound {
-                name,
-                suggestion,
-            },
+            BackendError::NotFound { name, suggestion } => {
+                CrosstacheError::SecretNotFound { name, suggestion }
+            }
+            BackendError::VaultNotFound { name, suggestion } => {
+                CrosstacheError::VaultNotFound { name, suggestion }
+            }
             BackendError::AuthenticationFailed(msg) => CrosstacheError::AuthenticationError(msg),
             BackendError::PermissionDenied(msg) => CrosstacheError::PermissionDenied(msg),
             BackendError::Unsupported(feature) => {
                 CrosstacheError::InvalidArgument(format!("operation not supported: {feature}"))
             }
-            BackendError::Conflict(msg) => CrosstacheError::AzureApiError(format!("conflict: {msg}")),
+            BackendError::Conflict(msg) => {
+                CrosstacheError::AzureApiError(format!("conflict: {msg}"))
+            }
             BackendError::RateLimited { retry_after_secs } => {
                 let detail = match retry_after_secs {
                     Some(secs) => format!("rate limited — retry after {secs}s"),

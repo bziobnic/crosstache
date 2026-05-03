@@ -49,11 +49,7 @@ pub trait SecretBackend: Send + Sync {
     ) -> Result<Vec<SecretSummary>, BackendError>;
 
     /// Delete a secret (soft-delete if the backend supports it).
-    async fn delete_secret(
-        &self,
-        vault: &str,
-        name: &str,
-    ) -> Result<(), BackendError>;
+    async fn delete_secret(&self, vault: &str, name: &str) -> Result<(), BackendError>;
 
     /// Update secret metadata (tags, groups, enabled state, etc.).
     async fn update_secret(
@@ -96,20 +92,12 @@ pub trait SecretBackend: Send + Sync {
     }
 
     /// Permanently purge a deleted secret.
-    async fn purge_secret(
-        &self,
-        _vault: &str,
-        _name: &str,
-    ) -> Result<(), BackendError> {
+    async fn purge_secret(&self, _vault: &str, _name: &str) -> Result<(), BackendError> {
         Err(BackendError::Unsupported("purge".into()))
     }
 
     /// Check if a secret exists (default: try `get_secret` and map the result).
-    async fn secret_exists(
-        &self,
-        vault: &str,
-        name: &str,
-    ) -> Result<bool, BackendError> {
+    async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
         match self.get_secret(vault, name, false).await {
             Ok(_) => Ok(true),
             Err(BackendError::NotFound { .. }) => Ok(false),
@@ -118,19 +106,12 @@ pub trait SecretBackend: Send + Sync {
     }
 
     /// List deleted secrets (only meaningful when soft-delete is supported).
-    async fn list_deleted_secrets(
-        &self,
-        _vault: &str,
-    ) -> Result<Vec<SecretSummary>, BackendError> {
+    async fn list_deleted_secrets(&self, _vault: &str) -> Result<Vec<SecretSummary>, BackendError> {
         Err(BackendError::Unsupported("list deleted secrets".into()))
     }
 
     /// Backup a secret to portable bytes.
-    async fn backup_secret(
-        &self,
-        _vault: &str,
-        _name: &str,
-    ) -> Result<Vec<u8>, BackendError> {
+    async fn backup_secret(&self, _vault: &str, _name: &str) -> Result<Vec<u8>, BackendError> {
         Err(BackendError::Unsupported("backup".into()))
     }
 

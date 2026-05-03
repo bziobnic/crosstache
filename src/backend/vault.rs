@@ -74,19 +74,12 @@ pub trait VaultBackend: Send + Sync {
     }
 
     /// Revoke access from a principal.
-    async fn revoke_access(
-        &self,
-        _vault: &str,
-        _principal: &str,
-    ) -> Result<(), BackendError> {
+    async fn revoke_access(&self, _vault: &str, _principal: &str) -> Result<(), BackendError> {
         Err(BackendError::Unsupported("RBAC".into()))
     }
 
     /// List access assignments on a vault.
-    async fn list_access(
-        &self,
-        _vault: &str,
-    ) -> Result<Vec<VaultRole>, BackendError> {
+    async fn list_access(&self, _vault: &str) -> Result<Vec<VaultRole>, BackendError> {
         Err(BackendError::Unsupported("RBAC".into()))
     }
 }
