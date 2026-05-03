@@ -1313,6 +1313,7 @@ async fn execute_file_download_recursive(
                 ));
                 failure_count += 1;
                 if continue_on_error {
+                    mp.advance_overall(blob_name);
                     continue;
                 } else {
                     return Err(CrosstacheError::config(format!(
@@ -1810,7 +1811,7 @@ async fn execute_file_sync(
                 };
                 if !need {
                     summary.skipped += 1;
-                    if tty {
+                    if tty && !config.output_json {
                         mp.log(&format!("skip (up to date): {blob_name}"));
                     } else if !config.output_json {
                         println!("skip (up to date): {blob_name}");
@@ -1838,10 +1839,12 @@ async fn execute_file_sync(
                 )
                 .await?;
                 summary.uploaded += 1;
-                mp.log(&format!(
-                    "upload: {} → {blob_name}",
-                    info.local_path.display()
-                ));
+                if tty && !config.output_json {
+                    mp.log(&format!(
+                        "upload: {} → {blob_name}",
+                        info.local_path.display()
+                    ));
+                }
                 mp.advance_overall(blob_name);
                 mutated = true;
             }
@@ -1892,7 +1895,7 @@ async fn execute_file_sync(
                 };
 
                 if !need {
-                    if tty {
+                    if tty && !config.output_json {
                         mp.log(&format!("skip (up to date): {blob_name}"));
                     } else if !config.output_json {
                         println!("skip (up to date): {blob_name}");
@@ -1922,7 +1925,9 @@ async fn execute_file_sync(
                 )
                 .await?;
                 summary.downloaded += 1;
-                mp.log(&format!("download: {blob_name} → {}", target.display()));
+                if tty && !config.output_json {
+                    mp.log(&format!("download: {blob_name} → {}", target.display()));
+                }
                 mp.advance_overall(blob_name);
                 mutated = true;
             }
@@ -1962,10 +1967,12 @@ async fn execute_file_sync(
                         )
                         .await?;
                         summary.uploaded += 1;
-                        mp.log(&format!(
-                            "upload: {} → {blob_name}",
-                            info.local_path.display()
-                        ));
+                        if tty && !config.output_json {
+                            mp.log(&format!(
+                                "upload: {} → {blob_name}",
+                                info.local_path.display()
+                            ));
+                        }
                         mp.advance_overall(blob_name);
                         mutated = true;
                     }
@@ -1992,7 +1999,9 @@ async fn execute_file_sync(
                         )
                         .await?;
                         summary.downloaded += 1;
-                        mp.log(&format!("download: {blob_name} → {}", target.display()));
+                        if tty && !config.output_json {
+                            mp.log(&format!("download: {blob_name} → {}", target.display()));
+                        }
                         mp.advance_overall(blob_name);
                         mutated = true;
                     }
@@ -2002,7 +2011,7 @@ async fn execute_file_sync(
                         let remote_info = remote_by_name.get(blob_name).unwrap();
                         match sync::resolve_both(size, mtime, remote_info) {
                             BothAction::Skip => {
-                                if tty {
+                                if tty && !config.output_json {
                                     mp.log(&format!("skip: {blob_name}"));
                                 } else if !config.output_json {
                                     println!("skip: {blob_name}");
@@ -2031,10 +2040,12 @@ async fn execute_file_sync(
                                 )
                                 .await?;
                                 summary.uploaded += 1;
-                                mp.log(&format!(
-                                    "upload: {} → {blob_name}",
-                                    info.local_path.display()
-                                ));
+                                if tty && !config.output_json {
+                                    mp.log(&format!(
+                                        "upload: {} → {blob_name}",
+                                        info.local_path.display()
+                                    ));
+                                }
                                 mp.advance_overall(blob_name);
                                 mutated = true;
                             }
@@ -2064,7 +2075,12 @@ async fn execute_file_sync(
                                 )
                                 .await?;
                                 summary.downloaded += 1;
-                                mp.log(&format!("download: {blob_name} → {}", target.display()));
+                                if tty && !config.output_json {
+                                    mp.log(&format!(
+                                        "download: {blob_name} → {}",
+                                        target.display()
+                                    ));
+                                }
                                 mp.advance_overall(blob_name);
                                 mutated = true;
                             }

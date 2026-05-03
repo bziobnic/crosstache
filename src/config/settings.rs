@@ -51,7 +51,6 @@ impl std::str::FromStr for AzureCredentialType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct BlobConfig {
     pub storage_account: String,
     pub container_name: String,
@@ -59,7 +58,12 @@ pub struct BlobConfig {
     pub enable_large_file_support: bool,
     pub chunk_size_mb: usize,
     pub max_concurrent_uploads: usize,
+    #[serde(default = "default_progress_threshold_mb")]
     pub progress_threshold_mb: usize,
+}
+
+fn default_progress_threshold_mb() -> usize {
+    5
 }
 
 impl Default for BlobConfig {
@@ -71,7 +75,7 @@ impl Default for BlobConfig {
             enable_large_file_support: true,
             chunk_size_mb: 4,
             max_concurrent_uploads: 3,
-            progress_threshold_mb: 5,
+            progress_threshold_mb: default_progress_threshold_mb(),
         }
     }
 }
