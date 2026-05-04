@@ -354,8 +354,17 @@ impl VaultOperations for AzureVaultOperations {
 
         let mut vaults = Vec::new();
         let mut next_url: Option<String> = Some(first_url);
+        let mut page_count: usize = 0;
 
         while let Some(current_url) = next_url.take() {
+            page_count += 1;
+            if page_count > crate::utils::MAX_PAGES {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Pagination exceeded maximum of {} pages",
+                    crate::utils::MAX_PAGES
+                )));
+            }
+
             let response = self
                 .http_client
                 .get(&current_url)

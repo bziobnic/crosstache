@@ -757,8 +757,17 @@ impl SecretOperations for AzureSecretOperations {
 
         let mut secret_summaries = Vec::new();
         let mut next_url: Option<String> = Some(list_url);
+        let mut page_count: usize = 0;
 
         while let Some(current_url) = next_url.take() {
+            page_count += 1;
+            if page_count > crate::utils::MAX_PAGES {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Pagination exceeded maximum of {} pages",
+                    crate::utils::MAX_PAGES
+                )));
+            }
+
             let response = client
                 .get(&current_url)
                 .headers(headers.clone())
@@ -1126,8 +1135,17 @@ impl SecretOperations for AzureSecretOperations {
 
         let mut versions = Vec::new();
         let mut next_url: Option<String> = Some(versions_url);
+        let mut page_count: usize = 0;
 
         while let Some(current_url) = next_url.take() {
+            page_count += 1;
+            if page_count > crate::utils::MAX_PAGES {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Pagination exceeded maximum of {} pages",
+                    crate::utils::MAX_PAGES
+                )));
+            }
+
             let response = http_client
                 .get(&current_url)
                 .headers(headers.clone())
