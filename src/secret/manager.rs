@@ -327,6 +327,18 @@ impl AzureSecretOperations {
     }
 }
 
+/// Read the body of an HTTP error response for diagnostic messages.
+///
+/// If reading the body fails (e.g. the connection was dropped), returns a
+/// descriptive placeholder rather than a bare empty string so callers always
+/// have actionable context in their error messages.
+async fn read_error_body(response: reqwest::Response) -> String {
+    response
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("(failed to read error body: {e})"))
+}
+
 #[async_trait]
 impl SecretOperations for AzureSecretOperations {
     async fn set_secret(
@@ -406,7 +418,7 @@ impl SecretOperations for AzureSecretOperations {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = read_error_body(response).await;
             return Err(CrosstacheError::azure_api(format!(
                 "Failed to set secret: HTTP {status} - {error_text}"
             )));
@@ -467,7 +479,7 @@ impl SecretOperations for AzureSecretOperations {
                     suggestion: None,
                 });
             }
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = read_error_body(response).await;
             return Err(CrosstacheError::azure_api(format!(
                 "Failed to get secret: HTTP {status} - {error_text}"
             )));
@@ -615,7 +627,7 @@ impl SecretOperations for AzureSecretOperations {
                     "Secret version '{version}' not found for secret '{secret_name}'"
                 )));
             }
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = read_error_body(response).await;
             return Err(CrosstacheError::azure_api(format!(
                 "Failed to get secret version: HTTP {} - {}",
                 status, error_text
@@ -756,7 +768,7 @@ impl SecretOperations for AzureSecretOperations {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let error_text = response.text().await.unwrap_or_default();
+                let error_text = read_error_body(response).await;
                 return Err(CrosstacheError::azure_api(format!(
                     "Failed to list secrets: HTTP {status} - {error_text}"
                 )));
@@ -934,7 +946,7 @@ impl SecretOperations for AzureSecretOperations {
                     "Deleted secret '{secret_name}' not found or cannot be restored"
                 )));
             }
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = read_error_body(response).await;
             return Err(CrosstacheError::azure_api(format!(
                 "Failed to restore secret: HTTP {status} - {error_text}"
             )));
@@ -1058,7 +1070,7 @@ impl SecretOperations for AzureSecretOperations {
                     "Deleted secret '{secret_name}' not found or cannot be purged"
                 )));
             }
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = read_error_body(response).await;
             return Err(CrosstacheError::azure_api(format!(
                 "Failed to purge secret: HTTP {status} - {error_text}"
             )));
@@ -1125,7 +1137,7 @@ impl SecretOperations for AzureSecretOperations {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let error_text = response.text().await.unwrap_or_default();
+                let error_text = read_error_body(response).await;
                 return Err(CrosstacheError::azure_api(format!(
                     "Failed to list secret versions: HTTP {} - {}",
                     status, error_text

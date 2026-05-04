@@ -419,7 +419,8 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
         let token = self
             .get_token(&["https://graph.microsoft.com/.default"])
             .await?;
-        let graph_url = format!("https://graph.microsoft.com/v1.0/users/{user}");
+        let graph_url =
+            crate::utils::url_helpers::graph_url("https://graph.microsoft.com/v1.0/users", &[user]);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             "Authorization",

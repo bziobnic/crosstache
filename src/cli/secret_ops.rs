@@ -2237,7 +2237,7 @@ async fn execute_secret_run(
 
         // secret_values is moved into stream_and_mask, which wraps it in Arc.
         // After threads join, Arc drop triggers Zeroizing::drop on each secret.
-        let exit_code = stream_and_mask(child, secret_values);
+        let exit_code = stream_and_mask(child, secret_values)?;
         std::process::exit(exit_code);
     }
 }
@@ -2248,11 +2248,18 @@ async fn execute_secret_run(
 /// `secret_values` is moved into an `Arc` and shared across two reader threads.
 /// After both threads join, this function holds the last `Arc` reference —
 /// dropping it triggers `Zeroizing::drop` on each secret value.
-fn stream_and_mask(mut child: std::process::Child, secret_values: Vec<Zeroizing<String>>) -> i32 {
+fn stream_and_mask(
+    mut child: std::process::Child,
+    secret_values: Vec<Zeroizing<String>>,
+) -> Result<i32> {
     use std::io::{BufRead, BufReader, Write};
 
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
+    let stdout = child.stdout.take().ok_or_else(|| {
+        CrosstacheError::config("failed to capture child stdout: pipe was not set")
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        CrosstacheError::config("failed to capture child stderr: pipe was not set")
+    })?;
 
     // Move secret_values into Arc for sharing across threads.
     // After threads join, the Arc in this function is the last reference.
@@ -2284,7 +2291,9 @@ fn stream_and_mask(mut child: std::process::Child, secret_values: Vec<Zeroizing<
     });
 
     // Wait for child to exit
-    let status = child.wait().expect("failed to wait on child");
+    let status = child
+        .wait()
+        .map_err(|e| CrosstacheError::config(format!("failed to wait on child process: {e}")))?;
 
     // Join threads (they'll finish once child closes pipe write-ends)
     let _ = stdout_thread.join();
@@ -2294,7 +2303,7 @@ fn stream_and_mask(mut child: std::process::Child, secret_values: Vec<Zeroizing<
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
 
-    status.code().unwrap_or(1)
+    Ok(status.code().unwrap_or(1))
 }
 
 async fn execute_secret_inject(

@@ -229,7 +229,8 @@ impl AzureDetector {
                 "GET",
                 "--url",
                 &format!(
-                    "https://graph.microsoft.com/v1.0/organization?$filter=id eq '{tenant_id}'"
+                    "https://graph.microsoft.com/v1.0/organization?$filter={}",
+                    crate::utils::url_helpers::odata_eq("id", tenant_id)
                 ),
             ])
             .output()

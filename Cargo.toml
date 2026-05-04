@@ -75,6 +75,7 @@ time = { version = "0.3", features = ["macros"] }
 
 # Additional utilities
 url = "2.0"
+urlencoding = "2"
 base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
