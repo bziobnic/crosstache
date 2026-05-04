@@ -222,6 +222,14 @@ impl AzureDetector {
 
     /// Get detailed tenant information
     async fn get_tenant_details(tenant_id: &str) -> Option<AzureTenant> {
+        // Validate tenant_id is a UUID before embedding in OData filter
+        if !is_valid_uuid(tenant_id) {
+            eprintln!(
+                "warning: tenant_id {:?} is not a valid UUID; skipping tenant details lookup",
+                tenant_id
+            );
+            return None;
+        }
         let output = Command::new("az")
             .args([
                 "rest",
@@ -564,6 +572,22 @@ impl AzureEnvironment {
 
         instructions
     }
+}
+
+/// Validate that a string matches the UUID format
+/// (8-4-4-4-12 lowercase or uppercase hex digits with hyphens).
+fn is_valid_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 5 {
+        return false;
+    }
+    let expected_lens = [8usize, 4, 4, 4, 12];
+    for (part, &expected) in parts.iter().zip(expected_lens.iter()) {
+        if part.len() != expected || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

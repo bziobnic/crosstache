@@ -63,13 +63,19 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 }
 
 fn reset_terminal_sync() {
-    disable_raw_mode().ok();
-    execute!(io::stdout(), LeaveAlternateScreen).ok();
+    if let Err(e) = disable_raw_mode() {
+        eprintln!("warning: failed to disable raw mode: {e}");
+    }
+    if let Err(e) = execute!(io::stdout(), LeaveAlternateScreen) {
+        eprintln!("warning: failed to leave alternate screen: {e}");
+    }
 }
 
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     reset_terminal_sync();
-    terminal.show_cursor().ok();
+    if let Err(e) = terminal.show_cursor() {
+        eprintln!("warning: failed to show cursor: {e}");
+    }
     Ok(())
 }
 

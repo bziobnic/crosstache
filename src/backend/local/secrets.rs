@@ -67,7 +67,7 @@ fn encode_name(name: &str) -> String {
 }
 
 /// Decode a URL-encoded filename back to the original secret name.
-#[allow(dead_code)] // Used in tests and will be needed for list operations in future PRs.
+#[cfg(test)]
 fn decode_name(encoded: &str) -> String {
     url::form_urlencoded::parse(encoded.as_bytes())
         .map(|(k, _)| k.into_owned())
@@ -181,8 +181,18 @@ fn next_version(store_path: &Path, vault: &str, name: &str) -> u32 {
                 if let Some(num_str) = rest.split('.').next() {
                     if let Ok(n) = num_str.parse::<u32>() {
                         max = max.max(n);
+                    } else {
+                        eprintln!(
+                            "warning: ignoring non-numeric entry {:?} in versions directory",
+                            fname
+                        );
                     }
                 }
+            } else {
+                eprintln!(
+                    "warning: ignoring non-numeric entry {:?} in versions directory",
+                    fname
+                );
             }
         }
     }
@@ -457,7 +467,13 @@ impl SecretBackend for LocalSecretBackend {
 
             let meta = match read_meta(&entry.path()) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "warning: secret {:?} exists but has corrupted metadata: {}",
+                        fname, e
+                    );
+                    continue;
+                }
             };
 
             // Apply group filter
@@ -649,11 +665,6 @@ impl SecretBackend for LocalSecretBackend {
 
         // Sort by version number
         versions.sort_by_key(|v| v.version_number.unwrap_or(0));
-
-        // Set sequential version numbers (1-based)
-        for (i, v) in versions.iter_mut().enumerate() {
-            v.version_number = Some(i as u32 + 1);
-        }
 
         Ok(versions)
     }

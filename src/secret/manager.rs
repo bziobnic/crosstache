@@ -684,8 +684,11 @@ impl SecretOperations for AzureSecretOperations {
             .unwrap_or(version)
             .to_string();
 
-        let attributes = &json["attributes"];
-        let enabled = attributes["enabled"].as_bool().unwrap_or(true);
+        let attributes = json.get("attributes").unwrap_or(&serde_json::Value::Null);
+        let enabled = attributes
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
         let created_ts = attributes
             .get("created")
@@ -1193,7 +1196,9 @@ impl SecretOperations for AzureSecretOperations {
 
             if let Some(value_array) = json["value"].as_array() {
                 for version_json in value_array {
-                    let attributes = &version_json["attributes"];
+                    let attributes = version_json
+                        .get("attributes")
+                        .unwrap_or(&serde_json::Value::Null);
 
                     let version = version_json["id"]
                         .as_str()
@@ -1201,9 +1206,18 @@ impl SecretOperations for AzureSecretOperations {
                         .unwrap_or("unknown")
                         .to_string();
 
-                    let enabled = attributes["enabled"].as_bool().unwrap_or(true);
-                    let created_timestamp = attributes["created"].as_i64().unwrap_or(0);
-                    let updated_timestamp = attributes["updated"].as_i64().unwrap_or(0);
+                    let enabled = attributes
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    let created_timestamp = attributes
+                        .get("created")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let updated_timestamp = attributes
+                        .get("updated")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
 
                     let created_on = DateTime::from_timestamp(created_timestamp, 0)
                         .unwrap_or_else(Utc::now)

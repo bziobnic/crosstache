@@ -229,7 +229,10 @@ fn linux_clipboard_copy(text: &str) -> Option<std::result::Result<(), String>> {
                         }
                     }
                 }
-                Err(_) => continue, // tool exists but failed to spawn, try next
+                Err(e) => {
+                    eprintln!("warning: failed to spawn {cmd}: {e}");
+                    continue;
+                }
             }
         }
     }
@@ -409,12 +412,15 @@ fn execute_custom_generator(script_path: &str, length: usize) -> Result<String> 
 
 /// Mask secret values in text output
 pub(crate) fn mask_secrets(text: &str, secrets: &[Zeroizing<String>]) -> String {
-    let mut result = text.to_string();
+    // Sort secrets by length descending so longer values are masked first,
+    // preventing partial matches. Skip values < 4 chars to avoid masking
+    // common short strings.
+    let mut sorted: Vec<&Zeroizing<String>> = secrets.iter().collect();
+    sorted.sort_by(|a, b| b.len().cmp(&a.len()));
 
-    for secret in secrets {
+    let mut result = text.to_string();
+    for secret in sorted {
         if secret.len() >= 4 {
-            // Only mask secrets that are at least 4 characters
-            // Replace with [MASKED] to indicate redaction
             result = result.replace(secret.as_str(), "[MASKED]");
         }
     }

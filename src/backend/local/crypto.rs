@@ -77,7 +77,8 @@ pub fn decrypt_bytes_from_file(
         .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
     {
         age::Decryptor::Recipients(d) => d,
-        _ => {
+        _other => {
+            eprintln!("warning: unexpected age decryptor variant (expected Recipients)");
             return Err(BackendError::Internal(
                 "unexpected passphrase-encrypted file".into(),
             ));
@@ -110,7 +111,8 @@ pub fn decrypt_from_file(
         .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
     {
         age::Decryptor::Recipients(d) => d,
-        _ => {
+        _other => {
+            eprintln!("warning: unexpected age decryptor variant (expected Recipients)");
             return Err(BackendError::Internal(
                 "unexpected passphrase-encrypted file".into(),
             ));
@@ -134,6 +136,15 @@ pub fn decrypt_from_file(
 /// The file may contain comments (lines starting with `#`) and blank lines;
 /// the first line matching the `AGE-SECRET-KEY-*` pattern is used.
 pub fn load_identity(key_path: &Path) -> Result<age::x25519::Identity, BackendError> {
+    let file_size = fs::metadata(key_path)
+        .map_err(|e| BackendError::Internal(format!("stat key {}: {e}", key_path.display())))?
+        .len();
+    if file_size > 1024 {
+        return Err(BackendError::Internal(format!(
+            "key file {} is too large ({file_size} bytes, max 1024)",
+            key_path.display()
+        )));
+    }
     let contents = fs::read_to_string(key_path)
         .map_err(|e| BackendError::Internal(format!("read key {}: {e}", key_path.display())))?;
 

@@ -37,6 +37,8 @@ pub struct VaultContext {
     /// Last used timestamp
     pub last_used: chrono::DateTime<chrono::Utc>,
     /// Usage count for prioritization
+    // Note: usage_count is best-effort and non-atomic. This is acceptable for a CLI tool
+    // (single process) but would need atomic operations in a server context.
     #[serde(default)]
     pub usage_count: u32,
 }

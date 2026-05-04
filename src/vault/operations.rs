@@ -1016,7 +1016,13 @@ impl VaultOperations for AzureVaultOperations {
             .await
         {
             Ok(token) => token.token.secret().to_string(),
-            Err(_) => return HashMap::new(),
+            Err(e) => {
+                eprintln!(
+                    "warning: Graph API call failed, role assignments may be incomplete: {}",
+                    e
+                );
+                return HashMap::new();
+            }
         };
 
         let mut headers = HeaderMap::new();
@@ -1039,16 +1045,32 @@ impl VaultOperations for AzureVaultOperations {
             .await
         {
             Ok(resp) => resp,
-            Err(_) => return HashMap::new(),
+            Err(e) => {
+                eprintln!(
+                    "warning: Graph API call failed, role assignments may be incomplete: {}",
+                    e
+                );
+                return HashMap::new();
+            }
         };
 
         if !response.status().is_success() {
+            eprintln!(
+                "warning: Graph API call failed, role assignments may be incomplete: HTTP {}",
+                response.status()
+            );
             return HashMap::new();
         }
 
         let data: Value = match response.json().await {
             Ok(d) => d,
-            Err(_) => return HashMap::new(),
+            Err(e) => {
+                eprintln!(
+                    "warning: Graph API call failed, role assignments may be incomplete: {}",
+                    e
+                );
+                return HashMap::new();
+            }
         };
 
         let mut result = HashMap::new();
@@ -1099,8 +1121,17 @@ impl AzureVaultOperations {
             .unwrap_or_default()
             .to_string();
 
-        // Extract resource group from ID
-        let resource_group = id.split('/').nth(4).unwrap_or_default().to_string();
+        // Extract resource group from ARM resource ID (/subscriptions/<sub>/resourceGroups/<rg>/...)
+        let resource_group = match id.split('/').nth(4) {
+            Some(rg) => rg.to_string(),
+            None => {
+                eprintln!(
+                    "warning: malformed ARM resource ID {:?}, resource group could not be extracted",
+                    id
+                );
+                String::new()
+            }
+        };
 
         let subscription_id = id
             .split('/')

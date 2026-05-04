@@ -76,6 +76,10 @@ pub fn sanitize_secret_name(name: &str) -> Result<String> {
 }
 
 /// Generate a hash-based name for secrets that can't be sanitized normally
+///
+/// SHA-256 truncated to 128 bits (16 bytes / 32 hex chars). This provides sufficient
+/// collision resistance for filename deduplication — birthday bound is ~2^64 which
+/// far exceeds our use case.
 pub fn hash_secret_name(name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
