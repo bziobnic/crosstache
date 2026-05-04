@@ -1284,29 +1284,16 @@ async fn execute_file_download_recursive(
             output_path.join(blob_name)
         };
 
-        // Security: prevent path traversal via malicious blob names (e.g. "../../etc/passwd")
+        // Security: prevent path traversal via malicious blob names (e.g. "../../etc/passwd").
+        // We inspect each component of the blob name BEFORE joining it with the
+        // destination directory so no filesystem call is required and there is no
+        // TOCTOU window.  Any ParentDir (`..`) component is an unambiguous sign of
+        // a traversal attempt and is rejected immediately.
         {
-            let canonical_output = output_path
-                .canonicalize()
-                .unwrap_or_else(|_| output_path.to_path_buf());
-            // Resolve what we can — parent dirs may not exist yet, so normalize components
-            let mut resolved = canonical_output.clone();
-            for component in local_path
-                .strip_prefix(output_path)
-                .unwrap_or(&local_path)
+            let has_traversal = Path::new(blob_name)
                 .components()
-            {
-                match component {
-                    std::path::Component::ParentDir => {
-                        resolved.pop();
-                    }
-                    std::path::Component::Normal(c) => {
-                        resolved.push(c);
-                    }
-                    _ => {}
-                }
-            }
-            if !resolved.starts_with(&canonical_output) {
+                .any(|c| c == std::path::Component::ParentDir);
+            if has_traversal {
                 output::warn(&format!(
                     "Skipping '{}': path traversal detected in blob name",
                     blob_name
