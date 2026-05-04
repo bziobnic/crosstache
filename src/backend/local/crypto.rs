@@ -11,6 +11,8 @@ use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use crate::utils::helpers::write_private;
+
 use age::secrecy::ExposeSecret;
 use zeroize::Zeroizing;
 
@@ -30,6 +32,18 @@ pub fn encrypt_to_file(
     let encryptor = age::Encryptor::with_recipients(boxed_recipients)
         .ok_or_else(|| BackendError::Internal("no recipients provided".into()))?;
 
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| BackendError::Internal(format!("create {}: {e}", path.display())))?
+    };
+    #[cfg(not(unix))]
     let file = File::create(path)
         .map_err(|e| BackendError::Internal(format!("create {}: {e}", path.display())))?;
 
@@ -192,7 +206,7 @@ pub fn generate_keypair(
     let identity = age::x25519::Identity::generate();
     let recipient = identity.to_public();
 
-    // Write private key
+    // Write private key with 0o600 permissions
     let secret_str = identity.to_string();
     let key_content = format!(
         "# created: {}\n# public key: {}\n{}\n",
@@ -200,15 +214,8 @@ pub fn generate_keypair(
         recipient,
         secret_str.expose_secret()
     );
-    fs::write(key_path, key_content.as_bytes())
+    write_private(key_path, key_content.as_bytes())
         .map_err(|e| BackendError::Internal(format!("write key: {e}")))?;
-
-    // Set key file permissions to 0600
-    #[cfg(unix)]
-    {
-        fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| BackendError::Internal(format!("chmod key: {e}")))?;
-    }
 
     // Write recipient (public key)
     let recipient_content = format!("{}\n", recipient);
