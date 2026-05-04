@@ -9,27 +9,61 @@ use std::collections::HashMap;
 use std::path::Path;
 use uuid::Uuid;
 
-/// Write content to a file with restricted permissions (0600 on Unix).
-/// Use for any file that may contain secrets, tokens, or sensitive config.
-pub fn write_sensitive_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, content)?;
+/// Write bytes to a file with mode 0o600 (owner read/write only).
+pub fn write_private(
+    path: impl AsRef<std::path::Path>,
+    bytes: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path.as_ref())?;
+        file.write_all(bytes.as_ref())?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path.as_ref(), bytes.as_ref())?;
+        let mut perms = std::fs::metadata(path.as_ref())?.permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(path.as_ref(), perms)?;
+        Ok(())
+    }
+}
+
+/// Create a directory (and parents) with mode 0o700 (owner only).
+pub fn create_private_dir(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(path.as_ref())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path.as_ref(), std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
 
+/// Write content to a file with restricted permissions (0600 on Unix).
+/// Use for any file that may contain secrets, tokens, or sensitive config.
+pub fn write_sensitive_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    write_private(path, content)
+}
+
 /// Async version of write_sensitive_file.
+///
+/// Delegates to the synchronous `write_private` on a blocking thread so that
+/// the atomic `OpenOptions::mode(0o600)` path is used (no TOCTOU window).
 pub async fn write_sensitive_file_async(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    tokio::fs::write(path, content).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
-    }
-    Ok(())
+    let path = path.to_path_buf();
+    let content = content.to_vec();
+    tokio::task::spawn_blocking(move || write_private(&path, &content))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
 }
 
 /// Check if a string is a valid GUID/UUID

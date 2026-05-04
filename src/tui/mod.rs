@@ -39,6 +39,12 @@ pub async fn run_tui(
         }
     });
 
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        reset_terminal_sync();
+        previous_hook(panic_info);
+    }));
+
     let mut terminal = setup_terminal()?;
     let result = run_loop(&mut terminal, config, backend).await;
     teardown_terminal(&mut terminal)?;
@@ -56,9 +62,13 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
         .map_err(|e| crate::error::CrosstacheError::config(format!("terminal: {e}")))
 }
 
-fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+fn reset_terminal_sync() {
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(io::stdout(), LeaveAlternateScreen).ok();
+}
+
+fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    reset_terminal_sync();
     terminal.show_cursor().ok();
     Ok(())
 }

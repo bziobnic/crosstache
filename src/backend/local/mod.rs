@@ -30,6 +30,8 @@ pub mod vaults;
 
 use std::fs;
 
+use crate::utils::helpers::{create_private_dir, write_private};
+
 use async_trait::async_trait;
 
 use super::error::BackendError;
@@ -79,7 +81,7 @@ impl LocalBackend {
 
         // Ensure vaults directory exists
         let vaults_dir = config.store_path.join("vaults");
-        fs::create_dir_all(&vaults_dir).map_err(|e| {
+        create_private_dir(&vaults_dir).map_err(|e| {
             BackendError::Internal(format!(
                 "create vaults directory {}: {e}",
                 vaults_dir.display()
@@ -92,17 +94,18 @@ impl LocalBackend {
         // Create default vault if it doesn't exist
         let default_vault_dir = vaults_dir.join(&config.default_vault);
         if !default_vault_dir.join(".vault.json").exists() {
-            fs::create_dir_all(default_vault_dir.join("secrets"))
+            create_private_dir(default_vault_dir.join("secrets"))
                 .map_err(|e| BackendError::Internal(format!("create default vault: {e}")))?;
             let meta = serde_json::json!({
                 "name": config.default_vault,
                 "created_at": chrono::Utc::now().to_rfc3339(),
                 "tags": {}
             });
-            fs::write(
+            write_private(
                 default_vault_dir.join(".vault.json"),
                 serde_json::to_string_pretty(&meta)
-                    .map_err(|e| BackendError::Internal(format!("serialize vault meta: {e}")))?,
+                    .map_err(|e| BackendError::Internal(format!("serialize vault meta: {e}")))?
+                    .as_bytes(),
             )
             .map_err(|e| BackendError::Internal(format!("write default vault meta: {e}")))?;
         }

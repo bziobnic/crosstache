@@ -15,6 +15,7 @@ use chrono::Utc;
 use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
 use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
+use crate::utils::helpers::create_private_dir;
 use crate::utils::progress::ProgressReporter;
 
 use super::crypto;
@@ -97,7 +98,7 @@ impl FileBackend for LocalFileBackend {
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError> {
         let fdir = files_dir(&self.store_path, &self.vault);
-        fs::create_dir_all(&fdir)
+        create_private_dir(&fdir)
             .map_err(|e| BackendError::Internal(format!("mkdir files: {e}")))?;
 
         let original_size = request.content.len() as u64;

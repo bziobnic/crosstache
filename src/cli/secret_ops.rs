@@ -694,6 +694,7 @@ pub(crate) async fn execute_secret_rotate_direct(
 pub(crate) async fn execute_secret_run_direct(
     group: Vec<String>,
     no_masking: bool,
+    inherit_env: bool,
     command: Vec<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
@@ -703,7 +704,16 @@ pub(crate) async fn execute_secret_run_direct(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_run(&secret_manager, None, group, no_masking, command, &config).await
+    execute_secret_run(
+        &secret_manager,
+        None,
+        group,
+        no_masking,
+        inherit_env,
+        command,
+        &config,
+    )
+    .await
 }
 
 pub(crate) async fn execute_secret_inject_direct(
@@ -2015,6 +2025,7 @@ async fn execute_secret_run(
     vault: Option<String>,
     groups: Vec<String>,
     no_masking: bool,
+    inherit_env: bool,
     command: Vec<String>,
     config: &Config,
 ) -> Result<()> {
@@ -2174,6 +2185,9 @@ async fn execute_secret_run(
     }
 
     // Set environment variables from vault secrets
+    if !inherit_env {
+        cmd.env_clear();
+    }
     cmd.envs(&env_vars);
 
     // Resolve URI references in existing environment variables

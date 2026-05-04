@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::utils::helpers::{create_private_dir, write_private};
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -159,7 +161,7 @@ fn read_meta(path: &Path) -> Result<SecretMeta, BackendError> {
 fn write_meta(path: &Path, meta: &SecretMeta) -> Result<(), BackendError> {
     let json = serde_json::to_string_pretty(meta)
         .map_err(|e| BackendError::Internal(format!("serialize meta: {e}")))?;
-    fs::write(path, json)
+    write_private(path, json.as_bytes())
         .map_err(|e| BackendError::Internal(format!("write meta {}: {e}", path.display())))
 }
 
@@ -257,7 +259,7 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         let sdir = secrets_dir(&store, vault);
-        fs::create_dir_all(&sdir)
+        create_private_dir(&sdir)
             .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
 
         let name = request.name.clone();
@@ -443,10 +445,11 @@ impl SecretBackend for LocalSecretBackend {
             "original_name": name,
         });
         let deleted_path = tdir.join(".deleted.json");
-        fs::write(
+        write_private(
             &deleted_path,
             serde_json::to_string_pretty(&deleted_meta)
-                .map_err(|e| BackendError::Internal(format!("serialize deleted meta: {e}")))?,
+                .map_err(|e| BackendError::Internal(format!("serialize deleted meta: {e}")))?
+                .as_bytes(),
         )
         .map_err(|e| BackendError::Internal(format!("write deleted meta: {e}")))?;
 
