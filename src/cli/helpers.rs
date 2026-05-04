@@ -1,8 +1,45 @@
 //! Shared CLI helper functions (clipboard, token parsing, random generation, formatting).
 
+use crate::backend::{BackendKind, BackendRegistry};
 use crate::cli::commands::CharsetType;
+use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use zeroize::Zeroizing;
+
+/// Returns `true` if the active backend is non-Azure and the registry is available.
+///
+/// When this returns `true`, CLI handlers should use the backend trait layer
+/// (`registry.active().secrets()` / `.vaults()`) instead of the legacy
+/// Azure-specific `SecretManager` / `VaultManager` code path.
+pub(crate) fn use_trait_path(registry: Option<&BackendRegistry>) -> bool {
+    registry.is_some_and(|r| r.active().kind() != BackendKind::Azure)
+}
+
+/// Resolve the vault name for the backend trait path.
+///
+/// Unlike `config.resolve_vault_name()` (which may involve Azure context),
+/// this helper uses a simple fallback chain that works for local and other
+/// non-Azure backends:
+///   1. `config.default_vault` (the top-level setting)
+///   2. `config.local.default_vault` (the local-backend-specific override)
+///   3. `"default"` as the last resort
+pub(crate) async fn resolve_vault_for_trait(config: &Config) -> Result<String> {
+    // Try the normal resolve_vault_name first — it handles CLI arg, project
+    // config, context, and config.default_vault. It only fails when none
+    // of those are set, which is fine; we fall back below.
+    if let Ok(name) = config.resolve_vault_name(None).await {
+        return Ok(name);
+    }
+
+    // Fall back to local backend config
+    if let Some(ref local) = config.local {
+        if let Some(ref vault) = local.default_vault {
+            return Ok(vault.clone());
+        }
+    }
+
+    Ok("default".to_string())
+}
 
 /// Obtain the Azure auth provider, preferring the one from the
 /// [`BackendRegistry`] (which was built once at startup) and falling back
