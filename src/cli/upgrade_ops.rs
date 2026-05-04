@@ -47,9 +47,10 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
             "Run 'xv upgrade' to install, or download from {}",
             release.html_url
         ));
-        // Exit with code 1 for scriptability (e.g., `xv upgrade --check && echo "up to date"`)
+        // Exit 0 so `xv upgrade --check && xv upgrade` chains work correctly.
+        // The update-available status is already surfaced via the stdout messages above.
         // We call exit directly to avoid main.rs printing error-formatted output.
-        std::process::exit(1);
+        std::process::exit(0);
     }
 
     output::info(&format!("Update available: v{current} → v{latest}"));
