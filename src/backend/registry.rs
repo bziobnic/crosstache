@@ -97,6 +97,15 @@ impl BackendRegistry {
         self.backends[self.default].as_ref()
     }
 
+    /// Get an `Arc` handle to the active backend (cloneable, `Send + Sync`).
+    ///
+    /// Useful when you need to move the backend into an async task (e.g. the
+    /// TUI data-loading spawns).
+    #[allow(dead_code)] // Used by the TUI feature gate; invisible to default builds.
+    pub fn active_arc(&self) -> Arc<dyn Backend> {
+        self.backends[self.default].clone()
+    }
+
     /// Get a backend by name.
     #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — used for multi-backend dispatch.
     pub fn get(&self, name: &str) -> Option<&dyn Backend> {

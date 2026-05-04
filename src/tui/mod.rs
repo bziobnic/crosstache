@@ -10,6 +10,7 @@ pub mod overlays;
 pub mod update;
 pub mod view;
 
+use crate::backend::Backend;
 use crate::config::Config;
 use crate::error::Result;
 use app::App;
@@ -21,14 +22,25 @@ use message::Message;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
+use std::sync::Arc;
 use update::Command;
 
 pub async fn run_tui(
     config: Config,
-    _registry: Option<&crate::backend::BackendRegistry>,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
+    // For non-Azure backends, extract a cloneable Arc so the TUI data-loading
+    // tasks can use the backend trait layer instead of hard-coded Azure auth.
+    let backend: Option<Arc<dyn Backend>> = registry.and_then(|r| {
+        if r.active().kind() != crate::backend::BackendKind::Azure {
+            Some(r.active_arc())
+        } else {
+            None
+        }
+    });
+
     let mut terminal = setup_terminal()?;
-    let result = run_loop(&mut terminal, config).await;
+    let result = run_loop(&mut terminal, config, backend).await;
     teardown_terminal(&mut terminal)?;
     result
 }
@@ -51,13 +63,17 @@ fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Resul
     Ok(())
 }
 
-async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, config: Config) -> Result<()> {
+async fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    config: Config,
+    backend: Option<Arc<dyn Backend>>,
+) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut app = App::new(config.clone());
 
     let _evt = event::spawn_event_reader(tx.clone());
     let _tick = event::spawn_tick_timer(tx.clone());
-    let _initial = data::spawn_load_vaults(config, tx.clone());
+    let _initial = data::spawn_load_vaults(config, tx.clone(), backend.clone());
 
     while !app.quit {
         terminal
@@ -66,26 +82,44 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, config: Con
         let Some(msg) = rx.recv().await else { break };
         let cmds = update::update(&mut app, msg);
         for cmd in cmds {
-            handle_command(&app, &tx, cmd).await;
+            handle_command(&app, &tx, cmd, &backend).await;
         }
     }
     Ok(())
 }
 
-async fn handle_command(app: &App, tx: &tokio::sync::mpsc::Sender<Message>, cmd: Command) {
+async fn handle_command(
+    app: &App,
+    tx: &tokio::sync::mpsc::Sender<Message>,
+    cmd: Command,
+    backend: &Option<Arc<dyn Backend>>,
+) {
     match cmd {
         Command::Quit => {}
         Command::LoadVaults => {
-            let _ = data::spawn_load_vaults(app.config.clone(), tx.clone());
+            let _ = data::spawn_load_vaults(app.config.clone(), tx.clone(), backend.clone());
         }
         Command::LoadSecrets { vault } => {
-            let _ = data::spawn_load_secrets(app.config.clone(), vault, tx.clone());
+            let _ =
+                data::spawn_load_secrets(app.config.clone(), vault, tx.clone(), backend.clone());
         }
         Command::LoadValue { vault, name } => {
-            let _ = data::spawn_load_value(app.config.clone(), vault, name, tx.clone());
+            let _ = data::spawn_load_value(
+                app.config.clone(),
+                vault,
+                name,
+                tx.clone(),
+                backend.clone(),
+            );
         }
         Command::LoadHistory { vault, name } => {
-            let _ = data::spawn_load_history(app.config.clone(), vault, name, tx.clone());
+            let _ = data::spawn_load_history(
+                app.config.clone(),
+                vault,
+                name,
+                tx.clone(),
+                backend.clone(),
+            );
         }
         Command::LoadAudit { vault, name } => {
             let _ = data::spawn_load_audit(app.config.clone(), vault, name, tx.clone());
