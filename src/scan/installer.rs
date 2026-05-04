@@ -52,6 +52,19 @@ pub fn install(force: bool) -> Result<HookInstallStatus> {
     }
     std::fs::write(&path, HOOK_BODY)?;
     set_executable(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let perms = meta.permissions();
+            if perms.mode() & 0o111 == 0 {
+                eprintln!(
+                    "warning: hook file {:?} is not executable; run: chmod +x {:?}",
+                    path, path
+                );
+            }
+        }
+    }
     Ok(HookInstallStatus::Installed(path))
 }
 

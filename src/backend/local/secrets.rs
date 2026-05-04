@@ -181,8 +181,18 @@ fn next_version(store_path: &Path, vault: &str, name: &str) -> u32 {
                 if let Some(num_str) = rest.split('.').next() {
                     if let Ok(n) = num_str.parse::<u32>() {
                         max = max.max(n);
+                    } else {
+                        eprintln!(
+                            "warning: ignoring non-numeric entry {:?} in versions directory",
+                            fname
+                        );
                     }
                 }
+            } else {
+                eprintln!(
+                    "warning: ignoring non-numeric entry {:?} in versions directory",
+                    fname
+                );
             }
         }
     }
@@ -457,7 +467,13 @@ impl SecretBackend for LocalSecretBackend {
 
             let meta = match read_meta(&entry.path()) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "warning: secret {:?} exists but has corrupted metadata: {}",
+                        fname, e
+                    );
+                    continue;
+                }
             };
 
             // Apply group filter

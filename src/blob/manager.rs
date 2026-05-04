@@ -51,6 +51,7 @@ impl BlobManager {
     /// Override the chunk size (MB) and maximum concurrent uploads used by
     /// `upload_large_file`.  Returns `self` for builder-style chaining.
     pub fn with_blob_config(mut self, chunk_size_mb: usize, max_concurrent_uploads: usize) -> Self {
+        // Clamp to minimum of 1 to prevent division by zero
         self.chunk_size_mb = chunk_size_mb.max(1);
         self.max_concurrent_uploads = max_concurrent_uploads.max(1);
         self
