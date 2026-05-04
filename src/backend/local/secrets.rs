@@ -321,10 +321,33 @@ impl SecretBackend for LocalSecretBackend {
             });
         }
 
+        // Reject symlinks to prevent attackers from redirecting reads to
+        // arbitrary files on the filesystem.
+        if fs::symlink_metadata(&mp)
+            .map(|m| m.is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(BackendError::Internal(format!(
+                "refusing to read metadata file: {} is a symlink",
+                mp.display()
+            )));
+        }
+
         let meta = read_meta(&mp)?;
 
         let value = if include_value {
             let ap = age_path(&self.store_path, vault, name);
+
+            if fs::symlink_metadata(&ap)
+                .map(|m| m.is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(BackendError::Internal(format!(
+                    "refusing to decrypt secret file: {} is a symlink",
+                    ap.display()
+                )));
+            }
+
             Some(crypto::decrypt_from_file(&ap, &self.identity)?)
         } else {
             None
@@ -359,10 +382,31 @@ impl SecretBackend for LocalSecretBackend {
             });
         }
 
+        if fs::symlink_metadata(&meta_file)
+            .map(|m| m.is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(BackendError::Internal(format!(
+                "refusing to read metadata file: {} is a symlink",
+                meta_file.display()
+            )));
+        }
+
         let meta = read_meta(&meta_file)?;
 
         let value = if include_value {
             let age_file = vdir.join(format!("{version}.age"));
+
+            if fs::symlink_metadata(&age_file)
+                .map(|m| m.is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(BackendError::Internal(format!(
+                    "refusing to decrypt secret file: {} is a symlink",
+                    age_file.display()
+                )));
+            }
+
             Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
         } else {
             None
