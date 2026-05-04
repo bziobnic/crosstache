@@ -229,7 +229,10 @@ fn linux_clipboard_copy(text: &str) -> Option<std::result::Result<(), String>> {
                         }
                     }
                 }
-                Err(_) => continue, // tool exists but failed to spawn, try next
+                Err(e) => {
+                    eprintln!("warning: failed to spawn {cmd}: {e}");
+                    continue;
+                }
             }
         }
     }

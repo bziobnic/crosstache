@@ -1634,9 +1634,9 @@ async fn execute_secret_find(
         combined
     } else {
         // Single-vault path (existing logic from Task 5).
-        let vault_name = single_vault
-            .as_ref()
-            .expect("single-vault find always resolves a vault name");
+        let vault_name = single_vault.as_ref().ok_or_else(|| {
+            CrosstacheError::config("vault name not resolved for single-vault search".to_string())
+        })?;
         let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
         let all_secrets = secret_manager
             .secret_ops()
@@ -1706,9 +1706,11 @@ async fn execute_secret_find(
                 output::info("No secrets found across all vaults");
             }
         } else {
-            let vault_name = single_vault
-                .as_ref()
-                .expect("single-vault empty-result message needs vault name");
+            let vault_name = single_vault.as_ref().ok_or_else(|| {
+                CrosstacheError::config(
+                    "vault name not resolved for single-vault search".to_string(),
+                )
+            })?;
             if let Some(p) = pattern {
                 output::info(&format!("No secrets match '{p}' in vault '{vault_name}'"));
             } else {

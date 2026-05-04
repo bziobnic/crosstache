@@ -1226,6 +1226,13 @@ async fn execute_file_download_recursive(
             ))
         })?;
     }
+    eprintln!(
+        "Downloading to: {}",
+        output_path
+            .canonicalize()
+            .unwrap_or_else(|_| output_path.to_path_buf())
+            .display()
+    );
 
     let mut all_files_to_download = Vec::new();
 

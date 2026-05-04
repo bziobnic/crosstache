@@ -67,7 +67,7 @@ fn encode_name(name: &str) -> String {
 }
 
 /// Decode a URL-encoded filename back to the original secret name.
-#[allow(dead_code)] // Used in tests and will be needed for list operations in future PRs.
+#[cfg(test)]
 fn decode_name(encoded: &str) -> String {
     url::form_urlencoded::parse(encoded.as_bytes())
         .map(|(k, _)| k.into_owned())
@@ -665,11 +665,6 @@ impl SecretBackend for LocalSecretBackend {
 
         // Sort by version number
         versions.sort_by_key(|v| v.version_number.unwrap_or(0));
-
-        // Set sequential version numbers (1-based)
-        for (i, v) in versions.iter_mut().enumerate() {
-            v.version_number = Some(i as u32 + 1);
-        }
 
         Ok(versions)
     }
