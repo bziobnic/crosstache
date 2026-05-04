@@ -120,6 +120,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
 
+      - name: Install minisign (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          curl -sL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz | tar xz
+          sudo cp -f minisign-linux/x86_64/minisign /usr/local/bin/
+
+      - name: Install minisign (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install minisign
+
       - name: Build release binary
         run: cargo build --release --features tui --target ${{ matrix.target }}
 
@@ -154,11 +164,22 @@ jobs:
             shasum -a 256 ${{ matrix.archive-name }} | cut -d ' ' -f 1 > ${{ matrix.archive-name }}.sha256
           fi
 
+      - name: Sign release archive
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          echo "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          minisign -Sm ${{ matrix.archive-name }} -s /tmp/minisign.key -t "crosstache ${{ github.ref_name }}"
+          rm -f /tmp/minisign.key
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
           files: |
             ${{ matrix.archive-name }}
             ${{ matrix.archive-name }}.sha256
+            ${{ matrix.archive-name }}.minisig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

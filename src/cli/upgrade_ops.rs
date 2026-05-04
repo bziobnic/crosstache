@@ -7,6 +7,10 @@ use crate::utils::output;
 const GITHUB_REPO: &str = "bziobnic/crosstache";
 const MAX_ASSET_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 
+/// Minisign public key for verifying release signatures.
+/// Generated 2026-05-04. See docs/superpowers/specs/2026-05-04-upgrade-signature-verification.md
+const RELEASE_SIGNING_KEY: &str = "RWRuXFh34rB613dgsXyAMmtKvYK0SFwxq4i44dhGFXVTrhAQ7hJXf6Ym";
+
 /// GitHub release metadata (subset of API response).
 #[derive(Debug, serde::Deserialize)]
 struct GitHubRelease {
@@ -96,6 +100,10 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
             ))
         })?;
 
+    // Look for minisig signature file
+    let sig_name = format!("{asset_name}.minisig");
+    let sig_asset = release.assets.iter().find(|a| a.name == sig_name);
+
     // Validate size
     if archive_asset.size > MAX_ASSET_SIZE {
         return Err(CrosstacheError::upgrade(format!(
@@ -110,6 +118,17 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
         download_asset(&archive_asset.browser_download_url, archive_asset.size).await?;
     let checksum_bytes =
         download_asset(&checksum_asset.browser_download_url, checksum_asset.size).await?;
+
+    // Signature verification (before checksum)
+    if let Some(sig_asset) = sig_asset {
+        let sig_bytes = download_asset(&sig_asset.browser_download_url, sig_asset.size).await?;
+        verify_signature(&archive_bytes, &sig_bytes)?;
+        output::success("Signature verified");
+    } else {
+        output::warn(
+            "Release is not signed. Signature verification will be required in a future version.",
+        );
+    }
 
     // Verify checksum
     let checksum_text = String::from_utf8_lossy(&checksum_bytes);
@@ -249,6 +268,22 @@ async fn download_asset(url: &str, expected_size: u64) -> Result<Vec<u8>> {
 /// Handles formats: "hash  filename", "hash *filename", or just "hash".
 fn parse_checksum_line(line: &str) -> &str {
     line.split_whitespace().next().unwrap_or("")
+}
+
+/// Verify the minisign signature of a release archive.
+fn verify_signature(archive_bytes: &[u8], signature_bytes: &[u8]) -> Result<()> {
+    use minisign_verify::{PublicKey, Signature};
+
+    let pk = PublicKey::from_base64(RELEASE_SIGNING_KEY)
+        .map_err(|e| CrosstacheError::upgrade(format!("Invalid embedded signing key: {e}")))?;
+    let sig = Signature::decode(&String::from_utf8_lossy(signature_bytes))
+        .map_err(|e| CrosstacheError::upgrade(format!("Invalid signature format: {e}")))?;
+    pk.verify(archive_bytes, &sig, false)
+        .map_err(|_| CrosstacheError::upgrade(
+            "Signature verification FAILED. The release archive may have been tampered with. \
+             Do NOT install this binary. Report this at https://github.com/bziobnic/crosstache/issues"
+        ))?;
+    Ok(())
 }
 
 /// Verify the SHA256 checksum of downloaded data.

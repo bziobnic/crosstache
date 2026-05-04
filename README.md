@@ -1171,6 +1171,18 @@ cargo release minor                      # 0.7.0 → 0.8.0
 
 ---
 
+## Release Verification
+
+Release archives are signed with [minisign](https://jedisct1.github.io/minisign/). To verify a download:
+
+```bash
+minisign -Vm xv-linux-x64.tar.gz -P RWRuXFh34rB613dgsXyAMmtKvYK0SFwxq4i44dhGFXVTrhAQ7hJXf6Ym
+```
+
+The public key is also embedded in the `xv` binary — `xv upgrade` automatically verifies signatures.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
