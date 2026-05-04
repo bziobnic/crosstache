@@ -23,3 +23,4 @@ pub mod resource_detector;
 pub mod retry;
 pub mod sanitizer;
 pub mod suggestions;
+pub mod url_helpers;

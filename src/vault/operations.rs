@@ -762,7 +762,8 @@ impl VaultOperations for AzureVaultOperations {
 
             // List role assignments for this scope
             let list_url = self.build_arm_url(&format!(
-                "{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId eq '{user_object_id}'"
+                "{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter={}",
+                crate::utils::url_helpers::odata_eq("principalId", user_object_id)
             ));
 
             let response = self
