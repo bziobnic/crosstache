@@ -226,6 +226,37 @@ pub trait SecretOperations: Send + Sync {
     ) -> Result<SecretProperties>;
 }
 
+/// Deserialize a JSON response body while enforcing a hard size limit.
+///
+/// Checks the `Content-Length` header first (fast path) and then verifies
+/// the actual byte count after buffering, to guard against oversized responses.
+async fn read_json_body<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<T> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes as u64 {
+            return Err(CrosstacheError::azure_api(format!(
+                "Response body too large: {} bytes (max: {} bytes)",
+                content_length, max_bytes
+            )));
+        }
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to read response body: {e}")))?;
+    if bytes.len() > max_bytes {
+        return Err(CrosstacheError::azure_api(format!(
+            "Response body too large: {} bytes (max: {} bytes)",
+            bytes.len(),
+            max_bytes
+        )));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|e| CrosstacheError::serialization(format!("Failed to parse JSON response: {e}")))
+}
+
 /// Azure Key Vault secret operations implementation
 pub struct AzureSecretOperations {
     auth_provider: Arc<dyn AzureAuthProvider>,
@@ -425,9 +456,8 @@ impl SecretOperations for AzureSecretOperations {
         }
 
         // Parse the response and convert to SecretProperties
-        let _json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to parse set secret response: {e}"))
-        })?;
+        let _json: serde_json::Value =
+            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
         // Return the created secret properties
         self.get_secret(vault_name, &sanitized_name, true).await
@@ -486,9 +516,8 @@ impl SecretOperations for AzureSecretOperations {
         }
 
         // Parse the response
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to parse secret response: {e}"))
-        })?;
+        let json: serde_json::Value =
+            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
         // Extract secret properties from JSON response
         let value = if include_value {
@@ -635,9 +664,8 @@ impl SecretOperations for AzureSecretOperations {
         }
 
         // Parse the JSON response
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::azure_api(format!("Failed to parse response JSON: {e}"))
-        })?;
+        let json: serde_json::Value =
+            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
         // Extract the secret value if requested
         let value = if include_value {
@@ -757,8 +785,17 @@ impl SecretOperations for AzureSecretOperations {
 
         let mut secret_summaries = Vec::new();
         let mut next_url: Option<String> = Some(list_url);
+        let mut page_count: usize = 0;
 
         while let Some(current_url) = next_url.take() {
+            page_count += 1;
+            if page_count > crate::utils::MAX_PAGES {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Pagination exceeded maximum of {} pages",
+                    crate::utils::MAX_PAGES
+                )));
+            }
+
             let response = client
                 .get(&current_url)
                 .headers(headers.clone())
@@ -774,9 +811,8 @@ impl SecretOperations for AzureSecretOperations {
                 )));
             }
 
-            let json: serde_json::Value = response.json().await.map_err(|e| {
-                CrosstacheError::serialization(format!("Failed to parse list response: {e}"))
-            })?;
+            let json: serde_json::Value =
+                read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
             if let Some(values) = json.get("value").and_then(|v| v.as_array()) {
                 for secret_value in values {
@@ -953,9 +989,8 @@ impl SecretOperations for AzureSecretOperations {
         }
 
         // Parse the response to get the restored secret properties
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to parse restore response: {e}"))
-        })?;
+        let json: serde_json::Value =
+            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
         // Extract secret properties from JSON response
         let version = json
@@ -1126,8 +1161,17 @@ impl SecretOperations for AzureSecretOperations {
 
         let mut versions = Vec::new();
         let mut next_url: Option<String> = Some(versions_url);
+        let mut page_count: usize = 0;
 
         while let Some(current_url) = next_url.take() {
+            page_count += 1;
+            if page_count > crate::utils::MAX_PAGES {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Pagination exceeded maximum of {} pages",
+                    crate::utils::MAX_PAGES
+                )));
+            }
+
             let response = http_client
                 .get(&current_url)
                 .headers(headers.clone())
@@ -1144,9 +1188,8 @@ impl SecretOperations for AzureSecretOperations {
                 )));
             }
 
-            let json: serde_json::Value = response.json().await.map_err(|e| {
-                CrosstacheError::azure_api(format!("Failed to parse response JSON: {e}"))
-            })?;
+            let json: serde_json::Value =
+                read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
             if let Some(value_array) = json["value"].as_array() {
                 for version_json in value_array {

@@ -3,6 +3,12 @@
 //! This module contains various utility functions including name sanitization,
 //! retry logic, connection string parsing, table formatting, and other helpers.
 
+/// Maximum number of pagination pages to follow before aborting to prevent infinite loops.
+pub const MAX_PAGES: usize = 1000;
+
+/// Maximum number of bytes accepted from a single API response body.
+pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+
 /// Re-export Azure detection at the legacy path for backward compatibility.
 /// New code should import from `crate::backend::azure::detect`.
 pub mod azure_detect {
