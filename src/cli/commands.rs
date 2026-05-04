@@ -413,6 +413,9 @@ pub enum Commands {
         /// Disable masking of secret values in output
         #[arg(long)]
         no_masking: bool,
+        /// Inherit the parent process environment (default: child starts with a clean env)
+        #[arg(long)]
+        inherit_env: bool,
         /// Command and arguments to run
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -1239,10 +1242,16 @@ impl Cli {
             Commands::Run {
                 group,
                 no_masking,
+                inherit_env,
                 command,
             } => {
                 crate::cli::secret_ops::execute_secret_run_direct(
-                    group, no_masking, command, config, registry,
+                    group,
+                    no_masking,
+                    inherit_env,
+                    command,
+                    config,
+                    registry,
                 )
                 .await
             }
