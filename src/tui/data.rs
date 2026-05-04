@@ -1,60 +1,96 @@
+use std::sync::Arc;
+
+use crate::backend::Backend;
 use crate::config::Config;
 use crate::error::CrosstacheError;
 use crate::tui::message::Message;
 use tokio::sync::mpsc::Sender;
 
-pub fn spawn_load_vaults(config: Config, tx: Sender<Message>) -> tokio::task::JoinHandle<()> {
+pub fn spawn_load_vaults(
+    config: Config,
+    tx: Sender<Message>,
+    backend: Option<Arc<dyn Backend>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        use crate::auth::provider::DefaultAzureCredentialProvider;
-        use crate::vault::manager::VaultManager;
-        let result: Result<_, CrosstacheError> = async {
-            let auth = std::sync::Arc::new(
-                DefaultAzureCredentialProvider::with_credential_priority(
-                    config.azure_credential_priority.clone(),
-                )
-                .map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?,
-            );
-            let vm = VaultManager::new(auth, config.subscription_id.clone(), config.no_color)?;
-            vm.vault_ops()
-                .list_vaults(Some(&config.subscription_id), None)
-                .await
+        if let Some(be) = backend {
+            // Trait-based path (local and future backends)
+            let result = match be.vaults() {
+                Some(vb) => vb.list_vaults().await.map_err(CrosstacheError::from),
+                None => Err(CrosstacheError::config(
+                    "active backend does not support vault listing",
+                )),
+            };
+            let msg = match result {
+                Ok(vaults) => Message::VaultsLoaded(vaults),
+                Err(e) => Message::Error(e),
+            };
+            let _ = tx.send(msg).await;
+        } else {
+            // Legacy Azure path
+            use crate::auth::provider::DefaultAzureCredentialProvider;
+            use crate::vault::manager::VaultManager;
+            let result: Result<_, CrosstacheError> = async {
+                let auth = std::sync::Arc::new(
+                    DefaultAzureCredentialProvider::with_credential_priority(
+                        config.azure_credential_priority.clone(),
+                    )
+                    .map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?,
+                );
+                let vm = VaultManager::new(auth, config.subscription_id.clone(), config.no_color)?;
+                vm.vault_ops()
+                    .list_vaults(Some(&config.subscription_id), None)
+                    .await
+            }
+            .await;
+            let msg = match result {
+                Ok(vaults) => Message::VaultsLoaded(vaults),
+                Err(e) => Message::Error(e),
+            };
+            let _ = tx.send(msg).await;
         }
-        .await;
-        let msg = match result {
-            Ok(vaults) => Message::VaultsLoaded(vaults),
-            Err(e) => Message::Error(e),
-        };
-        let _ = tx.send(msg).await;
     })
 }
-
-// STUBS — Tasks 5/6/10 replace each. They take the same parameters as the
-// real versions so the runtime in mod.rs can call them today.
 
 pub fn spawn_load_secrets(
     config: Config,
     vault: String,
     tx: Sender<Message>,
+    backend: Option<Arc<dyn Backend>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        use crate::auth::provider::DefaultAzureCredentialProvider;
-        use crate::secret::manager::SecretManager;
-        let result: Result<_, CrosstacheError> = async {
-            let auth = std::sync::Arc::new(
-                DefaultAzureCredentialProvider::with_credential_priority(
-                    config.azure_credential_priority.clone(),
-                )
-                .map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?,
-            );
-            let sm = SecretManager::new(auth, config.no_color);
-            sm.secret_ops().list_secrets(&vault, None).await
+        if let Some(be) = backend {
+            // Trait-based path
+            let result = be
+                .secrets()
+                .list_secrets(&vault, None)
+                .await
+                .map_err(CrosstacheError::from);
+            let msg = match result {
+                Ok(secrets) => Message::SecretsLoaded { vault, secrets },
+                Err(e) => Message::Error(e),
+            };
+            let _ = tx.send(msg).await;
+        } else {
+            // Legacy Azure path
+            use crate::auth::provider::DefaultAzureCredentialProvider;
+            use crate::secret::manager::SecretManager;
+            let result: Result<_, CrosstacheError> = async {
+                let auth = std::sync::Arc::new(
+                    DefaultAzureCredentialProvider::with_credential_priority(
+                        config.azure_credential_priority.clone(),
+                    )
+                    .map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?,
+                );
+                let sm = SecretManager::new(auth, config.no_color);
+                sm.secret_ops().list_secrets(&vault, None).await
+            }
+            .await;
+            let msg = match result {
+                Ok(secrets) => Message::SecretsLoaded { vault, secrets },
+                Err(e) => Message::Error(e),
+            };
+            let _ = tx.send(msg).await;
         }
-        .await;
-        let msg = match result {
-            Ok(secrets) => Message::SecretsLoaded { vault, secrets },
-            Err(e) => Message::Error(e),
-        };
-        let _ = tx.send(msg).await;
     })
 }
 
@@ -63,35 +99,60 @@ pub fn spawn_load_value(
     vault: String,
     name: String,
     tx: Sender<Message>,
+    backend: Option<Arc<dyn Backend>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        use crate::auth::provider::DefaultAzureCredentialProvider;
-        use crate::secret::manager::SecretManager;
-        let result: Result<_, CrosstacheError> = async {
-            let auth = std::sync::Arc::new(
-                DefaultAzureCredentialProvider::with_credential_priority(
-                    config.azure_credential_priority.clone(),
-                )
-                .map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?,
-            );
-            let sm = SecretManager::new(auth, config.no_color);
-            sm.secret_ops().get_secret(&vault, &name, true).await
-        }
-        .await;
-        let msg = match result {
-            Ok(props) => match props.value {
-                Some(v) => Message::ValueLoaded {
-                    vault,
-                    name,
-                    value: zeroize::Zeroizing::new(v.as_str().to_string()),
+        if let Some(be) = backend {
+            // Trait-based path
+            let result = be
+                .secrets()
+                .get_secret(&vault, &name, true)
+                .await
+                .map_err(CrosstacheError::from);
+            let msg = match result {
+                Ok(props) => match props.value {
+                    Some(v) => Message::ValueLoaded {
+                        vault,
+                        name,
+                        value: zeroize::Zeroizing::new(v.as_str().to_string()),
+                    },
+                    None => Message::Error(CrosstacheError::config(format!(
+                        "secret {name} has no value"
+                    ))),
                 },
-                None => Message::Error(CrosstacheError::config(format!(
-                    "secret {name} has no value"
-                ))),
-            },
-            Err(e) => Message::Error(e),
-        };
-        let _ = tx.send(msg).await;
+                Err(e) => Message::Error(e),
+            };
+            let _ = tx.send(msg).await;
+        } else {
+            // Legacy Azure path
+            use crate::auth::provider::DefaultAzureCredentialProvider;
+            use crate::secret::manager::SecretManager;
+            let result: Result<_, CrosstacheError> = async {
+                let auth = std::sync::Arc::new(
+                    DefaultAzureCredentialProvider::with_credential_priority(
+                        config.azure_credential_priority.clone(),
+                    )
+                    .map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?,
+                );
+                let sm = SecretManager::new(auth, config.no_color);
+                sm.secret_ops().get_secret(&vault, &name, true).await
+            }
+            .await;
+            let msg = match result {
+                Ok(props) => match props.value {
+                    Some(v) => Message::ValueLoaded {
+                        vault,
+                        name,
+                        value: zeroize::Zeroizing::new(v.as_str().to_string()),
+                    },
+                    None => Message::Error(CrosstacheError::config(format!(
+                        "secret {name} has no value"
+                    ))),
+                },
+                Err(e) => Message::Error(e),
+            };
+            let _ = tx.send(msg).await;
+        }
     })
 }
 
@@ -100,30 +161,50 @@ pub fn spawn_load_history(
     vault: String,
     name: String,
     tx: Sender<Message>,
+    backend: Option<Arc<dyn Backend>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        use crate::auth::provider::DefaultAzureCredentialProvider;
-        use crate::secret::manager::SecretManager;
-        let result: Result<_, CrosstacheError> = async {
-            let auth = std::sync::Arc::new(
-                DefaultAzureCredentialProvider::with_credential_priority(
-                    config.azure_credential_priority.clone(),
-                )
-                .map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?,
-            );
-            let sm = SecretManager::new(auth, config.no_color);
-            sm.secret_ops().get_secret_versions(&vault, &name).await
+        if let Some(be) = backend {
+            // Trait-based path
+            let result = be
+                .secrets()
+                .list_versions(&vault, &name)
+                .await
+                .map_err(CrosstacheError::from);
+            let msg = match result {
+                Ok(versions) => Message::HistoryLoaded {
+                    vault,
+                    name,
+                    versions,
+                },
+                Err(e) => Message::Error(e),
+            };
+            let _ = tx.send(msg).await;
+        } else {
+            // Legacy Azure path
+            use crate::auth::provider::DefaultAzureCredentialProvider;
+            use crate::secret::manager::SecretManager;
+            let result: Result<_, CrosstacheError> = async {
+                let auth = std::sync::Arc::new(
+                    DefaultAzureCredentialProvider::with_credential_priority(
+                        config.azure_credential_priority.clone(),
+                    )
+                    .map_err(|e| CrosstacheError::authentication(format!("auth: {e}")))?,
+                );
+                let sm = SecretManager::new(auth, config.no_color);
+                sm.secret_ops().get_secret_versions(&vault, &name).await
+            }
+            .await;
+            let msg = match result {
+                Ok(versions) => Message::HistoryLoaded {
+                    vault,
+                    name,
+                    versions,
+                },
+                Err(e) => Message::Error(e),
+            };
+            let _ = tx.send(msg).await;
         }
-        .await;
-        let msg = match result {
-            Ok(versions) => Message::HistoryLoaded {
-                vault,
-                name,
-                versions,
-            },
-            Err(e) => Message::Error(e),
-        };
-        let _ = tx.send(msg).await;
     })
 }
 
