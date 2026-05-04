@@ -224,7 +224,7 @@ fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
         .open(&lock_path)
         .map_err(|e| BackendError::Internal(format!("open lock: {e}")))?;
     lock_file
-        .try_lock_exclusive()
+        .lock_exclusive()
         .map_err(|e| BackendError::Internal(format!("vault locked by another process: {e}")))?;
     Ok(lock_file)
 }
@@ -265,18 +265,18 @@ impl SecretBackend for LocalSecretBackend {
         let identity = self.identity.clone();
         let recipients = self.recipients.clone();
 
-        // Acquire exclusive vault lock for the duration of the mutation.
+        // Validate vault exists before attempting to lock.
         let vault_dir = self.store_path.join("vaults").join(vault);
-        let _lock = lock_vault(&vault_dir)?;
-
-        // Validate vault exists
-        let vault_json = store.join("vaults").join(vault).join(".vault.json");
+        let vault_json = vault_dir.join(".vault.json");
         if !vault_json.exists() {
             return Err(BackendError::VaultNotFound {
                 name: vault.to_string(),
                 suggestion: None,
             });
         }
+
+        // Acquire exclusive vault lock for the duration of the mutation.
+        let _lock = lock_vault(&vault_dir)?;
 
         let sdir = secrets_dir(&store, vault);
         create_private_dir(&sdir)
@@ -477,6 +477,12 @@ impl SecretBackend for LocalSecretBackend {
 
     async fn delete_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
         let vault_dir = self.store_path.join("vaults").join(vault);
+        if !vault_dir.join(".vault.json").exists() {
+            return Err(BackendError::VaultNotFound {
+                name: vault.to_string(),
+                suggestion: None,
+            });
+        }
         let _lock = lock_vault(&vault_dir)?;
 
         let mp = meta_path(&self.store_path, vault, name);
@@ -529,6 +535,10 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
+        // Acquire exclusive vault lock — update_secret may call archive_current/next_version.
+        let vault_dir = self.store_path.join("vaults").join(vault);
+        let _lock = lock_vault(&vault_dir)?;
+
         let mp = meta_path(&self.store_path, vault, name);
         if !mp.exists() {
             return Err(BackendError::NotFound {
@@ -659,6 +669,10 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         version: &str,
     ) -> Result<SecretProperties, BackendError> {
+        // Acquire exclusive vault lock — rollback calls archive_current/next_version.
+        let vault_dir = self.store_path.join("vaults").join(vault);
+        let _lock = lock_vault(&vault_dir)?;
+
         // Find the target version in .versions/
         let vdir = versions_dir(&self.store_path, vault, name);
         let ver_age = vdir.join(format!("{version}.age"));
@@ -701,6 +715,12 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
     ) -> Result<SecretProperties, BackendError> {
         let vault_dir = self.store_path.join("vaults").join(vault);
+        if !vault_dir.join(".vault.json").exists() {
+            return Err(BackendError::VaultNotFound {
+                name: vault.to_string(),
+                suggestion: None,
+            });
+        }
         let _lock = lock_vault(&vault_dir)?;
 
         let tdir = trash_dir(&self.store_path, vault, name);
@@ -747,6 +767,12 @@ impl SecretBackend for LocalSecretBackend {
 
     async fn purge_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
         let vault_dir = self.store_path.join("vaults").join(vault);
+        if !vault_dir.join(".vault.json").exists() {
+            return Err(BackendError::VaultNotFound {
+                name: vault.to_string(),
+                suggestion: None,
+            });
+        }
         let _lock = lock_vault(&vault_dir)?;
 
         // Permanently remove from .trash/

@@ -379,9 +379,21 @@ impl VaultOperations for AzureVaultOperations {
                 return Err(self.parse_azure_error(status_code, &error_body));
             }
 
-            let response_data: Value = response.json().await.map_err(|e| {
-                CrosstacheError::serialization(format!("Failed to parse vaults response: {e}"))
-            })?;
+            let response_data: Value = {
+                let bytes = response.bytes().await.map_err(|e| {
+                    CrosstacheError::serialization(format!("Failed to read vaults response: {e}"))
+                })?;
+                if bytes.len() > crate::utils::MAX_RESPONSE_BYTES {
+                    return Err(CrosstacheError::serialization(format!(
+                        "Vaults response too large: {} bytes (max {})",
+                        bytes.len(),
+                        crate::utils::MAX_RESPONSE_BYTES,
+                    )));
+                }
+                serde_json::from_slice(&bytes).map_err(|e| {
+                    CrosstacheError::serialization(format!("Failed to parse vaults response: {e}"))
+                })?
+            };
 
             if let Some(vault_array) = response_data.get("value").and_then(|v| v.as_array()) {
                 for vault_value in vault_array {
