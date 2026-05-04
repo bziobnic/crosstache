@@ -55,14 +55,15 @@ pub fn write_sensitive_file(path: &Path, content: &[u8]) -> std::io::Result<()> 
 }
 
 /// Async version of write_sensitive_file.
+///
+/// Delegates to the synchronous `write_private` on a blocking thread so that
+/// the atomic `OpenOptions::mode(0o600)` path is used (no TOCTOU window).
 pub async fn write_sensitive_file_async(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    tokio::fs::write(path, content).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
-    }
-    Ok(())
+    let path = path.to_path_buf();
+    let content = content.to_vec();
+    tokio::task::spawn_blocking(move || write_private(&path, &content))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
 }
 
 /// Check if a string is a valid GUID/UUID
