@@ -29,7 +29,7 @@ pub(crate) async fn execute_secret_set_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
 
         // Parse expiry dates if provided
         let expires_on = if let Some(expires_str) = expires.as_deref() {
@@ -136,55 +136,15 @@ pub(crate) async fn execute_secret_set_direct(
                 "Bulk set complete: {success_count} succeeded, {error_count} failed"
             ));
         }
+
+        // Invalidate the secrets list cache for the resolved vault
+        invalidate_trait_secret_cache(&config, &vault_name);
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // TODO(backend-trait): Use registry.active().secrets().set_secret() directly
-    // once SecretBackend supports all set options (notes, folders, expiry).
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    // Check if this is a bulk set operation (multiple KEY=value pairs)
-    if args.len() == 1 && !args[0].contains('=') {
-        // Single secret operation (original behavior)
-        let name = &args[0];
-        execute_secret_set(
-            &secret_manager,
-            name,
-            None,
-            stdin,
-            note,
-            folder,
-            expires,
-            not_before,
-            &config,
-        )
-        .await?;
-    } else {
-        // Bulk set operation
-        if stdin {
-            return Err(CrosstacheError::invalid_argument(
-                "--stdin cannot be used with bulk set operation",
-            ));
-        }
-        if expires.is_some() || not_before.is_some() {
-            return Err(CrosstacheError::invalid_argument(
-                "--expires and --not-before cannot be used with bulk set operation",
-            ));
-        }
-        execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await?;
-    }
-
-    // Invalidate the secrets list cache for the resolved vault
-    if let Ok(vault_name) = config.resolve_vault_name(None).await {
-        let cache_manager = crate::cache::CacheManager::from_config(&config);
-        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
-    }
-
-    Ok(())
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 pub(crate) async fn execute_secret_get_direct(
@@ -197,7 +157,7 @@ pub(crate) async fn execute_secret_get_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
 
         let secret = if let Some(ref ver) = version {
             reg.active()
@@ -239,14 +199,9 @@ pub(crate) async fn execute_secret_get_direct(
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // TODO(backend-trait): Use registry.active().secrets().get_secret() directly.
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    execute_secret_get(&secret_manager, name, None, raw, version, &config).await
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 fn secret_summary_matches_group(
@@ -258,6 +213,31 @@ fn secret_summary_matches_group(
         .as_ref()
         .map(|groups| groups.split(',').any(|grp| grp.trim() == group))
         .unwrap_or(false)
+}
+
+fn trait_secret_cache_key(vault_name: &str) -> crate::cache::CacheKey {
+    crate::cache::CacheKey::SecretsList {
+        vault_name: vault_name.to_string(),
+    }
+}
+
+fn invalidate_trait_secret_cache(config: &Config, vault_name: &str) {
+    let cache_manager = crate::cache::CacheManager::from_config(config);
+    cache_manager.invalidate(&trait_secret_cache_key(vault_name));
+}
+
+fn filter_secret_summaries_for_display(
+    mut secrets: Vec<crate::secret::manager::SecretSummary>,
+    group: Option<&str>,
+    all: bool,
+) -> Vec<crate::secret::manager::SecretSummary> {
+    if !all {
+        secrets.retain(|s| s.enabled);
+    }
+    if let Some(g) = group {
+        secrets.retain(|s| secret_summary_matches_group(s, g));
+    }
+    secrets
 }
 
 fn secret_count_label(
@@ -293,14 +273,7 @@ pub(crate) fn display_cached_secret_list(
     use crate::utils::pagination::{paginate_slice, pagination_footer_text};
     use std::fmt::Write as _;
 
-    let mut filtered = secrets;
-
-    if !all {
-        filtered.retain(|s| s.enabled);
-    }
-    if let Some(ref g) = group {
-        filtered.retain(|s| secret_summary_matches_group(s, g));
-    }
+    let filtered = filter_secret_summaries_for_display(secrets, group.as_deref(), all);
 
     // Early exit for names-only mode (no pagination for pipe-friendly output)
     if names_only {
@@ -391,20 +364,106 @@ pub(crate) async fn execute_secret_list_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // ── Trait-based path (non-Azure backends) ──────────────────────────
+    // ── Trait-based path (all backends) ───────────────────────────────
     if use_trait_path(registry) {
+        use crate::cache::CacheManager;
+
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
-        let secrets = reg
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
+        let cache_manager = CacheManager::from_config(&config);
+        let cache_key = trait_secret_cache_key(&vault_name);
+        let use_cache = cache_manager.is_enabled() && !no_cache;
+
+        // Try cache (skip for expiry filters — they need per-secret API calls)
+        if use_cache && expiring.is_none() && !expired {
+            if let Some(cached) =
+                cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+            {
+                return display_cached_secret_list(
+                    cached,
+                    group,
+                    all,
+                    pagination,
+                    pager,
+                    &vault_name,
+                    &config,
+                    names_only,
+                );
+            }
+        }
+
+        // Fetch the full unfiltered list for the cache. For expiry filters,
+        // derive the display set from this cached dataset after applying the
+        // cheap group/enabled filters so we only call get_secret for rows that
+        // can actually be displayed.
+        let all_secrets = reg
             .active()
             .secrets()
-            .list_secrets(&vault_name, group.as_deref())
+            .list_secrets(&vault_name, None)
             .await?;
-        // Reuse existing display logic
+
+        // Cache the unfiltered list so subsequent calls see the full dataset.
+        if use_cache {
+            cache_manager.set(&cache_key, &all_secrets);
+        }
+
+        // Apply expiry filtering if requested (requires per-secret trait calls)
+        let secrets = if expired || expiring.is_some() {
+            use crate::utils::datetime::{is_expired, is_expiring_within};
+
+            let display_candidates =
+                filter_secret_summaries_for_display(all_secrets, group.as_deref(), all);
+            let mut filtered_secrets = Vec::new();
+            for secret_summary in display_candidates {
+                match reg
+                    .active()
+                    .secrets()
+                    .get_secret(&vault_name, &secret_summary.name, false)
+                    .await
+                {
+                    Ok(secret_props) => {
+                        let should_include = if expired {
+                            is_expired(secret_props.expires_on)
+                        } else if let Some(ref duration) = expiring {
+                            match is_expiring_within(secret_props.expires_on, duration) {
+                                Ok(is_exp) => is_exp,
+                                Err(e) => {
+                                    eprintln!("Warning: Invalid duration '{}': {}", duration, e);
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+                        if should_include {
+                            filtered_secrets.push(secret_summary);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to get details for secret '{}': {}",
+                            secret_summary.name, e
+                        );
+                    }
+                }
+            }
+            filtered_secrets
+        } else {
+            all_secrets
+        };
+
         return display_cached_secret_list(
             secrets,
-            group,
-            all,
+            if expired || expiring.is_some() {
+                None
+            } else {
+                group
+            },
+            if expired || expiring.is_some() {
+                true
+            } else {
+                all
+            },
             pagination,
             pager,
             &vault_name,
@@ -413,58 +472,9 @@ pub(crate) async fn execute_secret_list_direct(
         );
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    use crate::cache::{CacheKey, CacheManager};
-
-    let cache_manager = CacheManager::from_config(&config);
-    let vault_name = config.resolve_vault_name(None).await?;
-    let cache_key = CacheKey::SecretsList {
-        vault_name: vault_name.clone(),
-    };
-    let use_cache = cache_manager.is_enabled() && !no_cache;
-
-    // Try cache (skip for expiry filters — they need per-secret API calls)
-    if use_cache && expiring.is_none() && !expired {
-        if let Some(cached) =
-            cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
-        {
-            return display_cached_secret_list(
-                cached,
-                group,
-                all,
-                pagination,
-                pager,
-                &vault_name,
-                &config,
-                names_only,
-            );
-        }
-    }
-
-    // Cache miss — get auth provider from registry
-    // TODO(backend-trait): Use registry.active().secrets().list_secrets() directly.
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    let secrets = execute_secret_list(
-        &secret_manager,
-        group,
-        all,
-        expiring,
-        expired,
-        pagination,
-        pager,
-        names_only,
-        &config,
-    )
-    .await?;
-
-    if use_cache {
-        cache_manager.set(&cache_key, &secrets);
-    }
-
-    Ok(())
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 pub(crate) async fn execute_secret_delete_direct(
@@ -477,7 +487,7 @@ pub(crate) async fn execute_secret_delete_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
 
         if let Some(group_name) = group {
             // Group delete: list, filter by group, delete matching
@@ -521,34 +531,15 @@ pub(crate) async fn execute_secret_delete_direct(
                 "Either secret name or --group must be specified",
             ));
         }
+
+        // Invalidate the secrets list cache for the resolved vault
+        invalidate_trait_secret_cache(&config, &vault_name);
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // TODO(backend-trait): Use registry.active().secrets().delete_secret() directly.
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    // Check if this is a group delete operation
-    if let Some(group_name) = group {
-        execute_secret_delete_group(&secret_manager, &group_name, force, &config).await?;
-    } else if let Some(secret_name) = name {
-        execute_secret_delete(&secret_manager, &secret_name, None, force, &config).await?;
-    } else {
-        return Err(CrosstacheError::invalid_argument(
-            "Either secret name or --group must be specified",
-        ));
-    }
-
-    // Invalidate the secrets list cache for the resolved vault
-    if let Ok(vault_name) = config.resolve_vault_name(None).await {
-        let cache_manager = crate::cache::CacheManager::from_config(&config);
-        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
-    }
-
-    Ok(())
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 pub(crate) async fn execute_secret_history_direct(
@@ -570,7 +561,7 @@ pub(crate) async fn execute_secret_history_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
         let versions = reg
             .active()
             .secrets()
@@ -592,14 +583,9 @@ pub(crate) async fn execute_secret_history_direct(
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // TODO(backend-trait): Use registry.active().secrets().get_secret_versions() directly.
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    execute_secret_history(&secret_manager, name, None, &config).await
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 pub(crate) async fn execute_secret_rollback_direct(
@@ -620,10 +606,19 @@ pub(crate) async fn execute_secret_rollback_direct(
         }
     }
 
-    // ── Trait-based path (non-Azure backends) ──────────────────────────
+    // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
+        if reg.active().kind() == crate::backend::BackendKind::Azure {
+            return execute_secret_rollback_legacy(name, version, force, config, registry).await;
+        }
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
+        if !force {
+            output::warn(&format!(
+                "About to roll back secret '{name}' to version {version}. Use --force to confirm."
+            ));
+            return Ok(());
+        }
         let props = reg
             .active()
             .secrets()
@@ -633,10 +628,22 @@ pub(crate) async fn execute_secret_rollback_direct(
             "Successfully rolled back '{}' to version {version}",
             props.original_name
         ));
+        // Invalidate the secrets list cache for the resolved vault
+        invalidate_trait_secret_cache(&config, &vault_name);
         return Ok(());
     }
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
+    execute_secret_rollback_legacy(name, version, force, config, registry).await
+}
+
+async fn execute_secret_rollback_legacy(
+    name: &str,
+    version: &str,
+    force: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -753,7 +760,7 @@ pub(crate) async fn execute_secret_update_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
 
         // Parse value from stdin if requested
         let resolved_value = if stdin {
@@ -820,6 +827,8 @@ pub(crate) async fn execute_secret_update_direct(
             "Successfully updated secret '{}'",
             props.original_name
         ));
+        // Invalidate the secrets list cache for metadata, value, rename, or enablement changes.
+        invalidate_trait_secret_cache(&config, &vault_name);
         return Ok(());
     }
 
@@ -876,19 +885,39 @@ pub(crate) async fn execute_secret_purge_direct(
         }
     }
 
-    // ── Trait-based path (non-Azure backends) ──────────────────────────
+    // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
+        if reg.active().kind() == crate::backend::BackendKind::Azure {
+            return execute_secret_purge_legacy(name, force, config, registry).await;
+        }
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
+        if !force {
+            output::warn(&format!(
+                "About to PERMANENTLY DELETE secret '{name}'. This cannot be undone. Use --force to confirm."
+            ));
+            return Ok(());
+        }
         reg.active()
             .secrets()
             .purge_secret(&vault_name, name)
             .await?;
         output::success(&format!("Successfully purged secret '{name}'"));
+        // Invalidate the secrets list cache for the resolved vault
+        invalidate_trait_secret_cache(&config, &vault_name);
         return Ok(());
     }
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
+    execute_secret_purge_legacy(name, force, config, registry).await
+}
+
+async fn execute_secret_purge_legacy(
+    name: &str,
+    force: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -924,7 +953,7 @@ pub(crate) async fn execute_secret_restore_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config).await?;
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
         let props = reg
             .active()
             .secrets()
@@ -934,6 +963,8 @@ pub(crate) async fn execute_secret_restore_direct(
             "Successfully restored secret '{}'",
             props.original_name
         ));
+        // Invalidate the secrets list cache for the resolved vault
+        invalidate_trait_secret_cache(&config, &vault_name);
         return Ok(());
     }
 
@@ -1411,7 +1442,7 @@ pub(crate) async fn execute_secret_find_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
+        use crate::utils::fuzzy::{CandidateItem, FuzzyField, score_matches};
 
         // Parse --in fields
         let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
@@ -1455,7 +1486,7 @@ pub(crate) async fn execute_secret_find_direct(
             }
             combined
         } else {
-            let vault_name = resolve_vault_for_trait(&config).await?;
+            let vault_name = resolve_vault_for_trait(&config, registry).await?;
             let all_secrets = reg
                 .active()
                 .secrets()
@@ -1545,7 +1576,7 @@ async fn execute_secret_find(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
+    use crate::utils::fuzzy::{CandidateItem, FuzzyField, score_matches};
 
     // Parse --in fields first so argument errors fire before vault resolution.
     let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
@@ -3341,7 +3372,7 @@ async fn execute_secret_share(
             page_size,
             pager,
         } => {
-            use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
+            use crate::utils::pagination::{Pagination, paginate_slice, pagination_footer_text};
             use std::fmt::Write as _;
 
             let mut roles = vault_manager
@@ -3735,7 +3766,124 @@ fn parse_bulk_set_args(args: Vec<String>) -> Result<Vec<(String, String)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::error::BackendError;
+    use crate::backend::secret::SecretBackend;
+    use crate::backend::{Backend, BackendCapabilities, BackendKind, NameCharset};
     use std::process::{Command, Stdio};
+
+    struct TestBackend {
+        kind: BackendKind,
+    }
+
+    impl TestBackend {
+        fn azure() -> Self {
+            Self {
+                kind: BackendKind::Azure,
+            }
+        }
+
+        fn local() -> Self {
+            Self {
+                kind: BackendKind::Local,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SecretBackend for TestBackend {
+        async fn set_secret(
+            &self,
+            _vault: &str,
+            _request: crate::secret::manager::SecretRequest,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _include_value: bool,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret_version(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+            _include_value: bool,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn list_secrets(
+            &self,
+            _vault: &str,
+            _group_filter: Option<&str>,
+        ) -> std::result::Result<Vec<crate::secret::manager::SecretSummary>, BackendError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<(), BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _request: crate::secret::manager::SecretUpdateRequest,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for TestBackend {
+        fn name(&self) -> &'static str {
+            match self.kind {
+                BackendKind::Azure => "azure",
+                BackendKind::Local => "local",
+            }
+        }
+
+        fn kind(&self) -> BackendKind {
+            self.kind
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                has_vaults: self.kind == BackendKind::Local,
+                has_file_storage: false,
+                has_rbac: false,
+                has_audit: false,
+                has_versioning: true,
+                has_soft_delete: true,
+                has_secret_rotation: false,
+                has_groups: true,
+                has_folders: true,
+                has_notes: true,
+                has_expiry: true,
+                max_secret_size: None,
+                max_name_length: None,
+                name_charset: NameCharset::Unrestricted,
+            }
+        }
+
+        fn secrets(&self) -> &dyn SecretBackend {
+            self
+        }
+
+        async fn health_check(&self) -> std::result::Result<(), BackendError> {
+            Ok(())
+        }
+    }
 
     /// Helper: run stream_and_mask but redirect its print!/eprint! output to files
     /// so we can verify masking actually happened.
@@ -3798,16 +3946,82 @@ mod tests {
     }
 
     fn summary_with_groups(groups: Option<&str>) -> crate::secret::manager::SecretSummary {
+        summary_named("secret", groups, true)
+    }
+
+    fn summary_named(
+        name: &str,
+        groups: Option<&str>,
+        enabled: bool,
+    ) -> crate::secret::manager::SecretSummary {
         crate::secret::manager::SecretSummary {
-            name: "secret".to_string(),
-            original_name: "secret".to_string(),
+            name: name.to_string(),
+            original_name: name.to_string(),
             note: None,
             folder: None,
             groups: groups.map(str::to_string),
             updated_on: "2026-04-28".to_string(),
-            enabled: true,
+            enabled,
             content_type: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn azure_trait_vault_resolution_does_not_fallback_to_default() {
+        let registry = BackendRegistry::new(Arc::new(TestBackend::azure()));
+        let config = Config {
+            backend: Some("azure".to_string()),
+            default_vault: String::new(),
+            ..Default::default()
+        };
+
+        let err = resolve_vault_for_trait(&config, Some(&registry))
+            .await
+            .expect_err("azure should preserve missing-vault config error");
+        assert!(err.to_string().contains("No vault specified"));
+    }
+
+    #[tokio::test]
+    async fn local_trait_vault_resolution_can_fallback_to_local_default() {
+        let registry = BackendRegistry::new(Arc::new(TestBackend::local()));
+        let config = Config {
+            backend: Some("local".to_string()),
+            default_vault: String::new(),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: None,
+                key_file: None,
+                default_vault: Some("local-vault".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let resolved = resolve_vault_for_trait(&config, Some(&registry))
+            .await
+            .unwrap();
+        assert_eq!(resolved, "local-vault");
+    }
+
+    #[test]
+    fn expiry_filter_candidates_apply_group_and_enabled_filters_before_detail_fetches() {
+        let candidates = filter_secret_summaries_for_display(
+            vec![
+                summary_named("prod-enabled", Some("prod"), true),
+                summary_named("prod-disabled", Some("prod"), false),
+                summary_named("dev-enabled", Some("dev"), true),
+                summary_named("ungrouped", None, true),
+            ],
+            Some("prod"),
+            false,
+        );
+
+        let names: Vec<_> = candidates.into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["prod-enabled"]);
+    }
+
+    #[test]
+    fn trait_secret_cache_key_and_invalidation_use_same_resolved_vault_name() {
+        let key = trait_secret_cache_key("local-vault");
+        assert_eq!(key.to_string(), "secrets:local-vault");
     }
 
     #[test]
@@ -3920,7 +4134,7 @@ mod tests {
             .spawn()
             .expect("failed to spawn sh");
 
-        let exit_code = stream_and_mask(child, secrets);
+        let exit_code = stream_and_mask(child, secrets).unwrap();
         assert_eq!(exit_code, 42);
     }
 
@@ -3939,7 +4153,7 @@ mod tests {
             .spawn()
             .expect("failed to spawn sh");
 
-        let exit_code = stream_and_mask(child, secrets);
+        let exit_code = stream_and_mask(child, secrets).unwrap();
         assert_eq!(exit_code, 0);
     }
 }

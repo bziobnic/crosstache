@@ -6,29 +6,40 @@ use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use zeroize::Zeroizing;
 
-/// Returns `true` if the active backend is non-Azure and the registry is available.
+/// Returns `true` if a backend registry is available.
 ///
-/// When this returns `true`, CLI handlers should use the backend trait layer
-/// (`registry.active().secrets()` / `.vaults()`) instead of the legacy
-/// Azure-specific `SecretManager` / `VaultManager` code path.
+/// When this returns `true`, CLI handlers use the backend trait layer
+/// (`registry.active().secrets()` / `.vaults()`) for all backends including Azure.
 pub(crate) fn use_trait_path(registry: Option<&BackendRegistry>) -> bool {
+    registry.is_some()
+}
+
+/// Returns `true` when the active backend can use the generic vault trait path.
+///
+/// Azure vault commands still need the legacy `VaultManager` path because the
+/// trait command shim does not yet carry Azure-only inputs such as resource
+/// group, location, subscription, RBAC, backup/restore, and import/export.
+pub(crate) fn use_vault_trait_path(registry: Option<&BackendRegistry>) -> bool {
     registry.is_some_and(|r| r.active().kind() != BackendKind::Azure)
 }
 
-/// Resolve the vault name for the backend trait path.
+/// Resolve the vault name for the active backend trait path.
 ///
-/// Unlike `config.resolve_vault_name()` (which may involve Azure context),
-/// this helper uses a simple fallback chain that works for local and other
-/// non-Azure backends:
-///   1. `config.default_vault` (the top-level setting)
-///   2. `config.local.default_vault` (the local-backend-specific override)
-///   3. `"default"` as the last resort
-pub(crate) async fn resolve_vault_for_trait(config: &Config) -> Result<String> {
-    // Try the normal resolve_vault_name first — it handles CLI arg, project
-    // config, context, and config.default_vault. It only fails when none
-    // of those are set, which is fine; we fall back below.
-    if let Ok(name) = config.resolve_vault_name(None).await {
-        return Ok(name);
+/// Azure keeps the legacy resolver semantics: no implicit fallback is allowed,
+/// so users get the same clear "No vault specified" configuration error as
+/// before the Azure secret handlers moved to the trait layer. Local and future
+/// offline backends may still fall back to `local.default_vault` and finally
+/// `"default"`.
+pub(crate) async fn resolve_vault_for_trait(
+    config: &Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<String> {
+    match config.resolve_vault_name(None).await {
+        Ok(name) => return Ok(name),
+        Err(e) if registry.is_some_and(|r| r.active().kind() == BackendKind::Azure) => {
+            return Err(e);
+        }
+        Err(_) => {}
     }
 
     // Fall back to local backend config
@@ -110,7 +121,7 @@ pub(crate) fn extract_claims_from_token(token: &str) -> Result<TokenClaims> {
     }
 
     let payload = parts[1];
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     // Azure AD JWT tokens use base64url encoding (RFC 4648 §5), no padding
     let decoded = URL_SAFE_NO_PAD
         .decode(payload)

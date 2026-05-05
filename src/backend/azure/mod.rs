@@ -11,6 +11,7 @@ pub mod auth;
 pub mod detect;
 #[allow(clippy::module_inception)]
 pub mod secrets;
+pub mod types;
 pub mod vaults;
 
 #[cfg(feature = "file-ops")]
@@ -59,6 +60,8 @@ pub fn map_error(err: CrosstacheError) -> BackendError {
         CrosstacheError::ConnectionTimeout(msg) => BackendError::Network(msg),
         CrosstacheError::ConnectionRefused(msg) => BackendError::Network(msg),
         CrosstacheError::SslError(msg) => BackendError::Network(msg),
+        CrosstacheError::InvalidArgument(msg) => BackendError::InvalidArgument(msg),
+        CrosstacheError::InvalidUrl(msg) => BackendError::InvalidArgument(msg),
         other => BackendError::Internal(other.to_string()),
     }
 }
@@ -93,6 +96,10 @@ impl AzureBackend {
         config: &Config,
         auth_provider: Arc<dyn AzureAuthProvider>,
     ) -> Result<Self, BackendError> {
+        if !config.default_vault.is_empty() {
+            types::AzureVaultName::try_from(config.default_vault.as_str()).map_err(map_error)?;
+        }
+
         // Secret backend
         let secret_ops = Arc::new(AzureSecretOperations::new(auth_provider.clone()));
         let secret_backend = AzureSecretBackend::new(secret_ops);
