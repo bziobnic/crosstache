@@ -25,6 +25,7 @@ pub mod config;
 pub mod crypto;
 #[cfg(feature = "file-ops")]
 pub mod files;
+pub mod paths;
 pub mod secrets;
 pub mod vaults;
 
@@ -80,7 +81,7 @@ impl LocalBackend {
         crypto::set_dir_permissions(&config.store_path)?;
 
         // Ensure vaults directory exists
-        let vaults_dir = config.store_path.join("vaults");
+        let vaults_dir = paths::vaults_dir(&config.store_path);
         create_private_dir(&vaults_dir).map_err(|e| {
             BackendError::Internal(format!(
                 "create vaults directory {}: {e}",
@@ -92,7 +93,7 @@ impl LocalBackend {
         let (identity, recipients) = Self::resolve_keys(&config)?;
 
         // Create default vault if it doesn't exist
-        let default_vault_dir = vaults_dir.join(&config.default_vault);
+        let default_vault_dir = paths::vault_dir(&config.store_path, &config.default_vault)?;
         if !default_vault_dir.join(".vault.json").exists() {
             create_private_dir(default_vault_dir.join("secrets"))
                 .map_err(|e| BackendError::Internal(format!("create default vault: {e}")))?;
