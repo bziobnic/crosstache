@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::error::BackendError;
+use crate::backend::local::paths;
 use crate::backend::vault::VaultBackend;
 use crate::vault::models::{VaultCreateRequest, VaultProperties, VaultSummary};
 
@@ -43,19 +44,19 @@ impl LocalVaultBackend {
     }
 
     fn vaults_dir(&self) -> PathBuf {
-        self.store_path.join("vaults")
+        paths::vaults_dir(&self.store_path)
     }
 
-    fn vault_dir(&self, name: &str) -> PathBuf {
-        self.vaults_dir().join(name)
+    fn vault_dir(&self, name: &str) -> Result<PathBuf, BackendError> {
+        paths::vault_dir(&self.store_path, name)
     }
 
-    fn vault_json_path(&self, name: &str) -> PathBuf {
-        self.vault_dir(name).join(".vault.json")
+    fn vault_json_path(&self, name: &str) -> Result<PathBuf, BackendError> {
+        Ok(self.vault_dir(name)?.join(".vault.json"))
     }
 
     fn read_vault_meta(&self, name: &str) -> Result<VaultMeta, BackendError> {
-        let path = self.vault_json_path(name);
+        let path = self.vault_json_path(name)?;
         if !path.exists() {
             return Err(BackendError::VaultNotFound {
                 name: name.to_string(),
@@ -68,15 +69,15 @@ impl LocalVaultBackend {
             .map_err(|e| BackendError::Internal(format!("parse vault meta: {e}")))
     }
 
-    fn vault_meta_to_properties(&self, meta: &VaultMeta) -> VaultProperties {
-        VaultProperties {
+    fn vault_meta_to_properties(&self, meta: &VaultMeta) -> Result<VaultProperties, BackendError> {
+        Ok(VaultProperties {
             id: format!("local:{}", meta.name),
             name: meta.name.clone(),
             location: "local".to_string(),
             resource_group: String::new(),
             subscription_id: String::new(),
             tenant_id: String::new(),
-            uri: format!("file://{}", self.vault_dir(&meta.name).display()),
+            uri: format!("file://{}", self.vault_dir(&meta.name)?.display()),
             enabled_for_deployment: false,
             enabled_for_disk_encryption: false,
             enabled_for_template_deployment: false,
@@ -87,7 +88,7 @@ impl LocalVaultBackend {
             created_at: meta.created_at,
             tags: meta.tags.clone(),
             enable_rbac_authorization: Some(false),
-        }
+        })
     }
 }
 
@@ -102,10 +103,8 @@ impl VaultBackend for LocalVaultBackend {
             return Err(BackendError::Internal("vault name cannot be empty".into()));
         }
 
-        let vault_dir = self.vault_dir(name);
-        let vault_json = self.vault_json_path(name);
-
-        if vault_json.exists() {
+        let vault_dir = self.vault_dir(name)?;
+        if vault_dir.join(".vault.json").exists() {
             return Err(BackendError::Conflict(format!(
                 "vault '{name}' already exists"
             )));
@@ -123,15 +122,15 @@ impl VaultBackend for LocalVaultBackend {
 
         let json = serde_json::to_string_pretty(&meta)
             .map_err(|e| BackendError::Internal(format!("serialize vault meta: {e}")))?;
-        fs::write(&vault_json, json)
+        fs::write(vault_dir.join(".vault.json"), json)
             .map_err(|e| BackendError::Internal(format!("write vault meta: {e}")))?;
 
-        Ok(self.vault_meta_to_properties(&meta))
+        self.vault_meta_to_properties(&meta)
     }
 
     async fn get_vault(&self, name: &str) -> Result<VaultProperties, BackendError> {
         let meta = self.read_vault_meta(name)?;
-        Ok(self.vault_meta_to_properties(&meta))
+        self.vault_meta_to_properties(&meta)
     }
 
     async fn list_vaults(&self) -> Result<Vec<VaultSummary>, BackendError> {
@@ -149,7 +148,7 @@ impl VaultBackend for LocalVaultBackend {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            let vault_json = self.vault_json_path(&name);
+            let vault_json = self.vault_json_path(&name)?;
             if !vault_json.exists() {
                 continue;
             }
@@ -173,8 +172,8 @@ impl VaultBackend for LocalVaultBackend {
     }
 
     async fn delete_vault(&self, name: &str) -> Result<(), BackendError> {
-        let vault_dir = self.vault_dir(name);
-        let vault_json = self.vault_json_path(name);
+        let vault_dir = self.vault_dir(name)?;
+        let vault_json = self.vault_json_path(name)?;
 
         if !vault_json.exists() {
             return Err(BackendError::VaultNotFound {
@@ -254,6 +253,32 @@ mod tests {
 
         let got = backend.get_vault("myvault").await.unwrap();
         assert_eq!(got.name, "myvault");
+    }
+
+    #[tokio::test]
+    async fn rejects_traversal_vault_names() {
+        let (backend, tmp) = test_vault_backend();
+        let outside = tmp.path().join("outside");
+
+        let result = backend.create_vault(create_request("../../outside")).await;
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+        assert!(!outside.exists());
+
+        let result = backend.delete_vault("../../outside").await;
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+    }
+
+    #[tokio::test]
+    async fn rejects_separator_vault_names() {
+        let (backend, _tmp) = test_vault_backend();
+
+        for name in ["nested/vault", "nested\\vault", "/absolute"] {
+            let result = backend.create_vault(create_request(name)).await;
+            assert!(
+                matches!(result, Err(BackendError::InvalidArgument(_))),
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]

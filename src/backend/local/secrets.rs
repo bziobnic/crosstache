@@ -25,7 +25,7 @@ use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
 use crate::secret::manager::{SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest};
 
-use super::crypto;
+use super::{crypto, paths};
 
 // ---------------------------------------------------------------------------
 // Metadata persisted alongside each secret
@@ -74,36 +74,32 @@ fn decode_name(encoded: &str) -> String {
         .collect()
 }
 
-fn secrets_dir(store_path: &Path, vault: &str) -> PathBuf {
-    store_path.join("vaults").join(vault).join("secrets")
+fn secrets_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
+    paths::secrets_dir(store_path, vault)
 }
 
-fn age_path(store_path: &Path, vault: &str, name: &str) -> PathBuf {
+fn age_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
     let enc = encode_name(name);
-    secrets_dir(store_path, vault).join(format!("{enc}.age"))
+    Ok(secrets_dir(store_path, vault)?.join(format!("{enc}.age")))
 }
 
-fn meta_path(store_path: &Path, vault: &str, name: &str) -> PathBuf {
+fn meta_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
     let enc = encode_name(name);
-    secrets_dir(store_path, vault).join(format!("{enc}.meta.json"))
+    Ok(secrets_dir(store_path, vault)?.join(format!("{enc}.meta.json")))
 }
 
-fn versions_dir(store_path: &Path, vault: &str, name: &str) -> PathBuf {
+fn versions_dir(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
     let enc = encode_name(name);
-    secrets_dir(store_path, vault).join(".versions").join(enc)
+    Ok(secrets_dir(store_path, vault)?.join(".versions").join(enc))
 }
 
-fn trash_dir(store_path: &Path, vault: &str, name: &str) -> PathBuf {
+fn trash_dir(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
     let enc = encode_name(name);
-    store_path
-        .join("vaults")
-        .join(vault)
-        .join(".trash")
-        .join(enc)
+    Ok(paths::trash_base_dir(store_path, vault)?.join(enc))
 }
 
-fn trash_base_dir(store_path: &Path, vault: &str) -> PathBuf {
-    store_path.join("vaults").join(vault).join(".trash")
+fn trash_base_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
+    paths::trash_base_dir(store_path, vault)
 }
 
 // ---------------------------------------------------------------------------
@@ -168,10 +164,10 @@ fn write_meta(path: &Path, meta: &SecretMeta) -> Result<(), BackendError> {
 }
 
 /// Determine the next version number by scanning `.versions/<name>/`.
-fn next_version(store_path: &Path, vault: &str, name: &str) -> u32 {
-    let vdir = versions_dir(store_path, vault, name);
+fn next_version(store_path: &Path, vault: &str, name: &str) -> Result<u32, BackendError> {
+    let vdir = versions_dir(store_path, vault, name)?;
     if !vdir.exists() {
-        return 1;
+        return Ok(1);
     }
     let mut max: u32 = 0;
     if let Ok(entries) = fs::read_dir(&vdir) {
@@ -196,20 +192,20 @@ fn next_version(store_path: &Path, vault: &str, name: &str) -> u32 {
             }
         }
     }
-    max + 1
+    Ok(max + 1)
 }
 
 /// Archive the current secret to `.versions/<name>/v<N>.*`.
 fn archive_current(store_path: &Path, vault: &str, name: &str) -> Result<u32, BackendError> {
-    let ap = age_path(store_path, vault, name);
-    let mp = meta_path(store_path, vault, name);
+    let ap = age_path(store_path, vault, name)?;
+    let mp = meta_path(store_path, vault, name)?;
 
     if !ap.exists() && !mp.exists() {
         return Ok(1);
     }
 
-    let ver = next_version(store_path, vault, name);
-    let vdir = versions_dir(store_path, vault, name);
+    let ver = next_version(store_path, vault, name)?;
+    let vdir = versions_dir(store_path, vault, name)?;
     fs::create_dir_all(&vdir)
         .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
 
@@ -276,7 +272,7 @@ impl SecretBackend for LocalSecretBackend {
         let recipients = self.recipients.clone();
 
         // Validate vault exists before attempting to lock.
-        let vault_dir = self.store_path.join("vaults").join(vault);
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         let vault_json = vault_dir.join(".vault.json");
         if !vault_json.exists() {
             return Err(BackendError::VaultNotFound {
@@ -288,13 +284,13 @@ impl SecretBackend for LocalSecretBackend {
         // Acquire exclusive vault lock for the duration of the mutation.
         let _lock = lock_vault(&vault_dir)?;
 
-        let sdir = secrets_dir(&store, vault);
+        let sdir = secrets_dir(&store, vault)?;
         create_private_dir(&sdir)
             .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
 
         let name = request.name.clone();
-        let ap = age_path(&store, vault, &name);
-        let mp = meta_path(&store, vault, &name);
+        let ap = age_path(&store, vault, &name)?;
+        let mp = meta_path(&store, vault, &name)?;
 
         // If secret already exists, archive old version.
         let version = if mp.exists() {
@@ -343,7 +339,7 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
-        let mp = meta_path(&self.store_path, vault, name);
+        let mp = meta_path(&self.store_path, vault, name)?;
         if !mp.exists() {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
@@ -366,7 +362,7 @@ impl SecretBackend for LocalSecretBackend {
         let meta = read_meta(&mp)?;
 
         let value = if include_value {
-            let ap = age_path(&self.store_path, vault, name);
+            let ap = age_path(&self.store_path, vault, name)?;
 
             if fs::symlink_metadata(&ap)
                 .map(|m| m.is_symlink())
@@ -394,7 +390,7 @@ impl SecretBackend for LocalSecretBackend {
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
         // First check if this is the current version.
-        let mp = meta_path(&self.store_path, vault, name);
+        let mp = meta_path(&self.store_path, vault, name)?;
         if mp.exists() {
             let meta = read_meta(&mp)?;
             if meta.version == version {
@@ -403,7 +399,7 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         // Look in .versions/
-        let vdir = versions_dir(&self.store_path, vault, name);
+        let vdir = versions_dir(&self.store_path, vault, name)?;
         let meta_file = vdir.join(format!("{version}.meta.json"));
         if !meta_file.exists() {
             return Err(BackendError::NotFound {
@@ -450,7 +446,7 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>, BackendError> {
-        let sdir = secrets_dir(&self.store_path, vault);
+        let sdir = secrets_dir(&self.store_path, vault)?;
         if !sdir.exists() {
             return Ok(Vec::new());
         }
@@ -492,7 +488,7 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn delete_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
-        let vault_dir = self.store_path.join("vaults").join(vault);
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         if !vault_dir.join(".vault.json").exists() {
             return Err(BackendError::VaultNotFound {
                 name: vault.to_string(),
@@ -501,8 +497,8 @@ impl SecretBackend for LocalSecretBackend {
         }
         let _lock = lock_vault(&vault_dir)?;
 
-        let mp = meta_path(&self.store_path, vault, name);
-        let ap = age_path(&self.store_path, vault, name);
+        let mp = meta_path(&self.store_path, vault, name)?;
+        let ap = age_path(&self.store_path, vault, name)?;
 
         if !mp.exists() && !ap.exists() {
             return Err(BackendError::NotFound {
@@ -512,7 +508,7 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         // Soft delete: move files to .trash/{encoded_name}/
-        let tdir = trash_dir(&self.store_path, vault, name);
+        let tdir = trash_dir(&self.store_path, vault, name)?;
         fs::create_dir_all(&tdir)
             .map_err(|e| BackendError::Internal(format!("mkdir trash: {e}")))?;
 
@@ -552,10 +548,10 @@ impl SecretBackend for LocalSecretBackend {
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
         // Acquire exclusive vault lock — update_secret may call archive_current/next_version.
-        let vault_dir = self.store_path.join("vaults").join(vault);
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         let _lock = lock_vault(&vault_dir)?;
 
-        let mp = meta_path(&self.store_path, vault, name);
+        let mp = meta_path(&self.store_path, vault, name)?;
         if !mp.exists() {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
@@ -577,7 +573,7 @@ impl SecretBackend for LocalSecretBackend {
                 .unwrap_or(0);
             meta.version = format!("v{}", old_num + 1);
 
-            let ap = age_path(&self.store_path, vault, name);
+            let ap = age_path(&self.store_path, vault, name)?;
             crypto::encrypt_to_file(&ap, new_value.as_bytes(), &self.recipients)?;
         }
 
@@ -642,7 +638,7 @@ impl SecretBackend for LocalSecretBackend {
         let mut versions = Vec::new();
 
         // Collect archived versions
-        let vdir = versions_dir(&self.store_path, vault, name);
+        let vdir = versions_dir(&self.store_path, vault, name)?;
         if vdir.exists() {
             if let Ok(entries) = fs::read_dir(&vdir) {
                 for entry in entries.flatten() {
@@ -657,7 +653,7 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         // Add current version
-        let mp = meta_path(&self.store_path, vault, name);
+        let mp = meta_path(&self.store_path, vault, name)?;
         if mp.exists() {
             let meta = read_meta(&mp)?;
             versions.push(meta_to_properties(&meta, None));
@@ -670,7 +666,7 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
-        let mp = meta_path(&self.store_path, vault, name);
+        let mp = meta_path(&self.store_path, vault, name)?;
         Ok(mp.exists())
     }
 
@@ -681,11 +677,11 @@ impl SecretBackend for LocalSecretBackend {
         version: &str,
     ) -> Result<SecretProperties, BackendError> {
         // Acquire exclusive vault lock — rollback calls archive_current/next_version.
-        let vault_dir = self.store_path.join("vaults").join(vault);
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         let _lock = lock_vault(&vault_dir)?;
 
         // Find the target version in .versions/
-        let vdir = versions_dir(&self.store_path, vault, name);
+        let vdir = versions_dir(&self.store_path, vault, name)?;
         let ver_age = vdir.join(format!("{version}.age"));
         let ver_meta = vdir.join(format!("{version}.meta.json"));
 
@@ -700,8 +696,8 @@ impl SecretBackend for LocalSecretBackend {
         archive_current(&self.store_path, vault, name)?;
 
         // Copy the target version files to current
-        let ap = age_path(&self.store_path, vault, name);
-        let mp = meta_path(&self.store_path, vault, name);
+        let ap = age_path(&self.store_path, vault, name)?;
+        let mp = meta_path(&self.store_path, vault, name)?;
 
         if ver_age.exists() {
             fs::copy(&ver_age, &ap)
@@ -712,7 +708,7 @@ impl SecretBackend for LocalSecretBackend {
 
         // Update the version label to the next version number
         let mut meta = read_meta(&mp)?;
-        let next_ver = next_version(&self.store_path, vault, name);
+        let next_ver = next_version(&self.store_path, vault, name)?;
         meta.version = format!("v{next_ver}");
         meta.updated_at = Utc::now();
         write_meta(&mp, &meta)?;
@@ -725,7 +721,7 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         name: &str,
     ) -> Result<SecretProperties, BackendError> {
-        let vault_dir = self.store_path.join("vaults").join(vault);
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         if !vault_dir.join(".vault.json").exists() {
             return Err(BackendError::VaultNotFound {
                 name: vault.to_string(),
@@ -734,7 +730,7 @@ impl SecretBackend for LocalSecretBackend {
         }
         let _lock = lock_vault(&vault_dir)?;
 
-        let tdir = trash_dir(&self.store_path, vault, name);
+        let tdir = trash_dir(&self.store_path, vault, name)?;
         if !tdir.exists() {
             return Err(BackendError::NotFound {
                 name: format!("{name} (deleted)"),
@@ -754,12 +750,12 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         // Move files back to secrets/
-        let sdir = secrets_dir(&self.store_path, vault);
+        let sdir = secrets_dir(&self.store_path, vault)?;
         fs::create_dir_all(&sdir)
             .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
 
-        let ap = age_path(&self.store_path, vault, name);
-        let mp = meta_path(&self.store_path, vault, name);
+        let ap = age_path(&self.store_path, vault, name)?;
+        let mp = meta_path(&self.store_path, vault, name)?;
 
         if trash_age.exists() {
             fs::rename(&trash_age, &ap)
@@ -777,7 +773,7 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn purge_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
-        let vault_dir = self.store_path.join("vaults").join(vault);
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         if !vault_dir.join(".vault.json").exists() {
             return Err(BackendError::VaultNotFound {
                 name: vault.to_string(),
@@ -787,14 +783,14 @@ impl SecretBackend for LocalSecretBackend {
         let _lock = lock_vault(&vault_dir)?;
 
         // Permanently remove from .trash/
-        let tdir = trash_dir(&self.store_path, vault, name);
+        let tdir = trash_dir(&self.store_path, vault, name)?;
         if tdir.exists() {
             fs::remove_dir_all(&tdir)
                 .map_err(|e| BackendError::Internal(format!("purge trash: {e}")))?;
         }
 
         // Also remove any .versions/ for that secret
-        let vdir = versions_dir(&self.store_path, vault, name);
+        let vdir = versions_dir(&self.store_path, vault, name)?;
         if vdir.exists() {
             fs::remove_dir_all(&vdir)
                 .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
@@ -804,7 +800,7 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn list_deleted_secrets(&self, vault: &str) -> Result<Vec<SecretSummary>, BackendError> {
-        let tbase = trash_base_dir(&self.store_path, vault);
+        let tbase = trash_base_dir(&self.store_path, vault)?;
         if !tbase.exists() {
             return Ok(Vec::new());
         }
@@ -914,6 +910,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_traversal_vault_name_for_secret_writes() {
+        let (backend, tmp) = test_backend();
+        let outside = tmp.path().join("outside");
+
+        let result = backend
+            .set_secret("../../outside", make_request("escape", "value"))
+            .await;
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+        assert!(!outside.exists());
+    }
+
+    #[tokio::test]
     async fn set_secret_versions() {
         let (backend, _tmp) = test_backend();
 
@@ -999,10 +1007,12 @@ mod tests {
             .delete_secret("default", "restore-me")
             .await
             .unwrap();
-        assert!(!backend
-            .secret_exists("default", "restore-me")
-            .await
-            .unwrap());
+        assert!(
+            !backend
+                .secret_exists("default", "restore-me")
+                .await
+                .unwrap()
+        );
 
         // Restore
         let restored = backend
@@ -1012,10 +1022,12 @@ mod tests {
         assert_eq!(restored.name, "restore-me");
 
         // Should exist again
-        assert!(backend
-            .secret_exists("default", "restore-me")
-            .await
-            .unwrap());
+        assert!(
+            backend
+                .secret_exists("default", "restore-me")
+                .await
+                .unwrap()
+        );
 
         // Value should be recoverable
         let got = backend
@@ -1131,10 +1143,12 @@ mod tests {
             .set_secret("default", make_request("exists-test", "val"))
             .await
             .unwrap();
-        assert!(backend
-            .secret_exists("default", "exists-test")
-            .await
-            .unwrap());
+        assert!(
+            backend
+                .secret_exists("default", "exists-test")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

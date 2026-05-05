@@ -18,7 +18,7 @@ use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
 use crate::utils::helpers::create_private_dir;
 use crate::utils::progress::ProgressReporter;
 
-use super::crypto;
+use super::{crypto, paths};
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -29,18 +29,18 @@ fn encode_name(name: &str) -> String {
     url::form_urlencoded::byte_serialize(name.as_bytes()).collect()
 }
 
-fn files_dir(store_path: &Path, vault: &str) -> PathBuf {
-    store_path.join("vaults").join(vault).join("files")
+fn files_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
+    paths::files_dir(store_path, vault)
 }
 
-fn file_age_path(store_path: &Path, vault: &str, name: &str) -> PathBuf {
+fn file_age_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
     let enc = encode_name(name);
-    files_dir(store_path, vault).join(format!("{enc}.age"))
+    Ok(files_dir(store_path, vault)?.join(format!("{enc}.age")))
 }
 
-fn file_meta_path(store_path: &Path, vault: &str, name: &str) -> PathBuf {
+fn file_meta_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
     let enc = encode_name(name);
-    files_dir(store_path, vault).join(format!("{enc}.meta.json"))
+    Ok(files_dir(store_path, vault)?.join(format!("{enc}.meta.json")))
 }
 
 // ---------------------------------------------------------------------------
@@ -97,13 +97,13 @@ impl FileBackend for LocalFileBackend {
         request: FileUploadRequest,
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError> {
-        let fdir = files_dir(&self.store_path, &self.vault);
+        let fdir = files_dir(&self.store_path, &self.vault)?;
         create_private_dir(&fdir)
             .map_err(|e| BackendError::Internal(format!("mkdir files: {e}")))?;
 
         let original_size = request.content.len() as u64;
-        let ap = file_age_path(&self.store_path, &self.vault, &request.name);
-        let mp = file_meta_path(&self.store_path, &self.vault, &request.name);
+        let ap = file_age_path(&self.store_path, &self.vault, &request.name)?;
+        let mp = file_meta_path(&self.store_path, &self.vault, &request.name)?;
 
         // Encrypt and write file content
         crypto::encrypt_to_file(&ap, &request.content, &self.recipients)?;
@@ -132,7 +132,7 @@ impl FileBackend for LocalFileBackend {
         name: &str,
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<Vec<u8>, BackendError> {
-        let ap = file_age_path(&self.store_path, &self.vault, name);
+        let ap = file_age_path(&self.store_path, &self.vault, name)?;
         if !ap.exists() {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
@@ -144,7 +144,7 @@ impl FileBackend for LocalFileBackend {
     }
 
     async fn list_files(&self, request: FileListRequest) -> Result<Vec<FileInfo>, BackendError> {
-        let fdir = files_dir(&self.store_path, &self.vault);
+        let fdir = files_dir(&self.store_path, &self.vault)?;
         if !fdir.exists() {
             return Ok(Vec::new());
         }
@@ -193,8 +193,8 @@ impl FileBackend for LocalFileBackend {
     }
 
     async fn delete_file(&self, name: &str) -> Result<(), BackendError> {
-        let ap = file_age_path(&self.store_path, &self.vault, name);
-        let mp = file_meta_path(&self.store_path, &self.vault, name);
+        let ap = file_age_path(&self.store_path, &self.vault, name)?;
+        let mp = file_meta_path(&self.store_path, &self.vault, name)?;
 
         if !ap.exists() && !mp.exists() {
             return Err(BackendError::NotFound {
@@ -216,7 +216,7 @@ impl FileBackend for LocalFileBackend {
     }
 
     async fn get_file_info(&self, name: &str) -> Result<FileInfo, BackendError> {
-        let mp = file_meta_path(&self.store_path, &self.vault, name);
+        let mp = file_meta_path(&self.store_path, &self.vault, name)?;
         if !mp.exists() {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
@@ -282,6 +282,33 @@ mod tests {
         // Download and verify
         let bytes = backend.download_file("cert.pem", None).await.unwrap();
         assert_eq!(bytes, b"-----BEGIN CERTIFICATE-----\nMIIBxTCCA...");
+    }
+
+    #[tokio::test]
+    async fn rejects_traversal_vault_name_for_file_writes() {
+        let tmp = TempDir::new().unwrap();
+        let store = tmp.path().to_path_buf();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        let (identity, recipients) = generate_keypair(&key_path, &recipients_path).unwrap();
+        let backend = LocalFileBackend::new(store, "../../outside".into(), identity, recipients);
+
+        let result = backend
+            .upload_file(
+                FileUploadRequest {
+                    name: "escape.txt".into(),
+                    content: b"content".to_vec(),
+                    content_type: None,
+                    groups: Vec::new(),
+                    metadata: HashMap::new(),
+                    tags: HashMap::new(),
+                },
+                None,
+            )
+            .await;
+
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+        assert!(!tmp.path().join("outside").exists());
     }
 
     #[tokio::test]
