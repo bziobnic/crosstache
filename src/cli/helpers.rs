@@ -1,18 +1,17 @@
 //! Shared CLI helper functions (clipboard, token parsing, random generation, formatting).
 
-use crate::backend::{BackendKind, BackendRegistry};
+use crate::backend::BackendRegistry;
 use crate::cli::commands::CharsetType;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use zeroize::Zeroizing;
 
-/// Returns `true` if the active backend is non-Azure and the registry is available.
+/// Returns `true` if a backend registry is available.
 ///
-/// When this returns `true`, CLI handlers should use the backend trait layer
-/// (`registry.active().secrets()` / `.vaults()`) instead of the legacy
-/// Azure-specific `SecretManager` / `VaultManager` code path.
+/// When this returns `true`, CLI handlers use the backend trait layer
+/// (`registry.active().secrets()` / `.vaults()`) for all backends including Azure.
 pub(crate) fn use_trait_path(registry: Option<&BackendRegistry>) -> bool {
-    registry.is_some_and(|r| r.active().kind() != BackendKind::Azure)
+    registry.is_some()
 }
 
 /// Resolve the vault name for the backend trait path.

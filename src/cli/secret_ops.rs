@@ -136,52 +136,15 @@ pub(crate) async fn execute_secret_set_direct(
                 "Bulk set complete: {success_count} succeeded, {error_count} failed"
             ));
         }
+
+        // Invalidate the secrets list cache for the resolved vault
+        if let Ok(cache_vault) = config.resolve_vault_name(None).await {
+            let cache_manager = crate::cache::CacheManager::from_config(&config);
+            cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+                vault_name: cache_vault,
+            });
+        }
         return Ok(());
-    }
-
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // TODO(backend-trait): Use registry.active().secrets().set_secret() directly
-    // once SecretBackend supports all set options (notes, folders, expiry).
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    // Check if this is a bulk set operation (multiple KEY=value pairs)
-    if args.len() == 1 && !args[0].contains('=') {
-        // Single secret operation (original behavior)
-        let name = &args[0];
-        execute_secret_set(
-            &secret_manager,
-            name,
-            None,
-            stdin,
-            note,
-            folder,
-            expires,
-            not_before,
-            &config,
-        )
-        .await?;
-    } else {
-        // Bulk set operation
-        if stdin {
-            return Err(CrosstacheError::invalid_argument(
-                "--stdin cannot be used with bulk set operation",
-            ));
-        }
-        if expires.is_some() || not_before.is_some() {
-            return Err(CrosstacheError::invalid_argument(
-                "--expires and --not-before cannot be used with bulk set operation",
-            ));
-        }
-        execute_secret_set_bulk(&secret_manager, args, note, folder, &config).await?;
-    }
-
-    // Invalidate the secrets list cache for the resolved vault
-    if let Ok(vault_name) = config.resolve_vault_name(None).await {
-        let cache_manager = crate::cache::CacheManager::from_config(&config);
-        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
     }
 
     Ok(())
@@ -239,14 +202,7 @@ pub(crate) async fn execute_secret_get_direct(
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // TODO(backend-trait): Use registry.active().secrets().get_secret() directly.
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    execute_secret_get(&secret_manager, name, None, raw, version, &config).await
+    Ok(())
 }
 
 fn secret_summary_matches_group(
@@ -391,16 +347,87 @@ pub(crate) async fn execute_secret_list_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // ── Trait-based path (non-Azure backends) ──────────────────────────
+    // ── Trait-based path (all backends) ───────────────────────────────
     if use_trait_path(registry) {
+        use crate::cache::{CacheKey, CacheManager};
+
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config).await?;
-        let secrets = reg
+        let cache_manager = CacheManager::from_config(&config);
+        let cache_key = CacheKey::SecretsList {
+            vault_name: vault_name.clone(),
+        };
+        let use_cache = cache_manager.is_enabled() && !no_cache;
+
+        // Try cache (skip for expiry filters — they need per-secret API calls)
+        if use_cache && expiring.is_none() && !expired {
+            if let Some(cached) =
+                cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+            {
+                return display_cached_secret_list(
+                    cached,
+                    group,
+                    all,
+                    pagination,
+                    pager,
+                    &vault_name,
+                    &config,
+                    names_only,
+                );
+            }
+        }
+
+        let mut secrets = reg
             .active()
             .secrets()
             .list_secrets(&vault_name, group.as_deref())
             .await?;
-        // Reuse existing display logic
+
+        // Apply expiry filtering if requested (requires per-secret trait calls)
+        if expired || expiring.is_some() {
+            use crate::utils::datetime::{is_expired, is_expiring_within};
+
+            let mut filtered_secrets = Vec::new();
+            for secret_summary in secrets {
+                match reg
+                    .active()
+                    .secrets()
+                    .get_secret(&vault_name, &secret_summary.name, false)
+                    .await
+                {
+                    Ok(secret_props) => {
+                        let should_include = if expired {
+                            is_expired(secret_props.expires_on)
+                        } else if let Some(ref duration) = expiring {
+                            match is_expiring_within(secret_props.expires_on, duration) {
+                                Ok(is_exp) => is_exp,
+                                Err(e) => {
+                                    eprintln!("Warning: Invalid duration '{}': {}", duration, e);
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+                        if should_include {
+                            filtered_secrets.push(secret_summary);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to get details for secret '{}': {}",
+                            secret_summary.name, e
+                        );
+                    }
+                }
+            }
+            secrets = filtered_secrets;
+        }
+
+        if use_cache {
+            cache_manager.set(&cache_key, &secrets);
+        }
+
         return display_cached_secret_list(
             secrets,
             group,
@@ -411,57 +438,6 @@ pub(crate) async fn execute_secret_list_direct(
             &config,
             names_only,
         );
-    }
-
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    use crate::cache::{CacheKey, CacheManager};
-
-    let cache_manager = CacheManager::from_config(&config);
-    let vault_name = config.resolve_vault_name(None).await?;
-    let cache_key = CacheKey::SecretsList {
-        vault_name: vault_name.clone(),
-    };
-    let use_cache = cache_manager.is_enabled() && !no_cache;
-
-    // Try cache (skip for expiry filters — they need per-secret API calls)
-    if use_cache && expiring.is_none() && !expired {
-        if let Some(cached) =
-            cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
-        {
-            return display_cached_secret_list(
-                cached,
-                group,
-                all,
-                pagination,
-                pager,
-                &vault_name,
-                &config,
-                names_only,
-            );
-        }
-    }
-
-    // Cache miss — get auth provider from registry
-    // TODO(backend-trait): Use registry.active().secrets().list_secrets() directly.
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    let secrets = execute_secret_list(
-        &secret_manager,
-        group,
-        all,
-        expiring,
-        expired,
-        pagination,
-        pager,
-        names_only,
-        &config,
-    )
-    .await?;
-
-    if use_cache {
-        cache_manager.set(&cache_key, &secrets);
     }
 
     Ok(())
@@ -521,31 +497,15 @@ pub(crate) async fn execute_secret_delete_direct(
                 "Either secret name or --group must be specified",
             ));
         }
+
+        // Invalidate the secrets list cache for the resolved vault
+        if let Ok(cache_vault) = config.resolve_vault_name(None).await {
+            let cache_manager = crate::cache::CacheManager::from_config(&config);
+            cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+                vault_name: cache_vault,
+            });
+        }
         return Ok(());
-    }
-
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // TODO(backend-trait): Use registry.active().secrets().delete_secret() directly.
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    // Check if this is a group delete operation
-    if let Some(group_name) = group {
-        execute_secret_delete_group(&secret_manager, &group_name, force, &config).await?;
-    } else if let Some(secret_name) = name {
-        execute_secret_delete(&secret_manager, &secret_name, None, force, &config).await?;
-    } else {
-        return Err(CrosstacheError::invalid_argument(
-            "Either secret name or --group must be specified",
-        ));
-    }
-
-    // Invalidate the secrets list cache for the resolved vault
-    if let Ok(vault_name) = config.resolve_vault_name(None).await {
-        let cache_manager = crate::cache::CacheManager::from_config(&config);
-        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
     }
 
     Ok(())
@@ -592,14 +552,7 @@ pub(crate) async fn execute_secret_history_direct(
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // TODO(backend-trait): Use registry.active().secrets().get_secret_versions() directly.
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    execute_secret_history(&secret_manager, name, None, &config).await
+    Ok(())
 }
 
 pub(crate) async fn execute_secret_rollback_direct(
