@@ -407,13 +407,12 @@ pub(crate) async fn execute_secret_list_direct(
             cache_manager.set(&cache_key, &all_secrets);
         }
 
-        let display_candidates =
-            filter_secret_summaries_for_display(all_secrets.clone(), group.as_deref(), all);
-
         // Apply expiry filtering if requested (requires per-secret trait calls)
         let secrets = if expired || expiring.is_some() {
             use crate::utils::datetime::{is_expired, is_expiring_within};
 
+            let display_candidates =
+                filter_secret_summaries_for_display(all_secrets, group.as_deref(), all);
             let mut filtered_secrets = Vec::new();
             for secret_summary in display_candidates {
                 match reg
@@ -610,6 +609,9 @@ pub(crate) async fn execute_secret_rollback_direct(
     // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
+        if reg.active().kind() == crate::backend::BackendKind::Azure {
+            return execute_secret_rollback_legacy(name, version, force, config, registry).await;
+        }
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
         if !force {
             output::warn(&format!(
@@ -632,6 +634,16 @@ pub(crate) async fn execute_secret_rollback_direct(
     }
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
+    execute_secret_rollback_legacy(name, version, force, config, registry).await
+}
+
+async fn execute_secret_rollback_legacy(
+    name: &str,
+    version: &str,
+    force: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -876,6 +888,9 @@ pub(crate) async fn execute_secret_purge_direct(
     // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
+        if reg.active().kind() == crate::backend::BackendKind::Azure {
+            return execute_secret_purge_legacy(name, force, config, registry).await;
+        }
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
         if !force {
             output::warn(&format!(
@@ -894,6 +909,15 @@ pub(crate) async fn execute_secret_purge_direct(
     }
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
+    execute_secret_purge_legacy(name, force, config, registry).await
+}
+
+async fn execute_secret_purge_legacy(
+    name: &str,
+    force: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
