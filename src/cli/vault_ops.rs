@@ -1,9 +1,9 @@
 //! Vault command execution handlers.
 
 use crate::auth::provider::AzureAuthProvider;
-use crate::backend::{BackendKind, BackendRegistry};
+use crate::backend::BackendRegistry;
 use crate::cli::commands::{VaultCommands, VaultShareCommands};
-use crate::cli::helpers::get_azure_auth_provider;
+use crate::cli::helpers::{get_azure_auth_provider, use_vault_trait_path};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
@@ -20,7 +20,7 @@ pub(crate) async fn execute_vault_command(
     // ── Trait-based path (non-Azure backends only) ─────────────────────
     // Azure vault operations are not yet ported to the trait layer — they use
     // the legacy VaultManager path below.
-    if registry.is_some_and(|r| r.active().kind() != BackendKind::Azure) {
+    if use_vault_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
         let vaults_backend = reg.active().vaults().ok_or_else(|| {
             CrosstacheError::InvalidArgument(format!(
@@ -57,7 +57,7 @@ pub(crate) async fn execute_vault_command(
             } => {
                 use crate::utils::format::TableFormatter;
                 use crate::utils::pagination::{
-                    paginate_slice, pagination_footer_text, Pagination,
+                    Pagination, paginate_slice, pagination_footer_text,
                 };
 
                 let vaults = vaults_backend.list_vaults().await?;
@@ -345,7 +345,7 @@ async fn execute_vault_list(
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
     use crate::utils::format::TableFormatter;
-    use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
+    use crate::utils::pagination::{Pagination, paginate_slice, pagination_footer_text};
     use crate::vault::models::VaultSummary;
 
     let cache_manager = CacheManager::from_config(config);
@@ -1104,7 +1104,7 @@ async fn execute_vault_share(
             page_size,
             pager,
         } => {
-            use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
+            use crate::utils::pagination::{Pagination, paginate_slice, pagination_footer_text};
             use std::fmt::Write as _;
 
             let resource_group =
