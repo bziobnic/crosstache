@@ -1,9 +1,9 @@
 //! Vault command execution handlers.
 
 use crate::auth::provider::AzureAuthProvider;
-use crate::backend::BackendRegistry;
+use crate::backend::{BackendKind, BackendRegistry};
 use crate::cli::commands::{VaultCommands, VaultShareCommands};
-use crate::cli::helpers::{get_azure_auth_provider, use_trait_path};
+use crate::cli::helpers::get_azure_auth_provider;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
@@ -17,8 +17,10 @@ pub(crate) async fn execute_vault_command(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // ── Trait-based path (non-Azure backends) ──────────────────────────
-    if use_trait_path(registry) {
+    // ── Trait-based path (non-Azure backends only) ─────────────────────
+    // Azure vault operations are not yet ported to the trait layer — they use
+    // the legacy VaultManager path below.
+    if registry.is_some_and(|r| r.active().kind() != BackendKind::Azure) {
         let reg = registry.expect("use_trait_path guarantees Some");
         let vaults_backend = reg.active().vaults().ok_or_else(|| {
             CrosstacheError::InvalidArgument(format!(

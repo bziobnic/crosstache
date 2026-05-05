@@ -138,12 +138,10 @@ pub(crate) async fn execute_secret_set_direct(
         }
 
         // Invalidate the secrets list cache for the resolved vault
-        if let Ok(cache_vault) = config.resolve_vault_name(None).await {
-            let cache_manager = crate::cache::CacheManager::from_config(&config);
-            cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-                vault_name: cache_vault,
-            });
-        }
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            vault_name: vault_name.clone(),
+        });
         return Ok(());
     }
 
@@ -511,12 +509,10 @@ pub(crate) async fn execute_secret_delete_direct(
         }
 
         // Invalidate the secrets list cache for the resolved vault
-        if let Ok(cache_vault) = config.resolve_vault_name(None).await {
-            let cache_manager = crate::cache::CacheManager::from_config(&config);
-            cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-                vault_name: cache_vault,
-            });
-        }
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            vault_name: vault_name.clone(),
+        });
         return Ok(());
     }
 
