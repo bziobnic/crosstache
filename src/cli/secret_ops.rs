@@ -585,10 +585,16 @@ pub(crate) async fn execute_secret_rollback_direct(
         }
     }
 
-    // ── Trait-based path (non-Azure backends) ──────────────────────────
+    // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config).await?;
+        if !force {
+            output::warn(&format!(
+                "About to roll back secret '{name}' to version {version}. Use --force to confirm."
+            ));
+            return Ok(());
+        }
         let props = reg
             .active()
             .secrets()
@@ -598,6 +604,11 @@ pub(crate) async fn execute_secret_rollback_direct(
             "Successfully rolled back '{}' to version {version}",
             props.original_name
         ));
+        // Invalidate the secrets list cache for the resolved vault
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            vault_name: vault_name.clone(),
+        });
         return Ok(());
     }
 
@@ -841,15 +852,26 @@ pub(crate) async fn execute_secret_purge_direct(
         }
     }
 
-    // ── Trait-based path (non-Azure backends) ──────────────────────────
+    // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config).await?;
+        if !force {
+            output::warn(&format!(
+                "About to PERMANENTLY DELETE secret '{name}'. This cannot be undone. Use --force to confirm."
+            ));
+            return Ok(());
+        }
         reg.active()
             .secrets()
             .purge_secret(&vault_name, name)
             .await?;
         output::success(&format!("Successfully purged secret '{name}'"));
+        // Invalidate the secrets list cache for the resolved vault
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            vault_name: vault_name.clone(),
+        });
         return Ok(());
     }
 
