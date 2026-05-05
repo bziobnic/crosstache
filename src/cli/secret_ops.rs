@@ -147,7 +147,9 @@ pub(crate) async fn execute_secret_set_direct(
         return Ok(());
     }
 
-    Ok(())
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 pub(crate) async fn execute_secret_get_direct(
@@ -202,7 +204,9 @@ pub(crate) async fn execute_secret_get_direct(
         return Ok(());
     }
 
-    Ok(())
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 fn secret_summary_matches_group(
@@ -377,18 +381,26 @@ pub(crate) async fn execute_secret_list_direct(
             }
         }
 
-        let mut secrets = reg
+        // Fetch the full unfiltered list (group filter is ok — it's stable)
+        // We pass group=None to get everything and cache the complete dataset.
+        // The group filter is re-applied by display_cached_secret_list below.
+        let all_secrets = reg
             .active()
             .secrets()
-            .list_secrets(&vault_name, group.as_deref())
+            .list_secrets(&vault_name, None)
             .await?;
 
+        // Cache the unfiltered list so subsequent calls see the full dataset
+        if use_cache {
+            cache_manager.set(&cache_key, &all_secrets);
+        }
+
         // Apply expiry filtering if requested (requires per-secret trait calls)
-        if expired || expiring.is_some() {
+        let secrets = if expired || expiring.is_some() {
             use crate::utils::datetime::{is_expired, is_expiring_within};
 
             let mut filtered_secrets = Vec::new();
-            for secret_summary in secrets {
+            for secret_summary in all_secrets {
                 match reg
                     .active()
                     .secrets()
@@ -421,12 +433,10 @@ pub(crate) async fn execute_secret_list_direct(
                     }
                 }
             }
-            secrets = filtered_secrets;
-        }
-
-        if use_cache {
-            cache_manager.set(&cache_key, &secrets);
-        }
+            filtered_secrets
+        } else {
+            all_secrets
+        };
 
         return display_cached_secret_list(
             secrets,
@@ -440,7 +450,9 @@ pub(crate) async fn execute_secret_list_direct(
         );
     }
 
-    Ok(())
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 pub(crate) async fn execute_secret_delete_direct(
@@ -508,7 +520,9 @@ pub(crate) async fn execute_secret_delete_direct(
         return Ok(());
     }
 
-    Ok(())
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 pub(crate) async fn execute_secret_history_direct(
@@ -552,7 +566,9 @@ pub(crate) async fn execute_secret_history_direct(
         return Ok(());
     }
 
-    Ok(())
+    Err(CrosstacheError::config(
+        "No backend registry available. Run 'xv config show' to check your configuration.",
+    ))
 }
 
 pub(crate) async fn execute_secret_rollback_direct(
