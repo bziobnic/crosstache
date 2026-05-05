@@ -42,6 +42,10 @@ pub enum BackendError {
     #[error("operation not supported: {0}")]
     Unsupported(String),
 
+    /// An invalid argument was provided to the backend.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     /// A conflict occurred (e.g. a secret already exists in create-only mode).
     #[error("conflict: {0}")]
     Conflict(String),
@@ -77,6 +81,7 @@ impl From<BackendError> for CrosstacheError {
             BackendError::Unsupported(feature) => {
                 CrosstacheError::InvalidArgument(format!("operation not supported: {feature}"))
             }
+            BackendError::InvalidArgument(msg) => CrosstacheError::InvalidArgument(msg),
             BackendError::Conflict(msg) => CrosstacheError::Conflict(msg),
             BackendError::RateLimited { retry_after_secs } => {
                 let detail = match retry_after_secs {

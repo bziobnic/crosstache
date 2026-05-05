@@ -14,6 +14,7 @@ use tabled::Tabled;
 use zeroize::Zeroizing;
 
 use crate::auth::provider::AzureAuthProvider;
+use crate::backend::azure::types::AzureVaultName;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::models::SecretInfo;
 use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
@@ -268,15 +269,40 @@ impl AzureSecretOperations {
         Self { auth_provider }
     }
 
+    fn validated_vault_name(&self, vault_name: &str) -> Result<AzureVaultName> {
+        AzureVaultName::try_from(vault_name)
+    }
+
+    fn key_vault_api_url(
+        &self,
+        vault_name: &AzureVaultName,
+        path_segments: &[&str],
+    ) -> Result<String> {
+        let mut url = vault_name.key_vault_url()?;
+        {
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                CrosstacheError::invalid_url(format!(
+                    "Cannot build Key Vault URL for vault '{}'",
+                    vault_name.as_str()
+                ))
+            })?;
+            segments.clear();
+            segments.extend(path_segments.iter().copied());
+        }
+        url.query_pairs_mut().append_pair("api-version", "7.4");
+        Ok(url.to_string())
+    }
+
     /// Create a secret client for the specified vault
     async fn create_secret_client(&self, vault_name: &str) -> Result<SecretClient> {
-        let vault_url = format!("https://{vault_name}.vault.azure.net/");
+        let vault_name = self.validated_vault_name(vault_name)?;
+        let vault_url = vault_name.key_vault_url()?;
 
         // Get the credential from auth provider
         let credential = self.auth_provider.get_token_credential();
 
         // Create the secret client
-        let client = SecretClient::new(&vault_url, credential).map_err(|e| {
+        let client = SecretClient::new(vault_url.as_str(), credential).map_err(|e| {
             CrosstacheError::azure_api(format!("Failed to create SecretClient: {e}"))
         })?;
 
@@ -377,11 +403,11 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         request: &SecretRequest,
     ) -> Result<SecretProperties> {
+        let vault_name = self.validated_vault_name(vault_name)?;
         let (sanitized_name, tags) = self.prepare_secret_request(request)?;
 
         // Since Azure SDK v0.20 doesn't properly support tags, we'll use the REST API directly
-        let vault_url = format!("https://{vault_name}.vault.azure.net");
-        let secret_url = format!("{vault_url}/secrets/{sanitized_name}?api-version=7.4");
+        let secret_url = self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name])?;
 
         // Get an access token for Key Vault
         let token = self
@@ -460,7 +486,8 @@ impl SecretOperations for AzureSecretOperations {
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
         // Return the created secret properties
-        self.get_secret(vault_name, &sanitized_name, true).await
+        self.get_secret(vault_name.as_str(), &sanitized_name, true)
+            .await
     }
 
     async fn get_secret(
@@ -469,12 +496,12 @@ impl SecretOperations for AzureSecretOperations {
         secret_name: &str,
         include_value: bool,
     ) -> Result<SecretProperties> {
+        let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
         // Since Azure SDK v0.20 doesn't properly return tags with get_secret,
         // we'll use the REST API directly to get full secret details including tags
-        let vault_url = format!("https://{vault_name}.vault.azure.net");
-        let secret_url = format!("{vault_url}/secrets/{sanitized_name}?api-version=7.4");
+        let secret_url = self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name])?;
 
         // Get an access token for Key Vault
         let token = self
@@ -619,9 +646,10 @@ impl SecretOperations for AzureSecretOperations {
         version: &str,
         include_value: bool,
     ) -> Result<SecretProperties> {
+        let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
-        let vault_url = format!("https://{vault_name}.vault.azure.net");
-        let secret_url = format!("{vault_url}/secrets/{sanitized_name}/{version}?api-version=7.4");
+        let secret_url =
+            self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name, version])?;
 
         // Get an access token for Key Vault
         let token = self
@@ -764,10 +792,10 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>> {
+        let vault_name = self.validated_vault_name(vault_name)?;
         // Since Azure SDK v0.20 doesn't properly support list operations,
         // we'll use the REST API directly
-        let vault_url = format!("https://{vault_name}.vault.azure.net");
-        let list_url = format!("{vault_url}/secrets?api-version=7.4");
+        let list_url = self.key_vault_api_url(&vault_name, &["secrets"])?;
 
         // Get an access token for Key Vault
         let token = self
@@ -839,7 +867,7 @@ impl SecretOperations for AzureSecretOperations {
                             })
                             .unwrap_or_else(|| "Unknown".to_string());
 
-                        match self.get_secret(vault_name, &name, false).await {
+                        match self.get_secret(vault_name.as_str(), &name, false).await {
                             Ok(secret_details) => {
                                 let original_name =
                                     self.get_original_name(&name, &secret_details.tags);
@@ -941,12 +969,12 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         secret_name: &str,
     ) -> Result<SecretProperties> {
+        let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
         // Use REST API to restore a deleted secret
-        let vault_url = format!("https://{vault_name}.vault.azure.net");
         let restore_url =
-            format!("{vault_url}/deletedsecrets/{sanitized_name}/recover?api-version=7.4");
+            self.key_vault_api_url(&vault_name, &["deletedsecrets", &sanitized_name, "recover"])?;
 
         // Get an access token for Key Vault
         let token = self
@@ -1069,12 +1097,12 @@ impl SecretOperations for AzureSecretOperations {
     }
 
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()> {
+        let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
         // Use REST API to permanently purge a deleted secret
-        let vault_url = format!("https://{vault_name}.vault.azure.net");
         let purge_url =
-            format!("{vault_url}/deletedsecrets/{sanitized_name}/purge?api-version=7.4");
+            self.key_vault_api_url(&vault_name, &["deletedsecrets", &sanitized_name, "purge"])?;
 
         // Get an access token for Key Vault
         let token = self
@@ -1139,9 +1167,10 @@ impl SecretOperations for AzureSecretOperations {
         vault_name: &str,
         secret_name: &str,
     ) -> Result<Vec<SecretProperties>> {
+        let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
-        let vault_url = format!("https://{vault_name}.vault.azure.net");
-        let versions_url = format!("{vault_url}/secrets/{sanitized_name}/versions?api-version=7.4");
+        let versions_url =
+            self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name, "versions"])?;
 
         // Get an access token for Key Vault
         let token = self
@@ -1465,6 +1494,7 @@ impl SecretManager {
 
     /// Get detailed secret information without the secret value
     pub async fn get_secret_info(&self, vault_name: &str, secret_name: &str) -> Result<SecretInfo> {
+        let validated_vault_name = AzureVaultName::try_from(vault_name)?;
         // Use the existing get_secret method to fetch properties
         let secret_props = self
             .secret_ops
@@ -1472,7 +1502,11 @@ impl SecretManager {
             .await?;
 
         // Build the vault URI
-        let vault_uri = format!("https://{vault_name}.vault.azure.net");
+        let vault_uri = validated_vault_name
+            .key_vault_url()?
+            .as_str()
+            .trim_end_matches('/')
+            .to_string();
 
         // Build the secret ID (simulated since we don't have it from SecretProperties)
         let id = format!(
