@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "server",
-  "dolt_database": "crosstache",
-  "project_id": "493e9b97-23a8-410e-9f60-d25cfe5e43b1"
-}
