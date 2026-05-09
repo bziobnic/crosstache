@@ -9,7 +9,9 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-use crate::cache::models::{CacheEntry, CacheEntryInfo, CacheKey, CacheStatus};
+use crate::cache::models::{
+    validate_cache_vault_name, CacheEntry, CacheEntryInfo, CacheKey, CacheStatus,
+};
 use crate::cache::refresh;
 
 // ---------------------------------------------------------------------------
@@ -192,7 +194,15 @@ impl CacheManager {
 
     /// Delete the entire vault-scoped cache directory.
     pub fn invalidate_vault(&self, vault_name: &str) {
+        if let Err(reason) = validate_cache_vault_name(vault_name) {
+            debug!("invalidate_vault({vault_name}): rejected — {reason}");
+            return;
+        }
         let vault_dir = self.cache_dir.join(vault_name);
+        if !vault_dir.starts_with(&self.cache_dir) {
+            debug!("invalidate_vault({vault_name}): path escapes cache dir — skipped");
+            return;
+        }
         if vault_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&vault_dir) {
                 debug!("invalidate_vault({vault_name}): {e}");
@@ -211,7 +221,13 @@ impl CacheManager {
     /// * `vault = None`       — clears the entire cache directory.
     pub fn clear(&self, vault: Option<&str>) {
         match vault {
-            Some(name) => self.invalidate_vault(name),
+            Some(name) => {
+                if let Err(reason) = validate_cache_vault_name(name) {
+                    debug!("clear({name}): rejected — {reason}");
+                    return;
+                }
+                self.invalidate_vault(name);
+            }
             None => {
                 if self.cache_dir.exists() {
                     if let Err(e) = std::fs::remove_dir_all(&self.cache_dir) {
@@ -586,5 +602,48 @@ mod tests {
         assert_eq!(s.entries.len(), 2);
         assert!(s.enabled);
         assert_eq!(s.ttl_secs, 300);
+    }
+
+    #[test]
+    fn test_invalidate_vault_rejects_traversal_name() {
+        let dir = tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        // Create a directory outside the cache root that an attacker would
+        // want to delete.
+        let outside = dir.path().join("outside_target");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("important.txt"), b"do not delete").unwrap();
+
+        let mgr = make_manager(&cache_dir, true, 300);
+
+        // Attempt to invalidate with a traversal name.
+        mgr.invalidate_vault("../outside_target");
+
+        // The outside directory must still exist.
+        assert!(
+            outside.exists(),
+            "invalidate_vault traversal should NOT delete outside directory"
+        );
+        assert!(outside.join("important.txt").exists());
+    }
+
+    #[test]
+    fn test_clear_vault_rejects_traversal_name() {
+        let dir = tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let outside = dir.path().join("outside_target2");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let mgr = make_manager(&cache_dir, true, 300);
+        mgr.clear(Some("../outside_target2"));
+
+        assert!(
+            outside.exists(),
+            "clear(Some(traversal)) should NOT delete outside directory"
+        );
     }
 }
