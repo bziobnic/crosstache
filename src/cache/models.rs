@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// A cached response stored on disk as JSON.
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,12 +36,74 @@ pub enum CacheKey {
     FileList { vault_name: String, recursive: bool },
 }
 
+/// Validate that a vault name is a single safe filesystem component.
+///
+/// Mirrors `validate_vault_name` in `backend::local::paths` but returns
+/// `Result<(), String>` so the cache module stays independent of the backend
+/// error types.
+pub(crate) fn validate_cache_vault_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("vault name cannot be empty".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err("vault name must not be '.' or '..'".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("vault name must not contain path separators".to_string());
+    }
+    if name.starts_with('-') {
+        return Err("vault name must not start with '-'".to_string());
+    }
+    if name.chars().any(|ch| ch.is_control()) {
+        return Err("vault name must not contain control characters".to_string());
+    }
+    let path = Path::new(name);
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(component)), None) if component == name => Ok(()),
+        _ => Err(
+            "vault name must be a single path component without separators or prefixes".to_string(),
+        ),
+    }
+}
+
+/// Defence-in-depth: verify that `candidate` is a child of `base`.
+fn ensure_cache_child_path(base: &Path, candidate: &Path) -> bool {
+    candidate.starts_with(base)
+}
+
+/// Compute a safe fallback directory name for an invalid vault name.
+///
+/// The result is always a single safe component that cannot escape the cache
+/// directory.
+fn safe_fallback_dir(vault_name: &str) -> String {
+    let hash = vault_name
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    format!("_invalid_{hash:x}")
+}
+
 impl CacheKey {
     /// Resolve this key to its file path under the given cache directory.
+    ///
+    /// Vault names are validated before being used as path components.
+    /// Invalid names are replaced with a deterministic safe fallback so the
+    /// cache continues to function without escaping the cache root.
     pub fn to_path(&self, cache_dir: &Path) -> PathBuf {
         match self {
             CacheKey::SecretsList { vault_name } => {
-                cache_dir.join(vault_name).join("secrets-list.json")
+                let dir_name = match validate_cache_vault_name(vault_name) {
+                    Ok(()) => vault_name.clone(),
+                    Err(_) => safe_fallback_dir(vault_name),
+                };
+                let candidate = cache_dir.join(&dir_name).join("secrets-list.json");
+                if ensure_cache_child_path(cache_dir, &candidate) {
+                    candidate
+                } else {
+                    cache_dir
+                        .join(safe_fallback_dir(vault_name))
+                        .join("secrets-list.json")
+                }
             }
             CacheKey::VaultList => cache_dir.join("vaults-list.json"),
             CacheKey::FileList {
@@ -53,7 +115,16 @@ impl CacheKey {
                 } else {
                     "files-list.json"
                 };
-                cache_dir.join(vault_name).join(filename)
+                let dir_name = match validate_cache_vault_name(vault_name) {
+                    Ok(()) => vault_name.clone(),
+                    Err(_) => safe_fallback_dir(vault_name),
+                };
+                let candidate = cache_dir.join(&dir_name).join(filename);
+                if ensure_cache_child_path(cache_dir, &candidate) {
+                    candidate
+                } else {
+                    cache_dir.join(safe_fallback_dir(vault_name)).join(filename)
+                }
             }
         }
     }
@@ -108,6 +179,9 @@ impl std::str::FromStr for CacheKey {
             if vault_name.is_empty() {
                 return Err("Missing vault name after 'secrets:'".to_string());
             }
+            validate_cache_vault_name(vault_name).map_err(|reason| {
+                format!("Invalid vault name '{vault_name}' in cache key: {reason}")
+            })?;
             return Ok(CacheKey::SecretsList {
                 vault_name: vault_name.to_string(),
             });
@@ -116,6 +190,9 @@ impl std::str::FromStr for CacheKey {
             if vault_name.is_empty() {
                 return Err("Missing vault name after 'files-recursive:'".to_string());
             }
+            validate_cache_vault_name(vault_name).map_err(|reason| {
+                format!("Invalid vault name '{vault_name}' in cache key: {reason}")
+            })?;
             return Ok(CacheKey::FileList {
                 vault_name: vault_name.to_string(),
                 recursive: true,
@@ -125,6 +202,9 @@ impl std::str::FromStr for CacheKey {
             if vault_name.is_empty() {
                 return Err("Missing vault name after 'files:'".to_string());
             }
+            validate_cache_vault_name(vault_name).map_err(|reason| {
+                format!("Invalid vault name '{vault_name}' in cache key: {reason}")
+            })?;
             return Ok(CacheKey::FileList {
                 vault_name: vault_name.to_string(),
                 recursive: false,
@@ -217,6 +297,33 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_key_from_str_rejects_traversal_vault_names() {
+        // Path traversal
+        assert!("secrets:../outside".parse::<CacheKey>().is_err());
+        assert!("secrets:../../etc".parse::<CacheKey>().is_err());
+        assert!("files:../outside".parse::<CacheKey>().is_err());
+        assert!("files-recursive:../../etc".parse::<CacheKey>().is_err());
+
+        // Separators
+        assert!("secrets:foo/bar".parse::<CacheKey>().is_err());
+        assert!("secrets:foo\\bar".parse::<CacheKey>().is_err());
+
+        // Special names
+        assert!("secrets:.".parse::<CacheKey>().is_err());
+        assert!("secrets:..".parse::<CacheKey>().is_err());
+
+        // Absolute
+        assert!("secrets:/absolute".parse::<CacheKey>().is_err());
+
+        // Control characters
+        assert!("secrets:bad\nname".parse::<CacheKey>().is_err());
+        assert!("secrets:bad\x00name".parse::<CacheKey>().is_err());
+
+        // Leading dash
+        assert!("secrets:-badname".parse::<CacheKey>().is_err());
+    }
+
+    #[test]
     fn test_cache_key_to_path() {
         let base = PathBuf::from("/cache");
 
@@ -248,5 +355,80 @@ mod tests {
             key.to_path(&base),
             PathBuf::from("/cache/myvault/files-list-recursive.json")
         );
+    }
+
+    #[test]
+    fn test_to_path_never_escapes_cache_dir_for_adversarial_names() {
+        let base = PathBuf::from("/cache");
+
+        // These vault names are invalid and should be replaced with a safe
+        // fallback. Critically, the result must always be under /cache/.
+        let adversarial = [
+            "../..",
+            "../../etc",
+            "foo/bar",
+            "/absolute",
+            "\\absolute",
+            "..",
+            ".",
+            "bad\nname",
+            "bad\x00name",
+            "-leading",
+        ];
+
+        for bad_name in adversarial {
+            let key = CacheKey::SecretsList {
+                vault_name: bad_name.to_string(),
+            };
+            let path = key.to_path(&base);
+            assert!(
+                path.starts_with(&base),
+                "to_path escaped cache_dir for vault name {bad_name:?}: {}",
+                path.display()
+            );
+
+            let key = CacheKey::FileList {
+                vault_name: bad_name.to_string(),
+                recursive: true,
+            };
+            let path = key.to_path(&base);
+            assert!(
+                path.starts_with(&base),
+                "to_path escaped cache_dir for vault name {bad_name:?}: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_cache_vault_name_accepts_valid() {
+        for name in ["default", "work-secrets", "team_1", "Vault123"] {
+            assert!(
+                validate_cache_vault_name(name).is_ok(),
+                "should accept {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_cache_vault_name_rejects_invalid() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "../../outside",
+            "outside/child",
+            "/absolute",
+            "\\absolute",
+            "parent\\child",
+            "bad\nname",
+            "-leading",
+        ] {
+            assert!(
+                validate_cache_vault_name(name).is_err(),
+                "should reject {name:?}"
+            );
+        }
     }
 }
