@@ -91,12 +91,98 @@ impl VaultBackend for AwsVaultBackend {
         })
     }
 
-    async fn get_vault(&self, _name: &str) -> Result<VaultProperties, BackendError> {
-        Err(BackendError::Unsupported("get_vault not yet implemented".into()))
+    async fn get_vault(&self, name: &str) -> Result<VaultProperties, BackendError> {
+        use crate::backend::aws::encoding::marker_name;
+        let marker = marker_name(name);
+        let describe = self.client
+            .describe_secret()
+            .secret_id(&marker)
+            .send()
+            .await
+            .map_err(|e| match super::errors::from_describe(name, e) {
+                BackendError::NotFound { .. } => BackendError::VaultNotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                },
+                other => other,
+            })?;
+
+        // Build VaultProperties manually from describe output
+        let tags_list = describe.tags();
+        let mut tags: HashMap<String, String> = HashMap::new();
+        let mut vault_name = name.to_string();
+        let mut created_at = Utc::now();
+
+        for tag in tags_list {
+            if let (Some(key), Some(value)) = (tag.key(), tag.value()) {
+                if key == "xv:vault_name" {
+                    vault_name = value.to_string();
+                } else if key == "xv:created_at" {
+                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+                        created_at = dt.with_timezone(&Utc);
+                    }
+                } else if !key.starts_with("xv:") {
+                    tags.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+
+        Ok(VaultProperties {
+            id: format!("vault-{}", name),
+            name: vault_name,
+            location: "aws".to_string(),
+            resource_group: "default".to_string(),
+            subscription_id: "default".to_string(),
+            tenant_id: String::new(),
+            uri: format!("https://{}.vault.aws.net/", name),
+            enabled_for_deployment: false,
+            enabled_for_disk_encryption: false,
+            enabled_for_template_deployment: false,
+            soft_delete_retention_in_days: 30,
+            purge_protection: false,
+            sku: "standard".to_string(),
+            access_policies: Vec::new(),
+            created_at,
+            tags,
+            enable_rbac_authorization: Some(false),
+        })
     }
 
     async fn list_vaults(&self) -> Result<Vec<VaultSummary>, BackendError> {
-        Err(BackendError::Unsupported("list_vaults not yet implemented".into()))
+        use crate::backend::aws::metadata::{TAG_TYPE, TAG_VALUE_VAULT_MARKER};
+        use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
+
+        let mut next_token: Option<String> = None;
+        let mut summaries: Vec<VaultSummary> = Vec::new();
+
+        loop {
+            let mut req = self.client
+                .list_secrets()
+                .max_results(100)
+                .filters(Filter::builder().key(FilterNameStringType::TagKey).values(TAG_TYPE).build())
+                .filters(Filter::builder().key(FilterNameStringType::TagValue).values(TAG_VALUE_VAULT_MARKER).build());
+            if let Some(t) = &next_token {
+                req = req.next_token(t.clone());
+            }
+
+            let out = req.send().await.map_err(super::errors::from_list)?;
+            for entry in out.secret_list() {
+                let aws_full_name = entry.name().unwrap_or("");
+                if let Some(idx) = aws_full_name.rfind("/.xv-vault") {
+                    let vault = &aws_full_name[..idx];
+                    summaries.push(VaultSummary {
+                        name: vault.to_string(),
+                        location: "aws".to_string(),
+                        resource_group: "default".to_string(),
+                        status: "Active".to_string(),
+                        created_at: chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string(),
+                    });
+                }
+            }
+            next_token = out.next_token().map(|s| s.to_string());
+            if next_token.is_none() { break; }
+        }
+        Ok(summaries)
     }
 
     async fn delete_vault(&self, _name: &str) -> Result<(), BackendError> {

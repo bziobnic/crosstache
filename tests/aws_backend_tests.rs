@@ -506,3 +506,113 @@ async fn create_vault_writes_marker_secret() {
     let result = backend.create_vault(request).await.unwrap();
     assert_eq!(result.name, "myproj-kv");
 }
+
+#[tokio::test]
+async fn get_vault_returns_vault_not_found_when_marker_missing() {
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
+    use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
+    use crosstache::backend::VaultBackend;
+    use crosstache::backend::error::BackendError;
+
+    let rule = mock!(Client::describe_secret).then_error(|| {
+        DescribeSecretError::ResourceNotFoundException(
+            ResourceNotFoundException::builder().message("not found").build(),
+        )
+    });
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_vault_backend(client);
+
+    let err = backend.get_vault("missing-vault").await.unwrap_err();
+    assert!(
+        matches!(err, BackendError::VaultNotFound { .. }),
+        "got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn get_vault_returns_vault_properties() {
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use aws_sdk_secretsmanager::types::Tag;
+    use crosstache::backend::VaultBackend;
+
+    let rule = mock!(Client::describe_secret)
+        .match_requests(|req| req.secret_id() == Some("myproj-kv/.xv-vault"))
+        .then_output(|| {
+            DescribeSecretOutput::builder()
+                .name("myproj-kv/.xv-vault")
+                .tags(
+                    Tag::builder()
+                        .key("xv:vault_name")
+                        .value("myproj-kv")
+                        .build(),
+                )
+                .tags(
+                    Tag::builder()
+                        .key("xv:created_at")
+                        .value("2026-05-13T10:00:00+00:00")
+                        .build(),
+                )
+                .build()
+        });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_vault_backend(client);
+
+    let vault = backend.get_vault("myproj-kv").await.unwrap();
+    assert_eq!(vault.name, "myproj-kv");
+    assert_eq!(vault.id, "vault-myproj-kv");
+}
+
+#[tokio::test]
+async fn list_vaults_finds_all_markers() {
+    use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
+    use aws_sdk_secretsmanager::types::SecretListEntry;
+    use crosstache::backend::VaultBackend;
+
+    let rule = mock!(Client::list_secrets).then_output(|| {
+        ListSecretsOutput::builder()
+            .secret_list(SecretListEntry::builder().name("myproj-kv/.xv-vault").build())
+            .secret_list(SecretListEntry::builder().name("staging-kv/.xv-vault").build())
+            .build()
+    });
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_vault_backend(client);
+
+    let vaults = backend.list_vaults().await.unwrap();
+    let names: Vec<String> = vaults.iter().map(|v| v.name.clone()).collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&"myproj-kv".to_string()));
+    assert!(names.contains(&"staging-kv".to_string()));
+}
+
+#[tokio::test]
+async fn list_vaults_paginates() {
+    use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
+    use aws_sdk_secretsmanager::types::SecretListEntry;
+    use crosstache::backend::VaultBackend;
+
+    let page1 = mock!(Client::list_secrets).then_output(|| {
+        ListSecretsOutput::builder()
+            .secret_list(SecretListEntry::builder().name("vault1/.xv-vault").build())
+            .next_token("tok1")
+            .build()
+    });
+    let page2 = mock!(Client::list_secrets).then_output(|| {
+        ListSecretsOutput::builder()
+            .secret_list(SecretListEntry::builder().name("vault2/.xv-vault").build())
+            .build()
+    });
+
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&page1, &page2]
+    );
+    let backend = aws_vault_backend(client);
+
+    let vaults = backend.list_vaults().await.unwrap();
+    let names: Vec<String> = vaults.iter().map(|v| v.name.clone()).collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&"vault1".to_string()));
+    assert!(names.contains(&"vault2".to_string()));
+}
