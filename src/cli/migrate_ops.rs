@@ -3,11 +3,12 @@
 //! Implements `xv migrate --from <backend> --to <backend>`, which copies
 //! secrets from one backend to another while preserving metadata.
 
-use crate::backend::{Backend, BackendKind, BackendRegistry};
+use crate::backend::{Backend, BackendError, BackendKind, BackendRegistry};
 use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::manager::SecretRequest;
 use crate::utils::output;
+use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -124,6 +125,54 @@ fn build_request_from_props(
     }
 }
 
+async fn migrate_one(
+    source: &Arc<dyn Backend>,
+    target: &Arc<dyn Backend>,
+    vault: &str,
+    name: &str,
+    force_replace: bool,
+    source_name_for_tag: &str,
+) -> std::result::Result<String, (String, String)> {
+    // Fetch full props with value
+    let props = source
+        .secrets()
+        .get_secret(vault, name, true)
+        .await
+        .map_err(|e| (name.to_string(), format!("get_secret: {e}")))?;
+
+    // Idempotency check
+    if !force_replace {
+        if let Ok(existing) = target.secrets().get_secret(vault, name, false).await {
+            if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
+                let expected = format!("{}:{}:{}", source_name_for_tag, vault, props.version);
+                if prev_from == &expected {
+                    return Err((name.to_string(), format!("__skip__{}", name)));
+                }
+            }
+        }
+    }
+
+    let request = build_request_from_props(&props, source_name_for_tag, vault);
+
+    // Retry with exponential backoff on RateLimited
+    let mut attempt = 0u32;
+    loop {
+        match target.secrets().set_secret(vault, request.clone()).await {
+            Ok(_) => return Ok(name.to_string()),
+            Err(BackendError::RateLimited { retry_after_secs }) if attempt < 5 => {
+                let wait = retry_after_secs
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or_else(|| {
+                        std::time::Duration::from_millis(500 * 2u64.pow(attempt))
+                    });
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+            }
+            Err(e) => return Err((name.to_string(), format!("set_secret: {e}"))),
+        }
+    }
+}
+
 /// Create a backend instance for the given kind.
 fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>> {
     match kind {
@@ -206,8 +255,6 @@ pub(crate) async fn execute_migrate(
     } else {
         on_conflict
     };
-    // concurrency will be wired in Task 33
-    let _ = concurrency;
     // 1. Parse backend kinds
     let from_kind: BackendKind = from
         .parse()
@@ -307,57 +354,60 @@ pub(crate) async fn execute_migrate(
         return Ok(());
     }
 
+    // 6. Migrate secrets concurrently with backoff retry
+    let source_name_tag = source.name().to_string();
+    let source_arc = source.clone();
+    let target_arc = target.clone();
+    let vault_clone = vault_name.clone();
+
+    let results: Vec<_> = stream::iter(names_to_process.iter().map(|name| {
+        let source = source_arc.clone();
+        let target = target_arc.clone();
+        let vault = vault_clone.clone();
+        let name = name.clone();
+        let src_tag = source_name_tag.clone();
+        async move {
+            migrate_one(&source, &target, &vault, &name, force_replace, &src_tag).await
+        }
+    }))
+    .buffer_unordered(concurrency)
+    .collect()
+    .await;
+
     let mut migrated = 0usize;
     let mut skipped = 0usize;
+    let mut errors: Vec<(String, String)> = Vec::new();
 
-    // 6. Migrate each secret
-    for name in &names_to_process {
-        // Get secret with value from source
-        let props = source
-            .secrets()
-            .get_secret(&vault_name, name, true)
-            .await
-            .map_err(|e| {
-                CrosstacheError::Unknown(format!(
-                    "Failed to get secret '{}' from source: {e}",
-                    name
-                ))
-            })?;
-
-        // Idempotency check: skip if already migrated from the same source version
-        if !force_replace {
-            if let Ok(existing) = target.secrets().get_secret(&vault_name, name, false).await {
-                if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
-                    let expected = format!("{}:{}:{}", source.name(), vault_name, props.version);
-                    if prev_from == &expected {
-                        println!("  [skip] {} — already migrated (same source version)", name);
-                        skipped += 1;
-                        continue;
-                    }
-                }
-            }
-        }
-
-        let request = build_request_from_props(&props, source.name(), &vault_name);
-
-        // Set secret in target
-        match target.secrets().set_secret(&vault_name, request).await {
-            Ok(_) => {
+    for r in results {
+        match r {
+            Ok(name) => {
                 println!("  [ok] {}", name);
                 migrated += 1;
             }
-            Err(e) => {
-                println!("  [error] {} — {}", name, e);
+            Err((name, msg)) if msg.starts_with("__skip__") => {
+                println!("  [skip] {} — already migrated (same source version)", name);
                 skipped += 1;
+            }
+            Err((name, msg)) => {
+                println!("  [error] {} — {}", name, msg);
+                errors.push((name, msg));
             }
         }
     }
 
     // 7. Print summary
-    output::success(&format!(
-        "Migrated {} secret(s) ({} skipped)",
-        migrated, skipped
-    ));
+    println!();
+    if !errors.is_empty() {
+        output::warn(&format!(
+            "Migrated {} secret(s), {} skipped, {} error(s)",
+            migrated, skipped, errors.len()
+        ));
+    } else {
+        output::success(&format!(
+            "Migrated {} secret(s) ({} skipped)",
+            migrated, skipped
+        ));
+    }
 
     Ok(())
 }
