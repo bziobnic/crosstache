@@ -290,3 +290,66 @@ async fn secret_exists_false_on_not_found() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn set_secret_update_path_when_already_exists() {
+    use aws_sdk_secretsmanager::operation::create_secret::CreateSecretError;
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use aws_sdk_secretsmanager::operation::put_secret_value::PutSecretValueOutput;
+    use aws_sdk_secretsmanager::operation::tag_resource::TagResourceOutput;
+    use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceOutput;
+    use aws_sdk_secretsmanager::operation::update_secret::UpdateSecretOutput;
+    use aws_sdk_secretsmanager::types::error::ResourceExistsException;
+    use crosstache::backend::SecretBackend;
+    use crosstache::secret::manager::SecretRequest;
+    use zeroize::Zeroizing;
+
+    // create_secret returns ResourceExistsException — triggers update path.
+    let create_err = mock!(Client::create_secret).then_error(|| {
+        CreateSecretError::ResourceExistsException(
+            ResourceExistsException::builder()
+                .message("already exists")
+                .build(),
+        )
+    });
+    // put_secret_value — new version.
+    let put_value = mock!(Client::put_secret_value)
+        .then_output(|| PutSecretValueOutput::builder().version_id("v2").build());
+    // update_secret — description update (note is Some).
+    let update_secret_mock =
+        mock!(Client::update_secret).then_output(|| UpdateSecretOutput::builder().build());
+    // describe_secret — fetch existing tags (empty).
+    let describe =
+        mock!(Client::describe_secret).then_output(|| DescribeSecretOutput::builder().build());
+    // untag_resource — no-op because describe returned no tags; not called when key list is empty.
+    // tag_resource — apply new tags.
+    let tag = mock!(Client::tag_resource).then_output(|| TagResourceOutput::builder().build());
+
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&create_err, &put_value, &update_secret_mock, &describe, &tag]
+    );
+    let backend = aws_secret_backend(client);
+
+    let request = SecretRequest {
+        name: "db-password".to_string(),
+        value: Zeroizing::new("new-secret-value".to_string()),
+        content_type: None,
+        enabled: None,
+        expires_on: None,
+        not_before: None,
+        tags: None,
+        groups: None,
+        note: Some("updated note".to_string()),
+        folder: None,
+    };
+
+    let result = backend
+        .set_secret("myproj-kv", request)
+        .await
+        .expect("set_secret update path should succeed");
+
+    assert_eq!(result.version, "v2");
+    assert_eq!(result.name, "db-password");
+}

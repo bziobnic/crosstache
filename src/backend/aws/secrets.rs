@@ -28,16 +28,126 @@ impl AwsSecretBackend {
         Ok(())
     }
 
-    /// Update an already-existing secret (upsert path). Filled in Task 19.
+    /// Update an already-existing secret (upsert path). Implemented in Task 19.
     async fn update_existing_secret(
         &self,
-        _vault: &str,
-        _request: &SecretRequest,
-        _aws_full_name: &str,
+        vault: &str,
+        request: &SecretRequest,
+        aws_full_name: &str,
     ) -> Result<SecretProperties, BackendError> {
-        Err(BackendError::Unsupported(
-            "aws update path: not yet implemented".into(),
-        ))
+        use crate::backend::aws::metadata::{
+            TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME,
+        };
+        use aws_sdk_secretsmanager::types::Tag;
+
+        // Step 1: Put new value as new version.
+        let put_out = self
+            .client
+            .put_secret_value()
+            .secret_id(aws_full_name)
+            .secret_string(request.value.as_str().to_string())
+            .send()
+            .await
+            .map_err(|e| super::errors::from_put_value(&request.name, e))?;
+
+        // Step 2: Update description if provided.
+        if let Some(ref note) = request.note {
+            self.client
+                .update_secret()
+                .secret_id(aws_full_name)
+                .description(note)
+                .send()
+                .await
+                .map_err(|e| super::errors::from_update(&request.name, e))?;
+        }
+
+        // Step 3: Replace all tags (describe -> untag all -> re-tag).
+        let describe = self
+            .client
+            .describe_secret()
+            .secret_id(aws_full_name)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_describe(&request.name, e))?;
+
+        let existing_keys: Vec<String> = describe
+            .tags()
+            .iter()
+            .filter_map(|t| t.key().map(|k| k.to_string()))
+            .collect();
+        if !existing_keys.is_empty() {
+            self.client
+                .untag_resource()
+                .secret_id(aws_full_name)
+                .set_tag_keys(Some(existing_keys))
+                .send()
+                .await
+                .map_err(super::errors::from_untag)?;
+        }
+
+        let mut new_tags: Vec<Tag> = Vec::new();
+        new_tags.push(
+            Tag::builder()
+                .key(TAG_ORIGINAL_NAME)
+                .value(&request.name)
+                .build(),
+        );
+        if let Some(ref groups) = request.groups {
+            if !groups.is_empty() {
+                new_tags.push(
+                    Tag::builder()
+                        .key(TAG_GROUPS)
+                        .value(groups.join(","))
+                        .build(),
+                );
+            }
+        }
+        if let Some(ref f) = request.folder {
+            new_tags.push(Tag::builder().key(TAG_FOLDER).value(f).build());
+        }
+        if let Some(ref ct) = request.content_type {
+            new_tags.push(Tag::builder().key(TAG_CONTENT_TYPE).value(ct).build());
+        }
+        if let Some(ref e) = request.expires_on {
+            new_tags.push(
+                Tag::builder()
+                    .key(TAG_EXPIRES_AT)
+                    .value(e.to_rfc3339())
+                    .build(),
+            );
+        }
+        if let Some(ref user_tags) = request.tags {
+            for (k, v) in user_tags {
+                if !k.starts_with("xv:") {
+                    new_tags.push(Tag::builder().key(k).value(v).build());
+                }
+            }
+        }
+        self.client
+            .tag_resource()
+            .secret_id(aws_full_name)
+            .set_tags(Some(new_tags))
+            .send()
+            .await
+            .map_err(super::errors::from_tag)?;
+
+        let version = put_out.version_id().unwrap_or("").to_string();
+        Ok(SecretProperties {
+            name: request.name.clone(),
+            original_name: request.name.clone(),
+            value: None,
+            version,
+            version_number: None,
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: request.expires_on,
+            not_before: request.not_before,
+            tags: request.tags.clone().unwrap_or_default(),
+            content_type: request.content_type.clone().unwrap_or_default(),
+            recovery_level: None,
+        })
     }
 
     /// Build a `SecretProperties` from a `DescribeSecretOutput`.
@@ -399,11 +509,80 @@ impl SecretBackend for AwsSecretBackend {
 
     async fn update_secret(
         &self,
-        _vault: &str,
-        _name: &str,
-        _request: SecretUpdateRequest,
+        vault: &str,
+        name: &str,
+        request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
-        Err(BackendError::Unsupported("update_secret not yet implemented".into()))
+        use crate::backend::aws::encoding::aws_name;
+        use crate::backend::aws::metadata::{TAG_FOLDER, TAG_GROUPS};
+        use aws_sdk_secretsmanager::types::Tag;
+
+        let aws_full_name = aws_name(vault, name);
+
+        // Update description (note) if provided.
+        if let Some(ref new_note) = request.note {
+            self.client
+                .update_secret()
+                .secret_id(&aws_full_name)
+                .description(new_note)
+                .send()
+                .await
+                .map_err(|e| super::errors::from_update(name, e))?;
+        }
+
+        // Compute tag deltas.
+        let mut tags_to_set: Vec<Tag> = Vec::new();
+        let mut keys_to_remove: Vec<String> = Vec::new();
+
+        if let Some(ref groups) = request.groups {
+            if groups.is_empty() {
+                keys_to_remove.push(TAG_GROUPS.into());
+            } else {
+                tags_to_set.push(
+                    Tag::builder()
+                        .key(TAG_GROUPS)
+                        .value(groups.join(","))
+                        .build(),
+                );
+            }
+        }
+        if let Some(ref f) = request.folder {
+            if f.is_empty() {
+                keys_to_remove.push(TAG_FOLDER.into());
+            } else {
+                tags_to_set.push(Tag::builder().key(TAG_FOLDER).value(f).build());
+            }
+        }
+        if let Some(ref user_tags) = request.tags {
+            for (k, v) in user_tags {
+                if v.is_empty() {
+                    keys_to_remove.push(k.clone());
+                } else if !k.starts_with("xv:") {
+                    tags_to_set.push(Tag::builder().key(k).value(v).build());
+                }
+            }
+        }
+
+        if !keys_to_remove.is_empty() {
+            self.client
+                .untag_resource()
+                .secret_id(&aws_full_name)
+                .set_tag_keys(Some(keys_to_remove))
+                .send()
+                .await
+                .map_err(super::errors::from_untag)?;
+        }
+        if !tags_to_set.is_empty() {
+            self.client
+                .tag_resource()
+                .secret_id(&aws_full_name)
+                .set_tags(Some(tags_to_set))
+                .send()
+                .await
+                .map_err(super::errors::from_tag)?;
+        }
+
+        self.get_secret(vault, name, false).await
     }
 
     async fn purge_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
