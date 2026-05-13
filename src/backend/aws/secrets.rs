@@ -739,4 +739,49 @@ impl SecretBackend for AwsSecretBackend {
             },
         }
     }
+
+    async fn rollback(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+
+        // Find which version is currently AWSCURRENT
+        let listed = self
+            .client
+            .list_secret_version_ids()
+            .secret_id(&aws_full_name)
+            .include_deprecated(true)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_list_versions(name, e))?;
+
+        let current_version = listed
+            .versions()
+            .iter()
+            .find(|v| {
+                v.version_stages()
+                    .iter()
+                    .any(|s| s.as_str() == "AWSCURRENT")
+            })
+            .and_then(|v| v.version_id())
+            .map(|s| s.to_string());
+
+        // Move AWSCURRENT label to target version
+        self.client
+            .update_secret_version_stage()
+            .secret_id(&aws_full_name)
+            .version_stage("AWSCURRENT")
+            .move_to_version_id(version)
+            .set_remove_from_version_id(current_version)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_update_stage(name, e))?;
+
+        // Fetch and return the current secret properties
+        self.get_secret(vault, name, false).await
+    }
 }

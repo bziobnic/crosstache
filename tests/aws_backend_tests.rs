@@ -388,3 +388,39 @@ async fn list_versions_returns_history() {
     assert!(ids.contains(&"v1".to_string()));
     assert!(ids.contains(&"v2".to_string()));
 }
+
+#[tokio::test]
+async fn rollback_moves_awscurrent_to_target_version() {
+    use aws_sdk_secretsmanager::operation::list_secret_version_ids::ListSecretVersionIdsOutput;
+    use aws_sdk_secretsmanager::operation::update_secret_version_stage::UpdateSecretVersionStageOutput;
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use aws_sdk_secretsmanager::types::SecretVersionsListEntry;
+    use crosstache::backend::SecretBackend;
+
+    let list = mock!(Client::list_secret_version_ids).then_output(|| {
+        ListSecretVersionIdsOutput::builder()
+            .versions(
+                SecretVersionsListEntry::builder()
+                    .version_id("v3")
+                    .version_stages("AWSCURRENT".to_string())
+                    .build(),
+            )
+            .versions(SecretVersionsListEntry::builder().version_id("v2").build())
+            .build()
+    });
+    let update_stage = mock!(Client::update_secret_version_stage)
+        .match_requests(|req| {
+            req.move_to_version_id() == Some("v2")
+                && req.remove_from_version_id() == Some("v3")
+                && req.version_stage() == Some("AWSCURRENT")
+        })
+        .then_output(|| UpdateSecretVersionStageOutput::builder().build());
+    // rollback calls get_secret(vault, name, false) at the end which calls describe_secret
+    let describe = mock!(Client::describe_secret)
+        .then_output(|| DescribeSecretOutput::builder().name("myproj-kv/db-password").build());
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&list, &update_stage, &describe]);
+    let backend = aws_secret_backend(client);
+
+    backend.rollback("myproj-kv", "db-password", "v2").await.unwrap();
+}
