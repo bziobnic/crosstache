@@ -34,6 +34,28 @@ pub struct LocalConfig {
     pub default_vault: Option<String>,
 }
 
+/// Configuration for the AWS Secrets Manager backend.
+///
+/// Lives under `[aws]` in `xv.conf`. Only relevant when `backend = "aws"`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AwsConfig {
+    /// AWS region, e.g. `us-east-1`. Falls through to `AWS_REGION` env var.
+    #[serde(default)]
+    pub region: Option<String>,
+
+    /// AWS profile name. Falls through to `AWS_PROFILE`. Defaults to "default".
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    /// Optional endpoint URL override. Used for LocalStack and other AWS-compatible APIs.
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
+
+    /// Default vault name (= prefix) used when no `--vault` / context is set.
+    #[serde(default)]
+    pub default_vault: Option<String>,
+}
+
 /// Azure credential type priority for authentication
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -156,6 +178,11 @@ pub struct Config {
     #[tabled(skip)]
     #[serde(default)]
     pub local: Option<LocalConfig>,
+    /// Configuration for the AWS Secrets Manager backend.
+    /// Only relevant when `backend = "aws"`.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub aws: Option<AwsConfig>,
     /// Seconds before clipboard is automatically cleared (0 to disable)
     #[tabled(rename = "Clipboard Timeout")]
     #[serde(default = "default_clipboard_timeout")]
@@ -205,6 +232,7 @@ impl Default for Config {
             blob_config: None,
             azure_credential_priority: AzureCredentialType::Default,
             local: None,
+            aws: None,
             clipboard_timeout: default_clipboard_timeout(),
             gen_default_charset: None,
             env_flag: None,
@@ -219,17 +247,28 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        // Azure-specific fields are only required when using the Azure backend.
-        if self.effective_backend_name() == "azure" {
+        let backend = self.effective_backend_name();
+        if backend == "azure" {
             if self.subscription_id.is_empty() {
                 return Err(CrosstacheError::config("Subscription ID is required"));
             }
-
             if self.tenant_id.is_empty() {
                 return Err(CrosstacheError::config("Tenant ID is required"));
             }
         }
-
+        if backend == "aws" {
+            let aws = self.aws.as_ref().ok_or_else(|| {
+                CrosstacheError::config("[aws] config block is required when backend = \"aws\"")
+            })?;
+            if aws.region.is_none()
+                && std::env::var("AWS_REGION").is_err()
+                && std::env::var("AWS_DEFAULT_REGION").is_err()
+            {
+                return Err(CrosstacheError::config(
+                    "AWS region required: set [aws].region in config or AWS_REGION env var",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -773,5 +812,29 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.cache_enabled);
         assert_eq!(config.cache_ttl_secs, 900);
+    }
+
+    #[test]
+    fn validate_requires_aws_block_when_backend_is_aws() {
+        let cfg = Config {
+            backend: Some("aws".into()),
+            aws: None,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("aws"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_passes_when_aws_block_present_with_region() {
+        let cfg = Config {
+            backend: Some("aws".into()),
+            aws: Some(AwsConfig {
+                region: Some("us-east-1".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 }

@@ -202,6 +202,7 @@ impl ConfigInitializer {
         let config = Config {
             backend: Some("local".to_string()),
             local: Some(local_config),
+            aws: None,
             // Azure fields get sensible empty defaults
             subscription_id: String::new(),
             tenant_id: String::new(),
@@ -920,6 +921,7 @@ impl ConfigInitializer {
             blob_config,
             azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
             local: None,
+            aws: None,
             clipboard_timeout: 30,
             gen_default_charset: None,
             env_flag: None,
