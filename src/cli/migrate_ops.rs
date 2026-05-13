@@ -11,6 +11,9 @@ use crate::utils::output;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
+const TAG_MIGRATED_FROM: &str = "xv:migrated_from";
+const TAG_MIGRATED_AT: &str = "xv:migrated_at";
+
 struct MigrationDiff {
     to_migrate: Vec<String>,
     conflicts: Vec<String>,
@@ -81,6 +84,44 @@ fn print_diff_summary(
     println!("On conflict: {:?}", on_conflict);
     println!("Dry run? {}", if dry_run { "yes" } else { "no" });
     println!();
+}
+
+fn build_request_from_props(
+    props: &crate::secret::manager::SecretProperties,
+    source_name: &str,
+    vault: &str,
+) -> SecretRequest {
+    let mut tags = props.tags.clone();
+    tags.insert(
+        TAG_MIGRATED_FROM.into(),
+        format!("{}:{}:{}", source_name, vault, props.version),
+    );
+    tags.insert(TAG_MIGRATED_AT.into(), chrono::Utc::now().to_rfc3339());
+
+    SecretRequest {
+        name: props.original_name.clone(),
+        value: Zeroizing::new(
+            props.value.as_ref()
+                .map(|v| v.as_str().to_string())
+                .unwrap_or_default(),
+        ),
+        content_type: if props.content_type.is_empty() {
+            None
+        } else {
+            Some(props.content_type.clone())
+        },
+        enabled: Some(props.enabled),
+        expires_on: props.expires_on,
+        not_before: props.not_before,
+        tags: if tags.is_empty() {
+            None
+        } else {
+            Some(tags)
+        },
+        groups: None,
+        note: None,
+        folder: None,
+    }
 }
 
 /// Create a backend instance for the given kind.
@@ -165,8 +206,8 @@ pub(crate) async fn execute_migrate(
     } else {
         on_conflict
     };
-    // force_replace and concurrency will be wired in Tasks 32-33
-    let _ = (force_replace, concurrency);
+    // concurrency will be wired in Task 33
+    let _ = concurrency;
     // 1. Parse backend kinds
     let from_kind: BackendKind = from
         .parse()
@@ -283,28 +324,21 @@ pub(crate) async fn execute_migrate(
                 ))
             })?;
 
-        // Build SecretRequest from source properties
-        let value = props.value.unwrap_or_else(|| Zeroizing::new(String::new()));
-        let request = SecretRequest {
-            name: props.original_name.clone(),
-            value,
-            content_type: if props.content_type.is_empty() {
-                None
-            } else {
-                Some(props.content_type.clone())
-            },
-            enabled: Some(props.enabled),
-            expires_on: props.expires_on,
-            not_before: props.not_before,
-            tags: if props.tags.is_empty() {
-                None
-            } else {
-                Some(props.tags.clone())
-            },
-            groups: None,
-            note: None,
-            folder: None,
-        };
+        // Idempotency check: skip if already migrated from the same source version
+        if !force_replace {
+            if let Ok(existing) = target.secrets().get_secret(&vault_name, name, false).await {
+                if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
+                    let expected = format!("{}:{}:{}", source.name(), vault_name, props.version);
+                    if prev_from == &expected {
+                        println!("  [skip] {} — already migrated (same source version)", name);
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let request = build_request_from_props(&props, source.name(), &vault_name);
 
         // Set secret in target
         match target.secrets().set_secret(&vault_name, request).await {
