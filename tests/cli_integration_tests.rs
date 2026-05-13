@@ -401,3 +401,70 @@ fn tui_subcommand_unknown_when_feature_disabled() {
     // clap returns exit 2 for unknown subcommands.
     assert_eq!(out.status.code(), Some(2));
 }
+
+// -----------------------------------------------------------------------------
+// AWS migration dry-run (LocalStack-gated)
+// -----------------------------------------------------------------------------
+
+#[test]
+#[cfg(feature = "aws")]
+fn migrate_dry_run_against_local_to_aws_shows_summary() {
+    use tempfile::TempDir;
+
+    if std::env::var("AWS_INTEGRATION_TESTS").is_err() {
+        eprintln!("skipping: AWS_INTEGRATION_TESTS not set");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let xv = env!("CARGO_BIN_EXE_xv");
+
+    // Set up local store with one secret
+    let set_out = Command::new(xv)
+        .args(["--backend", "local", "set", "test-secret", "value123"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .output()
+        .expect("set should succeed");
+    assert!(
+        set_out.status.success(),
+        "set failed: {:?}",
+        String::from_utf8_lossy(&set_out.stderr)
+    );
+
+    // Run migrate dry-run
+    let out = Command::new(xv)
+        .args([
+            "migrate", "--from", "local", "--to", "aws",
+            "--vault", "default", "--dry-run",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env(
+            "AWS_ENDPOINT_URL",
+            std::env::var("AWS_ENDPOINT_URL")
+                .unwrap_or_else(|_| "http://localhost:4566".to_string()),
+        )
+        .env("AWS_REGION", "us-east-1")
+        .env("AWS_ACCESS_KEY_ID", "test")
+        .env("AWS_SECRET_ACCESS_KEY", "test")
+        .output()
+        .expect("migrate should run");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Source:") || stderr.contains("Source:"),
+        "expected 'Source:' in output; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Target:") || stderr.contains("Target:"),
+        "expected 'Target:' in output; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("to migrate") || stderr.contains("to migrate"),
+        "expected 'to migrate' counts; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
