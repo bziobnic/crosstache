@@ -43,7 +43,7 @@ azure_storage_blobs = "0.21"
 azure_mgmt_storage = "0.21"
 
 # AWS SDK - feature-gated under `aws`
-aws-sdk-secretsmanager = { version = "1", optional = true }
+aws-sdk-secretsmanager = { version = "1", optional = true, features = ["test-util"] }
 aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
 aws-smithy-runtime-api = { version = "1", optional = true }
 
