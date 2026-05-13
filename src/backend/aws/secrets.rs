@@ -384,8 +384,17 @@ impl SecretBackend for AwsSecretBackend {
         Ok(summaries)
     }
 
-    async fn delete_secret(&self, _vault: &str, _name: &str) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported("delete_secret not yet implemented".into()))
+    async fn delete_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+        self.client
+            .delete_secret()
+            .secret_id(&aws_full_name)
+            .recovery_window_in_days(30)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_delete(name, e))?;
+        Ok(())
     }
 
     async fn update_secret(
@@ -395,5 +404,18 @@ impl SecretBackend for AwsSecretBackend {
         _request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
         Err(BackendError::Unsupported("update_secret not yet implemented".into()))
+    }
+
+    async fn purge_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+        self.client
+            .delete_secret()
+            .secret_id(&aws_full_name)
+            .force_delete_without_recovery(true)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_delete(name, e))?;
+        Ok(())
     }
 }

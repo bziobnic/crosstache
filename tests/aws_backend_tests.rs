@@ -216,3 +216,35 @@ async fn list_secrets_paginates_and_filters_marker() {
     assert!(names.contains(&"api-key".to_string()));
     assert!(!names.contains(&".xv-vault".to_string()), "marker should be excluded");
 }
+
+#[tokio::test]
+async fn delete_secret_uses_recovery_window() {
+    use aws_sdk_secretsmanager::operation::delete_secret::DeleteSecretOutput;
+    use crosstache::backend::SecretBackend;
+
+    let rule = mock!(Client::delete_secret)
+        .match_requests(|req| {
+            req.secret_id() == Some("myproj-kv/db-password")
+                && req.recovery_window_in_days() == Some(30)
+                && req.force_delete_without_recovery() != Some(true)
+        })
+        .then_output(|| DeleteSecretOutput::builder().build());
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+    backend.delete_secret("myproj-kv", "db-password").await.unwrap();
+}
+
+#[tokio::test]
+async fn purge_secret_forces_immediate_delete() {
+    use aws_sdk_secretsmanager::operation::delete_secret::DeleteSecretOutput;
+    use crosstache::backend::SecretBackend;
+
+    let rule = mock!(Client::delete_secret)
+        .match_requests(|req| req.force_delete_without_recovery() == Some(true))
+        .then_output(|| DeleteSecretOutput::builder().build());
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+    backend.purge_secret("myproj-kv", "db-password").await.unwrap();
+}
