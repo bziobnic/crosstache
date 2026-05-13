@@ -784,4 +784,71 @@ impl SecretBackend for AwsSecretBackend {
         // Fetch and return the current secret properties
         self.get_secret(vault, name, false).await
     }
+
+    async fn restore_secret(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+        self.client
+            .restore_secret()
+            .secret_id(&aws_full_name)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_restore(name, e))?;
+        // After restore, fetch the metadata
+        self.get_secret(vault, name, false).await
+    }
+
+    async fn list_deleted_secrets(
+        &self,
+        vault: &str,
+    ) -> Result<Vec<SecretSummary>, BackendError> {
+        use crate::backend::aws::encoding::{is_marker, strip_prefix};
+        use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
+
+        let prefix = format!("{vault}/");
+        let out = self
+            .client
+            .list_secrets()
+            .max_results(100)
+            .include_planned_deletion(true)
+            .filters(
+                Filter::builder()
+                    .key(FilterNameStringType::Name)
+                    .values(prefix.clone())
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(super::errors::from_list)?;
+
+        let mut summaries: Vec<SecretSummary> = Vec::new();
+        for entry in out.secret_list() {
+            let aws_full_name = entry.name().unwrap_or("");
+            if entry.deleted_date().is_none() {
+                continue;
+            }
+            let secret_name = match strip_prefix(vault, aws_full_name) {
+                Some(n) => n,
+                None => continue,
+            };
+            if is_marker(aws_full_name) {
+                continue;
+            }
+            summaries.push(SecretSummary {
+                name: secret_name.clone(),
+                original_name: secret_name,
+                note: None,
+                folder: None,
+                groups: None,
+                updated_on: String::new(),
+                enabled: true,
+                content_type: String::new(),
+            });
+        }
+        Ok(summaries)
+    }
 }

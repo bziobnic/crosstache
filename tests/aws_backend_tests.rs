@@ -424,3 +424,49 @@ async fn rollback_moves_awscurrent_to_target_version() {
 
     backend.rollback("myproj-kv", "db-password", "v2").await.unwrap();
 }
+
+#[tokio::test]
+async fn restore_secret_calls_aws_restore() {
+    use aws_sdk_secretsmanager::operation::restore_secret::RestoreSecretOutput;
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use crosstache::backend::SecretBackend;
+
+    let restore = mock!(Client::restore_secret)
+        .match_requests(|req| req.secret_id() == Some("myproj-kv/db-password"))
+        .then_output(|| RestoreSecretOutput::builder().build());
+    // restore_secret calls get_secret at the end which calls describe_secret
+    let describe = mock!(Client::describe_secret)
+        .then_output(|| DescribeSecretOutput::builder().name("myproj-kv/db-password").build());
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&restore, &describe]);
+    let backend = aws_secret_backend(client);
+
+    let result = backend.restore_secret("myproj-kv", "db-password").await.unwrap();
+    assert_eq!(result.name, "db-password");
+}
+
+#[tokio::test]
+async fn list_deleted_secrets_filters_to_deleted_only() {
+    use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
+    use aws_sdk_secretsmanager::primitives::DateTime;
+    use aws_sdk_secretsmanager::types::SecretListEntry;
+    use crosstache::backend::SecretBackend;
+
+    let rule = mock!(Client::list_secrets).then_output(|| {
+        ListSecretsOutput::builder()
+            .secret_list(SecretListEntry::builder().name("myproj-kv/active").build())
+            .secret_list(
+                SecretListEntry::builder()
+                    .name("myproj-kv/deleted-one")
+                    .deleted_date(DateTime::from_secs(1_700_000_000))
+                    .build(),
+            )
+            .build()
+    });
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    let deleted = backend.list_deleted_secrets("myproj-kv").await.unwrap();
+    let names: Vec<String> = deleted.iter().map(|s| s.name.clone()).collect();
+    assert_eq!(names, vec!["deleted-one".to_string()]);
+}
