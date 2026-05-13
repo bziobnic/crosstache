@@ -16,6 +16,8 @@
 //! [`BackendRegistry`] for runtime backend resolution.
 
 pub mod azure;
+#[cfg(feature = "aws")]
+pub mod aws;
 pub mod error;
 #[cfg(feature = "file-ops")]
 pub mod file;
