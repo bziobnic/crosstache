@@ -119,6 +119,21 @@ Requires blob storage setup via `xv init`. Gated behind the `file-ops` feature f
 
 ---
 
+## Cross-cloud migration (v0.10)
+
+`xv migrate --from <source> --to <target>` copies secrets between backends. Supports Azure ↔ AWS ↔ Local in any combination. Hardening features:
+
+- `--on-conflict skip|replace|fail` — controls behavior when target secret exists
+- `--dry-run` — preview without changes
+- `--filter "<glob>"` — restrict to matching names
+- `--concurrency N` — bounded parallel transfers (default 8)
+- Idempotent: re-runs detect previously-migrated secrets via `xv:migrated_from` tag
+- Exponential backoff on rate limiting
+
+See [migration.md](migration.md) for the full guide.
+
+---
+
 ## Configuration
 
 | Command | Description |

@@ -134,6 +134,48 @@ default_vault = "default"
 
 ---
 
+## AWS Secrets Manager backend (v0.10)
+
+Use AWS Secrets Manager as the underlying secret store.
+
+```bash
+xv init  # pick "aws" when prompted
+# or edit ~/.config/xv/xv.conf:
+# backend = "aws"
+# [aws]
+# region = "us-east-1"
+# profile = "default"
+# default_vault = "myproj-kv"
+```
+
+Multi-region:
+
+```toml
+backend = "aws-east"
+[named_backends.aws-east]
+type = "aws"
+region = "us-east-1"
+[named_backends.aws-west]
+type = "aws"
+region = "us-west-2"
+```
+
+`xv share` and `xv audit` are not supported on AWS in v0.10. Use AWS IAM and CloudTrail directly for those needs.
+
+### Cross-cloud migration
+
+```bash
+# Move secrets from Azure to AWS
+xv migrate --from azure --to aws --vault myproj-kv
+
+# Preview first
+xv migrate --from azure --to aws --vault myproj-kv --dry-run
+```
+
+See [docs/migration.md](docs/migration.md) for the full guide.
+
+---
+
 ## Installation
 
 ### Quick install
