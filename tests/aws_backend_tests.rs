@@ -470,3 +470,39 @@ async fn list_deleted_secrets_filters_to_deleted_only() {
     let names: Vec<String> = deleted.iter().map(|s| s.name.clone()).collect();
     assert_eq!(names, vec!["deleted-one".to_string()]);
 }
+
+#[tokio::test]
+async fn create_vault_writes_marker_secret() {
+    use aws_sdk_secretsmanager::operation::create_secret::CreateSecretOutput;
+    use crosstache::backend::VaultBackend;
+    use crosstache::vault::models::VaultCreateRequest;
+
+    let rule = mock!(Client::create_secret)
+        .match_requests(|req| req.name() == Some("myproj-kv/.xv-vault"))
+        .then_output(|| {
+            CreateSecretOutput::builder()
+                .name("myproj-kv/.xv-vault")
+                .build()
+        });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_vault_backend(client);
+
+    let request = VaultCreateRequest {
+        name: "myproj-kv".to_string(),
+        location: "eastus".to_string(),
+        resource_group: "my-rg".to_string(),
+        subscription_id: "sub-123".to_string(),
+        sku: None,
+        enabled_for_deployment: None,
+        enabled_for_disk_encryption: None,
+        enabled_for_template_deployment: None,
+        soft_delete_retention_in_days: None,
+        purge_protection: None,
+        tags: None,
+        access_policies: None,
+    };
+
+    let result = backend.create_vault(request).await.unwrap();
+    assert_eq!(result.name, "myproj-kv");
+}
