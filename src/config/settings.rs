@@ -56,6 +56,19 @@ pub struct AwsConfig {
     pub default_vault: Option<String>,
 }
 
+/// A named backend entry in `Config.named_backends`. Each entry is a
+/// fully-self-contained backend configuration tagged with its type.
+///
+/// Used for multi-region AWS, multi-tenant Azure, etc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum NamedBackendEntry {
+    Aws(AwsConfig),
+    Local(LocalConfig),
+    // Azure intentionally omitted from this enum for now; existing
+    // top-level Azure fields handle the single-instance case.
+}
+
 /// Azure credential type priority for authentication
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -183,6 +196,11 @@ pub struct Config {
     #[tabled(skip)]
     #[serde(default)]
     pub aws: Option<AwsConfig>,
+    /// Named backend instances for multi-region / multi-tenant use.
+    /// Active backend selected via `Config.backend` matching a key here.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub named_backends: std::collections::HashMap<String, NamedBackendEntry>,
     /// Seconds before clipboard is automatically cleared (0 to disable)
     #[tabled(rename = "Clipboard Timeout")]
     #[serde(default = "default_clipboard_timeout")]
@@ -233,6 +251,7 @@ impl Default for Config {
             azure_credential_priority: AzureCredentialType::Default,
             local: None,
             aws: None,
+            named_backends: std::collections::HashMap::new(),
             clipboard_timeout: default_clipboard_timeout(),
             gen_default_charset: None,
             env_flag: None,
@@ -646,7 +665,7 @@ pub async fn init_default_config() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{NamedBackendEntry, *};
 
     #[test]
     fn test_azure_credential_type_from_str() {
@@ -836,5 +855,36 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn named_backends_deserializes_aws_entry() {
+        let toml_str = r#"
+backend = "aws-east"
+debug = false
+subscription_id = ""
+default_vault = ""
+default_resource_group = "Vaults"
+default_location = "eastus"
+tenant_id = ""
+output_json = false
+no_color = false
+
+[named_backends.aws-east]
+type = "aws"
+region = "us-east-1"
+profile = "prod"
+default_vault = "myproj-kv"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.backend.as_deref(), Some("aws-east"));
+        let entry = cfg.named_backends.get("aws-east").unwrap();
+        match entry {
+            NamedBackendEntry::Aws(aws) => {
+                assert_eq!(aws.region.as_deref(), Some("us-east-1"));
+                assert_eq!(aws.profile.as_deref(), Some("prod"));
+            }
+            _ => panic!("expected Aws variant"),
+        }
     }
 }
