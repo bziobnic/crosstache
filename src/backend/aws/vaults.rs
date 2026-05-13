@@ -188,6 +188,37 @@ impl VaultBackend for AwsVaultBackend {
     async fn delete_vault(&self, name: &str) -> Result<(), BackendError> {
         self.delete_vault_internal(name, false).await
     }
+
+    async fn update_vault(
+        &self,
+        name: &str,
+        request: crate::vault::models::VaultUpdateRequest,
+    ) -> Result<VaultProperties, BackendError> {
+        use crate::backend::aws::encoding::marker_name;
+
+        let marker = marker_name(name);
+
+        // Update tags if provided
+        if let Some(ref new_tags) = request.tags {
+            let tag_list: Vec<Tag> = new_tags
+                .iter()
+                .filter(|(k, _)| !k.starts_with("xv:"))
+                .map(|(k, v)| Tag::builder().key(k).value(v).build())
+                .collect();
+            if !tag_list.is_empty() {
+                self.client
+                    .tag_resource()
+                    .secret_id(&marker)
+                    .set_tags(Some(tag_list))
+                    .send()
+                    .await
+                    .map_err(super::errors::from_tag)?;
+            }
+        }
+
+        // Fetch updated vault properties
+        self.get_vault(name).await
+    }
 }
 
 impl AwsVaultBackend {

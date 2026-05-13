@@ -657,3 +657,67 @@ async fn delete_vault_succeeds_when_only_marker_exists() {
     let backend = aws_vault_backend(client);
     backend.delete_vault("myproj-kv").await.unwrap();
 }
+
+#[tokio::test]
+async fn update_vault_updates_tags() {
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use aws_sdk_secretsmanager::operation::tag_resource::TagResourceOutput;
+    use aws_sdk_secretsmanager::types::Tag;
+    use crosstache::backend::VaultBackend;
+    use crosstache::vault::models::VaultUpdateRequest;
+    use std::collections::HashMap;
+
+    let tag = mock!(Client::tag_resource)
+        .match_requests(|req| {
+            // Verify that tag_resource was called with the marker secret and tags
+            req.secret_id() == Some("myproj-kv/.xv-vault")
+        })
+        .then_output(|| TagResourceOutput::builder().build());
+
+    // update_vault calls get_vault at the end which calls describe_secret
+    let describe = mock!(Client::describe_secret)
+        .match_requests(|req| req.secret_id() == Some("myproj-kv/.xv-vault"))
+        .then_output(|| {
+            DescribeSecretOutput::builder()
+                .name("myproj-kv/.xv-vault")
+                .tags(
+                    Tag::builder()
+                        .key("xv:vault_name")
+                        .value("myproj-kv")
+                        .build(),
+                )
+                .tags(
+                    Tag::builder()
+                        .key("xv:created_at")
+                        .value("2026-05-13T10:00:00+00:00")
+                        .build(),
+                )
+                .tags(
+                    Tag::builder()
+                        .key("environment")
+                        .value("production")
+                        .build(),
+                )
+                .build()
+        });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&tag, &describe]);
+    let backend = aws_vault_backend(client);
+
+    let mut tags = HashMap::new();
+    tags.insert("environment".to_string(), "production".to_string());
+
+    let request = VaultUpdateRequest {
+        enabled_for_deployment: None,
+        enabled_for_disk_encryption: None,
+        enabled_for_template_deployment: None,
+        soft_delete_retention_in_days: None,
+        purge_protection: None,
+        tags: Some(tags),
+        access_policies: None,
+    };
+
+    let result = backend.update_vault("myproj-kv", request).await.unwrap();
+    assert_eq!(result.name, "myproj-kv");
+    assert_eq!(result.id, "vault-myproj-kv");
+}
