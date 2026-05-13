@@ -80,9 +80,21 @@ pub(crate) async fn execute_migrate(
     vault: Option<String>,
     filter: Option<String>,
     dry_run: bool,
-    overwrite: bool,
+    on_conflict: crate::cli::commands::OnConflict,
+    force_replace: bool,
+    concurrency: usize,
+    legacy_overwrite: bool,
     config: Config,
 ) -> Result<()> {
+    // Compatibility shim: --overwrite -> --on-conflict replace + warn
+    let on_conflict = if legacy_overwrite {
+        eprintln!("warning: --overwrite is deprecated; use --on-conflict replace");
+        crate::cli::commands::OnConflict::Replace
+    } else {
+        on_conflict
+    };
+    // force_replace and concurrency will be wired in Tasks 32-33
+    let _ = (force_replace, concurrency);
     // 1. Parse backend kinds
     let from_kind: BackendKind = from
         .parse()
@@ -208,10 +220,16 @@ pub(crate) async fn execute_migrate(
             continue;
         }
 
-        // Check if secret already exists in target (unless overwrite is set)
-        if !overwrite {
+        // Check if secret already exists in target
+        if on_conflict != crate::cli::commands::OnConflict::Replace {
             match target.secrets().secret_exists(&vault_name, name).await {
                 Ok(true) => {
+                    if on_conflict == crate::cli::commands::OnConflict::Fail {
+                        return Err(CrosstacheError::Unknown(format!(
+                            "Conflict: '{}' already exists in target (--on-conflict fail)",
+                            name
+                        )));
+                    }
                     println!("  [skip] {} — already exists in target", name);
                     skipped += 1;
                     continue;

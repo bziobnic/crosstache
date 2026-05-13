@@ -22,6 +22,22 @@ fn get_version() -> &'static str {
     built_info::PKG_VERSION
 }
 
+#[derive(Debug, Clone, clap::ValueEnum, PartialEq, Eq)]
+pub enum OnConflict {
+    /// Skip secrets that already exist in the target (default)
+    Skip,
+    /// Overwrite the target value, replacing the metadata
+    Replace,
+    /// Abort the migration on first conflict
+    Fail,
+}
+
+impl Default for OnConflict {
+    fn default() -> Self {
+        Self::Skip
+    }
+}
+
 /// Determine if options should be hidden based on environment or command line
 fn should_hide_options() -> bool {
     // Check if --show-options is present in command line args
@@ -696,10 +712,10 @@ pub enum Commands {
     },
     /// Migrate secrets between backends
     Migrate {
-        /// Source backend (azure, local)
+        /// Source backend (azure, local, aws)
         #[arg(long)]
         from: String,
-        /// Target backend (azure, local)
+        /// Target backend (azure, local, aws)
         #[arg(long)]
         to: String,
         /// Only migrate secrets from this vault
@@ -711,8 +727,17 @@ pub enum Commands {
         /// Preview what would be migrated without making changes
         #[arg(long)]
         dry_run: bool,
-        /// Overwrite secrets that already exist in the target
+        /// Behavior when a secret already exists in the target
+        #[arg(long, value_enum, default_value_t = OnConflict::Skip)]
+        on_conflict: OnConflict,
+        /// Ignore migration tags and replace targets unconditionally
         #[arg(long)]
+        force_replace: bool,
+        /// Concurrent transfers (default 8)
+        #[arg(long, default_value = "8")]
+        concurrency: usize,
+        /// DEPRECATED: use --on-conflict replace instead
+        #[arg(long, hide = true)]
         overwrite: bool,
     },
     /// Open the read-only terminal browser. Requires --features tui at build time.
@@ -1505,10 +1530,15 @@ impl Cli {
                 vault,
                 filter,
                 dry_run,
+                on_conflict,
+                force_replace,
+                concurrency,
                 overwrite,
             } => {
                 crate::cli::migrate_ops::execute_migrate(
-                    from, to, vault, filter, dry_run, overwrite, config,
+                    from, to, vault, filter, dry_run,
+                    on_conflict, force_replace, concurrency, overwrite,
+                    config,
                 )
                 .await
             }
@@ -1740,6 +1770,9 @@ mod tests {
                 vault,
                 filter,
                 dry_run,
+                on_conflict,
+                force_replace,
+                concurrency,
                 overwrite,
             } => {
                 assert_eq!(from, "azure");
@@ -1748,6 +1781,9 @@ mod tests {
                 assert_eq!(filter, Some("db-*".to_string()));
                 assert!(dry_run);
                 assert!(overwrite);
+                assert_eq!(on_conflict, OnConflict::Skip);
+                assert!(!force_replace);
+                assert_eq!(concurrency, 8);
             }
             _ => panic!("Expected Migrate command"),
         }
@@ -1765,6 +1801,9 @@ mod tests {
                 vault,
                 filter,
                 dry_run,
+                on_conflict,
+                force_replace,
+                concurrency,
                 overwrite,
             } => {
                 assert_eq!(from, "local");
@@ -1773,6 +1812,9 @@ mod tests {
                 assert_eq!(filter, None);
                 assert!(!dry_run);
                 assert!(!overwrite);
+                assert_eq!(on_conflict, OnConflict::Skip);
+                assert!(!force_replace);
+                assert_eq!(concurrency, 8);
             }
             _ => panic!("Expected Migrate command"),
         }
