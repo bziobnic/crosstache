@@ -37,8 +37,12 @@ pub fn is_marker(full_name: &str) -> bool {
     full_name.ends_with(&format!("/{MARKER_BASENAME}")) || full_name == MARKER_BASENAME
 }
 
-/// Validate a user-facing secret name. Rejects empty names and names
-/// starting with `.xv-` (reserved namespace).
+/// Validate a user-facing secret name. Rejects empty names, names in the
+/// reserved `.xv-*` namespace, and names that would exceed [`MAX_NAME_LEN`]
+/// once the vault prefix and separator are prepended.
+///
+/// Note: the vault prefix length is not known here, so we conservatively check
+/// that the bare name does not already exceed the limit by itself.
 pub fn validate_secret_name(name: &str) -> Result<(), BackendError> {
     if name.is_empty() {
         return Err(BackendError::InvalidArgument(
@@ -48,6 +52,12 @@ pub fn validate_secret_name(name: &str) -> Result<(), BackendError> {
     if name.starts_with(".xv-") {
         return Err(BackendError::InvalidArgument(format!(
             "secret name '{name}' is in the reserved '.xv-*' namespace"
+        )));
+    }
+    if name.len() > MAX_NAME_LEN {
+        return Err(BackendError::InvalidArgument(format!(
+            "secret name too long: {} chars (max {MAX_NAME_LEN})",
+            name.len()
         )));
     }
     Ok(())

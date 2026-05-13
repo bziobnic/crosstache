@@ -61,7 +61,9 @@ impl AwsSecretBackend {
                 .map_err(|e| super::errors::from_update(&request.name, e))?;
         }
 
-        // Step 3: Replace all tags (describe -> untag all -> re-tag).
+        // Step 3: Compute tag delta (describe -> untag removed keys -> re-tag all new).
+        // Only removing keys that won't be present in the new tag set shrinks the
+        // race window compared to untag-all + re-tag-all.
         let describe = self
             .client
             .describe_secret()
@@ -69,21 +71,6 @@ impl AwsSecretBackend {
             .send()
             .await
             .map_err(|e| super::errors::from_describe(&request.name, e))?;
-
-        let existing_keys: Vec<String> = describe
-            .tags()
-            .iter()
-            .filter_map(|t| t.key().map(|k| k.to_string()))
-            .collect();
-        if !existing_keys.is_empty() {
-            self.client
-                .untag_resource()
-                .secret_id(aws_full_name)
-                .set_tag_keys(Some(existing_keys))
-                .send()
-                .await
-                .map_err(super::errors::from_untag)?;
-        }
 
         let mut new_tags: Vec<Tag> = Vec::new();
         new_tags.push(
@@ -123,6 +110,29 @@ impl AwsSecretBackend {
                 }
             }
         }
+
+        // Compute which existing keys are absent from the new tag set so we
+        // only remove the delta rather than stripping and re-applying everything.
+        let new_keys: std::collections::HashSet<&str> = new_tags
+            .iter()
+            .filter_map(|t| t.key())
+            .collect();
+        let keys_to_remove: Vec<String> = describe
+            .tags()
+            .iter()
+            .filter_map(|t| t.key().map(|k| k.to_string()))
+            .filter(|k| !new_keys.contains(k.as_str()))
+            .collect();
+        if !keys_to_remove.is_empty() {
+            self.client
+                .untag_resource()
+                .secret_id(aws_full_name)
+                .set_tag_keys(Some(keys_to_remove))
+                .send()
+                .await
+                .map_err(super::errors::from_untag)?;
+        }
+
         self.client
             .tag_resource()
             .secret_id(aws_full_name)
@@ -387,15 +397,16 @@ impl SecretBackend for AwsSecretBackend {
             }
         }
 
-        let create_result = self
+        let mut create_builder = self
             .client
             .create_secret()
             .name(&aws_full_name)
             .secret_string(request.value.as_str().to_string())
-            .description(request.note.clone().unwrap_or_default())
-            .set_tags(if tags.is_empty() { None } else { Some(tags) })
-            .send()
-            .await;
+            .set_tags(if tags.is_empty() { None } else { Some(tags) });
+        if let Some(note) = request.note.as_deref().filter(|n| !n.is_empty()) {
+            create_builder = create_builder.description(note);
+        }
+        let create_result = create_builder.send().await;
 
         let version_id = match create_result {
             Ok(out) => out.version_id().unwrap_or("").to_string(),

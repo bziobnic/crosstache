@@ -246,26 +246,39 @@ impl AwsVaultBackend {
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 
         let prefix = format!("{name}/");
-        let out = self
-            .client
-            .list_secrets()
-            .max_results(100)
-            .filters(
-                Filter::builder()
-                    .key(FilterNameStringType::Name)
-                    .values(prefix.clone())
-                    .build(),
-            )
-            .send()
-            .await
-            .map_err(super::errors::from_list)?;
 
-        let non_marker: Vec<String> = out
-            .secret_list()
-            .iter()
-            .filter_map(|e| e.name().map(|s| s.to_string()))
-            .filter(|n| !is_marker(n) && strip_prefix(name, n).is_some())
-            .collect();
+        // Paginate through all secrets in this vault prefix.
+        let mut next_token: Option<String> = None;
+        let mut non_marker: Vec<String> = Vec::new();
+        loop {
+            let mut req = self
+                .client
+                .list_secrets()
+                .max_results(100)
+                .filters(
+                    Filter::builder()
+                        .key(FilterNameStringType::Name)
+                        .values(prefix.clone())
+                        .build(),
+                );
+            if let Some(ref t) = next_token {
+                req = req.next_token(t.clone());
+            }
+            let out = req.send().await.map_err(super::errors::from_list)?;
+
+            for entry in out.secret_list() {
+                if let Some(n) = entry.name() {
+                    if !is_marker(n) && strip_prefix(name, n).is_some() {
+                        non_marker.push(n.to_string());
+                    }
+                }
+            }
+
+            next_token = out.next_token().map(|s| s.to_string());
+            if next_token.is_none() {
+                break;
+            }
+        }
 
         if !non_marker.is_empty() && !force {
             return Err(BackendError::Conflict(format!(

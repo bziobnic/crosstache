@@ -76,9 +76,13 @@ impl BackendRegistry {
                             .into(),
                     )
                 })?;
-                // We need an async runtime. The registry is sync; use a runtime handle.
-                let backend = tokio::runtime::Handle::current()
-                    .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))?;
+                // block_in_place is safe to call from inside a tokio multi-thread
+                // runtime (unlike Handle::block_on which panics if a runtime is
+                // already active on the current thread).
+                let backend = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))
+                })?;
                 Ok(Self::new(Arc::new(backend)))
             }
             #[cfg(not(feature = "aws"))]
@@ -99,8 +103,10 @@ impl BackendRegistry {
         match entry {
             #[cfg(feature = "aws")]
             NBE::Aws(aws_cfg) => {
-                let backend = tokio::runtime::Handle::current()
-                    .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))?;
+                let backend = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))
+                })?;
                 Ok(Self::new(Arc::new(backend)))
             }
             #[cfg(not(feature = "aws"))]

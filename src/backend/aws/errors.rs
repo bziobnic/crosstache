@@ -135,11 +135,20 @@ pub fn from_update(name: &str, e: SdkError<UpdateSecretError, Response>) -> Back
 
 pub fn from_restore(name: &str, e: SdkError<RestoreSecretError, Response>) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
-        if let RestoreSecretError::ResourceNotFoundException(_) = svc.err() {
-            return BackendError::NotFound {
-                name: name.to_string(),
-                suggestion: None,
-            };
+        match svc.err() {
+            RestoreSecretError::ResourceNotFoundException(_) => {
+                return BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                }
+            }
+            RestoreSecretError::InvalidRequestException(inner) => {
+                // Typically means the secret is not scheduled for deletion.
+                return BackendError::InvalidArgument(format!(
+                    "Secret is not scheduled for deletion: {inner}"
+                ));
+            }
+            _ => {}
         }
     }
     handle_sdk("RestoreSecret", e)

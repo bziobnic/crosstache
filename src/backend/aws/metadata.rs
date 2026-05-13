@@ -3,8 +3,6 @@
 //! AWS Secrets Manager allows up to 50 tags per secret (vs Azure's 15);
 //! comfortable budget. Reserved keys live under the `xv:` prefix.
 
-use std::collections::HashMap;
-
 pub const TAG_ORIGINAL_NAME: &str = "xv:original_name";
 pub const TAG_GROUPS: &str = "xv:groups";
 pub const TAG_FOLDER: &str = "xv:folder";
@@ -16,95 +14,93 @@ pub const TAG_VALUE_VAULT_MARKER: &str = "vault-marker";
 pub const TAG_MIGRATED_FROM: &str = "xv:migrated_from";
 pub const TAG_MIGRATED_AT: &str = "xv:migrated_at";
 
-/// Subset of `SecretProperties` fields we actually round-trip.
-/// Real `SecretProperties` from `crate::secret::models` is bigger; we map
-/// to/from it at the call site.
-#[derive(Debug, Default, Clone)]
-pub struct TestProps {
-    pub original_name: String,
-    pub groups: Vec<String>,
-    pub folder: Option<String>,
-    pub created_by: Option<String>,
-    pub content_type: Option<String>,
-    pub note: Option<String>, // -> AWS Description, not a tag
-    pub expires_at: Option<String>,
-    pub user_tags: HashMap<String, String>,
-}
-
-impl TestProps {
-    pub fn empty(name: &str) -> Self {
-        Self {
-            original_name: name.into(),
-            ..Default::default()
-        }
-    }
-}
-
-/// Encode metadata into AWS-tag-shaped `(key, value)` pairs.
-/// Note: `note` is intentionally NOT encoded — it lives in AWS Description.
-pub fn encode_tags(p: &TestProps) -> Vec<(String, String)> {
-    let mut tags: Vec<(String, String)> = Vec::new();
-    tags.push((TAG_ORIGINAL_NAME.into(), p.original_name.clone()));
-    if !p.groups.is_empty() {
-        tags.push((TAG_GROUPS.into(), p.groups.join(",")));
-    }
-    if let Some(ref f) = p.folder {
-        tags.push((TAG_FOLDER.into(), f.clone()));
-    }
-    if let Some(ref c) = p.created_by {
-        tags.push((TAG_CREATED_BY.into(), c.clone()));
-    }
-    if let Some(ref ct) = p.content_type {
-        tags.push((TAG_CONTENT_TYPE.into(), ct.clone()));
-    }
-    if let Some(ref e) = p.expires_at {
-        tags.push((TAG_EXPIRES_AT.into(), e.clone()));
-    }
-    for (k, v) in &p.user_tags {
-        if !k.starts_with("xv:") {
-            tags.push((k.clone(), v.clone()));
-        }
-    }
-    tags
-}
-
-/// Decode AWS tags back into the metadata struct.
-pub fn decode_tags(tags: &[(String, String)]) -> TestProps {
-    let mut p = TestProps::default();
-    let mut user_tags = HashMap::new();
-    for (k, v) in tags {
-        match k.as_str() {
-            TAG_ORIGINAL_NAME => p.original_name = v.clone(),
-            TAG_GROUPS => {
-                p.groups = v
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect()
-            }
-            TAG_FOLDER => p.folder = Some(v.clone()),
-            TAG_CREATED_BY => p.created_by = Some(v.clone()),
-            TAG_CONTENT_TYPE => p.content_type = Some(v.clone()),
-            TAG_EXPIRES_AT => p.expires_at = Some(v.clone()),
-            _ if !k.starts_with("xv:") => {
-                user_tags.insert(k.clone(), v.clone());
-            }
-            _ => {} // unknown xv: tag — ignored on decode
-        }
-    }
-    p.user_tags = user_tags;
-    p
-}
-
-/// True if this tag is a vault marker tag (`xv:type=vault-marker`).
-pub fn is_vault_marker_tag(key: &str, value: &str) -> bool {
-    key == TAG_TYPE && value == TAG_VALUE_VAULT_MARKER
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// Subset of `SecretProperties` fields we actually round-trip in tests.
+    #[derive(Debug, Default, Clone)]
+    struct TestProps {
+        original_name: String,
+        groups: Vec<String>,
+        folder: Option<String>,
+        created_by: Option<String>,
+        content_type: Option<String>,
+        note: Option<String>, // -> AWS Description, not a tag
+        expires_at: Option<String>,
+        user_tags: HashMap<String, String>,
+    }
+
+    impl TestProps {
+        fn empty(name: &str) -> Self {
+            Self {
+                original_name: name.into(),
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Encode metadata into AWS-tag-shaped `(key, value)` pairs.
+    /// Note: `note` is intentionally NOT encoded — it lives in AWS Description.
+    fn encode_tags(p: &TestProps) -> Vec<(String, String)> {
+        let mut tags: Vec<(String, String)> = Vec::new();
+        tags.push((TAG_ORIGINAL_NAME.into(), p.original_name.clone()));
+        if !p.groups.is_empty() {
+            tags.push((TAG_GROUPS.into(), p.groups.join(",")));
+        }
+        if let Some(ref f) = p.folder {
+            tags.push((TAG_FOLDER.into(), f.clone()));
+        }
+        if let Some(ref c) = p.created_by {
+            tags.push((TAG_CREATED_BY.into(), c.clone()));
+        }
+        if let Some(ref ct) = p.content_type {
+            tags.push((TAG_CONTENT_TYPE.into(), ct.clone()));
+        }
+        if let Some(ref e) = p.expires_at {
+            tags.push((TAG_EXPIRES_AT.into(), e.clone()));
+        }
+        for (k, v) in &p.user_tags {
+            if !k.starts_with("xv:") {
+                tags.push((k.clone(), v.clone()));
+            }
+        }
+        tags
+    }
+
+    /// Decode AWS tags back into the metadata struct.
+    fn decode_tags(tags: &[(String, String)]) -> TestProps {
+        let mut p = TestProps::default();
+        let mut user_tags = HashMap::new();
+        for (k, v) in tags {
+            match k.as_str() {
+                TAG_ORIGINAL_NAME => p.original_name = v.clone(),
+                TAG_GROUPS => {
+                    p.groups = v
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect()
+                }
+                TAG_FOLDER => p.folder = Some(v.clone()),
+                TAG_CREATED_BY => p.created_by = Some(v.clone()),
+                TAG_CONTENT_TYPE => p.content_type = Some(v.clone()),
+                TAG_EXPIRES_AT => p.expires_at = Some(v.clone()),
+                _ if !k.starts_with("xv:") => {
+                    user_tags.insert(k.clone(), v.clone());
+                }
+                _ => {} // unknown xv: tag — ignored on decode
+            }
+        }
+        p.user_tags = user_tags;
+        p
+    }
+
+    /// True if this tag is a vault marker tag (`xv:type=vault-marker`).
+    fn is_vault_marker_tag(key: &str, value: &str) -> bool {
+        key == TAG_TYPE && value == TAG_VALUE_VAULT_MARKER
+    }
 
     #[test]
     fn round_trip_full_metadata() {

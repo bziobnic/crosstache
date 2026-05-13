@@ -15,6 +15,14 @@ use zeroize::Zeroizing;
 const TAG_MIGRATED_FROM: &str = "xv:migrated_from";
 const TAG_MIGRATED_AT: &str = "xv:migrated_at";
 
+/// Outcome of a single secret migration attempt.
+enum MigrateOutcome {
+    /// Secret was successfully copied to the target backend.
+    Migrated(String),
+    /// Secret was already migrated (same source version exists in target).
+    Skipped(String),
+}
+
 struct MigrationDiff {
     to_migrate: Vec<String>,
     conflicts: Vec<String>,
@@ -138,7 +146,7 @@ async fn migrate_one(
     name: &str,
     force_replace: bool,
     source_name_for_tag: &str,
-) -> std::result::Result<String, (String, String)> {
+) -> std::result::Result<MigrateOutcome, (String, String)> {
     // Fetch full props with value
     let props = source
         .secrets()
@@ -152,7 +160,7 @@ async fn migrate_one(
             if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
                 let expected = format!("{}:{}:{}", source_name_for_tag, vault, props.version);
                 if prev_from == &expected {
-                    return Err((name.to_string(), format!("__skip__{}", name)));
+                    return Ok(MigrateOutcome::Skipped(name.to_string()));
                 }
             }
         }
@@ -164,7 +172,7 @@ async fn migrate_one(
     let mut attempt = 0u32;
     loop {
         match target.secrets().set_secret(vault, request.clone()).await {
-            Ok(_) => return Ok(name.to_string()),
+            Ok(_) => return Ok(MigrateOutcome::Migrated(name.to_string())),
             Err(BackendError::RateLimited { retry_after_secs }) if attempt < 5 => {
                 let wait = retry_after_secs
                     .map(std::time::Duration::from_secs)
@@ -178,7 +186,7 @@ async fn migrate_one(
 }
 
 /// Create a backend instance for the given kind.
-fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>> {
+async fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>> {
     match kind {
         BackendKind::Azure => {
             let auth_provider =
@@ -205,11 +213,12 @@ fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>
                     "[aws] config block missing — set backend = \"aws\" or pass --aws-profile",
                 )
             })?;
-            let backend = tokio::runtime::Handle::current()
-                .block_on(crate::backend::aws::AwsBackend::new(aws_cfg, None, None))
-                .map_err(|e| {
-                    CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}"))
-                })?;
+            let backend =
+                crate::backend::aws::AwsBackend::new(aws_cfg, None, None)
+                    .await
+                    .map_err(|e| {
+                        CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}"))
+                    })?;
             Ok(Arc::new(backend))
         }
         #[cfg(not(feature = "aws"))]
@@ -276,8 +285,8 @@ pub(crate) async fn execute_migrate(
     }
 
     // 2. Create both backends
-    let source = create_backend(from_kind, &config)?;
-    let target = create_backend(to_kind, &config)?;
+    let source = create_backend(from_kind, &config).await?;
+    let target = create_backend(to_kind, &config).await?;
 
     // 3. Resolve vault name
     let vault_name = resolve_vault_name(&vault, &config)?;
@@ -396,11 +405,11 @@ pub(crate) async fn execute_migrate(
 
     for r in results {
         match r {
-            Ok(name) => {
+            Ok(MigrateOutcome::Migrated(name)) => {
                 println!("  [ok] {}", name);
                 migrated += 1;
             }
-            Err((name, msg)) if msg.starts_with("__skip__") => {
+            Ok(MigrateOutcome::Skipped(name)) => {
                 println!("  [skip] {} — already migrated (same source version)", name);
                 skipped += 1;
             }
