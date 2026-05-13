@@ -32,11 +32,22 @@ fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>
                 })?;
             Ok(Arc::new(backend))
         }
+        #[cfg(feature = "aws")]
         BackendKind::Aws => {
-            Err(CrosstacheError::Unknown(
-                "AWS Secrets Manager backend not yet implemented".to_string(),
-            ))
+            let aws_cfg = config.aws.as_ref().ok_or_else(|| {
+                CrosstacheError::config(
+                    "[aws] config block missing — set backend = \"aws\" or pass --aws-profile",
+                )
+            })?;
+            let backend = tokio::runtime::Handle::current()
+                .block_on(crate::backend::aws::AwsBackend::new(aws_cfg, None, None))
+                .map_err(|e| CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}")))?;
+            Ok(Arc::new(backend))
         }
+        #[cfg(not(feature = "aws"))]
+        BackendKind::Aws => Err(CrosstacheError::Unknown(
+            "AWS backend not compiled in: rebuild with --features aws".into(),
+        )),
     }
 }
 
