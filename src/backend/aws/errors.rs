@@ -5,23 +5,20 @@
 //! readable and the mapping is exhaustive over the variants we observe.
 
 use crate::backend::error::BackendError;
-use aws_sdk_secretsmanager::operation::create_secret::{CreateSecretError, CreateSecretOutput};
-use aws_sdk_secretsmanager::operation::delete_secret::{DeleteSecretError, DeleteSecretOutput};
-use aws_sdk_secretsmanager::operation::describe_secret::{DescribeSecretError, DescribeSecretOutput};
-use aws_sdk_secretsmanager::operation::get_secret_value::{GetSecretValueError, GetSecretValueOutput};
-use aws_sdk_secretsmanager::operation::list_secret_version_ids::{
-    ListSecretVersionIdsError, ListSecretVersionIdsOutput,
-};
-use aws_sdk_secretsmanager::operation::list_secrets::{ListSecretsError, ListSecretsOutput};
-use aws_sdk_secretsmanager::operation::put_secret_value::{PutSecretValueError, PutSecretValueOutput};
-use aws_sdk_secretsmanager::operation::restore_secret::{RestoreSecretError, RestoreSecretOutput};
-use aws_sdk_secretsmanager::operation::tag_resource::{TagResourceError, TagResourceOutput};
-use aws_sdk_secretsmanager::operation::untag_resource::{UntagResourceError, UntagResourceOutput};
-use aws_sdk_secretsmanager::operation::update_secret::{UpdateSecretError, UpdateSecretOutput};
-use aws_sdk_secretsmanager::operation::update_secret_version_stage::{
-    UpdateSecretVersionStageError, UpdateSecretVersionStageOutput,
-};
+use aws_sdk_secretsmanager::operation::create_secret::CreateSecretError;
+use aws_sdk_secretsmanager::operation::delete_secret::DeleteSecretError;
+use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
+use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueError;
+use aws_sdk_secretsmanager::operation::list_secret_version_ids::ListSecretVersionIdsError;
+use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsError;
+use aws_sdk_secretsmanager::operation::put_secret_value::PutSecretValueError;
+use aws_sdk_secretsmanager::operation::restore_secret::RestoreSecretError;
+use aws_sdk_secretsmanager::operation::tag_resource::TagResourceError;
+use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceError;
+use aws_sdk_secretsmanager::operation::update_secret::UpdateSecretError;
+use aws_sdk_secretsmanager::operation::update_secret_version_stage::UpdateSecretVersionStageError;
 use aws_smithy_runtime_api::client::result::SdkError;
+use aws_smithy_runtime_api::http::Response;
 
 fn generic<E: std::fmt::Display>(op: &str, e: E) -> BackendError {
     BackendError::Internal(format!("aws {op}: {e}"))
@@ -39,7 +36,7 @@ fn handle_sdk<E: std::fmt::Display + std::fmt::Debug, R: std::fmt::Debug>(op: &s
     }
 }
 
-pub fn from_create(e: SdkError<CreateSecretError, CreateSecretOutput>) -> BackendError {
+pub fn from_create(e: SdkError<CreateSecretError, Response>) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         match svc.err() {
             CreateSecretError::ResourceExistsException(inner) => {
@@ -62,7 +59,7 @@ pub fn from_create(e: SdkError<CreateSecretError, CreateSecretOutput>) -> Backen
     handle_sdk("CreateSecret", e)
 }
 
-pub fn from_get_value(name: &str, e: SdkError<GetSecretValueError, GetSecretValueOutput>) -> BackendError {
+pub fn from_get_value(name: &str, e: SdkError<GetSecretValueError, Response>) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         match svc.err() {
             GetSecretValueError::ResourceNotFoundException(_) => {
@@ -83,7 +80,7 @@ pub fn from_get_value(name: &str, e: SdkError<GetSecretValueError, GetSecretValu
     handle_sdk("GetSecretValue", e)
 }
 
-pub fn from_describe(name: &str, e: SdkError<DescribeSecretError, DescribeSecretOutput>) -> BackendError {
+pub fn from_describe(name: &str, e: SdkError<DescribeSecretError, Response>) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         if let DescribeSecretError::ResourceNotFoundException(_) = svc.err() {
             return BackendError::NotFound {
@@ -95,11 +92,11 @@ pub fn from_describe(name: &str, e: SdkError<DescribeSecretError, DescribeSecret
     handle_sdk("DescribeSecret", e)
 }
 
-pub fn from_list(e: SdkError<ListSecretsError, ListSecretsOutput>) -> BackendError {
+pub fn from_list(e: SdkError<ListSecretsError, Response>) -> BackendError {
     handle_sdk("ListSecrets", e)
 }
 
-pub fn from_delete(name: &str, e: SdkError<DeleteSecretError, DeleteSecretOutput>) -> BackendError {
+pub fn from_delete(name: &str, e: SdkError<DeleteSecretError, Response>) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         if let DeleteSecretError::ResourceNotFoundException(_) = svc.err() {
             return BackendError::NotFound {
@@ -111,7 +108,7 @@ pub fn from_delete(name: &str, e: SdkError<DeleteSecretError, DeleteSecretOutput
     handle_sdk("DeleteSecret", e)
 }
 
-pub fn from_put_value(name: &str, e: SdkError<PutSecretValueError, PutSecretValueOutput>) -> BackendError {
+pub fn from_put_value(name: &str, e: SdkError<PutSecretValueError, Response>) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         if let PutSecretValueError::ResourceNotFoundException(_) = svc.err() {
             return BackendError::NotFound {
@@ -123,7 +120,7 @@ pub fn from_put_value(name: &str, e: SdkError<PutSecretValueError, PutSecretValu
     handle_sdk("PutSecretValue", e)
 }
 
-pub fn from_update(name: &str, e: SdkError<UpdateSecretError, UpdateSecretOutput>) -> BackendError {
+pub fn from_update(name: &str, e: SdkError<UpdateSecretError, Response>) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         if let UpdateSecretError::ResourceNotFoundException(_) = svc.err() {
             return BackendError::NotFound {
@@ -135,7 +132,7 @@ pub fn from_update(name: &str, e: SdkError<UpdateSecretError, UpdateSecretOutput
     handle_sdk("UpdateSecret", e)
 }
 
-pub fn from_restore(name: &str, e: SdkError<RestoreSecretError, RestoreSecretOutput>) -> BackendError {
+pub fn from_restore(name: &str, e: SdkError<RestoreSecretError, Response>) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         if let RestoreSecretError::ResourceNotFoundException(_) = svc.err() {
             return BackendError::NotFound {
@@ -149,7 +146,7 @@ pub fn from_restore(name: &str, e: SdkError<RestoreSecretError, RestoreSecretOut
 
 pub fn from_list_versions(
     name: &str,
-    e: SdkError<ListSecretVersionIdsError, ListSecretVersionIdsOutput>,
+    e: SdkError<ListSecretVersionIdsError, Response>,
 ) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         if let ListSecretVersionIdsError::ResourceNotFoundException(_) = svc.err() {
@@ -164,7 +161,7 @@ pub fn from_list_versions(
 
 pub fn from_update_stage(
     name: &str,
-    e: SdkError<UpdateSecretVersionStageError, UpdateSecretVersionStageOutput>,
+    e: SdkError<UpdateSecretVersionStageError, Response>,
 ) -> BackendError {
     if let SdkError::ServiceError(svc) = &e {
         if let UpdateSecretVersionStageError::ResourceNotFoundException(_) = svc.err() {
@@ -177,10 +174,10 @@ pub fn from_update_stage(
     handle_sdk("UpdateSecretVersionStage", e)
 }
 
-pub fn from_tag(e: SdkError<TagResourceError, TagResourceOutput>) -> BackendError {
+pub fn from_tag(e: SdkError<TagResourceError, Response>) -> BackendError {
     handle_sdk("TagResource", e)
 }
 
-pub fn from_untag(e: SdkError<UntagResourceError, UntagResourceOutput>) -> BackendError {
+pub fn from_untag(e: SdkError<UntagResourceError, Response>) -> BackendError {
     handle_sdk("UntagResource", e)
 }

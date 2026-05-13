@@ -33,3 +33,44 @@ async fn smoke_health_check_with_empty_list() {
     let backend = aws_secret_backend(client);
     backend.health_check().await.expect("health check should pass");
 }
+
+#[tokio::test]
+async fn set_secret_create_writes_to_aws() {
+    use aws_sdk_secretsmanager::operation::create_secret::CreateSecretOutput;
+    use crosstache::backend::SecretBackend;
+    use crosstache::secret::manager::SecretRequest;
+    use zeroize::Zeroizing;
+
+    let rule = mock!(Client::create_secret)
+        .match_requests(|req| req.name() == Some("myproj-kv/db-password"))
+        .then_output(|| {
+            CreateSecretOutput::builder()
+                .name("myproj-kv/db-password")
+                .version_id("v1")
+                .build()
+        });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    let request = SecretRequest {
+        name: "db-password".to_string(),
+        value: Zeroizing::new("super-secret".to_string()),
+        content_type: None,
+        enabled: None,
+        expires_on: None,
+        not_before: None,
+        tags: None,
+        groups: None,
+        note: None,
+        folder: None,
+    };
+
+    let result = backend
+        .set_secret("myproj-kv", request)
+        .await
+        .expect("set_secret should succeed");
+
+    assert_eq!(result.name, "db-password");
+    assert_eq!(result.version, "v1");
+}
