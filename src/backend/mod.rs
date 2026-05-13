@@ -88,8 +88,27 @@ pub enum NameCharset {
     AlphanumericHyphen,
     /// Any printable character (the backend encodes as needed).
     Unrestricted,
+    /// AWS Secrets Manager: `[a-zA-Z0-9/_+=.@-]`.
+    AwsRelaxed,
     /// Custom validation function.
     Custom(fn(&str) -> bool),
+}
+
+impl NameCharset {
+    /// Returns true if `name` is valid under this charset.
+    pub fn is_valid(&self, name: &str) -> bool {
+        match self {
+            Self::AlphanumericHyphen => name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            Self::Unrestricted => true,
+            Self::AwsRelaxed => name.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '/' | '_' | '+' | '=' | '.' | '@' | '-')
+            }),
+            Self::Custom(f) => f(name),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,5 +224,22 @@ mod tests {
     #[test]
     fn backend_kind_aws_displays_as_aws() {
         assert_eq!(format!("{}", BackendKind::Aws), "aws");
+    }
+
+    #[test]
+    fn aws_relaxed_charset_accepts_aws_chars() {
+        let cs = NameCharset::AwsRelaxed;
+        assert!(cs.is_valid("myproj/db-password"));
+        assert!(cs.is_valid("api_key+v2"));
+        assert!(cs.is_valid("alice@example.com"));
+        assert!(cs.is_valid("v1.2.3"));
+    }
+
+    #[test]
+    fn aws_relaxed_charset_rejects_invalid_chars() {
+        let cs = NameCharset::AwsRelaxed;
+        assert!(!cs.is_valid("has space"));
+        assert!(!cs.is_valid("has*star"));
+        assert!(!cs.is_valid("has(paren)"));
     }
 }
