@@ -128,6 +128,14 @@ pub struct Cli {
     )]
     pub credential_type: Option<String>,
 
+    /// Override the AWS profile for this invocation (only honored when active backend is aws)
+    #[arg(long, global = true)]
+    pub aws_profile: Option<String>,
+
+    /// Override the AWS region for this invocation (only honored when active backend is aws)
+    #[arg(long, global = true)]
+    pub region: Option<String>,
+
     /// Show global options in help output
     #[arg(long)]
     pub show_options: bool,
@@ -1134,6 +1142,30 @@ impl Cli {
 
             config.azure_credential_priority =
                 AzureCredentialType::from_str(&cred_type).map_err(CrosstacheError::config)?;
+        }
+
+        // Apply --aws-profile CLI flag into config.aws
+        if let Some(ref p) = self.aws_profile {
+            if let Some(ref mut aws) = config.aws {
+                aws.profile = Some(p.clone());
+            } else {
+                config.aws = Some(crate::config::settings::AwsConfig {
+                    profile: Some(p.clone()),
+                    ..Default::default()
+                });
+            }
+        }
+
+        // Apply --region CLI flag into config.aws
+        if let Some(ref r) = self.region {
+            if let Some(ref mut aws) = config.aws {
+                aws.region = Some(r.clone());
+            } else {
+                config.aws = Some(crate::config::settings::AwsConfig {
+                    region: Some(r.clone()),
+                    ..Default::default()
+                });
+            }
         }
 
         match self.command {
