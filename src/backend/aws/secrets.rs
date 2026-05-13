@@ -150,6 +150,73 @@ impl AwsSecretBackend {
         })
     }
 
+    /// List all versions of a secret from the AWS API.
+    ///
+    /// Maps version info to `SecretProperties` entries (without values).
+    async fn list_versions_impl(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<Vec<SecretProperties>, BackendError> {
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+
+        let out = self
+            .client
+            .list_secret_version_ids()
+            .secret_id(&aws_full_name)
+            .include_deprecated(true)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_list_versions(name, e))?;
+
+        let mut versions: Vec<SecretProperties> = Vec::new();
+        for v in out.versions() {
+            let version_id = v.version_id().unwrap_or("").to_string();
+            let created_timestamp = v
+                .created_date()
+                .map(|d| d.secs())
+                .unwrap_or(0);
+            let created_on = if created_timestamp > 0 {
+                chrono::DateTime::from_timestamp(created_timestamp, 0)
+                    .map(|dt| dt.to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            // Collect version stages as a tag.
+            let stages_str = v
+                .version_stages()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut tags: HashMap<String, String> = HashMap::new();
+            if !stages_str.is_empty() {
+                tags.insert("aws:stages".to_string(), stages_str);
+            }
+
+            versions.push(SecretProperties {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                value: None,
+                version: version_id,
+                version_number: None,
+                created_timestamp,
+                created_on,
+                updated_on: String::new(),
+                enabled: true,
+                expires_on: None,
+                not_before: None,
+                tags,
+                content_type: String::new(),
+                recovery_level: None,
+            });
+        }
+        Ok(versions)
+    }
+
     /// Build a `SecretProperties` from a `DescribeSecretOutput`.
     ///
     /// The `fallback_name` is the user-facing name used when the `xv:original_name`
@@ -400,12 +467,69 @@ impl SecretBackend for AwsSecretBackend {
 
     async fn get_secret_version(
         &self,
-        _vault: &str,
-        _name: &str,
-        _version: &str,
-        _include_value: bool,
+        vault: &str,
+        name: &str,
+        version: &str,
+        include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
-        Err(BackendError::Unsupported("get_secret_version not yet implemented".into()))
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+
+        // If value not requested, find it in the version list.
+        if !include_value {
+            let mut versions = self.list_versions(vault, name).await?;
+            return versions
+                .drain(..)
+                .find(|p| p.version == version)
+                .ok_or_else(|| BackendError::NotFound {
+                    name: format!("{name} (version {version})"),
+                    suggestion: None,
+                });
+        }
+
+        // Get the secret value for this specific version.
+        let out = self
+            .client
+            .get_secret_value()
+            .secret_id(&aws_full_name)
+            .version_id(version)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_get_value(name, e))?;
+
+        // Build SecretProperties manually with the version-specific data.
+        let mut tags: HashMap<String, String> = HashMap::new();
+        tags.insert("aws:stages".to_string(), "[current]".to_string());
+
+        let version_id = out.version_id().unwrap_or("").to_string();
+        let secret_value = out
+            .secret_string()
+            .map(|s| zeroize::Zeroizing::new(s.to_string()));
+
+        Ok(SecretProperties {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            value: secret_value,
+            version: version_id,
+            version_number: None,
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags,
+            content_type: String::new(),
+            recovery_level: None,
+        })
+    }
+
+    async fn list_versions(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<Vec<SecretProperties>, BackendError> {
+        self.list_versions_impl(vault, name).await
     }
 
     async fn list_secrets(

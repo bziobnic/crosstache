@@ -353,3 +353,38 @@ async fn set_secret_update_path_when_already_exists() {
     assert_eq!(result.version, "v2");
     assert_eq!(result.name, "db-password");
 }
+
+#[tokio::test]
+async fn list_versions_returns_history() {
+    use aws_sdk_secretsmanager::operation::list_secret_version_ids::ListSecretVersionIdsOutput;
+    use aws_sdk_secretsmanager::types::SecretVersionsListEntry;
+    use crosstache::backend::SecretBackend;
+
+    let rule = mock!(Client::list_secret_version_ids).then_output(|| {
+        ListSecretVersionIdsOutput::builder()
+            .versions(
+                SecretVersionsListEntry::builder()
+                    .version_id("v1")
+                    .build()
+            )
+            .versions(
+                SecretVersionsListEntry::builder()
+                    .version_id("v2")
+                    .build()
+            )
+            .build()
+    });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    let versions = backend
+        .list_versions("myproj-kv", "db-password")
+        .await
+        .unwrap();
+
+    assert_eq!(versions.len(), 2);
+    let ids: Vec<String> = versions.iter().map(|v| v.version.clone()).collect();
+    assert!(ids.contains(&"v1".to_string()));
+    assert!(ids.contains(&"v2".to_string()));
+}
