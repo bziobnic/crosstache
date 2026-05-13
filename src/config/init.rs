@@ -32,6 +32,11 @@ pub struct InitConfig {
     pub blob_container_name: String,
     #[allow(dead_code)]
     pub create_storage_account: bool,
+    /// Which backend was chosen: "azure", "local", or "aws"
+    pub backend_choice: String,
+    pub aws_region: Option<String>,
+    pub aws_profile: Option<String>,
+    pub aws_default_vault: Option<String>,
 }
 
 impl ConfigInitializer {
@@ -52,6 +57,7 @@ impl ConfigInitializer {
         let backend_options = vec![
             "Azure Key Vault (cloud-based, requires Azure subscription)".to_string(),
             "Local (age-encrypted files, offline, no cloud account needed)".to_string(),
+            "AWS Secrets Manager (cloud-based, requires AWS account)".to_string(),
         ];
         let backend_index = self.prompt.select(
             "Which secrets backend would you like to use?",
@@ -61,6 +67,10 @@ impl ConfigInitializer {
 
         if backend_index == 1 {
             return self.run_local_setup().await;
+        }
+
+        if backend_index == 2 {
+            return self.run_aws_setup().await;
         }
 
         // Azure flow (unchanged)
@@ -130,6 +140,10 @@ impl ConfigInitializer {
             storage_account_name: storage_account,
             blob_container_name: container_name,
             create_storage_account: blob_storage_configured,
+            backend_choice: "azure".to_string(),
+            aws_region: None,
+            aws_profile: None,
+            aws_default_vault: None,
         };
 
         // Create and save the configuration
@@ -236,6 +250,119 @@ impl ConfigInitializer {
         }
 
         Ok(config)
+    }
+
+    /// Run the simplified AWS backend setup.
+    async fn run_aws_setup(&self) -> Result<Config> {
+        let mut init_config = InitConfig {
+            subscription_id: String::new(),
+            tenant_id: String::new(),
+            default_resource_group: String::new(),
+            default_location: String::new(),
+            default_vault: None,
+            create_test_vault: false,
+            storage_account_name: String::new(),
+            blob_container_name: String::new(),
+            create_storage_account: false,
+            backend_choice: "aws".to_string(),
+            aws_region: None,
+            aws_profile: None,
+            aws_default_vault: None,
+        };
+
+        self.init_aws_backend(&mut init_config).await?;
+
+        let aws_default_vault = init_config
+            .aws_default_vault
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+
+        let config = Config {
+            backend: Some("aws".to_string()),
+            aws: Some(crate::config::settings::AwsConfig {
+                region: init_config.aws_region.clone(),
+                profile: init_config.aws_profile.clone(),
+                default_vault: init_config.aws_default_vault.clone(),
+                endpoint_url: None,
+            }),
+            local: None,
+            named_backends: std::collections::HashMap::new(),
+            subscription_id: String::new(),
+            tenant_id: String::new(),
+            default_vault: aws_default_vault.clone(),
+            default_resource_group: String::new(),
+            default_location: String::new(),
+            output_json: false,
+            runtime_output_format: crate::utils::format::OutputFormat::Auto,
+            template: None,
+            no_color: false,
+            debug: false,
+            cache_enabled: true,
+            cache_ttl_secs: 900,
+            blob_config: None,
+            azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
+            clipboard_timeout: 30,
+            gen_default_charset: None,
+            env_flag: None,
+        };
+
+        self.save_config(&config).await?;
+
+        output::success("AWS backend setup completed!");
+        println!();
+        println!(
+            "  Region:        {}",
+            init_config.aws_region.as_deref().unwrap_or("us-east-1")
+        );
+        println!(
+            "  Profile:       {}",
+            init_config.aws_profile.as_deref().unwrap_or("default")
+        );
+        println!("  Default vault: {aws_default_vault}");
+
+        Ok(config)
+    }
+
+    /// Collect AWS-specific settings from the user.
+    async fn init_aws_backend(&self, init_config: &mut InitConfig) -> Result<()> {
+        use dialoguer::Input;
+
+        println!();
+        output::step("Step 1/3: AWS Region");
+        let region: String = Input::new()
+            .with_prompt("AWS region")
+            .default(
+                std::env::var("AWS_REGION")
+                    .unwrap_or_else(|_| "us-east-1".to_string()),
+            )
+            .interact_text()
+            .map_err(|e| CrosstacheError::config(format!("Region prompt failed: {e}")))?;
+
+        println!();
+        output::step("Step 2/3: AWS Profile");
+        let profile: String = Input::new()
+            .with_prompt("AWS profile")
+            .default(
+                std::env::var("AWS_PROFILE")
+                    .unwrap_or_else(|_| "default".to_string()),
+            )
+            .interact_text()
+            .map_err(|e| CrosstacheError::config(format!("Profile prompt failed: {e}")))?;
+
+        println!();
+        output::step("Step 3/3: Default Vault");
+        let default_vault: String = Input::new()
+            .with_prompt("Default vault (prefix)")
+            .default("default".to_string())
+            .interact_text()
+            .map_err(|e| CrosstacheError::config(format!("Vault prompt failed: {e}")))?;
+
+        init_config.aws_region = Some(region);
+        init_config.aws_profile = Some(profile);
+        init_config.aws_default_vault = Some(default_vault);
+        init_config.backend_choice = "aws".to_string();
+
+        Ok(())
     }
 
     /// Detect Azure environment and handle issues
@@ -905,8 +1032,20 @@ impl ConfigInitializer {
             None
         };
 
+        let (backend_field, aws_config) = if init_config.backend_choice == "aws" {
+            let aws = crate::config::settings::AwsConfig {
+                region: init_config.aws_region.clone(),
+                profile: init_config.aws_profile.clone(),
+                default_vault: init_config.aws_default_vault.clone(),
+                endpoint_url: None,
+            };
+            (Some("aws".to_string()), Some(aws))
+        } else {
+            (None, None)
+        };
+
         Ok(Config {
-            backend: None,
+            backend: backend_field,
             subscription_id: init_config.subscription_id,
             tenant_id: init_config.tenant_id,
             default_vault: init_config.default_vault.unwrap_or_default(),
@@ -922,7 +1061,7 @@ impl ConfigInitializer {
             blob_config,
             azure_credential_priority: crate::config::settings::AzureCredentialType::Default,
             local: None,
-            aws: None,
+            aws: aws_config,
             named_backends: std::collections::HashMap::new(),
             clipboard_timeout: 30,
             gen_default_charset: None,
@@ -1029,6 +1168,10 @@ mod tests {
             storage_account_name: "teststorage".to_string(),
             blob_container_name: "test-container".to_string(),
             create_storage_account: true,
+            backend_choice: "azure".to_string(),
+            aws_region: None,
+            aws_profile: None,
+            aws_default_vault: None,
         };
 
         assert_eq!(init_config.subscription_id, "test-sub");
