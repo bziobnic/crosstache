@@ -616,3 +616,44 @@ async fn list_vaults_paginates() {
     assert!(names.contains(&"vault1".to_string()));
     assert!(names.contains(&"vault2".to_string()));
 }
+
+#[tokio::test]
+async fn delete_vault_refuses_when_secrets_exist() {
+    use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
+    use aws_sdk_secretsmanager::types::SecretListEntry;
+    use crosstache::backend::VaultBackend;
+    use crosstache::backend::error::BackendError;
+
+    let rule = mock!(Client::list_secrets).then_output(|| {
+        ListSecretsOutput::builder()
+            .secret_list(SecretListEntry::builder().name("myproj-kv/.xv-vault").build())
+            .secret_list(SecretListEntry::builder().name("myproj-kv/db-password").build())
+            .build()
+    });
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_vault_backend(client);
+
+    let err = backend.delete_vault("myproj-kv").await.unwrap_err();
+    assert!(matches!(err, BackendError::Conflict(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn delete_vault_succeeds_when_only_marker_exists() {
+    use aws_sdk_secretsmanager::operation::delete_secret::DeleteSecretOutput;
+    use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
+    use aws_sdk_secretsmanager::types::SecretListEntry;
+    use crosstache::backend::VaultBackend;
+
+    let list = mock!(Client::list_secrets).then_output(|| {
+        ListSecretsOutput::builder()
+            .secret_list(SecretListEntry::builder().name("myproj-kv/.xv-vault").build())
+            .build()
+    });
+    let delete = mock!(Client::delete_secret)
+        .match_requests(|req| req.secret_id() == Some("myproj-kv/.xv-vault"))
+        .then_output(|| DeleteSecretOutput::builder().build());
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&list, &delete]);
+    let backend = aws_vault_backend(client);
+    backend.delete_vault("myproj-kv").await.unwrap();
+}

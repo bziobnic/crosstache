@@ -185,7 +185,63 @@ impl VaultBackend for AwsVaultBackend {
         Ok(summaries)
     }
 
-    async fn delete_vault(&self, _name: &str) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported("delete_vault not yet implemented".into()))
+    async fn delete_vault(&self, name: &str) -> Result<(), BackendError> {
+        self.delete_vault_internal(name, false).await
+    }
+}
+
+impl AwsVaultBackend {
+    pub async fn delete_vault_internal(
+        &self,
+        name: &str,
+        force: bool,
+    ) -> Result<(), BackendError> {
+        use crate::backend::aws::encoding::{is_marker, marker_name, strip_prefix};
+        use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
+
+        let prefix = format!("{name}/");
+        let out = self.client
+            .list_secrets()
+            .max_results(100)
+            .filters(Filter::builder().key(FilterNameStringType::Name).values(prefix.clone()).build())
+            .send()
+            .await
+            .map_err(super::errors::from_list)?;
+
+        let non_marker: Vec<String> = out.secret_list()
+            .iter()
+            .filter_map(|e| e.name().map(|s| s.to_string()))
+            .filter(|n| !is_marker(n) && strip_prefix(name, n).is_some())
+            .collect();
+
+        if !non_marker.is_empty() && !force {
+            return Err(BackendError::Conflict(format!(
+                "vault '{name}' contains {} secret(s); pass --force to delete them all",
+                non_marker.len()
+            )));
+        }
+
+        if force {
+            for full_name in &non_marker {
+                self.client
+                    .delete_secret()
+                    .secret_id(full_name)
+                    .recovery_window_in_days(30)
+                    .send()
+                    .await
+                    .map_err(|e| super::errors::from_delete(full_name, e))?;
+            }
+        }
+
+        let marker = marker_name(name);
+        self.client
+            .delete_secret()
+            .secret_id(&marker)
+            .force_delete_without_recovery(true)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_delete(&marker, e))?;
+
+        Ok(())
     }
 }
