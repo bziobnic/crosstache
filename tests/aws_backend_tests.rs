@@ -248,3 +248,45 @@ async fn purge_secret_forces_immediate_delete() {
     let backend = aws_secret_backend(client);
     backend.purge_secret("myproj-kv", "db-password").await.unwrap();
 }
+
+#[tokio::test]
+async fn secret_exists_true_when_describe_succeeds() {
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use crosstache::backend::SecretBackend;
+
+    let rule = mock!(Client::describe_secret)
+        .then_output(|| DescribeSecretOutput::builder().name("myproj-kv/db").build());
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    assert!(backend
+        .secret_exists("myproj-kv", "db")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn secret_exists_false_on_not_found() {
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
+    use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
+    use crosstache::backend::SecretBackend;
+
+    let rule = mock!(Client::describe_secret).then_error(|| {
+        DescribeSecretError::ResourceNotFoundException(
+            ResourceNotFoundException::builder()
+                .message("not found")
+                .build(),
+        )
+    });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    assert!(
+        !backend
+            .secret_exists("myproj-kv", "missing")
+            .await
+            .unwrap()
+    );
+}

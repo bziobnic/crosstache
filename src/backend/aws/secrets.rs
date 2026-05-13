@@ -418,4 +418,22 @@ impl SecretBackend for AwsSecretBackend {
             .map_err(|e| super::errors::from_delete(name, e))?;
         Ok(())
     }
+
+    async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+        match self
+            .client
+            .describe_secret()
+            .secret_id(&aws_full_name)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(e) => match super::errors::from_describe(name, e) {
+                BackendError::NotFound { .. } => Ok(false),
+                other => Err(other),
+            },
+        }
+    }
 }
