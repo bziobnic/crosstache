@@ -184,3 +184,35 @@ async fn get_secret_not_found_maps_to_backend_not_found() {
         "expected NotFound error, got: {result:?}"
     );
 }
+
+#[tokio::test]
+async fn list_secrets_paginates_and_filters_marker() {
+    use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
+    use aws_sdk_secretsmanager::types::SecretListEntry;
+    use crosstache::backend::SecretBackend;
+
+    // Page 1: marker + one real secret, with next_token
+    let page1 = mock!(Client::list_secrets).then_output(|| {
+        ListSecretsOutput::builder()
+            .secret_list(SecretListEntry::builder().name("myproj-kv/.xv-vault").build())
+            .secret_list(SecretListEntry::builder().name("myproj-kv/db-password").build())
+            .next_token("tok1")
+            .build()
+    });
+    // Page 2: one more secret, no next_token
+    let page2 = mock!(Client::list_secrets).then_output(|| {
+        ListSecretsOutput::builder()
+            .secret_list(SecretListEntry::builder().name("myproj-kv/api-key").build())
+            .build()
+    });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&page1, &page2]);
+    let backend = aws_secret_backend(client);
+
+    let secrets = backend.list_secrets("myproj-kv", None).await.unwrap();
+    let names: Vec<String> = secrets.iter().map(|s| s.name.clone()).collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&"db-password".to_string()));
+    assert!(names.contains(&"api-key".to_string()));
+    assert!(!names.contains(&".xv-vault".to_string()), "marker should be excluded");
+}
