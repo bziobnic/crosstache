@@ -1,10 +1,10 @@
 //! `AwsSecretBackend` impl `SecretBackend`.
 
-use crate::backend::SecretBackend;
 use crate::backend::error::BackendError;
+use crate::backend::SecretBackend;
 use crate::secret::manager::{SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest};
-use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -173,10 +173,7 @@ impl AwsSecretBackend {
         let mut versions: Vec<SecretProperties> = Vec::new();
         for v in out.versions() {
             let version_id = v.version_id().unwrap_or("").to_string();
-            let created_timestamp = v
-                .created_date()
-                .map(|d| d.secs())
-                .unwrap_or(0);
+            let created_timestamp = v.created_date().map(|d| d.secs()).unwrap_or(0);
             let created_on = if created_timestamp > 0 {
                 chrono::DateTime::from_timestamp(created_timestamp, 0)
                     .map(|dt| dt.to_string())
@@ -279,13 +276,13 @@ impl AwsSecretBackend {
             user_tags.insert("groups".to_string(), groups.join(","));
         }
 
-        let name = original_name.clone().unwrap_or_else(|| fallback_name.to_string());
+        let name = original_name
+            .clone()
+            .unwrap_or_else(|| fallback_name.to_string());
 
         // Extract timestamps from the describe output.
         let created_date = describe.created_date();
-        let created_timestamp = created_date
-            .map(|d| d.secs())
-            .unwrap_or(0);
+        let created_timestamp = created_date.map(|d| d.secs()).unwrap_or(0);
         let created_on = if created_timestamp > 0 {
             chrono::DateTime::from_timestamp(created_timestamp, 0)
                 .map(|dt| dt.to_string())
@@ -451,8 +448,16 @@ impl SecretBackend for AwsSecretBackend {
         }
 
         // include_value: run describe + get_secret_value concurrently.
-        let describe_fut = self.client.describe_secret().secret_id(&aws_full_name).send();
-        let value_fut = self.client.get_secret_value().secret_id(&aws_full_name).send();
+        let describe_fut = self
+            .client
+            .describe_secret()
+            .secret_id(&aws_full_name)
+            .send();
+        let value_fut = self
+            .client
+            .get_secret_value()
+            .secret_id(&aws_full_name)
+            .send();
 
         let (describe, value) = tokio::join!(describe_fut, value_fut);
         let describe = describe.map_err(|e| super::errors::from_describe(name, e))?;
@@ -546,16 +551,12 @@ impl SecretBackend for AwsSecretBackend {
         let mut summaries = Vec::new();
 
         loop {
-            let mut req = self
-                .client
-                .list_secrets()
-                .max_results(100)
-                .filters(
-                    Filter::builder()
-                        .key(FilterNameStringType::Name)
-                        .values(prefix.clone())
-                        .build(),
-                );
+            let mut req = self.client.list_secrets().max_results(100).filters(
+                Filter::builder()
+                    .key(FilterNameStringType::Name)
+                    .values(prefix.clone())
+                    .build(),
+            );
             if let Some(ref t) = next_token {
                 req = req.next_token(t.clone());
             }
@@ -581,10 +582,8 @@ impl SecretBackend for AwsSecretBackend {
                         .find(|t| t.key() == Some(TAG_GROUPS))
                         .and_then(|t| t.value())
                         .unwrap_or("");
-                    let groups: Vec<&str> = groups_str
-                        .split(',')
-                        .filter(|s| !s.is_empty())
-                        .collect();
+                    let groups: Vec<&str> =
+                        groups_str.split(',').filter(|s| !s.is_empty()).collect();
                     if !groups.contains(&group_want) {
                         continue;
                     }
@@ -802,10 +801,7 @@ impl SecretBackend for AwsSecretBackend {
         self.get_secret(vault, name, false).await
     }
 
-    async fn list_deleted_secrets(
-        &self,
-        vault: &str,
-    ) -> Result<Vec<SecretSummary>, BackendError> {
+    async fn list_deleted_secrets(&self, vault: &str) -> Result<Vec<SecretSummary>, BackendError> {
         use crate::backend::aws::encoding::{is_marker, strip_prefix};
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 

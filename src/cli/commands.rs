@@ -1536,8 +1536,15 @@ impl Cli {
                 overwrite,
             } => {
                 crate::cli::migrate_ops::execute_migrate(
-                    from, to, vault, filter, dry_run,
-                    on_conflict, force_replace, concurrency, overwrite,
+                    from,
+                    to,
+                    vault,
+                    filter,
+                    dry_run,
+                    on_conflict,
+                    force_replace,
+                    concurrency,
+                    overwrite,
                     config,
                 )
                 .await

@@ -228,6 +228,9 @@ mod tests {
         let result = BackendRegistry::from_config(&config);
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("[aws]") || err_str.contains("aws"), "got: {err_str}");
+        assert!(
+            err_str.contains("[aws]") || err_str.contains("aws"),
+            "got: {err_str}"
+        );
     }
 }

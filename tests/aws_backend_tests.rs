@@ -26,12 +26,14 @@ pub fn aws_vault_backend(client: Client) -> AwsVaultBackend {
 async fn smoke_health_check_with_empty_list() {
     use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
 
-    let rule = mock!(Client::list_secrets)
-        .then_output(|| ListSecretsOutput::builder().build());
+    let rule = mock!(Client::list_secrets).then_output(|| ListSecretsOutput::builder().build());
 
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_secret_backend(client);
-    backend.health_check().await.expect("health check should pass");
+    backend
+        .health_check()
+        .await
+        .expect("health check should pass");
 }
 
 #[tokio::test]
@@ -105,7 +107,10 @@ async fn get_secret_no_value_returns_metadata_only() {
         .expect("get_secret should succeed");
 
     assert_eq!(result.name, "api-key");
-    assert!(result.value.is_none(), "value should be absent when include_value=false");
+    assert!(
+        result.value.is_none(),
+        "value should be absent when include_value=false"
+    );
 }
 
 #[tokio::test]
@@ -152,7 +157,9 @@ async fn get_secret_with_value_includes_value() {
         .expect("get_secret with value should succeed");
 
     assert_eq!(result.name, "db-password");
-    let value = result.value.expect("value should be present when include_value=true");
+    let value = result
+        .value
+        .expect("value should be present when include_value=true");
     assert_eq!(value.as_str(), "super-secret-value");
 }
 
@@ -160,17 +167,16 @@ async fn get_secret_with_value_includes_value() {
 async fn get_secret_not_found_maps_to_backend_not_found() {
     use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
     use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
-    use crosstache::backend::SecretBackend;
     use crosstache::backend::error::BackendError;
+    use crosstache::backend::SecretBackend;
 
-    let rule = mock!(Client::describe_secret)
-        .then_error(|| {
-            DescribeSecretError::ResourceNotFoundException(
-                ResourceNotFoundException::builder()
-                    .message("Secret not found")
-                    .build(),
-            )
-        });
+    let rule = mock!(Client::describe_secret).then_error(|| {
+        DescribeSecretError::ResourceNotFoundException(
+            ResourceNotFoundException::builder()
+                .message("Secret not found")
+                .build(),
+        )
+    });
 
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_secret_backend(client);
@@ -194,8 +200,16 @@ async fn list_secrets_paginates_and_filters_marker() {
     // Page 1: marker + one real secret, with next_token
     let page1 = mock!(Client::list_secrets).then_output(|| {
         ListSecretsOutput::builder()
-            .secret_list(SecretListEntry::builder().name("myproj-kv/.xv-vault").build())
-            .secret_list(SecretListEntry::builder().name("myproj-kv/db-password").build())
+            .secret_list(
+                SecretListEntry::builder()
+                    .name("myproj-kv/.xv-vault")
+                    .build(),
+            )
+            .secret_list(
+                SecretListEntry::builder()
+                    .name("myproj-kv/db-password")
+                    .build(),
+            )
             .next_token("tok1")
             .build()
     });
@@ -206,7 +220,11 @@ async fn list_secrets_paginates_and_filters_marker() {
             .build()
     });
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&page1, &page2]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&page1, &page2]
+    );
     let backend = aws_secret_backend(client);
 
     let secrets = backend.list_secrets("myproj-kv", None).await.unwrap();
@@ -214,7 +232,10 @@ async fn list_secrets_paginates_and_filters_marker() {
     assert_eq!(names.len(), 2);
     assert!(names.contains(&"db-password".to_string()));
     assert!(names.contains(&"api-key".to_string()));
-    assert!(!names.contains(&".xv-vault".to_string()), "marker should be excluded");
+    assert!(
+        !names.contains(&".xv-vault".to_string()),
+        "marker should be excluded"
+    );
 }
 
 #[tokio::test]
@@ -232,7 +253,10 @@ async fn delete_secret_uses_recovery_window() {
 
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_secret_backend(client);
-    backend.delete_secret("myproj-kv", "db-password").await.unwrap();
+    backend
+        .delete_secret("myproj-kv", "db-password")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -246,7 +270,10 @@ async fn purge_secret_forces_immediate_delete() {
 
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_secret_backend(client);
-    backend.purge_secret("myproj-kv", "db-password").await.unwrap();
+    backend
+        .purge_secret("myproj-kv", "db-password")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -260,10 +287,7 @@ async fn secret_exists_true_when_describe_succeeds() {
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_secret_backend(client);
 
-    assert!(backend
-        .secret_exists("myproj-kv", "db")
-        .await
-        .unwrap());
+    assert!(backend.secret_exists("myproj-kv", "db").await.unwrap());
 }
 
 #[tokio::test]
@@ -283,12 +307,7 @@ async fn secret_exists_false_on_not_found() {
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_secret_backend(client);
 
-    assert!(
-        !backend
-            .secret_exists("myproj-kv", "missing")
-            .await
-            .unwrap()
-    );
+    assert!(!backend.secret_exists("myproj-kv", "missing").await.unwrap());
 }
 
 #[tokio::test]
@@ -328,7 +347,13 @@ async fn set_secret_update_path_when_already_exists() {
     let client = mock_client!(
         aws_sdk_secretsmanager,
         RuleMode::Sequential,
-        &[&create_err, &put_value, &update_secret_mock, &describe, &tag]
+        &[
+            &create_err,
+            &put_value,
+            &update_secret_mock,
+            &describe,
+            &tag
+        ]
     );
     let backend = aws_secret_backend(client);
 
@@ -362,16 +387,8 @@ async fn list_versions_returns_history() {
 
     let rule = mock!(Client::list_secret_version_ids).then_output(|| {
         ListSecretVersionIdsOutput::builder()
-            .versions(
-                SecretVersionsListEntry::builder()
-                    .version_id("v1")
-                    .build()
-            )
-            .versions(
-                SecretVersionsListEntry::builder()
-                    .version_id("v2")
-                    .build()
-            )
+            .versions(SecretVersionsListEntry::builder().version_id("v1").build())
+            .versions(SecretVersionsListEntry::builder().version_id("v2").build())
             .build()
     });
 
@@ -391,9 +408,9 @@ async fn list_versions_returns_history() {
 
 #[tokio::test]
 async fn rollback_moves_awscurrent_to_target_version() {
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
     use aws_sdk_secretsmanager::operation::list_secret_version_ids::ListSecretVersionIdsOutput;
     use aws_sdk_secretsmanager::operation::update_secret_version_stage::UpdateSecretVersionStageOutput;
-    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
     use aws_sdk_secretsmanager::types::SecretVersionsListEntry;
     use crosstache::backend::SecretBackend;
 
@@ -416,32 +433,52 @@ async fn rollback_moves_awscurrent_to_target_version() {
         })
         .then_output(|| UpdateSecretVersionStageOutput::builder().build());
     // rollback calls get_secret(vault, name, false) at the end which calls describe_secret
-    let describe = mock!(Client::describe_secret)
-        .then_output(|| DescribeSecretOutput::builder().name("myproj-kv/db-password").build());
+    let describe = mock!(Client::describe_secret).then_output(|| {
+        DescribeSecretOutput::builder()
+            .name("myproj-kv/db-password")
+            .build()
+    });
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&list, &update_stage, &describe]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&list, &update_stage, &describe]
+    );
     let backend = aws_secret_backend(client);
 
-    backend.rollback("myproj-kv", "db-password", "v2").await.unwrap();
+    backend
+        .rollback("myproj-kv", "db-password", "v2")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn restore_secret_calls_aws_restore() {
-    use aws_sdk_secretsmanager::operation::restore_secret::RestoreSecretOutput;
     use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use aws_sdk_secretsmanager::operation::restore_secret::RestoreSecretOutput;
     use crosstache::backend::SecretBackend;
 
     let restore = mock!(Client::restore_secret)
         .match_requests(|req| req.secret_id() == Some("myproj-kv/db-password"))
         .then_output(|| RestoreSecretOutput::builder().build());
     // restore_secret calls get_secret at the end which calls describe_secret
-    let describe = mock!(Client::describe_secret)
-        .then_output(|| DescribeSecretOutput::builder().name("myproj-kv/db-password").build());
+    let describe = mock!(Client::describe_secret).then_output(|| {
+        DescribeSecretOutput::builder()
+            .name("myproj-kv/db-password")
+            .build()
+    });
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&restore, &describe]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&restore, &describe]
+    );
     let backend = aws_secret_backend(client);
 
-    let result = backend.restore_secret("myproj-kv", "db-password").await.unwrap();
+    let result = backend
+        .restore_secret("myproj-kv", "db-password")
+        .await
+        .unwrap();
     assert_eq!(result.name, "db-password");
 }
 
@@ -511,12 +548,14 @@ async fn create_vault_writes_marker_secret() {
 async fn get_vault_returns_vault_not_found_when_marker_missing() {
     use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
     use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
-    use crosstache::backend::VaultBackend;
     use crosstache::backend::error::BackendError;
+    use crosstache::backend::VaultBackend;
 
     let rule = mock!(Client::describe_secret).then_error(|| {
         DescribeSecretError::ResourceNotFoundException(
-            ResourceNotFoundException::builder().message("not found").build(),
+            ResourceNotFoundException::builder()
+                .message("not found")
+                .build(),
         )
     });
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
@@ -571,8 +610,16 @@ async fn list_vaults_finds_all_markers() {
 
     let rule = mock!(Client::list_secrets).then_output(|| {
         ListSecretsOutput::builder()
-            .secret_list(SecretListEntry::builder().name("myproj-kv/.xv-vault").build())
-            .secret_list(SecretListEntry::builder().name("staging-kv/.xv-vault").build())
+            .secret_list(
+                SecretListEntry::builder()
+                    .name("myproj-kv/.xv-vault")
+                    .build(),
+            )
+            .secret_list(
+                SecretListEntry::builder()
+                    .name("staging-kv/.xv-vault")
+                    .build(),
+            )
             .build()
     });
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
@@ -621,13 +668,21 @@ async fn list_vaults_paginates() {
 async fn delete_vault_refuses_when_secrets_exist() {
     use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
     use aws_sdk_secretsmanager::types::SecretListEntry;
-    use crosstache::backend::VaultBackend;
     use crosstache::backend::error::BackendError;
+    use crosstache::backend::VaultBackend;
 
     let rule = mock!(Client::list_secrets).then_output(|| {
         ListSecretsOutput::builder()
-            .secret_list(SecretListEntry::builder().name("myproj-kv/.xv-vault").build())
-            .secret_list(SecretListEntry::builder().name("myproj-kv/db-password").build())
+            .secret_list(
+                SecretListEntry::builder()
+                    .name("myproj-kv/.xv-vault")
+                    .build(),
+            )
+            .secret_list(
+                SecretListEntry::builder()
+                    .name("myproj-kv/db-password")
+                    .build(),
+            )
             .build()
     });
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
@@ -646,14 +701,22 @@ async fn delete_vault_succeeds_when_only_marker_exists() {
 
     let list = mock!(Client::list_secrets).then_output(|| {
         ListSecretsOutput::builder()
-            .secret_list(SecretListEntry::builder().name("myproj-kv/.xv-vault").build())
+            .secret_list(
+                SecretListEntry::builder()
+                    .name("myproj-kv/.xv-vault")
+                    .build(),
+            )
             .build()
     });
     let delete = mock!(Client::delete_secret)
         .match_requests(|req| req.secret_id() == Some("myproj-kv/.xv-vault"))
         .then_output(|| DeleteSecretOutput::builder().build());
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&list, &delete]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&list, &delete]
+    );
     let backend = aws_vault_backend(client);
     backend.delete_vault("myproj-kv").await.unwrap();
 }
@@ -701,7 +764,11 @@ async fn update_vault_updates_tags() {
                 .build()
         });
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&tag, &describe]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&tag, &describe]
+    );
     let backend = aws_vault_backend(client);
 
     let mut tags = HashMap::new();

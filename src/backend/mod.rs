@@ -15,9 +15,9 @@
 //! See also: [`BackendError`] for the backend-agnostic error type, and
 //! [`BackendRegistry`] for runtime backend resolution.
 
-pub mod azure;
 #[cfg(feature = "aws")]
 pub mod aws;
+pub mod azure;
 pub mod error;
 #[cfg(feature = "file-ops")]
 pub mod file;
@@ -100,13 +100,10 @@ impl NameCharset {
     /// Returns true if `name` is valid under this charset.
     pub fn is_valid(&self, name: &str) -> bool {
         match self {
-            Self::AlphanumericHyphen => name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            Self::AlphanumericHyphen => name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
             Self::Unrestricted => true,
             Self::AwsRelaxed => name.chars().all(|c| {
-                c.is_ascii_alphanumeric()
-                    || matches!(c, '/' | '_' | '+' | '=' | '.' | '@' | '-')
+                c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '+' | '=' | '.' | '@' | '-')
             }),
             Self::Custom(f) => f(name),
         }
@@ -220,7 +217,10 @@ mod tests {
     fn backend_kind_parses_aws() {
         assert_eq!(BackendKind::from_str("aws").unwrap(), BackendKind::Aws);
         assert_eq!(BackendKind::from_str("AWS").unwrap(), BackendKind::Aws);
-        assert_eq!(BackendKind::from_str("secretsmanager").unwrap(), BackendKind::Aws);
+        assert_eq!(
+            BackendKind::from_str("secretsmanager").unwrap(),
+            BackendKind::Aws
+        );
     }
 
     #[test]

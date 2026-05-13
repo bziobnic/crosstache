@@ -11,10 +11,10 @@ pub mod vaults;
 
 use std::sync::Arc;
 
+use crate::backend::error::BackendError;
 use crate::backend::{
     Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend, VaultBackend,
 };
-use crate::backend::error::BackendError;
 use crate::config::settings::AwsConfig;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 

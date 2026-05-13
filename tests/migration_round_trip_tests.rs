@@ -19,8 +19,7 @@ use zeroize::Zeroizing;
 /// Returns `true` when the LocalStack integration environment is NOT configured,
 /// meaning the test should silently skip.
 fn skip_unless_enabled() -> bool {
-    std::env::var("AWS_INTEGRATION_TESTS").is_err()
-        || std::env::var("AWS_ENDPOINT_URL").is_err()
+    std::env::var("AWS_INTEGRATION_TESTS").is_err() || std::env::var("AWS_ENDPOINT_URL").is_err()
 }
 
 /// Extract groups from a `SecretProperties.tags` map (mirrors `SecretInfo::extract_groups`).
@@ -116,7 +115,11 @@ async fn local_to_aws_round_trip() {
             "value mismatch for secret {n}"
         );
         let got_groups = groups_from_tags(&got.tags);
-        assert_eq!(got_groups, vec!["roundtrip"], "groups mismatch for secret {n}");
+        assert_eq!(
+            got_groups,
+            vec!["roundtrip"],
+            "groups mismatch for secret {n}"
+        );
     }
 
     // ---- cleanup AWS side ----

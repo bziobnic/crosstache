@@ -40,7 +40,9 @@ async fn compute_diff(
     let filtered: Vec<String> = match filter {
         Some(pattern) => {
             let glob = globset::Glob::new(pattern)
-                .map_err(|e| CrosstacheError::invalid_argument(format!("Invalid glob pattern: {e}")))?
+                .map_err(|e| {
+                    CrosstacheError::invalid_argument(format!("Invalid glob pattern: {e}"))
+                })?
                 .compile_matcher();
             source_secrets
                 .into_iter()
@@ -64,7 +66,10 @@ async fn compute_diff(
             }
         }
     }
-    Ok(MigrationDiff { to_migrate, conflicts })
+    Ok(MigrationDiff {
+        to_migrate,
+        conflicts,
+    })
 }
 
 fn print_diff_summary(
@@ -80,7 +85,10 @@ fn print_diff_summary(
     println!("Target: {}:{}", target_name, vault);
     println!();
     println!("  to migrate:    {} secret(s)", diff.to_migrate.len());
-    println!("  conflict:      {} secret(s) (target already has same name)", diff.conflicts.len());
+    println!(
+        "  conflict:      {} secret(s) (target already has same name)",
+        diff.conflicts.len()
+    );
     println!();
     println!("On conflict: {:?}", on_conflict);
     println!("Dry run? {}", if dry_run { "yes" } else { "no" });
@@ -102,7 +110,9 @@ fn build_request_from_props(
     SecretRequest {
         name: props.original_name.clone(),
         value: Zeroizing::new(
-            props.value.as_ref()
+            props
+                .value
+                .as_ref()
                 .map(|v| v.as_str().to_string())
                 .unwrap_or_default(),
         ),
@@ -114,11 +124,7 @@ fn build_request_from_props(
         enabled: Some(props.enabled),
         expires_on: props.expires_on,
         not_before: props.not_before,
-        tags: if tags.is_empty() {
-            None
-        } else {
-            Some(tags)
-        },
+        tags: if tags.is_empty() { None } else { Some(tags) },
         groups: None,
         note: None,
         folder: None,
@@ -162,9 +168,7 @@ async fn migrate_one(
             Err(BackendError::RateLimited { retry_after_secs }) if attempt < 5 => {
                 let wait = retry_after_secs
                     .map(std::time::Duration::from_secs)
-                    .unwrap_or_else(|| {
-                        std::time::Duration::from_millis(500 * 2u64.pow(attempt))
-                    });
+                    .unwrap_or_else(|| std::time::Duration::from_millis(500 * 2u64.pow(attempt)));
                 tokio::time::sleep(wait).await;
                 attempt += 1;
             }
@@ -203,7 +207,9 @@ fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>
             })?;
             let backend = tokio::runtime::Handle::current()
                 .block_on(crate::backend::aws::AwsBackend::new(aws_cfg, None, None))
-                .map_err(|e| CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}")))?;
+                .map_err(|e| {
+                    CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}"))
+                })?;
             Ok(Arc::new(backend))
         }
         #[cfg(not(feature = "aws"))]
@@ -329,7 +335,14 @@ pub(crate) async fn execute_migrate(
 
     // 5. Compute diff (list + filter + conflict detection)
     let diff = compute_diff(&source, &target, &vault_name, filter.as_deref()).await?;
-    print_diff_summary(&diff, source.name(), target.name(), &vault_name, &on_conflict, dry_run);
+    print_diff_summary(
+        &diff,
+        source.name(),
+        target.name(),
+        &vault_name,
+        &on_conflict,
+        dry_run,
+    );
 
     if dry_run {
         return Ok(());
@@ -360,19 +373,22 @@ pub(crate) async fn execute_migrate(
     let target_arc = target.clone();
     let vault_clone = vault_name.clone();
 
-    let results: Vec<_> = stream::iter(names_to_process.iter().map(|name| {
-        let source = source_arc.clone();
-        let target = target_arc.clone();
-        let vault = vault_clone.clone();
-        let name = name.clone();
-        let src_tag = source_name_tag.clone();
-        async move {
-            migrate_one(&source, &target, &vault, &name, force_replace, &src_tag).await
-        }
-    }))
-    .buffer_unordered(concurrency)
-    .collect()
-    .await;
+    let results: Vec<_> =
+        stream::iter(
+            names_to_process.iter().map(|name| {
+                let source = source_arc.clone();
+                let target = target_arc.clone();
+                let vault = vault_clone.clone();
+                let name = name.clone();
+                let src_tag = source_name_tag.clone();
+                async move {
+                    migrate_one(&source, &target, &vault, &name, force_replace, &src_tag).await
+                }
+            }),
+        )
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
 
     let mut migrated = 0usize;
     let mut skipped = 0usize;
@@ -400,7 +416,9 @@ pub(crate) async fn execute_migrate(
     if !errors.is_empty() {
         output::warn(&format!(
             "Migrated {} secret(s), {} skipped, {} error(s)",
-            migrated, skipped, errors.len()
+            migrated,
+            skipped,
+            errors.len()
         ));
     } else {
         output::success(&format!(

@@ -1007,12 +1007,10 @@ mod tests {
             .delete_secret("default", "restore-me")
             .await
             .unwrap();
-        assert!(
-            !backend
-                .secret_exists("default", "restore-me")
-                .await
-                .unwrap()
-        );
+        assert!(!backend
+            .secret_exists("default", "restore-me")
+            .await
+            .unwrap());
 
         // Restore
         let restored = backend
@@ -1022,12 +1020,10 @@ mod tests {
         assert_eq!(restored.name, "restore-me");
 
         // Should exist again
-        assert!(
-            backend
-                .secret_exists("default", "restore-me")
-                .await
-                .unwrap()
-        );
+        assert!(backend
+            .secret_exists("default", "restore-me")
+            .await
+            .unwrap());
 
         // Value should be recoverable
         let got = backend
@@ -1143,12 +1139,10 @@ mod tests {
             .set_secret("default", make_request("exists-test", "val"))
             .await
             .unwrap();
-        assert!(
-            backend
-                .secret_exists("default", "exists-test")
-                .await
-                .unwrap()
-        );
+        assert!(backend
+            .secret_exists("default", "exists-test")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

@@ -32,9 +32,7 @@ fn skip_unless_enabled() -> bool {
 
 async fn build_backend() -> AwsBackend {
     let cfg = AwsConfig {
-        region: Some(
-            std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
-        ),
+        region: Some(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string())),
         endpoint_url: Some(std::env::var("AWS_ENDPOINT_URL").unwrap()),
         ..Default::default()
     };

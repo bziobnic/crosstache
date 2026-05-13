@@ -34,8 +34,7 @@ pub fn marker_name(vault: &str) -> String {
 
 /// Returns true if `full_name` is a vault marker secret name.
 pub fn is_marker(full_name: &str) -> bool {
-    full_name.ends_with(&format!("/{MARKER_BASENAME}"))
-        || full_name == MARKER_BASENAME
+    full_name.ends_with(&format!("/{MARKER_BASENAME}")) || full_name == MARKER_BASENAME
 }
 
 /// Validate a user-facing secret name. Rejects empty names and names
@@ -60,12 +59,18 @@ mod tests {
 
     #[test]
     fn aws_name_joins_prefix() {
-        assert_eq!(aws_name("myproj-kv", "db-password"), "myproj-kv/db-password");
+        assert_eq!(
+            aws_name("myproj-kv", "db-password"),
+            "myproj-kv/db-password"
+        );
     }
 
     #[test]
     fn strip_prefix_extracts_secret_name() {
-        assert_eq!(strip_prefix("myproj-kv", "myproj-kv/db-password"), Some("db-password".to_string()));
+        assert_eq!(
+            strip_prefix("myproj-kv", "myproj-kv/db-password"),
+            Some("db-password".to_string())
+        );
         assert_eq!(strip_prefix("myproj-kv", "other-vault/db-password"), None);
     }
 

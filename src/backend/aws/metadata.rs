@@ -26,7 +26,7 @@ pub struct TestProps {
     pub folder: Option<String>,
     pub created_by: Option<String>,
     pub content_type: Option<String>,
-    pub note: Option<String>,            // -> AWS Description, not a tag
+    pub note: Option<String>, // -> AWS Description, not a tag
     pub expires_at: Option<String>,
     pub user_tags: HashMap<String, String>,
 }
@@ -146,7 +146,9 @@ mod tests {
             ..Default::default()
         };
         let aws_tags = encode_tags(&props);
-        assert!(!aws_tags.iter().any(|(k, _)| k == "note" || k.contains("note")));
+        assert!(!aws_tags
+            .iter()
+            .any(|(k, _)| k == "note" || k.contains("note")));
     }
 
     #[test]

@@ -24,14 +24,15 @@ fn generic<E: std::fmt::Display>(op: &str, e: E) -> BackendError {
     BackendError::Internal(format!("aws {op}: {e}"))
 }
 
-fn handle_sdk<E: std::fmt::Display + std::fmt::Debug, R: std::fmt::Debug>(op: &str, e: SdkError<E, R>) -> BackendError {
+fn handle_sdk<E: std::fmt::Display + std::fmt::Debug, R: std::fmt::Debug>(
+    op: &str,
+    e: SdkError<E, R>,
+) -> BackendError {
     match e {
         SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) => {
             BackendError::Network(format!("aws {op}: timeout or dispatch failure"))
         }
-        SdkError::ServiceError(svc) => {
-            BackendError::Internal(format!("aws {op}: {}", svc.err()))
-        }
+        SdkError::ServiceError(svc) => BackendError::Internal(format!("aws {op}: {}", svc.err())),
         other => generic(op, format!("{other:?}")),
     }
 }

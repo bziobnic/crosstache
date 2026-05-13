@@ -1442,7 +1442,7 @@ pub(crate) async fn execute_secret_find_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        use crate::utils::fuzzy::{CandidateItem, FuzzyField, score_matches};
+        use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
 
         // Parse --in fields
         let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
@@ -1576,7 +1576,7 @@ async fn execute_secret_find(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    use crate::utils::fuzzy::{CandidateItem, FuzzyField, score_matches};
+    use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
 
     // Parse --in fields first so argument errors fire before vault resolution.
     let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
@@ -3372,7 +3372,7 @@ async fn execute_secret_share(
             page_size,
             pager,
         } => {
-            use crate::utils::pagination::{Pagination, paginate_slice, pagination_footer_text};
+            use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
             use std::fmt::Write as _;
 
             let mut roles = vault_manager

@@ -436,8 +436,14 @@ fn migrate_dry_run_against_local_to_aws_shows_summary() {
     // Run migrate dry-run
     let out = Command::new(xv)
         .args([
-            "migrate", "--from", "local", "--to", "aws",
-            "--vault", "default", "--dry-run",
+            "migrate",
+            "--from",
+            "local",
+            "--to",
+            "aws",
+            "--vault",
+            "default",
+            "--dry-run",
         ])
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join("config"))

@@ -57,7 +57,7 @@ pub(crate) async fn execute_vault_command(
             } => {
                 use crate::utils::format::TableFormatter;
                 use crate::utils::pagination::{
-                    Pagination, paginate_slice, pagination_footer_text,
+                    paginate_slice, pagination_footer_text, Pagination,
                 };
 
                 let vaults = vaults_backend.list_vaults().await?;
@@ -345,7 +345,7 @@ async fn execute_vault_list(
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
     use crate::utils::format::TableFormatter;
-    use crate::utils::pagination::{Pagination, paginate_slice, pagination_footer_text};
+    use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
     use crate::vault::models::VaultSummary;
 
     let cache_manager = CacheManager::from_config(config);
@@ -1104,7 +1104,7 @@ async fn execute_vault_share(
             page_size,
             pager,
         } => {
-            use crate::utils::pagination::{Pagination, paginate_slice, pagination_footer_text};
+            use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
             use std::fmt::Write as _;
 
             let resource_group =

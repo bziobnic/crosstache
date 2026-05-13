@@ -331,10 +331,7 @@ impl ConfigInitializer {
         output::step("Step 1/3: AWS Region");
         let region: String = Input::new()
             .with_prompt("AWS region")
-            .default(
-                std::env::var("AWS_REGION")
-                    .unwrap_or_else(|_| "us-east-1".to_string()),
-            )
+            .default(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()))
             .interact_text()
             .map_err(|e| CrosstacheError::config(format!("Region prompt failed: {e}")))?;
 
@@ -342,10 +339,7 @@ impl ConfigInitializer {
         output::step("Step 2/3: AWS Profile");
         let profile: String = Input::new()
             .with_prompt("AWS profile")
-            .default(
-                std::env::var("AWS_PROFILE")
-                    .unwrap_or_else(|_| "default".to_string()),
-            )
+            .default(std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string()))
             .interact_text()
             .map_err(|e| CrosstacheError::config(format!("Profile prompt failed: {e}")))?;
 

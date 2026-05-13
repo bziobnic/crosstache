@@ -1,10 +1,10 @@
 //! `AwsVaultBackend` impl `VaultBackend`.
 
-use crate::backend::VaultBackend;
 use crate::backend::error::BackendError;
+use crate::backend::VaultBackend;
 use crate::vault::models::{VaultCreateRequest, VaultProperties, VaultSummary};
-use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 use aws_sdk_secretsmanager::types::Tag;
+use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,10 +80,15 @@ impl VaultBackend for AwsVaultBackend {
             uri: format!("https://{}.vault.aws.net/", request.name),
             enabled_for_deployment: request.enabled_for_deployment.unwrap_or(false),
             enabled_for_disk_encryption: request.enabled_for_disk_encryption.unwrap_or(false),
-            enabled_for_template_deployment: request.enabled_for_template_deployment.unwrap_or(false),
+            enabled_for_template_deployment: request
+                .enabled_for_template_deployment
+                .unwrap_or(false),
             soft_delete_retention_in_days: request.soft_delete_retention_in_days.unwrap_or(30),
             purge_protection: request.purge_protection.unwrap_or(false),
-            sku: request.sku.clone().unwrap_or_else(|| "standard".to_string()),
+            sku: request
+                .sku
+                .clone()
+                .unwrap_or_else(|| "standard".to_string()),
             access_policies: request.access_policies.clone().unwrap_or_default(),
             created_at: now,
             tags: request.tags.clone().unwrap_or_default(),
@@ -94,7 +99,8 @@ impl VaultBackend for AwsVaultBackend {
     async fn get_vault(&self, name: &str) -> Result<VaultProperties, BackendError> {
         use crate::backend::aws::encoding::marker_name;
         let marker = marker_name(name);
-        let describe = self.client
+        let describe = self
+            .client
             .describe_secret()
             .secret_id(&marker)
             .send()
@@ -156,11 +162,22 @@ impl VaultBackend for AwsVaultBackend {
         let mut summaries: Vec<VaultSummary> = Vec::new();
 
         loop {
-            let mut req = self.client
+            let mut req = self
+                .client
                 .list_secrets()
                 .max_results(100)
-                .filters(Filter::builder().key(FilterNameStringType::TagKey).values(TAG_TYPE).build())
-                .filters(Filter::builder().key(FilterNameStringType::TagValue).values(TAG_VALUE_VAULT_MARKER).build());
+                .filters(
+                    Filter::builder()
+                        .key(FilterNameStringType::TagKey)
+                        .values(TAG_TYPE)
+                        .build(),
+                )
+                .filters(
+                    Filter::builder()
+                        .key(FilterNameStringType::TagValue)
+                        .values(TAG_VALUE_VAULT_MARKER)
+                        .build(),
+                );
             if let Some(t) = &next_token {
                 req = req.next_token(t.clone());
             }
@@ -180,7 +197,9 @@ impl VaultBackend for AwsVaultBackend {
                 }
             }
             next_token = out.next_token().map(|s| s.to_string());
-            if next_token.is_none() { break; }
+            if next_token.is_none() {
+                break;
+            }
         }
         Ok(summaries)
     }
@@ -222,24 +241,27 @@ impl VaultBackend for AwsVaultBackend {
 }
 
 impl AwsVaultBackend {
-    pub async fn delete_vault_internal(
-        &self,
-        name: &str,
-        force: bool,
-    ) -> Result<(), BackendError> {
+    pub async fn delete_vault_internal(&self, name: &str, force: bool) -> Result<(), BackendError> {
         use crate::backend::aws::encoding::{is_marker, marker_name, strip_prefix};
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 
         let prefix = format!("{name}/");
-        let out = self.client
+        let out = self
+            .client
             .list_secrets()
             .max_results(100)
-            .filters(Filter::builder().key(FilterNameStringType::Name).values(prefix.clone()).build())
+            .filters(
+                Filter::builder()
+                    .key(FilterNameStringType::Name)
+                    .values(prefix.clone())
+                    .build(),
+            )
             .send()
             .await
             .map_err(super::errors::from_list)?;
 
-        let non_marker: Vec<String> = out.secret_list()
+        let non_marker: Vec<String> = out
+            .secret_list()
             .iter()
             .filter_map(|e| e.name().map(|s| s.to_string()))
             .filter(|n| !is_marker(n) && strip_prefix(name, n).is_some())
