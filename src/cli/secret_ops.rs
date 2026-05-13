@@ -3850,6 +3850,7 @@ mod tests {
             match self.kind {
                 BackendKind::Azure => "azure",
                 BackendKind::Local => "local",
+                BackendKind::Aws => "aws",
             }
         }
 

@@ -32,6 +32,11 @@ fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>
                 })?;
             Ok(Arc::new(backend))
         }
+        BackendKind::Aws => {
+            Err(CrosstacheError::Unknown(
+                "AWS Secrets Manager backend not yet implemented".to_string(),
+            ))
+        }
     }
 }
 

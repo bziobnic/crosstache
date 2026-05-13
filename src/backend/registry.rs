@@ -63,6 +63,11 @@ impl BackendRegistry {
                 let backend = super::local::LocalBackend::new(config.local.as_ref())?;
                 Ok(Self::new(Arc::new(backend)))
             }
+            BackendKind::Aws => {
+                Err(BackendError::Internal(
+                    "AWS Secrets Manager backend not yet implemented".to_string(),
+                ))
+            }
         }
     }
 

@@ -47,6 +47,8 @@ pub enum BackendKind {
     Azure,
     /// Local age-encrypted file backend (Phase 2).
     Local,
+    /// AWS Secrets Manager backend (Phase 3).
+    Aws,
 }
 
 impl std::fmt::Display for BackendKind {
@@ -54,6 +56,7 @@ impl std::fmt::Display for BackendKind {
         match self {
             Self::Azure => write!(f, "azure"),
             Self::Local => write!(f, "local"),
+            Self::Aws => write!(f, "aws"),
         }
     }
 }
@@ -65,8 +68,9 @@ impl std::str::FromStr for BackendKind {
         match s.to_lowercase().as_str() {
             "azure" | "az" | "keyvault" => Ok(Self::Azure),
             "local" | "file" | "age" => Ok(Self::Local),
+            "aws" | "secretsmanager" | "asm" => Ok(Self::Aws),
             _ => Err(format!(
-                "unknown backend kind: {s}. Valid options: azure, local"
+                "unknown backend kind: {s}. Valid options: azure, local, aws"
             )),
         }
     }
@@ -184,4 +188,22 @@ pub trait Backend: Send + Sync {
 
     /// Validate configuration and connectivity. Called once at startup.
     async fn health_check(&self) -> Result<(), BackendError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn backend_kind_parses_aws() {
+        assert_eq!(BackendKind::from_str("aws").unwrap(), BackendKind::Aws);
+        assert_eq!(BackendKind::from_str("AWS").unwrap(), BackendKind::Aws);
+        assert_eq!(BackendKind::from_str("secretsmanager").unwrap(), BackendKind::Aws);
+    }
+
+    #[test]
+    fn backend_kind_aws_displays_as_aws() {
+        assert_eq!(format!("{}", BackendKind::Aws), "aws");
+    }
 }
