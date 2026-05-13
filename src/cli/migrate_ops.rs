@@ -11,6 +11,78 @@ use crate::utils::output;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
+struct MigrationDiff {
+    to_migrate: Vec<String>,
+    conflicts: Vec<String>,
+}
+
+async fn compute_diff(
+    source: &Arc<dyn Backend>,
+    target: &Arc<dyn Backend>,
+    vault: &str,
+    filter: Option<&str>,
+) -> Result<MigrationDiff> {
+    let source_secrets = source
+        .secrets()
+        .list_secrets(vault, None)
+        .await
+        .map_err(|e| {
+            CrosstacheError::Unknown(format!(
+                "Failed to list secrets from {} backend: {e}",
+                source.name()
+            ))
+        })?;
+
+    let filtered: Vec<String> = match filter {
+        Some(pattern) => {
+            let glob = globset::Glob::new(pattern)
+                .map_err(|e| CrosstacheError::invalid_argument(format!("Invalid glob pattern: {e}")))?
+                .compile_matcher();
+            source_secrets
+                .into_iter()
+                .filter(|s| glob.is_match(&s.name))
+                .map(|s| s.name)
+                .collect()
+        }
+        None => source_secrets.into_iter().map(|s| s.name).collect(),
+    };
+
+    let mut to_migrate = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for name in filtered {
+        match target.secrets().secret_exists(vault, &name).await {
+            Ok(true) => conflicts.push(name),
+            Ok(false) => to_migrate.push(name),
+            Err(e) => {
+                tracing::debug!("secret_exists check failed for {name}: {e}; assuming new");
+                to_migrate.push(name);
+            }
+        }
+    }
+    Ok(MigrationDiff { to_migrate, conflicts })
+}
+
+fn print_diff_summary(
+    diff: &MigrationDiff,
+    source_name: &str,
+    target_name: &str,
+    vault: &str,
+    on_conflict: &crate::cli::commands::OnConflict,
+    dry_run: bool,
+) {
+    println!();
+    println!("Source: {}:{}", source_name, vault);
+    println!("Target: {}:{}", target_name, vault);
+    println!();
+    println!("  to migrate:    {} secret(s)", diff.to_migrate.len());
+    println!("  conflict:      {} secret(s) (target already has same name)", diff.conflicts.len());
+    println!();
+    println!("On conflict: {:?}", on_conflict);
+    println!("Dry run? {}", if dry_run { "yes" } else { "no" });
+    println!();
+}
+
 /// Create a backend instance for the given kind.
 fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>> {
     match kind {
@@ -167,80 +239,38 @@ pub(crate) async fn execute_migrate(
         }
     }
 
-    // 5. List secrets from source
-    let secrets = source
-        .secrets()
-        .list_secrets(&vault_name, None)
-        .await
-        .map_err(|e| {
-            CrosstacheError::Unknown(format!(
-                "Failed to list secrets from {} backend: {e}",
-                source.name()
-            ))
-        })?;
+    // 5. Compute diff (list + filter + conflict detection)
+    let diff = compute_diff(&source, &target, &vault_name, filter.as_deref()).await?;
+    print_diff_summary(&diff, source.name(), target.name(), &vault_name, &on_conflict, dry_run);
 
-    if secrets.is_empty() {
-        output::info("No secrets found in the source vault.");
+    if dry_run {
         return Ok(());
     }
 
-    // 6. Apply filter if specified
-    let filtered_secrets: Vec<_> = if let Some(ref pattern) = filter {
-        let glob = globset::Glob::new(pattern)
-            .map_err(|e| CrosstacheError::invalid_argument(format!("Invalid glob pattern: {e}")))?
-            .compile_matcher();
-        secrets
-            .into_iter()
-            .filter(|s| glob.is_match(&s.name))
-            .collect()
-    } else {
-        secrets
-    };
-
-    if filtered_secrets.is_empty() {
-        output::info("No secrets matched the filter pattern.");
-        return Ok(());
+    // Honor --on-conflict fail
+    if !diff.conflicts.is_empty() && on_conflict == crate::cli::commands::OnConflict::Fail {
+        return Err(CrosstacheError::Unknown(format!(
+            "{} conflict(s) detected; aborting (--on-conflict fail)",
+            diff.conflicts.len()
+        )));
     }
 
-    output::info(&format!(
-        "Found {} secret(s) to migrate",
-        filtered_secrets.len()
-    ));
+    // Build list of names to process
+    let mut names_to_process: Vec<String> = diff.to_migrate.clone();
+    if on_conflict == crate::cli::commands::OnConflict::Replace {
+        names_to_process.extend(diff.conflicts.clone());
+    }
+
+    if names_to_process.is_empty() {
+        output::info("No secrets to migrate.");
+        return Ok(());
+    }
 
     let mut migrated = 0usize;
     let mut skipped = 0usize;
 
-    // 7. Migrate each secret
-    for summary in &filtered_secrets {
-        let name = &summary.name;
-
-        if dry_run {
-            println!("  [dry-run] Would migrate: {}", name);
-            migrated += 1;
-            continue;
-        }
-
-        // Check if secret already exists in target
-        if on_conflict != crate::cli::commands::OnConflict::Replace {
-            match target.secrets().secret_exists(&vault_name, name).await {
-                Ok(true) => {
-                    if on_conflict == crate::cli::commands::OnConflict::Fail {
-                        return Err(CrosstacheError::Unknown(format!(
-                            "Conflict: '{}' already exists in target (--on-conflict fail)",
-                            name
-                        )));
-                    }
-                    println!("  [skip] {} — already exists in target", name);
-                    skipped += 1;
-                    continue;
-                }
-                Ok(false) => {}
-                Err(_) => {
-                    // If existence check fails, proceed anyway
-                }
-            }
-        }
-
+    // 6. Migrate each secret
+    for name in &names_to_process {
         // Get secret with value from source
         let props = source
             .secrets()
@@ -289,19 +319,11 @@ pub(crate) async fn execute_migrate(
         }
     }
 
-    // 8. Print summary
-    println!();
-    if dry_run {
-        output::success(&format!(
-            "Dry run complete: {} secret(s) would be migrated",
-            migrated
-        ));
-    } else {
-        output::success(&format!(
-            "Migrated {} secret(s) ({} skipped)",
-            migrated, skipped
-        ));
-    }
+    // 7. Print summary
+    output::success(&format!(
+        "Migrated {} secret(s) ({} skipped)",
+        migrated, skipped
+    ));
 
     Ok(())
 }
