@@ -8,6 +8,12 @@ use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn preserves_request_tag(key: &str) -> bool {
+    use crate::backend::aws::metadata::{TAG_MIGRATED_AT, TAG_MIGRATED_FROM};
+
+    !key.starts_with("xv:") || key == TAG_MIGRATED_FROM || key == TAG_MIGRATED_AT
+}
+
 pub struct AwsSecretBackend {
     pub(crate) client: Arc<SecretsManagerClient>,
 }
@@ -31,7 +37,7 @@ impl AwsSecretBackend {
     /// Update an already-existing secret (upsert path). Implemented in Task 19.
     async fn update_existing_secret(
         &self,
-        vault: &str,
+        _vault: &str,
         request: &SecretRequest,
         aws_full_name: &str,
     ) -> Result<SecretProperties, BackendError> {
@@ -105,7 +111,7 @@ impl AwsSecretBackend {
         }
         if let Some(ref user_tags) = request.tags {
             for (k, v) in user_tags {
-                if !k.starts_with("xv:") {
+                if preserves_request_tag(k) {
                     new_tags.push(Tag::builder().key(k).value(v).build());
                 }
             }
@@ -113,10 +119,8 @@ impl AwsSecretBackend {
 
         // Compute which existing keys are absent from the new tag set so we
         // only remove the delta rather than stripping and re-applying everything.
-        let new_keys: std::collections::HashSet<&str> = new_tags
-            .iter()
-            .filter_map(|t| t.key())
-            .collect();
+        let new_keys: std::collections::HashSet<&str> =
+            new_tags.iter().filter_map(|t| t.key()).collect();
         let keys_to_remove: Vec<String> = describe
             .tags()
             .iter()
@@ -234,7 +238,8 @@ impl AwsSecretBackend {
         fallback_name: &str,
     ) -> SecretProperties {
         use crate::backend::aws::metadata::{
-            TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME,
+            TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_MIGRATED_AT,
+            TAG_MIGRATED_FROM, TAG_ORIGINAL_NAME,
         };
 
         // Collect the AWS Tag list into a flat vec of (key, value) pairs.
@@ -272,6 +277,9 @@ impl AwsSecretBackend {
                     expires_on = chrono::DateTime::parse_from_rfc3339(v)
                         .ok()
                         .map(|dt| dt.with_timezone(&chrono::Utc));
+                }
+                TAG_MIGRATED_FROM | TAG_MIGRATED_AT => {
+                    user_tags.insert(k.clone(), v.clone());
                 }
                 _ if !k.starts_with("xv:") => {
                     user_tags.insert(k.clone(), v.clone());
@@ -391,7 +399,7 @@ impl SecretBackend for AwsSecretBackend {
         }
         if let Some(ref user_tags) = request.tags {
             for (k, v) in user_tags {
-                if !k.starts_with("xv:") {
+                if preserves_request_tag(k) {
                     tags.push(Tag::builder().key(k).value(v).build());
                 }
             }
@@ -691,7 +699,7 @@ impl SecretBackend for AwsSecretBackend {
             for (k, v) in user_tags {
                 if v.is_empty() {
                     keys_to_remove.push(k.clone());
-                } else if !k.starts_with("xv:") {
+                } else if preserves_request_tag(k) {
                     tags_to_set.push(Tag::builder().key(k).value(v).build());
                 }
             }
@@ -817,45 +825,57 @@ impl SecretBackend for AwsSecretBackend {
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 
         let prefix = format!("{vault}/");
-        let out = self
-            .client
-            .list_secrets()
-            .max_results(100)
-            .include_planned_deletion(true)
-            .filters(
-                Filter::builder()
-                    .key(FilterNameStringType::Name)
-                    .values(prefix.clone())
-                    .build(),
-            )
-            .send()
-            .await
-            .map_err(super::errors::from_list)?;
-
+        let mut next_token: Option<String> = None;
         let mut summaries: Vec<SecretSummary> = Vec::new();
-        for entry in out.secret_list() {
-            let aws_full_name = entry.name().unwrap_or("");
-            if entry.deleted_date().is_none() {
-                continue;
+
+        loop {
+            let mut req = self
+                .client
+                .list_secrets()
+                .max_results(100)
+                .include_planned_deletion(true)
+                .filters(
+                    Filter::builder()
+                        .key(FilterNameStringType::Name)
+                        .values(prefix.clone())
+                        .build(),
+                );
+            if let Some(ref t) = next_token {
+                req = req.next_token(t.clone());
             }
-            let secret_name = match strip_prefix(vault, aws_full_name) {
-                Some(n) => n,
-                None => continue,
-            };
-            if is_marker(aws_full_name) {
-                continue;
+
+            let out = req.send().await.map_err(super::errors::from_list)?;
+
+            for entry in out.secret_list() {
+                let aws_full_name = entry.name().unwrap_or("");
+                if entry.deleted_date().is_none() {
+                    continue;
+                }
+                let secret_name = match strip_prefix(vault, aws_full_name) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                if is_marker(aws_full_name) {
+                    continue;
+                }
+                summaries.push(SecretSummary {
+                    name: secret_name.clone(),
+                    original_name: secret_name,
+                    note: None,
+                    folder: None,
+                    groups: None,
+                    updated_on: String::new(),
+                    enabled: true,
+                    content_type: String::new(),
+                });
             }
-            summaries.push(SecretSummary {
-                name: secret_name.clone(),
-                original_name: secret_name,
-                note: None,
-                folder: None,
-                groups: None,
-                updated_on: String::new(),
-                enabled: true,
-                content_type: String::new(),
-            });
+
+            next_token = out.next_token().map(|s| s.to_string());
+            if next_token.is_none() {
+                break;
+            }
         }
+
         Ok(summaries)
     }
 }

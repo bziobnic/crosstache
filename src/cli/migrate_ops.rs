@@ -213,12 +213,11 @@ async fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Ba
                     "[aws] config block missing — set backend = \"aws\" or pass --aws-profile",
                 )
             })?;
-            let backend =
-                crate::backend::aws::AwsBackend::new(aws_cfg, None, None)
-                    .await
-                    .map_err(|e| {
-                        CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}"))
-                    })?;
+            let backend = crate::backend::aws::AwsBackend::new(aws_cfg, None, None)
+                .await
+                .map_err(|e| {
+                    CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}"))
+                })?;
             Ok(Arc::new(backend))
         }
         #[cfg(not(feature = "aws"))]
@@ -429,6 +428,10 @@ pub(crate) async fn execute_migrate(
             skipped,
             errors.len()
         ));
+        return Err(CrosstacheError::Unknown(format!(
+            "Migration failed for {} secret(s)",
+            errors.len()
+        )));
     } else {
         output::success(&format!(
             "Migrated {} secret(s) ({} skipped)",

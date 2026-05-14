@@ -78,6 +78,53 @@ async fn set_secret_create_writes_to_aws() {
 }
 
 #[tokio::test]
+async fn set_secret_preserves_migration_idempotency_tags() {
+    use aws_sdk_secretsmanager::operation::create_secret::CreateSecretOutput;
+    use crosstache::backend::SecretBackend;
+    use crosstache::secret::manager::SecretRequest;
+    use std::collections::HashMap;
+    use zeroize::Zeroizing;
+
+    let rule = mock!(Client::create_secret)
+        .match_requests(|req| {
+            let has_migrated_from = req
+                .tags()
+                .iter()
+                .any(|t| t.key() == Some("xv:migrated_from") && t.value() == Some("local:v1"));
+            let has_migrated_at = req
+                .tags()
+                .iter()
+                .any(|t| t.key() == Some("xv:migrated_at") && t.value() == Some("now"));
+            let drops_unknown_xv = req.tags().iter().all(|t| t.key() != Some("xv:internal"));
+            has_migrated_from && has_migrated_at && drops_unknown_xv
+        })
+        .then_output(|| CreateSecretOutput::builder().version_id("v1").build());
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    let mut tags = HashMap::new();
+    tags.insert("xv:migrated_from".to_string(), "local:v1".to_string());
+    tags.insert("xv:migrated_at".to_string(), "now".to_string());
+    tags.insert("xv:internal".to_string(), "drop-me".to_string());
+
+    let request = SecretRequest {
+        name: "db-password".to_string(),
+        value: Zeroizing::new("super-secret".to_string()),
+        content_type: None,
+        enabled: None,
+        expires_on: None,
+        not_before: None,
+        tags: Some(tags),
+        groups: None,
+        note: None,
+        folder: None,
+    };
+
+    backend.set_secret("myproj-kv", request).await.unwrap();
+}
+
+#[tokio::test]
 async fn get_secret_no_value_returns_metadata_only() {
     use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
     use aws_sdk_secretsmanager::types::Tag;
@@ -95,6 +142,18 @@ async fn get_secret_no_value_returns_metadata_only() {
                         .value("api-key")
                         .build(),
                 )
+                .tags(
+                    Tag::builder()
+                        .key("xv:migrated_from")
+                        .value("local:myproj-kv:v1")
+                        .build(),
+                )
+                .tags(
+                    Tag::builder()
+                        .key("xv:migrated_at")
+                        .value("2026-05-13T21:00:00Z")
+                        .build(),
+                )
                 .build()
         });
 
@@ -110,6 +169,14 @@ async fn get_secret_no_value_returns_metadata_only() {
     assert!(
         result.value.is_none(),
         "value should be absent when include_value=false"
+    );
+    assert_eq!(
+        result.tags.get("xv:migrated_from").map(String::as_str),
+        Some("local:myproj-kv:v1")
+    );
+    assert_eq!(
+        result.tags.get("xv:migrated_at").map(String::as_str),
+        Some("2026-05-13T21:00:00Z")
     );
 }
 
@@ -316,7 +383,6 @@ async fn set_secret_update_path_when_already_exists() {
     use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
     use aws_sdk_secretsmanager::operation::put_secret_value::PutSecretValueOutput;
     use aws_sdk_secretsmanager::operation::tag_resource::TagResourceOutput;
-    use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceOutput;
     use aws_sdk_secretsmanager::operation::update_secret::UpdateSecretOutput;
     use aws_sdk_secretsmanager::types::error::ResourceExistsException;
     use crosstache::backend::SecretBackend;
@@ -506,6 +572,54 @@ async fn list_deleted_secrets_filters_to_deleted_only() {
     let deleted = backend.list_deleted_secrets("myproj-kv").await.unwrap();
     let names: Vec<String> = deleted.iter().map(|s| s.name.clone()).collect();
     assert_eq!(names, vec!["deleted-one".to_string()]);
+}
+
+#[tokio::test]
+async fn list_deleted_secrets_paginates_all_pages() {
+    use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
+    use aws_sdk_secretsmanager::primitives::DateTime;
+    use aws_sdk_secretsmanager::types::SecretListEntry;
+    use crosstache::backend::SecretBackend;
+
+    let first_page = mock!(Client::list_secrets)
+        .match_requests(|req| req.next_token().is_none())
+        .then_output(|| {
+            ListSecretsOutput::builder()
+                .secret_list(
+                    SecretListEntry::builder()
+                        .name("myproj-kv/deleted-one")
+                        .deleted_date(DateTime::from_secs(1_700_000_000))
+                        .build(),
+                )
+                .next_token("page-2")
+                .build()
+        });
+    let second_page = mock!(Client::list_secrets)
+        .match_requests(|req| req.next_token() == Some("page-2"))
+        .then_output(|| {
+            ListSecretsOutput::builder()
+                .secret_list(
+                    SecretListEntry::builder()
+                        .name("myproj-kv/deleted-two")
+                        .deleted_date(DateTime::from_secs(1_700_000_001))
+                        .build(),
+                )
+                .build()
+        });
+
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&first_page, &second_page]
+    );
+    let backend = aws_secret_backend(client);
+
+    let deleted = backend.list_deleted_secrets("myproj-kv").await.unwrap();
+    let names: Vec<String> = deleted.iter().map(|s| s.name.clone()).collect();
+    assert_eq!(
+        names,
+        vec!["deleted-one".to_string(), "deleted-two".to_string()]
+    );
 }
 
 #[tokio::test]
