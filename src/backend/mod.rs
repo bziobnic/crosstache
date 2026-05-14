@@ -15,6 +15,8 @@
 //! See also: [`BackendError`] for the backend-agnostic error type, and
 //! [`BackendRegistry`] for runtime backend resolution.
 
+#[cfg(feature = "aws")]
+pub mod aws;
 pub mod azure;
 pub mod error;
 #[cfg(feature = "file-ops")]
@@ -47,6 +49,8 @@ pub enum BackendKind {
     Azure,
     /// Local age-encrypted file backend (Phase 2).
     Local,
+    /// AWS Secrets Manager backend (Phase 3).
+    Aws,
 }
 
 impl std::fmt::Display for BackendKind {
@@ -54,6 +58,7 @@ impl std::fmt::Display for BackendKind {
         match self {
             Self::Azure => write!(f, "azure"),
             Self::Local => write!(f, "local"),
+            Self::Aws => write!(f, "aws"),
         }
     }
 }
@@ -65,8 +70,9 @@ impl std::str::FromStr for BackendKind {
         match s.to_lowercase().as_str() {
             "azure" | "az" | "keyvault" => Ok(Self::Azure),
             "local" | "file" | "age" => Ok(Self::Local),
+            "aws" | "secretsmanager" | "asm" => Ok(Self::Aws),
             _ => Err(format!(
-                "unknown backend kind: {s}. Valid options: azure, local"
+                "unknown backend kind: {s}. Valid options: azure, local, aws"
             )),
         }
     }
@@ -84,8 +90,24 @@ pub enum NameCharset {
     AlphanumericHyphen,
     /// Any printable character (the backend encodes as needed).
     Unrestricted,
+    /// AWS Secrets Manager: `[a-zA-Z0-9/_+=.@-]`.
+    AwsRelaxed,
     /// Custom validation function.
     Custom(fn(&str) -> bool),
+}
+
+impl NameCharset {
+    /// Returns true if `name` is valid under this charset.
+    pub fn is_valid(&self, name: &str) -> bool {
+        match self {
+            Self::AlphanumericHyphen => name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            Self::Unrestricted => true,
+            Self::AwsRelaxed => name.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '+' | '=' | '.' | '@' | '-')
+            }),
+            Self::Custom(f) => f(name),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,4 +206,42 @@ pub trait Backend: Send + Sync {
 
     /// Validate configuration and connectivity. Called once at startup.
     async fn health_check(&self) -> Result<(), BackendError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn backend_kind_parses_aws() {
+        assert_eq!(BackendKind::from_str("aws").unwrap(), BackendKind::Aws);
+        assert_eq!(BackendKind::from_str("AWS").unwrap(), BackendKind::Aws);
+        assert_eq!(
+            BackendKind::from_str("secretsmanager").unwrap(),
+            BackendKind::Aws
+        );
+    }
+
+    #[test]
+    fn backend_kind_aws_displays_as_aws() {
+        assert_eq!(format!("{}", BackendKind::Aws), "aws");
+    }
+
+    #[test]
+    fn aws_relaxed_charset_accepts_aws_chars() {
+        let cs = NameCharset::AwsRelaxed;
+        assert!(cs.is_valid("myproj/db-password"));
+        assert!(cs.is_valid("api_key+v2"));
+        assert!(cs.is_valid("alice@example.com"));
+        assert!(cs.is_valid("v1.2.3"));
+    }
+
+    #[test]
+    fn aws_relaxed_charset_rejects_invalid_chars() {
+        let cs = NameCharset::AwsRelaxed;
+        assert!(!cs.is_valid("has space"));
+        assert!(!cs.is_valid("has*star"));
+        assert!(!cs.is_valid("has(paren)"));
+    }
 }

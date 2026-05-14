@@ -1,6 +1,6 @@
 [package]
 name = "crosstache"
-version = "0.9.0"
+version = "0.10.0-rc.1"
 edition = "2021"
 authors = ["crosstache Team"]
 description = "A comprehensive command-line tool for managing Azure Key Vaults"
@@ -41,6 +41,11 @@ azure_core = "0.21"
 azure_security_keyvault = "0.21"
 azure_storage_blobs = "0.21"
 azure_mgmt_storage = "0.21"
+
+# AWS SDK - feature-gated under `aws`
+aws-sdk-secretsmanager = { version = "1", optional = true }
+aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
+aws-smithy-runtime-api = { version = "1", optional = true }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -99,6 +104,7 @@ zip = "2"
 default = ["file-ops"]
 file-ops = []
 tui = []
+aws = ["dep:aws-sdk-secretsmanager", "dep:aws-config", "dep:aws-smithy-runtime-api"]
 
 [build-dependencies]
 built = { version = "0.7", features = ["git2", "chrono"] }
@@ -108,6 +114,8 @@ mockall = "0.12"
 tempfile = "3.0"
 tokio-test = "0.4"
 time = { version = "0.3", features = ["macros"] }
+aws-smithy-mocks-experimental = "0.2"
+aws-sdk-secretsmanager = { version = "1", features = ["test-util"] }
 
 [profile.release]
 strip = true

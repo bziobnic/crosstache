@@ -111,6 +111,16 @@ fn meta_to_properties(meta: &SecretMeta, value: Option<Zeroizing<String>>) -> Se
         .version
         .strip_prefix('v')
         .and_then(|s| s.parse::<u32>().ok());
+    let mut tags = meta.tags.clone();
+    if !meta.groups.is_empty() {
+        tags.insert("groups".to_string(), meta.groups.join(","));
+    }
+    if let Some(note) = meta.note.as_ref().filter(|n| !n.is_empty()) {
+        tags.insert("note".to_string(), note.clone());
+    }
+    if let Some(folder) = meta.folder.as_ref().filter(|f| !f.is_empty()) {
+        tags.insert("folder".to_string(), folder.clone());
+    }
 
     SecretProperties {
         name: meta.name.clone(),
@@ -124,7 +134,7 @@ fn meta_to_properties(meta: &SecretMeta, value: Option<Zeroizing<String>>) -> Se
         enabled: meta.enabled,
         expires_on: meta.expires_on,
         not_before: meta.not_before,
-        tags: meta.tags.clone(),
+        tags,
         content_type: meta.content_type.clone(),
         recovery_level: None,
     }
@@ -1007,12 +1017,10 @@ mod tests {
             .delete_secret("default", "restore-me")
             .await
             .unwrap();
-        assert!(
-            !backend
-                .secret_exists("default", "restore-me")
-                .await
-                .unwrap()
-        );
+        assert!(!backend
+            .secret_exists("default", "restore-me")
+            .await
+            .unwrap());
 
         // Restore
         let restored = backend
@@ -1022,12 +1030,10 @@ mod tests {
         assert_eq!(restored.name, "restore-me");
 
         // Should exist again
-        assert!(
-            backend
-                .secret_exists("default", "restore-me")
-                .await
-                .unwrap()
-        );
+        assert!(backend
+            .secret_exists("default", "restore-me")
+            .await
+            .unwrap());
 
         // Value should be recoverable
         let got = backend
@@ -1143,12 +1149,10 @@ mod tests {
             .set_secret("default", make_request("exists-test", "val"))
             .await
             .unwrap();
-        assert!(
-            backend
-                .secret_exists("default", "exists-test")
-                .await
-                .unwrap()
-        );
+        assert!(backend
+            .secret_exists("default", "exists-test")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

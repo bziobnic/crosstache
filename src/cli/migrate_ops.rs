@@ -3,16 +3,200 @@
 //! Implements `xv migrate --from <backend> --to <backend>`, which copies
 //! secrets from one backend to another while preserving metadata.
 
-use crate::backend::{Backend, BackendKind, BackendRegistry};
+use crate::backend::{Backend, BackendError, BackendKind, BackendRegistry};
 use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::manager::SecretRequest;
 use crate::utils::output;
+use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
+const TAG_MIGRATED_FROM: &str = "xv:migrated_from";
+const TAG_MIGRATED_AT: &str = "xv:migrated_at";
+
+/// Outcome of a single secret migration attempt.
+enum MigrateOutcome {
+    /// Secret was successfully copied to the target backend.
+    Migrated(String),
+    /// Secret was already migrated (same source version exists in target).
+    Skipped(String),
+}
+
+struct MigrationDiff {
+    to_migrate: Vec<String>,
+    conflicts: Vec<String>,
+}
+
+async fn compute_diff(
+    source: &Arc<dyn Backend>,
+    target: &Arc<dyn Backend>,
+    vault: &str,
+    filter: Option<&str>,
+) -> Result<MigrationDiff> {
+    let source_secrets = source
+        .secrets()
+        .list_secrets(vault, None)
+        .await
+        .map_err(|e| {
+            CrosstacheError::Unknown(format!(
+                "Failed to list secrets from {} backend: {e}",
+                source.name()
+            ))
+        })?;
+
+    let filtered: Vec<String> = match filter {
+        Some(pattern) => {
+            let glob = globset::Glob::new(pattern)
+                .map_err(|e| {
+                    CrosstacheError::invalid_argument(format!("Invalid glob pattern: {e}"))
+                })?
+                .compile_matcher();
+            source_secrets
+                .into_iter()
+                .filter(|s| glob.is_match(&s.name))
+                .map(|s| s.name)
+                .collect()
+        }
+        None => source_secrets.into_iter().map(|s| s.name).collect(),
+    };
+
+    let mut to_migrate = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for name in filtered {
+        match target.secrets().secret_exists(vault, &name).await {
+            Ok(true) => conflicts.push(name),
+            Ok(false) => to_migrate.push(name),
+            Err(e) => {
+                tracing::debug!("secret_exists check failed for {name}: {e}; assuming new");
+                to_migrate.push(name);
+            }
+        }
+    }
+    Ok(MigrationDiff {
+        to_migrate,
+        conflicts,
+    })
+}
+
+fn print_diff_summary(
+    diff: &MigrationDiff,
+    source_name: &str,
+    target_name: &str,
+    vault: &str,
+    on_conflict: &crate::cli::commands::OnConflict,
+    dry_run: bool,
+) {
+    println!();
+    println!("Source: {}:{}", source_name, vault);
+    println!("Target: {}:{}", target_name, vault);
+    println!();
+    println!("  to migrate:    {} secret(s)", diff.to_migrate.len());
+    println!(
+        "  conflict:      {} secret(s) (target already has same name)",
+        diff.conflicts.len()
+    );
+    println!();
+    println!("On conflict: {:?}", on_conflict);
+    println!("Dry run? {}", if dry_run { "yes" } else { "no" });
+    println!();
+}
+
+fn build_request_from_props(
+    props: &crate::secret::manager::SecretProperties,
+    source_name: &str,
+    vault: &str,
+) -> SecretRequest {
+    let mut tags = props.tags.clone();
+    let groups = tags.remove("groups").map(|groups| {
+        groups
+            .split(',')
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    let note = tags.remove("note").filter(|note| !note.is_empty());
+    let folder = tags.remove("folder").filter(|folder| !folder.is_empty());
+    tags.insert(
+        TAG_MIGRATED_FROM.into(),
+        format!("{}:{}:{}", source_name, vault, props.version),
+    );
+    tags.insert(TAG_MIGRATED_AT.into(), chrono::Utc::now().to_rfc3339());
+
+    SecretRequest {
+        name: props.original_name.clone(),
+        value: Zeroizing::new(
+            props
+                .value
+                .as_ref()
+                .map(|v| v.as_str().to_string())
+                .unwrap_or_default(),
+        ),
+        content_type: if props.content_type.is_empty() {
+            None
+        } else {
+            Some(props.content_type.clone())
+        },
+        enabled: Some(props.enabled),
+        expires_on: props.expires_on,
+        not_before: props.not_before,
+        tags: if tags.is_empty() { None } else { Some(tags) },
+        groups,
+        note,
+        folder,
+    }
+}
+
+async fn migrate_one(
+    source: &Arc<dyn Backend>,
+    target: &Arc<dyn Backend>,
+    vault: &str,
+    name: &str,
+    force_replace: bool,
+    source_name_for_tag: &str,
+) -> std::result::Result<MigrateOutcome, (String, String)> {
+    // Fetch full props with value
+    let props = source
+        .secrets()
+        .get_secret(vault, name, true)
+        .await
+        .map_err(|e| (name.to_string(), format!("get_secret: {e}")))?;
+
+    // Idempotency check
+    if !force_replace {
+        if let Ok(existing) = target.secrets().get_secret(vault, name, false).await {
+            if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
+                let expected = format!("{}:{}:{}", source_name_for_tag, vault, props.version);
+                if prev_from == &expected {
+                    return Ok(MigrateOutcome::Skipped(name.to_string()));
+                }
+            }
+        }
+    }
+
+    let request = build_request_from_props(&props, source_name_for_tag, vault);
+
+    // Retry with exponential backoff on RateLimited
+    let mut attempt = 0u32;
+    loop {
+        match target.secrets().set_secret(vault, request.clone()).await {
+            Ok(_) => return Ok(MigrateOutcome::Migrated(name.to_string())),
+            Err(BackendError::RateLimited { retry_after_secs }) if attempt < 5 => {
+                let wait = retry_after_secs
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or_else(|| std::time::Duration::from_millis(500 * 2u64.pow(attempt)));
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+            }
+            Err(e) => return Err((name.to_string(), format!("set_secret: {e}"))),
+        }
+    }
+}
+
 /// Create a backend instance for the given kind.
-fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>> {
+async fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>> {
     match kind {
         BackendKind::Azure => {
             let auth_provider =
@@ -32,6 +216,24 @@ fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>
                 })?;
             Ok(Arc::new(backend))
         }
+        #[cfg(feature = "aws")]
+        BackendKind::Aws => {
+            let aws_cfg = config.aws.as_ref().ok_or_else(|| {
+                CrosstacheError::config(
+                    "[aws] config block missing — set backend = \"aws\" or pass --aws-profile",
+                )
+            })?;
+            let backend = crate::backend::aws::AwsBackend::new(aws_cfg, None, None)
+                .await
+                .map_err(|e| {
+                    CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}"))
+                })?;
+            Ok(Arc::new(backend))
+        }
+        #[cfg(not(feature = "aws"))]
+        BackendKind::Aws => Err(CrosstacheError::Unknown(
+            "AWS backend not compiled in: rebuild with --features aws".into(),
+        )),
     }
 }
 
@@ -52,6 +254,15 @@ fn resolve_vault_name(vault_flag: &Option<String>, config: &Config) -> Result<St
             }
         }
     }
+    // Try AWS config default_vault
+    #[cfg(feature = "aws")]
+    if let Some(ref aws) = config.aws {
+        if let Some(ref dv) = aws.default_vault {
+            if !dv.is_empty() {
+                return Ok(dv.clone());
+            }
+        }
+    }
     Err(CrosstacheError::config(
         "No vault specified. Use --vault to specify the vault to migrate.",
     ))
@@ -64,9 +275,25 @@ pub(crate) async fn execute_migrate(
     vault: Option<String>,
     filter: Option<String>,
     dry_run: bool,
-    overwrite: bool,
+    on_conflict: crate::cli::commands::OnConflict,
+    force_replace: bool,
+    concurrency: usize,
+    legacy_overwrite: bool,
     config: Config,
 ) -> Result<()> {
+    if concurrency == 0 {
+        return Err(CrosstacheError::invalid_argument(
+            "--concurrency must be at least 1",
+        ));
+    }
+
+    // Compatibility shim: --overwrite -> --on-conflict replace + warn
+    let on_conflict = if legacy_overwrite {
+        eprintln!("warning: --overwrite is deprecated; use --on-conflict replace");
+        crate::cli::commands::OnConflict::Replace
+    } else {
+        on_conflict
+    };
     // 1. Parse backend kinds
     let from_kind: BackendKind = from
         .parse()
@@ -82,8 +309,8 @@ pub(crate) async fn execute_migrate(
     }
 
     // 2. Create both backends
-    let source = create_backend(from_kind, &config)?;
-    let target = create_backend(to_kind, &config)?;
+    let source = create_backend(from_kind, &config).await?;
+    let target = create_backend(to_kind, &config).await?;
 
     // 3. Resolve vault name
     let vault_name = resolve_vault_name(&vault, &config)?;
@@ -139,129 +366,97 @@ pub(crate) async fn execute_migrate(
         }
     }
 
-    // 5. List secrets from source
-    let secrets = source
-        .secrets()
-        .list_secrets(&vault_name, None)
-        .await
-        .map_err(|e| {
-            CrosstacheError::Unknown(format!(
-                "Failed to list secrets from {} backend: {e}",
-                source.name()
-            ))
-        })?;
+    // 5. Compute diff (list + filter + conflict detection)
+    let diff = compute_diff(&source, &target, &vault_name, filter.as_deref()).await?;
+    print_diff_summary(
+        &diff,
+        source.name(),
+        target.name(),
+        &vault_name,
+        &on_conflict,
+        dry_run,
+    );
 
-    if secrets.is_empty() {
-        output::info("No secrets found in the source vault.");
+    if dry_run {
         return Ok(());
     }
 
-    // 6. Apply filter if specified
-    let filtered_secrets: Vec<_> = if let Some(ref pattern) = filter {
-        let glob = globset::Glob::new(pattern)
-            .map_err(|e| CrosstacheError::invalid_argument(format!("Invalid glob pattern: {e}")))?
-            .compile_matcher();
-        secrets
-            .into_iter()
-            .filter(|s| glob.is_match(&s.name))
-            .collect()
-    } else {
-        secrets
-    };
+    // Honor --on-conflict fail
+    if !diff.conflicts.is_empty() && on_conflict == crate::cli::commands::OnConflict::Fail {
+        return Err(CrosstacheError::Unknown(format!(
+            "{} conflict(s) detected; aborting (--on-conflict fail)",
+            diff.conflicts.len()
+        )));
+    }
 
-    if filtered_secrets.is_empty() {
-        output::info("No secrets matched the filter pattern.");
+    // Build list of names to process
+    let mut names_to_process: Vec<String> = diff.to_migrate.clone();
+    if on_conflict == crate::cli::commands::OnConflict::Replace {
+        names_to_process.extend(diff.conflicts.clone());
+    }
+
+    if names_to_process.is_empty() {
+        output::info("No secrets to migrate.");
         return Ok(());
     }
 
-    output::info(&format!(
-        "Found {} secret(s) to migrate",
-        filtered_secrets.len()
-    ));
+    // 6. Migrate secrets concurrently with backoff retry
+    let source_name_tag = source.name().to_string();
+    let source_arc = source.clone();
+    let target_arc = target.clone();
+    let vault_clone = vault_name.clone();
+
+    let results: Vec<_> =
+        stream::iter(
+            names_to_process.iter().map(|name| {
+                let source = source_arc.clone();
+                let target = target_arc.clone();
+                let vault = vault_clone.clone();
+                let name = name.clone();
+                let src_tag = source_name_tag.clone();
+                async move {
+                    migrate_one(&source, &target, &vault, &name, force_replace, &src_tag).await
+                }
+            }),
+        )
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
 
     let mut migrated = 0usize;
     let mut skipped = 0usize;
+    let mut errors: Vec<(String, String)> = Vec::new();
 
-    // 7. Migrate each secret
-    for summary in &filtered_secrets {
-        let name = &summary.name;
-
-        if dry_run {
-            println!("  [dry-run] Would migrate: {}", name);
-            migrated += 1;
-            continue;
-        }
-
-        // Check if secret already exists in target (unless overwrite is set)
-        if !overwrite {
-            match target.secrets().secret_exists(&vault_name, name).await {
-                Ok(true) => {
-                    println!("  [skip] {} — already exists in target", name);
-                    skipped += 1;
-                    continue;
-                }
-                Ok(false) => {}
-                Err(_) => {
-                    // If existence check fails, proceed anyway
-                }
-            }
-        }
-
-        // Get secret with value from source
-        let props = source
-            .secrets()
-            .get_secret(&vault_name, name, true)
-            .await
-            .map_err(|e| {
-                CrosstacheError::Unknown(format!(
-                    "Failed to get secret '{}' from source: {e}",
-                    name
-                ))
-            })?;
-
-        // Build SecretRequest from source properties
-        let value = props.value.unwrap_or_else(|| Zeroizing::new(String::new()));
-        let request = SecretRequest {
-            name: props.original_name.clone(),
-            value,
-            content_type: if props.content_type.is_empty() {
-                None
-            } else {
-                Some(props.content_type.clone())
-            },
-            enabled: Some(props.enabled),
-            expires_on: props.expires_on,
-            not_before: props.not_before,
-            tags: if props.tags.is_empty() {
-                None
-            } else {
-                Some(props.tags.clone())
-            },
-            groups: None,
-            note: None,
-            folder: None,
-        };
-
-        // Set secret in target
-        match target.secrets().set_secret(&vault_name, request).await {
-            Ok(_) => {
+    for r in results {
+        match r {
+            Ok(MigrateOutcome::Migrated(name)) => {
                 println!("  [ok] {}", name);
                 migrated += 1;
             }
-            Err(e) => {
-                println!("  [error] {} — {}", name, e);
+            Ok(MigrateOutcome::Skipped(name)) => {
+                println!("  [skip] {} — already migrated (same source version)", name);
                 skipped += 1;
+            }
+            Err((name, msg)) => {
+                println!("  [error] {} — {}", name, msg);
+                errors.push((name, msg));
             }
         }
     }
 
-    // 8. Print summary
+    // 7. Print summary
     println!();
-    if dry_run {
-        output::success(&format!(
-            "Dry run complete: {} secret(s) would be migrated",
-            migrated
+    if !errors.is_empty() {
+        output::warn(&format!(
+            "Migrated {} secret(s), {} skipped, {} error(s)",
+            migrated,
+            skipped,
+            errors.len()
         ));
+        return Err(CrosstacheError::Unknown(format!(
+            "Migration failed for {} secret(s)",
+            errors.len()
+        )));
     } else {
         output::success(&format!(
             "Migrated {} secret(s) ({} skipped)",
@@ -276,6 +471,7 @@ pub(crate) async fn execute_migrate(
 mod tests {
     use super::*;
     use crate::config::settings::LocalConfig;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -308,6 +504,20 @@ mod tests {
         assert_eq!(result.unwrap(), "local-vault");
     }
 
+    #[cfg(feature = "aws")]
+    #[test]
+    fn resolve_vault_name_from_aws_config() {
+        let config = Config {
+            aws: Some(crate::config::settings::AwsConfig {
+                default_vault: Some("aws-vault".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let result = resolve_vault_name(&None, &config);
+        assert_eq!(result.unwrap(), "aws-vault");
+    }
+
     #[test]
     fn resolve_vault_name_fails_when_no_vault() {
         let config = Config::default();
@@ -320,6 +530,73 @@ mod tests {
         let from_kind: BackendKind = "local".parse().unwrap();
         let to_kind: BackendKind = "local".parse().unwrap();
         assert_eq!(from_kind, to_kind);
+    }
+
+    #[test]
+    fn build_request_promotes_metadata_tags_to_request_fields() {
+        let mut tags = HashMap::new();
+        tags.insert("groups".to_string(), "db, prod".to_string());
+        tags.insert("note".to_string(), "primary database password".to_string());
+        tags.insert("folder".to_string(), "infra/database".to_string());
+        tags.insert("owner".to_string(), "platform".to_string());
+
+        let props = crate::secret::manager::SecretProperties {
+            name: "db-password".to_string(),
+            original_name: "db-password".to_string(),
+            value: Some(Zeroizing::new("secret-value".to_string())),
+            version: "v7".to_string(),
+            version_number: Some(7),
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags,
+            content_type: "text/plain".to_string(),
+            recovery_level: None,
+        };
+
+        let request = build_request_from_props(&props, "local", "default");
+
+        assert_eq!(
+            request.groups,
+            Some(vec!["db".to_string(), "prod".to_string()])
+        );
+        assert_eq!(request.note.as_deref(), Some("primary database password"));
+        assert_eq!(request.folder.as_deref(), Some("infra/database"));
+        let request_tags = request.tags.unwrap();
+        assert_eq!(
+            request_tags.get("owner").map(String::as_str),
+            Some("platform")
+        );
+        assert_eq!(
+            request_tags.get(TAG_MIGRATED_FROM).map(String::as_str),
+            Some("local:default:v7")
+        );
+        assert!(!request_tags.contains_key("groups"));
+        assert!(!request_tags.contains_key("note"));
+        assert!(!request_tags.contains_key("folder"));
+    }
+
+    #[tokio::test]
+    async fn execute_migrate_rejects_zero_concurrency() {
+        let result = execute_migrate(
+            "local".to_string(),
+            "aws".to_string(),
+            Some("default".to_string()),
+            None,
+            false,
+            crate::cli::commands::OnConflict::Skip,
+            false,
+            0,
+            false,
+            Config::default(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("concurrency"));
     }
 
     #[tokio::test]

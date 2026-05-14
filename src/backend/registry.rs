@@ -40,14 +40,19 @@ impl BackendRegistry {
     /// Build a registry from the loaded [`Config`].
     ///
     /// The active backend is determined by `config.backend` (defaulting to
-    /// `"azure"` when absent). For Azure, an [`AzureBackend`] is created
-    /// using the existing auth provider. For Local, an error is returned
-    /// because the local backend is not yet implemented.
+    /// `"azure"` when absent). Named backends in `config.named_backends` are
+    /// checked first; if a matching entry is found it is instantiated directly.
     ///
     /// [`AzureBackend`]: super::azure::AzureBackend
     pub fn from_config(config: &Config) -> Result<Self, BackendError> {
-        let kind: BackendKind = config
-            .effective_backend_name()
+        let backend_name = config.effective_backend_name();
+
+        // Resolve named-backend entry first if applicable
+        if let Some(entry) = config.named_backends.get(backend_name) {
+            return Self::from_named_entry(backend_name, entry);
+        }
+
+        let kind: BackendKind = backend_name
             .parse()
             .map_err(|e: String| BackendError::Internal(e))?;
 
@@ -61,6 +66,55 @@ impl BackendRegistry {
             }
             BackendKind::Local => {
                 let backend = super::local::LocalBackend::new(config.local.as_ref())?;
+                Ok(Self::new(Arc::new(backend)))
+            }
+            #[cfg(feature = "aws")]
+            BackendKind::Aws => {
+                let aws_cfg = config.aws.as_ref().ok_or_else(|| {
+                    BackendError::Internal(
+                        "[aws] config block missing — set backend = \"aws\" with [aws] block"
+                            .into(),
+                    )
+                })?;
+                // block_in_place is safe to call from inside a tokio multi-thread
+                // runtime (unlike Handle::block_on which panics if a runtime is
+                // already active on the current thread).
+                let backend = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))
+                })?;
+                Ok(Self::new(Arc::new(backend)))
+            }
+            #[cfg(not(feature = "aws"))]
+            BackendKind::Aws => Err(BackendError::Internal(
+                "AWS backend not compiled in: rebuild with --features aws".into(),
+            )),
+        }
+    }
+
+    fn from_named_entry(
+        name: &str,
+        entry: &crate::config::settings::NamedBackendEntry,
+    ) -> Result<Self, BackendError> {
+        use crate::config::settings::NamedBackendEntry as NBE;
+        // `name` is used in the not(feature = "aws") error path below.
+        // When aws is compiled in, Rust sees it unused — suppress the lint.
+        let _ = name;
+        match entry {
+            #[cfg(feature = "aws")]
+            NBE::Aws(aws_cfg) => {
+                let backend = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))
+                })?;
+                Ok(Self::new(Arc::new(backend)))
+            }
+            #[cfg(not(feature = "aws"))]
+            NBE::Aws(_) => Err(BackendError::Internal(format!(
+                "named backend '{name}' is aws but binary built without --features aws"
+            ))),
+            NBE::Local(local_cfg) => {
+                let backend = super::local::LocalBackend::new(Some(local_cfg))?;
                 Ok(Self::new(Arc::new(backend)))
             }
         }
@@ -167,5 +221,22 @@ mod tests {
         };
         let result = BackendRegistry::from_config(&config);
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "aws")]
+    #[tokio::test]
+    async fn from_config_aws_requires_aws_block() {
+        let config = Config {
+            backend: Some("aws".to_string()),
+            aws: None,
+            ..Default::default()
+        };
+        let result = BackendRegistry::from_config(&config);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("[aws]") || err_str.contains("aws"),
+            "got: {err_str}"
+        );
     }
 }

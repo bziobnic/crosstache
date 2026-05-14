@@ -121,7 +121,7 @@ pub(crate) fn extract_claims_from_token(token: &str) -> Result<TokenClaims> {
     }
 
     let payload = parts[1];
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     // Azure AD JWT tokens use base64url encoding (RFC 4648 §5), no padding
     let decoded = URL_SAFE_NO_PAD
         .decode(payload)
