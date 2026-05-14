@@ -37,12 +37,8 @@ pub fn is_marker(full_name: &str) -> bool {
     full_name.ends_with(&format!("/{MARKER_BASENAME}")) || full_name == MARKER_BASENAME
 }
 
-/// Validate a user-facing secret name. Rejects empty names, names in the
-/// reserved `.xv-*` namespace, and names that would exceed [`MAX_NAME_LEN`]
-/// once the vault prefix and separator are prepended.
-///
-/// Note: the vault prefix length is not known here, so we conservatively check
-/// that the bare name does not already exceed the limit by itself.
+/// Validate a user-facing secret name. Rejects empty names and names in the
+/// reserved `.xv-*` namespace.
 pub fn validate_secret_name(name: &str) -> Result<(), BackendError> {
     if name.is_empty() {
         return Err(BackendError::InvalidArgument(
@@ -58,6 +54,19 @@ pub fn validate_secret_name(name: &str) -> Result<(), BackendError> {
         return Err(BackendError::InvalidArgument(format!(
             "secret name too long: {} chars (max {MAX_NAME_LEN})",
             name.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the full AWS secret name after the vault prefix is prepended.
+pub fn validate_full_secret_name(vault: &str, name: &str) -> Result<(), BackendError> {
+    validate_secret_name(name)?;
+    let full_name = aws_name(vault, name);
+    if full_name.len() > MAX_NAME_LEN {
+        return Err(BackendError::InvalidArgument(format!(
+            "AWS secret name too long: {} chars for '{vault}/{name}' (max {MAX_NAME_LEN})",
+            full_name.len()
         )));
     }
     Ok(())
@@ -111,5 +120,16 @@ mod tests {
         assert!(validate_secret_name("db-password").is_ok());
         assert!(validate_secret_name("api/v1/key").is_ok());
         assert!(validate_secret_name("v1.2.3-rc.1").is_ok());
+    }
+
+    #[test]
+    fn validate_full_secret_name_counts_vault_prefix() {
+        let vault = "vault-prefix";
+        let max_inner = MAX_NAME_LEN - vault.len() - 1;
+        assert!(validate_full_secret_name(vault, &"a".repeat(max_inner)).is_ok());
+        assert!(matches!(
+            validate_full_secret_name(vault, &"a".repeat(max_inner + 1)),
+            Err(BackendError::InvalidArgument(_))
+        ));
     }
 }

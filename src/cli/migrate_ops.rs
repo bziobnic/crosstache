@@ -254,6 +254,15 @@ fn resolve_vault_name(vault_flag: &Option<String>, config: &Config) -> Result<St
             }
         }
     }
+    // Try AWS config default_vault
+    #[cfg(feature = "aws")]
+    if let Some(ref aws) = config.aws {
+        if let Some(ref dv) = aws.default_vault {
+            if !dv.is_empty() {
+                return Ok(dv.clone());
+            }
+        }
+    }
     Err(CrosstacheError::config(
         "No vault specified. Use --vault to specify the vault to migrate.",
     ))
@@ -493,6 +502,20 @@ mod tests {
         };
         let result = resolve_vault_name(&None, &config);
         assert_eq!(result.unwrap(), "local-vault");
+    }
+
+    #[cfg(feature = "aws")]
+    #[test]
+    fn resolve_vault_name_from_aws_config() {
+        let config = Config {
+            aws: Some(crate::config::settings::AwsConfig {
+                default_vault: Some("aws-vault".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let result = resolve_vault_name(&None, &config);
+        assert_eq!(result.unwrap(), "aws-vault");
     }
 
     #[test]

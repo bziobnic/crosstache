@@ -363,13 +363,13 @@ impl SecretBackend for AwsSecretBackend {
         vault: &str,
         request: SecretRequest,
     ) -> Result<SecretProperties, BackendError> {
-        use crate::backend::aws::encoding::{aws_name, validate_secret_name};
+        use crate::backend::aws::encoding::{aws_name, validate_full_secret_name};
         use crate::backend::aws::metadata::{
             TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME,
         };
         use aws_sdk_secretsmanager::types::Tag;
 
-        validate_secret_name(&request.name)?;
+        validate_full_secret_name(vault, &request.name)?;
         let aws_full_name = aws_name(vault, &request.name);
 
         let mut tags: Vec<Tag> = Vec::new();
