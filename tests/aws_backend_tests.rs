@@ -154,6 +154,13 @@ async fn get_secret_no_value_returns_metadata_only() {
                         .value("2026-05-13T21:00:00Z")
                         .build(),
                 )
+                .tags(Tag::builder().key("xv:groups").value("api,prod").build())
+                .tags(
+                    Tag::builder()
+                        .key("xv:folder")
+                        .value("services/api")
+                        .build(),
+                )
                 .build()
         });
 
@@ -177,6 +184,18 @@ async fn get_secret_no_value_returns_metadata_only() {
     assert_eq!(
         result.tags.get("xv:migrated_at").map(String::as_str),
         Some("2026-05-13T21:00:00Z")
+    );
+    assert_eq!(
+        result.tags.get("groups").map(String::as_str),
+        Some("api,prod")
+    );
+    assert_eq!(
+        result.tags.get("folder").map(String::as_str),
+        Some("services/api")
+    );
+    assert_eq!(
+        result.tags.get("note").map(String::as_str),
+        Some("API key for service")
     );
 }
 

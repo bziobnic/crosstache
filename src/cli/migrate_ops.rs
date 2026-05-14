@@ -109,6 +109,16 @@ fn build_request_from_props(
     vault: &str,
 ) -> SecretRequest {
     let mut tags = props.tags.clone();
+    let groups = tags.remove("groups").map(|groups| {
+        groups
+            .split(',')
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    let note = tags.remove("note").filter(|note| !note.is_empty());
+    let folder = tags.remove("folder").filter(|folder| !folder.is_empty());
     tags.insert(
         TAG_MIGRATED_FROM.into(),
         format!("{}:{}:{}", source_name, vault, props.version),
@@ -133,9 +143,9 @@ fn build_request_from_props(
         expires_on: props.expires_on,
         not_before: props.not_before,
         tags: if tags.is_empty() { None } else { Some(tags) },
-        groups: None,
-        note: None,
-        folder: None,
+        groups,
+        note,
+        folder,
     }
 }
 
@@ -262,6 +272,12 @@ pub(crate) async fn execute_migrate(
     legacy_overwrite: bool,
     config: Config,
 ) -> Result<()> {
+    if concurrency == 0 {
+        return Err(CrosstacheError::invalid_argument(
+            "--concurrency must be at least 1",
+        ));
+    }
+
     // Compatibility shim: --overwrite -> --on-conflict replace + warn
     let on_conflict = if legacy_overwrite {
         eprintln!("warning: --overwrite is deprecated; use --on-conflict replace");
@@ -446,6 +462,7 @@ pub(crate) async fn execute_migrate(
 mod tests {
     use super::*;
     use crate::config::settings::LocalConfig;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -490,6 +507,73 @@ mod tests {
         let from_kind: BackendKind = "local".parse().unwrap();
         let to_kind: BackendKind = "local".parse().unwrap();
         assert_eq!(from_kind, to_kind);
+    }
+
+    #[test]
+    fn build_request_promotes_metadata_tags_to_request_fields() {
+        let mut tags = HashMap::new();
+        tags.insert("groups".to_string(), "db, prod".to_string());
+        tags.insert("note".to_string(), "primary database password".to_string());
+        tags.insert("folder".to_string(), "infra/database".to_string());
+        tags.insert("owner".to_string(), "platform".to_string());
+
+        let props = crate::secret::manager::SecretProperties {
+            name: "db-password".to_string(),
+            original_name: "db-password".to_string(),
+            value: Some(Zeroizing::new("secret-value".to_string())),
+            version: "v7".to_string(),
+            version_number: Some(7),
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags,
+            content_type: "text/plain".to_string(),
+            recovery_level: None,
+        };
+
+        let request = build_request_from_props(&props, "local", "default");
+
+        assert_eq!(
+            request.groups,
+            Some(vec!["db".to_string(), "prod".to_string()])
+        );
+        assert_eq!(request.note.as_deref(), Some("primary database password"));
+        assert_eq!(request.folder.as_deref(), Some("infra/database"));
+        let request_tags = request.tags.unwrap();
+        assert_eq!(
+            request_tags.get("owner").map(String::as_str),
+            Some("platform")
+        );
+        assert_eq!(
+            request_tags.get(TAG_MIGRATED_FROM).map(String::as_str),
+            Some("local:default:v7")
+        );
+        assert!(!request_tags.contains_key("groups"));
+        assert!(!request_tags.contains_key("note"));
+        assert!(!request_tags.contains_key("folder"));
+    }
+
+    #[tokio::test]
+    async fn execute_migrate_rejects_zero_concurrency() {
+        let result = execute_migrate(
+            "local".to_string(),
+            "aws".to_string(),
+            Some("default".to_string()),
+            None,
+            false,
+            crate::cli::commands::OnConflict::Skip,
+            false,
+            0,
+            false,
+            Config::default(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("concurrency"));
     }
 
     #[tokio::test]

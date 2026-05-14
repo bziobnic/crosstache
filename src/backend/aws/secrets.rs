@@ -256,7 +256,7 @@ impl AwsSecretBackend {
         // Decode xv: tags into semantic fields; everything else becomes a user tag.
         let mut original_name: Option<String> = None;
         let mut groups: Vec<String> = Vec::new();
-        let mut _folder: Option<String> = None;
+        let mut folder: Option<String> = None;
         let mut content_type: Option<String> = None;
         let mut expires_on: Option<chrono::DateTime<chrono::Utc>> = None;
         let mut user_tags: HashMap<String, String> = HashMap::new();
@@ -271,7 +271,7 @@ impl AwsSecretBackend {
                         .map(|s| s.to_string())
                         .collect();
                 }
-                TAG_FOLDER => _folder = Some(v.clone()),
+                TAG_FOLDER => folder = Some(v.clone()),
                 TAG_CONTENT_TYPE => content_type = Some(v.clone()),
                 TAG_EXPIRES_AT => {
                     expires_on = chrono::DateTime::parse_from_rfc3339(v)
@@ -292,6 +292,12 @@ impl AwsSecretBackend {
         // (which reads tags["groups"]) can still find them.
         if !groups.is_empty() {
             user_tags.insert("groups".to_string(), groups.join(","));
+        }
+        if let Some(folder) = folder.filter(|f| !f.is_empty()) {
+            user_tags.insert("folder".to_string(), folder);
+        }
+        if let Some(note) = describe.description().filter(|n| !n.is_empty()) {
+            user_tags.insert("note".to_string(), note.to_string());
         }
 
         let name = original_name
