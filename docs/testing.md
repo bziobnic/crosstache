@@ -57,6 +57,60 @@ These tests:
 - Clean up created secrets at the end of the suite
 - Are intentionally NOT in the default CI run (no Azure creds in CI)
 
+## Authenticated backend e2e tests — manual
+
+Two suites exercise the `AwsBackend` / `AzureBackend` types directly
+(not via the `xv` binary) against the **real** cloud APIs, using the
+credentials already configured for the `aws` / `az` CLIs. All tests are
+`#[ignore]`'d so they never run in normal `cargo test`.
+
+### AWS — `tests/e2e_aws_backend.rs`
+
+Requires a working AWS identity (`aws sts get-caller-identity`) with
+Secrets Manager create/read/update/delete permission.
+
+```bash
+cargo test --features aws --test e2e_aws_backend -- --ignored --nocapture --test-threads=1
+```
+
+Notes:
+- Each test uses a unique timestamped vault prefix (`xv-e2e-aws-<ts>`)
+  and force-purges everything it creates.
+- AWS CLI v2.22+ caches credentials under `~/.aws/login/cache/`, a format
+  the Rust SDK credential chain does not read. The test harness bridges
+  this with `aws configure export-credentials --format env` before
+  building the client.
+- `ListSecrets` / `list_vaults` are eventually consistent — the harness
+  polls (12 × 2s) instead of asserting immediately after a write.
+
+### Azure — `tests/e2e_azure_backend.rs`
+
+Requires Azure CLI auth (`az login`) and a reachable test Key Vault.
+Defaults to vault `heythere`; override with `XV_E2E_AZURE_VAULT` or
+`DEFAULT_VAULT`.
+
+```bash
+cargo test --test e2e_azure_backend -- --ignored --nocapture --test-threads=1
+```
+
+Notes:
+- Each secret name is uniquely timestamped (`xv-e2e-az-<ts>`).
+- `heythere` has purge protection enabled, so cleanup is best-effort
+  soft-delete only; unique names guarantee no reuse within the recovery
+  window.
+
+### Known backend issues surfaced by these tests
+
+- **AWS multi-group tags** — `AwsSecretBackend` stores groups as the
+  `xv:groups` tag value joined by `,`. AWS Secrets Manager's tagging
+  service rejects commas in tag values, so any update with 2+ groups
+  fails (`InvalidRequestException`). The e2e test only exercises a single
+  group as a workaround.
+- **Azure `version` field inconsistency** — `set_secret`/`get_secret`
+  populate `SecretProperties.version` with the *full* Key Vault id URL,
+  but `get_secret_version` / `rollback` expect only the trailing version
+  segment. The e2e test normalises with `rsplit('/')`.
+
 ## Adding a new hermetic test
 
 1. Pick the file that fits thematically (or create a new `tests/<topic>_tests.rs`).
