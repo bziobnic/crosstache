@@ -15,10 +15,14 @@ vault = "myproj-dev-kv"
 resource_group = "myproj-rg"
 group = "backend"          # optional
 folder = "app/database"    # optional
+backend = "azure"          # optional: azure | local | aws
 
 [env.prod]
 vault = "myproj-prod-kv"
 resource_group = "myproj-prod-rg"
+
+[env.local-dev]
+backend = "local"          # use local age-encrypted backend for this env
 ```
 
 All fields except `[env.<name>]` blocks are optional. New fields (output
@@ -44,6 +48,18 @@ resolves in this order:
 2. The active env's field in `.xv.toml`
 3. The legacy `.xv/context` JSON (deprecated; see below)
 4. The user's global config default
+
+### Backend resolution
+
+The `backend` field in an env profile selects which secrets backend that env
+targets. Resolution order (highest first):
+
+1. `--backend` CLI flag
+2. `backend` field in the active env profile (`.xv.toml`)
+3. `backend` key in the global config file (`xv.conf`) or `XV_BACKEND` env var
+4. Default: `azure`
+
+Valid values: `azure`, `local`, `aws` (canonical names only — aliases like `az`, `file`, or `secretsmanager` are not accepted in `.xv.toml`; named backend keys defined under `[backends.*]` in `xv.conf` are also not supported here).
 
 ## Cross-boundary notice
 
