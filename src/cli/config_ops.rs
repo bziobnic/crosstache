@@ -791,6 +791,7 @@ async fn execute_context_init(
             resource_group: Some(resource_group),
             group: None,
             folder: None,
+            backend: None,
         },
     );
 

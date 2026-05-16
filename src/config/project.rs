@@ -49,6 +49,41 @@ pub struct EnvProfile {
     pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// Backend to use for this env. Must be one of: `azure`, `local`, `aws`.
+    /// Overrides the global config `backend` key but loses to `--backend` CLI flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+}
+
+/// Validate that a backend value from an env profile is a known backend.
+///
+/// Returns `Err` with a descriptive message if `value` is not one of the
+/// recognised canonical names (`azure`, `local`, `aws`).
+pub fn validate_env_profile_backend(value: &str) -> Result<()> {
+    match value {
+        "azure" | "local" | "aws" => Ok(()),
+        other => Err(CrosstacheError::config(format!(
+            "invalid backend {other:?} in .xv.toml env profile — must be one of: azure, local, aws"
+        ))),
+    }
+}
+
+/// Resolve the effective backend name from the four resolution layers.
+///
+/// Precedence (highest first):
+/// 1. `cli_backend`     — explicit `--backend` flag
+/// 2. `profile_backend` — active env profile's `backend` field
+/// 3. `config_backend`  — global config `backend` key (or `XV_BACKEND`)
+/// 4. `"azure"`         — built-in default
+pub fn resolve_effective_backend<'a>(
+    cli_backend: Option<&'a str>,
+    profile_backend: Option<&'a str>,
+    config_backend: Option<&'a str>,
+) -> &'a str {
+    cli_backend
+        .or(profile_backend)
+        .or(config_backend)
+        .unwrap_or("azure")
 }
 
 /// Scanner configuration block for leak detection settings.
@@ -224,6 +259,7 @@ mod tests {
         assert_eq!(p.resource_group, None);
         assert_eq!(p.group, None);
         assert_eq!(p.folder, None);
+        assert_eq!(p.backend, None);
     }
 
     #[test]
@@ -509,6 +545,85 @@ resource_group = "rg"
             Some("using config from /path/a/.xv.toml (env: dev)".to_string()),
         );
         assert_eq!(captured2, None, "second call must be no-op");
+    }
+
+    // --- backend field tests ---
+
+    #[test]
+    fn backend_field_parses() {
+        let toml = r#"
+[env.dev]
+vault = "v"
+resource_group = "rg"
+backend = "aws"
+"#;
+        let cfg = parse_str(toml).expect("must parse");
+        let dev = cfg.envs.get("dev").unwrap();
+        assert_eq!(dev.backend.as_deref(), Some("aws"));
+    }
+
+    #[test]
+    fn backend_field_defaults_to_none() {
+        let toml = r#"
+[env.dev]
+vault = "v"
+resource_group = "rg"
+"#;
+        let cfg = parse_str(toml).expect("must parse");
+        let dev = cfg.envs.get("dev").unwrap();
+        assert_eq!(dev.backend, None);
+    }
+
+    #[test]
+    fn backend_all_valid_values_accepted() {
+        for name in &["azure", "local", "aws"] {
+            assert!(
+                validate_env_profile_backend(name).is_ok(),
+                "expected {name:?} to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_invalid_value_rejected() {
+        let err = validate_env_profile_backend("gcp").expect_err("must err");
+        assert!(
+            err.to_string().contains("gcp"),
+            "error should name the bad value; got: {err}"
+        );
+        assert!(
+            err.to_string().contains("azure") || err.to_string().contains("must be"),
+            "error should name valid options; got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_backend_cli_wins_over_all() {
+        assert_eq!(
+            resolve_effective_backend(Some("local"), Some("aws"), Some("azure")),
+            "local"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_backend_profile_wins_over_config() {
+        assert_eq!(
+            resolve_effective_backend(None, Some("aws"), Some("azure")),
+            "aws"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_backend_config_wins_over_default() {
+        assert_eq!(
+            resolve_effective_backend(None, None, Some("local")),
+            "local"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_backend_falls_back_to_azure() {
+        assert_eq!(resolve_effective_backend(None, None, None), "azure");
     }
 
     #[test]

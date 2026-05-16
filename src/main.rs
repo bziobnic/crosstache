@@ -89,10 +89,61 @@ async fn run(cli: Cli) -> Result<()> {
     // resolve_resource_group when consulting .xv.toml).
     config.env_flag = cli.env.clone();
 
-    // Apply CLI --backend flag to config (overrides config file and env var).
-    if let Some(ref backend) = cli.backend {
-        config.backend = Some(backend.clone());
-    }
+    // Resolve env-profile backend (validate early; fail before touching Azure).
+    // Precedence: CLI --backend > env-profile backend > config-file backend > "azure".
+    let profile_backend: Option<String> = if cli.backend.is_none() {
+        match std::env::current_dir() {
+            Err(_) => None, // degenerate env — skip project-config walk
+            Ok(cwd) => {
+                if let Ok(Some((path, proj_cfg))) =
+                    crate::config::project::find_project_config(&cwd).await
+                {
+                    if let Ok((name, profile)) =
+                        crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
+                    {
+                        if let Some(ref b) = profile.backend {
+                            crate::config::project::validate_env_profile_backend(b)?;
+                            // Emit a notice when the project file (especially an
+                            // ancestor directory's) overrides the backend — this
+                            // is the highest-impact override a .xv.toml can make.
+                            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                                if let Some(line) =
+                                    crate::config::project::capture_cross_boundary_notice(
+                                        &path, name,
+                                    )
+                                {
+                                    eprintln!("{line}");
+                                }
+                            }
+                            tracing::debug!(
+                                "backend '{b}' selected by env profile '{name}' in {}",
+                                path.display()
+                            );
+                            Some(b.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        // Unknown env name — skip; command handler surfaces the error.
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    config.backend = Some(
+        crate::config::project::resolve_effective_backend(
+            cli.backend.as_deref(),
+            profile_backend.as_deref(),
+            config.backend.as_deref(),
+        )
+        .to_string(),
+    );
 
     // Build the backend registry for commands that talk to a secrets backend.
     // Commands that are purely local (Config, Init, Cache, Context, etc.) skip
