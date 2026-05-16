@@ -99,18 +99,6 @@ Notes:
   soft-delete only; unique names guarantee no reuse within the recovery
   window.
 
-### Known backend issues surfaced by these tests
-
-- **AWS multi-group tags** — `AwsSecretBackend` stores groups as the
-  `xv:groups` tag value joined by `,`. AWS Secrets Manager's tagging
-  service rejects commas in tag values, so any update with 2+ groups
-  fails (`InvalidRequestException`). The e2e test only exercises a single
-  group as a workaround.
-- **Azure `version` field inconsistency** — `set_secret`/`get_secret`
-  populate `SecretProperties.version` with the *full* Key Vault id URL,
-  but `get_secret_version` / `rollback` expect only the trailing version
-  segment. The e2e test normalises with `rsplit('/')`.
-
 ## Adding a new hermetic test
 
 1. Pick the file that fits thematically (or create a new `tests/<topic>_tests.rs`).
