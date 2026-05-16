@@ -1,6 +1,6 @@
 //! Secret command execution handlers.
 
-use crate::backend::BackendRegistry;
+use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, ShareCommands};
 use crate::cli::helpers::{
     copy_to_clipboard, generate_random_value, get_azure_auth_provider, mask_secrets,
@@ -2053,6 +2053,42 @@ async fn execute_secret_rotate(
     Ok(())
 }
 
+/// Resolve a single `xv://` URI reference to its secret, dispatching to the
+/// active backend or a cross-backend instance as needed.
+///
+/// `cross_backends` caches freshly-created backends by kind so the SDK is not
+/// re-initialised per URI. Shared by `execute_secret_run` and
+/// `execute_secret_inject` to keep cross-backend resolution logic in one place.
+async fn resolve_uri_secret(
+    backend_ref: &BackendRef,
+    secret_name: &str,
+    secret_manager: &crate::secret::manager::SecretManager,
+    config: &Config,
+    active_kind: BackendKind,
+    cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
+) -> Result<crate::secret::manager::SecretProperties> {
+    if let Some(backend_kind) = backend_ref.backend {
+        if backend_kind != active_kind {
+            // Cross-backend: reuse or create a cached backend instance
+            if !cross_backends.contains_key(&backend_kind) {
+                let b = BackendRegistry::create_for_kind(backend_kind, config)
+                    .await
+                    .map_err(CrosstacheError::from)?;
+                cross_backends.insert(backend_kind, b);
+            }
+            return cross_backends[&backend_kind]
+                .secrets()
+                .get_secret(&backend_ref.vault, secret_name, true)
+                .await
+                .map_err(CrosstacheError::from);
+        }
+    }
+    secret_manager
+        .secret_ops()
+        .get_secret(&backend_ref.vault, secret_name, true)
+        .await
+}
+
 async fn execute_secret_run(
     secret_manager: &crate::secret::manager::SecretManager,
     vault: Option<String>,
@@ -2079,21 +2115,21 @@ async fn execute_secret_run(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
-    // Parse current environment for xv:// URI references
-    let mut uri_secrets: Vec<(String, String)> = Vec::new(); // (vault, secret) pairs
-    let uri_regex = Regex::new(r"xv://([^/]+)/([^/\s]+)").unwrap();
+    // Parse current environment for xv:// URI references (supports optional backend prefix)
+    let mut uri_refs: Vec<(String, BackendRef)> = Vec::new(); // (original_uri, parsed_ref)
+    let uri_regex = Regex::new(r"xv://([^/\s]+)/([^/\s]+)").unwrap();
 
     for (_env_name, env_value) in std::env::vars() {
         for captures in uri_regex.captures_iter(&env_value) {
-            if let Some(vault_match) = captures.get(1) {
-                if let Some(secret_match) = captures.get(2) {
-                    let target_vault = vault_match.as_str().to_string();
-                    let secret_name = secret_match.as_str().to_string();
-                    let pair = (target_vault, secret_name);
-                    if !uri_secrets.contains(&pair) {
-                        uri_secrets.push(pair);
-                    }
-                }
+            let vault_part = captures.get(1).map_or("", |m| m.as_str());
+            let secret_part = captures.get(2).map_or("", |m| m.as_str());
+            let uri_key = format!("xv://{vault_part}/{secret_part}");
+            if uri_refs.iter().any(|(uri, _)| uri == &uri_key) {
+                continue;
+            }
+            match BackendRef::parse(&format!("{vault_part}/{secret_part}")) {
+                Ok(r) => uri_refs.push((uri_key, r)),
+                Err(e) => output::warn(&format!("Skipping invalid URI '{uri_key}': {e}")),
             }
         }
     }
@@ -2171,41 +2207,56 @@ async fn execute_secret_run(
         }
     }
 
-    // Fetch cross-vault secrets referenced by URIs in environment
-    if !uri_secrets.is_empty() {
+    // Fetch URI-referenced secrets from environment variables
+    if !uri_refs.is_empty() {
         output::info(&format!(
-            "Found {} cross-vault URI reference(s) in environment",
-            uri_secrets.len()
+            "Found {} URI reference(s) in environment",
+            uri_refs.len()
         ));
 
-        for (target_vault, secret_name) in &uri_secrets {
-            let uri = format!("xv://{}/{}", target_vault, secret_name);
+        let active_kind: BackendKind = config
+            .effective_backend_name()
+            .parse()
+            .unwrap_or(BackendKind::Azure);
 
-            match secret_manager
-                .secret_ops()
-                .get_secret(target_vault, secret_name, true)
-                .await
-            {
+        // Cache backends by kind — avoids re-initialising the SDK per URI
+        let mut cross_backends: std::collections::HashMap<
+            BackendKind,
+            Arc<dyn crate::backend::Backend>,
+        > = std::collections::HashMap::new();
+
+        for (uri, backend_ref) in &uri_refs {
+            let secret_name = match &backend_ref.secret {
+                Some(s) => s.clone(),
+                None => {
+                    output::warn(&format!("URI '{uri}' has no secret segment — skipping"));
+                    continue;
+                }
+            };
+
+            let fetch_result = resolve_uri_secret(
+                backend_ref,
+                &secret_name,
+                secret_manager,
+                config,
+                active_kind,
+                &mut cross_backends,
+            )
+            .await;
+
+            match fetch_result {
                 Ok(secret_props) => {
                     if let Some(value) = secret_props.value {
                         uri_values.insert(uri.clone(), value.clone());
-
-                        // Store for masking (if enabled)
                         if !no_masking && !value.is_empty() {
                             secret_values.push(value);
                         }
                     } else {
-                        output::warn(&format!(
-                            "Secret '{}' in vault '{}' has no value",
-                            secret_name, target_vault
-                        ));
+                        output::warn(&format!("URI '{uri}' resolved but has no value"));
                     }
                 }
                 Err(e) => {
-                    output::warn(&format!(
-                        "Failed to get secret '{}' from vault '{}': {}",
-                        secret_name, target_vault, e
-                    ));
+                    output::warn(&format!("Failed to resolve URI '{uri}': {e}"));
                 }
             }
         }
@@ -2376,12 +2427,12 @@ async fn execute_secret_inject(
     };
 
     // Parse template for secret references
-    // Supports: {{ secret:name }} and xv://vault-name/secret-name
+    // Supports: {{ secret:name }} and xv://[backend:]vault/secret
     let secret_regex = Regex::new(r"\{\{\s*secret:([^}\s]+)\s*\}\}").unwrap();
-    let uri_regex = Regex::new(r"xv://([^/]+)/([^/\s]+)").unwrap();
+    let uri_regex = Regex::new(r"xv://([^/\s]+)/([^/\s]+)").unwrap();
 
     let mut required_secrets: Vec<String> = Vec::new();
-    let mut cross_vault_secrets: Vec<(String, String)> = Vec::new(); // (vault, secret) pairs
+    let mut cross_vault_refs: Vec<(String, BackendRef)> = Vec::new(); // (original_uri, parsed_ref)
 
     // Find {{ secret:name }} references (current vault)
     for captures in secret_regex.captures_iter(&template_content) {
@@ -2393,23 +2444,23 @@ async fn execute_secret_inject(
         }
     }
 
-    // Find xv://vault/secret URI references
+    // Find xv://[backend:]vault/secret URI references
     for captures in uri_regex.captures_iter(&template_content) {
-        if let Some(vault_match) = captures.get(1) {
-            if let Some(secret_match) = captures.get(2) {
-                let vault = vault_match.as_str().to_string();
-                let secret = secret_match.as_str().to_string();
-                let pair = (vault, secret);
-                if !cross_vault_secrets.contains(&pair) {
-                    cross_vault_secrets.push(pair);
-                }
-            }
+        let vault_part = captures.get(1).map_or("", |m| m.as_str());
+        let secret_part = captures.get(2).map_or("", |m| m.as_str());
+        let uri_key = format!("xv://{vault_part}/{secret_part}");
+        if cross_vault_refs.iter().any(|(uri, _)| uri == &uri_key) {
+            continue;
+        }
+        match BackendRef::parse(&format!("{vault_part}/{secret_part}")) {
+            Ok(r) => cross_vault_refs.push((uri_key, r)),
+            Err(e) => output::warn(&format!("Skipping invalid URI '{uri_key}': {e}")),
         }
     }
 
-    if required_secrets.is_empty() && cross_vault_secrets.is_empty() {
+    if required_secrets.is_empty() && cross_vault_refs.is_empty() {
         output::warn("No secret references found in template");
-        println!("    Use {{ secret:name }} syntax or xv://vault-name/secret-name URIs");
+        println!("    Use {{ secret:name }} syntax or xv://[backend:]vault/secret URIs");
 
         // Still write the template content as-is to output
         match output_file {
@@ -2433,7 +2484,7 @@ async fn execute_secret_inject(
         return Ok(());
     }
 
-    let total_references = required_secrets.len() + cross_vault_secrets.len();
+    let total_references = required_secrets.len() + cross_vault_refs.len();
     output::info(&format!(
         "Found {} secret reference(s) in template",
         total_references
@@ -2446,8 +2497,8 @@ async fn execute_secret_inject(
             required_secrets.len()
         );
     }
-    if !cross_vault_secrets.is_empty() {
-        println!("  Cross-vault: {} secret(s)", cross_vault_secrets.len());
+    if !cross_vault_refs.is_empty() {
+        println!("  Cross-vault/backend: {} secret(s)", cross_vault_refs.len());
     }
 
     // Get all secrets from the vault
@@ -2514,32 +2565,52 @@ async fn execute_secret_inject(
         }
     }
 
-    // Fetch cross-vault secrets
-    for (target_vault, secret_name) in &cross_vault_secrets {
-        let uri = format!("xv://{}/{}", target_vault, secret_name);
+    // Fetch URI-referenced secrets (supports optional backend prefix)
+    {
+        let active_kind: BackendKind = config
+            .effective_backend_name()
+            .parse()
+            .unwrap_or(BackendKind::Azure);
 
-        match secret_manager
-            .secret_ops()
-            .get_secret(target_vault, secret_name, true)
-            .await
-        {
-            Ok(secret_props) => {
-                if let Some(value) = secret_props.value {
-                    cross_vault_values.insert(uri.clone(), value);
-                } else {
-                    output::warn(&format!(
-                        "Secret '{}' in vault '{}' has no value",
-                        secret_name, target_vault
-                    ));
-                    missing_secrets.push(uri);
+        // Cache backends by kind — avoids re-initialising the SDK per URI
+        let mut cross_backends: std::collections::HashMap<
+            BackendKind,
+            Arc<dyn crate::backend::Backend>,
+        > = std::collections::HashMap::new();
+
+        for (uri, backend_ref) in &cross_vault_refs {
+            let secret_name = match &backend_ref.secret {
+                Some(s) => s.clone(),
+                None => {
+                    output::warn(&format!("URI '{uri}' has no secret segment — skipping"));
+                    missing_secrets.push(uri.clone());
+                    continue;
                 }
-            }
-            Err(e) => {
-                output::warn(&format!(
-                    "Failed to get secret '{}' from vault '{}': {}",
-                    secret_name, target_vault, e
-                ));
-                missing_secrets.push(uri);
+            };
+
+            let fetch_result = resolve_uri_secret(
+                backend_ref,
+                &secret_name,
+                secret_manager,
+                config,
+                active_kind,
+                &mut cross_backends,
+            )
+            .await;
+
+            match fetch_result {
+                Ok(secret_props) => {
+                    if let Some(value) = secret_props.value {
+                        cross_vault_values.insert(uri.clone(), value);
+                    } else {
+                        output::warn(&format!("URI '{uri}' resolved but has no value"));
+                        missing_secrets.push(uri.clone());
+                    }
+                }
+                Err(e) => {
+                    output::warn(&format!("Failed to resolve URI '{uri}': {e}"));
+                    missing_secrets.push(uri.clone());
+                }
             }
         }
     }

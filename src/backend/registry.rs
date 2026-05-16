@@ -178,6 +178,41 @@ impl BackendRegistry {
         self.default
     }
 
+    /// Create a fresh backend instance for the given kind using the provided config.
+    ///
+    /// Used for cross-backend operations such as resolving `xv://aws:prod/SECRET`
+    /// while the active backend is Azure.
+    pub async fn create_for_kind(
+        kind: BackendKind,
+        config: &Config,
+    ) -> std::result::Result<std::sync::Arc<dyn Backend>, BackendError> {
+        match kind {
+            BackendKind::Azure => {
+                let auth = Self::create_azure_auth_provider(config)?;
+                let backend = super::azure::AzureBackend::new(config, auth)?;
+                Ok(std::sync::Arc::new(backend))
+            }
+            BackendKind::Local => {
+                let backend = super::local::LocalBackend::new(config.local.as_ref())?;
+                Ok(std::sync::Arc::new(backend))
+            }
+            #[cfg(feature = "aws")]
+            BackendKind::Aws => {
+                let aws_cfg = config.aws.as_ref().ok_or_else(|| {
+                    BackendError::Internal(
+                        "[aws] config block missing — add an [aws] section to your config".into(),
+                    )
+                })?;
+                let backend = super::aws::AwsBackend::new(aws_cfg, None, None).await?;
+                Ok(std::sync::Arc::new(backend))
+            }
+            #[cfg(not(feature = "aws"))]
+            BackendKind::Aws => Err(BackendError::Internal(
+                "AWS backend not compiled in: rebuild with --features aws".into(),
+            )),
+        }
+    }
+
     /// Try to extract the Azure auth provider from the active backend.
     ///
     /// During the migration period, many CLI handlers still need the raw
