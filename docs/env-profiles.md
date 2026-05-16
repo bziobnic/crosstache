@@ -61,6 +61,63 @@ targets. Resolution order (highest first):
 
 Valid values: `azure`, `local`, `aws` (canonical names only — aliases like `az`, `file`, or `secretsmanager` are not accepted in `.xv.toml`; named backend keys defined under `[backends.*]` in `xv.conf` are also not supported here).
 
+## Backend-prefixed addressing (`xv://backend:vault/secret`)
+
+Secret references in templates and environment variables accept an optional
+backend prefix before the vault name:
+
+```
+xv://vault/secret            # use the active/default backend (unchanged behaviour)
+xv://azure:my-kv/API_KEY     # always resolve against the Azure backend
+xv://aws:prod-sm/DB_PASS     # always resolve against the AWS Secrets Manager backend
+xv://local:default/DEV_KEY   # always resolve against the local age-encrypted backend
+```
+
+The prefix is separated from the vault name by `:`. Vault names must not
+contain `:` (they never do on any supported backend). When no prefix is given
+the existing behaviour is preserved — the secret is fetched from whichever
+backend the active env profile selects.
+
+Valid backend names (and aliases):
+
+| Canonical | Aliases |
+|-----------|---------|
+| `azure`   | `az`, `keyvault` |
+| `local`   | `file`, `age` |
+| `aws`     | `secretsmanager`, `asm` |
+
+### Example: mixed-backend template
+
+```
+# config/.env.template
+DATABASE_URL=postgres://{{ secret:db-host }}/app
+STRIPE_KEY={{ xv://aws:prod-secrets/STRIPE_API_KEY }}
+INTERNAL_TOKEN={{ xv://local:default/INTERNAL_TOKEN }}
+```
+
+`xv inject` resolves all three references — `db-host` from the active vault,
+`STRIPE_API_KEY` from AWS Secrets Manager, and `INTERNAL_TOKEN` from the
+local backend — without switching context.
+
+### `xv migrate` with per-side vault
+
+`xv migrate --from` and `--to` also accept the `backend:vault` form so each
+side of a migration can target a different vault:
+
+```bash
+# migrate from Azure vault "dev-kv" to local vault "default"
+xv migrate --from azure:dev-kv --to local:default
+
+# migrate from AWS prod to Azure staging (vault from --vault flag)
+xv migrate --from aws:prod-secrets --to azure:staging-kv
+
+# original form (backend only, vault from --vault flag) still works
+xv migrate --from local --to aws --vault my-vault
+```
+
+When both sides share the same vault name, the single `--vault` flag is
+sufficient. When they differ, embed the vault in the `--from`/`--to` value.
+
 ## Cross-boundary notice
 
 When a `.xv.toml` is found in an ancestor directory (not in cwd),

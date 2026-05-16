@@ -17,6 +17,7 @@
 
 #[cfg(feature = "aws")]
 pub mod aws;
+pub mod addressing;
 pub mod azure;
 pub mod error;
 #[cfg(feature = "file-ops")]
@@ -27,6 +28,7 @@ pub mod secret;
 pub mod vault;
 
 // Re-exports for convenience.
+pub use addressing::BackendRef;
 pub use error::BackendError;
 pub use registry::BackendRegistry;
 pub use secret::SecretBackend;

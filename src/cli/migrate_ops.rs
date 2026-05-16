@@ -3,7 +3,7 @@
 //! Implements `xv migrate --from <backend> --to <backend>`, which copies
 //! secrets from one backend to another while preserving metadata.
 
-use crate::backend::{Backend, BackendError, BackendKind, BackendRegistry};
+use crate::backend::{Backend, BackendError, BackendRef, BackendRegistry};
 use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::manager::SecretRequest;
@@ -31,12 +31,13 @@ struct MigrationDiff {
 async fn compute_diff(
     source: &Arc<dyn Backend>,
     target: &Arc<dyn Backend>,
-    vault: &str,
+    source_vault: &str,
+    target_vault: &str,
     filter: Option<&str>,
 ) -> Result<MigrationDiff> {
     let source_secrets = source
         .secrets()
-        .list_secrets(vault, None)
+        .list_secrets(source_vault, None)
         .await
         .map_err(|e| {
             CrosstacheError::Unknown(format!(
@@ -65,7 +66,7 @@ async fn compute_diff(
     let mut conflicts = Vec::new();
 
     for name in filtered {
-        match target.secrets().secret_exists(vault, &name).await {
+        match target.secrets().secret_exists(target_vault, &name).await {
             Ok(true) => conflicts.push(name),
             Ok(false) => to_migrate.push(name),
             Err(e) => {
@@ -84,13 +85,14 @@ fn print_diff_summary(
     diff: &MigrationDiff,
     source_name: &str,
     target_name: &str,
-    vault: &str,
+    source_vault: &str,
+    target_vault: &str,
     on_conflict: &crate::cli::commands::OnConflict,
     dry_run: bool,
 ) {
     println!();
-    println!("Source: {}:{}", source_name, vault);
-    println!("Target: {}:{}", target_name, vault);
+    println!("Source: {}:{}", source_name, source_vault);
+    println!("Target: {}:{}", target_name, target_vault);
     println!();
     println!("  to migrate:    {} secret(s)", diff.to_migrate.len());
     println!(
@@ -152,7 +154,8 @@ fn build_request_from_props(
 async fn migrate_one(
     source: &Arc<dyn Backend>,
     target: &Arc<dyn Backend>,
-    vault: &str,
+    source_vault: &str,
+    target_vault: &str,
     name: &str,
     force_replace: bool,
     source_name_for_tag: &str,
@@ -160,15 +163,16 @@ async fn migrate_one(
     // Fetch full props with value
     let props = source
         .secrets()
-        .get_secret(vault, name, true)
+        .get_secret(source_vault, name, true)
         .await
         .map_err(|e| (name.to_string(), format!("get_secret: {e}")))?;
 
     // Idempotency check
     if !force_replace {
-        if let Ok(existing) = target.secrets().get_secret(vault, name, false).await {
+        if let Ok(existing) = target.secrets().get_secret(target_vault, name, false).await {
             if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
-                let expected = format!("{}:{}:{}", source_name_for_tag, vault, props.version);
+                let expected =
+                    format!("{}:{}:{}", source_name_for_tag, source_vault, props.version);
                 if prev_from == &expected {
                     return Ok(MigrateOutcome::Skipped(name.to_string()));
                 }
@@ -176,12 +180,12 @@ async fn migrate_one(
         }
     }
 
-    let request = build_request_from_props(&props, source_name_for_tag, vault);
+    let request = build_request_from_props(&props, source_name_for_tag, source_vault);
 
     // Retry with exponential backoff on RateLimited
     let mut attempt = 0u32;
     loop {
-        match target.secrets().set_secret(vault, request.clone()).await {
+        match target.secrets().set_secret(target_vault, request.clone()).await {
             Ok(_) => return Ok(MigrateOutcome::Migrated(name.to_string())),
             Err(BackendError::RateLimited { retry_after_secs }) if attempt < 5 => {
                 let wait = retry_after_secs
@@ -192,48 +196,6 @@ async fn migrate_one(
             }
             Err(e) => return Err((name.to_string(), format!("set_secret: {e}"))),
         }
-    }
-}
-
-/// Create a backend instance for the given kind.
-async fn create_backend(kind: BackendKind, config: &Config) -> Result<Arc<dyn Backend>> {
-    match kind {
-        BackendKind::Azure => {
-            let auth_provider =
-                BackendRegistry::create_azure_auth_provider(config).map_err(|e| {
-                    CrosstacheError::Unknown(format!("Failed to create Azure auth: {e}"))
-                })?;
-            let backend =
-                crate::backend::azure::AzureBackend::new(config, auth_provider).map_err(|e| {
-                    CrosstacheError::Unknown(format!("Failed to create Azure backend: {e}"))
-                })?;
-            Ok(Arc::new(backend))
-        }
-        BackendKind::Local => {
-            let backend =
-                crate::backend::local::LocalBackend::new(config.local.as_ref()).map_err(|e| {
-                    CrosstacheError::Unknown(format!("Failed to create local backend: {e}"))
-                })?;
-            Ok(Arc::new(backend))
-        }
-        #[cfg(feature = "aws")]
-        BackendKind::Aws => {
-            let aws_cfg = config.aws.as_ref().ok_or_else(|| {
-                CrosstacheError::config(
-                    "[aws] config block missing — set backend = \"aws\" or pass --aws-profile",
-                )
-            })?;
-            let backend = crate::backend::aws::AwsBackend::new(aws_cfg, None, None)
-                .await
-                .map_err(|e| {
-                    CrosstacheError::Unknown(format!("Failed to create AWS backend: {e}"))
-                })?;
-            Ok(Arc::new(backend))
-        }
-        #[cfg(not(feature = "aws"))]
-        BackendKind::Aws => Err(CrosstacheError::Unknown(
-            "AWS backend not compiled in: rebuild with --features aws".into(),
-        )),
     }
 }
 
@@ -294,33 +256,50 @@ pub(crate) async fn execute_migrate(
     } else {
         on_conflict
     };
-    // 1. Parse backend kinds
-    let from_kind: BackendKind = from
-        .parse()
-        .map_err(|e: String| CrosstacheError::invalid_argument(e))?;
-    let to_kind: BackendKind = to
-        .parse()
-        .map_err(|e: String| CrosstacheError::invalid_argument(e))?;
+    // 1. Parse backend kinds (accepting bare `backend` or `backend:vault` form)
+    let (from_kind, from_vault_override) = BackendRef::parse_migrate_endpoint(&from)
+        .map_err(CrosstacheError::invalid_argument)?;
+    let (to_kind, to_vault_override) = BackendRef::parse_migrate_endpoint(&to)
+        .map_err(CrosstacheError::invalid_argument)?;
 
-    if from_kind == to_kind {
+    if from_kind == to_kind && from_vault_override == to_vault_override {
         return Err(CrosstacheError::invalid_argument(
-            "Source and target backends must be different",
+            "Source and target must be different (same backend and same vault)",
         ));
     }
 
     // 2. Create both backends
-    let source = create_backend(from_kind, &config).await?;
-    let target = create_backend(to_kind, &config).await?;
+    let source = BackendRegistry::create_for_kind(from_kind, &config)
+        .await
+        .map_err(|e| CrosstacheError::Unknown(format!("Failed to create source backend: {e}")))?;
+    let target = BackendRegistry::create_for_kind(to_kind, &config)
+        .await
+        .map_err(|e| CrosstacheError::Unknown(format!("Failed to create target backend: {e}")))?;
 
-    // 3. Resolve vault name
-    let vault_name = resolve_vault_name(&vault, &config)?;
+    // 3. Resolve vault names (per-side overrides take precedence over --vault / config)
+    let source_vault = from_vault_override
+        .map(Ok)
+        .unwrap_or_else(|| resolve_vault_name(&vault, &config))?;
+    let target_vault = to_vault_override
+        .map(Ok)
+        .unwrap_or_else(|| resolve_vault_name(&vault, &config))?;
 
-    output::step(&format!(
-        "Migrating secrets from {} to {} (vault: {})",
-        source.name(),
-        target.name(),
-        vault_name
-    ));
+    if source_vault == target_vault {
+        output::step(&format!(
+            "Migrating secrets from {} to {} (vault: {})",
+            source.name(),
+            target.name(),
+            source_vault
+        ));
+    } else {
+        output::step(&format!(
+            "Migrating secrets from {}:{} to {}:{}",
+            source.name(),
+            source_vault,
+            target.name(),
+            target_vault
+        ));
+    }
     if dry_run {
         output::info("DRY RUN — no changes will be made");
     }
@@ -329,16 +308,16 @@ pub(crate) async fn execute_migrate(
     if !dry_run {
         if let Some(target_vaults) = target.vaults() {
             // Try to get the vault; if not found, create it
-            match target_vaults.get_vault(&vault_name).await {
+            match target_vaults.get_vault(&target_vault).await {
                 Ok(_) => {}
                 Err(crate::backend::BackendError::VaultNotFound { .. }) => {
                     output::step(&format!(
                         "Creating vault '{}' in {} backend...",
-                        vault_name,
+                        target_vault,
                         target.name()
                     ));
                     let create_req = crate::vault::models::VaultCreateRequest {
-                        name: vault_name.clone(),
+                        name: target_vault.clone(),
                         location: String::new(),
                         resource_group: String::new(),
                         subscription_id: String::new(),
@@ -354,7 +333,7 @@ pub(crate) async fn execute_migrate(
                     target_vaults.create_vault(create_req).await.map_err(|e| {
                         CrosstacheError::Unknown(format!(
                             "Failed to create vault '{}' in target: {e}",
-                            vault_name
+                            target_vault
                         ))
                     })?;
                 }
@@ -367,12 +346,14 @@ pub(crate) async fn execute_migrate(
     }
 
     // 5. Compute diff (list + filter + conflict detection)
-    let diff = compute_diff(&source, &target, &vault_name, filter.as_deref()).await?;
+    let diff =
+        compute_diff(&source, &target, &source_vault, &target_vault, filter.as_deref()).await?;
     print_diff_summary(
         &diff,
         source.name(),
         target.name(),
-        &vault_name,
+        &source_vault,
+        &target_vault,
         &on_conflict,
         dry_run,
     );
@@ -404,18 +385,20 @@ pub(crate) async fn execute_migrate(
     let source_name_tag = source.name().to_string();
     let source_arc = source.clone();
     let target_arc = target.clone();
-    let vault_clone = vault_name.clone();
+    let src_vault_clone = source_vault.clone();
+    let tgt_vault_clone = target_vault.clone();
 
     let results: Vec<_> =
         stream::iter(
             names_to_process.iter().map(|name| {
                 let source = source_arc.clone();
                 let target = target_arc.clone();
-                let vault = vault_clone.clone();
+                let sv = src_vault_clone.clone();
+                let tv = tgt_vault_clone.clone();
                 let name = name.clone();
                 let src_tag = source_name_tag.clone();
                 async move {
-                    migrate_one(&source, &target, &vault, &name, force_replace, &src_tag).await
+                    migrate_one(&source, &target, &sv, &tv, &name, force_replace, &src_tag).await
                 }
             }),
         )
@@ -470,6 +453,7 @@ pub(crate) async fn execute_migrate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BackendKind;
     use crate::config::settings::LocalConfig;
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -526,10 +510,35 @@ mod tests {
     }
 
     #[test]
-    fn same_backend_rejected() {
-        let from_kind: BackendKind = "local".parse().unwrap();
-        let to_kind: BackendKind = "local".parse().unwrap();
+    fn same_backend_same_vault_rejected() {
+        let (from_kind, from_vault) = BackendRef::parse_migrate_endpoint("local").unwrap();
+        let (to_kind, to_vault) = BackendRef::parse_migrate_endpoint("local").unwrap();
         assert_eq!(from_kind, to_kind);
+        assert_eq!(from_vault, to_vault); // both None → same
+    }
+
+    #[test]
+    fn same_backend_different_vault_allowed() {
+        let (from_kind, from_vault) =
+            BackendRef::parse_migrate_endpoint("local:source-store").unwrap();
+        let (to_kind, to_vault) =
+            BackendRef::parse_migrate_endpoint("local:target-store").unwrap();
+        assert_eq!(from_kind, to_kind);
+        assert_ne!(from_vault, to_vault);
+    }
+
+    #[test]
+    fn parse_migrate_endpoint_with_vault() {
+        let (kind, vault) = BackendRef::parse_migrate_endpoint("aws:prod-secrets").unwrap();
+        assert_eq!(kind, BackendKind::Aws);
+        assert_eq!(vault.as_deref(), Some("prod-secrets"));
+    }
+
+    #[test]
+    fn parse_migrate_endpoint_backend_only() {
+        let (kind, vault) = BackendRef::parse_migrate_endpoint("azure").unwrap();
+        assert_eq!(kind, BackendKind::Azure);
+        assert_eq!(vault, None);
     }
 
     #[test]
