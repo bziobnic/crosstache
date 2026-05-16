@@ -262,12 +262,6 @@ pub(crate) async fn execute_migrate(
     let (to_kind, to_vault_override) = BackendRef::parse_migrate_endpoint(&to)
         .map_err(CrosstacheError::invalid_argument)?;
 
-    if from_kind == to_kind && from_vault_override == to_vault_override {
-        return Err(CrosstacheError::invalid_argument(
-            "Source and target must be different (same backend and same vault)",
-        ));
-    }
-
     // 2. Create both backends
     let source = BackendRegistry::create_for_kind(from_kind, &config)
         .await
@@ -283,6 +277,12 @@ pub(crate) async fn execute_migrate(
     let target_vault = to_vault_override
         .map(Ok)
         .unwrap_or_else(|| resolve_vault_name(&vault, &config))?;
+
+    if source.kind() == target.kind() && source_vault == target_vault {
+        return Err(CrosstacheError::invalid_argument(
+            "Source and target must be different (same backend and same vault)",
+        ));
+    }
 
     if source_vault == target_vault {
         output::step(&format!(

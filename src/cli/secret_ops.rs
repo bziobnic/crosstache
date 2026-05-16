@@ -2053,6 +2053,42 @@ async fn execute_secret_rotate(
     Ok(())
 }
 
+/// Resolve a single `xv://` URI reference to its secret, dispatching to the
+/// active backend or a cross-backend instance as needed.
+///
+/// `cross_backends` caches freshly-created backends by kind so the SDK is not
+/// re-initialised per URI. Shared by `execute_secret_run` and
+/// `execute_secret_inject` to keep cross-backend resolution logic in one place.
+async fn resolve_uri_secret(
+    backend_ref: &BackendRef,
+    secret_name: &str,
+    secret_manager: &crate::secret::manager::SecretManager,
+    config: &Config,
+    active_kind: BackendKind,
+    cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
+) -> Result<crate::secret::manager::SecretProperties> {
+    if let Some(backend_kind) = backend_ref.backend {
+        if backend_kind != active_kind {
+            // Cross-backend: reuse or create a cached backend instance
+            if !cross_backends.contains_key(&backend_kind) {
+                let b = BackendRegistry::create_for_kind(backend_kind, config)
+                    .await
+                    .map_err(CrosstacheError::from)?;
+                cross_backends.insert(backend_kind, b);
+            }
+            return cross_backends[&backend_kind]
+                .secrets()
+                .get_secret(&backend_ref.vault, secret_name, true)
+                .await
+                .map_err(CrosstacheError::from);
+        }
+    }
+    secret_manager
+        .secret_ops()
+        .get_secret(&backend_ref.vault, secret_name, true)
+        .await
+}
+
 async fn execute_secret_run(
     secret_manager: &crate::secret::manager::SecretManager,
     vault: Option<String>,
@@ -2198,39 +2234,15 @@ async fn execute_secret_run(
                 }
             };
 
-            let fetch_result = if let Some(backend_kind) = backend_ref.backend {
-                if backend_kind != active_kind {
-                    // Cross-backend: reuse or create a cached backend instance
-                    if !cross_backends.contains_key(&backend_kind) {
-                        match BackendRegistry::create_for_kind(backend_kind, config).await {
-                            Ok(b) => {
-                                cross_backends.insert(backend_kind, b);
-                            }
-                            Err(e) => {
-                                output::warn(&format!(
-                                    "Failed to create backend for URI '{uri}': {e}"
-                                ));
-                                continue;
-                            }
-                        }
-                    }
-                    cross_backends[&backend_kind]
-                        .secrets()
-                        .get_secret(&backend_ref.vault, &secret_name, true)
-                        .await
-                        .map_err(CrosstacheError::from)
-                } else {
-                    secret_manager
-                        .secret_ops()
-                        .get_secret(&backend_ref.vault, &secret_name, true)
-                        .await
-                }
-            } else {
-                secret_manager
-                    .secret_ops()
-                    .get_secret(&backend_ref.vault, &secret_name, true)
-                    .await
-            };
+            let fetch_result = resolve_uri_secret(
+                backend_ref,
+                &secret_name,
+                secret_manager,
+                config,
+                active_kind,
+                &mut cross_backends,
+            )
+            .await;
 
             match fetch_result {
                 Ok(secret_props) => {
@@ -2576,40 +2588,15 @@ async fn execute_secret_inject(
                 }
             };
 
-            let fetch_result = if let Some(backend_kind) = backend_ref.backend {
-                if backend_kind != active_kind {
-                    // Cross-backend: reuse or create a cached backend instance
-                    if !cross_backends.contains_key(&backend_kind) {
-                        match BackendRegistry::create_for_kind(backend_kind, config).await {
-                            Ok(b) => {
-                                cross_backends.insert(backend_kind, b);
-                            }
-                            Err(e) => {
-                                output::warn(&format!(
-                                    "Failed to create backend for URI '{uri}': {e}"
-                                ));
-                                missing_secrets.push(uri.clone());
-                                continue;
-                            }
-                        }
-                    }
-                    cross_backends[&backend_kind]
-                        .secrets()
-                        .get_secret(&backend_ref.vault, &secret_name, true)
-                        .await
-                        .map_err(CrosstacheError::from)
-                } else {
-                    secret_manager
-                        .secret_ops()
-                        .get_secret(&backend_ref.vault, &secret_name, true)
-                        .await
-                }
-            } else {
-                secret_manager
-                    .secret_ops()
-                    .get_secret(&backend_ref.vault, &secret_name, true)
-                    .await
-            };
+            let fetch_result = resolve_uri_secret(
+                backend_ref,
+                &secret_name,
+                secret_manager,
+                config,
+                active_kind,
+                &mut cross_backends,
+            )
+            .await;
 
             match fetch_result {
                 Ok(secret_props) => {
