@@ -86,13 +86,9 @@ impl AwsSecretBackend {
                 .build(),
         );
         if let Some(ref groups) = request.groups {
-            if !groups.is_empty() {
-                new_tags.push(
-                    Tag::builder()
-                        .key(TAG_GROUPS)
-                        .value(groups.join(","))
-                        .build(),
-                );
+            let encoded = crate::backend::aws::metadata::encode_groups(groups);
+            if !encoded.is_empty() {
+                new_tags.push(Tag::builder().key(TAG_GROUPS).value(encoded).build());
             }
         }
         if let Some(ref f) = request.folder {
@@ -265,11 +261,7 @@ impl AwsSecretBackend {
             match k.as_str() {
                 TAG_ORIGINAL_NAME => original_name = Some(v.clone()),
                 TAG_GROUPS => {
-                    groups = v
-                        .split(',')
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
-                        .collect();
+                    groups = crate::backend::aws::metadata::decode_groups(v);
                 }
                 TAG_FOLDER => folder = Some(v.clone()),
                 TAG_CONTENT_TYPE => content_type = Some(v.clone()),
@@ -380,13 +372,9 @@ impl SecretBackend for AwsSecretBackend {
                 .build(),
         );
         if let Some(ref groups) = request.groups {
-            if !groups.is_empty() {
-                tags.push(
-                    Tag::builder()
-                        .key(TAG_GROUPS)
-                        .value(groups.join(","))
-                        .build(),
-                );
+            let encoded = crate::backend::aws::metadata::encode_groups(groups);
+            if !encoded.is_empty() {
+                tags.push(Tag::builder().key(TAG_GROUPS).value(encoded).build());
             }
         }
         if let Some(ref f) = request.folder {
@@ -607,19 +595,20 @@ impl SecretBackend for AwsSecretBackend {
                         .find(|t| t.key() == Some(TAG_GROUPS))
                         .and_then(|t| t.value())
                         .unwrap_or("");
-                    let groups: Vec<&str> =
-                        groups_str.split(',').filter(|s| !s.is_empty()).collect();
-                    if !groups.contains(&group_want) {
+                    let groups = crate::backend::aws::metadata::decode_groups(groups_str);
+                    if !groups.iter().any(|g| g == group_want) {
                         continue;
                     }
                 }
-                // Extract groups tag for summary.
+                // Extract groups tag for summary, normalised to the
+                // comma-separated form the rest of the codebase expects.
                 let groups_val = entry
                     .tags()
                     .iter()
                     .find(|t| t.key() == Some(TAG_GROUPS))
                     .and_then(|t| t.value())
-                    .map(|s| s.to_string());
+                    .map(|s| crate::backend::aws::metadata::decode_groups(s).join(","))
+                    .filter(|s| !s.is_empty());
 
                 summaries.push(SecretSummary {
                     name: secret_name.clone(),
@@ -686,12 +675,12 @@ impl SecretBackend for AwsSecretBackend {
             if groups.is_empty() {
                 keys_to_remove.push(TAG_GROUPS.into());
             } else {
-                tags_to_set.push(
-                    Tag::builder()
-                        .key(TAG_GROUPS)
-                        .value(groups.join(","))
-                        .build(),
-                );
+                let encoded = crate::backend::aws::metadata::encode_groups(groups);
+                if encoded.is_empty() {
+                    keys_to_remove.push(TAG_GROUPS.into());
+                } else {
+                    tags_to_set.push(Tag::builder().key(TAG_GROUPS).value(encoded).build());
+                }
             }
         }
         if let Some(ref f) = request.folder {

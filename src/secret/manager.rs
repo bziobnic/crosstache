@@ -555,9 +555,14 @@ impl SecretOperations for AzureSecretOperations {
             None
         };
 
+        // Extract the bare version segment from the id URL. Key Vault ids
+        // look like `https://<vault>.vault.azure.net/secrets/<name>/<version>`;
+        // `get_secret_version` / `rollback` expect just the trailing
+        // `<version>` segment, so we normalise here for consistency.
         let version = json
             .get("id")
             .and_then(|v| v.as_str())
+            .and_then(|id| id.split('/').next_back())
             .unwrap_or("")
             .to_string();
 
@@ -1024,9 +1029,14 @@ impl SecretOperations for AzureSecretOperations {
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
         // Extract secret properties from JSON response
+        // Extract the bare version segment from the id URL. Key Vault ids
+        // look like `https://<vault>.vault.azure.net/secrets/<name>/<version>`;
+        // `get_secret_version` / `rollback` expect just the trailing
+        // `<version>` segment, so we normalise here for consistency.
         let version = json
             .get("id")
             .and_then(|v| v.as_str())
+            .and_then(|id| id.split('/').next_back())
             .unwrap_or("")
             .to_string();
 

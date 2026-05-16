@@ -14,6 +14,41 @@ pub const TAG_VALUE_VAULT_MARKER: &str = "vault-marker";
 pub const TAG_MIGRATED_FROM: &str = "xv:migrated_from";
 pub const TAG_MIGRATED_AT: &str = "xv:migrated_at";
 
+/// Separator used inside the `xv:groups` AWS tag value.
+///
+/// AWS Secrets Manager tag values may only contain characters matching
+/// `[\p{L}\p{Z}\p{N}_.:/=+\-@]` — notably **not** a comma. The rest of the
+/// crosstache codebase uses `,` as the canonical in-memory group separator
+/// (and Azure tag values permit commas), so the comma-joined value is only
+/// ever translated to/from this AWS-safe separator at the AWS tag boundary.
+pub const GROUPS_TAG_SEPARATOR: char = '+';
+
+/// Encode a group list into an AWS-tag-safe `xv:groups` value.
+///
+/// Empty groups are dropped. Returns an empty string when there are no
+/// groups (callers should skip writing the tag in that case).
+pub fn encode_groups(groups: &[String]) -> String {
+    groups
+        .iter()
+        .map(|g| g.trim())
+        .filter(|g| !g.is_empty())
+        .collect::<Vec<_>>()
+        .join(&GROUPS_TAG_SEPARATOR.to_string())
+}
+
+/// Decode an `xv:groups` AWS tag value back into a group list.
+///
+/// Tolerates both the current `+` separator and the legacy `,` separator
+/// so secrets written before this fix still decode correctly.
+pub fn decode_groups(value: &str) -> Vec<String> {
+    value
+        .split([GROUPS_TAG_SEPARATOR, ','])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +202,57 @@ mod tests {
         assert!(is_vault_marker_tag("xv:type", "vault-marker"));
         assert!(!is_vault_marker_tag("xv:type", "other"));
         assert!(!is_vault_marker_tag("other", "vault-marker"));
+    }
+
+    #[test]
+    fn encode_groups_uses_aws_safe_separator() {
+        let groups = vec!["backend".to_string(), "prod".to_string()];
+        let encoded = encode_groups(&groups);
+        assert_eq!(encoded, "backend+prod");
+        assert!(
+            !encoded.contains(','),
+            "encoded value must not contain a comma (AWS rejects it)"
+        );
+    }
+
+    #[test]
+    fn encode_groups_drops_empty_and_trims() {
+        let groups = vec![
+            "  a  ".to_string(),
+            "".to_string(),
+            "b".to_string(),
+            "   ".to_string(),
+        ];
+        assert_eq!(encode_groups(&groups), "a+b");
+    }
+
+    #[test]
+    fn encode_groups_empty_input_is_empty_string() {
+        assert_eq!(encode_groups(&[]), "");
+    }
+
+    #[test]
+    fn decode_groups_round_trips_current_format() {
+        let groups = vec!["backend".to_string(), "prod".to_string()];
+        let encoded = encode_groups(&groups);
+        assert_eq!(decode_groups(&encoded), groups);
+    }
+
+    #[test]
+    fn decode_groups_tolerates_legacy_comma_format() {
+        // Secrets written before the fix used a comma separator.
+        assert_eq!(
+            decode_groups("backend,prod"),
+            vec!["backend".to_string(), "prod".to_string()]
+        );
+    }
+
+    #[test]
+    fn decode_groups_handles_mixed_and_empty_segments() {
+        assert_eq!(
+            decode_groups("a+,b,+c"),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert!(decode_groups("").is_empty());
     }
 }

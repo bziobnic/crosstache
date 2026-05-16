@@ -182,14 +182,11 @@ async fn e2e_azure_secret_full_lifecycle() {
     assert_eq!(got2.value.as_ref().map(|v| v.as_str()), Some(v2_value));
 
     // --- GET SPECIFIC VERSION (v1 still readable by id) ---
-    // NOTE: `set_secret`/`get_secret` populate `version` with the *full*
-    // Key Vault id URL, while `get_secret_version` expects only the trailing
-    // version segment. We normalise here; the inconsistency is a known
-    // backend wart worth tracking.
-    let v1_segment = v1_version.rsplit('/').next().unwrap_or(&v1_version);
+    // `version` is the bare Key Vault version segment, which is exactly
+    // what get_secret_version expects.
     let v1_again = backend
         .secrets()
-        .get_secret_version(&vault, &secret, v1_segment, true)
+        .get_secret_version(&vault, &secret, &v1_version, true)
         .await
         .expect("get_secret_version for v1 should succeed");
     assert_eq!(
@@ -244,10 +241,9 @@ async fn e2e_azure_secret_full_lifecycle() {
     );
 
     // --- ROLLBACK (re-apply v1's value as a new current version) ---
-    // Uses the bare version segment for the same reason as get_secret_version.
     backend
         .secrets()
-        .rollback(&vault, &secret, v1_segment)
+        .rollback(&vault, &secret, &v1_version)
         .await
         .expect("rollback to v1 should succeed");
     let rolled = backend

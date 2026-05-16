@@ -294,11 +294,10 @@ async fn e2e_aws_secret_full_lifecycle() {
         versions.len()
     );
 
-    // --- UPDATE METADATA (note + group) ---
-    // NOTE: only a single group is used here. The AWS backend stores groups
-    // as the `xv:groups` tag value joined by ',' — but AWS Secrets Manager's
-    // tagging service rejects commas in tag values, so multi-group updates
-    // currently fail against the live API. See e2e findings / backend issue.
+    // --- UPDATE METADATA (note + multiple groups) ---
+    // Groups are stored in the AWS `xv:groups` tag using a `+` separator
+    // (commas are rejected by the AWS tagging service), so multi-group
+    // updates round-trip correctly.
     let update = SecretUpdateRequest {
         name: secret.to_string(),
         new_name: None,
@@ -308,7 +307,7 @@ async fn e2e_aws_secret_full_lifecycle() {
         expires_on: None,
         not_before: None,
         tags: None,
-        groups: Some(vec!["e2e".to_string()]),
+        groups: Some(vec!["e2e".to_string(), "prod".to_string()]),
         note: Some("updated by e2e test".to_string()),
         folder: None,
         replace_tags: false,
@@ -329,6 +328,17 @@ async fn e2e_aws_secret_full_lifecycle() {
         Some("updated by e2e test"),
         "note should be persisted, tags: {:?}",
         after_meta.tags
+    );
+    // Both groups must round-trip — the AWS tag is exposed back to callers
+    // as the canonical comma-separated form.
+    let groups = after_meta
+        .tags
+        .get("groups")
+        .map(String::as_str)
+        .unwrap_or("");
+    assert!(
+        groups.split(',').any(|g| g == "e2e") && groups.split(',').any(|g| g == "prod"),
+        "both groups should round-trip, got groups tag: {groups:?}"
     );
 
     // --- ROLLBACK (AWSCURRENT → v1) ---
