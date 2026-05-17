@@ -1075,9 +1075,9 @@ async fn execute_env_use(name: &str, _config: &Config) -> Result<()> {
             if proj_cfg.envs.contains_key(name) {
                 return Err(CrosstacheError::config(format!(
                     "No legacy user profile named '{name}'.\n\
-Found project env '{name}' in {} — activate it with:\n\
-  xv --env {name} <command>\n\
-  XV_ENV={name} xv <command>\n\
+Found project env '{name}' in {} — activate it with:\n  \
+xv --env {name} <command>\n  \
+XV_ENV={name} xv <command>\n\
 Or set `default_env = \"{name}\"` in .xv.toml.\n\
 (Legacy `xv env use` manages user-scoped profiles, not .xv.toml envs.)",
                     path.display()
