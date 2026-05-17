@@ -87,14 +87,25 @@ fn version_lists_compiled_backends() {
     // `xv version` should always mention "azure" and "local" as built-in backends.
     let (mut cmd, _temp) = common::xv_isolated();
     let out = cmd.args(["version"]).output().expect("spawn");
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", common::stderr_str(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
     let stdout = common::stdout_str(&out);
     assert!(
         stdout.contains("Backends:"),
         "expected Backends: line in version output: {stdout}"
     );
-    assert!(stdout.contains("azure"), "expected azure in backends: {stdout}");
-    assert!(stdout.contains("local"), "expected local in backends: {stdout}");
+    assert!(
+        stdout.contains("azure"),
+        "expected azure in backends: {stdout}"
+    );
+    assert!(
+        stdout.contains("local"),
+        "expected local in backends: {stdout}"
+    );
 }
 
 #[cfg(not(feature = "aws"))]

@@ -22,20 +22,15 @@ fn get_version() -> &'static str {
     built_info::PKG_VERSION
 }
 
-#[derive(Debug, Clone, clap::ValueEnum, PartialEq, Eq)]
+#[derive(Debug, Clone, clap::ValueEnum, PartialEq, Eq, Default)]
 pub enum OnConflict {
     /// Skip secrets that already exist in the target (default)
+    #[default]
     Skip,
     /// Overwrite the target value, replacing the metadata
     Replace,
     /// Abort the migration on first conflict
     Fail,
-}
-
-impl Default for OnConflict {
-    fn default() -> Self {
-        Self::Skip
-    }
 }
 
 /// Determine if options should be hidden based on environment or command line

@@ -152,7 +152,10 @@ async fn poll_list_vaults_contains(backend: &AwsBackend, vault: &str) {
     const MAX_ATTEMPTS: u32 = 12;
     let vaults = backend.vaults().expect("AWS backend exposes vaults");
     for attempt in 1..=MAX_ATTEMPTS {
-        let all = vaults.list_vaults().await.expect("list_vaults should succeed");
+        let all = vaults
+            .list_vaults()
+            .await
+            .expect("list_vaults should succeed");
         if all.iter().any(|v| v.name == vault) {
             return;
         }

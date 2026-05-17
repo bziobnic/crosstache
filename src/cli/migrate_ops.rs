@@ -185,7 +185,11 @@ async fn migrate_one(
     // Retry with exponential backoff on RateLimited
     let mut attempt = 0u32;
     loop {
-        match target.secrets().set_secret(target_vault, request.clone()).await {
+        match target
+            .secrets()
+            .set_secret(target_vault, request.clone())
+            .await
+        {
             Ok(_) => return Ok(MigrateOutcome::Migrated(name.to_string())),
             Err(BackendError::RateLimited { retry_after_secs }) if attempt < 5 => {
                 let wait = retry_after_secs
@@ -257,10 +261,10 @@ pub(crate) async fn execute_migrate(
         on_conflict
     };
     // 1. Parse backend kinds (accepting bare `backend` or `backend:vault` form)
-    let (from_kind, from_vault_override) = BackendRef::parse_migrate_endpoint(&from)
-        .map_err(CrosstacheError::invalid_argument)?;
-    let (to_kind, to_vault_override) = BackendRef::parse_migrate_endpoint(&to)
-        .map_err(CrosstacheError::invalid_argument)?;
+    let (from_kind, from_vault_override) =
+        BackendRef::parse_migrate_endpoint(&from).map_err(CrosstacheError::invalid_argument)?;
+    let (to_kind, to_vault_override) =
+        BackendRef::parse_migrate_endpoint(&to).map_err(CrosstacheError::invalid_argument)?;
 
     // 2. Create both backends
     let source = BackendRegistry::create_for_kind(from_kind, &config)
@@ -346,8 +350,14 @@ pub(crate) async fn execute_migrate(
     }
 
     // 5. Compute diff (list + filter + conflict detection)
-    let diff =
-        compute_diff(&source, &target, &source_vault, &target_vault, filter.as_deref()).await?;
+    let diff = compute_diff(
+        &source,
+        &target,
+        &source_vault,
+        &target_vault,
+        filter.as_deref(),
+    )
+    .await?;
     print_diff_summary(
         &diff,
         source.name(),
@@ -521,8 +531,7 @@ mod tests {
     fn same_backend_different_vault_allowed() {
         let (from_kind, from_vault) =
             BackendRef::parse_migrate_endpoint("local:source-store").unwrap();
-        let (to_kind, to_vault) =
-            BackendRef::parse_migrate_endpoint("local:target-store").unwrap();
+        let (to_kind, to_vault) = BackendRef::parse_migrate_endpoint("local:target-store").unwrap();
         assert_eq!(from_kind, to_kind);
         assert_ne!(from_vault, to_vault);
     }

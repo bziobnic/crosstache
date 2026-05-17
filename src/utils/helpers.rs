@@ -63,7 +63,7 @@ pub async fn write_sensitive_file_async(path: &Path, content: &[u8]) -> std::io:
     let content = content.to_vec();
     tokio::task::spawn_blocking(move || write_private(&path, &content))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 /// Check if a string is a valid GUID/UUID

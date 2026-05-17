@@ -15,9 +15,9 @@
 //! See also: [`BackendError`] for the backend-agnostic error type, and
 //! [`BackendRegistry`] for runtime backend resolution.
 
+pub mod addressing;
 #[cfg(feature = "aws")]
 pub mod aws;
-pub mod addressing;
 pub mod azure;
 pub mod error;
 #[cfg(feature = "file-ops")]
@@ -100,6 +100,7 @@ pub enum NameCharset {
 
 impl NameCharset {
     /// Returns true if `name` is valid under this charset.
+    #[allow(dead_code)] // public API; currently exercised only by tests
     pub fn is_valid(&self, name: &str) -> bool {
         match self {
             Self::AlphanumericHyphen => name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),

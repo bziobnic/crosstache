@@ -54,8 +54,7 @@ async fn azure_backend() -> AzureBackend {
         config.azure_credential_priority.clone(),
     )
     .expect("failed to build Azure credential provider — is the az CLI authenticated?");
-    AzureBackend::new(&config, Arc::new(provider))
-        .expect("failed to construct AzureBackend")
+    AzureBackend::new(&config, Arc::new(provider)).expect("failed to construct AzureBackend")
 }
 
 /// Unique secret name for one test run.
