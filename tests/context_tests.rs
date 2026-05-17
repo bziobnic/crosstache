@@ -244,3 +244,80 @@ fn xv_toml_in_ancestor_emits_cross_boundary_notice() {
         "cross-boundary notice expected on stderr: {stderr}"
     );
 }
+
+// ── P0.1 tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn context_use_rejects_xv_toml_env_name() {
+    // `xv context use dev` when .xv.toml has [env.dev] must fail with a
+    // targeted message instead of silently creating a vault named "dev".
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(temp.path(), "dev", &[("dev", "real-dev-vault")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["context", "use", "dev"])
+        .output()
+        .expect("spawn");
+    // Must be an error.
+    assert_ne!(out.status.code(), Some(0), "should have failed");
+    let stderr = stderr_str(&out);
+    // Must mention that "dev" is an env profile, not a vault.
+    assert!(
+        stderr.contains("env profile") || stderr.contains("--env"),
+        "expected targeted env-profile hint in stderr: {stderr}"
+    );
+    // Must not say "Switched to vault 'dev'".
+    assert!(
+        !stderr.contains("Switched to vault"),
+        "must not have silently created vault context: {stderr}"
+    );
+}
+
+#[test]
+fn env_list_shows_xv_toml_project_envs() {
+    // `xv env list` with a .xv.toml present should surface project envs.
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(temp.path(), "dev", &[("dev", "vault-dev"), ("prod", "vault-prod")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "list"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let stdout = stdout_str(&out);
+    // Should show the .xv.toml profiles.
+    assert!(stdout.contains("dev"), "expected 'dev' in output: {stdout}");
+    assert!(stdout.contains("prod"), "expected 'prod' in output: {stdout}");
+    // Should indicate these are activated via --env / XV_ENV.
+    assert!(
+        stdout.contains("--env") || stdout.contains("XV_ENV"),
+        "expected activation hint in output: {stdout}"
+    );
+}
+
+#[test]
+fn env_use_targeted_error_for_xv_toml_env() {
+    // `xv env use dev` when dev exists only in .xv.toml should produce a
+    // targeted hint rather than a bare "not found" error.
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(temp.path(), "dev", &[("dev", "real-dev-vault")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "use", "dev"])
+        .output()
+        .expect("spawn");
+    assert_ne!(out.status.code(), Some(0), "should have failed");
+    let stderr = stderr_str(&out);
+    // Must mention .xv.toml or --env as the correct path.
+    assert!(
+        stderr.contains(".xv.toml") || stderr.contains("--env") || stderr.contains("XV_ENV"),
+        "expected targeted hint in stderr: {stderr}"
+    );
+    // Must not just say "not found" with no guidance.
+    let bare_not_found = stderr.contains("not found") &&
+        !stderr.contains("--env") && !stderr.contains(".xv.toml") && !stderr.contains("XV_ENV");
+    assert!(!bare_not_found, "bare not-found without hint: {stderr}");
+}

@@ -115,7 +115,20 @@ pub struct Cli {
     pub env: Option<String>,
 
     /// Secrets backend to use (overrides config file and XV_BACKEND env var).
-    /// Valid values: azure, local.
+    /// Valid values: azure, local, aws.
+    #[cfg(feature = "aws")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "BACKEND",
+        env = "XV_BACKEND",
+        hide = should_hide_options()
+    )]
+    pub backend: Option<String>,
+
+    /// Secrets backend to use (overrides config file and XV_BACKEND env var).
+    /// Valid values: azure, local (aws unavailable in this build; rebuild with --features aws).
+    #[cfg(not(feature = "aws"))]
     #[arg(
         long,
         global = true,

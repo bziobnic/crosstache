@@ -145,6 +145,17 @@ async fn run(cli: Cli) -> Result<()> {
         .to_string(),
     );
 
+    // P0.3: Emit a clear error before dispatch when AWS is requested on a build
+    // that was compiled without --features aws, rather than surfacing a generic
+    // "No backend registry available" message later.
+    #[cfg(not(feature = "aws"))]
+    if config.effective_backend_name() == "aws" {
+        return Err(CrosstacheError::config(
+            "AWS backend is not included in this build. \
+Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
+        ));
+    }
+
     // Build the backend registry for commands that talk to a secrets backend.
     // Commands that are purely local (Config, Init, Cache, Context, etc.) skip
     // this entirely.  For commands that *may* need the backend we attempt

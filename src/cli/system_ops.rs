@@ -532,11 +532,18 @@ async fn execute_secret_info_from_root(
 pub(crate) async fn execute_version_command() -> Result<()> {
     let build_info = super::commands::get_build_info();
 
+    // P0.3: List compiled-in backends so users can see whether aws is available.
+    let mut backends = vec!["azure", "local"];
+    if cfg!(feature = "aws") {
+        backends.push("aws");
+    }
+
     println!("crosstache Rust CLI");
     println!("===================");
     println!("Version:      {}", build_info.version);
     println!("Git Hash:     {}", build_info.git_hash);
     println!("Git Branch:   {}", build_info.git_branch);
+    println!("Backends:     {}", backends.join(", "));
 
     Ok(())
 }

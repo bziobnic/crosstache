@@ -79,3 +79,43 @@ fn config_help_documents_subcommands() {
     assert!(stdout.contains("path"));
     assert!(stdout.contains("set"));
 }
+
+// ── P0.3 tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn version_lists_compiled_backends() {
+    // `xv version` should always mention "azure" and "local" as built-in backends.
+    let (mut cmd, _temp) = common::xv_isolated();
+    let out = cmd.args(["version"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", common::stderr_str(&out));
+    let stdout = common::stdout_str(&out);
+    assert!(
+        stdout.contains("Backends:"),
+        "expected Backends: line in version output: {stdout}"
+    );
+    assert!(stdout.contains("azure"), "expected azure in backends: {stdout}");
+    assert!(stdout.contains("local"), "expected local in backends: {stdout}");
+}
+
+#[cfg(not(feature = "aws"))]
+#[test]
+fn backend_aws_on_default_build_gives_clear_error() {
+    // On a build without --features aws, `xv --backend aws list` must return a
+    // targeted error rather than the generic "No backend registry available" message.
+    let (mut cmd, _temp) = common::xv_isolated();
+    let out = cmd
+        .args(["--backend", "aws", "list"])
+        .output()
+        .expect("spawn");
+    assert_ne!(out.status.code(), Some(0), "should have failed");
+    let stderr = common::stderr_str(&out);
+    assert!(
+        stderr.contains("AWS backend") || stderr.contains("--features aws"),
+        "expected AWS build hint in stderr: {stderr}"
+    );
+    // Must not say "No backend registry available" (the old generic message).
+    assert!(
+        !stderr.contains("No backend registry available"),
+        "must not emit generic registry error: {stderr}"
+    );
+}
