@@ -21,3 +21,6 @@ Thumbs.db
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# OMC (Oh My ClaudeCode) agent state — transient, machine-specific
+.omc/
