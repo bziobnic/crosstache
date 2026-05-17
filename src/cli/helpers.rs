@@ -427,7 +427,7 @@ pub(crate) fn mask_secrets(text: &str, secrets: &[Zeroizing<String>]) -> String 
     // preventing partial matches. Skip values < 4 chars to avoid masking
     // common short strings.
     let mut sorted: Vec<&Zeroizing<String>> = secrets.iter().collect();
-    sorted.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     let mut result = text.to_string();
     for secret in sorted {

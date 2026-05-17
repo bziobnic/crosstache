@@ -1244,6 +1244,7 @@ pub(crate) async fn execute_secret_share_direct(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
 async fn execute_secret_set(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -1330,6 +1331,7 @@ async fn execute_secret_set(
     Ok(())
 }
 
+#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
 async fn execute_secret_get(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -1793,6 +1795,7 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
 async fn execute_secret_history(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -2070,11 +2073,12 @@ async fn resolve_uri_secret(
     if let Some(backend_kind) = backend_ref.backend {
         if backend_kind != active_kind {
             // Cross-backend: reuse or create a cached backend instance
-            if !cross_backends.contains_key(&backend_kind) {
+            if let std::collections::hash_map::Entry::Vacant(e) = cross_backends.entry(backend_kind)
+            {
                 let b = BackendRegistry::create_for_kind(backend_kind, config)
                     .await
                     .map_err(CrosstacheError::from)?;
-                cross_backends.insert(backend_kind, b);
+                e.insert(b);
             }
             return cross_backends[&backend_kind]
                 .secrets()
@@ -2498,7 +2502,10 @@ async fn execute_secret_inject(
         );
     }
     if !cross_vault_refs.is_empty() {
-        println!("  Cross-vault/backend: {} secret(s)", cross_vault_refs.len());
+        println!(
+            "  Cross-vault/backend: {} secret(s)",
+            cross_vault_refs.len()
+        );
     }
 
     // Get all secrets from the vault
@@ -2670,6 +2677,7 @@ async fn execute_secret_inject(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
 async fn execute_secret_list(
     secret_manager: &crate::secret::manager::SecretManager,
     group: Option<String>,
@@ -2855,6 +2863,7 @@ async fn execute_secret_list(
     Ok(all_secrets)
 }
 
+#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
 async fn execute_secret_delete(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -3493,6 +3502,7 @@ async fn execute_secret_share(
 }
 
 /// Execute bulk secret set operation
+#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
 async fn execute_secret_set_bulk(
     secret_manager: &crate::secret::manager::SecretManager,
     args: Vec<String>,
@@ -3658,6 +3668,7 @@ async fn execute_secret_set_bulk(
 }
 
 /// Execute group delete operation
+#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
 async fn execute_secret_delete_group(
     secret_manager: &crate::secret::manager::SecretManager,
     group_name: &str,

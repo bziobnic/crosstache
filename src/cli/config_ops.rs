@@ -1011,7 +1011,11 @@ async fn execute_env_list(config: &Config) -> Result<()> {
             println!("Project envs (from {}):", path.display());
             println!("  Activated via: xv --env <name> <command>  |  XV_ENV=<name>  |  default_env in .xv.toml");
             for (name, profile) in &proj_cfg.envs {
-                let marker = if active.as_deref() == Some(name.as_str()) { "*" } else { " " };
+                let marker = if active.as_deref() == Some(name.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
                 let vault = profile.vault.as_deref().unwrap_or("(unset)");
                 let backend = profile.backend.as_deref().unwrap_or("azure");
                 println!("  {marker} {name}  backend={backend}  vault={vault}");

@@ -64,7 +64,14 @@ impl BackendRef {
             Some(pos) => {
                 let v = rest[..pos].to_string();
                 let sec = &rest[pos + 1..];
-                (v, if sec.is_empty() { None } else { Some(sec.to_string()) })
+                (
+                    v,
+                    if sec.is_empty() {
+                        None
+                    } else {
+                        Some(sec.to_string())
+                    },
+                )
             }
             None => (rest.to_string(), None),
         };
@@ -73,7 +80,11 @@ impl BackendRef {
             return Err(format!("vault name cannot be empty in '{s}'"));
         }
 
-        Ok(BackendRef { backend, vault, secret })
+        Ok(BackendRef {
+            backend,
+            vault,
+            secret,
+        })
     }
 
     /// Parse a migrate endpoint string: `backend` or `backend:vault`.
@@ -89,15 +100,15 @@ impl BackendRef {
         if let Some(colon) = s.find(':') {
             let left = &s[..colon];
             let right = &s[colon + 1..];
-            let kind = left
-                .parse::<BackendKind>()
-                .map_err(|_| format!("unknown backend '{left}' in '{s}': valid values are azure, local, aws"))?;
+            let kind = left.parse::<BackendKind>().map_err(|_| {
+                format!("unknown backend '{left}' in '{s}': valid values are azure, local, aws")
+            })?;
             let vault = right.to_string();
             Ok((kind, if vault.is_empty() { None } else { Some(vault) }))
         } else {
-            let kind = s
-                .parse::<BackendKind>()
-                .map_err(|_| format!("unknown backend '{s}': valid values are azure, local, aws"))?;
+            let kind = s.parse::<BackendKind>().map_err(|_| {
+                format!("unknown backend '{s}': valid values are azure, local, aws")
+            })?;
             Ok((kind, None))
         }
     }
@@ -259,10 +270,7 @@ mod tests {
     #[test]
     fn migrate_unknown_backend_rejected() {
         let err = BackendRef::parse_migrate_endpoint("gcp").unwrap_err();
-        assert!(
-            err.contains("unknown") || err.contains("gcp"),
-            "got: {err}"
-        );
+        assert!(err.contains("unknown") || err.contains("gcp"), "got: {err}");
     }
 
     #[test]

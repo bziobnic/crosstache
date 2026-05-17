@@ -236,6 +236,7 @@ fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
     let lock_path = vault_dir.join(".lock");
     let lock_file = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&lock_path)
         .map_err(|e| BackendError::Internal(format!("open lock: {e}")))?;

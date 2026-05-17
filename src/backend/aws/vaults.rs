@@ -251,16 +251,12 @@ impl AwsVaultBackend {
         let mut next_token: Option<String> = None;
         let mut non_marker: Vec<String> = Vec::new();
         loop {
-            let mut req = self
-                .client
-                .list_secrets()
-                .max_results(100)
-                .filters(
-                    Filter::builder()
-                        .key(FilterNameStringType::Name)
-                        .values(prefix.clone())
-                        .build(),
-                );
+            let mut req = self.client.list_secrets().max_results(100).filters(
+                Filter::builder()
+                    .key(FilterNameStringType::Name)
+                    .values(prefix.clone())
+                    .build(),
+            );
             if let Some(ref t) = next_token {
                 req = req.next_token(t.clone());
             }

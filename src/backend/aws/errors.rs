@@ -29,9 +29,7 @@ fn handle_sdk<E: std::fmt::Display + std::fmt::Debug, R: std::fmt::Debug>(
     e: SdkError<E, R>,
 ) -> BackendError {
     match e {
-        SdkError::TimeoutError(_) => {
-            BackendError::Network(format!("aws {op}: timeout"))
-        }
+        SdkError::TimeoutError(_) => BackendError::Network(format!("aws {op}: timeout")),
         SdkError::DispatchFailure(ref df) if df.is_user() => {
             // Credential resolution failure — not a network error.
             BackendError::AuthenticationFailed(format!(
@@ -218,7 +216,9 @@ mod tests {
             matches!(err, BackendError::AuthenticationFailed(_)),
             "expected AuthenticationFailed, got: {err:?}"
         );
-        let BackendError::AuthenticationFailed(msg) = err else { unreachable!() };
+        let BackendError::AuthenticationFailed(msg) = err else {
+            unreachable!()
+        };
         assert!(msg.contains("aws configure"), "hint missing: {msg}");
         assert!(msg.contains("AWS_ACCESS_KEY_ID"), "hint missing: {msg}");
     }
