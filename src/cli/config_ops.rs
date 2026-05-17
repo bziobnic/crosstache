@@ -538,6 +538,17 @@ async fn execute_context_use(
 ) -> Result<()> {
     use crate::config::{ContextManager, VaultContext};
 
+    // P0.1: If the name matches a .xv.toml env profile, reject with a targeted hint.
+    let cwd = std::env::current_dir()?;
+    if let Ok(Some((_path, proj_cfg))) = crate::config::project::find_project_config(&cwd).await {
+        if proj_cfg.envs.contains_key(vault_name) {
+            return Err(CrosstacheError::config(format!(
+                "'{vault_name}' is an env profile in .xv.toml, not a vault name. \
+Use `xv --env {vault_name} <command>` to activate it, or set XV_ENV={vault_name} in your shell."
+            )));
+        }
+    }
+
     let mut context_manager = if local {
         // Create local context
         ContextManager::new_local()?
@@ -984,17 +995,44 @@ pub(crate) async fn execute_env_command(command: EnvCommands, config: Config) ->
     }
 }
 
-async fn execute_env_list(_config: &Config) -> Result<()> {
+async fn execute_env_list(config: &Config) -> Result<()> {
     let manager = EnvironmentProfileManager::load().await?;
 
+    // P0.1: Always show .xv.toml project envs first (activated via --env / XV_ENV).
+    let cwd = std::env::current_dir()?;
+    let project_env_names: Vec<String> = if let Ok(Some((path, proj_cfg))) =
+        crate::config::project::find_project_config(&cwd).await
+    {
+        if !proj_cfg.envs.is_empty() {
+            let active = crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
+                .ok()
+                .map(|(name, _)| name.to_string());
+
+            println!("Project envs (from {}):", path.display());
+            println!("  Activated via: xv --env <name> <command>  |  XV_ENV=<name>  |  default_env in .xv.toml");
+            for (name, profile) in &proj_cfg.envs {
+                let marker = if active.as_deref() == Some(name.as_str()) { "*" } else { " " };
+                let vault = profile.vault.as_deref().unwrap_or("(unset)");
+                let backend = profile.backend.as_deref().unwrap_or("azure");
+                println!("  {marker} {name}  backend={backend}  vault={vault}");
+            }
+            println!();
+        }
+        proj_cfg.envs.keys().cloned().collect()
+    } else {
+        Vec::new()
+    };
+
     if manager.profiles.is_empty() {
-        output::info("No environment profiles found.");
-        println!("Create one with: xv env create <name> --vault <vault> --group <group>");
+        if project_env_names.is_empty() {
+            output::info("No environment profiles found.");
+            println!("Create one with: xv env create <name> --vault <vault> --group <group>");
+        }
         return Ok(());
     }
 
-    println!("Environment Profiles:");
-    println!("────────────────────");
+    println!("Legacy user profiles (activated via: xv env use <name>):");
+    println!("────────────────────────────────────────────────────────");
 
     for (name, profile) in &manager.profiles {
         let current_marker = if manager.current_profile.as_ref() == Some(name) {
@@ -1027,6 +1065,26 @@ async fn execute_env_list(_config: &Config) -> Result<()> {
 
 async fn execute_env_use(name: &str, _config: &Config) -> Result<()> {
     let mut manager = EnvironmentProfileManager::load().await?;
+
+    // P0.1: When the legacy lookup would fail, check whether the name exists as a
+    // .xv.toml env profile and emit a targeted hint instead of the generic "not found".
+    if !manager.profiles.contains_key(name) {
+        let cwd = std::env::current_dir()?;
+        if let Ok(Some((path, proj_cfg))) = crate::config::project::find_project_config(&cwd).await
+        {
+            if proj_cfg.envs.contains_key(name) {
+                return Err(CrosstacheError::config(format!(
+                    "No legacy user profile named '{name}'.\n\
+Found project env '{name}' in {} — activate it with:\n  \
+xv --env {name} <command>\n  \
+XV_ENV={name} xv <command>\n\
+Or set `default_env = \"{name}\"` in .xv.toml.\n\
+(Legacy `xv env use` manages user-scoped profiles, not .xv.toml envs.)",
+                    path.display()
+                )));
+            }
+        }
+    }
 
     // Get profile data before using (to avoid borrow checker issues)
     let (vault_name, resource_group, subscription_id) = {

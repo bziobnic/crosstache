@@ -29,8 +29,19 @@ fn handle_sdk<E: std::fmt::Display + std::fmt::Debug, R: std::fmt::Debug>(
     e: SdkError<E, R>,
 ) -> BackendError {
     match e {
-        SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) => {
-            BackendError::Network(format!("aws {op}: timeout or dispatch failure"))
+        SdkError::TimeoutError(_) => {
+            BackendError::Network(format!("aws {op}: timeout"))
+        }
+        SdkError::DispatchFailure(ref df) if df.is_user() => {
+            // Credential resolution failure — not a network error.
+            BackendError::AuthenticationFailed(format!(
+                "No AWS credentials resolved (operation: {op}). \
+Try `aws configure`, set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, \
+or run `eval \"$(aws configure export-credentials --format env)\"` after `aws login`."
+            ))
+        }
+        SdkError::DispatchFailure(_) => {
+            BackendError::Network(format!("aws {op}: dispatch failure"))
         }
         SdkError::ServiceError(svc) => BackendError::Internal(format!("aws {op}: {}", svc.err())),
         other => generic(op, format!("{other:?}")),
@@ -182,6 +193,44 @@ pub fn from_update_stage(
         }
     }
     handle_sdk("UpdateSecretVersionStage", e)
+}
+
+#[cfg(all(test, feature = "aws"))]
+mod tests {
+    use super::*;
+    use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+    use aws_smithy_runtime_api::client::result::ConnectorError;
+
+    fn make_user_dispatch_failure() -> SdkError<ListSecretsError, HttpResponse> {
+        let inner = std::io::Error::new(std::io::ErrorKind::Other, "no credentials in chain");
+        SdkError::dispatch_failure(ConnectorError::user(Box::new(inner)))
+    }
+
+    fn make_timeout_error() -> SdkError<ListSecretsError, HttpResponse> {
+        let inner = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        SdkError::dispatch_failure(ConnectorError::timeout(Box::new(inner)))
+    }
+
+    #[test]
+    fn dispatch_failure_user_maps_to_auth_error() {
+        let err = from_list(make_user_dispatch_failure());
+        assert!(
+            matches!(err, BackendError::AuthenticationFailed(_)),
+            "expected AuthenticationFailed, got: {err:?}"
+        );
+        let BackendError::AuthenticationFailed(msg) = err else { unreachable!() };
+        assert!(msg.contains("aws configure"), "hint missing: {msg}");
+        assert!(msg.contains("AWS_ACCESS_KEY_ID"), "hint missing: {msg}");
+    }
+
+    #[test]
+    fn dispatch_failure_timeout_maps_to_network() {
+        let err = from_list(make_timeout_error());
+        assert!(
+            matches!(err, BackendError::Network(_)),
+            "expected Network, got: {err:?}"
+        );
+    }
 }
 
 pub fn from_tag(e: SdkError<TagResourceError, Response>) -> BackendError {
