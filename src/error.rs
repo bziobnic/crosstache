@@ -20,6 +20,10 @@ pub enum CrosstacheError {
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
+    #[error("Backend '{backend}' is not available: {reason}")]
+    #[allow(dead_code)]
+    BackendUnavailable { backend: String, reason: String },
+
     #[error("Secret not found: {name}")]
     SecretNotFound {
         name: String,
@@ -110,6 +114,7 @@ impl CrosstacheError {
             Self::RateLimited(_) => "xv-rate-limited",
             Self::ConfigError(_) => "xv-config-invalid",
             Self::ConfigLoadError(_) => "xv-config-invalid",
+            Self::BackendUnavailable { .. } => "xv-backend-unavailable",
             Self::SecretNotFound { .. } => "xv-secret-not-found",
             Self::VaultNotFound { .. } => "xv-vault-not-found",
             Self::InvalidSecretName { .. } => "xv-invalid-secret-name",
@@ -141,6 +146,7 @@ impl CrosstacheError {
         match self {
             Self::InvalidArgument(_) => 2,
             Self::ConfigError(_) | Self::ConfigLoadError(_) | Self::EnvNotDefined { .. } => 3,
+            Self::BackendUnavailable { .. } => 3,
 
             Self::SecretNotFound { .. } => 10,
             Self::VaultNotFound { .. } => 11,
@@ -195,6 +201,14 @@ impl CrosstacheError {
 
     pub fn config<S: Into<String>>(msg: S) -> Self {
         Self::ConfigError(msg.into())
+    }
+
+    #[allow(dead_code)]
+    pub fn backend_unavailable<S: Into<String>, R: Into<String>>(backend: S, reason: R) -> Self {
+        Self::BackendUnavailable {
+            backend: backend.into(),
+            reason: reason.into(),
+        }
     }
 
     #[allow(dead_code)]
@@ -498,6 +512,10 @@ mod tests {
             (CrosstacheError::rate_limited("x"), "xv-rate-limited"),
             (CrosstacheError::config("x"), "xv-config-invalid"),
             (
+                CrosstacheError::backend_unavailable("aws", "not compiled in"),
+                "xv-backend-unavailable",
+            ),
+            (
                 CrosstacheError::secret_not_found("x"),
                 "xv-secret-not-found",
             ),
@@ -556,6 +574,10 @@ mod tests {
 
         // 3 — config family
         assert_eq!(CrosstacheError::config("x").exit_code(), 3);
+        assert_eq!(
+            CrosstacheError::backend_unavailable("aws", "x").exit_code(),
+            3
+        );
 
         // 10–19 — not-found family
         assert_eq!(CrosstacheError::secret_not_found("x").exit_code(), 10);
