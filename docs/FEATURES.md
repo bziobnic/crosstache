@@ -79,9 +79,11 @@ Names are automatically sanitized for backend compatibility (Azure: alphanumeric
 | `xv context show` | Show current context |
 | `xv context list` | Recent contexts |
 | `xv context clear` | Clear context |
-| `xv env create <name>` | Create named profile (`--vault`, `--group`) |
-| `xv env use <name>` | Switch to profile |
-| `xv env list` | List profiles |
+| `xv env list` | List `[env.*]` blocks in the resolved `.xv.toml` (`xv context envs` is an alias) |
+| `xv env use <name>` | Set `default_env = "<name>"` in the nearest `.xv.toml` |
+| `xv env create <name>` | Add `[env.<name>]` to the nearest `.xv.toml` (`--vault`, `--resource-group`, `--backend`, `--default`) |
+| `xv env delete <name>` | Remove `[env.<name>]` from the resolved `.xv.toml` (`-f` to skip confirmation) |
+| `xv env show` | Show the active env (source, backend, vault, resource_group, group, folder) |
 | `xv env pull` | Download secrets as `.env` file |
 | `xv env push <file>` | Upload `.env` contents as secrets |
 

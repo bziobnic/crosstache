@@ -8,8 +8,6 @@ use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::output;
 use crate::vault::VaultManager;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -698,42 +696,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
 }
 
 async fn execute_context_envs(config: &Config) -> Result<()> {
-    use crate::config::project;
-
-    let cwd = std::env::current_dir()?;
-    let Some((path, cfg)) = project::find_project_config(&cwd).await? else {
-        crate::utils::output::warn("no .xv.toml found in cwd or any ancestor (within boundary)");
-        crate::utils::output::info("hint: run 'xv context init' to create one");
-        return Ok(());
-    };
-
-    // Resolve active env (best-effort — don't error out, just leave
-    // the active marker absent if resolution fails).
-    let active = project::resolve_env(&cfg, config.env_flag.as_deref())
-        .ok()
-        .map(|(name, _)| name.to_string());
-
-    println!("config: {}", path.display());
-    if let Some(d) = cfg.default_env.as_deref() {
-        println!("default_env: {d}");
-    }
-    println!();
-    if cfg.envs.is_empty() {
-        println!("(no envs defined)");
-        return Ok(());
-    }
-    println!("envs:");
-    for (name, profile) in &cfg.envs {
-        let marker = if active.as_deref() == Some(name.as_str()) {
-            "*"
-        } else {
-            " "
-        };
-        let vault = profile.vault.as_deref().unwrap_or("(unset)");
-        let rg = profile.resource_group.as_deref().unwrap_or("(unset)");
-        println!("  {marker} {name}  vault={vault}  rg={rg}");
-    }
-    Ok(())
+    execute_env_list(config).await
 }
 
 async fn execute_context_init(
@@ -827,150 +790,6 @@ async fn execute_context_init(
     Ok(())
 }
 
-// ── Environment Profiles ─────────────────────────────────────────────────────
-
-/// Environment profile structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EnvironmentProfile {
-    pub name: String,
-    pub vault_name: String,
-    pub resource_group: String,
-    pub subscription_id: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub last_used: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl EnvironmentProfile {
-    pub fn new(
-        name: String,
-        vault_name: String,
-        resource_group: String,
-        subscription_id: Option<String>,
-    ) -> Self {
-        Self {
-            name,
-            vault_name,
-            resource_group,
-            subscription_id,
-            created_at: chrono::Utc::now(),
-            last_used: None,
-        }
-    }
-
-    pub fn update_usage(&mut self) {
-        self.last_used = Some(chrono::Utc::now());
-    }
-}
-
-/// Environment profile manager
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct EnvironmentProfileManager {
-    pub profiles: std::collections::HashMap<String, EnvironmentProfile>,
-    pub current_profile: Option<String>,
-}
-
-impl EnvironmentProfileManager {
-    /// Load profiles from configuration file
-    pub async fn load() -> Result<Self> {
-        let profile_path = Self::get_profile_path()?;
-
-        if !profile_path.exists() {
-            return Ok(Self::default());
-        }
-
-        let content = tokio::fs::read_to_string(&profile_path).await?;
-        let manager = serde_json::from_str(&content)?;
-        Ok(manager)
-    }
-
-    /// Save profiles to configuration file
-    pub async fn save(&self) -> Result<()> {
-        let profile_path = Self::get_profile_path()?;
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = profile_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        let content = serde_json::to_string_pretty(self)?;
-        crate::utils::helpers::write_sensitive_file_async(&profile_path, content.as_bytes())
-            .await?;
-        Ok(())
-    }
-
-    /// Get the profile configuration file path
-    fn get_profile_path() -> Result<PathBuf> {
-        // Check for local .xv.json file first
-        let local_path = std::env::current_dir()?.join(".xv.json");
-        if local_path.exists() {
-            return Ok(local_path);
-        }
-
-        // Use global profile path
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            use std::env;
-            let config_dir = if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
-                PathBuf::from(xdg_config_home)
-            } else {
-                let home_dir = env::var("HOME")
-                    .map_err(|_| CrosstacheError::config("HOME environment variable not set"))?;
-                PathBuf::from(home_dir).join(".config")
-            };
-            Ok(config_dir.join("xv").join("profiles.json"))
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let config_dir = dirs::config_dir()
-                .ok_or_else(|| CrosstacheError::config("Unable to determine config directory"))?;
-            Ok(config_dir.join("xv").join("profiles.json"))
-        }
-    }
-
-    /// Add a new environment profile
-    pub fn create_profile(&mut self, profile: EnvironmentProfile) -> Result<()> {
-        if self.profiles.contains_key(&profile.name) {
-            return Err(CrosstacheError::config(format!(
-                "Environment profile '{}' already exists",
-                profile.name
-            )));
-        }
-
-        self.profiles.insert(profile.name.clone(), profile);
-        Ok(())
-    }
-
-    /// Delete an environment profile
-    pub fn delete_profile(&mut self, name: &str) -> Result<()> {
-        if !self.profiles.contains_key(name) {
-            return Err(CrosstacheError::config(format!(
-                "Environment profile '{}' not found",
-                name
-            )));
-        }
-
-        // Clear current profile if it's the one being deleted
-        if self.current_profile.as_ref() == Some(&name.to_string()) {
-            self.current_profile = None;
-        }
-
-        self.profiles.remove(name);
-        Ok(())
-    }
-
-    /// Use an environment profile (set it as current)
-    pub fn use_profile(&mut self, name: &str) -> Result<&EnvironmentProfile> {
-        let profile = self.profiles.get_mut(name).ok_or_else(|| {
-            CrosstacheError::config(format!("Environment profile '{}' not found", name))
-        })?;
-
-        profile.update_usage();
-        self.current_profile = Some(name.to_string());
-        Ok(profile)
-    }
-}
-
 // ── Env Commands ─────────────────────────────────────────────────────────────
 
 pub(crate) async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()> {
@@ -980,10 +799,26 @@ pub(crate) async fn execute_env_command(command: EnvCommands, config: Config) ->
         EnvCommands::Create {
             name,
             vault,
+            resource_group,
+            backend,
             group,
-            subscription,
-            global,
-        } => execute_env_create(&name, &vault, &group, subscription, global, &config).await,
+            folder,
+            default,
+            force,
+        } => {
+            execute_env_create(
+                &name,
+                &vault,
+                &resource_group,
+                backend.as_deref(),
+                group.as_deref(),
+                folder.as_deref(),
+                default,
+                force,
+                &config,
+            )
+            .await
+        }
         EnvCommands::Delete { name, force } => execute_env_delete(&name, force, &config).await,
         EnvCommands::Show => execute_env_show(&config).await,
         EnvCommands::Pull {
@@ -996,249 +831,222 @@ pub(crate) async fn execute_env_command(command: EnvCommands, config: Config) ->
 }
 
 async fn execute_env_list(config: &Config) -> Result<()> {
-    let manager = EnvironmentProfileManager::load().await?;
+    use crate::config::project;
 
-    // P0.1: Always show .xv.toml project envs first (activated via --env / XV_ENV).
     let cwd = std::env::current_dir()?;
-    let project_env_names: Vec<String> = if let Ok(Some((path, proj_cfg))) =
-        crate::config::project::find_project_config(&cwd).await
-    {
-        if !proj_cfg.envs.is_empty() {
-            let active = crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
-                .ok()
-                .map(|(name, _)| name.to_string());
-
-            println!("Project envs (from {}):", path.display());
-            println!("  Activated via: xv --env <name> <command>  |  XV_ENV=<name>  |  default_env in .xv.toml");
-            for (name, profile) in &proj_cfg.envs {
-                let marker = if active.as_deref() == Some(name.as_str()) {
-                    "*"
-                } else {
-                    " "
-                };
-                let vault = profile.vault.as_deref().unwrap_or("(unset)");
-                let backend = profile.backend.as_deref().unwrap_or("azure");
-                println!("  {marker} {name}  backend={backend}  vault={vault}");
-            }
-            println!();
-        }
-        proj_cfg.envs.keys().cloned().collect()
-    } else {
-        Vec::new()
+    let Some((path, cfg)) = project::find_project_config(&cwd).await? else {
+        output::info(&format!(
+            "No .xv.toml found from {}. Create one with: xv context init",
+            cwd.display()
+        ));
+        return Ok(());
     };
 
-    if manager.profiles.is_empty() {
-        if project_env_names.is_empty() {
-            output::info("No environment profiles found.");
-            println!("Create one with: xv env create <name> --vault <vault> --group <group>");
-        }
-        return Ok(());
-    }
+    let active = project::resolve_env(&cfg, config.env_flag.as_deref())
+        .ok()
+        .map(|(name, _)| name.to_string());
 
-    println!("Legacy user profiles (activated via: xv env use <name>):");
-    println!("────────────────────────────────────────────────────────");
-
-    for (name, profile) in &manager.profiles {
-        let current_marker = if manager.current_profile.as_ref() == Some(name) {
-            "* "
+    let default_label = cfg
+        .default_env
+        .as_deref()
+        .map(|d| format!(", default: {d}"))
+        .unwrap_or_default();
+    println!("Project envs (from {}{}):", path.display(), default_label);
+    for (name, profile) in &cfg.envs {
+        let marker = if active.as_deref() == Some(name.as_str()) {
+            "*"
         } else {
-            "  "
+            " "
         };
-
-        println!(
-            "{}{} → {} ({})",
-            current_marker, name, profile.vault_name, profile.resource_group
-        );
-
-        if let Some(last_used) = profile.last_used {
-            println!(
-                "    Last used: {}",
-                last_used.format("%Y-%m-%d %H:%M:%S UTC")
-            );
+        let backend = profile.backend.as_deref().unwrap_or("azure");
+        let vault = profile.vault.as_deref().unwrap_or("(unset)");
+        let mut extras = String::new();
+        if let Some(rg) = &profile.resource_group {
+            extras.push_str(&format!("  resource_group={rg}"));
         }
+        println!("  {marker} {name}  backend={backend}  vault={vault}{extras}");
     }
-
-    if let Some(current_name) = &manager.current_profile {
-        println!("\nCurrent profile: {}", current_name);
-    } else {
-        println!("\nNo profile currently active");
-    }
-
     Ok(())
 }
 
 async fn execute_env_use(name: &str, _config: &Config) -> Result<()> {
-    let mut manager = EnvironmentProfileManager::load().await?;
+    use crate::config::project;
 
-    // P0.1: When the legacy lookup would fail, check whether the name exists as a
-    // .xv.toml env profile and emit a targeted hint instead of the generic "not found".
-    if !manager.profiles.contains_key(name) {
-        let cwd = std::env::current_dir()?;
-        if let Ok(Some((path, proj_cfg))) = crate::config::project::find_project_config(&cwd).await
-        {
-            if proj_cfg.envs.contains_key(name) {
-                return Err(CrosstacheError::config(format!(
-                    "No legacy user profile named '{name}'.\n\
-Found project env '{name}' in {} — activate it with:\n  \
-xv --env {name} <command>\n  \
-XV_ENV={name} xv <command>\n\
-Or set `default_env = \"{name}\"` in .xv.toml.\n\
-(Legacy `xv env use` manages user-scoped profiles, not .xv.toml envs.)",
-                    path.display()
-                )));
-            }
+    let cwd = std::env::current_dir()?;
+    let (path, mut cfg) = match project::find_project_config(&cwd).await? {
+        Some(result) => result,
+        None => {
+            return Err(CrosstacheError::config(format!(
+                "No .xv.toml found from {}. Create one with: xv context init",
+                cwd.display()
+            )));
         }
-    }
-
-    // Get profile data before using (to avoid borrow checker issues)
-    let (vault_name, resource_group, subscription_id) = {
-        let profile = manager.use_profile(name)?;
-        (
-            profile.vault_name.clone(),
-            profile.resource_group.clone(),
-            profile.subscription_id.clone(),
-        )
     };
 
-    // Update the vault context using the profile
-    use crate::config::context::VaultContext;
-    use crate::config::ContextManager;
-
-    let vault_context = VaultContext::new(
-        vault_name.clone(),
-        Some(resource_group.clone()),
-        subscription_id.clone(),
-    );
-
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
-    context_manager.set_context(vault_context).await?;
-
-    // Save the profile manager
-    manager.save().await?;
-
-    output::success(&format!("Using environment profile: {}", name));
-    println!("  Vault: {}", vault_name);
-    println!("  Resource Group: {}", resource_group);
-    if let Some(subscription) = &subscription_id {
-        println!("  Subscription: {}", subscription);
+    if !cfg.envs.contains_key(name) {
+        let available: Vec<String> = cfg.envs.keys().cloned().collect();
+        return Err(CrosstacheError::config(format!(
+            "No env profile '{}' in {}. Available: {}",
+            name,
+            path.display(),
+            if available.is_empty() {
+                "(none)".to_string()
+            } else {
+                available.join(", ")
+            }
+        )));
     }
 
+    cfg.default_env = Some(name.to_string());
+    cfg.save(&path).await?;
+    output::success(&format!(
+        "Set default_env = {:?} in {}",
+        name,
+        path.display()
+    ));
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_env_create(
     name: &str,
     vault: &str,
-    group: &str,
-    subscription: Option<String>,
-    global: bool,
+    resource_group: &str,
+    backend: Option<&str>,
+    group: Option<&str>,
+    folder: Option<&str>,
+    set_default: bool,
+    force: bool,
     _config: &Config,
 ) -> Result<()> {
-    let mut manager = EnvironmentProfileManager::load().await?;
+    use crate::config::project::{validate_env_profile_backend, EnvProfile};
 
-    let profile = EnvironmentProfile::new(
-        name.to_string(),
-        vault.to_string(),
-        group.to_string(),
-        subscription.clone(),
-    );
-
-    manager.create_profile(profile.clone())?;
-
-    if global {
-        // Set as current profile
-        manager.use_profile(name)?;
-
-        // Update the vault context
-        use crate::config::context::VaultContext;
-        use crate::config::ContextManager;
-
-        let vault_context = VaultContext::new(
-            vault.to_string(),
-            Some(group.to_string()),
-            subscription.clone(),
-        );
-
-        let mut context_manager = ContextManager::load().await.unwrap_or_default();
-        context_manager.set_context(vault_context).await?;
+    if let Some(b) = backend {
+        validate_env_profile_backend(b)?;
     }
 
-    manager.save().await?;
+    let cwd = std::env::current_dir()?;
+    let (path, mut cfg) = crate::config::project::find_or_create_project_config(&cwd).await?;
 
-    output::success(&format!("Created environment profile: {}", name));
-    println!("  Vault: {}", vault);
-    println!("  Resource Group: {}", group);
-    if let Some(subscription) = &subscription {
-        println!("  Subscription: {}", subscription);
+    if cfg.envs.contains_key(name) && !force {
+        return Err(CrosstacheError::config(format!(
+            "env profile '{name}' already exists in {}. Use --force to overwrite.",
+            path.display()
+        )));
     }
 
-    if global {
-        println!("  Set as current profile");
+    let profile = EnvProfile {
+        vault: Some(vault.to_string()),
+        resource_group: Some(resource_group.to_string()),
+        backend: backend.map(String::from),
+        group: group.map(String::from),
+        folder: folder.map(String::from),
+    };
+
+    cfg.envs.insert(name.to_string(), profile);
+
+    if set_default {
+        cfg.default_env = Some(name.to_string());
     }
 
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            CrosstacheError::config(format!(
+                "failed to create directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    cfg.save(&path).await?;
+    output::success(&format!("Added [env.{}] to {}", name, path.display()));
+    if set_default {
+        println!("  default_env = {:?}", name);
+    }
     Ok(())
 }
 
 async fn execute_env_delete(name: &str, force: bool, _config: &Config) -> Result<()> {
-    let mut manager = EnvironmentProfileManager::load().await?;
+    use crate::config::project;
 
-    if !manager.profiles.contains_key(name) {
+    let cwd = std::env::current_dir()?;
+    let (path, mut cfg) = match project::find_project_config(&cwd).await? {
+        Some(result) => result,
+        None => {
+            return Err(CrosstacheError::config(format!(
+                "No .xv.toml found from {}. Create one with: xv context init",
+                cwd.display()
+            )));
+        }
+    };
+
+    if !cfg.envs.contains_key(name) {
+        let available: Vec<String> = cfg.envs.keys().cloned().collect();
         return Err(CrosstacheError::config(format!(
-            "Environment profile '{}' not found",
-            name
+            "No env profile '{}' in {}. Available: {}",
+            name,
+            path.display(),
+            if available.is_empty() {
+                "(none)".to_string()
+            } else {
+                available.join(", ")
+            }
         )));
     }
 
     if !force {
         use crate::utils::interactive::InteractivePrompt;
-
         let prompt = InteractivePrompt::new();
-        let confirmation_message = format!("Delete environment profile '{}'?", name);
-        if !prompt.confirm(&confirmation_message, false)? {
+        if !prompt.confirm(
+            &format!("Remove [env.{name}] from {}?", path.display()),
+            false,
+        )? {
             println!("Delete cancelled");
             return Ok(());
         }
     }
 
-    manager.delete_profile(name)?;
-    manager.save().await?;
+    cfg.envs.remove(name);
 
-    output::success(&format!("Deleted environment profile: {}", name));
+    if cfg.default_env.as_deref() == Some(name) {
+        cfg.default_env = None;
+    }
 
+    cfg.save(&path).await?;
+    output::success(&format!("Removed [env.{}] from {}", name, path.display()));
     Ok(())
 }
 
-async fn execute_env_show(_config: &Config) -> Result<()> {
-    let manager = EnvironmentProfileManager::load().await?;
+async fn execute_env_show(config: &Config) -> Result<()> {
+    use crate::config::project;
 
-    if let Some(current_name) = &manager.current_profile {
-        if let Some(profile) = manager.profiles.get(current_name) {
-            println!("Current Environment Profile: {}", current_name);
-            println!("──────────────────────────");
-            println!("Vault: {}", profile.vault_name);
-            println!("Resource Group: {}", profile.resource_group);
-            if let Some(subscription) = &profile.subscription_id {
-                println!("Subscription: {}", subscription);
-            }
-            println!(
-                "Created: {}",
-                profile.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
-            if let Some(last_used) = profile.last_used {
-                println!("Last Used: {}", last_used.format("%Y-%m-%d %H:%M:%S UTC"));
-            }
-        } else {
-            println!(
-                "Current profile '{}' not found (corrupted state)",
-                current_name
-            );
-        }
-    } else {
-        output::info("No environment profile is currently active");
-        println!("Use 'xv env list' to see available profiles");
-        println!("Use 'xv env use <name>' to activate a profile");
+    let cwd = std::env::current_dir()?;
+    let Some((path, cfg)) = project::find_project_config(&cwd).await? else {
+        output::info(&format!(
+            "No .xv.toml found from {}. Create one with: xv context init",
+            cwd.display()
+        ));
+        return Ok(());
+    };
+
+    let (name, profile) = project::resolve_env(&cfg, config.env_flag.as_deref())?;
+
+    println!("Active env: {name} (from {})", path.display());
+    if let Some(b) = &profile.backend {
+        println!("  backend: {b}");
     }
-
+    if let Some(v) = &profile.vault {
+        println!("  vault: {v}");
+    }
+    if let Some(rg) = &profile.resource_group {
+        println!("  resource_group: {rg}");
+    }
+    if let Some(g) = &profile.group {
+        println!("  group: {g}");
+    }
+    if let Some(f) = &profile.folder {
+        println!("  folder: {f}");
+    }
     Ok(())
 }
 

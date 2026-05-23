@@ -604,7 +604,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: ContextCommands,
     },
-    /// Environment profile management
+    /// Manage `.xv.toml` project environments (the `[env.<name>]` blocks).
+    /// Activate via `--env <name>`, `XV_ENV=<name>`, or by setting `default_env`.
     Env {
         #[command(subcommand)]
         command: EnvCommands,
@@ -1083,39 +1084,48 @@ pub enum ContextCommands {
 
 #[derive(Subcommand)]
 pub enum EnvCommands {
-    /// List available environment profiles
+    /// List `.xv.toml` environments from the resolved project config
     List,
-    /// Use an environment profile (sets vault and group context)
+    /// Write `default_env = "<name>"` into the nearest `.xv.toml`
     Use {
-        /// Profile name
+        /// Env name defined in `.xv.toml`
         name: String,
     },
-    /// Create a new environment profile
+    /// Add a new `[env.<name>]` block to the nearest `.xv.toml` (creates the file if absent)
     Create {
-        /// Profile name
+        /// Env name
         name: String,
-        /// Vault name for this profile
+        /// Vault name for this env
         #[arg(long)]
         vault: String,
         /// Resource group for the vault
         #[arg(long)]
-        group: String,
-        /// Subscription ID (optional)
+        resource_group: String,
+        /// Backend to use (azure | local | aws); defaults to azure
         #[arg(long)]
-        subscription: Option<String>,
-        /// Set this profile as global default
+        backend: Option<String>,
+        /// Default secret group filter for this env
         #[arg(long)]
-        global: bool,
+        group: Option<String>,
+        /// Default folder prefix for this env
+        #[arg(long)]
+        folder: Option<String>,
+        /// Also set this env as `default_env`
+        #[arg(long)]
+        default: bool,
+        /// Overwrite an existing `[env.<name>]` block
+        #[arg(long)]
+        force: bool,
     },
-    /// Delete an environment profile
+    /// Remove an `[env.<name>]` block from the resolved `.xv.toml`
     Delete {
-        /// Profile name
+        /// Env name
         name: String,
-        /// Force deletion without confirmation
+        /// Remove without confirmation prompt
         #[arg(short, long)]
         force: bool,
     },
-    /// Show current environment profile
+    /// Show the currently-active env (source, backend, vault, resource_group, group, folder)
     Show,
     /// Pull secrets to a file format
     Pull {
