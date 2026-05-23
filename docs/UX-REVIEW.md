@@ -95,6 +95,8 @@ match a `.xv.toml` env with a targeted message:
 
 ### 2. AWS auth failures are reported as network timeouts
 
+> **Resolved in v0.11.0** (PR fix/aws-healthcheck-auth-classification) — `health_check` and all SDK error mappers now classify credential-resolution failures as `xv-auth-failed` with the `aws configure` remediation hint; defensive matching also catches non-user `DispatchFailure`/`ConstructionFailure` paths whose source chain mentions credential providers.
+
 Problem: when AWS credentials cannot be resolved, `xv` returns `xv-network` and
 claims `timeout or dispatch failure`. This hides the real fix: configure usable
 AWS SDK credentials.

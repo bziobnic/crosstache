@@ -25,13 +25,6 @@ new feature work in this lane — only blockers found during rc soak.
 
 ## Near-term (v0.11.x)
 
-### P0 — AWS auth failures surface as network timeouts
-Source: `docs/UX-REVIEW.md` §P0-2. Missing/invalid AWS credentials produce
-generic `reqwest` timeouts instead of a "credentials not configured" message
-with the standard remediation pointers (`aws configure`, `AWS_PROFILE`, IAM
-role chain). Partially addressed in `#206` but needs verification across all
-AWS code paths (list, get, migrate).
-
 ### P0 — Default build silently cannot use AWS
 Source: `docs/UX-REVIEW.md` §P0-3. A binary built without `--features aws`
 accepts `--backend aws` flags and only fails deep in the call stack with an
