@@ -24,6 +24,51 @@ fn generic<E: std::fmt::Display>(op: &str, e: E) -> BackendError {
     BackendError::Internal(format!("aws {op}: {e}"))
 }
 
+/// Build the standard credential-remediation hint shown when the AWS SDK
+/// cannot resolve credentials. Centralised so every code path (per-operation
+/// SdkError handlers, the lightweight `health_check`, and any future
+/// non-SdkError wrappers) prints the same actionable text.
+pub(crate) fn aws_credentials_hint(op: &str) -> String {
+    format!(
+        "No AWS credentials resolved (operation: {op}). \
+Try `aws configure`, set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, \
+or run `eval \"$(aws configure export-credentials --format env)\"` after `aws login`."
+    )
+}
+
+/// Walk an error's source chain looking for tell-tale strings produced by the
+/// AWS credential providers (e.g. `CredentialsNotLoaded`, "no credentials",
+/// "ProviderError", "credentials provider"). Used as a defensive fallback for
+/// SdkError variants — notably `ConstructionFailure` and edge-case
+/// `DispatchFailure`s where `is_user()` may be false but the underlying cause
+/// is still credential resolution.
+fn looks_like_credential_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    fn matches(s: &str) -> bool {
+        let lower = s.to_ascii_lowercase();
+        lower.contains("credentialsnotloaded")
+            || lower.contains("no credentials")
+            || lower.contains("credentials not loaded")
+            || lower.contains("credentials provider")
+            || lower.contains("providererror")
+            || lower.contains("provider error")
+            || lower.contains("no credentials in chain")
+            || lower.contains("failed to load credentials")
+    }
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    let mut depth = 0;
+    while let Some(e) = cur {
+        if matches(&e.to_string()) {
+            return true;
+        }
+        depth += 1;
+        if depth > 16 {
+            break;
+        }
+        cur = e.source();
+    }
+    false
+}
+
 fn handle_sdk<E: std::fmt::Display + std::fmt::Debug, R: std::fmt::Debug>(
     op: &str,
     e: SdkError<E, R>,
@@ -32,14 +77,29 @@ fn handle_sdk<E: std::fmt::Display + std::fmt::Debug, R: std::fmt::Debug>(
         SdkError::TimeoutError(_) => BackendError::Network(format!("aws {op}: timeout")),
         SdkError::DispatchFailure(ref df) if df.is_user() => {
             // Credential resolution failure — not a network error.
-            BackendError::AuthenticationFailed(format!(
-                "No AWS credentials resolved (operation: {op}). \
-Try `aws configure`, set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, \
-or run `eval \"$(aws configure export-credentials --format env)\"` after `aws login`."
-            ))
+            BackendError::AuthenticationFailed(aws_credentials_hint(op))
+        }
+        SdkError::DispatchFailure(ref df)
+            if df
+                .as_connector_error()
+                .map(|c| looks_like_credential_error(c))
+                .unwrap_or(false) =>
+        {
+            // Defensive: some SDK versions/transports route credential
+            // failures through DispatchFailure without flagging `is_user()`.
+            BackendError::AuthenticationFailed(aws_credentials_hint(op))
         }
         SdkError::DispatchFailure(_) => {
             BackendError::Network(format!("aws {op}: dispatch failure"))
+        }
+        SdkError::ConstructionFailure(ref _cf)
+            if format!("{e:?}").to_ascii_lowercase().contains("credential") =>
+        {
+            // Credential providers can fail before the request is dispatched
+            // (e.g. missing profile, invalid IMDS response), surfacing as a
+            // ConstructionFailure. Classify as auth so users get the hint
+            // instead of an opaque "Internal" error.
+            BackendError::AuthenticationFailed(aws_credentials_hint(op))
         }
         SdkError::ServiceError(svc) => BackendError::Internal(format!("aws {op}: {}", svc.err())),
         other => generic(op, format!("{other:?}")),
@@ -229,6 +289,53 @@ mod tests {
         assert!(
             matches!(err, BackendError::Network(_)),
             "expected Network, got: {err:?}"
+        );
+    }
+
+    /// Regression test for `docs/UX-REVIEW.md` §P0-2: a credential-resolution
+    /// failure whose payload doesn't have `is_user()` set must still map to
+    /// `AuthenticationFailed` so the user sees the `aws configure` hint
+    /// instead of a "dispatch failure" / "network" message.
+    #[test]
+    fn dispatch_failure_with_credentials_string_maps_to_auth() {
+        // Build a non-user DispatchFailure carrying an inner error whose
+        // Display contains a credential-provider hint. `ConnectorError::io`
+        // does not set the user flag.
+        let inner = std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "CredentialsNotLoaded: failed to load credentials",
+        );
+        let sdk: SdkError<ListSecretsError, HttpResponse> =
+            SdkError::dispatch_failure(ConnectorError::io(Box::new(inner)));
+        let err = from_list(sdk);
+        assert!(
+            matches!(err, BackendError::AuthenticationFailed(_)),
+            "expected AuthenticationFailed, got: {err:?}"
+        );
+        let BackendError::AuthenticationFailed(msg) = err else {
+            unreachable!()
+        };
+        assert!(msg.contains("aws configure"), "hint missing: {msg}");
+    }
+
+    /// Regression test: the `health_check` lightweight ping (used at backend
+    /// construction time and by `xv list` precondition checks) used to map
+    /// every SDK error to `BackendError::Network`, masking credential
+    /// failures. It must now route through `from_list` and surface
+    /// `AuthenticationFailed` for credential-resolution failures.
+    #[tokio::test]
+    async fn health_check_classifies_credential_errors_as_auth() {
+        // We can't easily build a real SecretsManagerClient that fails in a
+        // specific way without spinning up a mock, so instead we mirror the
+        // call site by piping the same SdkError variants through `from_list`
+        // (the mapper now used inside `health_check`) and asserting on the
+        // classification. This is a contract test — `health_check`'s
+        // production code path is `req.send().await.map_err(from_list)`, so
+        // any mapper change is caught here.
+        let err = from_list(make_user_dispatch_failure());
+        assert!(
+            matches!(err, BackendError::AuthenticationFailed(_)),
+            "health_check would have returned: {err:?}"
         );
     }
 }

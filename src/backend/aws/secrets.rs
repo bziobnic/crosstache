@@ -24,13 +24,19 @@ impl AwsSecretBackend {
     }
 
     /// Lightweight health check: list secrets with limit=1.
+    ///
+    /// Routes errors through the standard per-operation mapping
+    /// (`super::errors::from_list`) so that credential-resolution failures
+    /// surface as `BackendError::AuthenticationFailed` with the
+    /// `aws configure` remediation hint — not as a generic network error.
+    /// See `docs/UX-REVIEW.md` §P0-2.
     pub async fn health_check(&self) -> Result<(), BackendError> {
         self.client
             .list_secrets()
             .max_results(1)
             .send()
             .await
-            .map_err(|e| BackendError::Network(format!("aws health check: {e}")))?;
+            .map_err(super::errors::from_list)?;
         Ok(())
     }
 
