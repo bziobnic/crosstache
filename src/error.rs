@@ -691,6 +691,7 @@ mod tests {
             ("InvalidArgument", vec!["msg"]),
             ("Upgrade", vec!["msg"]),
             ("ScanLeakDetected", vec!["count"]),
+            ("BackendUnavailable", vec!["backend", "reason"]),
             ("Unknown", vec!["msg"]),
             ("EnvNotDefined", vec!["name", "available"]),
         ];
