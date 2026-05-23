@@ -25,12 +25,6 @@ new feature work in this lane — only blockers found during rc soak.
 
 ## Near-term (v0.11.x)
 
-### P0 — Default build silently cannot use AWS
-Source: `docs/UX-REVIEW.md` §P0-3. A binary built without `--features aws`
-accepts `--backend aws` flags and only fails deep in the call stack with an
-opaque error. Detect feature absence early; print a one-line "rebuild with
-`--features aws`" hint (partially addressed in `#206`; verify).
-
 ### P1 — Backend selection diagnostics
 Source: `docs/UX-REVIEW.md` §P1-3. Backend can come from global config,
 `.xv.toml`, env vars, or `--backend`. Add `xv config show --resolved` (or

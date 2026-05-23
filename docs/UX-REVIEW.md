@@ -127,6 +127,8 @@ Try `aws configure`, set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or run
 
 ### 3. A default build silently cannot use AWS but does not clearly say so
 
+> **Resolved in v0.11.0** (PR fix/p0-3-backend-unavailable-error-code) — `--backend aws` on a non-AWS build now fails before command dispatch with the dedicated `xv-backend-unavailable` error code (exit 3) and a one-line rebuild hint. `xv version` lists compiled-in backends, and `--backend` help advertises AWS availability per-build.
+
 Problem: AWS is a compile-time feature, but the default binary hides that behind
 a generic backend-registry failure. The explicit "AWS backend not compiled in"
 message exists in source but is swallowed before the command-level error.

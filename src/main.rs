@@ -150,7 +150,8 @@ async fn run(cli: Cli) -> Result<()> {
     // "No backend registry available" message later.
     #[cfg(not(feature = "aws"))]
     if config.effective_backend_name() == "aws" {
-        return Err(CrosstacheError::config(
+        return Err(CrosstacheError::backend_unavailable(
+            "aws",
             "AWS backend is not included in this build. \
 Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
         ));
