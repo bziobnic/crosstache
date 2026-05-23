@@ -168,15 +168,34 @@ pub async fn find_project_config(start: &Path) -> Result<Option<(PathBuf, Projec
 }
 
 impl ProjectConfig {
+    /// Standard header banner prepended to every `.xv.toml` written by
+    /// crosstache (both `xv context init` and `ProjectConfig::save`).
+    ///
+    /// This file is project-scoped and meant to be checked into VCS, so
+    /// the header gives team members a discoverable docs link without
+    /// requiring them to run `--help`.
+    pub const HEADER: &'static str = "# crosstache project config — see https://github.com/bziobnic/crosstache/blob/main/docs/env-profiles.md\n";
+
     /// Serialize this config to TOML and write it to `path`.
+    ///
+    /// `.xv.toml` is project-scoped and intended to be checked into the
+    /// repository, so we use `tokio::fs::write` (respects umask, typically
+    /// 0o644) rather than `write_sensitive_file_async` (forces 0o600).
+    /// Bugbot finding on PR #211: forcing 0o600 broke shared-filesystem
+    /// workflows.
+    ///
+    /// The standard `HEADER` banner is always prepended, so successive
+    /// `save()` calls don't strip the helpful "see docs" pointer that
+    /// `xv context init` writes. Per-user comments inside the file are
+    /// still discarded — this is a documented limitation; users wanting
+    /// comments should edit the file manually outside of `xv env *`.
     pub async fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)
+        let body = toml::to_string_pretty(self)
             .map_err(|e| CrosstacheError::config(format!(".xv.toml serialize error: {e}")))?;
-        crate::utils::helpers::write_sensitive_file_async(path, content.as_bytes())
-            .await
-            .map_err(|e| {
-                CrosstacheError::config(format!("failed to write {}: {e}", path.display()))
-            })
+        let full = format!("{}{body}", Self::HEADER);
+        tokio::fs::write(path, full).await.map_err(|e| {
+            CrosstacheError::config(format!("failed to write {}: {e}", path.display()))
+        })
     }
 }
 
@@ -577,6 +596,60 @@ resource_group = "rg"
         let dev = loaded.envs.get("dev").expect("env.dev must be present");
         assert_eq!(dev.vault.as_deref(), Some("myvault"));
         assert_eq!(dev.resource_group.as_deref(), Some("myrg"));
+    }
+
+    /// PR #211 Bugbot finding (Medium): `save()` must use umask-respecting
+    /// permissions, not 0o600. `.xv.toml` is project-scoped and intended
+    /// to be committed to VCS / shared on a team filesystem.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn project_config_save_respects_umask_not_0o600() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".xv.toml");
+        let cfg = ProjectConfig::default();
+        cfg.save(&path).await.expect("save must succeed");
+        let mode = tokio::fs::metadata(&path)
+            .await
+            .expect("stat must succeed")
+            .permissions()
+            .mode()
+            & 0o777;
+        // Default umask is 0o022 → file mode 0o644. Some test environments
+        // run with umask 0o002 → 0o664. Both are world/group-readable, which
+        // is the property we care about. 0o600 is what we're guarding against.
+        assert_ne!(
+            mode, 0o600,
+            ".xv.toml must NOT be 0o600 — see PR #211 Bugbot finding"
+        );
+        assert!(
+            mode & 0o044 != 0,
+            ".xv.toml must be group/world readable (got {mode:o})"
+        );
+    }
+
+    /// PR #211 Bugbot finding (Medium): `save()` must prepend the standard
+    /// HEADER banner so the helpful "see docs" comment written by
+    /// `xv context init` survives every subsequent `xv env use/create/delete`.
+    #[tokio::test]
+    async fn project_config_save_preserves_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".xv.toml");
+        let cfg = ProjectConfig::default();
+        cfg.save(&path).await.expect("save must succeed");
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            content.starts_with(ProjectConfig::HEADER),
+            "saved file must start with HEADER banner; got:\n{content}"
+        );
+        // And re-saving doesn't duplicate the header.
+        cfg.save(&path).await.expect("re-save must succeed");
+        let content2 = tokio::fs::read_to_string(&path).await.unwrap();
+        let header_count = content2.matches(ProjectConfig::HEADER).count();
+        assert_eq!(
+            header_count, 1,
+            "header must appear exactly once after re-save; got {header_count}"
+        );
     }
 
     #[tokio::test]

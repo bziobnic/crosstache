@@ -778,9 +778,9 @@ async fn execute_context_init(
     let body = toml::to_string_pretty(&cfg)
         .map_err(|e| CrosstacheError::config(format!("failed to serialize .xv.toml: {e}")))?;
 
-    // Helpful header
-    let header = "# crosstache project config — see https://github.com/bziobnic/crosstache/blob/main/docs/env-profiles.md\n";
-    let full = format!("{header}{body}");
+    // Use the same header `ProjectConfig::save()` writes, so the comment
+    // survives later `xv env use/create/delete` rewrites.
+    let full = format!("{}{body}", crate::config::project::ProjectConfig::HEADER);
 
     tokio::fs::write(&path, full).await?;
     crate::utils::output::success(&format!(
