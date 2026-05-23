@@ -569,16 +569,20 @@ xv --env prod list                       # one-off override
 XV_ENV=staging xv list                   # session override
 ```
 
-### Inspect
+### Manage envs
 
 ```bash
-xv context envs                          # lists envs with * on the active one
-# config: /code/myproj/.xv.toml
-# default_env: dev
-#
-# envs:
-#   * dev   vault=myproj-dev-kv  rg=myproj-rg
-#     prod  vault=myproj-prod-kv rg=myproj-prod-rg
+xv env list                              # list envs with * on the active one
+# Project envs (from /code/myproj/.xv.toml, default: dev):
+#   * dev   backend=azure  vault=myproj-dev-kv  resource_group=myproj-rg
+#     prod  backend=azure  vault=myproj-prod-kv
+
+xv env use prod                          # set default_env = "prod" in .xv.toml
+xv env show                              # show active env fields
+xv env create stage \
+    --vault myproj-stage-kv \
+    --resource-group myproj-rg-stage     # add [env.stage] to .xv.toml
+xv env delete stage -f                   # remove [env.stage]
 
 xv context show                          # full context, including resolved env defaults
 ```
@@ -600,8 +604,6 @@ touch /code/monorepo/services/checkout/.xv.boundary
 To **disable walk-up entirely**, set `XV_NO_PARENT_CONFIG=1`.
 
 See [`docs/env-profiles.md`](docs/env-profiles.md) for the full reference.
-
-> **Note:** `xv context init/envs/show` (project-scoped via `.xv.toml`) is separate from `xv env create/use/list/...` (global, user-scoped named profiles). They coexist; project config wins where present.
 
 ---
 

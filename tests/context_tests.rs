@@ -274,9 +274,10 @@ fn context_use_rejects_xv_toml_env_name() {
     );
 }
 
+// ── xv env list ──────────────────────────────────────────────────────────────
+
 #[test]
 fn env_list_shows_xv_toml_project_envs() {
-    // `xv env list` with a .xv.toml present should surface project envs.
     let (mut cmd, temp) = xv_isolated();
     write_xv_toml(
         temp.path(),
@@ -291,42 +292,284 @@ fn env_list_shows_xv_toml_project_envs() {
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
     let stdout = stdout_str(&out);
-    // Should show the .xv.toml profiles.
     assert!(stdout.contains("dev"), "expected 'dev' in output: {stdout}");
     assert!(
         stdout.contains("prod"),
         "expected 'prod' in output: {stdout}"
     );
-    // Should indicate these are activated via --env / XV_ENV.
+    // Active env (default_env=dev) must be starred.
     assert!(
-        stdout.contains("--env") || stdout.contains("XV_ENV"),
-        "expected activation hint in output: {stdout}"
+        stdout.contains("* dev"),
+        "expected '* dev' starred: {stdout}"
     );
 }
 
 #[test]
-fn env_use_targeted_error_for_xv_toml_env() {
-    // `xv env use dev` when dev exists only in .xv.toml should produce a
-    // targeted hint rather than a bare "not found" error.
+fn env_list_without_xv_toml_prints_info() {
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "list"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let combined = format!("{}{}", stdout_str(&out), stderr_str(&out));
+    assert!(
+        combined.contains(".xv.toml"),
+        "must mention .xv.toml: {combined}"
+    );
+    assert!(
+        combined.contains("xv context init"),
+        "must hint at context init: {combined}"
+    );
+}
+
+// ── xv env use ───────────────────────────────────────────────────────────────
+
+#[test]
+fn env_use_rewrites_default_env() {
     let (mut cmd, temp) = xv_isolated();
-    write_xv_toml(temp.path(), "dev", &[("dev", "real-dev-vault")]);
+    write_xv_toml(
+        temp.path(),
+        "dev",
+        &[("dev", "vault-dev"), ("prod", "vault-prod")],
+    );
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "use", "prod"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(
+        content.contains("default_env = \"prod\""),
+        "expected default_env=prod in .xv.toml: {content}"
+    );
+}
+
+#[test]
+fn env_use_errors_without_xv_toml() {
+    let (mut cmd, _temp) = xv_isolated();
     let out = cmd
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
         .args(["env", "use", "dev"])
         .output()
         .expect("spawn");
-    assert_ne!(out.status.code(), Some(0), "should have failed");
+    assert_ne!(out.status.code(), Some(0));
     let stderr = stderr_str(&out);
-    // Must mention .xv.toml or --env as the correct path.
     assert!(
-        stderr.contains(".xv.toml") || stderr.contains("--env") || stderr.contains("XV_ENV"),
-        "expected targeted hint in stderr: {stderr}"
+        stderr.contains(".xv.toml"),
+        "must mention .xv.toml: {stderr}"
     );
-    // Must not just say "not found" with no guidance.
-    let bare_not_found = stderr.contains("not found")
-        && !stderr.contains("--env")
-        && !stderr.contains(".xv.toml")
-        && !stderr.contains("XV_ENV");
-    assert!(!bare_not_found, "bare not-found without hint: {stderr}");
+    assert!(
+        stderr.contains("xv context init"),
+        "must hint at context init: {stderr}"
+    );
+}
+
+#[test]
+fn env_use_errors_when_env_not_in_config() {
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(temp.path(), "dev", &[("dev", "vault-dev")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "use", "nonexistent"])
+        .output()
+        .expect("spawn");
+    assert_ne!(out.status.code(), Some(0));
+    let stderr = stderr_str(&out);
+    assert!(
+        stderr.contains("nonexistent"),
+        "must name the missing env: {stderr}"
+    );
+    assert!(
+        stderr.contains("Available"),
+        "must list available envs: {stderr}"
+    );
+}
+
+// ── xv env create ────────────────────────────────────────────────────────────
+
+#[test]
+fn env_create_adds_block_to_xv_toml() {
+    let (mut cmd, temp) = xv_isolated();
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "env",
+            "create",
+            "stage",
+            "--vault",
+            "stage-vault",
+            "--resource-group",
+            "rg-stage",
+            "--backend",
+            "azure",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(content.contains("[env.stage]"), ".xv.toml: {content}");
+    assert!(
+        content.contains("vault = \"stage-vault\""),
+        ".xv.toml: {content}"
+    );
+    assert!(
+        content.contains("resource_group = \"rg-stage\""),
+        ".xv.toml: {content}"
+    );
+}
+
+#[test]
+fn env_create_conflict_errors_without_force() {
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(temp.path(), "dev", &[("stage", "existing-vault")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "env",
+            "create",
+            "stage",
+            "--vault",
+            "other",
+            "--resource-group",
+            "other",
+        ])
+        .output()
+        .expect("spawn");
+    assert_ne!(out.status.code(), Some(0));
+    let stderr = stderr_str(&out);
+    assert!(
+        stderr.contains("already exists"),
+        "must mention conflict: {stderr}"
+    );
+    assert!(stderr.contains("--force"), "must hint --force: {stderr}");
+}
+
+#[test]
+fn env_create_with_force_overwrites() {
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(temp.path(), "dev", &[("stage", "old-vault")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "env",
+            "create",
+            "stage",
+            "--vault",
+            "new-vault",
+            "--resource-group",
+            "rg",
+            "--force",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(content.contains("new-vault"), ".xv.toml: {content}");
+}
+
+#[test]
+fn env_create_with_default_sets_default_env() {
+    let (mut cmd, temp) = xv_isolated();
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "env",
+            "create",
+            "prod",
+            "--vault",
+            "prod-vault",
+            "--resource-group",
+            "rg-prod",
+            "--default",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(
+        content.contains("default_env = \"prod\""),
+        ".xv.toml: {content}"
+    );
+}
+
+// ── xv env delete ────────────────────────────────────────────────────────────
+
+#[test]
+fn env_delete_removes_block() {
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(
+        temp.path(),
+        "dev",
+        &[("dev", "vault-dev"), ("prod", "vault-prod")],
+    );
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "delete", "prod", "-f"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(
+        !content.contains("[env.prod]"),
+        "prod block must be gone: {content}"
+    );
+    assert!(
+        content.contains("[env.dev]") || content.contains("vault-dev"),
+        "dev must remain: {content}"
+    );
+}
+
+#[test]
+fn env_delete_clears_default_env_when_deleted() {
+    let (mut cmd, temp) = xv_isolated();
+    // default_env points at "dev" — deleting dev must also clear default_env.
+    write_xv_toml(temp.path(), "dev", &[("dev", "vault-dev")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "delete", "dev", "-f"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(
+        !content.contains("default_env"),
+        "default_env must be cleared: {content}"
+    );
+}
+
+// ── xv env show ──────────────────────────────────────────────────────────────
+
+#[test]
+fn env_show_prints_active_env() {
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(temp.path(), "dev", &[("dev", "vault-dev")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "show"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let stdout = stdout_str(&out);
+    assert!(
+        stdout.contains("Active env: dev"),
+        "expected 'Active env: dev' in output: {stdout}"
+    );
+    assert!(
+        stdout.contains("vault-dev"),
+        "expected vault in output: {stdout}"
+    );
 }

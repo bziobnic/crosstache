@@ -167,6 +167,29 @@ pub async fn find_project_config(start: &Path) -> Result<Option<(PathBuf, Projec
     Ok(None)
 }
 
+impl ProjectConfig {
+    /// Serialize this config to TOML and write it to `path`.
+    pub async fn save(&self, path: &Path) -> Result<()> {
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| CrosstacheError::config(format!(".xv.toml serialize error: {e}")))?;
+        crate::utils::helpers::write_sensitive_file_async(path, content.as_bytes())
+            .await
+            .map_err(|e| {
+                CrosstacheError::config(format!("failed to write {}: {e}", path.display()))
+            })
+    }
+}
+
+/// Walk up from `cwd` to find the nearest `.xv.toml`. If none is found,
+/// return `(cwd/.xv.toml, ProjectConfig::default())` so callers can
+/// mutate and then `save()` without a separate existence check.
+pub async fn find_or_create_project_config(cwd: &Path) -> Result<(PathBuf, ProjectConfig)> {
+    match find_project_config(cwd).await? {
+        Some(result) => Ok(result),
+        None => Ok((cwd.join(".xv.toml"), ProjectConfig::default())),
+    }
+}
+
 /// Selection priority for active env: `XV_ENV` env var → `cli_flag`
 /// argument → `cfg.default_env` field → error.
 ///
@@ -530,6 +553,56 @@ resource_group = "rg"
             }
             other => panic!("expected EnvNotDefined, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn project_config_save_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".xv.toml");
+        let mut cfg = ProjectConfig {
+            default_env: Some("dev".to_string()),
+            ..Default::default()
+        };
+        cfg.envs.insert(
+            "dev".to_string(),
+            EnvProfile {
+                vault: Some("myvault".to_string()),
+                resource_group: Some("myrg".to_string()),
+                ..Default::default()
+            },
+        );
+        cfg.save(&path).await.expect("save must succeed");
+        let loaded = parse_file(&path).await.expect("reload must parse");
+        assert_eq!(loaded.default_env.as_deref(), Some("dev"));
+        let dev = loaded.envs.get("dev").expect("env.dev must be present");
+        assert_eq!(dev.vault.as_deref(), Some("myvault"));
+        assert_eq!(dev.resource_group.as_deref(), Some("myrg"));
+    }
+
+    #[tokio::test]
+    async fn find_or_create_returns_existing() {
+        let temp = tempfile::tempdir().unwrap();
+        write_xv_toml(temp.path()).await;
+        let (path, cfg) = find_or_create_project_config(temp.path())
+            .await
+            .expect("must succeed");
+        assert_eq!(path, temp.path().join(".xv.toml"));
+        assert_eq!(cfg.default_env.as_deref(), Some("dev"));
+    }
+
+    #[tokio::test]
+    async fn find_or_create_returns_cwd_default_when_none() {
+        // Temp dirs under the system temp root have no .xv.toml ancestors,
+        // so find_project_config returns None and we get the fallback path.
+        let temp = tempfile::tempdir().unwrap();
+        let (path, cfg) = find_or_create_project_config(temp.path())
+            .await
+            .expect("must succeed");
+        assert_eq!(path, temp.path().join(".xv.toml"));
+        assert!(cfg.envs.is_empty());
+        assert_eq!(cfg.default_env, None);
+        // The file must NOT have been created on disk.
+        assert!(!path.exists(), "find_or_create must not write the file");
     }
 
     #[test]

@@ -21,6 +21,8 @@ binary was exercised for default-install behavior.
 
 ### 1. Project envs, legacy env profiles, and vault contexts present three conflicting "environment" systems
 
+> **Resolved in v0.11.0** (PR feat/env-rip-replace) — legacy user-scoped env profiles removed. `xv env *` now operates exclusively on `.xv.toml` project envs.
+
 Problem: `xv` exposes three overlapping concepts with nearly identical names:
 
 - `.xv.toml` `[env.<name>]` profiles, selected by `default_env`, `--env`, or `XV_ENV`.

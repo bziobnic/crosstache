@@ -25,12 +25,6 @@ new feature work in this lane — only blockers found during rc soak.
 
 ## Near-term (v0.11.x)
 
-### P0 — UX: three "environment" concepts collide
-Source: `docs/UX-REVIEW.md` §P0-1. `xv env` (legacy `.env` push/pull),
-`.xv.toml` project envs, and `vault context` all read as "environments." Pick a
-single user-facing word and rename/alias the other two. Until then, every
-onboarding doc has to over-explain.
-
 ### P0 — AWS auth failures surface as network timeouts
 Source: `docs/UX-REVIEW.md` §P0-2. Missing/invalid AWS credentials produce
 generic `reqwest` timeouts instead of a "credentials not configured" message
@@ -43,13 +37,6 @@ Source: `docs/UX-REVIEW.md` §P0-3. A binary built without `--features aws`
 accepts `--backend aws` flags and only fails deep in the call stack with an
 opaque error. Detect feature absence early; print a one-line "rebuild with
 `--features aws`" hint (partially addressed in `#206`; verify).
-
-### P1 — `.xv.toml` activation is invisible
-Source: `docs/UX-REVIEW.md` §P1-1, §P1-2. Read-only discovery commands fail
-before showing which `.xv.toml` profile is active, and there's no
-`xv env activate` command. Add an "active profile" line to `xv whoami` /
-`xv context show`, and either an activation subcommand or a documented
-walk-up resolution flow surfaced in `--help`.
 
 ### P1 — Backend selection diagnostics
 Source: `docs/UX-REVIEW.md` §P1-3. Backend can come from global config,

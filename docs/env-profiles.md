@@ -152,14 +152,9 @@ The legacy fallback is removed in v0.8.
 | Command | What it does |
 |---------|--------------|
 | `xv context init` | Creates `.xv.toml` in cwd. Interactive by default; pass `--non-interactive --vault X --resource-group Y` for scripts. `--force` to overwrite. |
-| `xv context envs` | Lists envs in the resolved `.xv.toml` with the active one starred. |
-| `xv context show` | Existing command; now also shows the active env block when a `.xv.toml` resolves. |
+| `xv env list` | Lists envs in the resolved `.xv.toml` with the active one starred. `xv context envs` is an alias. |
+| `xv env use <name>` | Writes `default_env = "<name>"` into the nearest `.xv.toml`. |
+| `xv env create <name> --vault V --resource-group RG [--backend B] [--group G] [--folder F] [--default]` | Adds `[env.<name>]` to the nearest `.xv.toml` (creates the file if absent). `--default` also sets `default_env`. |
+| `xv env delete <name> [-f]` | Removes `[env.<name>]` from the resolved `.xv.toml`. Clears `default_env` if it pointed at that env. |
+| `xv env show` | Shows the currently-active env (source path, backend, vault, resource_group, group, folder). |
 | `xv --env <name> <command>` | Override the active env for one command. |
-
-## How `xv env` differs
-
-`xv env create / use / list / pull / push` manage **global, user-scoped**
-profiles in your user config (one set of named profiles per machine,
-per user). `.xv.toml` env profiles are **project-scoped**, checked into
-the repo, shared across the team. They coexist; when both are present,
-the project `.xv.toml` wins.
