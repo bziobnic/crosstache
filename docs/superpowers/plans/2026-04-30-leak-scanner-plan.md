@@ -1,5 +1,11 @@
 # `xv scan` Pre-Commit Leak Scanner Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.7.0-rc.1** (2026-04-30).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship `xv scan` — a pre-commit leak scanner whose unique value is matching files against the user's actual secret values. Built-in pattern set is small (~7 families: AWS, GitHub, Stripe, Slack, JWT, SSH private-key headers, high-entropy fallback); the headline is "this file contains the value of secret `DB_PASSWORD` from vault `dev-kv`." Adds `xv scan install`/`uninstall` for idempotent git pre-commit hook management. Cuts v0.7.0-rc.1.

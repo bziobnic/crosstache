@@ -1,5 +1,11 @@
 # Errors, Suggestions & Exit Codes Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.6.0-rc.1** (2026-04-30).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship structured error codes, documented exit codes, "did you mean…?" suggestions, and a JSON error envelope so scripts and CI tools can consume crosstache failures programmatically. Foundation for v0.6.0-rc.

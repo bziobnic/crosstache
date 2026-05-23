@@ -1,5 +1,11 @@
 # `xv upgrade` — Self-Update Command Design Spec
 
+> **Status:** ✅ Implemented in **v0.5.1** (2026-03-21).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 ## Overview
 
 Add a self-update command (`xv upgrade`) that checks GitHub Releases for new versions and replaces the running binary in-place with SHA256 checksum verification.

@@ -1,5 +1,11 @@
 # xfunction Installer Design Spec
 
+> **Status:** ✅ Implemented in **v0.6.0** (2026-03-28).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 **Date:** 2026-03-27
 **Status:** Approved
 **Approach:** Hybrid — az CLI commands with Python orchestration

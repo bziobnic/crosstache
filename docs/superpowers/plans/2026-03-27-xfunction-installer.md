@@ -1,5 +1,11 @@
 # xfunction Installer Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.6.0** (2026-03-28).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a Python installer that provisions all Azure infrastructure for the xfunction RBAC automation service with a single command.

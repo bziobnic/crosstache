@@ -1,5 +1,12 @@
 # Design: File/blob CLI extraction (`file_ops.rs`)
 
+> **Status:** ✅ Implemented in **v0.4.22** (2026-03-21).
+> Initial extraction; full split completed in v0.5.0.
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **Status:** Implemented (2026-03-20) — `src/cli/file_ops.rs` + thin dispatch in `commands.rs`  
 > **Date:** 2026-03-20  
 > **Scope:** Mechanical refactor only — no user-visible behavior change  

@@ -1,5 +1,11 @@
 # `xv upgrade` Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.5.1** (2026-03-21).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a self-update command that checks GitHub Releases for new versions, verifies SHA256 checksums, and replaces the running binary in-place.
