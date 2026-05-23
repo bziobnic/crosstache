@@ -1,5 +1,11 @@
 # `xv find` Fuzzy Search Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.6.1-rc.1** (2026-04-30).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the existing interactive `xv find` (dialoguer FuzzySelect) with a non-interactive ranked fuzzy search using the `nucleo` crate. Default search field is secret name; `--in <field>` opts in to folder/groups/note/tags. Output is table-like by default with score bars; `--names-only` makes it pipe-friendly. Adds `--names-only` to `xv ls` for the canonical `xv ls --names-only | fzf` workflow. Cuts v0.6.1-rc.1.

@@ -1,5 +1,12 @@
 # Hermetic End-to-End Test Harness Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.7.0** (2026-05-01).
+> Hermetic test harness landed alongside v0.7 work; ongoing maintenance.
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a comprehensive **hermetic** end-to-end test suite that exercises the `xv` binary as a black box without Azure credentials. Covers every phase-1 feature (errors+exit-codes, env profiles, fuzzy find, pagination, leak scanner, TUI parse). Live-Azure tests stay where they are (`tests/e2e_integration_tests.rs`, gated `#[ignore]`); this plan adds the no-credentials track that PR-time CI can run unconditionally.

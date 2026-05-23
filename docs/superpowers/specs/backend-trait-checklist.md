@@ -1,5 +1,7 @@
 # Backend Trait Checklist
 
+> **Status:** 🟢 Living document. Phase 2 (backend trait extraction) shipped in v0.8.0 (#165); phase 3 (AWS backend) in v0.10.0-rc.1. New backends should append entries below.
+
 Soft-commitment audit: every PR adds a line below for each new manager-method
 read-surface call introduced. The end-of-quarter audit will turn this
 into the spec for phase 2 ("Backend Pluggability Initiative").

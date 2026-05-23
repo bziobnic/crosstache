@@ -1,5 +1,12 @@
 # Backend Pluggability — Phase 2 (v0.8 → v0.9) Design
 
+> **Status:** ✅ Implemented in **v0.8.0** (2026-05-02).
+> Backend trait hierarchy landed in #165 (v0.8.0); AWS backend (phase 3) shipped in v0.10.0-rc.1.
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 **Date:** 2026-05-03
 **Status:** Draft — pending review
 **Owner:** Scott Zionic

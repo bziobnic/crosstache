@@ -1,5 +1,11 @@
 # `xv run` Streaming Masking — Design Spec
 
+> **Status:** ✅ Implemented in **v0.5.2** (2026-03-21).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 ## Overview
 
 Fix the `xv run` masking path to stream output line-by-line instead of buffering the entire child process output in memory. The `--no-masking` path is already correct (uses `Command::status()` with inherited stdio).

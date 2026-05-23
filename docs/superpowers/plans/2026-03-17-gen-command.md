@@ -1,5 +1,11 @@
 # `xv gen` Password Generator Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.4.21** (2026-03-19).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an `xv gen` command that generates a random password, copies it to the clipboard, and optionally saves it as a vault secret.

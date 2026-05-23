@@ -1,5 +1,11 @@
 # Env Profiles Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.6.0-rc.2** (2026-04-30).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship `.xv.toml` env profiles with walk-up resolution so users can keep per-project vault/RG/group/folder defaults in a checked-in file. Adds `xv context init/envs`, extends `xv context show`, adds `--env` global flag and `XV_ENV` env var, adds new error code `xv-env-not-defined`. Foundation for v0.6.0-rc.2.

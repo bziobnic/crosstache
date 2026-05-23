@@ -1,5 +1,11 @@
 # Secret Commands Extraction Design Spec
 
+> **Status:** ✅ Implemented in **v0.5.0** (2026-03-21).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 ## Goal
 
 Extract all secret command execution handlers from `commands.rs` into `cli/secret_ops.rs`, completing the CLI module decomposition. After this, `commands.rs` retains only clap definitions, the `Cli::execute()` dispatcher, and unit tests.

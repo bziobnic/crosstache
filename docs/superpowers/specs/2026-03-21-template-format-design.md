@@ -1,5 +1,11 @@
 # `--format template` Output Format — Design Spec
 
+> **Status:** ✅ Implemented in **v0.5.2** (2026-03-22).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 ## Overview
 
 Implement the `--format template` output format, which applies per-row field substitution using a user-provided template string via the existing `--template` flag.

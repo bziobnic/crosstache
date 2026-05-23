@@ -1,5 +1,11 @@
 # Progress Indicators for File Operations — Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.7.3** (2026-05-02).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add progress bars and spinners to blob file operations so users get visual feedback during uploads, downloads, and sync.

@@ -1,5 +1,11 @@
 # AWS Secrets Manager Backend — Phase 3 (v0.10) Design
 
+> **Status:** ✅ Implemented in **v0.10.0-rc.1** (2026-05-13).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 **Date:** 2026-05-09
 **Status:** Draft — pending user review
 **Owner:** Scott Zionic

@@ -1,5 +1,12 @@
 # Strategic Improvements — Phase 1 (v0.6 → v0.7) Design
 
+> **Status:** ✅ Implemented in **v0.6.0–v0.7.0** (2026-04-29).
+> Loved-features parity arc: errors+exit-codes (v0.6.0-rc.1), env profiles (v0.6.0-rc.2), fuzzy find (v0.6.1-rc.1), leak scanner (v0.7.0-rc.1), TUI (v0.7.0-rc.2).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 **Date:** 2026-04-29
 **Status:** Design approved; spec under self-review
 **Owner:** Scott Zionic

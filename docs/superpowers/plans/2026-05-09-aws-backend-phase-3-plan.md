@@ -1,5 +1,11 @@
 # AWS Secrets Manager Backend Implementation Plan
 
+> **Status:** ✅ Implemented in **v0.10.0-rc.1** (2026-05-13).
+> Retained as design history.
+> Roadmap & open work tracked in `ROADMAP.md` at the repo root.
+> Implementation history lives in `CHANGELOG.md`. This file is retained as design context — do not edit to reflect current behavior; open a new spec instead.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship `xv --backend aws` — a third backend implementation backed by AWS Secrets Manager, paired with hardened cross-cloud `xv migrate` as the v0.10 marquee feature. Behind a `aws` Cargo feature flag (default off). Prefix-based virtual vaults via `<vault>/.xv-vault` marker secrets; one region per backend instance with `[named_backends.*]` support for multi-region; RBAC, audit, S3, and native rotation deferred (graceful `Unsupported` errors).
