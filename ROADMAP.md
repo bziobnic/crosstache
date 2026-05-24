@@ -36,13 +36,8 @@ fixing as code drifts.
 > **Resolved in v0.11.0** (PR `fix/p1-local-transactional-secret-writes`) — local secret set/update now stage encrypted payload + metadata to temp files, atomically activate them, then archive the prior version snapshot to prevent archive-then-write data loss on write failure.
 >
 > **Resolved in v0.11.0** (PR `fix/p1-symlink-following-writes`) — `write_private()` and `encrypt_to_file()` now use `O_NOFOLLOW` on Unix to refuse symlink following on sensitive writes. Unit tests verify rejection.
-
-### P1 — `xv upgrade` signature verification
-Source: `docs/superpowers/specs/2026-05-04-upgrade-signature-verification.md`.
-Binary + checksum currently come from the same GitHub Releases endpoint
-(integrity, not authenticity). Embed a minisign public key, sign release
-archives in CI, verify before swap. Spec is design-approved but
-implementation has not landed.
+>
+> **Resolved in v0.11.0** (PR `docs/p1-upgrade-signature-verification-resolved`) — `xv upgrade` now verifies minisign signatures on release archives before installation. Public key embedded in binary; CI signs all releases. Full design in `docs/superpowers/specs/2026-05-04-upgrade-signature-verification.md`.
 
 ### P2 — Local file metadata uses world-readable defaults
 `src/backend/local/files.rs:57`. Switch to `write_private`; assert
