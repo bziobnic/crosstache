@@ -758,11 +758,20 @@ pub(crate) async fn execute_context_command(
             env,
             vault,
             resource_group,
+            backend,
             non_interactive,
             force,
         } => {
-            execute_context_init(env, vault, resource_group, non_interactive, force, &config)
-                .await?;
+            execute_context_init(
+                env,
+                vault,
+                resource_group,
+                backend,
+                non_interactive,
+                force,
+                &config,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -1005,6 +1014,7 @@ async fn execute_context_init(
     env_name: String,
     vault_arg: Option<String>,
     rg_arg: Option<String>,
+    backend_arg: Option<String>,
     non_interactive: bool,
     force: bool,
     config: &Config,
@@ -1022,14 +1032,36 @@ async fn execute_context_init(
         )));
     }
 
-    // Resolve vault/RG: explicit flag → interactive prompt → config default
+    use crate::config::project::validate_env_profile_backend;
+
+    let profile_backend = if let Some(ref b) = backend_arg {
+        validate_env_profile_backend(b)?;
+        Some(b.as_str())
+    } else {
+        None
+    };
+
+    // Effective backend for prompts/validation: explicit --backend, else the
+    // already-resolved global backend (xv.conf / XV_BACKEND / top-level --backend).
+    // Only write a profile backend when --backend was passed — unset inherits
+    // via resolve_effective_backend at runtime.
+    let effective_backend = profile_backend.unwrap_or_else(|| config.effective_backend_name());
+
+    // Resolve vault/RG: explicit flag → interactive prompt → config default.
+    // Azure requires resource_group; aws/local do not.
     let (vault, resource_group) = if non_interactive {
         let vault = vault_arg.ok_or_else(|| {
             CrosstacheError::invalid_argument("--non-interactive requires --vault")
         })?;
-        let rg = rg_arg.ok_or_else(|| {
-            CrosstacheError::invalid_argument("--non-interactive requires --resource-group")
-        })?;
+        let rg = if effective_backend == "azure" {
+            Some(rg_arg.ok_or_else(|| {
+                CrosstacheError::invalid_argument(
+                    "--non-interactive requires --resource-group when --backend azure",
+                )
+            })?)
+        } else {
+            rg_arg
+        };
         (vault, rg)
     } else {
         use crate::utils::interactive::InteractivePrompt;
@@ -1046,15 +1078,16 @@ async fn execute_context_init(
             )?,
         };
         let rg = match rg_arg {
-            Some(r) => r,
-            None => prompt.input_text(
+            Some(r) => Some(r),
+            None if effective_backend == "azure" => Some(prompt.input_text(
                 &format!("Resource group for env '{env_name}'"),
                 if !config.default_resource_group.is_empty() {
                     Some(config.default_resource_group.as_str())
                 } else {
                     None
                 },
-            )?,
+            )?),
+            None => None,
         };
         (vault, rg)
     };
@@ -1064,10 +1097,10 @@ async fn execute_context_init(
         env_name.clone(),
         EnvProfile {
             vault: Some(vault),
-            resource_group: Some(resource_group),
+            resource_group,
             group: None,
             folder: None,
-            backend: None,
+            backend: profile_backend.map(String::from),
         },
     );
 

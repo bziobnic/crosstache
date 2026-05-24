@@ -25,12 +25,6 @@ new feature work in this lane — only blockers found during rc soak.
 
 ## Near-term (v0.11.x)
 
-### P1 — `xv context init` cannot create AWS or local profiles
-Source: `docs/UX-REVIEW.md` §P1-4. Wizard is still Azure-only despite AWS
-being shipped. Add backend selection to the init flow.
-
----
-
 ## Security hardening
 
 Sourced from `docs/code-review-gpt55.md` (GPT-5.5 code review, 2026-05-09).

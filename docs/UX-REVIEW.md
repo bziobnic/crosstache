@@ -263,6 +263,8 @@ each value. Also include `backend=<value>` in `context envs` output.
 
 ### 4. `xv context init` cannot create an AWS or local env profile
 
+> **Resolved in v0.11.0** (PR fix/context-init-backend-selection) — `xv context init` now accepts `--backend` (azure/aws/local), writes backend-aware env profiles, and only requires `--resource-group` for Azure.
+
 Problem: `xv context init` is the documented project-config onboarding command,
 but it only accepts env, vault, and resource group. There is no `--backend`,
 `--region`, `--aws-profile`, or AWS prefix/default-vault option for the env it

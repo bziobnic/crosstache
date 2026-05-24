@@ -1083,7 +1083,11 @@ pub enum ContextCommands {
         /// Resource group for the env (skips interactive prompt if provided)
         #[arg(long)]
         resource_group: Option<String>,
-        /// Skip prompts entirely; require --vault and --resource-group
+        /// Backend for the env (azure | aws | local). When omitted, uses the
+        /// global config backend for prompts and is not written to `.xv.toml`.
+        #[arg(long)]
+        backend: Option<String>,
+        /// Skip prompts entirely; require --vault and --resource-group for azure
         #[arg(long)]
         non_interactive: bool,
         /// Overwrite an existing .xv.toml

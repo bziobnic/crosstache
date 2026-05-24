@@ -8,6 +8,38 @@ use common::{parse_json_envelope, stderr_str, stdout_str, write_xv_toml, xv_isol
 const FAKE_SUB: &str = "00000000-0000-0000-0000-000000000001";
 const FAKE_TENANT: &str = "00000000-0000-0000-0000-000000000002";
 
+/// Write a minimal global `xv.conf` with `backend = "local"` for isolated tests.
+fn write_local_global_config(temp: &std::path::Path) {
+    let xv_dir = temp.join(".config/xv");
+    std::fs::create_dir_all(&xv_dir).expect("config dir");
+    let store = temp.join("local-store");
+    let key = temp.join("local-key.txt");
+    std::fs::create_dir_all(&store).expect("store dir");
+    let content = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = "{FAKE_SUB}"
+tenant_id = "{FAKE_TENANT}"
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store}"
+key_file = "{key}"
+default_vault = "default"
+"#,
+        store = store.display(),
+        key = key.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), content).expect("write xv.conf");
+}
+
 #[test]
 fn context_init_non_interactive_writes_xv_toml() {
     let (mut cmd, temp) = xv_isolated();
@@ -32,6 +64,87 @@ fn context_init_non_interactive_writes_xv_toml() {
     assert!(content.contains("default_env = \"dev\""));
     assert!(content.contains("vault = \"myvault\""));
     assert!(content.contains("resource_group = \"myrg\""));
+    assert!(
+        !content.contains("backend ="),
+        "omit profile backend when --backend not passed: {content}"
+    );
+}
+
+#[test]
+fn context_init_non_interactive_inherits_global_backend_without_writing_profile_backend() {
+    let (mut cmd, temp) = xv_isolated();
+    write_local_global_config(temp.path());
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "context",
+            "init",
+            "--non-interactive",
+            "--vault",
+            "prod-prefix",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(
+        !content.contains("backend ="),
+        "profile should inherit global backend: {content}"
+    );
+    assert!(
+        !content.contains("resource_group ="),
+        "local backend should not require resource_group: {content}"
+    );
+}
+
+#[test]
+#[cfg(feature = "aws")]
+fn context_init_non_interactive_aws_does_not_require_resource_group() {
+    let (mut cmd, temp) = xv_isolated();
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "context",
+            "init",
+            "--non-interactive",
+            "--backend",
+            "aws",
+            "--vault",
+            "prod-prefix",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(content.contains("backend = \"aws\""), ".xv.toml: {content}");
+    assert!(!content.contains("resource_group ="), ".xv.toml: {content}");
+}
+
+#[test]
+fn context_init_non_interactive_azure_requires_resource_group() {
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "context",
+            "init",
+            "--non-interactive",
+            "--backend",
+            "azure",
+            "--vault",
+            "myvault",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr_str(&out));
+    assert!(
+        stderr_str(&out).contains("--resource-group"),
+        "stderr: {}",
+        stderr_str(&out)
+    );
 }
 
 #[test]
