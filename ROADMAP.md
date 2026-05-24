@@ -32,11 +32,8 @@ Each item names the source file at review time — verify line numbers before
 fixing as code drifts.
 
 > **Resolved in v0.11.0** (PR `fix/p1-path-traversal-url-injection`) — `AzureVaultName` validated type gates all Key Vault URL construction; local backend path components validated via `validate_vault_name()` with containment assertion; cache keys validated and safe-fallback on adversarial input. Unit tests prove rejection and containment for all three surfaces.
-
-### P1 — Local secret writes not transactional
-`src/backend/local/secrets.rs:300,571`. Archive-then-write loses the active
-secret on encryption/metadata failure. Write to temp + fsync + atomic
-rename; archive only after the replacement is durable.
+>
+> **Resolved in v0.11.0** (PR `fix/p1-local-transactional-secret-writes`) — local secret set/update now stage encrypted payload + metadata to temp files, atomically activate them, then archive the prior version snapshot to prevent archive-then-write data loss on write failure.
 
 ### P1 — Symlink-following on sensitive writes
 `src/utils/helpers.rs:21`, `src/backend/local/crypto.rs:38`. Use

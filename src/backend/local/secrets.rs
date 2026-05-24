@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 
@@ -173,6 +174,42 @@ fn write_meta(path: &Path, meta: &SecretMeta) -> Result<(), BackendError> {
         .map_err(|e| BackendError::Internal(format!("write meta {}: {e}", path.display())))
 }
 
+fn temp_path_for(path: &Path) -> Result<PathBuf, BackendError> {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?
+        .as_nanos();
+    let pid = std::process::id();
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| BackendError::Internal(format!("invalid file name: {}", path.display())))?;
+    Ok(path.with_file_name(format!(".{name}.tmp.{pid}.{ts}")))
+}
+
+fn archive_snapshot(
+    store_path: &Path,
+    vault: &str,
+    name: &str,
+    version: &str,
+    age_bytes: &[u8],
+    meta: &SecretMeta,
+) -> Result<(), BackendError> {
+    let vdir = versions_dir(store_path, vault, name)?;
+    fs::create_dir_all(&vdir)
+        .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+
+    let age_dest = vdir.join(format!("{version}.age"));
+    let meta_dest = vdir.join(format!("{version}.meta.json"));
+
+    write_private(&age_dest, age_bytes)
+        .map_err(|e| BackendError::Internal(format!("archive age: {e}")))?;
+    write_meta(&meta_dest, meta)
+        .map_err(|e| BackendError::Internal(format!("archive meta: {e}")))?;
+
+    Ok(())
+}
+
 /// Determine the next version number by scanning `.versions/<name>/`.
 fn next_version(store_path: &Path, vault: &str, name: &str) -> Result<u32, BackendError> {
     let vdir = versions_dir(store_path, vault, name)?;
@@ -303,12 +340,18 @@ impl SecretBackend for LocalSecretBackend {
         let ap = age_path(&store, vault, &name)?;
         let mp = meta_path(&store, vault, &name)?;
 
-        // If secret already exists, archive old version.
-        let version = if mp.exists() {
+        // Snapshot old state for transactional replace+archive.
+        let old_snapshot = if mp.exists() {
             let old_meta = read_meta(&mp)?;
-            let archived_ver = archive_current(&store, vault, &name)?;
-            // new version = old version number + 1
-            let _archived_ver = archived_ver; // already moved
+            let old_age = fs::read(&ap).map_err(|e| {
+                BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
+            })?;
+            Some((old_meta, old_age))
+        } else {
+            None
+        };
+
+        let version = if let Some((old_meta, _)) = old_snapshot.as_ref() {
             let old_num: u32 = old_meta
                 .version
                 .strip_prefix('v')
@@ -336,10 +379,23 @@ impl SecretBackend for LocalSecretBackend {
             version: version.clone(),
         };
 
-        // Encrypt value and write files (blocking I/O).
+        // Encrypt + write to temp files first, then atomically replace active.
         let _identity = identity;
-        crypto::encrypt_to_file(&ap, request.value.as_bytes(), &recipients)?;
-        write_meta(&mp, &meta)?;
+        let ap_tmp = temp_path_for(&ap)?;
+        let mp_tmp = temp_path_for(&mp)?;
+
+        crypto::encrypt_to_file(&ap_tmp, request.value.as_bytes(), &recipients)?;
+        write_meta(&mp_tmp, &meta)?;
+
+        fs::rename(&ap_tmp, &ap)
+            .map_err(|e| BackendError::Internal(format!("activate age {}: {e}", ap.display())))?;
+        fs::rename(&mp_tmp, &mp)
+            .map_err(|e| BackendError::Internal(format!("activate meta {}: {e}", mp.display())))?;
+
+        // Archive old version only after replacement is durable.
+        if let Some((old_meta, old_age)) = old_snapshot {
+            archive_snapshot(&store, vault, &name, &old_meta.version, &old_age, &old_meta)?;
+        }
 
         Ok(meta_to_properties(&meta, None))
     }
@@ -573,9 +629,13 @@ impl SecretBackend for LocalSecretBackend {
         let mut meta = read_meta(&mp)?;
         let now = Utc::now();
 
-        // If value is being updated, archive old and re-encrypt.
+        // If value is being updated, replace active first, then archive prior snapshot.
         if let Some(ref new_value) = request.value {
-            archive_current(&self.store_path, vault, name)?;
+            let ap = age_path(&self.store_path, vault, name)?;
+            let old_age = fs::read(&ap).map_err(|e| {
+                BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
+            })?;
+            let old_meta = meta.clone();
 
             let old_num: u32 = meta
                 .version
@@ -584,8 +644,20 @@ impl SecretBackend for LocalSecretBackend {
                 .unwrap_or(0);
             meta.version = format!("v{}", old_num + 1);
 
-            let ap = age_path(&self.store_path, vault, name)?;
-            crypto::encrypt_to_file(&ap, new_value.as_bytes(), &self.recipients)?;
+            let ap_tmp = temp_path_for(&ap)?;
+            crypto::encrypt_to_file(&ap_tmp, new_value.as_bytes(), &self.recipients)?;
+            fs::rename(&ap_tmp, &ap).map_err(|e| {
+                BackendError::Internal(format!("activate age {}: {e}", ap.display()))
+            })?;
+
+            archive_snapshot(
+                &self.store_path,
+                vault,
+                name,
+                &old_meta.version,
+                &old_age,
+                &old_meta,
+            )?;
         }
 
         // Merge or replace tags
