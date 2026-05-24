@@ -758,11 +758,20 @@ pub(crate) async fn execute_context_command(
             env,
             vault,
             resource_group,
+            backend,
             non_interactive,
             force,
         } => {
-            execute_context_init(env, vault, resource_group, non_interactive, force, &config)
-                .await?;
+            execute_context_init(
+                env,
+                vault,
+                resource_group,
+                backend,
+                non_interactive,
+                force,
+                &config,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -1005,6 +1014,7 @@ async fn execute_context_init(
     env_name: String,
     vault_arg: Option<String>,
     rg_arg: Option<String>,
+    backend_arg: Option<String>,
     non_interactive: bool,
     force: bool,
     config: &Config,
@@ -1022,14 +1032,31 @@ async fn execute_context_init(
         )));
     }
 
-    // Resolve vault/RG: explicit flag → interactive prompt → config default
+    let backend = backend_arg.unwrap_or_else(|| "azure".to_string());
+    let backend = match backend.as_str() {
+        "azure" | "aws" | "local" => backend,
+        other => {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "invalid backend '{other}' (expected: azure | aws | local)"
+            )));
+        }
+    };
+
+    // Resolve vault/RG: explicit flag → interactive prompt → config default.
+    // Azure requires resource_group; aws/local do not.
     let (vault, resource_group) = if non_interactive {
         let vault = vault_arg.ok_or_else(|| {
             CrosstacheError::invalid_argument("--non-interactive requires --vault")
         })?;
-        let rg = rg_arg.ok_or_else(|| {
-            CrosstacheError::invalid_argument("--non-interactive requires --resource-group")
-        })?;
+        let rg = if backend == "azure" {
+            Some(rg_arg.ok_or_else(|| {
+                CrosstacheError::invalid_argument(
+                    "--non-interactive requires --resource-group when --backend azure",
+                )
+            })?)
+        } else {
+            rg_arg
+        };
         (vault, rg)
     } else {
         use crate::utils::interactive::InteractivePrompt;
@@ -1046,15 +1073,16 @@ async fn execute_context_init(
             )?,
         };
         let rg = match rg_arg {
-            Some(r) => r,
-            None => prompt.input_text(
+            Some(r) => Some(r),
+            None if backend == "azure" => Some(prompt.input_text(
                 &format!("Resource group for env '{env_name}'"),
                 if !config.default_resource_group.is_empty() {
                     Some(config.default_resource_group.as_str())
                 } else {
                     None
                 },
-            )?,
+            )?),
+            None => None,
         };
         (vault, rg)
     };
@@ -1064,10 +1092,10 @@ async fn execute_context_init(
         env_name.clone(),
         EnvProfile {
             vault: Some(vault),
-            resource_group: Some(resource_group),
+            resource_group,
             group: None,
             folder: None,
-            backend: None,
+            backend: Some(backend),
         },
     );
 

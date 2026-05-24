@@ -32,6 +32,55 @@ fn context_init_non_interactive_writes_xv_toml() {
     assert!(content.contains("default_env = \"dev\""));
     assert!(content.contains("vault = \"myvault\""));
     assert!(content.contains("resource_group = \"myrg\""));
+    assert!(content.contains("backend = \"azure\""));
+}
+
+#[test]
+fn context_init_non_interactive_aws_does_not_require_resource_group() {
+    let (mut cmd, temp) = xv_isolated();
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "context",
+            "init",
+            "--non-interactive",
+            "--backend",
+            "aws",
+            "--vault",
+            "prod-prefix",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
+    assert!(content.contains("backend = \"aws\""), ".xv.toml: {content}");
+    assert!(!content.contains("resource_group ="), ".xv.toml: {content}");
+}
+
+#[test]
+fn context_init_non_interactive_azure_requires_resource_group() {
+    let (mut cmd, _temp) = xv_isolated();
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "context",
+            "init",
+            "--non-interactive",
+            "--backend",
+            "azure",
+            "--vault",
+            "myvault",
+        ])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr_str(&out));
+    assert!(
+        stderr_str(&out).contains("--resource-group"),
+        "stderr: {}",
+        stderr_str(&out)
+    );
 }
 
 #[test]
