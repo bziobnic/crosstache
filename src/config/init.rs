@@ -236,6 +236,9 @@ impl ConfigInitializer {
             clipboard_timeout: 30,
             gen_default_charset: None,
             env_flag: None,
+            cli_backend: None,
+            cli_backend_was_arg: false,
+            disk_backend: None,
         };
 
         self.save_config(&config).await?;
@@ -304,6 +307,9 @@ impl ConfigInitializer {
             clipboard_timeout: 30,
             gen_default_charset: None,
             env_flag: None,
+            cli_backend: None,
+            cli_backend_was_arg: false,
+            disk_backend: None,
         };
 
         self.save_config(&config).await?;
@@ -1060,6 +1066,9 @@ impl ConfigInitializer {
             clipboard_timeout: 30,
             gen_default_charset: None,
             env_flag: None,
+            cli_backend: None,
+            cli_backend_was_arg: false,
+            disk_backend: None,
         })
     }
 

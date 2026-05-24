@@ -136,6 +136,16 @@ async fn run(cli: Cli) -> Result<()> {
         None
     };
 
+    // Snapshot the on-disk backend value BEFORE resolution overwrites it, plus
+    // the original CLI flag and whether `--backend` was actually passed
+    // (vs. populated by clap from XV_BACKEND via `env = "XV_BACKEND"`).
+    // `xv config show --resolved` reads these to attribute precedence
+    // correctly when values across layers coincide.
+    config.disk_backend = config.backend.clone();
+    config.cli_backend = cli.backend.clone();
+    config.cli_backend_was_arg = std::env::args_os()
+        .any(|a| a == "--backend" || a.to_string_lossy().starts_with("--backend="));
+
     config.backend = Some(
         crate::config::project::resolve_effective_backend(
             cli.backend.as_deref(),

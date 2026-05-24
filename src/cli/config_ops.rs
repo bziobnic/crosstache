@@ -218,93 +218,122 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
         None
     };
 
-    // Resolve active env profile (if a .xv.toml was found).
-    let (project_path, active_env_name, active_profile) = match &project_hit {
+    // Resolve active env profile (if a .xv.toml was found). Track WHY
+    // resolution failed when it did — Bugbot finding on PR #216 (Medium):
+    // displaying vault/RG values that real commands won't use is worse
+    // than showing nothing.
+    let (project_path, active_env_name, active_profile, env_resolve_err) = match &project_hit {
         Some((path, cfg)) => match project::resolve_env(cfg, config.env_flag.as_deref()) {
             Ok((name, profile)) => (
                 Some(path.clone()),
                 Some(name.to_string()),
                 Some(profile.clone()),
+                None,
             ),
-            Err(_) => (Some(path.clone()), None, None),
+            Err(e) => (Some(path.clone()), None, None, Some(format!("{e}"))),
         },
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
 
     // --- Backend resolution ---
-    // We can't see the original `--backend` flag here, but we CAN see the
-    // post-resolution value in `config.backend` and the inputs that fed
-    // resolve_effective_backend. Walk the precedence ladder ourselves to
-    // attribute the win to the highest source whose value matches.
+    // Precedence per resolve_effective_backend:
+    //   1. --backend CLI flag (if actually on the cmdline)
+    //   2. clap's `env = XV_BACKEND` populates cli.backend (== Some(env_val))
+    //   3. .xv.toml [env.<active>] backend
+    //   4. global config backend (xv.conf on disk)
+    //   5. built-in default "azure"
+    //
+    // Bugbot findings #1/#2 on PR #216: the v1 logic infer-by-string-match
+    // got CLI/env/profile confused when values coincided, and labeled the
+    // built-in default as "global config" because main.rs always overwrites
+    // `config.backend` with the resolved value. Fix by reading the original
+    // sources (cli_backend, cli_backend_was_arg, disk_backend) stashed in
+    // main.rs BEFORE the overwrite, plus XV_BACKEND directly.
     let xv_backend_env = std::env::var("XV_BACKEND").ok();
     let profile_backend = active_profile
         .as_ref()
         .and_then(|p| p.backend.as_deref().map(String::from));
     let effective_backend = config.effective_backend_name().to_string();
 
-    let backend_source = if let Some(ref pb) = profile_backend {
+    let backend_source = if config.cli_backend_was_arg && config.cli_backend.is_some() {
+        // --backend was explicitly passed; it wins over everything below.
+        "--backend CLI flag".to_string()
+    } else if let Some(ref pb) = profile_backend {
+        // Profile is next in precedence (it outranks env + global config).
         if pb == &effective_backend {
             format!(
                 ".xv.toml [env.{}] backend",
                 active_env_name.as_deref().unwrap_or("?")
             )
         } else {
-            // Profile said one thing, effective is different → only `--backend`
-            // (which outranks profile) can explain that.
-            "--backend flag (overrides .xv.toml profile)".to_string()
+            // Shouldn't happen — profile is set but effective differs and
+            // no CLI override fired. Be honest.
+            format!("<unexpected: profile={pb} effective={effective_backend}>")
         }
     } else if let Some(ref env_val) = xv_backend_env {
         if env_val == &effective_backend {
             "XV_BACKEND env var".to_string()
         } else {
-            // XV_BACKEND said one thing, effective is different → --backend
-            // CLI flag overrode it.
-            "--backend flag (overrides XV_BACKEND)".to_string()
+            format!("<unexpected: XV_BACKEND={env_val} effective={effective_backend}>")
         }
-    } else if config.backend.is_some() {
-        // Came from the on-disk global config OR --backend; we can't
-        // distinguish those two from here without plumbing the CLI value
-        // through. Be honest about the ambiguity.
-        "global config `backend` (or --backend flag)".to_string()
+    } else if let Some(ref dv) = config.disk_backend {
+        // No CLI, no profile, no env — value came from the on-disk config.
+        if dv == &effective_backend {
+            "global config `backend`".to_string()
+        } else {
+            format!("<unexpected: disk={dv} effective={effective_backend}>")
+        }
     } else {
+        // No source set anything — falling back to built-in default.
         "built-in default".to_string()
     };
 
-    // --- Vault resolution ---
-    // Mirrors Config::resolve_vault_name precedence:
-    //   1. CLI vault arg (not visible here)
-    //   2. .xv.toml profile.vault
-    //   3. ContextManager.current_vault()
-    //   4. config.default_vault
+    // --- Vault & resource_group resolution ---
+    // Bugbot finding #4 on PR #216: if .xv.toml exists but resolve_env
+    // failed (unknown XV_ENV / --env), real commands error out via
+    // `resolve_vault_name`. Showing the global-config or context fallback
+    // here misrepresents what `xv list` would actually use. Surface the
+    // env error instead.
     let context_manager = crate::config::ContextManager::load()
         .await
         .unwrap_or_default();
 
-    let (vault_value, vault_source) =
-        if let Some(v) = active_profile.as_ref().and_then(|p| p.vault.as_deref()) {
-            (
-                v.to_string(),
-                format!(
-                    ".xv.toml [env.{}] vault",
-                    active_env_name.as_deref().unwrap_or("?")
-                ),
-            )
-        } else if let Some(v) = context_manager.current_vault() {
-            (
-                v.to_string(),
-                context_manager.scope_description().to_string(),
-            )
-        } else if !config.default_vault.is_empty() {
-            (
-                config.default_vault.clone(),
-                "global config `default_vault`".to_string(),
-            )
-        } else {
-            ("<unset>".to_string(), "(none)".to_string())
-        };
+    let (vault_value, vault_source) = if let Some(ref err) = env_resolve_err {
+        (
+            "<error>".to_string(),
+            format!("env resolution failed: {err}"),
+        )
+    } else if let Some(v) = active_profile.as_ref().and_then(|p| p.vault.as_deref()) {
+        (
+            v.to_string(),
+            format!(
+                ".xv.toml [env.{}] vault",
+                active_env_name.as_deref().unwrap_or("?")
+            ),
+        )
+    } else if let Some(v) = context_manager.current_vault() {
+        (
+            v.to_string(),
+            context_manager.scope_description().to_string(),
+        )
+    } else if !config.default_vault.is_empty() {
+        (
+            config.default_vault.clone(),
+            "global config `default_vault`".to_string(),
+        )
+    } else {
+        ("<unset>".to_string(), "(none)".to_string())
+    };
 
-    // --- Resource group resolution ---
-    let (rg_value, rg_source) = if let Some(rg) = active_profile
+    // Bugbot finding #3 on PR #216: real `Config::resolve_resource_group`
+    // precedence is .xv.toml → context → global config. The display
+    // previously skipped the context layer. Mirror the real resolver.
+    let (rg_value, rg_source) = if env_resolve_err.is_some() {
+        (
+            "<error>".to_string(),
+            "env resolution failed (see vault row)".to_string(),
+        )
+    } else if let Some(rg) = active_profile
         .as_ref()
         .and_then(|p| p.resource_group.as_deref())
     {
@@ -314,6 +343,11 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
                 ".xv.toml [env.{}] resource_group",
                 active_env_name.as_deref().unwrap_or("?")
             ),
+        )
+    } else if let Some(rg) = context_manager.current_resource_group() {
+        (
+            rg.to_string(),
+            context_manager.scope_description().to_string(),
         )
     } else if !config.default_resource_group.is_empty() {
         (
