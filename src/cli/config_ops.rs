@@ -1032,15 +1032,20 @@ async fn execute_context_init(
         )));
     }
 
-    let backend = backend_arg.unwrap_or_else(|| "azure".to_string());
-    let backend = match backend.as_str() {
-        "azure" | "aws" | "local" => backend,
-        other => {
-            return Err(CrosstacheError::invalid_argument(format!(
-                "invalid backend '{other}' (expected: azure | aws | local)"
-            )));
-        }
+    use crate::config::project::validate_env_profile_backend;
+
+    let profile_backend = if let Some(ref b) = backend_arg {
+        validate_env_profile_backend(b)?;
+        Some(b.as_str())
+    } else {
+        None
     };
+
+    // Effective backend for prompts/validation: explicit --backend, else the
+    // already-resolved global backend (xv.conf / XV_BACKEND / top-level --backend).
+    // Only write a profile backend when --backend was passed — unset inherits
+    // via resolve_effective_backend at runtime.
+    let effective_backend = profile_backend.unwrap_or_else(|| config.effective_backend_name());
 
     // Resolve vault/RG: explicit flag → interactive prompt → config default.
     // Azure requires resource_group; aws/local do not.
@@ -1048,7 +1053,7 @@ async fn execute_context_init(
         let vault = vault_arg.ok_or_else(|| {
             CrosstacheError::invalid_argument("--non-interactive requires --vault")
         })?;
-        let rg = if backend == "azure" {
+        let rg = if effective_backend == "azure" {
             Some(rg_arg.ok_or_else(|| {
                 CrosstacheError::invalid_argument(
                     "--non-interactive requires --resource-group when --backend azure",
@@ -1074,7 +1079,7 @@ async fn execute_context_init(
         };
         let rg = match rg_arg {
             Some(r) => Some(r),
-            None if backend == "azure" => Some(prompt.input_text(
+            None if effective_backend == "azure" => Some(prompt.input_text(
                 &format!("Resource group for env '{env_name}'"),
                 if !config.default_resource_group.is_empty() {
                     Some(config.default_resource_group.as_str())
@@ -1095,7 +1100,7 @@ async fn execute_context_init(
             resource_group,
             group: None,
             folder: None,
-            backend: Some(backend),
+            backend: profile_backend.map(String::from),
         },
     );
 
