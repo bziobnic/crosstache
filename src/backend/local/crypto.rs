@@ -40,6 +40,7 @@ pub fn encrypt_to_file(
             .write(true)
             .truncate(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(path)
             .map_err(|e| BackendError::Internal(format!("create {}: {e}", path.display())))?
     };
@@ -320,5 +321,31 @@ mod tests {
     fn load_identity_missing_file() {
         let result = load_identity(Path::new("/nonexistent/key.txt"));
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encrypt_to_file_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        let (_identity, recipients) = generate_keypair(&key_path, &recipients_path).unwrap();
+
+        let target = tmp.path().join("target.age");
+        let link = tmp.path().join("symlink.age");
+
+        // Create a symlink
+        symlink(&target, &link).unwrap();
+
+        // encrypt_to_file should refuse to follow the symlink (O_NOFOLLOW)
+        let result = encrypt_to_file(&link, b"secret data", &recipients);
+        assert!(result.is_err());
+        if let Err(BackendError::Internal(msg)) = result {
+            assert!(msg.contains("symlink.age"));
+        } else {
+            panic!("Expected BackendError::Internal");
+        }
     }
 }
