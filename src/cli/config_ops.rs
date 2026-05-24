@@ -401,14 +401,19 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
     });
 
     // Backend-specific extras: region/profile for AWS; storage_account for Azure.
+    //
+    // Resolution order must match `backend::aws::auth::build_client`:
+    //   region:  CLI --region > config aws.region > AWS_REGION > AWS_DEFAULT_REGION
+    //   profile: CLI --profile > config aws.profile > AWS_PROFILE (via SDK chain)
+    // `--resolved` has no CLI flags in scope, so it reports the remaining order.
     if effective_backend == "aws" {
-        let (region_val, region_src) = match std::env::var("AWS_REGION") {
-            Ok(v) if !v.is_empty() => (v, "AWS_REGION env var".to_string()),
-            _ => match std::env::var("AWS_DEFAULT_REGION") {
-                Ok(v) if !v.is_empty() => (v, "AWS_DEFAULT_REGION env var".to_string()),
-                _ => match config.aws.as_ref().and_then(|a| a.region.clone()) {
-                    Some(r) => (r, "global config `aws.region`".to_string()),
-                    None => ("<unset>".to_string(), "(none)".to_string()),
+        let (region_val, region_src) = match config.aws.as_ref().and_then(|a| a.region.clone()) {
+            Some(r) => (r, "global config `aws.region`".to_string()),
+            None => match std::env::var("AWS_REGION") {
+                Ok(v) if !v.is_empty() => (v, "AWS_REGION env var".to_string()),
+                _ => match std::env::var("AWS_DEFAULT_REGION") {
+                    Ok(v) if !v.is_empty() => (v, "AWS_DEFAULT_REGION env var".to_string()),
+                    _ => ("<unset>".to_string(), "(none)".to_string()),
                 },
             },
         };
@@ -417,11 +422,11 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
             value: region_val,
             source: region_src,
         });
-        let (prof_val, prof_src) = match std::env::var("AWS_PROFILE") {
-            Ok(v) if !v.is_empty() => (v, "AWS_PROFILE env var".to_string()),
-            _ => match config.aws.as_ref().and_then(|a| a.profile.clone()) {
-                Some(p) => (p, "global config `aws.profile`".to_string()),
-                None => ("<unset>".to_string(), "(none)".to_string()),
+        let (prof_val, prof_src) = match config.aws.as_ref().and_then(|a| a.profile.clone()) {
+            Some(p) => (p, "global config `aws.profile`".to_string()),
+            None => match std::env::var("AWS_PROFILE") {
+                Ok(v) if !v.is_empty() => (v, "AWS_PROFILE env var".to_string()),
+                _ => ("<unset>".to_string(), "(none)".to_string()),
             },
         };
         rows.push(Row {
