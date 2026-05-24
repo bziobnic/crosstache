@@ -34,11 +34,8 @@ fixing as code drifts.
 > **Resolved in v0.11.0** (PR `fix/p1-path-traversal-url-injection`) — `AzureVaultName` validated type gates all Key Vault URL construction; local backend path components validated via `validate_vault_name()` with containment assertion; cache keys validated and safe-fallback on adversarial input. Unit tests prove rejection and containment for all three surfaces.
 >
 > **Resolved in v0.11.0** (PR `fix/p1-local-transactional-secret-writes`) — local secret set/update now stage encrypted payload + metadata to temp files, atomically activate them, then archive the prior version snapshot to prevent archive-then-write data loss on write failure.
-
-### P1 — Symlink-following on sensitive writes
-`src/utils/helpers.rs:21`, `src/backend/local/crypto.rs:38`. Use
-`O_NOFOLLOW | O_CLOEXEC` + `create_new`, write through temp files in
-trusted directories, verify `symlink_metadata` before writes.
+>
+> **Resolved in v0.11.0** (PR `fix/p1-symlink-following-writes`) — `write_private()` and `encrypt_to_file()` now use `O_NOFOLLOW` on Unix to refuse symlink following on sensitive writes. Unit tests verify rejection.
 
 ### P1 — `xv upgrade` signature verification
 Source: `docs/superpowers/specs/2026-05-04-upgrade-signature-verification.md`.

@@ -10,6 +10,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// Write bytes to a file with mode 0o600 (owner read/write only).
+/// Refuses to follow symlinks on Unix (O_NOFOLLOW).
 pub fn write_private(
     path: impl AsRef<std::path::Path>,
     bytes: impl AsRef<[u8]>,
@@ -23,6 +24,7 @@ pub fn write_private(
             .write(true)
             .truncate(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(path.as_ref())?;
         file.write_all(bytes.as_ref())?;
         Ok(())
@@ -273,5 +275,22 @@ mod tests {
             .collect::<Vec<_>>()
             .join("/");
         assert!(validate_folder_path(&deep_path).is_err()); // Too deep
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_private_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("symlink.txt");
+
+        // Create a symlink
+        symlink(&target, &link).unwrap();
+
+        // write_private should refuse to follow the symlink (O_NOFOLLOW)
+        let result = write_private(&link, b"secret data");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().raw_os_error() == Some(libc::ELOOP));
     }
 }
