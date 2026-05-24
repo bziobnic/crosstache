@@ -230,6 +230,8 @@ matching `.xv.toml` profile and print the exact command to use.
 
 ### 3. Backend selection is split across global config, `.xv.toml`, env vars, and flags with no diagnostic
 
+> **Resolved in v0.11.0** (PR fix/config-show-resolved) — `xv config show --resolved` now prints the effective backend, env, vault, and resource group with the source of each (CLI flag / env var / `.xv.toml` profile / global config / built-in). Precedence summary printed beneath the table.
+
 Problem: backend resolution is powerful but invisible. The effective backend
 can come from `--backend`, active `.xv.toml` env, global `xv.conf`, `XV_BACKEND`,
 or the Azure default. Help and error output rarely say which layer won.

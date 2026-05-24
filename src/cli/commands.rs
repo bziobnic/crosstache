@@ -1005,7 +1005,17 @@ pub enum ShareCommands {
 #[derive(Subcommand)]
 pub enum ConfigCommands {
     /// Show current configuration
-    Show,
+    Show {
+        /// Show the *effective* (resolved) backend/env/vault/RG and the source
+        /// of each (CLI flag / env var / `.xv.toml` profile / global config /
+        /// built-in default).
+        ///
+        /// Use this when `xv` picks a backend you didn't expect — backend
+        /// resolution layers across `--backend`, `.xv.toml`, `XV_BACKEND`, and
+        /// global config, and this flag prints which layer won.
+        #[arg(long)]
+        resolved: bool,
+    },
     /// Set a configuration value
     Set {
         /// Setting name

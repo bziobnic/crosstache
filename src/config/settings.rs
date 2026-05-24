@@ -217,6 +217,36 @@ pub struct Config {
     #[serde(skip)]
     #[tabled(skip)]
     pub env_flag: Option<String>,
+
+    /// Original `--backend` CLI flag value, BEFORE `resolve_effective_backend`
+    /// collapses every layer into `self.backend`. Set once in main.rs from
+    /// `cli.backend.clone()`. Used only by `xv config show --resolved` to
+    /// attribute the winning layer correctly when CLI/profile/env values
+    /// happen to coincide.
+    ///
+    /// Note: clap auto-populates `cli.backend` from `XV_BACKEND` too, so this
+    /// alone cannot distinguish CLI from env var — `cli_backend_was_arg`
+    /// is required for that.
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub cli_backend: Option<String>,
+
+    /// `true` when `--backend` was passed on the command line (vs. populated
+    /// from `XV_BACKEND` via clap's `env = ...`). Set in main.rs by checking
+    /// `std::env::args_os()`. Lets `--resolved` distinguish "won by CLI flag"
+    /// from "won by env var" even when both supply the same string.
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub cli_backend_was_arg: bool,
+
+    /// Backend value loaded from the on-disk global config (`xv.conf`), BEFORE
+    /// main.rs overwrites `self.backend` with the resolved value. Set once
+    /// in main.rs by snapshotting `config.backend` immediately after
+    /// `Config::load_or_create`. Used only by `xv config show --resolved`
+    /// to detect the "no source set anything → built-in default" case.
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub disk_backend: Option<String>,
 }
 
 fn default_clipboard_timeout() -> u64 {
@@ -255,6 +285,9 @@ impl Default for Config {
             clipboard_timeout: default_clipboard_timeout(),
             gen_default_charset: None,
             env_flag: None,
+            cli_backend: None,
+            cli_backend_was_arg: false,
+            disk_backend: None,
         }
     }
 }
