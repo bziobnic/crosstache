@@ -31,25 +31,7 @@ Sourced from `docs/code-review-gpt55.md` (GPT-5.5 code review, 2026-05-09).
 Each item names the source file at review time — verify line numbers before
 fixing as code drifts.
 
-### P1 — Path-traversal & URL-injection via unvalidated names
-- **Azure vault names** interpolated into Key Vault URLs without
-  validation (`src/secret/manager.rs:273,383,476,430`). A vault name
-  containing URL authority/path delimiters can redirect a bearer token to
-  an attacker-controlled host. Introduce `ValidatedVaultName`
-  (`^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$`); build URLs with `url::Url`.
-- **Local vault & secret names** used as raw filesystem path components
-  (`src/backend/local/vaults.rs`, `secrets.rs`, `files.rs`). Names like
-  `../../outside` escape the store. Validate component-only or
-  encode + canonicalize + assert containment.
-- **Cache keys** use raw `vault_name` (`src/cache/models.rs`,
-  `cache/manager.rs`, `cache/refresh.rs`). Encode or hash; reject separators.
-
-### P1 — `xv upgrade` signature verification
-Source: `docs/superpowers/specs/2026-05-04-upgrade-signature-verification.md`.
-Binary + checksum currently come from the same GitHub Releases endpoint
-(integrity, not authenticity). Embed a minisign public key, sign release
-archives in CI, verify before swap. Spec is design-approved but
-implementation has not landed.
+> **Resolved in v0.11.0** (PR `fix/p1-path-traversal-url-injection`) — `AzureVaultName` validated type gates all Key Vault URL construction; local backend path components validated via `validate_vault_name()` with containment assertion; cache keys validated and safe-fallback on adversarial input. Unit tests prove rejection and containment for all three surfaces.
 
 ### P1 — Local secret writes not transactional
 `src/backend/local/secrets.rs:300,571`. Archive-then-write loses the active
@@ -60,6 +42,13 @@ rename; archive only after the replacement is durable.
 `src/utils/helpers.rs:21`, `src/backend/local/crypto.rs:38`. Use
 `O_NOFOLLOW | O_CLOEXEC` + `create_new`, write through temp files in
 trusted directories, verify `symlink_metadata` before writes.
+
+### P1 — `xv upgrade` signature verification
+Source: `docs/superpowers/specs/2026-05-04-upgrade-signature-verification.md`.
+Binary + checksum currently come from the same GitHub Releases endpoint
+(integrity, not authenticity). Embed a minisign public key, sign release
+archives in CI, verify before swap. Spec is design-approved but
+implementation has not landed.
 
 ### P2 — Local file metadata uses world-readable defaults
 `src/backend/local/files.rs:57`. Switch to `write_private`; assert
