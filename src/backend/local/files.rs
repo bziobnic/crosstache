@@ -15,7 +15,7 @@ use chrono::Utc;
 use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
 use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
-use crate::utils::helpers::create_private_dir;
+use crate::utils::helpers::{create_private_dir, write_private};
 use crate::utils::progress::ProgressReporter;
 
 use super::{crypto, paths};
@@ -57,7 +57,7 @@ fn read_file_meta(path: &Path) -> Result<FileInfo, BackendError> {
 fn write_file_meta(path: &Path, info: &FileInfo) -> Result<(), BackendError> {
     let json = serde_json::to_string_pretty(info)
         .map_err(|e| BackendError::Internal(format!("serialize file meta: {e}")))?;
-    fs::write(path, json)
+    write_private(path, json.as_bytes())
         .map_err(|e| BackendError::Internal(format!("write file meta {}: {e}", path.display())))
 }
 
@@ -437,5 +437,34 @@ mod tests {
 
         let result = backend.download_file("nonexistent.txt", None).await;
         assert!(matches!(result, Err(BackendError::NotFound { .. })));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn meta_json_has_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (backend, tmp) = test_file_backend();
+
+        let request = FileUploadRequest {
+            name: "perm-test.bin".into(),
+            content: b"secret data".to_vec(),
+            content_type: None,
+            groups: Vec::new(),
+            metadata: HashMap::new(),
+            tags: HashMap::new(),
+        };
+        backend.upload_file(request, None).await.unwrap();
+
+        let files_dir = tmp.path().join("vaults").join("default").join("files");
+        let meta_path = fs::read_dir(&files_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with(".meta.json"))
+            .expect("meta.json not found after upload");
+
+        let mode = fs::metadata(&meta_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "meta.json mode should be 0600, got {mode:o}");
     }
 }
