@@ -1,7 +1,7 @@
 # `xv upgrade` Signature Verification Design
 
-> **Status:** 🟡 Proposed (not yet implemented as of v0.10.0-rc.2) | **Date:** 2026-05-04 | **Author:** Hermes + Scott
-> Tracked in `ROADMAP.md` → "Security hardening".
+> **Status:** ✅ Implemented in **v0.11.0** (2026-05-24). Retained as design history. | **Date:** 2026-05-04 | **Author:** Hermes + Scott
+> Originally tracked in `ROADMAP.md` → "Security hardening".
 
 ---
 
