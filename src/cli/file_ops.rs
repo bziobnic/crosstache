@@ -422,11 +422,26 @@ async fn execute_file_download(
     config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileDownloadRequest;
+    use crate::utils::helpers::safe_join;
     use std::fs;
     use std::path::Path;
 
-    // Determine output path
-    let output_path = output.unwrap_or_else(|| name.to_string());
+    // Determine output path with traversal guard.
+    // When --output is an existing directory, place the file inside it.
+    // When --output is an explicit file path (caller-resolved), use it directly.
+    // When --output is omitted, derive from blob name anchored at CWD.
+    let output_path: String = match output {
+        Some(ref p) if Path::new(p).is_dir() => {
+            safe_join(Path::new(p), name).map(|pb| pb.to_string_lossy().into_owned())?
+        }
+        Some(p) => p,
+        None => {
+            let cwd = std::env::current_dir().map_err(|e| {
+                CrosstacheError::config(format!("Cannot determine current directory: {e}"))
+            })?;
+            safe_join(&cwd, name).map(|pb| pb.to_string_lossy().into_owned())?
+        }
+    };
 
     // Check if file exists and handle force flag
     if Path::new(&output_path).exists() && !force {
@@ -1146,6 +1161,35 @@ async fn execute_file_upload_multiple(
     Ok(())
 }
 
+/// Resolve the output directory for a multi-file download.
+///
+/// Returns an error if `output` names an existing non-directory path (which would
+/// cause every file to clobber the same destination). Creates the directory if it
+/// doesn't exist yet.
+fn resolve_multi_download_dir(output: Option<&str>) -> Result<PathBuf> {
+    use std::fs;
+    use std::path::Path;
+    match output {
+        Some(p) => {
+            let path = Path::new(p);
+            if path.exists() && !path.is_dir() {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "--output '{p}' must be a directory when downloading multiple files"
+                )));
+            }
+            if !path.exists() {
+                fs::create_dir_all(path).map_err(|e| {
+                    CrosstacheError::config(format!("Failed to create output directory '{p}': {e}"))
+                })?;
+            }
+            Ok(path.to_path_buf())
+        }
+        None => std::env::current_dir().map_err(|e| {
+            CrosstacheError::config(format!("Cannot determine current directory: {e}"))
+        }),
+    }
+}
+
 async fn execute_file_download_multiple(
     blob_manager: &BlobManager,
     files: Vec<String>,
@@ -1154,13 +1198,44 @@ async fn execute_file_download_multiple(
     continue_on_error: bool,
     config: &Config,
 ) -> Result<()> {
+    use crate::utils::helpers::safe_join;
+
+    let output_dir = resolve_multi_download_dir(output.as_deref())?;
+
     println!("Downloading {} file(s)...", files.len());
 
     let mut success_count = 0;
     let mut error_count = 0;
 
     for file_name in files {
-        match execute_file_download(blob_manager, &file_name, output.clone(), force, config).await {
+        // Compute a unique per-file output path via traversal guard.
+        let per_file_output = match safe_join(&output_dir, &file_name) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => {
+                eprintln!(
+                    "  {}",
+                    output::format_line(
+                        output::Level::Error,
+                        &format!("{file_name}: {e}"),
+                        output::should_use_rich_stderr(),
+                    )
+                );
+                error_count += 1;
+                if !continue_on_error {
+                    return Err(e);
+                }
+                continue;
+            }
+        };
+        match execute_file_download(
+            blob_manager,
+            &file_name,
+            Some(per_file_output),
+            force,
+            config,
+        )
+        .await
+        {
             Ok(_) => {
                 println!(
                     "  {}",
@@ -2231,6 +2306,72 @@ pub(crate) async fn execute_file_upload_quick(
         config,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- safe_join integration: traversal and absolute-path rejection ---
+
+    #[test]
+    fn test_single_file_rejects_traversal() {
+        let base = std::path::Path::new("/tmp/base");
+        let err = crate::utils::helpers::safe_join(base, "../escape.txt").unwrap_err();
+        assert!(
+            err.to_string().contains(".."),
+            "error should mention '..': {err}"
+        );
+    }
+
+    #[test]
+    fn test_single_file_rejects_absolute_path() {
+        let base = std::path::Path::new("/tmp/base");
+        let err = crate::utils::helpers::safe_join(base, "/etc/passwd").unwrap_err();
+        assert!(
+            err.to_string().contains("absolute"),
+            "error should mention 'absolute': {err}"
+        );
+    }
+
+    #[test]
+    fn test_single_file_normal_name_resolves_under_base() {
+        let base = std::path::Path::new("/tmp/base");
+        let result = crate::utils::helpers::safe_join(base, "docs/readme.md").unwrap();
+        assert_eq!(result, std::path::Path::new("/tmp/base/docs/readme.md"));
+    }
+
+    // --- resolve_multi_download_dir: directory validation ---
+
+    #[test]
+    fn test_multi_download_rejects_file_as_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("notadir.txt");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        let err = resolve_multi_download_dir(Some(file_path.to_str().unwrap())).unwrap_err();
+        assert!(
+            err.to_string().contains("must be a directory"),
+            "error should say 'must be a directory': {err}"
+        );
+    }
+
+    #[test]
+    fn test_multi_download_creates_and_returns_dir() {
+        let parent = tempfile::tempdir().unwrap();
+        let new_dir = parent.path().join("downloads");
+
+        assert!(!new_dir.exists());
+        let result = resolve_multi_download_dir(Some(new_dir.to_str().unwrap())).unwrap();
+        assert!(result.exists() && result.is_dir());
+    }
+
+    #[test]
+    fn test_multi_download_uses_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve_multi_download_dir(Some(dir.path().to_str().unwrap())).unwrap();
+        assert_eq!(result, dir.path());
+    }
 }
 
 /// Quick file download command (alias for file download)

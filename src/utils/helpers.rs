@@ -6,7 +6,7 @@
 use crate::error::{CrosstacheError, Result};
 use regex::Regex;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Write bytes to a file with mode 0o600 (owner read/write only).
@@ -209,6 +209,30 @@ pub fn validate_folder_path(folder_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Safely join an untrusted path component onto a base directory.
+///
+/// Rejects absolute paths and `..` components in `untrusted` to prevent
+/// path traversal from malicious blob names.
+pub fn safe_join(base: &Path, untrusted: &str) -> Result<PathBuf> {
+    let untrusted_path = Path::new(untrusted);
+
+    if untrusted_path.is_absolute() {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "Blob name '{untrusted}' is an absolute path, which is not allowed"
+        )));
+    }
+
+    for component in untrusted_path.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "Blob name '{untrusted}' contains '..', which is not allowed"
+            )));
+        }
+    }
+
+    Ok(base.join(untrusted_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +299,32 @@ mod tests {
             .collect::<Vec<_>>()
             .join("/");
         assert!(validate_folder_path(&deep_path).is_err()); // Too deep
+    }
+
+    #[test]
+    fn test_safe_join_rejects_traversal() {
+        let base = std::path::Path::new("/tmp/base");
+        assert!(safe_join(base, "../escape.txt").is_err());
+        assert!(safe_join(base, "subdir/../../escape.txt").is_err());
+        assert!(safe_join(base, "a/../../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_safe_join_rejects_absolute() {
+        let base = std::path::Path::new("/tmp/base");
+        assert!(safe_join(base, "/etc/passwd").is_err());
+        assert!(safe_join(base, "/absolute/path").is_err());
+    }
+
+    #[test]
+    fn test_safe_join_allows_normal_names() {
+        let base = std::path::Path::new("/tmp/base");
+
+        let result = safe_join(base, "readme.txt").unwrap();
+        assert_eq!(result, std::path::Path::new("/tmp/base/readme.txt"));
+
+        let result = safe_join(base, "docs/readme.md").unwrap();
+        assert_eq!(result, std::path::Path::new("/tmp/base/docs/readme.md"));
     }
 
     #[test]
