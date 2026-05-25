@@ -422,26 +422,10 @@ async fn execute_file_download(
     config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileDownloadRequest;
-    use crate::utils::helpers::safe_join;
     use std::fs;
     use std::path::Path;
 
-    // Determine output path with traversal guard.
-    // When --output is an existing directory, place the file inside it.
-    // When --output is an explicit file path (caller-resolved), use it directly.
-    // When --output is omitted, derive from blob name anchored at CWD.
-    let output_path: String = match output {
-        Some(ref p) if Path::new(p).is_dir() => {
-            safe_join(Path::new(p), name).map(|pb| pb.to_string_lossy().into_owned())?
-        }
-        Some(p) => p,
-        None => {
-            let cwd = std::env::current_dir().map_err(|e| {
-                CrosstacheError::config(format!("Cannot determine current directory: {e}"))
-            })?;
-            safe_join(&cwd, name).map(|pb| pb.to_string_lossy().into_owned())?
-        }
-    };
+    let output_path = resolve_single_download_path(name, output.as_deref())?;
 
     // Check if file exists and handle force flag
     if Path::new(&output_path).exists() && !force {
@@ -491,6 +475,27 @@ async fn execute_file_download(
     output::success(&format!("Successfully downloaded file '{name}'"));
 
     Ok(())
+}
+
+fn resolve_single_download_path(name: &str, output: Option<&str>) -> Result<String> {
+    use crate::utils::helpers::safe_join;
+
+    // Determine output path with traversal guard.
+    // When --output is an existing directory, place the file inside it.
+    // When --output is an explicit file path (caller-resolved), use it directly.
+    // When --output is omitted, derive from blob name anchored at CWD.
+    match output {
+        Some(p) if Path::new(p).is_dir() => {
+            safe_join(Path::new(p), name).map(|pb| pb.to_string_lossy().into_owned())
+        }
+        Some(p) => Ok(p.to_string()),
+        None => {
+            let cwd = std::env::current_dir().map_err(|e| {
+                CrosstacheError::config(format!("Cannot determine current directory: {e}"))
+            })?;
+            safe_join(&cwd, name).map(|pb| pb.to_string_lossy().into_owned())
+        }
+    }
 }
 
 fn display_file_list_items(
@@ -2337,7 +2342,7 @@ pub(crate) async fn execute_file_download_quick(
         }
     })?;
 
-    let output_path = output.clone();
+    let final_output_path = resolve_single_download_path(name, output.as_deref())?;
     execute_file_download(
         &blob_manager,
         name,
@@ -2349,7 +2354,6 @@ pub(crate) async fn execute_file_download_quick(
 
     // Handle --open flag: open the downloaded file with the system's default application
     if open {
-        let final_output_path = output_path.unwrap_or_else(|| name.to_string());
         match std::fs::canonicalize(&final_output_path) {
             Ok(path) => {
                 if let Err(e) = opener::open(&path) {
@@ -2399,6 +2403,19 @@ mod tests {
         let base = std::path::Path::new("/tmp/base");
         let result = crate::utils::helpers::safe_join(base, "docs/readme.md").unwrap();
         assert_eq!(result, std::path::Path::new("/tmp/base/docs/readme.md"));
+    }
+
+    #[test]
+    fn test_single_download_output_dir_resolves_to_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let result =
+            resolve_single_download_path("docs/readme.md", Some(dir.path().to_str().unwrap()))
+                .unwrap();
+
+        assert_eq!(
+            std::path::Path::new(&result),
+            &dir.path().join("docs/readme.md")
+        );
     }
 
     // --- resolve_multi_download_dir: directory validation ---
