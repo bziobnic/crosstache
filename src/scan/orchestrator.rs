@@ -61,7 +61,7 @@ pub async fn fetch_secret_values(
                     Ok(props) => props.value.map(|v| SecretRef {
                         name: secret_name,
                         vault,
-                        value: v.as_str().to_string(),
+                        value: v,
                     }),
                     Err(e) => {
                         tracing::debug!("get_secret failed for {vault}/{backend_name}: {e}");
@@ -87,6 +87,7 @@ mod tests {
     use crate::scan::patterns::builtin_patterns;
     use crate::scan::walker::{walk, WalkConfig};
     use tempfile::tempdir;
+    use zeroize::Zeroizing;
 
     #[test]
     fn scan_files_with_inline_engine() {
@@ -98,7 +99,7 @@ mod tests {
         let secrets = vec![SecretRef {
             name: "DB_PW".to_string(),
             vault: "v".to_string(),
-            value: "hunter2-very-long-password".to_string(),
+            value: Zeroizing::new("hunter2-very-long-password".to_string()),
         }];
         let patterns = builtin_patterns();
         let engine = MatchEngine::new(&secrets, &patterns);
