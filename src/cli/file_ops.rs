@@ -475,6 +475,17 @@ async fn execute_file_download(
     let content = blob_manager
         .download_file(download_request, reporter.as_ref())
         .await?;
+    // Ensure parent directories exist so blob names with path segments
+    // (e.g. "docs/readme.md") succeed when their parents are not yet created.
+    if let Some(parent) = Path::new(&output_path).parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| {
+                CrosstacheError::config(format!(
+                    "Failed to create parent directories for {output_path}: {e}"
+                ))
+            })?;
+        }
+    }
     fs::write(&output_path, content)
         .map_err(|e| CrosstacheError::config(format!("Failed to write file {output_path}: {e}")))?;
     output::success(&format!("Successfully downloaded file '{name}'"));
@@ -2308,6 +2319,55 @@ pub(crate) async fn execute_file_upload_quick(
     .await
 }
 
+/// Quick file download command (alias for file download)
+pub(crate) async fn execute_file_download_quick(
+    name: &str,
+    output: Option<String>,
+    open: bool,
+    config: &Config,
+) -> Result<()> {
+    // Create blob manager
+    let blob_manager = create_blob_manager(config).map_err(|e| {
+        if e.to_string().contains("No storage account configured") {
+            CrosstacheError::config(
+                "No blob storage configured. Run 'xv init' to set up blob storage.",
+            )
+        } else {
+            e
+        }
+    })?;
+
+    let output_path = output.clone();
+    execute_file_download(
+        &blob_manager,
+        name,
+        output,
+        false, // force
+        config,
+    )
+    .await?;
+
+    // Handle --open flag: open the downloaded file with the system's default application
+    if open {
+        let final_output_path = output_path.unwrap_or_else(|| name.to_string());
+        match std::fs::canonicalize(&final_output_path) {
+            Ok(path) => {
+                if let Err(e) = opener::open(&path) {
+                    eprintln!("Warning: could not open file '{}': {}", path.display(), e);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not resolve path '{}': {}",
+                    final_output_path, e
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2372,53 +2432,4 @@ mod tests {
         let result = resolve_multi_download_dir(Some(dir.path().to_str().unwrap())).unwrap();
         assert_eq!(result, dir.path());
     }
-}
-
-/// Quick file download command (alias for file download)
-pub(crate) async fn execute_file_download_quick(
-    name: &str,
-    output: Option<String>,
-    open: bool,
-    config: &Config,
-) -> Result<()> {
-    // Create blob manager
-    let blob_manager = create_blob_manager(config).map_err(|e| {
-        if e.to_string().contains("No storage account configured") {
-            CrosstacheError::config(
-                "No blob storage configured. Run 'xv init' to set up blob storage.",
-            )
-        } else {
-            e
-        }
-    })?;
-
-    let output_path = output.clone();
-    execute_file_download(
-        &blob_manager,
-        name,
-        output,
-        false, // force
-        config,
-    )
-    .await?;
-
-    // Handle --open flag: open the downloaded file with the system's default application
-    if open {
-        let final_output_path = output_path.unwrap_or_else(|| name.to_string());
-        match std::fs::canonicalize(&final_output_path) {
-            Ok(path) => {
-                if let Err(e) = opener::open(&path) {
-                    eprintln!("Warning: could not open file '{}': {}", path.display(), e);
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "Warning: could not resolve path '{}': {}",
-                    final_output_path, e
-                );
-            }
-        }
-    }
-
-    Ok(())
 }
