@@ -1554,6 +1554,7 @@ dependencies = [
  "mockall",
  "nucleo",
  "opener",
+ "percent-encoding",
  "rand 0.10.1",
  "ratatui",
  "regex",
