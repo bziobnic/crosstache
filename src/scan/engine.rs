@@ -6,6 +6,7 @@ use crate::scan::patterns::BuiltinPattern;
 use std::path::Path;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
+use zeroize::Zeroizing;
 
 /// Minimum length for a secret value to be added to the automaton.
 /// Prevents single-letter / very-short secrets from generating noise.
@@ -13,14 +14,28 @@ pub const DEFAULT_MIN_VALUE_LENGTH: usize = 8;
 
 /// Reference to a vault-side secret. Engine consumes a slice of these
 /// and never exposes the values back through findings.
+///
+/// # Security trade-off
+///
+/// `value` is `Zeroizing<String>` so the plaintext is wiped when this struct
+/// drops. However, `MatchEngine::new` copies needle bytes into the internal
+/// Aho-Corasick automaton, which holds plaintext for its own lifetime.
+/// Callers MUST drop the `Vec<SecretRef>` immediately after constructing the
+/// engine, and MUST drop the engine promptly after scanning completes.
 #[derive(Debug, Clone)]
 pub struct SecretRef {
     pub name: String,
     pub vault: String,
-    pub value: String,
+    pub value: Zeroizing<String>,
 }
 
 /// Pre-built scan engine. Construct once per scan; reuse across files.
+///
+/// # Security note
+///
+/// The internal Aho-Corasick automaton retains copies of all secret-value
+/// needles in plaintext until this struct is dropped. Drop the engine as
+/// soon as scanning is complete to minimise the window of exposure.
 pub struct MatchEngine {
     /// Aho-Corasick automaton over secret values (and any literal
     /// pattern prefixes — none today, reserved for future).
@@ -173,7 +188,7 @@ mod tests {
         let secrets = vec![SecretRef {
             name: "DB_PASSWORD".to_string(),
             vault: "dev-kv".to_string(),
-            value: "hunter2-very-long-password".to_string(),
+            value: Zeroizing::new("hunter2-very-long-password".to_string()),
         }];
         let engine = MatchEngine::new(&secrets, &[]);
         let findings = engine.scan_text(
@@ -197,7 +212,7 @@ mod tests {
         let secrets = vec![SecretRef {
             name: "SHORT".to_string(),
             vault: "v".to_string(),
-            value: "abc".to_string(),
+            value: Zeroizing::new("abc".to_string()),
         }];
         let engine = MatchEngine::new(&secrets, &[]);
         let findings = engine.scan_text(Path::new("x"), "abc abc abc abc");
@@ -224,7 +239,7 @@ mod tests {
         let secrets = vec![SecretRef {
             name: "API_KEY".to_string(),
             vault: "v".to_string(),
-            value: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            value: Zeroizing::new("AKIAIOSFODNN7EXAMPLE".to_string()),
         }];
         let patterns = builtin_patterns();
         let engine = MatchEngine::new(&secrets, &patterns);
@@ -240,7 +255,7 @@ mod tests {
         let secrets = vec![SecretRef {
             name: "X".to_string(),
             vault: "v".to_string(),
-            value: "needle12345".to_string(),
+            value: Zeroizing::new("needle12345".to_string()),
         }];
         let engine = MatchEngine::new(&secrets, &[]);
         let content = "line1\nline2 needle12345 line2 cont\nline3";
