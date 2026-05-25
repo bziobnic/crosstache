@@ -4,11 +4,31 @@
 //! creation, deletion, access control, and metadata management.
 
 use async_trait::async_trait;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{header::HeaderMap, Client};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// RFC 3986 path-segment encoding: encodes everything except unreserved chars.
+/// `/` and `%` must be encoded to prevent path injection and double-encoding.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'%');
+
+fn enc(s: &str) -> impl std::fmt::Display + '_ {
+    utf8_percent_encode(s, PATH_SEGMENT)
+}
 
 use super::models::{
     AccessLevel, AccessPolicy, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary,
@@ -166,9 +186,9 @@ impl AzureVaultOperations {
     fn get_vault_resource_id(&self, vault_name: &AzureVaultName, resource_group: &str) -> String {
         format!(
             "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}",
-            self.subscription_id,
-            resource_group,
-            vault_name.as_str()
+            enc(&self.subscription_id),
+            enc(resource_group),
+            enc(vault_name.as_str())
         )
     }
 
@@ -353,11 +373,14 @@ impl VaultOperations for AzureVaultOperations {
 
         let first_url = if let Some(rg) = resource_group {
             self.build_arm_url(&format!(
-                "/subscriptions/{sub_id}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01"
+                "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01",
+                enc(sub_id),
+                enc(rg)
             ))
         } else {
             self.build_arm_url(&format!(
-                "/subscriptions/{sub_id}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01"
+                "/subscriptions/{}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01",
+                enc(sub_id)
             ))
         };
 
@@ -519,9 +542,9 @@ impl VaultOperations for AzureVaultOperations {
             let headers = self.create_headers().await?;
             let url = self.build_arm_url(&format!(
                 "/subscriptions/{}/providers/Microsoft.KeyVault/locations/{}/deletedVaults/{}/recover?api-version=2023-07-01",
-                self.subscription_id,
-                location,
-                vault_name.as_str()
+                enc(&self.subscription_id),
+                enc(location),
+                enc(vault_name.as_str())
             ));
 
             let response = self
@@ -554,8 +577,8 @@ impl VaultOperations for AzureVaultOperations {
             Ok(VaultProperties {
                 id: format!(
                     "/subscriptions/{}/providers/Microsoft.KeyVault/vaults/{}",
-                    self.subscription_id,
-                    vault_name.as_str()
+                    enc(&self.subscription_id),
+                    enc(vault_name.as_str())
                 ),
                 name: vault_name.as_str().to_string(),
                 location: location.to_string(),
@@ -585,9 +608,9 @@ impl VaultOperations for AzureVaultOperations {
             let headers = self.create_headers().await?;
             let url = self.build_arm_url(&format!(
                 "/subscriptions/{}/providers/Microsoft.KeyVault/locations/{}/deletedVaults/{}/purge?api-version=2023-07-01",
-                self.subscription_id,
-                location,
-                vault_name.as_str()
+                enc(&self.subscription_id),
+                enc(location),
+                enc(vault_name.as_str())
             ));
 
             let response = self
@@ -742,10 +765,10 @@ impl VaultOperations for AzureVaultOperations {
             let headers = self.create_headers().await?;
             let scope = format!(
                 "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}/secrets/{}",
-                self.subscription_id,
-                resource_group,
-                vault_name.as_str(),
-                secret_name
+                enc(&self.subscription_id),
+                enc(resource_group),
+                enc(vault_name.as_str()),
+                enc(secret_name)
             );
 
             let role_definition_id = match access_level {
@@ -763,7 +786,7 @@ impl VaultOperations for AzureVaultOperations {
                 "properties": {
                     "roleDefinitionId": format!(
                         "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}",
-                        self.subscription_id
+                        enc(&self.subscription_id)
                     ),
                     "principalId": user_object_id
                 }
@@ -804,10 +827,10 @@ impl VaultOperations for AzureVaultOperations {
             let headers = self.create_headers().await?;
             let scope = format!(
                 "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}/secrets/{}",
-                self.subscription_id,
-                resource_group,
-                vault_name.as_str(),
-                secret_name
+                enc(&self.subscription_id),
+                enc(resource_group),
+                enc(vault_name.as_str()),
+                enc(secret_name)
             );
 
             // List role assignments for this scope
@@ -891,10 +914,10 @@ impl VaultOperations for AzureVaultOperations {
             let headers = self.create_headers().await?;
             let scope = format!(
                 "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}/secrets/{}",
-                self.subscription_id,
-                resource_group,
-                vault_name.as_str(),
-                secret_name
+                enc(&self.subscription_id),
+                enc(resource_group),
+                enc(vault_name.as_str()),
+                enc(secret_name)
             );
 
             let url = self.build_arm_url(&format!(
@@ -1356,16 +1379,98 @@ mod tests {
     use super::*;
     use crate::auth::provider::DefaultAzureCredentialProvider;
 
+    fn make_ops(sub_id: &str) -> AzureVaultOperations {
+        let auth_provider = DefaultAzureCredentialProvider::new().unwrap();
+        AzureVaultOperations::new(Arc::new(auth_provider), sub_id.to_string()).unwrap()
+    }
+
+    // --- enc() unit tests ---
+
+    #[test]
+    fn test_enc_safe_chars_unchanged() {
+        assert_eq!(enc("my-rg").to_string(), "my-rg");
+    }
+
+    #[test]
+    fn test_enc_space() {
+        assert_eq!(enc("my rg").to_string(), "my%20rg");
+    }
+
+    #[test]
+    fn test_enc_slash() {
+        assert_eq!(enc("rg/with/slash").to_string(), "rg%2Fwith%2Fslash");
+    }
+
+    #[test]
+    fn test_enc_percent_not_double_encoded() {
+        // A literal % must be encoded to %25, not passed through
+        assert_eq!(enc("rg%20name").to_string(), "rg%2520name");
+    }
+
+    #[test]
+    fn test_enc_alphanumeric_and_hyphen_unchanged() {
+        assert_eq!(enc("abc-123_XYZ").to_string(), "abc-123_XYZ");
+    }
+
+    // --- get_vault_resource_id tests ---
+
+    #[test]
+    fn test_resource_id_safe_rg_unchanged() {
+        let ops = make_ops("sub-123");
+        let vault_name = AzureVaultName::try_from("my-vault").unwrap();
+        let id = ops.get_vault_resource_id(&vault_name, "my-rg");
+        assert_eq!(
+            id,
+            "/subscriptions/sub-123/resourceGroups/my-rg/providers/Microsoft.KeyVault/vaults/my-vault"
+        );
+    }
+
+    #[test]
+    fn test_resource_id_rg_space_encoded() {
+        let ops = make_ops("sub-123");
+        let vault_name = AzureVaultName::try_from("my-vault").unwrap();
+        let id = ops.get_vault_resource_id(&vault_name, "my rg");
+        assert!(id.contains("my%20rg"), "expected encoded space in: {id}");
+    }
+
+    #[test]
+    fn test_resource_id_rg_slash_encoded() {
+        let ops = make_ops("sub-123");
+        let vault_name = AzureVaultName::try_from("my-vault").unwrap();
+        let id = ops.get_vault_resource_id(&vault_name, "rg/with/slash");
+        assert!(
+            id.contains("rg%2Fwith%2Fslash"),
+            "expected encoded slashes in: {id}"
+        );
+    }
+
+    #[test]
+    fn test_resource_id_subscription_encoded() {
+        let ops = make_ops("sub/with/slash");
+        let vault_name = AzureVaultName::try_from("my-vault").unwrap();
+        let id = ops.get_vault_resource_id(&vault_name, "my-rg");
+        assert!(
+            id.contains("sub%2Fwith%2Fslash"),
+            "expected encoded subscription in: {id}"
+        );
+    }
+
+    #[test]
+    fn test_resource_id_vault_name_safe_chars_noop() {
+        // AzureVaultName only allows alphanumeric + hyphens; enc is a no-op for these
+        let ops = make_ops("sub-123");
+        let vault_name = AzureVaultName::try_from("my-vault").unwrap();
+        let id = ops.get_vault_resource_id(&vault_name, "my-rg");
+        assert!(
+            id.ends_with("/vaults/my-vault"),
+            "vault name must be unmodified: {id}"
+        );
+    }
+
     #[tokio::test]
     async fn test_vault_operations_creation() {
-        // This is a basic test to ensure the structure compiles
-        // Real tests would require Azure credentials and resources
-        let auth_provider = DefaultAzureCredentialProvider::new().unwrap();
-        let vault_ops =
-            AzureVaultOperations::new(Arc::new(auth_provider), "test-subscription-id".to_string())
-                .unwrap();
-
-        // Test resource ID generation
+        // Smoke test: structure compiles and resource ID contains expected segments
+        let vault_ops = make_ops("test-subscription-id");
         let vault_name = AzureVaultName::try_from("test-vault").unwrap();
         let resource_id = vault_ops.get_vault_resource_id(&vault_name, "test-rg");
         assert!(resource_id.contains("test-vault"));
