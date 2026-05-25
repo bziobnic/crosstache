@@ -421,11 +421,20 @@ async fn execute_file_download(
     force: bool,
     config: &Config,
 ) -> Result<()> {
+    let output_path = resolve_single_download_path(name, output.as_deref())?;
+    execute_file_download_to_path(blob_manager, name, output_path, force, config).await
+}
+
+async fn execute_file_download_to_path(
+    blob_manager: &BlobManager,
+    name: &str,
+    output_path: String,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
     use crate::blob::models::FileDownloadRequest;
     use std::fs;
     use std::path::Path;
-
-    let output_path = resolve_single_download_path(name, output.as_deref())?;
 
     // Check if file exists and handle force flag
     if Path::new(&output_path).exists() && !force {
@@ -1243,10 +1252,10 @@ async fn execute_file_download_multiple(
                 continue;
             }
         };
-        match execute_file_download(
+        match execute_file_download_to_path(
             blob_manager,
             &file_name,
-            Some(per_file_output),
+            per_file_output,
             force,
             config,
         )
