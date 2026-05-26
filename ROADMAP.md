@@ -40,10 +40,16 @@ fixing as code drifts.
 > **Resolved in v0.11.0** (PR `docs/p1-upgrade-signature-verification-resolved`) — `xv upgrade` now verifies minisign signatures on release archives before installation. Public key embedded in binary; CI signs all releases. Full design in `docs/superpowers/specs/2026-05-04-upgrade-signature-verification.md`.
 
 ### P2 — Local file metadata uses world-readable defaults
+
+> **Resolved in v0.11.0** (PR #222) — Local file metadata now written with 0600 permissions via `write_private`; permissions asserted in tests.
+
 `src/backend/local/files.rs:57`. Switch to `write_private`; assert
 permissions in tests.
 
 ### P2 — Single-file blob download lacks traversal guard
+
+> **Resolved in v0.11.0** (PR #223) — Traversal guard added to single-file blob download; multi-download `--output` collision check enforced via shared containment helper.
+
 `src/cli/file_ops.rs:428`. Multi-download `--output` collisions
 (`src/cli/file_ops.rs:1162`). Share the recursive containment helper;
 require `--output` to be a directory for multi-downloads.
@@ -53,11 +59,17 @@ require `--output` to be a directory for multi-downloads.
 introduce a backend-level rename where APIs allow.
 
 ### P2 — ARM resource IDs not URL-encoded
+
+> **Resolved in v0.11.0** (PR #225) — Every segment in ARM resource ID construction is now URL-encoded; wrong-path addressing via malformed names is prevented.
+
 `src/vault/operations.rs:133`. Lower-impact than the Azure URL issue
 (fixed host), but still allows wrong-path addressing. URL-encode every
 segment.
 
 ### P2 — Scanner secret values held as plain `String`
+
+> **Resolved in v0.11.0** (PR #224) — Scanner `SecretRef.value` now wrapped in `Zeroizing<String>` end-to-end; engine is dropped promptly after use.
+
 `src/scan/engine.rs:17`, `src/scan/orchestrator.rs:61`. Defeats the
 project's `Zeroizing` posture. Store fetched values in
 `Zeroizing<String>` end-to-end; drop the engine promptly.

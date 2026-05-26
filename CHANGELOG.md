@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.11.0 — Security hardening + dependency triage
+
+### Security (P2 items from GPT-5.5 review)
+
+- **#222** — Local file metadata now written with 0600 permissions via `write_private`; permissions asserted in tests.
+- **#223** — Traversal guard added to single-file blob download; multi-download `--output` collision check enforced via shared containment helper.
+- **#224** — Scanner `SecretRef.value` wrapped in `Zeroizing<String>` end-to-end; engine dropped promptly after use.
+- **#225** — Every segment in ARM resource ID construction is URL-encoded; wrong-path addressing via malformed names is prevented.
+
+### Dependencies
+
+- `ratatui` bumped `0.28` → `0.30`; transitively updates `lru` `0.12.5` → `0.16.4` (clears Dependabot alert #2).
+- 4 remaining Dependabot alerts triaged: #17, #8, #9 are dev-only (`aws-sdk-secretsmanager` `test-util` feature, not in shipped binary); #11 (`rand 0.7.3`) is pinned by `azure_core 0.21` and not exploitable without a custom logger.
+
+---
+
 ## v0.10.0 — AWS Secrets Manager backend
 
 _Release candidate: v0.10.0-rc.1 (rc soak in progress)_
