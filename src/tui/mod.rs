@@ -22,6 +22,7 @@ use message::Message;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use update::Command;
 
@@ -87,7 +88,12 @@ async fn run_loop(
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut app = App::new(config.clone());
 
-    let _evt = event::spawn_event_reader(tx.clone());
+    // Shared shutdown flag so the blocking event-reader thread can exit cleanly
+    // when the UI quits, instead of staying parked in `crossterm::event::read()`
+    // until the next keystroke (which delayed process exit / prompt return).
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    let _evt = event::spawn_event_reader(tx.clone(), shutdown.clone());
     let _tick = event::spawn_tick_timer(tx.clone());
     let _initial = data::spawn_load_vaults(config, tx.clone(), backend.clone());
 
@@ -101,6 +107,9 @@ async fn run_loop(
             handle_command(&app, &tx, cmd, &backend).await;
         }
     }
+
+    // Signal the blocking reader to stop so it doesn't hold up shutdown.
+    shutdown.store(true, Ordering::Relaxed);
     Ok(())
 }
 
