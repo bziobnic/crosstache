@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-05-23 · **Current version:** `v0.10.0-rc.2` · **Branch protection:** `main` (all changes via PR)
+> **Last reviewed:** 2026-06-07 · **Current version:** `v0.11.0` · **Branch protection:** `main` (all changes via PR)
 
 Single source of truth for **unimplemented** ideas, deferred work, and known
 limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).
@@ -12,14 +12,6 @@ Severity legend (mirrors the UX/code reviews):
 - **P1** — high user-pain, ships next minor
 - **P2** — medium friction
 - **P3** — polish / nice-to-have
-
----
-
-## In flight
-
-### AWS backend → GA (v0.10.0)
-`v0.10.0-rc.2` is currently soaking. Once soak completes, cut `v0.10.0`. No
-new feature work in this lane — only blockers found during rc soak.
 
 ---
 
@@ -141,8 +133,12 @@ dotenv-quoted output; add tests for newlines, `#`, `$`, quotes.
 `src/utils/format.rs:174`. Use the `csv` crate.
 
 ### P3 — Local metadata plaintext disclosure
-`src/backend/local/secrets.rs:146`. Document the limitation in `init`
-and docs; opt-in encrypted metadata index.
+> **Documented in README** (2026-06-07 docs refresh) — local backend docs now
+> call out that `.meta.json` files are plaintext and list the visible fields.
+> Opt-in encrypted metadata/index work remains deferred under Backend ecosystem.
+
+`src/backend/local/secrets.rs:146`. Add an opt-in encrypted metadata index or
+encrypted metadata mode for users who need names/groups/tags hidden at rest.
 
 ### P3 — Missing serialization guards for value-like fields
 `src/error.rs:637`. Extend the existing error-variant guard to cover

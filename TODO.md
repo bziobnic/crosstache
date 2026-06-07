@@ -1,34 +1,27 @@
-# TODO — Fix `xv tui` exit hang
+# TODO — Engineering documentation refresh
 
-## Problem
+## Goal
 
-When the user quits the TUI (`q` / `Esc` / `Ctrl-C`), the shell prompt does not
-return until the user presses another key.
-
-## Root cause
-
-`src/tui/event.rs::spawn_event_reader` runs an indefinitely-blocking
-`crossterm::event::read()` loop inside `tokio::task::spawn_blocking`.
-`spawn_blocking` threads cannot be cancelled. On quit, `run_loop` returns and the
-mpsc receiver is dropped, but the reader thread stays parked inside `read()`,
-which only returns on terminal input. The Tokio runtime blocks process shutdown
-waiting for that thread, so the prompt hangs until a keystroke unblocks `read()`.
+Keep user-facing engineering docs aligned with recent v0.11 code changes without
+inventing behavior. Prefer focused updates to existing pages over new redundant
+documents.
 
 ## Plan
 
-- [x] Branch `fix/tui-exit-hang` created off `main`.
-- [x] Step 1: Convert the reader loop to a `crossterm::event::poll(timeout)` +
-      shutdown-flag pattern so it exits cleanly without input.
-- [x] Step 2: Thread an `Arc<AtomicBool>` shutdown flag from `run_loop` into the
-      reader; set it after the event loop exits (before teardown).
-- [x] Step 3: Build with `--features tui`.
-- [x] Step 4: Add a regression test that the reader thread terminates after the
-      shutdown flag is set, without any input.
-- [x] Step 5: Run full test suite + clippy.
+- [x] Step 1: Inspect recent commits and identify changed subsystems with weak
+      docs.
+- [x] Step 2: Verify doc candidates against source code and command help.
+- [x] Step 3: Update existing docs for backend diagnostics and `.xv.toml`
+      workflows.
+- [x] Step 4: Update existing docs for security hardening in local storage, blob
+      downloads, scanner memory hygiene, and TUI exit behavior.
+- [x] Step 5: Run formatting/verification checks appropriate for docs-only
+      changes.
+- [x] Step 6: Commit, pull/rebase, push the documentation-only branch, and open a
+      PR with a concise summary.
 
 ## Verification
 
-- `cargo build --features tui` succeeds.
-- New test: reader `JoinHandle` completes within a bounded time after the
-  shutdown flag is set and no events are sent.
-- `cargo test --features tui` green; `cargo clippy --features tui` clean.
+- Docs reference only behavior verified from source or generated help.
+- Markdown links and examples remain concise and consistent with existing style.
+- `cargo test --doc` succeeds or any environment-related limitation is recorded.

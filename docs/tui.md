@@ -48,6 +48,13 @@ The TUI lists secrets cheaply (names + metadata). The **value** for the highligh
 
 Values are wrapped in `Zeroizing<String>` end-to-end.
 
+## Exit and terminal restore
+
+`q`, `Esc`, and `Ctrl-C` return to the shell immediately; the background event
+reader polls with a shutdown flag instead of waiting forever for another key.
+On normal exit, the TUI leaves the alternate screen and disables raw mode. A
+panic hook also attempts the same terminal restore before printing the panic.
+
 ## Audit overlay limitation
 
 The audit overlay (`a`) ships as a **placeholder** in v0.7. Real Azure Activity Log integration needs a separate API surface and elevated RBAC; it lands in v0.7.1.

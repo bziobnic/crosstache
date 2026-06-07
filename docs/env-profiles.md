@@ -142,8 +142,21 @@ warning: legacy .xv/context loaded from <path>; consider migrating to .xv.toml â
 ```
 
 Migrating: run `xv context init` in the project root and answer the
-prompts (or pass `--non-interactive --vault X --resource-group Y` for scripts).
-You can then delete `.xv/context`.
+prompts. For scripts, pass the backend-specific non-interactive flags:
+
+```bash
+# Azure env profile: resource group is required.
+xv context init --backend azure --non-interactive \
+  --vault myproj-dev-kv --resource-group myproj-rg
+
+# Local or AWS env profile: resource group is optional and usually omitted.
+xv context init --backend local --non-interactive --vault default
+xv context init --backend aws --non-interactive --vault prod-secrets
+```
+
+When `--backend` is omitted, `context init` uses the globally resolved backend
+for prompts and does not write a `backend = ...` field, so the profile continues
+to inherit future global backend changes. You can then delete `.xv/context`.
 
 The legacy fallback is removed in v0.8.
 
@@ -151,10 +164,11 @@ The legacy fallback is removed in v0.8.
 
 | Command | What it does |
 |---------|--------------|
-| `xv context init` | Creates `.xv.toml` in cwd. Interactive by default; pass `--non-interactive --vault X --resource-group Y` for scripts. `--force` to overwrite. |
+| `xv context init [--backend azure\|aws\|local]` | Creates `.xv.toml` in cwd. Interactive by default; pass `--non-interactive --vault X` for scripts. Azure additionally requires `--resource-group RG`. `--force` overwrites an existing file. |
 | `xv env list` | Lists envs in the resolved `.xv.toml` with the active one starred. `xv context envs` is an alias. |
 | `xv env use <name>` | Writes `default_env = "<name>"` into the nearest `.xv.toml`. |
 | `xv env create <name> --vault V --resource-group RG [--backend B] [--group G] [--folder F] [--default]` | Adds `[env.<name>]` to the nearest `.xv.toml` (creates the file if absent). `--default` also sets `default_env`. |
 | `xv env delete <name> [-f]` | Removes `[env.<name>]` from the resolved `.xv.toml`. Clears `default_env` if it pointed at that env. |
 | `xv env show` | Shows the currently-active env (source path, backend, vault, resource_group, group, folder). |
+| `xv config show --resolved` | Prints the effective backend, env, vault, and resource group plus the layer that supplied each value. Use this when `.xv.toml`, `XV_BACKEND`, legacy context, and global config appear to disagree. |
 | `xv --env <name> <command>` | Override the active env for one command. |

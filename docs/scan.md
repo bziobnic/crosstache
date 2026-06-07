@@ -39,6 +39,15 @@ JSON (`--format json`): array of `{file, line, col, secret_name, vault, kind, se
 
 **Findings never echo the matched value.** That invariant is enforced by a hand-maintained banned-key test against the `Finding` struct's serialized form.
 
+## Memory hygiene
+
+Fetched secret values are stored as `Zeroizing<String>` in scanner input refs, so
+they are wiped when those refs are dropped. During a scan, the match engine also
+copies plaintext needles into its Aho-Corasick automaton; those copies live only
+for the lifetime of the `MatchEngine`, which is built per scan and dropped
+after results are rendered. Scanner output and serialized findings still contain
+only location metadata plus the secret name, never the matched value.
+
 ## `.xv.toml` `[scan]` block
 
 ```toml

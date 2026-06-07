@@ -1,6 +1,7 @@
 # Feature Reference
 
-> Complete command reference for `xv`. Current backend: Azure Key Vault.
+> Complete command reference for `xv`. Supported secret backends: Azure Key
+> Vault, AWS Secrets Manager, and local age-encrypted files.
 
 ---
 
@@ -142,6 +143,7 @@ See [migration.md](migration.md) for the full guide.
 |---------|-------------|
 | `xv init` | Interactive setup |
 | `xv config show` | Show current config |
+| `xv config show --resolved` | Show effective backend/env/vault/resource group and the source layer for each |
 | `xv config set <key> <value>` | Set a config value |
 | `xv config path` | Show config file location |
 
@@ -165,4 +167,4 @@ Table (default), JSON (`--format json`), YAML (`--format yaml`), CSV (`--format 
 - **Binary:** `xv`
 - **Platforms:** Windows x64, macOS (Intel + Apple Silicon), Linux x64
 - **Feature flags:** `file-ops` (default on)
-- **Security:** `zeroize` for secrets in memory, restricted file permissions, clipboard auto-clear
+- **Security:** `zeroize` for secrets in memory, restricted/no-follow sensitive writes on Unix, blob download containment checks, clipboard auto-clear

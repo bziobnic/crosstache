@@ -1,6 +1,7 @@
 # crosstache
 
-A cross-platform secrets manager for the command line, currently backed by Azure Key Vault. The binary is `xv`.
+A cross-platform secrets manager for the command line, backed by Azure Key Vault,
+AWS Secrets Manager, or local age-encrypted files. The binary is `xv`.
 
 ```bash
 xv set DB_PASSWORD                     # store a secret (prompts for value)
@@ -103,6 +104,20 @@ Secrets are encrypted with [age](https://age-encryption.org/) and stored as indi
                 ├── DB_PASSWORD.age          # Encrypted value
                 └── DB_PASSWORD.meta.json    # Metadata (name, groups, tags)
 ```
+
+### Security and metadata visibility
+
+- The age identity, encrypted payloads, and metadata files are written with
+  owner-only permissions (`0600` on Unix); crosstache-created vault, secret, and
+  file-store directories are private where the local backend creates them.
+- Sensitive local writes refuse to follow symlinks on Unix, which prevents a
+  malicious symlink from redirecting secret material into another file.
+- Secret writes are transactional: `xv set` / `xv update` stage the encrypted
+  payload and metadata before activating the new version and archiving the old
+  one.
+- Metadata JSON is **not encrypted**. Secret values stay encrypted in `.age`
+  files, but names, original names, groups, tags, folders, notes, timestamps, and
+  enabled/expiry flags are visible to anyone who can read the local store.
 
 ### Migrating between backends
 
@@ -728,6 +743,14 @@ xv file sync ./mydir --dry-run                   # show planned transfers
 xv file sync ./mydir --prefix backup/ --delete   # mirror; remove extra remote blobs
 ```
 
+### Download safety constraints
+
+`xv download`, `xv file download`, recursive downloads, and sync-down paths all
+validate blob names before writing to disk. Absolute blob names and `..`
+components are rejected so a remote name cannot escape the requested output
+directory. For multi-file downloads, `--output` is treated as a directory and
+each destination is checked for containment before any file is written.
+
 ---
 
 ## Pre-commit leak scanner — `xv scan`
@@ -1002,6 +1025,7 @@ See [`docs/exit-codes.md`](docs/exit-codes.md) for the full table.
 ```bash
 xv init                                  # interactive — vault + storage account
 xv config show                           # full effective config
+xv config show --resolved                # backend/env/vault/RG plus source layer
 xv config show --format json
 xv config set default_vault my-vault
 xv config set clipboard_timeout 60
@@ -1009,6 +1033,11 @@ xv config set azure_credential_priority cli
 xv config path                           # path to the config file
 xv config unset clipboard_timeout
 ```
+
+Use `xv config show --resolved` when a command picks an unexpected backend,
+environment, vault, or resource group. It prints the effective value and the
+winning layer (`--backend`, `.xv.toml`, `XV_BACKEND`, legacy context, global
+config, or built-in default).
 
 ### Key environment variables
 
@@ -1100,7 +1129,8 @@ The error often suggests a near-match (`did you mean: X-other?`).
 ```bash
 xv vault list                            # confirm the name
 xv whoami                                # confirm you're authenticated
-xv config show | grep subscription_id    # confirm correct subscription
+xv config show --resolved                # confirm backend/vault/RG source
+xv config show | grep subscription_id    # confirm Azure subscription
 ```
 
 ### `error[xv-permission-denied]`
@@ -1155,14 +1185,14 @@ XV_NO_PARENT_CONFIG=1 xv list            # only the cwd's .xv.toml is considered
 
 ## Security model
 
-- **Memory hygiene.** Secret values are wrapped in `Zeroizing<String>` and zeroed on drop. The TUI's value cache, the scanner's match-engine, and the run-time injection layer all use this.
+- **Memory hygiene.** Secret values are wrapped in `Zeroizing<String>` and zeroed on drop in the CLI, TUI value cache, scanner input refs, migration paths, and run-time injection layer. The scanner's Aho-Corasick automaton still holds plaintext copies of match needles for the duration of a scan and is dropped promptly afterward.
 - **Clipboard auto-clear.** Default 30 s; configurable via `clipboard_timeout` (`0` to disable).
-- **File permissions.** Config and export files are written `0600` (owner-only).
-- **Path traversal.** Recursive downloads validate paths to prevent `../../../etc/passwd` shenanigans.
+- **File permissions.** Config, export, local backend payloads, and local metadata files are written `0600` (owner-only). Sensitive writes refuse symlink-following on Unix.
+- **Path traversal.** Blob downloads validate destination paths to prevent `../../../etc/passwd` shenanigans across single-file, multi-file, recursive, and sync-down flows.
 - **Generator scripts.** `xv rotate --generator <script>` validates the script is owned by you and `0700`.
 - **`xv run` masking.** Secret values are masked in stdout/stderr by default; use `--no-masking` only when you understand the consequences.
 - **`xv scan` value-never-leaked invariant.** The `Finding` struct never contains the matched value — only file/line/col + the secret's *name*. Enforced by a hand-maintained banned-key test on the on-disk schema.
-- **Secret-name handling.** Names are sanitized for Azure (alphanumeric + hyphens; original preserved in tags); names > 127 chars are SHA256-hashed.
+- **Secret-name handling.** Names are sanitized for Azure (alphanumeric + hyphens; original preserved in tags); names > 127 chars are SHA256-hashed. ARM resource ID path segments are URL-encoded before Azure management calls.
 
 ---
 
