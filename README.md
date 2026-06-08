@@ -1031,7 +1031,7 @@ See [`docs/exit-codes.md`](docs/exit-codes.md) for the full table.
 1. CLI flags (`--credential-type cli`, `--vault foo`)
 2. Environment variables (`XV_ENV`, `AZURE_SUBSCRIPTION_ID`)
 3. Project config (`.xv.toml`, walk-up from cwd)
-4. Legacy `.xv/context` (deprecated; prints one-time warning per process; removed in v0.8)
+4. Legacy `.xv/context` (deprecated fallback; prints a one-time warning per process when loaded)
 5. User config file (`$XDG_CONFIG_HOME/xv/xv.conf` or `~/.config/xv/xv.conf`)
 6. Defaults
 

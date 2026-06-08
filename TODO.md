@@ -14,8 +14,8 @@ subsystems, without adding redundant pages or documenting unverified behavior.
   - backend-prefixed `xv://` and `xv migrate` addressing,
   - AWS credential-remediation messaging.
 - [x] Update existing docs in place.
-- [ ] Run docs/source verification checks and targeted tests.
-- [ ] Commit and push the documentation-only change.
+- [x] Run docs/source verification checks and targeted tests.
+- [x] Commit and push the documentation-only change.
 
 ## Verification plan
 
