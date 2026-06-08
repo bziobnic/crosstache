@@ -1,6 +1,6 @@
 # Feature Reference
 
-> Complete command reference for `xv`. Current backend: Azure Key Vault.
+> Complete command reference for `xv`. Supported secret backends: Azure Key Vault, local age-encrypted files, and AWS Secrets Manager (`--features aws` for source builds).
 
 ---
 
@@ -40,7 +40,7 @@ Names are automatically sanitized for backend compatibility (Azure: alphanumeric
 | Command | Description |
 |---------|-------------|
 | `xv run -- <command>` | Run a process with secrets as env vars (`--group`, `--no-masking`) |
-| `xv inject` | Render templates with `{{ secret:name }}` and `xv://vault/secret` refs |
+| `xv inject` | Render templates with `{{ secret:name }}` and `xv://[backend:]vault/secret` refs |
 
 ---
 
@@ -106,6 +106,12 @@ Requires blob storage setup via `xv init`. Gated behind the `file-ops` feature f
 | `xv file info` | File metadata |
 | `xv file sync` | Sync local directory with blob prefix (`--direction` up/down/both, `--dry-run`, `--delete`) |
 
+Safety notes:
+
+- Single and multi-file downloads reject absolute blob names and `..` path components before writing.
+- Multi-file downloads require `--output` to be a directory so multiple blobs cannot clobber one file.
+- The local file backend stores encrypted content plus plaintext metadata under the local store using owner-only permissions on Unix.
+
 ---
 
 ## Utilities
@@ -123,7 +129,7 @@ Requires blob storage setup via `xv init`. Gated behind the `file-ops` feature f
 
 ## Cross-cloud migration (v0.10)
 
-`xv migrate --from <source> --to <target>` copies secrets between backends. Supports Azure ↔ AWS ↔ Local in any combination. Hardening features:
+`xv migrate --from <source> --to <target>` copies secrets between backends. Supports Azure ↔ AWS ↔ Local in any combination. `<source>` and `<target>` may be either a backend (`azure`, `aws`, `local`) or `backend:vault` when each side uses a different vault/store name. Hardening features:
 
 - `--on-conflict skip|replace|fail` — controls behavior when target secret exists
 - `--dry-run` — preview without changes
@@ -142,15 +148,17 @@ See [migration.md](migration.md) for the full guide.
 |---------|-------------|
 | `xv init` | Interactive setup |
 | `xv config show` | Show current config |
+| `xv config show --resolved` | Show effective backend/env/vault/resource group and the source layer for each |
 | `xv config set <key> <value>` | Set a config value |
 | `xv config path` | Show config file location |
 
 ### Hierarchy
 
 1. CLI flags
-2. Environment variables
-3. Config file (`~/.config/xv/xv.conf`)
-4. Defaults
+2. Environment variables (`XV_BACKEND`, `XV_ENV`, backend-specific env)
+3. Project config (`.xv.toml`, with walk-up and `.xv.boundary`)
+4. Config file (`~/.config/xv/xv.conf`)
+5. Defaults
 
 ---
 

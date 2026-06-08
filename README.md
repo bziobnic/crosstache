@@ -93,7 +93,7 @@ Secrets are encrypted with [age](https://age-encryption.org/) and stored as indi
 
 ```
 ~/.xv/
-├── key.txt              # Your age private key (0600 permissions)
+├── key.txt              # Your age private key (0600 permissions on Unix)
 ├── recipients.txt       # Public key for encryption
 └── store/
     └── vaults/
@@ -104,11 +104,21 @@ Secrets are encrypted with [age](https://age-encryption.org/) and stored as indi
                 └── DB_PASSWORD.meta.json    # Metadata (name, groups, tags)
 ```
 
+Safety constraints:
+
+- Store directories are created owner-only (`0700` on Unix); private keys, encrypted values, and metadata are written owner read/write (`0600` on Unix).
+- Sensitive writes refuse to follow symlinks on Unix, so a malicious link cannot redirect key or metadata output.
+- Local vault names must be a single safe filesystem component such as `default` or `work-secrets`; separators, `.`/`..`, absolute paths, control characters, and leading `-` are rejected.
+- Secret writes stage new encrypted value and metadata in temporary files, then atomically rename them into place; an old-value snapshot is archived as version history after replacement.
+
 ### Migrating between backends
 
 ```bash
 # Copy all secrets from Azure to local
 xv migrate --from azure --to local
+
+# Copy between different vault names on each side
+xv migrate --from azure:myproj-kv --to local:default
 
 # Copy from local to Azure
 xv migrate --from local --to azure --vault my-keyvault
@@ -162,11 +172,24 @@ region = "us-west-2"
 
 `xv share` and `xv audit` are not supported on AWS in v0.10. Use AWS IAM and CloudTrail directly for those needs.
 
+Authentication uses the AWS SDK default credential chain: environment variables,
+shared AWS config/credentials files, SSO/profile credentials, and instance/task
+roles. If the AWS CLI is logged in but the Rust SDK cannot see credentials
+(common with newer `aws login` caches), bridge them into the shell before
+running `xv`:
+
+```bash
+eval "$(aws configure export-credentials --format env)"
+```
+
 ### Cross-cloud migration
 
 ```bash
 # Move secrets from Azure to AWS
 xv migrate --from azure --to aws --vault myproj-kv
+
+# Use different source/target vault names
+xv migrate --from azure:dev-kv --to aws:prod-sm
 
 # Preview first
 xv migrate --from azure --to aws --vault myproj-kv --dry-run
@@ -516,12 +539,14 @@ Render config files with `{{ secret:NAME }}` references resolved:
 # template.yml:
 #   db_password: "{{ secret:DB_PASSWORD }}"
 #   api_key:     "{{ secret:STRIPE_KEY }}"
-#   cross_vault: "{{ xv://other-vault/SHARED_TOKEN }}"
+#   cross_vault: "xv://other-vault/SHARED_TOKEN"
+#   aws_token:   "xv://aws:prod-sm/API_TOKEN"
+#   local_dev:   "xv://local:default/DEV_TOKEN"
 
 xv inject --template template.yml --out app.config
 cat template.yml | xv inject > resolved.yml          # also reads stdin
 
-# Cross-vault references (xv://vault-name/secret-name) work without context switching.
+# Cross-vault and cross-backend references use xv://[backend:]vault/secret.
 ```
 
 ---
@@ -538,6 +563,7 @@ default_env = "dev"
 [env.dev]
 vault = "myproj-dev-kv"
 resource_group = "myproj-rg"
+backend = "azure"          # optional: azure | local | aws
 group = "backend"          # optional
 folder = "app/database"    # optional
 
@@ -553,6 +579,9 @@ xv context init                              # interactive prompts (seeded from 
 xv context init --non-interactive \
                 --vault myproj-dev-kv \
                 --resource-group myproj-rg   # CI-friendly
+xv context init --non-interactive \
+                --backend local \
+                --vault default              # local/aws profiles do not need resource_group
 xv context init --force                      # overwrite an existing .xv.toml
 ```
 
@@ -569,6 +598,10 @@ xv --env prod list                       # one-off override
 XV_ENV=staging xv list                   # session override
 ```
 
+Backend selection is separate from env selection. `--backend` and `XV_BACKEND`
+override the active env profile's `backend`; otherwise the profile backend wins
+over global `xv.conf`, and the built-in default is `azure`.
+
 ### Manage envs
 
 ```bash
@@ -582,9 +615,14 @@ xv env show                              # show active env fields
 xv env create stage \
     --vault myproj-stage-kv \
     --resource-group myproj-rg-stage     # add [env.stage] to .xv.toml
+xv env create local-dev \
+    --backend local \
+    --vault default \
+    --resource-group local               # env create currently requires this flag
 xv env delete stage -f                   # remove [env.stage]
 
 xv context show                          # full context, including resolved env defaults
+xv config show --resolved                # explain which backend/env/vault/RG source won
 ```
 
 ### Walk-up boundaries
@@ -1002,6 +1040,7 @@ See [`docs/exit-codes.md`](docs/exit-codes.md) for the full table.
 ```bash
 xv init                                  # interactive — vault + storage account
 xv config show                           # full effective config
+xv config show --resolved                # backend/env/vault/RG plus source layer
 xv config show --format json
 xv config set default_vault my-vault
 xv config set clipboard_timeout 60
@@ -1021,6 +1060,7 @@ xv config unset clipboard_timeout
 | `DEFAULT_VAULT` | Default vault name |
 | `DEFAULT_RESOURCE_GROUP` | Default resource group |
 | `DEFAULT_LOCATION` | Default Azure location (e.g., `eastus`) |
+| `XV_BACKEND` | Active backend override (`azure`, `local`, or `aws`) |
 | `XV_ENV` | Active env from `.xv.toml` (highest priority for env selection) |
 | `XV_NO_PARENT_CONFIG` | `1` disables `.xv.toml` walk-up |
 | `CACHE_TTL` | Cache TTL in seconds |
@@ -1039,6 +1079,7 @@ These work with any command:
 | `--columns <COLS>` | Select specific columns for table output (comma-separated) |
 | `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
 | `--template <TEMPLATE>` | Custom template string for template format |
+| `--backend <BACKEND>` | Active backend override (`azure`, `local`, or `aws`) |
 | `--env <NAME>` | Active env from `.xv.toml` (overridden by `XV_ENV`) |
 | `--debug` | Enable debug logging |
 | `--show-options` | Show global options in `--help` output |
@@ -1047,7 +1088,7 @@ These work with any command:
 
 ## Authentication
 
-crosstache uses Azure's `DefaultAzureCredential` chain. You can control the order:
+For Azure, crosstache uses Azure's `DefaultAzureCredential` chain. You can control the order:
 
 ```bash
 # Per-command
@@ -1077,6 +1118,15 @@ export AZURE_CLIENT_SECRET=...
 export AZURE_TENANT_ID=...
 export AZURE_CREDENTIAL_PRIORITY=environment
 xv list
+```
+
+For AWS, crosstache uses the AWS SDK default credential chain. Prefer standard
+AWS environment variables, `AWS_PROFILE`, SSO/profile credentials, or workload
+identity. If the AWS CLI is authenticated but `xv` reports
+`error[xv-auth-failed]`, run:
+
+```bash
+eval "$(aws configure export-credentials --format env)"
 ```
 
 ---
@@ -1132,9 +1182,14 @@ xv context show                          # see which .xv.toml is being used
 ### `error[xv-auth-failed]`
 
 ```bash
+# Azure
 az login                                 # re-authenticate with Azure CLI
 xv config show | grep credential         # check current priority
 xv list --credential-type cli            # try Azure CLI explicitly
+
+# AWS
+aws sts get-caller-identity              # confirm the AWS CLI can authenticate
+eval "$(aws configure export-credentials --format env)"
 ```
 
 ### Debug logging
@@ -1157,8 +1212,9 @@ XV_NO_PARENT_CONFIG=1 xv list            # only the cwd's .xv.toml is considered
 
 - **Memory hygiene.** Secret values are wrapped in `Zeroizing<String>` and zeroed on drop. The TUI's value cache, the scanner's match-engine, and the run-time injection layer all use this.
 - **Clipboard auto-clear.** Default 30 s; configurable via `clipboard_timeout` (`0` to disable).
-- **File permissions.** Config and export files are written `0600` (owner-only).
-- **Path traversal.** Recursive downloads validate paths to prevent `../../../etc/passwd` shenanigans.
+- **File permissions.** Sensitive config, exports, local-backend keys, encrypted values, and metadata are written owner-only (`0600` on Unix); local store directories are owner-only (`0700` on Unix).
+- **Symlink refusal.** Sensitive Unix writes use `O_NOFOLLOW` where available.
+- **Path traversal.** File downloads and sync validate untrusted blob names before writing, rejecting absolute paths and `..` components such as `../../../etc/passwd`.
 - **Generator scripts.** `xv rotate --generator <script>` validates the script is owned by you and `0700`.
 - **`xv run` masking.** Secret values are masked in stdout/stderr by default; use `--no-masking` only when you understand the consequences.
 - **`xv scan` value-never-leaked invariant.** The `Finding` struct never contains the matched value — only file/line/col + the secret's *name*. Enforced by a hand-maintained banned-key test on the on-disk schema.

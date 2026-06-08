@@ -11,6 +11,10 @@ xv migrate --from azure --to aws --vault myproj-kv
 # AWS -> Azure
 xv migrate --from aws --to azure --vault myproj-kv
 
+# Different source/target vault names
+xv migrate --from azure:dev-kv --to aws:prod-sm
+xv migrate --from aws:prod-sm --to local:default
+
 # Filter
 xv migrate --from azure --to aws --vault myproj-kv --filter "db-*"
 
@@ -73,6 +77,21 @@ Minimal AWS IAM policy for the target:
 No prerequisites beyond a configured local backend (`xv init --backend local`).
 
 ## How it works
+
+### Addressing
+
+`--from` and `--to` accept either a backend name (`azure`, `aws`, `local`) or a
+per-side endpoint in `backend:vault` form. The endpoint form is useful when the
+source and target vault/store names differ:
+
+```bash
+xv migrate --from azure:dev-kv --to aws:prod-sm
+```
+
+When the endpoint omits a vault, `xv` uses the command's `--vault` value or the
+backend's configured default vault for that side. Backend aliases accepted by the
+parser are `az`/`keyvault`, `age`/`file`, and `asm`/`secretsmanager`, but docs
+use canonical names for clarity.
 
 Pre-flight: `xv migrate` enumerates source and target secrets, computes a diff, and prints a summary. In dry-run mode, the run stops here.
 
