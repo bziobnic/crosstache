@@ -87,6 +87,9 @@ Either accept vault per call, or rebuild per operation from resolved vault.
 implemented or finish the REST paths.
 
 ### P2 — Local soft-delete trash collisions
+
+> **Resolved in Unreleased** — Trash entries are now suffixed with the deletion timestamp (`<encoded_name>@<unix-millis>`), so delete/recreate/delete cycles preserve every deleted snapshot. Same-name+same-timestamp collisions are rejected with a `Conflict` error instead of overwriting. Recover restores the most recent entry; legacy un-suffixed entries remain listable and recoverable; purge removes all snapshots for a name. Unit tests cover the cycle, collision rejection, and legacy-format recovery.
+
 `src/backend/local/secrets.rs:514`. `xv delete <X>`, recreate, delete
 again clobbers prior deleted material. Suffix trash entries with
 deletion timestamp; reject on collision.

@@ -94,13 +94,57 @@ fn versions_dir(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, B
     Ok(secrets_dir(store_path, vault)?.join(".versions").join(enc))
 }
 
-fn trash_dir(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
-    let enc = encode_name(name);
-    Ok(paths::trash_base_dir(store_path, vault)?.join(enc))
-}
-
 fn trash_base_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
     paths::trash_base_dir(store_path, vault)
+}
+
+/// Directory for a single trash entry, suffixed with the deletion timestamp so
+/// repeated delete/recreate/delete cycles never collide. `@` cannot appear in a
+/// percent-encoded name (it encodes as `%40`), so the suffix is unambiguous.
+fn trash_entry_dir(
+    store_path: &Path,
+    vault: &str,
+    name: &str,
+    deleted_at_millis: u128,
+) -> Result<PathBuf, BackendError> {
+    let enc = encode_name(name);
+    Ok(trash_base_dir(store_path, vault)?.join(format!("{enc}@{deleted_at_millis}")))
+}
+
+/// All trash entries for a secret, as `(deleted_at_millis, dir)` pairs.
+///
+/// Handles both naming formats: legacy un-suffixed dirs (`<enc>`, written by
+/// older versions, treated as timestamp 0) and suffixed dirs (`<enc>@<millis>`).
+fn trash_entries_for(
+    store_path: &Path,
+    vault: &str,
+    name: &str,
+) -> Result<Vec<(u128, PathBuf)>, BackendError> {
+    let tbase = trash_base_dir(store_path, vault)?;
+    let mut entries = Vec::new();
+    if !tbase.exists() {
+        return Ok(entries);
+    }
+
+    let enc = encode_name(name);
+    let prefix = format!("{enc}@");
+    let dir_entries =
+        fs::read_dir(&tbase).map_err(|e| BackendError::Internal(format!("read trash dir: {e}")))?;
+    for entry in dir_entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if fname == enc {
+            entries.push((0, entry.path()));
+        } else if let Some(ts) = fname
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.parse::<u128>().ok())
+        {
+            entries.push((ts, entry.path()));
+        }
+    }
+    Ok(entries)
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +349,75 @@ impl LocalSecretBackend {
             identity,
             recipients,
         }
+    }
+
+    /// Soft-delete `name` into a trash entry stamped with `deleted_at_millis`.
+    ///
+    /// Rejects with [`BackendError::Conflict`] if an entry with the same name
+    /// and timestamp already exists, rather than overwriting trashed material.
+    fn delete_secret_at(
+        &self,
+        vault: &str,
+        name: &str,
+        deleted_at_millis: u128,
+    ) -> Result<(), BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        if !vault_dir.join(".vault.json").exists() {
+            return Err(BackendError::VaultNotFound {
+                name: vault.to_string(),
+                suggestion: None,
+            });
+        }
+        let _lock = lock_vault(&vault_dir)?;
+
+        let mp = meta_path(&self.store_path, vault, name)?;
+        let ap = age_path(&self.store_path, vault, name)?;
+
+        if !mp.exists() && !ap.exists() {
+            return Err(BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            });
+        }
+
+        // Soft delete: move files to .trash/{encoded_name}@{deleted_at_millis}/
+        let tdir = trash_entry_dir(&self.store_path, vault, name, deleted_at_millis)?;
+        if tdir.exists() {
+            return Err(BackendError::Conflict(format!(
+                "trash entry for '{name}' at timestamp {deleted_at_millis} already exists; \
+                 refusing to overwrite previously deleted secret"
+            )));
+        }
+        fs::create_dir_all(&tdir)
+            .map_err(|e| BackendError::Internal(format!("mkdir trash: {e}")))?;
+
+        let enc = encode_name(name);
+        if ap.exists() {
+            let dest = tdir.join(format!("{enc}.age"));
+            fs::rename(&ap, &dest)
+                .map_err(|e| BackendError::Internal(format!("move age to trash: {e}")))?;
+        }
+        if mp.exists() {
+            let dest = tdir.join(format!("{enc}.meta.json"));
+            fs::rename(&mp, &dest)
+                .map_err(|e| BackendError::Internal(format!("move meta to trash: {e}")))?;
+        }
+
+        // Write deletion metadata
+        let deleted_meta = serde_json::json!({
+            "deleted_at": Utc::now().to_rfc3339(),
+            "original_name": name,
+        });
+        let deleted_path = tdir.join(".deleted.json");
+        write_private(
+            &deleted_path,
+            serde_json::to_string_pretty(&deleted_meta)
+                .map_err(|e| BackendError::Internal(format!("serialize deleted meta: {e}")))?
+                .as_bytes(),
+        )
+        .map_err(|e| BackendError::Internal(format!("write deleted meta: {e}")))?;
+
+        Ok(())
     }
 }
 
@@ -555,57 +668,11 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn delete_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        if !vault_dir.join(".vault.json").exists() {
-            return Err(BackendError::VaultNotFound {
-                name: vault.to_string(),
-                suggestion: None,
-            });
-        }
-        let _lock = lock_vault(&vault_dir)?;
-
-        let mp = meta_path(&self.store_path, vault, name)?;
-        let ap = age_path(&self.store_path, vault, name)?;
-
-        if !mp.exists() && !ap.exists() {
-            return Err(BackendError::NotFound {
-                name: name.to_string(),
-                suggestion: None,
-            });
-        }
-
-        // Soft delete: move files to .trash/{encoded_name}/
-        let tdir = trash_dir(&self.store_path, vault, name)?;
-        fs::create_dir_all(&tdir)
-            .map_err(|e| BackendError::Internal(format!("mkdir trash: {e}")))?;
-
-        let enc = encode_name(name);
-        if ap.exists() {
-            let dest = tdir.join(format!("{enc}.age"));
-            fs::rename(&ap, &dest)
-                .map_err(|e| BackendError::Internal(format!("move age to trash: {e}")))?;
-        }
-        if mp.exists() {
-            let dest = tdir.join(format!("{enc}.meta.json"));
-            fs::rename(&mp, &dest)
-                .map_err(|e| BackendError::Internal(format!("move meta to trash: {e}")))?;
-        }
-
-        // Write deletion metadata
-        let deleted_meta = serde_json::json!({
-            "deleted_at": Utc::now().to_rfc3339(),
-            "original_name": name,
-        });
-        let deleted_path = tdir.join(".deleted.json");
-        write_private(
-            &deleted_path,
-            serde_json::to_string_pretty(&deleted_meta)
-                .map_err(|e| BackendError::Internal(format!("serialize deleted meta: {e}")))?
-                .as_bytes(),
-        )
-        .map_err(|e| BackendError::Internal(format!("write deleted meta: {e}")))?;
-
-        Ok(())
+        let deleted_at_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?
+            .as_millis();
+        self.delete_secret_at(vault, name, deleted_at_millis)
     }
 
     async fn update_secret(
@@ -813,13 +880,17 @@ impl SecretBackend for LocalSecretBackend {
         }
         let _lock = lock_vault(&vault_dir)?;
 
-        let tdir = trash_dir(&self.store_path, vault, name)?;
-        if !tdir.exists() {
+        // Restore the most recent trash entry for this name (legacy un-suffixed
+        // entries sort as oldest). Ties on timestamp break by path so the
+        // choice is deterministic regardless of read_dir order.
+        let mut entries = trash_entries_for(&self.store_path, vault, name)?;
+        entries.sort();
+        let Some((_, tdir)) = entries.pop() else {
             return Err(BackendError::NotFound {
                 name: format!("{name} (deleted)"),
                 suggestion: Some("Secret is not in the trash".into()),
             });
-        }
+        };
 
         let enc = encode_name(name);
         let trash_age = tdir.join(format!("{enc}.age"));
@@ -840,6 +911,14 @@ impl SecretBackend for LocalSecretBackend {
         let ap = age_path(&self.store_path, vault, name)?;
         let mp = meta_path(&self.store_path, vault, name)?;
 
+        // If an active secret with this name exists (delete → recreate →
+        // restore), archive it to .versions/ instead of silently destroying
+        // it, mirroring the rollback path.
+        let had_active = ap.exists() || mp.exists();
+        if had_active {
+            archive_current(&self.store_path, vault, name)?;
+        }
+
         if trash_age.exists() {
             fs::rename(&trash_age, &ap)
                 .map_err(|e| BackendError::Internal(format!("restore age from trash: {e}")))?;
@@ -851,7 +930,15 @@ impl SecretBackend for LocalSecretBackend {
         fs::remove_dir_all(&tdir)
             .map_err(|e| BackendError::Internal(format!("remove trash dir: {e}")))?;
 
-        let meta = read_meta(&mp)?;
+        let mut meta = read_meta(&mp)?;
+        if had_active {
+            // Relabel so the restored secret doesn't reuse a version label
+            // already taken by the archived active secret.
+            let next_ver = next_version(&self.store_path, vault, name)?;
+            meta.version = format!("v{next_ver}");
+            meta.updated_at = Utc::now();
+            write_meta(&mp, &meta)?;
+        }
         Ok(meta_to_properties(&meta, None))
     }
 
@@ -865,9 +952,8 @@ impl SecretBackend for LocalSecretBackend {
         }
         let _lock = lock_vault(&vault_dir)?;
 
-        // Permanently remove from .trash/
-        let tdir = trash_dir(&self.store_path, vault, name)?;
-        if tdir.exists() {
+        // Permanently remove every trash entry for this name (both naming formats).
+        for (_, tdir) in trash_entries_for(&self.store_path, vault, name)? {
             fs::remove_dir_all(&tdir)
                 .map_err(|e| BackendError::Internal(format!("purge trash: {e}")))?;
         }
@@ -1325,6 +1411,215 @@ mod tests {
             .unwrap();
         assert_eq!(&*got.value.unwrap(), "val");
         assert_eq!(got.name, "my/secret:key");
+    }
+
+    #[tokio::test]
+    async fn delete_recreate_delete_preserves_both_trash_snapshots() {
+        let (backend, _tmp) = test_backend();
+
+        backend
+            .set_secret("default", make_request("cycle", "first-value"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "cycle").await.unwrap();
+
+        backend
+            .set_secret("default", make_request("cycle", "second-value"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "cycle").await.unwrap();
+
+        // Both deleted versions must exist in the trash.
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert_eq!(deleted.len(), 2);
+        assert!(deleted.iter().all(|s| s.name == "cycle"));
+
+        // Recover restores the most recent snapshot.
+        backend.restore_secret("default", "cycle").await.unwrap();
+        let got = backend.get_secret("default", "cycle", true).await.unwrap();
+        assert_eq!(&*got.value.unwrap(), "second-value");
+
+        // The older snapshot is still in the trash.
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert_eq!(deleted.len(), 1);
+
+        // Delete again and recover twice: most recent first, then the oldest.
+        backend.delete_secret("default", "cycle").await.unwrap();
+        backend.restore_secret("default", "cycle").await.unwrap();
+        let got = backend.get_secret("default", "cycle", true).await.unwrap();
+        assert_eq!(&*got.value.unwrap(), "second-value");
+
+        backend.restore_secret("default", "cycle").await.unwrap();
+        let got = backend.get_secret("default", "cycle", true).await.unwrap();
+        assert_eq!(&*got.value.unwrap(), "first-value");
+
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert!(deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trash_collision_same_name_and_timestamp_rejected() {
+        let (backend, _tmp) = test_backend();
+
+        backend
+            .set_secret("default", make_request("collide", "first"))
+            .await
+            .unwrap();
+        backend
+            .delete_secret_at("default", "collide", 1_234_567)
+            .unwrap();
+
+        backend
+            .set_secret("default", make_request("collide", "second"))
+            .await
+            .unwrap();
+        let result = backend.delete_secret_at("default", "collide", 1_234_567);
+        assert!(matches!(result, Err(BackendError::Conflict(_))));
+
+        // The rejected delete must not have touched the active secret...
+        let got = backend
+            .get_secret("default", "collide", true)
+            .await
+            .unwrap();
+        assert_eq!(&*got.value.unwrap(), "second");
+
+        // ...nor the previously trashed snapshot, which is still recoverable.
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert_eq!(deleted.len(), 1);
+
+        backend.delete_secret("default", "collide").await.unwrap();
+        backend.restore_secret("default", "collide").await.unwrap();
+        let got = backend
+            .get_secret("default", "collide", true)
+            .await
+            .unwrap();
+        assert_eq!(&*got.value.unwrap(), "second");
+
+        backend.restore_secret("default", "collide").await.unwrap();
+        let got = backend
+            .get_secret("default", "collide", true)
+            .await
+            .unwrap();
+        assert_eq!(&*got.value.unwrap(), "first");
+    }
+
+    #[tokio::test]
+    async fn legacy_unsuffixed_trash_entry_still_recoverable() {
+        let (backend, tmp) = test_backend();
+
+        // Trash a secret, then rename its entry to the legacy un-suffixed
+        // format written by older versions.
+        backend
+            .set_secret("default", make_request("legacy", "legacy-value"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "legacy").await.unwrap();
+
+        let tbase = trash_base_dir(tmp.path(), "default").unwrap();
+        let suffixed = fs::read_dir(&tbase)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with("legacy@"))
+            .unwrap()
+            .path();
+        fs::rename(&suffixed, tbase.join("legacy")).unwrap();
+
+        // Legacy entry shows up in the deleted list.
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].name, "legacy");
+
+        // A newer suffixed entry takes precedence on recover.
+        backend
+            .set_secret("default", make_request("legacy", "newer-value"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "legacy").await.unwrap();
+
+        backend.restore_secret("default", "legacy").await.unwrap();
+        let got = backend.get_secret("default", "legacy", true).await.unwrap();
+        assert_eq!(&*got.value.unwrap(), "newer-value");
+
+        // The legacy entry is restored last.
+        backend.delete_secret("default", "legacy").await.unwrap();
+        backend.purge_secret("default", "legacy").await.unwrap();
+        // Recreate the legacy-only situation: purge removed everything, so
+        // rebuild a legacy entry and confirm restore handles it directly.
+        backend
+            .set_secret("default", make_request("legacy", "legacy-value"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "legacy").await.unwrap();
+        let suffixed = fs::read_dir(&tbase)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with("legacy@"))
+            .unwrap()
+            .path();
+        fs::rename(&suffixed, tbase.join("legacy")).unwrap();
+
+        backend.restore_secret("default", "legacy").await.unwrap();
+        let got = backend.get_secret("default", "legacy", true).await.unwrap();
+        assert_eq!(&*got.value.unwrap(), "legacy-value");
+    }
+
+    #[tokio::test]
+    async fn restore_over_active_secret_archives_instead_of_clobbering() {
+        let (backend, _tmp) = test_backend();
+
+        backend
+            .set_secret("default", make_request("overwrite", "old-value"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "overwrite").await.unwrap();
+
+        // Recreate while the old snapshot sits in the trash.
+        backend
+            .set_secret("default", make_request("overwrite", "live-value"))
+            .await
+            .unwrap();
+
+        // Restore brings back the trashed snapshot...
+        let restored = backend
+            .restore_secret("default", "overwrite")
+            .await
+            .unwrap();
+        let got = backend
+            .get_secret("default", "overwrite", true)
+            .await
+            .unwrap();
+        assert_eq!(&*got.value.unwrap(), "old-value");
+
+        // ...and the live secret is archived as a version, not destroyed.
+        let archived = backend
+            .get_secret_version("default", "overwrite", "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(&*archived.value.unwrap(), "live-value");
+        assert_ne!(restored.version, "v1");
+    }
+
+    #[tokio::test]
+    async fn purge_removes_all_trash_snapshots() {
+        let (backend, _tmp) = test_backend();
+
+        backend
+            .set_secret("default", make_request("purge-all", "v1"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "purge-all").await.unwrap();
+        backend
+            .set_secret("default", make_request("purge-all", "v2"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "purge-all").await.unwrap();
+
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert_eq!(deleted.len(), 2);
+
+        backend.purge_secret("default", "purge-all").await.unwrap();
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert!(deleted.is_empty());
     }
 
     #[test]
