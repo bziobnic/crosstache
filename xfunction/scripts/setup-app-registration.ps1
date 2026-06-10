@@ -32,13 +32,13 @@ az ad app permission admin-consent --id $app.appId
 
 # Update function app settings
 Write-Host "Updating Function App settings..."
-az functionapp config appsettings set --name $FunctionAppName --resource-group $ResourceGroup --settings "AZURE_CLIENT_ID=$($app.appId)" "AZURE_CLIENT_SECRET=$($secret.password)" "AZURE_TENANT_ID=$($secret.tenant)"
+az functionapp config appsettings set --name $FunctionAppName --resource-group $ResourceGroup --settings "AZURE_CLIENT_ID=$($app.appId)" "AZURE_CLIENT_SECRET=$($secret.password)" "AZURE_TENANT_ID=$($secret.tenant)" "EXPECTED_AUDIENCE=$($app.appId)"
 
 Write-Host "`n----------------------------------------"
 Write-Host "App Registration Setup Complete!"
 Write-Host "----------------------------------------"
 Write-Host "Application (client) ID: $($app.appId)"
 Write-Host "Directory (tenant) ID: $($secret.tenant)"
-Write-Host "Client Secret: $($secret.password)"
+Write-Host "Client Secret: stored in Function App setting AZURE_CLIENT_SECRET (not displayed; expires $($secret.endDateTime))"
 Write-Host "`nThese values have been automatically added to your Function App settings."
-Write-Host "Please save these values securely for your records."
+Write-Host "If you need the secret value elsewhere, rotate it with 'az ad app credential reset' rather than reusing this one."

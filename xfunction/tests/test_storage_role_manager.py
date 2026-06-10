@@ -128,7 +128,32 @@ class TestStorageRoleManager(unittest.TestCase):
         self.assertEqual(len(storage_accounts), 2)
         self.assertIn(mock_account1.id, storage_accounts)
         self.assertIn(mock_account2.id, storage_accounts)
-    
+
+    @patch('StorageRoleManager.storage_role_manager.StorageManagementClient')
+    def test_discover_skips_unassociated_accounts(self, mock_storage_client):
+        """Accounts with no explicit association must NOT be selected.
+
+        Regression test: discovery used to fall back to *all* storage accounts
+        in the resource group when nothing matched, which granted the caller
+        roles on unrelated accounts in shared resource groups.
+        """
+        mock_unrelated = Mock()
+        mock_unrelated.id = "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.Storage/storageAccounts/somethingelse"
+        mock_unrelated.name = "somethingelse"
+        mock_unrelated.tags = {}
+
+        mock_client_instance = Mock()
+        mock_client_instance.storage_accounts.list_by_resource_group.return_value = [mock_unrelated]
+        mock_storage_client.return_value = mock_client_instance
+
+        vault_resource_id = "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.KeyVault/vaults/testvault"
+
+        storage_accounts = asyncio.run(
+            self.storage_manager.discover_associated_storage_accounts(vault_resource_id)
+        )
+
+        self.assertEqual(storage_accounts, [])
+
     @patch('StorageRoleManager.storage_role_manager.StorageManagementClient')
     def test_discover_storage_accounts_invalid_vault_id(self, mock_storage_client):
         """Test storage account discovery with invalid vault resource ID."""

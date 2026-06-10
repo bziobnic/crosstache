@@ -278,6 +278,7 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Setup mocks
         mock_validate_jwt.return_value = self.valid_token_payload
         mock_manager = AsyncMock()
+        mock_manager.get_vault_info = AsyncMock(return_value=self.mock_vault_info)
         mock_manager.assign_role_to_user = AsyncMock(side_effect=[False, True])
         mock_vault_role_manager_class.return_value = mock_manager
         mock_storage_manager = AsyncMock()
@@ -383,21 +384,26 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
     @patch('function_app.StorageRoleManager')
     @patch('function_app.VaultRoleManager')
     def test_vault_missing_creator_tag(self, mock_vault_role_manager_class, mock_storage_role_manager_class, mock_validate_jwt):
-        """Test when vault doesn't have a CreatedByID tag."""
+        """A vault without a CreatedByID tag must be refused (fail closed).
+
+        If the tag is missing the creator cannot be verified, so role
+        assignment must NOT proceed — otherwise any tenant-authenticated
+        caller could self-assign Owner on an untagged vault.
+        """
         # Setup mocks
         mock_vault_role_manager_class.return_value = self.mock_manager
         mock_storage_manager = AsyncMock()
         mock_storage_manager.discover_associated_storage_accounts = AsyncMock(return_value=[])
         mock_storage_role_manager_class.return_value = mock_storage_manager
         mock_validate_jwt.return_value = self.valid_token_payload
-        
+
         # Create vault info without CreatedByID tag
         no_creator_vault_info = self.mock_vault_info.copy()
         no_creator_vault_info['tags'] = {
             "CreatedAt": "2023-03-31T12:00:00Z"
         }
         self.mock_manager.get_vault_info = AsyncMock(return_value=no_creator_vault_info)
-        
+
         # Create request
         req = func.HttpRequest(
             method='POST',
@@ -405,18 +411,18 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
             url='/api/assign-roles',
             headers={'Authorization': f'Bearer {self.valid_token}'}
         )
-        
+
         # Call function
         resp = self._run_async_test(direct_vault_rbac_processor(req))
-        
-        # Assert response - should still succeed but with a warning logged
-        self.assertEqual(resp.status_code, 200)
+
+        # Assert response - must be refused
+        self.assertEqual(resp.status_code, 403)
         resp_body = json.loads(resp.get_body())
-        self.assertTrue(resp_body['success'])
-        self.assertFalse(resp_body['isCreator'])
-        
-        # Assert role assignment was attempted
-        self.assertEqual(self.mock_manager.assign_role_to_user.call_count, 2)
+        self.assertIn('error', resp_body)
+        self.assertIn('CreatedByID', resp_body['error'])
+
+        # Assert role assignment was never attempted
+        self.mock_manager.assign_role_to_user.assert_not_called()
 
     @patch('function_app._validate_jwt')
     @patch('function_app.StorageRoleManager')

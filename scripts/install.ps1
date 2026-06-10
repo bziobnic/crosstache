@@ -175,33 +175,29 @@ function Test-Checksum {
         [string]$ChecksumPath
     )
     
+    # Verification is mandatory: installing an unverified archive is never
+    # acceptable, so every failure path below aborts the installation.
     if (-not (Test-Path $ChecksumPath)) {
-        Write-Warning "Checksum file not found, skipping verification"
-        return
+        Write-Error "Checksum file not found. Refusing to install without verification."
     }
-    
+
     try {
         Write-Info "Verifying checksum..."
-        
-        # Wait a moment to ensure file is fully written
-        Start-Sleep -Milliseconds 500
-        
+
         # Check if checksum file has content
         if ((Get-Item $ChecksumPath).Length -eq 0) {
-            Write-Warning "Checksum file is empty, skipping verification"
-            return
+            Write-Error "Checksum file is empty. Refusing to install without verification."
         }
-        
+
         $expectedHash = (Get-Content $ChecksumPath -Raw).Trim() -replace '\r?\n.*', '' -replace '\s.*', ''
-        
+
         if ([string]::IsNullOrWhiteSpace($expectedHash)) {
-            Write-Warning "Could not read valid checksum from file, skipping verification"
-            return
+            Write-Error "Could not read valid checksum from file. Refusing to install without verification."
         }
-        
+
         $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToLower()
         $expectedHash = $expectedHash.ToLower()
-        
+
         if ($expectedHash -ne $actualHash) {
             Write-Error "Checksum verification failed. Expected: $expectedHash, Got: $actualHash"
         }
@@ -210,7 +206,7 @@ function Test-Checksum {
         }
     }
     catch {
-        Write-Warning "Checksum verification failed: $($_.Exception.Message)"
+        Write-Error "Checksum verification failed: $($_.Exception.Message)"
     }
 }
 
@@ -345,11 +341,11 @@ function Install-crosstache {
         
         try {
             Download-File -Url $checksumUrl -OutFile $checksumPath -Description "checksum"
-            Test-Checksum -FilePath $archivePath -ChecksumPath $checksumPath
         }
         catch {
-            Write-Warning "Could not download or verify checksum: $_"
+            Write-Error "Could not download checksum file: $_. Refusing to install without verification."
         }
+        Test-Checksum -FilePath $archivePath -ChecksumPath $checksumPath
         
         # Create installation directory
         if (-not (Test-Path $InstallDir)) {

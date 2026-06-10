@@ -70,11 +70,10 @@ func azure functionapp publish <function-app-name>
 ## Storage Integration Details
 
 ### Storage Account Discovery Strategy
-The function automatically discovers storage accounts associated with a Key Vault using three strategies:
+The function discovers storage accounts associated with a Key Vault by scanning the vault's resource group for **explicit** associations only (accounts with no association are never granted roles):
 
-1. **Resource Group Strategy (Primary)**: Finds all storage accounts in the same resource group as the vault
-2. **Tag-Based Association (Secondary)**: Looks for storage accounts with `AssociatedVault` tag matching the vault name
-3. **Naming Convention (Fallback)**: Identifies storage accounts with names containing the vault name using patterns:
+1. **Tag-Based Association (Primary)**: Looks for storage accounts with `AssociatedVault` tag matching the vault name
+2. **Naming Convention (Secondary)**: Identifies storage accounts with names containing the vault name using patterns:
    - `{vault-name}storage`
    - `{vault-name}stor`
    - `stor{vault-name}`

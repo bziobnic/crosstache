@@ -100,9 +100,22 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
             ))
         })?;
 
-    // Look for minisig signature file
+    // Require the minisig signature file. All releases since v0.11.0 are signed
+    // in CI; a latest release without a signature is either tampered with or
+    // misconfigured, and must never be installed (the .sha256 file comes from
+    // the same channel as the archive, so it is not an authenticity control).
     let sig_name = format!("{asset_name}.minisig");
-    let sig_asset = release.assets.iter().find(|a| a.name == sig_name);
+    let sig_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == sig_name)
+        .ok_or_else(|| {
+            CrosstacheError::upgrade(format!(
+                "Release v{latest} has no signature file ({sig_name}). \
+                 Refusing to install an unsigned release. \
+                 If this is unexpected, report it at https://github.com/{GITHUB_REPO}/issues"
+            ))
+        })?;
 
     // Validate size
     if archive_asset.size > MAX_ASSET_SIZE {
@@ -120,15 +133,9 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
         download_asset(&checksum_asset.browser_download_url, checksum_asset.size).await?;
 
     // Signature verification (before checksum)
-    if let Some(sig_asset) = sig_asset {
-        let sig_bytes = download_asset(&sig_asset.browser_download_url, sig_asset.size).await?;
-        verify_signature(&archive_bytes, &sig_bytes)?;
-        output::success("Signature verified");
-    } else {
-        output::warn(
-            "Release is not signed. Signature verification will be required in a future version.",
-        );
-    }
+    let sig_bytes = download_asset(&sig_asset.browser_download_url, sig_asset.size).await?;
+    verify_signature(&archive_bytes, &sig_bytes)?;
+    output::success("Signature verified");
 
     // Verify checksum
     let checksum_text = String::from_utf8_lossy(&checksum_bytes);

@@ -89,10 +89,17 @@ class StorageRoleManager:
                         storage_accounts.append(account.id)
                         continue
 
-                # If no specific associations found, include all storage accounts in the resource group
+                # Never broaden to unassociated accounts: granting roles on every
+                # storage account in a shared resource group would hand the caller
+                # access far beyond the vault relationship that was verified.
                 if not storage_accounts and accounts_in_rg:
-                    logging.info(f"No explicit associations found, including all storage accounts in resource group")
-                    storage_accounts = [account.id for account in accounts_in_rg]
+                    logging.warning(
+                        "No storage accounts explicitly associated with vault %s "
+                        "(via AssociatedVault tag or naming convention); skipping "
+                        "storage role assignment for the %d unassociated account(s) "
+                        "in resource group %s",
+                        vault_name, len(accounts_in_rg), resource_group,
+                    )
 
             except Exception as ex:
                 logging.error(f"Error listing storage accounts in resource group: {str(ex)}")

@@ -15,9 +15,37 @@ use std::io::stdout;
 use std::io::IsTerminal;
 use std::sync::LazyLock;
 use tabled::{
-    settings::{object::Rows, Alignment, Color, Modify, Padding, Style, Width},
+    settings::{
+        object::{Rows, Segment},
+        Alignment, Color, Format, Modify, Padding, Style, Width,
+    },
     Table, Tabled,
 };
+
+/// Visibly escape control characters in untrusted display text so
+/// remote-supplied values (blob names, metadata, tags) cannot inject terminal
+/// escape sequences into TTY output. Covers C0 controls, DEL, and C1 controls
+/// (e.g. U+009B CSI). Newlines and tabs are kept: they only affect layout,
+/// not terminal state. Machine-readable formats (JSON/YAML/CSV) are left
+/// untouched so scripts see the raw values.
+fn sanitize_control_chars(input: &str) -> String {
+    fn is_dangerous(c: char) -> bool {
+        c.is_control() && c != '\n' && c != '\t'
+    }
+    if !input.chars().any(is_dangerous) {
+        return input.to_string();
+    }
+    input
+        .chars()
+        .map(|c| {
+            if is_dangerous(c) {
+                format!("\\x{:02X}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
 
 /// Regex for template placeholders: {{field_name}} with optional whitespace.
 /// Field names may contain word characters and spaces.
@@ -141,6 +169,9 @@ impl TableFormatter {
     fn format_as_table<T: Tabled>(&self, data: &[T]) -> Result<String> {
         let mut table = Table::new(data);
 
+        // Neutralize terminal escape sequences in untrusted cell content
+        table.with(Modify::new(Segment::all()).with(Format::content(sanitize_control_chars)));
+
         // Apply styling
         table
             .with(Style::rounded())
@@ -191,6 +222,8 @@ impl TableFormatter {
     /// Format data as plain text
     fn format_as_plain<T: Tabled>(&self, data: &[T]) -> Result<String> {
         let mut table = Table::new(data);
+        // Neutralize terminal escape sequences in untrusted cell content
+        table.with(Modify::new(Segment::all()).with(Format::content(sanitize_control_chars)));
         table.with(Style::ascii()).with(Padding::new(1, 1, 0, 0));
         Ok(table.to_string())
     }
@@ -380,6 +413,44 @@ mod tests {
     use super::*;
     use serde::Serialize;
     use tabled::Tabled;
+
+    #[test]
+    fn sanitize_escapes_ansi_and_c1_controls() {
+        // ANSI color/OSC injection via ESC
+        assert_eq!(
+            sanitize_control_chars("evil\x1b[31mred\x1b]0;title\x07"),
+            "evil\\x1B[31mred\\x1B]0;title\\x07"
+        );
+        // C1 CSI (U+009B) is a single-char escape sequence on many terminals
+        assert_eq!(sanitize_control_chars("a\u{9b}31mb"), "a\\x9B31mb");
+        // Newlines and tabs are layout, not terminal state — preserved
+        assert_eq!(sanitize_control_chars("a\nb\tc"), "a\nb\tc");
+        // Clean strings pass through unchanged
+        assert_eq!(
+            sanitize_control_chars("plain-name_1.txt"),
+            "plain-name_1.txt"
+        );
+    }
+
+    #[test]
+    fn table_output_neutralizes_escape_sequences() {
+        let data = vec![TestData {
+            name: "blob\x1b]8;;http://evil\x07link".to_string(),
+            value: "v".to_string(),
+            status: "ok".to_string(),
+        }];
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None);
+        let out = formatter.format_table(&data).unwrap();
+        assert!(
+            !out.contains('\x1b'),
+            "table output must not contain raw ESC"
+        );
+        assert!(
+            !out.contains('\x07'),
+            "table output must not contain raw BEL"
+        );
+        assert!(out.contains("\\x1B"), "escaped form should be visible");
+    }
 
     #[derive(Debug, Clone, Serialize, Tabled)]
     struct TestData {
