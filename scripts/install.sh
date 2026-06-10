@@ -199,48 +199,38 @@ download_and_install() {
     info "Downloading $archive_name..."
     if command -v curl >/dev/null 2>&1; then
         curl -sSL "$download_url" -o "$archive_name" || error "Failed to download archive"
-        curl -sSL "$checksum_url" -o "$archive_name.sha256" 2>/dev/null || warning "Could not download checksum"
+        curl -sSL "$checksum_url" -o "$archive_name.sha256" 2>/dev/null || error "Failed to download checksum file. Refusing to install without verification."
     elif command -v wget >/dev/null 2>&1; then
         wget -q "$download_url" -O "$archive_name" || error "Failed to download archive"
-        wget -q "$checksum_url" -O "$archive_name.sha256" 2>/dev/null || warning "Could not download checksum"
+        wget -q "$checksum_url" -O "$archive_name.sha256" 2>/dev/null || error "Failed to download checksum file. Refusing to install without verification."
     fi
-    
-    # Verify checksum if available
-    if [ -f "$archive_name.sha256" ]; then
-        info "Verifying checksum..."
-        
-        # Wait a moment to ensure file is fully written
-        sleep 1
-        
-        # Check if checksum file has content
-        if [ ! -s "$archive_name.sha256" ]; then
-            warning "Checksum file is empty, skipping verification"
-        else
-            # Read the checksum from file
-            expected_checksum=$(cat "$archive_name.sha256" | tr -d '\r\n' | awk '{print $1}')
-            
-            if [ -z "$expected_checksum" ]; then
-                warning "Could not read checksum from file, skipping verification"
-            else
-                # Calculate actual checksum
-                if command -v shasum >/dev/null 2>&1; then
-                    actual_checksum=$(shasum -a 256 "$archive_name" | awk '{print $1}')
-                elif command -v sha256sum >/dev/null 2>&1; then
-                    actual_checksum=$(sha256sum "$archive_name" | awk '{print $1}')
-                else
-                    warning "No checksum utility found, skipping verification"
-                    actual_checksum=""
-                fi
-                
-                if [ -n "$actual_checksum" ]; then
-                    if [ "$expected_checksum" = "$actual_checksum" ]; then
-                        info "Checksum verification passed"
-                    else
-                        error "Checksum verification failed. Expected: $expected_checksum, Got: $actual_checksum"
-                    fi
-                fi
-            fi
-        fi
+
+    # Verify checksum. Verification is mandatory: installing an unverified
+    # archive is never acceptable, so every failure path below is fatal.
+    info "Verifying checksum..."
+
+    if [ ! -s "$archive_name.sha256" ]; then
+        error "Checksum file is missing or empty. Refusing to install without verification."
+    fi
+
+    expected_checksum=$(cat "$archive_name.sha256" | tr -d '\r\n' | awk '{print $1}')
+
+    if [ -z "$expected_checksum" ]; then
+        error "Could not read checksum from file. Refusing to install without verification."
+    fi
+
+    if command -v shasum >/dev/null 2>&1; then
+        actual_checksum=$(shasum -a 256 "$archive_name" | awk '{print $1}')
+    elif command -v sha256sum >/dev/null 2>&1; then
+        actual_checksum=$(sha256sum "$archive_name" | awk '{print $1}')
+    else
+        error "No checksum utility (shasum or sha256sum) found. Refusing to install without verification."
+    fi
+
+    if [ "$expected_checksum" = "$actual_checksum" ]; then
+        info "Checksum verification passed"
+    else
+        error "Checksum verification failed. Expected: $expected_checksum, Got: $actual_checksum"
     fi
     
     # Extract archive

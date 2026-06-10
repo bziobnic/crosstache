@@ -111,6 +111,20 @@ def _validate_jwt(token: str) -> Dict[str, Any]:
     expected_issuer = _get_expected_issuer(tenant_id)
     expected_audience = os.environ.get("EXPECTED_AUDIENCE")
 
+    # Fail closed on missing validation configuration: a token minted for any
+    # audience (or any tenant, if the issuer is also unknown) must never be
+    # accepted by this privileged role-granting endpoint.
+    if not expected_audience:
+        raise jwt.InvalidTokenError(
+            "Server misconfiguration: EXPECTED_AUDIENCE is not set; "
+            "refusing to validate tokens without audience verification"
+        )
+    if not expected_issuer:
+        raise jwt.InvalidTokenError(
+            "Server misconfiguration: AZURE_TENANT_ID / AZURE_AD_ISSUER is not set; "
+            "refusing to validate tokens without issuer verification"
+        )
+
     # Read unverified header to get kid and algorithm
     unverified_header = jwt.get_unverified_header(token)
     kid = unverified_header.get("kid")
@@ -140,19 +154,16 @@ def _validate_jwt(token: str) -> Dict[str, Any]:
     decode_options: Dict[str, Any] = {
         "verify_signature": True,
         "verify_exp": True,
-        "verify_aud": bool(expected_audience),
-        "verify_iss": bool(expected_issuer),
+        "verify_aud": True,
+        "verify_iss": True,
     }
 
     decode_kwargs: Dict[str, Any] = {
         "algorithms": [algorithm],
         "options": decode_options,
+        "issuer": expected_issuer,
+        "audience": expected_audience,
     }
-
-    if expected_issuer:
-        decode_kwargs["issuer"] = expected_issuer
-    if expected_audience:
-        decode_kwargs["audience"] = expected_audience
 
     decoded = jwt.decode(token, public_key, **decode_kwargs)
     return decoded
@@ -335,8 +346,18 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
             logging.info(f"Current user ID from token: {user_id}")
             
             if not creator_id:
-                logging.warning("Vault does not have CreatedByID tag, cannot verify creator")
-                # Continue with role assignment but log the warning
+                logging.error(
+                    "Vault does not have a CreatedByID tag; refusing role assignment "
+                    "because the creator cannot be verified"
+                )
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": "Unauthorized: vault has no CreatedByID tag, creator cannot be verified",
+                        "userId": user_id
+                    }),
+                    status_code=403,
+                    mimetype="application/json"
+                )
             elif creator_id.lower() != user_id.lower():
                 logging.error(f"User {user_id} is not the creator of the vault (creator is {creator_id})")
                 return func.HttpResponse(

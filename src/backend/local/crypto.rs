@@ -137,16 +137,56 @@ pub fn decrypt_from_file(
 /// The file may contain comments (lines starting with `#`) and blank lines;
 /// the first line matching the `AGE-SECRET-KEY-*` pattern is used.
 pub fn load_identity(key_path: &Path) -> Result<age::x25519::Identity, BackendError> {
-    let file_size = fs::metadata(key_path)
-        .map_err(|e| BackendError::Internal(format!("stat key {}: {e}", key_path.display())))?
-        .len();
+    // Open exactly once and inspect metadata through the handle: this rejects
+    // symlinked key paths (O_NOFOLLOW) and closes the stat-then-read TOCTOU
+    // window. The key protects every secret in the local store, so a
+    // group/world-accessible key file is an error, not a warning.
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(key_path)
+            .map_err(|e| {
+                BackendError::Internal(format!(
+                    "open key {}: {e} (symlinked key files are not allowed)",
+                    key_path.display()
+                ))
+            })?
+    };
+    #[cfg(not(unix))]
+    let mut file = File::open(key_path)
+        .map_err(|e| BackendError::Internal(format!("open key {}: {e}", key_path.display())))?;
+
+    let metadata = file
+        .metadata()
+        .map_err(|e| BackendError::Internal(format!("stat key {}: {e}", key_path.display())))?;
+
+    let file_size = metadata.len();
     if file_size > 1024 {
         return Err(BackendError::Internal(format!(
             "key file {} is too large ({file_size} bytes, max 1024)",
             key_path.display()
         )));
     }
-    let contents = fs::read_to_string(key_path)
+
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(BackendError::Internal(format!(
+                "key file {} is group/world-accessible (mode {:03o}); \
+                 run 'chmod 600 {}' to fix",
+                key_path.display(),
+                mode & 0o777,
+                key_path.display()
+            )));
+        }
+    }
+
+    let mut contents = Zeroizing::new(String::new());
+    file.read_to_string(&mut contents)
         .map_err(|e| BackendError::Internal(format!("read key {}: {e}", key_path.display())))?;
 
     for line in contents.lines() {
@@ -321,6 +361,53 @@ mod tests {
     fn load_identity_missing_file() {
         let result = load_identity(Path::new("/nonexistent/key.txt"));
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_identity_rejects_symlinked_key() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        generate_keypair(&key_path, &recipients_path).unwrap();
+
+        let link = tmp.path().join("key-link.txt");
+        symlink(&key_path, &link).unwrap();
+
+        let result = load_identity(&link);
+        assert!(result.is_err(), "symlinked key file must be rejected");
+        if let Err(BackendError::Internal(msg)) = result {
+            assert!(
+                msg.contains("symlink"),
+                "error should mention symlinks: {msg}"
+            );
+        } else {
+            panic!("Expected BackendError::Internal");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_identity_rejects_group_world_readable_key() {
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        generate_keypair(&key_path, &recipients_path).unwrap();
+
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let result = load_identity(&key_path);
+        assert!(result.is_err(), "world-readable key file must be rejected");
+        if let Err(BackendError::Internal(msg)) = result {
+            assert!(
+                msg.contains("chmod 600"),
+                "error should tell user how to fix: {msg}"
+            );
+        } else {
+            panic!("Expected BackendError::Internal");
+        }
     }
 
     #[cfg(unix)]

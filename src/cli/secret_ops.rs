@@ -2119,21 +2119,27 @@ async fn execute_secret_run(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
-    // Parse current environment for xv:// URI references (supports optional backend prefix)
+    // Parse current environment for xv:// URI references (supports optional backend prefix).
+    // Only done when the parent environment is inherited: in clean-env mode
+    // (`inherit_env == false`) parent variables never reach the child, and
+    // resolving/re-adding them would silently reintroduce parent-controlled
+    // variables after `env_clear()` — an isolation bypass.
     let mut uri_refs: Vec<(String, BackendRef)> = Vec::new(); // (original_uri, parsed_ref)
     let uri_regex = Regex::new(r"xv://([^/\s]+)/([^/\s]+)").unwrap();
 
-    for (_env_name, env_value) in std::env::vars() {
-        for captures in uri_regex.captures_iter(&env_value) {
-            let vault_part = captures.get(1).map_or("", |m| m.as_str());
-            let secret_part = captures.get(2).map_or("", |m| m.as_str());
-            let uri_key = format!("xv://{vault_part}/{secret_part}");
-            if uri_refs.iter().any(|(uri, _)| uri == &uri_key) {
-                continue;
-            }
-            match BackendRef::parse(&format!("{vault_part}/{secret_part}")) {
-                Ok(r) => uri_refs.push((uri_key, r)),
-                Err(e) => output::warn(&format!("Skipping invalid URI '{uri_key}': {e}")),
+    if inherit_env {
+        for (_env_name, env_value) in std::env::vars() {
+            for captures in uri_regex.captures_iter(&env_value) {
+                let vault_part = captures.get(1).map_or("", |m| m.as_str());
+                let secret_part = captures.get(2).map_or("", |m| m.as_str());
+                let uri_key = format!("xv://{vault_part}/{secret_part}");
+                if uri_refs.iter().any(|(uri, _)| uri == &uri_key) {
+                    continue;
+                }
+                match BackendRef::parse(&format!("{vault_part}/{secret_part}")) {
+                    Ok(r) => uri_refs.push((uri_key, r)),
+                    Err(e) => output::warn(&format!("Skipping invalid URI '{uri_key}': {e}")),
+                }
             }
         }
     }
@@ -2278,8 +2284,10 @@ async fn execute_secret_run(
     }
     cmd.envs(&env_vars);
 
-    // Resolve URI references in existing environment variables
-    if !uri_values.is_empty() {
+    // Resolve URI references in existing environment variables.
+    // `uri_values` is only populated when `inherit_env` is true (see the scan
+    // above), so this never re-adds parent variables after `env_clear()`.
+    if inherit_env && !uri_values.is_empty() {
         for (env_name, env_value) in std::env::vars() {
             let mut resolved_value = env_value.clone();
 

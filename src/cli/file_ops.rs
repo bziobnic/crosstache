@@ -1378,44 +1378,39 @@ async fn execute_file_download_recursive(
     for file_info in &all_files_to_download {
         let blob_name = &file_info.name;
 
-        // Determine local file path
-        let local_path = if flatten {
-            // Flatten: use only filename
+        // Determine local file path.
+        // Security: blob names come from the remote listing and are untrusted.
+        // `safe_join` rejects both `..` components and absolute paths (a plain
+        // `Path::join` would silently discard the base directory for an
+        // absolute blob name like "/etc/cron.d/x"). The check inspects the
+        // name before any filesystem call, so there is no TOCTOU window.
+        let joined = if flatten {
+            // Flatten: use only the final filename component
             let filename = Path::new(blob_name)
                 .file_name()
                 .unwrap_or_default()
-                .to_string_lossy();
-            output_path.join(filename.as_ref())
+                .to_string_lossy()
+                .into_owned();
+            crate::utils::helpers::safe_join(output_path, &filename)
         } else {
             // Preserve structure: use full blob path
-            output_path.join(blob_name)
+            crate::utils::helpers::safe_join(output_path, blob_name)
         };
-
-        // Security: prevent path traversal via malicious blob names (e.g. "../../etc/passwd").
-        // We inspect each component of the blob name BEFORE joining it with the
-        // destination directory so no filesystem call is required and there is no
-        // TOCTOU window.  Any ParentDir (`..`) component is an unambiguous sign of
-        // a traversal attempt and is rejected immediately.
-        {
-            let has_traversal = Path::new(blob_name)
-                .components()
-                .any(|c| c == std::path::Component::ParentDir);
-            if has_traversal {
-                output::warn(&format!(
-                    "Skipping '{}': path traversal detected in blob name",
-                    blob_name
-                ));
+        let local_path = match joined {
+            Ok(path) => path,
+            Err(e) => {
+                output::warn(&format!("Skipping '{blob_name}': {e}"));
                 failure_count += 1;
                 if continue_on_error {
                     mp.advance_overall(blob_name);
                     continue;
                 } else {
                     return Err(CrosstacheError::config(format!(
-                        "Path traversal detected in blob name: {blob_name}"
+                        "Unsafe blob name '{blob_name}': {e}"
                     )));
                 }
             }
-        }
+        };
 
         let local_path_str = local_path.to_string_lossy().to_string();
 
