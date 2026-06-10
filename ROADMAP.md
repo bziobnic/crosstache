@@ -137,6 +137,8 @@ batch with bounded concurrency + retry.
 longest secret length.
 
 ### P3 — Env export emits unescaped `KEY=value`
+> **Resolved in Unreleased** — env export now emits POSIX single-quoted values (`KEY='val'`, embedded single quotes escaped as `'\''`); keys that are not valid shell identifiers are skipped with a warning on stderr. Round-trip through `sh` source verified byte-for-byte in tests.
+
 `src/cli/vault_ops.rs:644`. POSIX single-quote escaping or
 dotenv-quoted output; add tests for newlines, `#`, `$`, quotes.
 
