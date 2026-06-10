@@ -273,9 +273,13 @@ pub enum Commands {
         /// Supports @/path/to/file to load value from file (e.g., KEY=@/path/to/file)
         #[arg(required = true, num_args = 1..)]
         args: Vec<String>,
-        /// Read value from stdin instead of prompting (only for single secret)
+        /// Read value from stdin instead of prompting (only for single secret).
+        /// Input bytes are preserved exactly: no trimming or newline stripping
         #[arg(long)]
         stdin: bool,
+        /// Trim leading/trailing whitespace from the value read via --stdin
+        #[arg(long, requires = "stdin")]
+        trim: bool,
         /// Note to attach to the secret(s)
         #[arg(long)]
         note: Option<String>,
@@ -470,9 +474,13 @@ pub enum Commands {
         name: String,
         /// New value (if not provided, will prompt)
         value: Option<String>,
-        /// Read value from stdin
+        /// Read value from stdin.
+        /// Input bytes are preserved exactly: no trimming or newline stripping
         #[arg(long)]
         stdin: bool,
+        /// Trim leading/trailing whitespace from the value read via --stdin
+        #[arg(long, requires = "stdin")]
+        trim: bool,
         /// Tags for the secret in key=value format
         #[arg(short, long, value_parser = parse_key_val::<String, String>)]
         tags: Vec<(String, String)>,
@@ -1229,13 +1237,14 @@ impl Cli {
             Commands::Set {
                 args,
                 stdin,
+                trim,
                 note,
                 folder,
                 expires,
                 not_before,
             } => {
                 crate::cli::secret_ops::execute_secret_set_direct(
-                    args, stdin, note, folder, expires, not_before, config, registry,
+                    args, stdin, trim, note, folder, expires, not_before, config, registry,
                 )
                 .await
             }
@@ -1358,6 +1367,7 @@ impl Cli {
                 name,
                 value,
                 stdin,
+                trim,
                 tags,
                 group,
                 rename,
@@ -1374,6 +1384,7 @@ impl Cli {
                     &name,
                     value,
                     stdin,
+                    trim,
                     tags,
                     group,
                     rename,

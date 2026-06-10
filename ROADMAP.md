@@ -95,6 +95,8 @@ again clobbers prior deleted material. Suffix trash entries with
 deletion timestamp; reject on collision.
 
 ### P3 — `--stdin` trims whitespace
+> **Resolved in Unreleased**
+
 `src/cli/secret_ops.rs:51,724`. Corrupts secrets where trailing newlines
 matter. Preserve bytes exactly by default; add explicit `--trim`.
 

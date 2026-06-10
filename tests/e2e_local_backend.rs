@@ -150,6 +150,29 @@ default_vault = "default"
         let out = self.xv_ok(&["get", name, "--raw"]);
         out.trim().to_string()
     }
+
+    /// Run `xv` with the given args, piping `input` to stdin. Returns the
+    /// raw Output (no success assertion) so callers can check exact bytes
+    /// or expected failures.
+    fn xv_with_stdin(&self, args: &[&str], input: &str) -> std::process::Output {
+        let mut cmd = self.xv();
+        cmd.args(args);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().expect("spawn xv");
+        if let Some(ref mut stdin) = child.stdin {
+            stdin.write_all(input.as_bytes()).ok();
+        }
+        child.wait_with_output().expect("wait for xv")
+    }
+
+    /// Get a secret's raw value with bytes preserved exactly (no trimming).
+    /// `xv get --raw` prints the value with no trailing newline appended.
+    fn get_raw_exact(&self, name: &str) -> String {
+        self.xv_ok(&["get", name, "--raw"])
+    }
 }
 
 // ===========================================================================
@@ -715,6 +738,122 @@ fn update_value_via_update() {
 
     let value = env.get_raw("UPD_VAL");
     assert_eq!(value, "new-val");
+}
+
+// ===========================================================================
+// --stdin byte-exactness (P3 fix: no implicit trimming)
+// ===========================================================================
+
+#[test]
+fn stdin_set_preserves_trailing_newline_byte_exact() {
+    let env = TestEnv::new();
+    let pem_like = "-----BEGIN KEY-----\nabc123\n-----END KEY-----\n";
+
+    env.set_secret("PEM_KEY", pem_like);
+    assert_eq!(env.get_raw_exact("PEM_KEY"), pem_like);
+}
+
+#[test]
+fn stdin_set_preserves_leading_and_trailing_spaces() {
+    let env = TestEnv::new();
+    let padded = "  spaced value  ";
+
+    env.set_secret("PADDED", padded);
+    assert_eq!(env.get_raw_exact("PADDED"), padded);
+}
+
+#[test]
+fn stdin_set_with_trim_strips_whitespace() {
+    let env = TestEnv::new();
+
+    env.set_secret_with_args("TRIMMED", "  value with spaces  \n", &["--trim"]);
+    assert_eq!(env.get_raw_exact("TRIMMED"), "value with spaces");
+}
+
+#[test]
+fn stdin_set_empty_input_is_rejected() {
+    let env = TestEnv::new();
+
+    let output = env.xv_with_stdin(&["set", "EMPTY", "--stdin"], "");
+    assert!(
+        !output.status.success(),
+        "empty stdin should be rejected for set"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be empty"),
+        "expected empty-value error, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn stdin_set_whitespace_only_with_trim_is_rejected() {
+    let env = TestEnv::new();
+
+    let output = env.xv_with_stdin(&["set", "WS_ONLY", "--stdin", "--trim"], " \n ");
+    assert!(
+        !output.status.success(),
+        "whitespace-only stdin with --trim should be rejected"
+    );
+}
+
+#[test]
+fn trim_flag_requires_stdin() {
+    let env = TestEnv::new();
+
+    let (_, stderr) = env.xv_fail(&["set", "NO_STDIN", "--trim"]);
+    assert!(
+        stderr.contains("--stdin"),
+        "--trim without --stdin should mention the missing flag, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn stdin_update_preserves_bytes_exactly() {
+    let env = TestEnv::new();
+    env.set_secret("UPD_STDIN", "initial");
+
+    let new_value = "  updated value\n";
+    let output = env.xv_with_stdin(&["update", "UPD_STDIN", "--stdin"], new_value);
+    assert!(
+        output.status.success(),
+        "update --stdin failed:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(env.get_raw_exact("UPD_STDIN"), new_value);
+}
+
+#[test]
+fn stdin_update_with_trim_strips_whitespace() {
+    let env = TestEnv::new();
+    env.set_secret("UPD_TRIM", "initial");
+
+    let output = env.xv_with_stdin(&["update", "UPD_TRIM", "--stdin", "--trim"], "  new  \n");
+    assert!(
+        output.status.success(),
+        "update --stdin --trim failed:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(env.get_raw_exact("UPD_TRIM"), "new");
+}
+
+#[test]
+fn stdin_update_empty_input_is_rejected() {
+    let env = TestEnv::new();
+    env.set_secret("UPD_EMPTY", "initial");
+
+    let output = env.xv_with_stdin(&["update", "UPD_EMPTY", "--stdin"], "");
+    assert!(
+        !output.status.success(),
+        "empty stdin should be rejected for update"
+    );
+
+    // Original value untouched
+    assert_eq!(env.get_raw_exact("UPD_EMPTY"), "initial");
 }
 
 // ===========================================================================

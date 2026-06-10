@@ -15,10 +15,28 @@ use crate::utils::pagination::Pagination;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
+/// Read a secret value from `reader`, preserving the input bytes exactly.
+/// With `trim`, leading/trailing whitespace is stripped (the pre-v0.11.1
+/// default, now opt-in via `--trim`).
+fn read_secret_value<R: std::io::Read>(reader: &mut R, trim: bool) -> Result<String> {
+    let mut buffer = String::new();
+    reader.read_to_string(&mut buffer)?;
+    if trim {
+        Ok(buffer.trim().to_string())
+    } else {
+        Ok(buffer)
+    }
+}
+
+fn read_secret_value_from_stdin(trim: bool) -> Result<String> {
+    read_secret_value(&mut std::io::stdin(), trim)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_set_direct(
     args: Vec<String>,
     stdin: bool,
+    trim: bool,
     note: Option<String>,
     folder: Option<String>,
     expires: Option<String>,
@@ -49,9 +67,7 @@ pub(crate) async fn execute_secret_set_direct(
             // Single secret set
             let name = &args[0];
             let value = if stdin {
-                let mut buffer = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)?;
-                buffer.trim().to_string()
+                read_secret_value_from_stdin(trim)?
             } else {
                 rpassword::prompt_password(format!("Enter value for secret '{name}': "))?
             };
@@ -743,6 +759,7 @@ pub(crate) async fn execute_secret_update_direct(
     name: &str,
     value: Option<String>,
     stdin: bool,
+    trim: bool,
     tags: Vec<(String, String)>,
     groups: Vec<String>,
     rename: Option<String>,
@@ -764,9 +781,11 @@ pub(crate) async fn execute_secret_update_direct(
 
         // Parse value from stdin if requested
         let resolved_value = if stdin {
-            let mut buffer = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)?;
-            Some(Zeroizing::new(buffer.trim().to_string()))
+            let stdin_value = read_secret_value_from_stdin(trim)?;
+            if stdin_value.is_empty() {
+                return Err(CrosstacheError::config("Secret value cannot be empty"));
+            }
+            Some(Zeroizing::new(stdin_value))
         } else {
             value.map(Zeroizing::new)
         };
@@ -844,6 +863,7 @@ pub(crate) async fn execute_secret_update_direct(
         None,
         value,
         stdin,
+        trim,
         tags,
         groups,
         rename,
@@ -1250,6 +1270,7 @@ async fn execute_secret_set(
     name: &str,
     vault: Option<String>,
     stdin: bool,
+    trim: bool,
     note: Option<String>,
     folder: Option<String>,
     expires: Option<String>,
@@ -1257,7 +1278,6 @@ async fn execute_secret_set(
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    use std::io::{self, Read};
 
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
@@ -1268,9 +1288,7 @@ async fn execute_secret_set(
 
     // Get secret value
     let value = if stdin {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        buffer.trim().to_string()
+        read_secret_value_from_stdin(trim)?
     } else {
         // Use rpassword for secure input
         rpassword::prompt_password(format!("Enter value for secret '{name}': "))?
@@ -2919,6 +2937,7 @@ async fn execute_secret_update(
     vault: Option<String>,
     value: Option<String>,
     stdin: bool,
+    trim: bool,
     tags: Vec<(String, String)>,
     groups: Vec<String>,
     rename: Option<String>,
@@ -2935,7 +2954,6 @@ async fn execute_secret_update(
     use crate::config::ContextManager;
     use crate::secret::manager::SecretUpdateRequest;
     use std::collections::HashMap;
-    use std::io::{self, Read};
 
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
@@ -2952,13 +2970,11 @@ async fn execute_secret_update(
         }
         Some(Zeroizing::new(v))
     } else if stdin {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        let trimmed = buffer.trim().to_string();
-        if trimmed.is_empty() {
+        let stdin_value = read_secret_value_from_stdin(trim)?;
+        if stdin_value.is_empty() {
             return Err(CrosstacheError::config("Secret value cannot be empty"));
         }
-        Some(Zeroizing::new(trimmed))
+        Some(Zeroizing::new(stdin_value))
     } else {
         None // Don't update value, just metadata
     };
@@ -4246,5 +4262,45 @@ mod tests {
 
         let exit_code = stream_and_mask(child, secrets).unwrap();
         assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn stdin_value_is_byte_exact_by_default() {
+        let pem = "-----BEGIN KEY-----\nabc123\n-----END KEY-----\n";
+        let mut reader = std::io::Cursor::new(pem);
+        assert_eq!(read_secret_value(&mut reader, false).unwrap(), pem);
+    }
+
+    #[test]
+    fn stdin_value_preserves_leading_and_trailing_spaces() {
+        let padded = "  value with spaces  ";
+        let mut reader = std::io::Cursor::new(padded);
+        assert_eq!(read_secret_value(&mut reader, false).unwrap(), padded);
+    }
+
+    #[test]
+    fn stdin_trim_strips_leading_and_trailing_whitespace() {
+        let mut reader = std::io::Cursor::new("\n  value with spaces  \n");
+        assert_eq!(
+            read_secret_value(&mut reader, true).unwrap(),
+            "value with spaces"
+        );
+    }
+
+    #[test]
+    fn stdin_trim_preserves_interior_whitespace() {
+        let mut reader = std::io::Cursor::new("  line1\nline2  ");
+        assert_eq!(
+            read_secret_value(&mut reader, true).unwrap(),
+            "line1\nline2"
+        );
+    }
+
+    #[test]
+    fn stdin_empty_input_yields_empty_string_for_caller_rejection() {
+        let mut reader = std::io::Cursor::new("");
+        assert_eq!(read_secret_value(&mut reader, false).unwrap(), "");
+        let mut reader = std::io::Cursor::new("  \n  ");
+        assert_eq!(read_secret_value(&mut reader, true).unwrap(), "");
     }
 }
