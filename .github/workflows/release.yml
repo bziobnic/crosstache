@@ -130,6 +130,14 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: brew install minisign
 
+      - name: Install minisign (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          curl -sLO https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-win64.zip
+          unzip -j minisign-0.11-win64.zip -d minisign-bin
+          echo "MINISIGN_BIN=./minisign-bin/minisign.exe" >> "$GITHUB_ENV"
+
       - name: Build release binary
         run: cargo build --release --features tui --target ${{ matrix.target }}
 
@@ -164,13 +172,15 @@ jobs:
             shasum -a 256 ${{ matrix.archive-name }} | cut -d ' ' -f 1 > ${{ matrix.archive-name }}.sha256
           fi
 
+      # Signing must run on EVERY platform: `xv upgrade` (>= v0.11.1) refuses
+      # to install a release asset that has no .minisig, so an unsigned
+      # Windows archive would strand Windows users on their current version.
       - name: Sign release archive
-        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
-          echo "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
-          minisign -Sm ${{ matrix.archive-name }} -s /tmp/minisign.key -t "crosstache ${{ github.ref_name }}"
-          rm -f /tmp/minisign.key
+          echo "$MINISIGN_SECRET_KEY" > minisign.key
+          "${MINISIGN_BIN:-minisign}" -Sm ${{ matrix.archive-name }} -s minisign.key -t "crosstache ${{ github.ref_name }}"
+          rm -f minisign.key
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
 
