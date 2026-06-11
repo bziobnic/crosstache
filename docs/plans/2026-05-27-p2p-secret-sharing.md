@@ -445,10 +445,23 @@ pub fn encrypt(
     use ed25519_dalek::Signer;
     use std::io::Write;
 
-    let sig = sender.sign_key.sign(plaintext);
-    let mut inner = Vec::with_capacity(SIG_LEN + PUB_LEN + plaintext.len());
+    // The signed payload includes the sender age public key so receivers can
+    // compute the same TOFU fingerprint shown by `xv identity show`:
+    // SHA-256(age_pub || sign_pub), Crockford 4x4.
+    let sender_age_pub = sender.age_recipient().to_string();
+    let mut signed_payload = Vec::new();
+    signed_payload.extend_from_slice(sender_age_pub.as_bytes());
+    signed_payload.push(0); // separator: age recipient strings are ASCII and contain no NUL
+    signed_payload.extend_from_slice(plaintext);
+    let sig = sender.sign_key.sign(&signed_payload);
+
+    let age_len: u16 = sender_age_pub.len().try_into()
+        .map_err(|_| crate::error::Error::Crypto("age pubkey too long".into()))?;
+    let mut inner = Vec::with_capacity(SIG_LEN + PUB_LEN + 2 + sender_age_pub.len() + plaintext.len());
     inner.extend_from_slice(&sig.to_bytes());
     inner.extend_from_slice(sender.sign_pubkey().as_bytes());
+    inner.extend_from_slice(&age_len.to_be_bytes());
+    inner.extend_from_slice(sender_age_pub.as_bytes());
     inner.extend_from_slice(plaintext);
 
     let recip: Vec<Box<dyn age::Recipient + Send>> = recipients.iter()
@@ -491,7 +504,7 @@ git commit -m "feat(share): sign-then-encrypt (age + ed25519)"
 
 ## Task 6: `share::decrypt` + verify
 
-**Objective:** Reverse of Task 5. Returns plaintext + the signer pubkey.
+**Objective:** Reverse of Task 5. Returns plaintext + the signer public keys needed for signature verification and TOFU fingerprint display.
 
 **Files:**
 - Modify: `src/share/crypto.rs`
@@ -502,6 +515,7 @@ git commit -m "feat(share): sign-then-encrypt (age + ed25519)"
 pub struct Opened {
     pub plaintext: Vec<u8>,
     pub signer_pubkey: ed25519_dalek::VerifyingKey,
+    pub signer_age_pubkey: age::x25519::Recipient,
 }
 
 pub fn decrypt(
@@ -526,12 +540,22 @@ pub fn decrypt(
     reader.read_to_end(&mut inner)
         .map_err(|e| crate::error::Error::Crypto(e.to_string()))?;
 
-    if inner.len() < SIG_LEN + PUB_LEN {
+    if inner.len() < SIG_LEN + PUB_LEN + 2 {
         return Err(crate::error::Error::Crypto("inner payload too short".into()));
     }
     let sig_bytes: [u8; SIG_LEN] = inner[..SIG_LEN].try_into().unwrap();
     let pub_bytes: [u8; PUB_LEN] = inner[SIG_LEN..SIG_LEN+PUB_LEN].try_into().unwrap();
-    let plaintext = inner[SIG_LEN+PUB_LEN..].to_vec();
+    let age_len = u16::from_be_bytes(inner[SIG_LEN+PUB_LEN..SIG_LEN+PUB_LEN+2].try_into().unwrap()) as usize;
+    let age_start = SIG_LEN + PUB_LEN + 2;
+    let age_end = age_start + age_len;
+    if inner.len() < age_end {
+        return Err(crate::error::Error::Crypto("inner age pubkey truncated".into()));
+    }
+    let signer_age_str = std::str::from_utf8(&inner[age_start..age_end])
+        .map_err(|e| crate::error::Error::Crypto(e.to_string()))?;
+    let signer_age_pubkey: age::x25519::Recipient = signer_age_str.parse()
+        .map_err(|e| crate::error::Error::Crypto(format!("sender age pubkey: {e}")))?;
+    let plaintext = inner[age_end..].to_vec();
 
     let sig = Signature::from_bytes(&sig_bytes);
     let signer = ed25519_dalek::VerifyingKey::from_bytes(&pub_bytes)
@@ -541,9 +565,13 @@ pub fn decrypt(
             return Err(crate::error::Error::Crypto("signer pubkey mismatch".into()));
         }
     }
-    signer.verify(&plaintext, &sig)
+    let mut signed_payload = Vec::new();
+    signed_payload.extend_from_slice(signer_age_str.as_bytes());
+    signed_payload.push(0);
+    signed_payload.extend_from_slice(&plaintext);
+    signer.verify(&signed_payload, &sig)
         .map_err(|e| crate::error::Error::Crypto(format!("signature: {e}")))?;
-    Ok(Opened { plaintext, signer_pubkey: signer })
+    Ok(Opened { plaintext, signer_pubkey: signer, signer_age_pubkey })
 }
 ```
 
@@ -579,7 +607,7 @@ git commit -m "feat(share): decrypt + verify + adversarial tests"
 
 ## Task 7: Claim-code generator + parser
 
-**Objective:** Generate 40-bit Crockford 4×2 codes (`GG6H-D5PP`), and a parser that accepts case-insensitive input with optional hyphens.
+**Objective:** Generate 40-bit Crockford 4×2 codes (`GG6H-D5PP`), plus an equivalent 8-word BIP-39 representation for voice dictation. The parser must accept case-insensitive Crockford input with optional hyphens/whitespace **and** 8 BIP-39 words that decode back to the same 40-bit code.
 
 **Files:**
 - Modify: `src/share/claim_code.rs`
@@ -611,16 +639,44 @@ mod tests {
         assert_eq!(p3.as_str(), c.as_str());
     }
     #[test]
+    fn bip39_words_roundtrip_to_same_code() {
+        let c = ClaimCode::random();
+        let words = c.to_bip39_words();
+        assert_eq!(words.split_whitespace().count(), 8);
+        let parsed: ClaimCode = words.parse().unwrap();
+        assert_eq!(parsed.as_str(), c.as_str());
+    }
+
+    #[test]
+    fn bip39_words_accept_hyphenated_voice_output() {
+        let c = ClaimCode::random();
+        let words = c.to_bip39_words();
+        let hyphenated = words.split_whitespace().collect::<Vec<_>>().join("-");
+        let parsed: ClaimCode = hyphenated.parse().unwrap();
+        assert_eq!(parsed.as_str(), c.as_str());
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!("not-a-code".parse::<ClaimCode>().is_err());
         assert!("ABCD-EF".parse::<ClaimCode>().is_err()); // wrong length
+        assert!("abandon abandon abandon abandon abandon abandon abandon abandon".parse::<ClaimCode>().is_err()); // checksum/domain mismatch
     }
 }
 ```
 
 **Step 2: Implement**
 
-Code = 40-bit random → Crockford base32 → 8 chars → split into 4+4 with hyphen.
+Code = 40-bit random → Crockford base32 → 8 chars → split into 4+4 with hyphen. Store the canonical string, but keep helpers to convert to/from the underlying 5 raw bytes.
+
+For BIP-39 voice codes, map the same 5 claim-code bytes into 8 words as:
+
+1. `payload = raw_code_bytes` (5 bytes / 40 bits).
+2. `checksum = sha256(b"xv-claim-words-v1" || payload)[0..6]` (48 bits).
+3. Concatenate `payload || checksum` = 88 bits.
+4. Split into eight 11-bit integers and index the English BIP-39 word list.
+
+Decoding performs the inverse and rejects the words unless the checksum matches. This makes the 8-word form a deterministic alternate representation of the same 40-bit claim code instead of a second unrelated code space. Accept both space-separated words and the hyphen-separated form printed by `xv share --verbose-code`; hyphens are word separators for BIP-39 input, not Crockford separators, once the normalized token count is eight.
 
 ```rust
 pub struct ClaimCode(String);
@@ -628,27 +684,38 @@ pub struct ClaimCode(String);
 impl ClaimCode {
     pub fn random() -> Self { ... }   // 5 random bytes -> base32 -> uppercase -> 4-4
     pub fn as_str(&self) -> &str { &self.0 }
+    pub fn to_bytes(&self) -> [u8; 5] { ... }
+    pub fn from_bytes(bytes: [u8; 5]) -> Self { ... }
+    pub fn to_bip39_words(&self) -> String { ... } // 8 English words
+    pub fn from_bip39_words(s: &str) -> Result<Self, crate::error::Error> { ... } // accepts space or hyphen separators; validates checksum
 }
 
 impl std::str::FromStr for ClaimCode {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let word_tokens: Vec<&str> = s
+            .split(|c: char| c.is_whitespace() || c == '-')
+            .filter(|t| !t.is_empty())
+            .collect();
+        if word_tokens.len() == 8 {
+            return ClaimCode::from_bip39_words(&word_tokens.join(" "));
+        }
         let cleaned: String = s.chars().filter(|c| *c != '-' && !c.is_whitespace())
             .flat_map(|c| c.to_uppercase()).collect();
         if cleaned.len() != 8 { return Err(...); }
-        // decode to validate it's a real Crockford string
+        // decode to validate it's a real Crockford string, then canonicalize
         ...
         Ok(ClaimCode(format!("{}-{}", &cleaned[..4], &cleaned[4..])))
     }
 }
 ```
 
-Reuse the Crockford `Encoding` builder from spike 004.
+Reuse the Crockford `Encoding` builder from spike 004 and `bip39::Language::English.word_list()` for word lookup.
 
 **Step 3: Verify**
 
 Run: `cargo test --lib share::claim_code`
-Expected: 3 passed.
+Expected: 5 passed.
 
 **Step 4: Commit**
 
@@ -865,8 +932,10 @@ pub async fn share(ctx: &Context, args: ShareArgs) -> Result<()> {
     println!("Share uploaded. To claim:");
     println!("  xv claim {}", code.as_str());
     if args.verbose_code {
-        let words = words_for(&code); // bip39 helper
-        println!("  (or, by voice: {})", words.join("-"));
+        let words = code.to_bip39_words();
+        // Hyphenated for copy/paste as one shell argument; ClaimCode::from_str
+        // treats this as eight BIP-39 word tokens, not as a Crockford code.
+        println!("  (or, by voice: {})", words.split_whitespace().collect::<Vec<_>>().join("-"));
     }
     Ok(())
 }
@@ -934,9 +1003,9 @@ pub async fn claim(ctx: &Context, args: ClaimArgs) -> Result<()> {
         if args.trust_existing_only {
             return Err(Error::UnknownSigner);
         }
-        let fp = Fingerprint::of_raw(b"", opened.signer_pubkey.as_bytes());
+        let fp = Fingerprint::of(&opened.signer_age_pubkey, &opened.signer_pubkey);
         eprintln!("This share is signed by an UNKNOWN peer.");
-        eprintln!("Fingerprint (sign-only): {}", fp.as_str());
+        eprintln!("Fingerprint: {}", fp.as_str());
         if !dialoguer::Confirm::new()
             .with_prompt("Trust this signer for this claim only?")
             .interact()? { return Err(Error::ClaimAborted); }
