@@ -234,50 +234,139 @@ async fn test_file_storage_roundtrip() {
         metadata: HashMap::from([("env".into(), "prod".into())]),
         tags: HashMap::from([("purpose".into(), "tls".into())]),
     };
-    let info = files.upload_file(upload_req, None).await.unwrap();
+    let info = files
+        .upload_file("default", upload_req, None)
+        .await
+        .unwrap();
     assert_eq!(info.name, "certs/server.pem");
     assert_eq!(info.size, content.len() as u64);
 
     // List files
     let list = files
-        .list_files(FileListRequest {
-            prefix: None,
-            groups: None,
-            limit: None,
-            delimiter: None,
-        })
+        .list_files(
+            "default",
+            FileListRequest {
+                prefix: None,
+                groups: None,
+                limit: None,
+                delimiter: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "certs/server.pem");
 
     // Download and verify content matches
-    let downloaded = files.download_file("certs/server.pem", None).await.unwrap();
+    let downloaded = files
+        .download_file("default", "certs/server.pem", None)
+        .await
+        .unwrap();
     assert_eq!(downloaded, content);
 
     // Get file info
-    let file_info = files.get_file_info("certs/server.pem").await.unwrap();
+    let file_info = files
+        .get_file_info("default", "certs/server.pem")
+        .await
+        .unwrap();
     assert_eq!(file_info.name, "certs/server.pem");
     assert_eq!(file_info.content_type, "application/x-pem-file");
 
     // Delete
-    files.delete_file("certs/server.pem").await.unwrap();
+    files
+        .delete_file("default", "certs/server.pem")
+        .await
+        .unwrap();
 
     // Verify gone
     let list = files
-        .list_files(FileListRequest {
-            prefix: None,
-            groups: None,
-            limit: None,
-            delimiter: None,
-        })
+        .list_files(
+            "default",
+            FileListRequest {
+                prefix: None,
+                groups: None,
+                limit: None,
+                delimiter: None,
+            },
+        )
         .await
         .unwrap();
     assert!(list.is_empty());
 
     // Download should fail
-    let err = files.download_file("certs/server.pem", None).await;
+    let err = files
+        .download_file("default", "certs/server.pem", None)
+        .await;
     assert!(matches!(err, Err(BackendError::NotFound { .. })));
+}
+
+/// Regression test for ROADMAP P2: file operations used to be pinned to the
+/// vault captured at backend construction (the default vault), so every
+/// upload landed in `default` regardless of the selected vault.
+#[cfg(feature = "file-ops")]
+#[tokio::test]
+async fn test_file_operations_target_selected_vault() {
+    use crosstache::blob::models::{FileListRequest, FileUploadRequest};
+
+    let tmp = TempDir::new().unwrap();
+    let backend = make_backend(&tmp);
+    let vaults = backend.vaults().expect("local backend has vaults");
+    let files = backend.files().expect("file-ops feature should be enabled");
+
+    vaults.create_vault(vault_req("dev")).await.unwrap();
+    vaults.create_vault(vault_req("prod")).await.unwrap();
+
+    let upload_req = |content: &[u8]| FileUploadRequest {
+        name: "app.env".into(),
+        content: content.to_vec(),
+        content_type: None,
+        groups: Vec::new(),
+        metadata: HashMap::new(),
+        tags: HashMap::new(),
+    };
+    files
+        .upload_file("dev", upload_req(b"DEV=1"), None)
+        .await
+        .unwrap();
+    files
+        .upload_file("prod", upload_req(b"PROD=1"), None)
+        .await
+        .unwrap();
+
+    // Nothing leaked into the default vault.
+    assert!(!tmp.path().join("store/vaults/default/files").exists());
+    let list_req = || FileListRequest {
+        prefix: None,
+        groups: None,
+        limit: None,
+        delimiter: None,
+    };
+    assert!(files
+        .list_files("default", list_req())
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Each vault sees exactly its own copy with its own content.
+    let dev_list = files.list_files("dev", list_req()).await.unwrap();
+    assert_eq!(dev_list.len(), 1);
+    assert_eq!(
+        files.download_file("dev", "app.env", None).await.unwrap(),
+        b"DEV=1"
+    );
+    assert_eq!(
+        files.download_file("prod", "app.env", None).await.unwrap(),
+        b"PROD=1"
+    );
+
+    // Deleting from one vault does not touch the other.
+    files.delete_file("dev", "app.env").await.unwrap();
+    let err = files.get_file_info("dev", "app.env").await;
+    assert!(matches!(err, Err(BackendError::NotFound { .. })));
+    assert_eq!(
+        files.download_file("prod", "app.env", None).await.unwrap(),
+        b"PROD=1"
+    );
 }
 
 #[tokio::test]

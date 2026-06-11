@@ -119,12 +119,7 @@ impl LocalBackend {
         let vault_backend = LocalVaultBackend::new(config.store_path.clone());
 
         #[cfg(feature = "file-ops")]
-        let file_backend = LocalFileBackend::new(
-            config.store_path.clone(),
-            config.default_vault.clone(),
-            identity,
-            recipients,
-        );
+        let file_backend = LocalFileBackend::new(config.store_path.clone(), identity, recipients);
 
         Ok(Self {
             config,

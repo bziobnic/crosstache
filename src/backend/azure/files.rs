@@ -31,10 +31,13 @@ impl AzureFileBackend {
     }
 }
 
+/// Azure blob file storage is scoped to one container per storage account,
+/// not per vault, so the `vault` argument is ignored.
 #[async_trait]
 impl FileBackend for AzureFileBackend {
     async fn upload_file(
         &self,
+        _vault: &str,
         request: FileUploadRequest,
         reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError> {
@@ -48,6 +51,7 @@ impl FileBackend for AzureFileBackend {
 
     async fn download_file(
         &self,
+        _vault: &str,
         name: &str,
         reporter: Option<&dyn ProgressReporter>,
     ) -> Result<Vec<u8>, BackendError> {
@@ -62,15 +66,19 @@ impl FileBackend for AzureFileBackend {
             .map_err(map_error)
     }
 
-    async fn list_files(&self, request: FileListRequest) -> Result<Vec<FileInfo>, BackendError> {
+    async fn list_files(
+        &self,
+        _vault: &str,
+        request: FileListRequest,
+    ) -> Result<Vec<FileInfo>, BackendError> {
         self.inner.list_files(request).await.map_err(map_error)
     }
 
-    async fn delete_file(&self, name: &str) -> Result<(), BackendError> {
+    async fn delete_file(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
         self.inner.delete_file(name).await.map_err(map_error)
     }
 
-    async fn get_file_info(&self, name: &str) -> Result<FileInfo, BackendError> {
+    async fn get_file_info(&self, _vault: &str, name: &str) -> Result<FileInfo, BackendError> {
         self.inner.get_file_info(name).await.map_err(map_error)
     }
 }
