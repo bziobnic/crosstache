@@ -29,21 +29,10 @@ Sourced from `docs/code-review-gpt55.md` (GPT-5.5 code review, 2026-05-09).
 Each item names the source file at review time — verify line numbers before
 fixing as code drifts.
 
-### P2 — Secret rename is non-atomic create + delete
-`src/secret/manager.rs:1959`. Surface recovery plan on partial failure or
-introduce a backend-level rename where APIs allow.
-
-### P2 — Blob downloads buffer entire blob in memory
-`src/blob/manager.rs:393,568,654`. Stream to writer; bound chunk
-concurrency; enforce configurable max file size.
-
-### P2 — Local file backend captures vault at construction
-`src/backend/local/files.rs:100`. Inconsistent with `SecretBackend`.
-Either accept vault per call, or rebuild per operation from resolved vault.
-
-### P2 — Azure backend exposes stub list_deleted / backup / restore_from_backup
-`src/backend/azure/secrets.rs:204`. Either align capabilities with what's
-implemented or finish the REST paths.
+All four P2 items from this review shipped on 2026-06-11 (#242 rename
+recoverability, #243 blob download streaming, #244 per-call file vault
+resolution, #245 Azure deleted/backup/restore REST paths). Remaining items
+are P3 and below.
 
 ### P3 — Context files not written via private writer
 `src/config/context.rs:193,348`. Treat as user-private config; share the
