@@ -287,6 +287,7 @@ impl ConfigInitializer {
                 profile: init_config.aws_profile.clone(),
                 default_vault: init_config.aws_default_vault.clone(),
                 endpoint_url: None,
+                s3_bucket: None,
             }),
             local: None,
             named_backends: std::collections::HashMap::new(),
@@ -1038,6 +1039,7 @@ impl ConfigInitializer {
                 profile: init_config.aws_profile.clone(),
                 default_vault: init_config.aws_default_vault.clone(),
                 endpoint_url: None,
+                s3_bucket: None,
             };
             (Some("aws".to_string()), Some(aws))
         } else {

@@ -45,6 +45,7 @@ azure_mgmt_storage = "0.21"
 # AWS SDK - feature-gated under `aws`
 aws-sdk-secretsmanager = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-sdk-cloudtrail = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
 aws-config = { version = "1", optional = true, features = ["behavior-version-latest"] }
 aws-smithy-runtime-api = { version = "1", optional = true }
 
@@ -106,7 +107,7 @@ zip = "2"
 default = ["file-ops"]
 file-ops = []
 tui = []
-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-sdk-cloudtrail", "dep:aws-config", "dep:aws-smithy-runtime-api"]
+aws = ["dep:aws-sdk-secretsmanager", "dep:aws-sdk-cloudtrail", "dep:aws-config", "dep:aws-smithy-runtime-api", "dep:aws-sdk-s3"]
 
 [build-dependencies]
 built = { version = "0.7", features = ["git2", "chrono"] }
