@@ -13,6 +13,7 @@ use aws_sdk_secretsmanager::operation::list_secret_version_ids::ListSecretVersio
 use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsError;
 use aws_sdk_secretsmanager::operation::put_secret_value::PutSecretValueError;
 use aws_sdk_secretsmanager::operation::restore_secret::RestoreSecretError;
+use aws_sdk_secretsmanager::operation::rotate_secret::RotateSecretError;
 use aws_sdk_secretsmanager::operation::tag_resource::TagResourceError;
 use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceError;
 use aws_sdk_secretsmanager::operation::update_secret::UpdateSecretError;
@@ -253,6 +254,66 @@ pub fn from_update_stage(
     handle_sdk("UpdateSecretVersionStage", e)
 }
 
+pub fn from_tag(e: SdkError<TagResourceError, Response>) -> BackendError {
+    handle_sdk("TagResource", e)
+}
+
+pub fn from_untag(e: SdkError<UntagResourceError, Response>) -> BackendError {
+    handle_sdk("UntagResource", e)
+}
+
+/// Remediation hint shown when `RotateSecret` is rejected because the secret
+/// has no rotation Lambda configured (AWS reports this as
+/// `InvalidRequestException`).
+pub(crate) fn rotation_lambda_hint(secret_id: &str) -> String {
+    format!(
+        "No rotation Lambda appears to be configured for this secret. \
+Configure one with `aws secretsmanager rotate-secret --secret-id {secret_id} \
+--rotation-lambda-arn <lambda-arn>`, then retry `xv rotate --native`."
+    )
+}
+
+pub fn from_rotate(
+    name: &str,
+    secret_id: &str,
+    e: SdkError<RotateSecretError, Response>,
+) -> BackendError {
+    if let SdkError::ServiceError(svc) = &e {
+        match svc.err() {
+            RotateSecretError::ResourceNotFoundException(_) => {
+                return BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                }
+            }
+            RotateSecretError::InvalidRequestException(inner) => {
+                // Most commonly: no rotation Lambda is associated with the
+                // secret, so there is nothing for AWS to invoke.
+                return BackendError::InvalidArgument(format!(
+                    "{inner}. {}",
+                    rotation_lambda_hint(secret_id)
+                ));
+            }
+            RotateSecretError::InvalidParameterException(inner) => {
+                return BackendError::InvalidArgument(inner.to_string())
+            }
+            other => {
+                // AccessDenied is not a modeled variant on RotateSecretError;
+                // it arrives as an unmodeled service error. Classify by code
+                // so users get a permissions message instead of "Internal".
+                use aws_sdk_secretsmanager::error::ProvideErrorMetadata;
+                if other.code() == Some("AccessDeniedException") {
+                    return BackendError::PermissionDenied(format!(
+                        "secretsmanager:RotateSecret denied for '{name}': {}",
+                        other.message().unwrap_or("access denied")
+                    ));
+                }
+            }
+        }
+    }
+    handle_sdk("RotateSecret", e)
+}
+
 #[cfg(all(test, feature = "aws"))]
 mod tests {
     use super::*;
@@ -335,12 +396,12 @@ mod tests {
             "health_check would have returned: {err:?}"
         );
     }
-}
 
-pub fn from_tag(e: SdkError<TagResourceError, Response>) -> BackendError {
-    handle_sdk("TagResource", e)
-}
-
-pub fn from_untag(e: SdkError<UntagResourceError, Response>) -> BackendError {
-    handle_sdk("UntagResource", e)
+    #[test]
+    fn rotation_lambda_hint_includes_cli_remediation() {
+        let hint = rotation_lambda_hint("myproj-kv/db-password");
+        assert!(hint.contains("aws secretsmanager rotate-secret"), "{hint}");
+        assert!(hint.contains("--secret-id myproj-kv/db-password"), "{hint}");
+        assert!(hint.contains("--rotation-lambda-arn"), "{hint}");
+    }
 }

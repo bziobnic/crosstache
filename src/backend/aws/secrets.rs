@@ -904,4 +904,21 @@ impl SecretBackend for AwsSecretBackend {
 
         Ok(summaries)
     }
+
+    /// Trigger AWS Secrets Manager native rotation (`RotateSecret`), which
+    /// invokes the rotation Lambda configured on the secret.
+    ///
+    /// Success means AWS accepted the rotation request — the Lambda runs
+    /// asynchronously, so the new version appears only once it completes.
+    async fn native_rotate(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        use crate::backend::aws::encoding::aws_name;
+        let aws_full_name = aws_name(vault, name);
+        self.client
+            .rotate_secret()
+            .secret_id(&aws_full_name)
+            .send()
+            .await
+            .map_err(|e| super::errors::from_rotate(name, &aws_full_name, e))?;
+        Ok(())
+    }
 }

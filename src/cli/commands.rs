@@ -416,6 +416,13 @@ pub enum Commands {
         /// Custom generator script path (overrides charset and length)
         #[arg(long)]
         generator: Option<String>,
+        /// Use the backend's native rotation instead of generating a value
+        /// locally. On AWS this calls RotateSecret, which invokes the
+        /// secret's configured rotation Lambda; the rotation completes
+        /// asynchronously. Errors on backends without native rotation.
+        /// Generation flags (--length, --charset) are ignored.
+        #[arg(long, conflicts_with_all = ["generator", "show_value"])]
+        native: bool,
         /// Show the generated value (default: hidden for security)
         #[arg(long)]
         show_value: bool,
@@ -1323,11 +1330,12 @@ impl Cli {
                 length,
                 charset,
                 generator,
+                native,
                 show_value,
                 force,
             } => {
                 crate::cli::secret_ops::execute_secret_rotate_direct(
-                    &name, length, charset, generator, show_value, force, config, registry,
+                    &name, length, charset, generator, native, show_value, force, config, registry,
                 )
                 .await
             }

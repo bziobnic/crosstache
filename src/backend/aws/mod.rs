@@ -59,7 +59,7 @@ impl Backend for AwsBackend {
             has_audit: false,
             has_versioning: true,
             has_soft_delete: true,
-            has_secret_rotation: false,
+            has_secret_rotation: true,
             has_groups: true,
             has_folders: true,
             has_notes: true,
