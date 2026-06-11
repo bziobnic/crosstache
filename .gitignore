@@ -24,3 +24,7 @@ Thumbs.db
 
 # OMC (Oh My ClaudeCode) agent state — transient, machine-specific
 .omc/
+spikes/
+
+# CodeGraph local index/runtime data — machine-specific SQLite DB, logs, daemon state
+.codegraph/
