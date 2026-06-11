@@ -640,6 +640,12 @@ impl AwsFileBackend {
         let user_prefix = normalize_user_prefix(request.prefix.as_deref());
         let full_prefix = format!("{base}{user_prefix}");
         let delimiter = request.delimiter.clone().unwrap_or_else(|| "/".to_string());
+        // Hierarchical listing treats the user prefix as a FOLDER: a
+        // non-empty prefix must end with the delimiter, otherwise `docs`
+        // would also match sibling trees like `docs-extra/...` (Azure's
+        // normalize_prefix appends '/' the same way). The flat
+        // `list_files` path keeps exact-prefix semantics intentionally.
+        let full_prefix = ensure_folder_prefix(full_prefix, &user_prefix, &delimiter);
 
         let mut items: Vec<BlobListItem> = Vec::new();
         let mut continuation: Option<String> = None;
@@ -746,6 +752,17 @@ fn normalize_user_prefix(prefix: Option<&str>) -> String {
     prefix
         .map(|p| p.trim_start_matches('/').to_string())
         .unwrap_or_default()
+}
+
+/// For hierarchical (delimiter-based) listing, a non-empty user prefix is a
+/// folder and must end with the delimiter so `docs` cannot also match
+/// sibling trees like `docs-extra/...` (mirrors Azure's normalize_prefix).
+fn ensure_folder_prefix(full_prefix: String, user_prefix: &str, delimiter: &str) -> String {
+    if !user_prefix.is_empty() && !full_prefix.ends_with(delimiter) {
+        format!("{full_prefix}{delimiter}")
+    } else {
+        full_prefix
+    }
 }
 
 #[async_trait]
@@ -1138,6 +1155,25 @@ mod tests {
         assert_eq!(normalize_user_prefix(Some("/docs")), "docs");
         assert_eq!(normalize_user_prefix(Some("docs/")), "docs/");
         assert_eq!(normalize_user_prefix(None), "");
+    }
+
+    #[test]
+    fn folder_prefix_gets_trailing_delimiter_for_hierarchical_list() {
+        // `docs` must not match `docs-extra/...` in hierarchical listing
+        assert_eq!(
+            ensure_folder_prefix("v/files/docs".to_string(), "docs", "/"),
+            "v/files/docs/"
+        );
+        // Already-terminated prefix unchanged
+        assert_eq!(
+            ensure_folder_prefix("v/files/docs/".to_string(), "docs/", "/"),
+            "v/files/docs/"
+        );
+        // Empty user prefix (vault root): exact base prefix, no extra delimiter
+        assert_eq!(
+            ensure_folder_prefix("v/files/".to_string(), "", "/"),
+            "v/files/"
+        );
     }
 
     #[tokio::test]
