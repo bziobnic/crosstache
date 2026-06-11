@@ -550,12 +550,15 @@ impl BlobManager {
             }
         })?;
 
-        // Handle empty files specially to avoid HTTP 416 error
-        // Azure's get_content() fails with 416 Range Not Satisfiable for 0-byte blobs
         let content_length = properties.blob.properties.content_length;
+        validate_download_size(content_length, MAX_DOWNLOAD_SIZE_BYTES)?;
+
+        use tokio::io::AsyncWriteExt;
+
+        // Handle empty files specially to avoid HTTP 416 error
+        // Azure's ranged GET fails with 416 Range Not Satisfiable for 0-byte blobs
         if content_length == 0 {
             // For empty files, just flush the writer and return
-            use tokio::io::AsyncWriteExt;
             writer
                 .flush()
                 .await
@@ -563,21 +566,25 @@ impl BlobManager {
             return Ok(());
         }
 
-        // For streaming large files, we'll use the get_content method for now
-        // The Azure SDK v0.21 handles chunking internally for better reliability
-        let blob_content = blob_client
-            .get_content()
+        // Stream the blob as a sequence of chunk-sized ranged GETs. Each page's
+        // body is itself a byte stream, so at most one chunk is buffered at a
+        // time instead of the entire blob.
+        let chunk_size = download_chunk_size_bytes(self.chunk_size_mb);
+        let mut pages = blob_client.get().chunk_size(chunk_size).into_stream();
+        while let Some(page) = pages
+            .try_next()
             .await
-            .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {e}")))?;
-
-        // Stream the data and write to the provided writer
-        use tokio::io::AsyncWriteExt;
-
-        // Write all content at once (Azure SDK already optimized the download)
-        writer
-            .write_all(&blob_content)
-            .await
-            .map_err(|e| CrosstacheError::unknown(format!("Failed to write blob data: {e}")))?;
+            .map_err(|e| CrosstacheError::azure_api(format!("Failed to download blob: {e}")))?
+        {
+            let mut body = page.data;
+            while let Some(bytes) = body.try_next().await.map_err(|e| {
+                CrosstacheError::azure_api(format!("Failed to read blob data stream: {e}"))
+            })? {
+                writer.write_all(&bytes).await.map_err(|e| {
+                    CrosstacheError::unknown(format!("Failed to write blob data: {e}"))
+                })?;
+            }
+        }
 
         // Ensure all data is flushed
         writer
@@ -783,6 +790,33 @@ fn sort_blob_items(items: &mut [BlobListItem]) {
     });
 }
 
+/// Maximum blob size accepted by `download_file_stream`.
+///
+/// There is currently no user-facing config field for a download size limit
+/// (`chunk_size_mb` only governs chunking), so this conservative internal cap
+/// guards against runaway downloads.
+/// TODO: replace with a config field (e.g. `blob_max_download_size_mb`) if
+/// per-user limits are needed.
+const MAX_DOWNLOAD_SIZE_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GiB
+
+/// Convert the configured chunk size (MB) into the byte count used for ranged
+/// download GETs. Clamped to a minimum of 1 MB, mirroring `with_blob_config`.
+fn download_chunk_size_bytes(chunk_size_mb: usize) -> u64 {
+    (chunk_size_mb.max(1) as u64) * 1024 * 1024
+}
+
+/// Reject downloads whose blob size exceeds `max_bytes`.
+fn validate_download_size(content_length: u64, max_bytes: u64) -> Result<()> {
+    if content_length > max_bytes {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "Blob size {} exceeds the maximum allowed download size of {}",
+            format_size(content_length),
+            format_size(max_bytes)
+        )));
+    }
+    Ok(())
+}
+
 /// Generate a fixed-length block ID for the given zero-based block index.
 ///
 /// Azure requires all block IDs within a block list to have the same length.
@@ -894,6 +928,53 @@ mod tests {
         // Azure: block ID must not exceed 64 bytes before base64 encoding.
         let id = generate_block_id(u32::MAX);
         assert!(id.bytes().len() <= 64);
+    }
+
+    // ── download_chunk_size_bytes ────────────────────────────────────────────
+
+    #[test]
+    fn test_download_chunk_size_converts_mb_to_bytes() {
+        assert_eq!(download_chunk_size_bytes(4), 4 * 1024 * 1024);
+        assert_eq!(download_chunk_size_bytes(1), 1024 * 1024);
+        assert_eq!(download_chunk_size_bytes(16), 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_download_chunk_size_clamps_zero_to_one_mb() {
+        // Mirrors the with_blob_config clamp: never a zero-sized chunk.
+        assert_eq!(download_chunk_size_bytes(0), 1024 * 1024);
+    }
+
+    // ── validate_download_size ───────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_download_size_allows_under_limit() {
+        assert!(validate_download_size(100, 1024).is_ok());
+    }
+
+    #[test]
+    fn test_validate_download_size_allows_exact_limit() {
+        assert!(validate_download_size(1024, 1024).is_ok());
+    }
+
+    #[test]
+    fn test_validate_download_size_allows_zero_byte_blob() {
+        assert!(validate_download_size(0, 1024).is_ok());
+    }
+
+    #[test]
+    fn test_validate_download_size_rejects_over_limit() {
+        let err = validate_download_size(1025, 1024).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exceeds the maximum allowed download size"));
+    }
+
+    #[test]
+    fn test_validate_download_size_rejects_over_default_cap() {
+        assert!(
+            validate_download_size(MAX_DOWNLOAD_SIZE_BYTES + 1, MAX_DOWNLOAD_SIZE_BYTES).is_err()
+        );
+        assert!(validate_download_size(MAX_DOWNLOAD_SIZE_BYTES, MAX_DOWNLOAD_SIZE_BYTES).is_ok());
     }
 
     // ── read_chunk ───────────────────────────────────────────────────────────
