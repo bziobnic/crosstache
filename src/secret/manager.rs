@@ -73,6 +73,45 @@ pub struct SecretRequest {
     pub folder: Option<String>,
 }
 
+/// Tri-state update for an optional metadata field: leave it as-is, set a
+/// new value, or remove the current value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FieldUpdate<T> {
+    #[default]
+    Unchanged,
+    Set(T),
+    Clear,
+}
+
+impl<T> FieldUpdate<T> {
+    /// Build from a CLI-style `(value, clear)` flag pair. Supplying both a
+    /// value and the clear flag for the same field is an error.
+    pub fn from_flags(value: Option<T>, clear: bool, field: &str) -> Result<Self> {
+        match (value, clear) {
+            (Some(_), true) => Err(CrosstacheError::invalid_argument(format!(
+                "Cannot set and clear {field} in the same update"
+            ))),
+            (Some(v), false) => Ok(FieldUpdate::Set(v)),
+            (None, true) => Ok(FieldUpdate::Clear),
+            (None, false) => Ok(FieldUpdate::Unchanged),
+        }
+    }
+
+    /// Resolve against the current value: `Unchanged` preserves it,
+    /// `Set` replaces it, `Clear` removes it.
+    pub fn apply(self, current: Option<T>) -> Option<T> {
+        match self {
+            FieldUpdate::Unchanged => current,
+            FieldUpdate::Set(v) => Some(v),
+            FieldUpdate::Clear => None,
+        }
+    }
+
+    pub fn is_unchanged(&self) -> bool {
+        matches!(self, FieldUpdate::Unchanged)
+    }
+}
+
 /// Secret update request for advanced operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretUpdateRequest {
@@ -81,12 +120,12 @@ pub struct SecretUpdateRequest {
     pub value: Option<Zeroizing<String>>,
     pub content_type: Option<String>,
     pub enabled: Option<bool>,
-    pub expires_on: Option<DateTime<Utc>>,
-    pub not_before: Option<DateTime<Utc>>,
+    pub expires_on: FieldUpdate<DateTime<Utc>>,
+    pub not_before: FieldUpdate<DateTime<Utc>>,
     pub tags: Option<HashMap<String, String>>,
     pub groups: Option<Vec<String>>,
-    pub note: Option<String>,
-    pub folder: Option<String>,
+    pub note: FieldUpdate<String>,
+    pub folder: FieldUpdate<String>,
     pub replace_tags: bool,
     pub replace_groups: bool,
 }
@@ -1962,17 +2001,17 @@ impl SecretManager {
             })
         };
 
-        // Handle folder - preserve existing if not specified in update
+        // Handle folder - Unchanged preserves the existing value, Clear removes it
         let final_folder = update_request
             .folder
             .clone()
-            .or_else(|| current_secret.tags.get("folder").cloned());
+            .apply(current_secret.tags.get("folder").cloned());
 
-        // Handle note - preserve existing if not specified in update
+        // Handle note - Unchanged preserves the existing value, Clear removes it
         let final_note = update_request
             .note
             .clone()
-            .or_else(|| current_secret.tags.get("note").cloned());
+            .apply(current_secret.tags.get("note").cloned());
 
         // Create the enhanced secret request
         let secret_request = SecretRequest {
@@ -1988,8 +2027,17 @@ impl SecretManager {
             }),
             content_type: update_request.content_type.clone(),
             enabled: update_request.enabled,
-            expires_on: update_request.expires_on,
-            not_before: update_request.not_before,
+            // Azure updates PUT a new secret version, so attributes omitted
+            // from the request are dropped: Unchanged must carry the current
+            // value forward explicitly.
+            expires_on: update_request
+                .expires_on
+                .clone()
+                .apply(current_secret.expires_on),
+            not_before: update_request
+                .not_before
+                .clone()
+                .apply(current_secret.not_before),
             tags: final_tags,
             groups: final_groups,
             note: final_note,
@@ -2056,5 +2104,33 @@ mod tests {
         // Invalid names
         assert!(manager.validate_secret_name("").is_err());
         assert!(manager.validate_secret_name(&"a".repeat(128)).is_err());
+    }
+
+    #[test]
+    fn test_field_update_from_flags() {
+        assert_eq!(
+            FieldUpdate::from_flags(Some("x".to_string()), false, "note").unwrap(),
+            FieldUpdate::Set("x".to_string())
+        );
+        assert_eq!(
+            FieldUpdate::from_flags(None::<String>, true, "note").unwrap(),
+            FieldUpdate::Clear
+        );
+        assert_eq!(
+            FieldUpdate::from_flags(None::<String>, false, "note").unwrap(),
+            FieldUpdate::Unchanged
+        );
+        // Set + clear together is an error
+        assert!(FieldUpdate::from_flags(Some("x".to_string()), true, "note").is_err());
+    }
+
+    #[test]
+    fn test_field_update_apply() {
+        assert_eq!(FieldUpdate::Unchanged.apply(Some(1)), Some(1));
+        assert_eq!(FieldUpdate::<i32>::Unchanged.apply(None), None);
+        assert_eq!(FieldUpdate::Set(2).apply(Some(1)), Some(2));
+        assert_eq!(FieldUpdate::Set(2).apply(None), Some(2));
+        assert_eq!(FieldUpdate::Clear.apply(Some(1)), None);
+        assert_eq!(FieldUpdate::<i32>::Clear.apply(None), None);
     }
 }

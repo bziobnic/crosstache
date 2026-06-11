@@ -2,7 +2,9 @@
 
 use crate::backend::error::BackendError;
 use crate::backend::SecretBackend;
-use crate::secret::manager::{SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest};
+use crate::secret::manager::{
+    FieldUpdate, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+};
 use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 use std::collections::HashMap;
@@ -657,20 +659,32 @@ impl SecretBackend for AwsSecretBackend {
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
         use crate::backend::aws::encoding::aws_name;
-        use crate::backend::aws::metadata::{TAG_FOLDER, TAG_GROUPS};
+        use crate::backend::aws::metadata::{TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS};
         use aws_sdk_secretsmanager::types::Tag;
 
         let aws_full_name = aws_name(vault, name);
 
-        // Update description (note) if provided.
-        if let Some(ref new_note) = request.note {
-            self.client
-                .update_secret()
-                .secret_id(&aws_full_name)
-                .description(new_note)
-                .send()
-                .await
-                .map_err(|e| super::errors::from_update(name, e))?;
+        // Update description (note): Set writes the new text, Clear empties it.
+        match &request.note {
+            FieldUpdate::Set(new_note) => {
+                self.client
+                    .update_secret()
+                    .secret_id(&aws_full_name)
+                    .description(new_note)
+                    .send()
+                    .await
+                    .map_err(|e| super::errors::from_update(name, e))?;
+            }
+            FieldUpdate::Clear => {
+                self.client
+                    .update_secret()
+                    .secret_id(&aws_full_name)
+                    .description("")
+                    .send()
+                    .await
+                    .map_err(|e| super::errors::from_update(name, e))?;
+            }
+            FieldUpdate::Unchanged => {}
         }
 
         // Compute tag deltas.
@@ -689,12 +703,23 @@ impl SecretBackend for AwsSecretBackend {
                 }
             }
         }
-        if let Some(ref f) = request.folder {
-            if f.is_empty() {
-                keys_to_remove.push(TAG_FOLDER.into());
-            } else {
-                tags_to_set.push(Tag::builder().key(TAG_FOLDER).value(f).build());
+        match &request.folder {
+            FieldUpdate::Set(f) if f.is_empty() => keys_to_remove.push(TAG_FOLDER.into()),
+            FieldUpdate::Set(f) => {
+                tags_to_set.push(Tag::builder().key(TAG_FOLDER).value(f).build())
             }
+            FieldUpdate::Clear => keys_to_remove.push(TAG_FOLDER.into()),
+            FieldUpdate::Unchanged => {}
+        }
+        match &request.expires_on {
+            FieldUpdate::Set(e) => tags_to_set.push(
+                Tag::builder()
+                    .key(TAG_EXPIRES_AT)
+                    .value(e.to_rfc3339())
+                    .build(),
+            ),
+            FieldUpdate::Clear => keys_to_remove.push(TAG_EXPIRES_AT.into()),
+            FieldUpdate::Unchanged => {}
         }
         if let Some(ref user_tags) = request.tags {
             for (k, v) in user_tags {
