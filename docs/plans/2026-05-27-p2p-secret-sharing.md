@@ -648,6 +648,15 @@ mod tests {
     }
 
     #[test]
+    fn bip39_words_accept_hyphenated_voice_output() {
+        let c = ClaimCode::random();
+        let words = c.to_bip39_words();
+        let hyphenated = words.split_whitespace().collect::<Vec<_>>().join("-");
+        let parsed: ClaimCode = hyphenated.parse().unwrap();
+        assert_eq!(parsed.as_str(), c.as_str());
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!("not-a-code".parse::<ClaimCode>().is_err());
         assert!("ABCD-EF".parse::<ClaimCode>().is_err()); // wrong length
@@ -667,7 +676,7 @@ For BIP-39 voice codes, map the same 5 claim-code bytes into 8 words as:
 3. Concatenate `payload || checksum` = 88 bits.
 4. Split into eight 11-bit integers and index the English BIP-39 word list.
 
-Decoding performs the inverse and rejects the words unless the checksum matches. This makes the 8-word form a deterministic alternate representation of the same 40-bit claim code instead of a second unrelated code space.
+Decoding performs the inverse and rejects the words unless the checksum matches. This makes the 8-word form a deterministic alternate representation of the same 40-bit claim code instead of a second unrelated code space. Accept both space-separated words and the hyphen-separated form printed by `xv share --verbose-code`; hyphens are word separators for BIP-39 input, not Crockford separators, once the normalized token count is eight.
 
 ```rust
 pub struct ClaimCode(String);
@@ -678,14 +687,18 @@ impl ClaimCode {
     pub fn to_bytes(&self) -> [u8; 5] { ... }
     pub fn from_bytes(bytes: [u8; 5]) -> Self { ... }
     pub fn to_bip39_words(&self) -> String { ... } // 8 English words
-    pub fn from_bip39_words(s: &str) -> Result<Self, crate::error::Error> { ... } // validates checksum
+    pub fn from_bip39_words(s: &str) -> Result<Self, crate::error::Error> { ... } // accepts space or hyphen separators; validates checksum
 }
 
 impl std::str::FromStr for ClaimCode {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.split_whitespace().count() == 8 {
-            return ClaimCode::from_bip39_words(s);
+        let word_tokens: Vec<&str> = s
+            .split(|c: char| c.is_whitespace() || c == '-')
+            .filter(|t| !t.is_empty())
+            .collect();
+        if word_tokens.len() == 8 {
+            return ClaimCode::from_bip39_words(&word_tokens.join(" "));
         }
         let cleaned: String = s.chars().filter(|c| *c != '-' && !c.is_whitespace())
             .flat_map(|c| c.to_uppercase()).collect();
@@ -702,7 +715,7 @@ Reuse the Crockford `Encoding` builder from spike 004 and `bip39::Language::Engl
 **Step 3: Verify**
 
 Run: `cargo test --lib share::claim_code`
-Expected: 4 passed.
+Expected: 5 passed.
 
 **Step 4: Commit**
 
@@ -919,8 +932,10 @@ pub async fn share(ctx: &Context, args: ShareArgs) -> Result<()> {
     println!("Share uploaded. To claim:");
     println!("  xv claim {}", code.as_str());
     if args.verbose_code {
-        let words = words_for(&code); // bip39 helper
-        println!("  (or, by voice: {})", words.join("-"));
+        let words = code.to_bip39_words();
+        // Hyphenated for copy/paste as one shell argument; ClaimCode::from_str
+        // treats this as eight BIP-39 word tokens, not as a Crockford code.
+        println!("  (or, by voice: {})", words.split_whitespace().collect::<Vec<_>>().join("-"));
     }
     Ok(())
 }
