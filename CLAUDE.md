@@ -202,14 +202,14 @@ Azure Key Vault secrets are limited to 15 tags total. crosstache uses:
 - Tests require Azure credentials for integration testing
 
 ### Current Implementation Status
-As of `v0.10.0-rc.2`:
+As of `v0.11.1` plus current `main`:
 
 - **Output Formats**: JSON, YAML, CSV, plain, raw, and `template` (with field substitution, shipped v0.5.2) all working.
 - **Pagination**: Secret listing follows Azure `nextLink` for large result sets; list-style pagination across `xv list` / `vault list` / `file list` / `share` shipped v0.6.0-rc.2.
 - **Configurable Clipboard Timeout**: `clipboard_timeout` config key (default 30s, 0 to disable).
 - **File Sync** (`xv file sync`): Implemented (`--direction` up/down/both, `--dry-run`, `--delete`); see `src/blob/sync.rs` and `execute_file_sync` in `src/cli/file_ops.rs`.
 - **Vault Sharing**: Implemented via Azure RBAC (`xv share grant|revoke|list`).
-- **Backends**: Azure Key Vault (default), AWS Secrets Manager (`--features aws`, shipped v0.10.0-rc.1), Local (age-encrypted on disk).
+- **Backends**: Azure Key Vault (default), AWS Secrets Manager (`--features aws`, shipped v0.10.0), Local (age-encrypted on disk).
 - **TUI**: Read-only browser (`xv tui`), shipped v0.7.0-rc.2.
 - **Leak Scanner**: `xv scan` pre-commit scanner, shipped v0.7.0-rc.1.
 - **Self-update**: `xv upgrade`, shipped v0.5.1.
@@ -218,6 +218,5 @@ Known partial / known limitations (tracked in `ROADMAP.md`):
 
 - **Azure Secret Backup/Restore**: stub on Azure backend (`src/backend/azure/secrets.rs`).
 - **AWS capability gaps**: `xv share`, `xv audit`, native rotation, file storage — see ROADMAP § "AWS capability matrix gaps".
-- **`xv upgrade` signature verification**: design approved, not yet implemented.
 
 For open work items, see `ROADMAP.md` at the repo root. Implementation history is in `CHANGELOG.md`; shipped designs live under `docs/superpowers/specs/` with version banners.
