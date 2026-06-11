@@ -52,13 +52,27 @@ impl AwsAuditBackend {
         let end_time = chrono::Utc::now();
         let start_time = end_time - chrono::Duration::days(days as i64);
 
-        let attribute = LookupAttribute::builder()
-            .attribute_key(LookupAttributeKey::EventSource)
-            .attribute_value(SECRETS_MANAGER_EVENT_SOURCE)
-            .build()
-            .map_err(|e| {
-                BackendError::Internal(format!("aws LookupEvents: invalid lookup attribute: {e}"))
-            })?;
+        // For a single-secret audit, scope the CloudTrail lookup to that
+        // secret's full (vault-prefixed) name via ResourceName. An
+        // EventSource-wide scan pages newest-first across ALL Secrets
+        // Manager activity in the account, so in busy accounts the
+        // MAX_PAGES window could be exhausted before reaching events for
+        // the requested secret. Vault-wide audit keeps the EventSource
+        // scan (CloudTrail allows only one lookup attribute per call) and
+        // filters per event in `map_event`.
+        let attribute = match secret_filter {
+            Some(secret) => LookupAttribute::builder()
+                .attribute_key(LookupAttributeKey::ResourceName)
+                .attribute_value(format!("{vault}/{secret}"))
+                .build(),
+            None => LookupAttribute::builder()
+                .attribute_key(LookupAttributeKey::EventSource)
+                .attribute_value(SECRETS_MANAGER_EVENT_SOURCE)
+                .build(),
+        }
+        .map_err(|e| {
+            BackendError::Internal(format!("aws LookupEvents: invalid lookup attribute: {e}"))
+        })?;
 
         let mut events: Vec<AuditEvent> = Vec::new();
         let mut next_token: Option<String> = None;
