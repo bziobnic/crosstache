@@ -526,6 +526,24 @@ async fn execute_vault_purge(
     Ok(())
 }
 
+/// Quote a value for POSIX shell single-quoting: wrap in `'...'` with
+/// embedded single quotes escaped as `'\''`. Round-trips byte-for-byte
+/// through `sh` `source`/`eval`.
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// A valid shell identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn format_env_line(key: &str, value: &str) -> String {
+    format!("{key}={}", shell_single_quote(value))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_vault_export(
     _vault_manager: &VaultManager,
@@ -641,7 +659,14 @@ async fn execute_vault_export(
                                     .to_uppercase()
                                     .replace("-", "_")
                                     .replace(".", "_");
-                                env_lines.push(format!("{env_name}={}", value.as_str()));
+                                if is_valid_env_key(&env_name) {
+                                    env_lines.push(format_env_line(&env_name, value.as_str()));
+                                } else {
+                                    eprintln!(
+                                        "Warning: Skipping secret '{}' — derived env name '{}' is not a valid shell identifier",
+                                        secret.original_name, env_name
+                                    );
+                                }
                             }
                         }
                         Err(e) => {
@@ -1149,4 +1174,148 @@ async fn execute_vault_share(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_env_line, is_valid_env_key, shell_single_quote};
+
+    fn adversarial_values() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("V_NEWLINE", "line1\nline2"),
+            ("V_HASH", "abc#def"),
+            ("V_DOLLAR", "$HOME and ${PATH}"),
+            ("V_SINGLE_QUOTE", "it's a 'test'"),
+            ("V_DOUBLE_QUOTE", "say \"hello\""),
+            ("V_BACKSLASH", "back\\slash\\\\double"),
+            ("V_SPACES", "  leading and trailing  "),
+            ("V_EMPTY", ""),
+            ("V_BACKTICK", "`whoami`"),
+            ("V_MIXED", "a'b\"c$d`e\\f\ng#h"),
+        ]
+    }
+
+    #[test]
+    fn quote_newline() {
+        assert_eq!(shell_single_quote("a\nb"), "'a\nb'");
+    }
+
+    #[test]
+    fn quote_hash() {
+        assert_eq!(shell_single_quote("a#b"), "'a#b'");
+    }
+
+    #[test]
+    fn quote_dollar() {
+        assert_eq!(shell_single_quote("$HOME"), "'$HOME'");
+    }
+
+    #[test]
+    fn quote_single_quote() {
+        assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn quote_double_quote() {
+        assert_eq!(shell_single_quote("a\"b"), "'a\"b'");
+    }
+
+    #[test]
+    fn quote_backslash() {
+        assert_eq!(shell_single_quote("a\\b"), "'a\\b'");
+    }
+
+    #[test]
+    fn quote_spaces() {
+        assert_eq!(shell_single_quote(" a b "), "' a b '");
+    }
+
+    #[test]
+    fn quote_empty() {
+        assert_eq!(shell_single_quote(""), "''");
+    }
+
+    #[test]
+    fn format_env_line_quotes_value() {
+        assert_eq!(format_env_line("KEY", "v'al"), "KEY='v'\\''al'");
+    }
+
+    #[test]
+    fn valid_env_keys() {
+        assert!(is_valid_env_key("FOO"));
+        assert!(is_valid_env_key("_FOO"));
+        assert!(is_valid_env_key("FOO_BAR_2"));
+        assert!(is_valid_env_key("f"));
+    }
+
+    #[test]
+    fn invalid_env_keys() {
+        assert!(!is_valid_env_key(""));
+        assert!(!is_valid_env_key("2FOO"));
+        assert!(!is_valid_env_key("FOO-BAR"));
+        assert!(!is_valid_env_key("FOO BAR"));
+        assert!(!is_valid_env_key("FOO.BAR"));
+        assert!(!is_valid_env_key("FOO$"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_through_sh() {
+        use std::process::Command;
+
+        for (key, value) in adversarial_values() {
+            let script = format!("{}\nprintf %s \"${key}\"", format_env_line(key, value));
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("failed to run sh");
+            assert!(
+                output.status.success(),
+                "sh failed for {key}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                output.stdout,
+                value.as_bytes(),
+                "round-trip mismatch for {key}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_whole_file_via_dot_source() {
+        use std::io::Write;
+        use std::process::Command;
+
+        let values = adversarial_values();
+        let mut file_body = String::from("# Exported from vault 'test' on 2026-01-01\n");
+        for (key, value) in &values {
+            file_body.push_str(&format_env_line(key, value));
+            file_body.push('\n');
+        }
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        tmp.write_all(file_body.as_bytes()).expect("write");
+
+        for (key, value) in &values {
+            let script = format!(". {}\nprintf %s \"${key}\"", tmp.path().display());
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("failed to run sh");
+            assert!(
+                output.status.success(),
+                "sourcing failed for {key}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                output.stdout,
+                value.as_bytes(),
+                "round-trip mismatch for {key}"
+            );
+        }
+    }
 }
