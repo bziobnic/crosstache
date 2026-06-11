@@ -287,12 +287,27 @@ pub fn from_rotate(
                 }
             }
             RotateSecretError::InvalidRequestException(inner) => {
-                // Most commonly: no rotation Lambda is associated with the
-                // secret, so there is nothing for AWS to invoke.
-                return BackendError::InvalidArgument(format!(
-                    "{inner}. {}",
-                    rotation_lambda_hint(secret_id)
-                ));
+                // InvalidRequestException covers several failure modes
+                // (secret deleted/being deleted, rotation already in
+                // progress, no Lambda configured, ...). Only append the
+                // configure-a-Lambda hint when the message actually says
+                // no rotation Lambda is associated; otherwise surface the
+                // real error untouched. (`message()` is an inherent method
+                // on the modeled exception type; no trait import needed.)
+                let msg = inner.message().unwrap_or_default().to_lowercase();
+                let no_lambda = msg.contains("lambda")
+                    && (msg.contains("no rotation")
+                        || msg.contains("not configured")
+                        || msg.contains("no lambda")
+                        || msg.contains("rotation lambda arn"));
+                return if no_lambda {
+                    BackendError::InvalidArgument(format!(
+                        "{inner}. {}",
+                        rotation_lambda_hint(secret_id)
+                    ))
+                } else {
+                    BackendError::InvalidArgument(inner.to_string())
+                };
             }
             RotateSecretError::InvalidParameterException(inner) => {
                 return BackendError::InvalidArgument(inner.to_string())
