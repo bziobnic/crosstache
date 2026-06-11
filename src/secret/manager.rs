@@ -2047,7 +2047,10 @@ impl SecretManager {
         // Show update progress
         output::info(&format!("Updating secret '{}'...", update_request.name));
 
-        // If renaming, we need to create a new secret and delete the old one
+        // If renaming, we need to create a new secret and delete the old one.
+        // The backend has no atomic rename, so this is a recoverable two-step
+        // operation: create-new first (failure there leaves everything
+        // untouched), then delete-old.
         if update_request.new_name.is_some() {
             // Create new secret with new name
             let new_secret = self
@@ -2055,10 +2058,23 @@ impl SecretManager {
                 .set_secret(vault_name, &secret_request)
                 .await?;
 
-            // Delete old secret
-            self.secret_ops
+            // Delete old secret. On failure the new secret must be left in
+            // place — it holds a good copy of the material, and a rollback
+            // delete could itself fail or remove the only live copy. Both
+            // secrets surviving is the safe outcome; the error tells the
+            // user how to finish the rename by hand.
+            if let Err(cause) = self
+                .secret_ops
                 .delete_secret(vault_name, &update_request.name)
-                .await?;
+                .await
+            {
+                return Err(CrosstacheError::RenameIncomplete {
+                    source: update_request.name.clone(),
+                    destination: secret_request.name.clone(),
+                    vault: vault_name.to_string(),
+                    cause: Box::new(cause),
+                });
+            }
 
             output::info(&format!(
                 "Successfully renamed secret '{}' to '{}'",
@@ -2132,5 +2148,278 @@ mod tests {
         assert_eq!(FieldUpdate::Set(2).apply(None), Some(2));
         assert_eq!(FieldUpdate::Clear.apply(Some(1)), None);
         assert_eq!(FieldUpdate::<i32>::Clear.apply(None), None);
+    }
+
+    // --- Rename recoverability ---
+
+    use std::sync::Mutex;
+
+    fn test_properties(name: &str, value: Option<&str>) -> SecretProperties {
+        SecretProperties {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            value: value.map(|v| Zeroizing::new(v.to_string())),
+            version: "v1".to_string(),
+            version_number: None,
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags: HashMap::new(),
+            content_type: String::new(),
+            recovery_level: None,
+        }
+    }
+
+    /// Fake backend that records every write so tests can assert exactly
+    /// which secrets a rename touched. `fail_delete` simulates the old
+    /// secret's deletion failing after the new secret was created.
+    #[derive(Default)]
+    struct FakeSecretOps {
+        fail_delete: bool,
+        /// (name, include_value) of every get_secret call, in order
+        get_requests: Mutex<Vec<(String, bool)>>,
+        /// (name, value) of every set_secret call, in order
+        set_requests: Mutex<Vec<(String, String)>>,
+        /// Names passed to delete_secret, whether or not the call succeeded
+        delete_attempts: Mutex<Vec<String>>,
+        /// Names passed to purge_secret
+        purge_attempts: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl SecretOperations for FakeSecretOps {
+        async fn set_secret(
+            &self,
+            _vault_name: &str,
+            request: &SecretRequest,
+        ) -> Result<SecretProperties> {
+            self.set_requests
+                .lock()
+                .unwrap()
+                .push((request.name.clone(), request.value.to_string()));
+            Ok(test_properties(&request.name, None))
+        }
+
+        async fn get_secret(
+            &self,
+            _vault_name: &str,
+            secret_name: &str,
+            include_value: bool,
+        ) -> Result<SecretProperties> {
+            self.get_requests
+                .lock()
+                .unwrap()
+                .push((secret_name.to_string(), include_value));
+            Ok(test_properties(
+                secret_name,
+                include_value.then_some("old-value"),
+            ))
+        }
+
+        async fn get_secret_version(
+            &self,
+            _vault_name: &str,
+            _secret_name: &str,
+            _version: &str,
+            _include_value: bool,
+        ) -> Result<SecretProperties> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+
+        async fn list_secrets(
+            &self,
+            _vault_name: &str,
+            _group_filter: Option<&str>,
+        ) -> Result<Vec<SecretSummary>> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+
+        async fn delete_secret(&self, _vault_name: &str, secret_name: &str) -> Result<()> {
+            self.delete_attempts
+                .lock()
+                .unwrap()
+                .push(secret_name.to_string());
+            if self.fail_delete {
+                return Err(CrosstacheError::network(format!(
+                    "simulated outage deleting '{secret_name}'"
+                )));
+            }
+            Ok(())
+        }
+
+        async fn update_secret(
+            &self,
+            _vault_name: &str,
+            _secret_name: &str,
+            _request: &SecretRequest,
+        ) -> Result<SecretProperties> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+
+        async fn restore_secret(
+            &self,
+            _vault_name: &str,
+            _secret_name: &str,
+        ) -> Result<SecretProperties> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+
+        async fn purge_secret(&self, _vault_name: &str, secret_name: &str) -> Result<()> {
+            self.purge_attempts
+                .lock()
+                .unwrap()
+                .push(secret_name.to_string());
+            Ok(())
+        }
+
+        async fn list_deleted_secrets(&self, _vault_name: &str) -> Result<Vec<SecretSummary>> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+
+        async fn secret_exists(&self, _vault_name: &str, _secret_name: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn get_secret_versions(
+            &self,
+            _vault_name: &str,
+            _secret_name: &str,
+        ) -> Result<Vec<SecretProperties>> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+
+        async fn rollback_secret(
+            &self,
+            _vault_name: &str,
+            _secret_name: &str,
+            _version: &str,
+        ) -> Result<SecretProperties> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+
+        async fn backup_secret(&self, _vault_name: &str, _secret_name: &str) -> Result<Vec<u8>> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+
+        async fn restore_secret_from_backup(
+            &self,
+            _vault_name: &str,
+            _backup_data: &[u8],
+        ) -> Result<SecretProperties> {
+            Err(CrosstacheError::unknown("not implemented in fake"))
+        }
+    }
+
+    fn rename_request(from: &str, to: &str) -> SecretUpdateRequest {
+        SecretUpdateRequest {
+            name: from.to_string(),
+            new_name: Some(to.to_string()),
+            value: None,
+            content_type: None,
+            enabled: None,
+            expires_on: FieldUpdate::Unchanged,
+            not_before: FieldUpdate::Unchanged,
+            tags: None,
+            groups: None,
+            note: FieldUpdate::Unchanged,
+            folder: FieldUpdate::Unchanged,
+            replace_tags: false,
+            replace_groups: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rename_succeeds_creates_new_then_deletes_old() {
+        let ops = Arc::new(FakeSecretOps::default());
+        let manager = SecretManager {
+            secret_ops: ops.clone(),
+            no_color: true,
+        };
+
+        let result = manager
+            .update_secret_enhanced("test-vault", &rename_request("legacy-name", "modern-name"))
+            .await
+            .expect("rename should succeed");
+        assert_eq!(result.name, "modern-name");
+
+        // A pure rename must fetch the old secret's value so it can be
+        // carried over to the new secret.
+        assert_eq!(
+            ops.get_requests.lock().unwrap().as_slice(),
+            [("legacy-name".to_string(), true)]
+        );
+        let sets = ops.set_requests.lock().unwrap();
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].0, "modern-name");
+        // The old secret's material was carried over to the new secret
+        assert_eq!(sets[0].1, "old-value");
+        assert_eq!(
+            ops.delete_attempts.lock().unwrap().as_slice(),
+            ["legacy-name".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rename_delete_failure_keeps_new_secret_and_reports_recovery() {
+        let ops = Arc::new(FakeSecretOps {
+            fail_delete: true,
+            ..Default::default()
+        });
+        let manager = SecretManager {
+            secret_ops: ops.clone(),
+            no_color: true,
+        };
+
+        let err = manager
+            .update_secret_enhanced("test-vault", &rename_request("legacy-name", "modern-name"))
+            .await
+            .expect_err("rename must fail when the old secret cannot be deleted");
+
+        match &err {
+            CrosstacheError::RenameIncomplete {
+                source,
+                destination,
+                vault,
+                cause,
+            } => {
+                assert_eq!(source, "legacy-name");
+                assert_eq!(destination, "modern-name");
+                assert_eq!(vault, "test-vault");
+                assert!(matches!(**cause, CrosstacheError::NetworkError(_)));
+            }
+            other => panic!("expected RenameIncomplete, got {other:?}"),
+        }
+
+        // The message names both secrets and the vault, preserves the
+        // underlying failure, and gives concrete recovery steps.
+        let msg = err.to_string();
+        assert!(msg.contains("'legacy-name'"), "missing source: {msg}");
+        assert!(msg.contains("'modern-name'"), "missing destination: {msg}");
+        assert!(msg.contains("'test-vault'"), "missing vault: {msg}");
+        assert!(msg.contains("simulated outage"), "missing cause: {msg}");
+        assert!(msg.contains("Next steps"), "missing recovery plan: {msg}");
+        assert!(
+            msg.contains("xv get modern-name"),
+            "missing verify step: {msg}"
+        );
+        assert!(
+            msg.contains("xv delete legacy-name"),
+            "missing manual delete step: {msg}"
+        );
+
+        // The new secret was created exactly once and never rolled back:
+        // the only delete attempt targeted the old name, and nothing was
+        // purged.
+        let sets = ops.set_requests.lock().unwrap();
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].0, "modern-name");
+        assert_eq!(
+            ops.delete_attempts.lock().unwrap().as_slice(),
+            ["legacy-name".to_string()]
+        );
+        assert!(ops.purge_attempts.lock().unwrap().is_empty());
     }
 }
