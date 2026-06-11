@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.11.2 — P2 security-hardening completion (2026-06-11)
+
+Closes out all four remaining P2 items from the 2026-05-09 GPT-5.5 code
+review, plus byte-fidelity and data-loss fixes that had been soaking in
+`Unreleased`.
 
 ### Fixed
 
