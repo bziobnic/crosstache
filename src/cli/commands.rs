@@ -490,10 +490,10 @@ pub enum Commands {
         /// New name for the secret (rename operation)
         #[arg(long)]
         rename: Option<String>,
-        /// Note to attach to the secret
+        /// Note to attach to the secret (omit to leave unchanged; use --clear-note to remove)
         #[arg(long)]
         note: Option<String>,
-        /// Folder path for the secret (e.g., 'app/database', 'config/dev')
+        /// Folder path for the secret (e.g., 'app/database'; omit to leave unchanged; use --clear-folder to remove)
         #[arg(long)]
         folder: Option<String>,
         /// Replace existing tags instead of merging
@@ -502,10 +502,10 @@ pub enum Commands {
         /// Replace existing groups instead of merging
         #[arg(long)]
         replace_groups: bool,
-        /// Set expiration date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        /// Set expiration date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS; omit to leave unchanged; use --clear-expires to remove)
         #[arg(long)]
         expires: Option<String>,
-        /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+        /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS; omit to leave unchanged; use --clear-not-before to remove)
         #[arg(long)]
         not_before: Option<String>,
         /// Clear expiration date
@@ -514,6 +514,12 @@ pub enum Commands {
         /// Clear not-before date
         #[arg(long, conflicts_with = "not_before")]
         clear_not_before: bool,
+        /// Clear the note
+        #[arg(long, conflicts_with = "note")]
+        clear_note: bool,
+        /// Clear the folder
+        #[arg(long, conflicts_with = "folder")]
+        clear_folder: bool,
     },
     /// Compare secrets between two vaults
     Diff {
@@ -1379,6 +1385,8 @@ impl Cli {
                 not_before,
                 clear_expires,
                 clear_not_before,
+                clear_note,
+                clear_folder,
             } => {
                 crate::cli::secret_ops::execute_secret_update_direct(
                     &name,
@@ -1396,6 +1404,8 @@ impl Cli {
                     not_before,
                     clear_expires,
                     clear_not_before,
+                    clear_note,
+                    clear_folder,
                     config,
                     registry,
                 )
@@ -1664,6 +1674,61 @@ mod tests {
         assert!("alpha".parse::<CharsetType>().is_err());
         assert!("unknown".parse::<CharsetType>().is_err());
         assert!("".parse::<CharsetType>().is_err());
+    }
+
+    #[test]
+    fn test_update_clear_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "xv",
+            "update",
+            "mysecret",
+            "--clear-expires",
+            "--clear-not-before",
+            "--clear-note",
+            "--clear-folder",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Update {
+                clear_expires,
+                clear_not_before,
+                clear_note,
+                clear_folder,
+                expires,
+                not_before,
+                note,
+                folder,
+                ..
+            } => {
+                assert!(clear_expires);
+                assert!(clear_not_before);
+                assert!(clear_note);
+                assert!(clear_folder);
+                assert!(expires.is_none());
+                assert!(not_before.is_none());
+                assert!(note.is_none());
+                assert!(folder.is_none());
+            }
+            _ => panic!("expected update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_set_and_clear_same_field_conflicts() {
+        for (set_flag, set_value, clear_flag) in [
+            ("--expires", "2030-01-01", "--clear-expires"),
+            ("--not-before", "2030-01-01", "--clear-not-before"),
+            ("--note", "some note", "--clear-note"),
+            ("--folder", "app/db", "--clear-folder"),
+        ] {
+            let result =
+                Cli::try_parse_from(["xv", "update", "mysecret", set_flag, set_value, clear_flag]);
+            assert!(
+                result.is_err(),
+                "{set_flag} together with {clear_flag} should be rejected"
+            );
+        }
     }
 
     #[test]

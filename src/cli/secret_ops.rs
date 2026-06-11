@@ -771,11 +771,16 @@ pub(crate) async fn execute_secret_update_direct(
     not_before: Option<String>,
     clear_expires: bool,
     clear_not_before: bool,
+    clear_note: bool,
+    clear_folder: bool,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
+        use crate::secret::manager::FieldUpdate;
+        use crate::utils::datetime::parse_datetime_or_duration;
+
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
 
@@ -790,23 +795,25 @@ pub(crate) async fn execute_secret_update_direct(
             value.map(Zeroizing::new)
         };
 
-        // Parse expiry dates
-        let expires_on_dt = if clear_expires {
-            None // The backend will handle clearing
-        } else if let Some(ref es) = expires {
-            use crate::utils::datetime::parse_datetime_or_duration;
-            Some(parse_datetime_or_duration(es)?)
-        } else {
-            None
-        };
-        let not_before_dt = if clear_not_before {
-            None
-        } else if let Some(ref nb) = not_before {
-            use crate::utils::datetime::parse_datetime_or_duration;
-            Some(parse_datetime_or_duration(nb)?)
-        } else {
-            None
-        };
+        // Tri-state metadata updates: omitted = Unchanged, value = Set, --clear-* = Clear
+        let expires_update = FieldUpdate::from_flags(
+            expires
+                .as_deref()
+                .map(parse_datetime_or_duration)
+                .transpose()?,
+            clear_expires,
+            "expiration date",
+        )?;
+        let not_before_update = FieldUpdate::from_flags(
+            not_before
+                .as_deref()
+                .map(parse_datetime_or_duration)
+                .transpose()?,
+            clear_not_before,
+            "not-before date",
+        )?;
+        let note_update = FieldUpdate::from_flags(note, clear_note, "note")?;
+        let folder_update = FieldUpdate::from_flags(folder, clear_folder, "folder")?;
 
         let merged_tags = if tags.is_empty() {
             None
@@ -828,12 +835,12 @@ pub(crate) async fn execute_secret_update_direct(
             value: resolved_value,
             content_type: None,
             enabled: None,
-            expires_on: expires_on_dt,
-            not_before: not_before_dt,
+            expires_on: expires_update,
+            not_before: not_before_update,
             tags: merged_tags,
             groups: merged_groups,
-            note,
-            folder,
+            note: note_update,
+            folder: folder_update,
             replace_tags,
             replace_groups,
         };
@@ -875,6 +882,8 @@ pub(crate) async fn execute_secret_update_direct(
         not_before,
         clear_expires,
         clear_not_before,
+        clear_note,
+        clear_folder,
         &config,
     )
     .await?;
@@ -2949,10 +2958,12 @@ async fn execute_secret_update(
     not_before: Option<String>,
     clear_expires: bool,
     clear_not_before: bool,
+    clear_note: bool,
+    clear_folder: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
-    use crate::secret::manager::SecretUpdateRequest;
+    use crate::secret::manager::{FieldUpdate, SecretUpdateRequest};
     use std::collections::HashMap;
 
     // Determine vault name using context resolution
@@ -2990,6 +3001,8 @@ async fn execute_secret_update(
         && not_before.is_none()
         && !clear_expires
         && !clear_not_before
+        && !clear_note
+        && !clear_folder
     {
         return Err(CrosstacheError::invalid_argument(
             "No updates specified. Use 'secret update' to modify metadata (groups, tags, folder, note, expiry) or rename secrets. Use 'secret set' to update secret values.",
@@ -3024,24 +3037,26 @@ async fn execute_secret_update(
         }
     }
 
-    // Parse expiry dates if provided
-    let expires_on = if clear_expires {
-        None // Explicitly clear the expiry date
-    } else if let Some(expires_str) = expires.as_deref() {
-        use crate::utils::datetime::parse_datetime_or_duration;
-        Some(parse_datetime_or_duration(expires_str)?)
-    } else {
-        None // No change to expiry
-    };
-
-    let not_before_on = if clear_not_before {
-        None // Explicitly clear the not-before date
-    } else if let Some(not_before_str) = not_before.as_deref() {
-        use crate::utils::datetime::parse_datetime_or_duration;
-        Some(parse_datetime_or_duration(not_before_str)?)
-    } else {
-        None // No change to not-before
-    };
+    // Tri-state metadata updates: omitted = Unchanged, value = Set, --clear-* = Clear
+    use crate::utils::datetime::parse_datetime_or_duration;
+    let expires_update = FieldUpdate::from_flags(
+        expires
+            .as_deref()
+            .map(parse_datetime_or_duration)
+            .transpose()?,
+        clear_expires,
+        "expiration date",
+    )?;
+    let not_before_update = FieldUpdate::from_flags(
+        not_before
+            .as_deref()
+            .map(parse_datetime_or_duration)
+            .transpose()?,
+        clear_not_before,
+        "not-before date",
+    )?;
+    let note_update = FieldUpdate::from_flags(note.clone(), clear_note, "note")?;
+    let folder_update = FieldUpdate::from_flags(folder.clone(), clear_folder, "folder")?;
 
     // Create update request with enhanced parameters
     let update_request = SecretUpdateRequest {
@@ -3050,12 +3065,12 @@ async fn execute_secret_update(
         value: new_value.clone(),
         content_type: None,
         enabled: None,
-        expires_on,
-        not_before: not_before_on,
+        expires_on: expires_update,
+        not_before: not_before_update,
         tags: tags_map,
         groups: groups_vec,
-        note: note.clone(),
-        folder: folder.clone(),
+        note: note_update,
+        folder: folder_update,
         replace_tags,
         replace_groups,
     };
@@ -3098,10 +3113,14 @@ async fn execute_secret_update(
             update_request.groups.as_ref().unwrap()
         );
     }
-    if let Some(ref note_text) = note {
+    if clear_note {
+        println!("  → Clearing note");
+    } else if let Some(ref note_text) = note {
         println!("  → Adding note: {note_text}");
     }
-    if let Some(ref folder_path) = folder {
+    if clear_folder {
+        println!("  → Clearing folder");
+    } else if let Some(ref folder_path) = folder {
         println!("  → Setting folder: {folder_path}");
     }
     if clear_expires {

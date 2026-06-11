@@ -102,9 +102,15 @@ impl SecretBackend for AzureSecretBackend {
         //  - value is None (to avoid overwriting with empty string)
         //  - replace_tags is false and new tags are provided (to merge)
         //  - replace_groups is false and new groups are provided (to merge)
+        //  - any tri-state metadata field is Unchanged (the underlying Azure
+        //    update is a PUT, so unchanged fields must be carried forward)
         let needs_current = request.value.is_none()
             || (!request.replace_tags && request.tags.is_some())
-            || (!request.replace_groups && request.groups.is_some());
+            || (!request.replace_groups && request.groups.is_some())
+            || request.expires_on.is_unchanged()
+            || request.not_before.is_unchanged()
+            || request.note.is_unchanged()
+            || request.folder.is_unchanged();
 
         let current = if needs_current {
             Some(
@@ -162,12 +168,20 @@ impl SecretBackend for AzureSecretBackend {
             value,
             content_type: request.content_type,
             enabled: request.enabled,
-            expires_on: request.expires_on,
-            not_before: request.not_before,
+            expires_on: request
+                .expires_on
+                .apply(current.as_ref().and_then(|c| c.expires_on)),
+            not_before: request
+                .not_before
+                .apply(current.as_ref().and_then(|c| c.not_before)),
             tags,
             groups,
-            note: request.note,
-            folder: request.folder,
+            note: request
+                .note
+                .apply(current.as_ref().and_then(|c| c.tags.get("note").cloned())),
+            folder: request
+                .folder
+                .apply(current.as_ref().and_then(|c| c.tags.get("folder").cloned())),
         };
         self.inner
             .update_secret(vault, name, &compat_request)

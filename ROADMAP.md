@@ -105,6 +105,8 @@ matter. Preserve bytes exactly by default; add explicit `--trim`.
 distinguish "leave unchanged" from "clear." Model as
 `Unchanged | Set(T) | Clear` for expiry, not-before, note, folder.
 
+> **Resolved in Unreleased** — `SecretUpdateRequest` now models expiry, not-before, note, and folder as `FieldUpdate<T> { Unchanged, Set(T), Clear }`. CLI gains `--clear-note` / `--clear-folder` alongside the existing `--clear-expires` / `--clear-not-before`; setting and clearing the same field is rejected. Local, Azure, and AWS update paths honor all three states (Azure also stops silently dropping expiry/nbf on unrelated updates, since its update PUT must carry unchanged attributes forward). Round-trip tests on the local backend cover all four fields.
+
 ### P3 — Context files not written via private writer
 `src/config/context.rs:193,348`. Treat as user-private config; share the
 sensitive-file helper.

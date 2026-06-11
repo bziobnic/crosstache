@@ -757,18 +757,10 @@ impl SecretBackend for LocalSecretBackend {
         if let Some(enabled) = request.enabled {
             meta.enabled = enabled;
         }
-        if request.expires_on.is_some() {
-            meta.expires_on = request.expires_on;
-        }
-        if request.not_before.is_some() {
-            meta.not_before = request.not_before;
-        }
-        if request.note.is_some() {
-            meta.note = request.note.clone();
-        }
-        if request.folder.is_some() {
-            meta.folder = request.folder.clone();
-        }
+        meta.expires_on = request.expires_on.apply(meta.expires_on);
+        meta.not_before = request.not_before.apply(meta.not_before);
+        meta.note = request.note.apply(meta.note.take());
+        meta.folder = request.folder.apply(meta.folder.take());
 
         meta.updated_at = now;
         write_meta(&mp, &meta)?;
@@ -1006,6 +998,7 @@ impl SecretBackend for LocalSecretBackend {
 mod tests {
     use super::*;
     use crate::backend::local::crypto::generate_keypair;
+    use crate::secret::manager::FieldUpdate;
     use tempfile::TempDir;
 
     /// Create a test backend with a temp dir and return it along with the temp dir.
@@ -1337,12 +1330,12 @@ mod tests {
             value: None,
             content_type: Some("application/json".into()),
             enabled: Some(false),
-            expires_on: None,
-            not_before: None,
+            expires_on: FieldUpdate::Unchanged,
+            not_before: FieldUpdate::Unchanged,
             tags: Some(HashMap::from([("new_tag".into(), "new_val".into())])),
             groups: Some(vec!["added-group".into()]),
-            note: Some("updated note".into()),
-            folder: None,
+            note: FieldUpdate::Set("updated note".into()),
+            folder: FieldUpdate::Unchanged,
             replace_tags: false,
             replace_groups: false,
         };
@@ -1373,12 +1366,12 @@ mod tests {
             value: Some(Zeroizing::new("new".into())),
             content_type: None,
             enabled: None,
-            expires_on: None,
-            not_before: None,
+            expires_on: FieldUpdate::Unchanged,
+            not_before: FieldUpdate::Unchanged,
             tags: None,
             groups: None,
-            note: None,
-            folder: None,
+            note: FieldUpdate::Unchanged,
+            folder: FieldUpdate::Unchanged,
             replace_tags: false,
             replace_groups: false,
         };
@@ -1394,6 +1387,201 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&*got.value.unwrap(), "new");
+    }
+
+    /// An update request that changes nothing — base for tri-state tests.
+    fn unchanged_update(name: &str) -> SecretUpdateRequest {
+        SecretUpdateRequest {
+            name: name.into(),
+            new_name: None,
+            value: None,
+            content_type: None,
+            enabled: None,
+            expires_on: FieldUpdate::Unchanged,
+            not_before: FieldUpdate::Unchanged,
+            tags: None,
+            groups: None,
+            note: FieldUpdate::Unchanged,
+            folder: FieldUpdate::Unchanged,
+            replace_tags: false,
+            replace_groups: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn tristate_expires_set_survives_unrelated_update_then_clears() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("tri-exp", "v"))
+            .await
+            .unwrap();
+
+        let exp: DateTime<Utc> = "2030-01-02T03:04:05Z".parse().unwrap();
+        let mut update = unchanged_update("tri-exp");
+        update.expires_on = FieldUpdate::Set(exp);
+        let props = backend
+            .update_secret("default", "tri-exp", update)
+            .await
+            .unwrap();
+        assert_eq!(props.expires_on, Some(exp));
+
+        // Unrelated update must leave expiry untouched
+        let mut update = unchanged_update("tri-exp");
+        update.note = FieldUpdate::Set("something else".into());
+        let props = backend
+            .update_secret("default", "tri-exp", update)
+            .await
+            .unwrap();
+        assert_eq!(props.expires_on, Some(exp));
+
+        // Clear removes it
+        let mut update = unchanged_update("tri-exp");
+        update.expires_on = FieldUpdate::Clear;
+        let props = backend
+            .update_secret("default", "tri-exp", update)
+            .await
+            .unwrap();
+        assert_eq!(props.expires_on, None);
+
+        let got = backend
+            .get_secret("default", "tri-exp", false)
+            .await
+            .unwrap();
+        assert_eq!(got.expires_on, None);
+    }
+
+    #[tokio::test]
+    async fn tristate_not_before_set_survives_unrelated_update_then_clears() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("tri-nbf", "v"))
+            .await
+            .unwrap();
+
+        let nbf: DateTime<Utc> = "2029-06-07T08:09:10Z".parse().unwrap();
+        let mut update = unchanged_update("tri-nbf");
+        update.not_before = FieldUpdate::Set(nbf);
+        let props = backend
+            .update_secret("default", "tri-nbf", update)
+            .await
+            .unwrap();
+        assert_eq!(props.not_before, Some(nbf));
+
+        let mut update = unchanged_update("tri-nbf");
+        update.folder = FieldUpdate::Set("elsewhere".into());
+        let props = backend
+            .update_secret("default", "tri-nbf", update)
+            .await
+            .unwrap();
+        assert_eq!(props.not_before, Some(nbf));
+
+        let mut update = unchanged_update("tri-nbf");
+        update.not_before = FieldUpdate::Clear;
+        let props = backend
+            .update_secret("default", "tri-nbf", update)
+            .await
+            .unwrap();
+        assert_eq!(props.not_before, None);
+
+        let got = backend
+            .get_secret("default", "tri-nbf", false)
+            .await
+            .unwrap();
+        assert_eq!(got.not_before, None);
+    }
+
+    #[tokio::test]
+    async fn tristate_note_set_survives_unrelated_update_then_clears() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("tri-note", "v"))
+            .await
+            .unwrap();
+
+        let mut update = unchanged_update("tri-note");
+        update.note = FieldUpdate::Set("important note".into());
+        let props = backend
+            .update_secret("default", "tri-note", update)
+            .await
+            .unwrap();
+        assert_eq!(
+            props.tags.get("note").map(String::as_str),
+            Some("important note")
+        );
+
+        // Unrelated update must leave the note untouched
+        let mut update = unchanged_update("tri-note");
+        update.folder = FieldUpdate::Set("new/folder".into());
+        let props = backend
+            .update_secret("default", "tri-note", update)
+            .await
+            .unwrap();
+        assert_eq!(
+            props.tags.get("note").map(String::as_str),
+            Some("important note")
+        );
+
+        // Clear removes it
+        let mut update = unchanged_update("tri-note");
+        update.note = FieldUpdate::Clear;
+        let props = backend
+            .update_secret("default", "tri-note", update)
+            .await
+            .unwrap();
+        assert_eq!(props.tags.get("note"), None);
+
+        let got = backend
+            .get_secret("default", "tri-note", false)
+            .await
+            .unwrap();
+        assert_eq!(got.tags.get("note"), None);
+    }
+
+    #[tokio::test]
+    async fn tristate_folder_set_survives_unrelated_update_then_clears() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("tri-folder", "v"))
+            .await
+            .unwrap();
+
+        let mut update = unchanged_update("tri-folder");
+        update.folder = FieldUpdate::Set("app/database".into());
+        let props = backend
+            .update_secret("default", "tri-folder", update)
+            .await
+            .unwrap();
+        assert_eq!(
+            props.tags.get("folder").map(String::as_str),
+            Some("app/database")
+        );
+
+        // Unrelated update must leave the folder untouched
+        let mut update = unchanged_update("tri-folder");
+        update.note = FieldUpdate::Set("touch note".into());
+        let props = backend
+            .update_secret("default", "tri-folder", update)
+            .await
+            .unwrap();
+        assert_eq!(
+            props.tags.get("folder").map(String::as_str),
+            Some("app/database")
+        );
+
+        // Clear removes it
+        let mut update = unchanged_update("tri-folder");
+        update.folder = FieldUpdate::Clear;
+        let props = backend
+            .update_secret("default", "tri-folder", update)
+            .await
+            .unwrap();
+        assert_eq!(props.tags.get("folder"), None);
+
+        let got = backend
+            .get_secret("default", "tri-folder", false)
+            .await
+            .unwrap();
+        assert_eq!(got.tags.get("folder"), None);
     }
 
     #[tokio::test]

@@ -28,7 +28,7 @@ use crosstache::auth::provider::DefaultAzureCredentialProvider;
 use crosstache::backend::azure::AzureBackend;
 use crosstache::backend::Backend;
 use crosstache::config::settings::Config;
-use crosstache::secret::manager::{SecretRequest, SecretUpdateRequest};
+use crosstache::secret::manager::{FieldUpdate, SecretRequest, SecretUpdateRequest};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
@@ -213,12 +213,12 @@ async fn e2e_azure_secret_full_lifecycle() {
         value: None,
         content_type: None,
         enabled: None,
-        expires_on: None,
-        not_before: None,
+        expires_on: FieldUpdate::Unchanged,
+        not_before: FieldUpdate::Unchanged,
         tags: None,
         groups: Some(vec!["e2e".to_string(), "prod".to_string()]),
-        note: Some("updated by e2e test".to_string()),
-        folder: None,
+        note: FieldUpdate::Set("updated by e2e test".to_string()),
+        folder: FieldUpdate::Unchanged,
         replace_tags: false,
         replace_groups: true,
     };
