@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-05-23 · **Current version:** `v0.10.0-rc.2` · **Branch protection:** `main` (all changes via PR)
+> **Last reviewed:** 2026-06-11 · **Latest released version:** `v0.11.1` · **Branch protection:** `main` (all changes via PR)
 
 Single source of truth for **unimplemented** ideas, deferred work, and known
 limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).
@@ -17,13 +17,11 @@ Severity legend (mirrors the UX/code reviews):
 
 ## In flight
 
-### AWS backend → GA (v0.10.0)
-`v0.10.0-rc.2` is currently soaking. Once soak completes, cut `v0.10.0`. No
-new feature work in this lane — only blockers found during rc soak.
+No active release-soak lane. Implemented-but-unreleased fixes are tracked in
+[`CHANGELOG.md`](./CHANGELOG.md) under `Unreleased`; this roadmap only tracks
+open work.
 
 ---
-
-## Near-term (v0.11.x)
 
 ## Security hardening
 
@@ -31,48 +29,9 @@ Sourced from `docs/code-review-gpt55.md` (GPT-5.5 code review, 2026-05-09).
 Each item names the source file at review time — verify line numbers before
 fixing as code drifts.
 
-> **Resolved in v0.11.0** (PR `fix/p1-path-traversal-url-injection`) — `AzureVaultName` validated type gates all Key Vault URL construction; local backend path components validated via `validate_vault_name()` with containment assertion; cache keys validated and safe-fallback on adversarial input. Unit tests prove rejection and containment for all three surfaces.
->
-> **Resolved in v0.11.0** (PR `fix/p1-local-transactional-secret-writes`) — local secret set/update now stage encrypted payload + metadata to temp files, atomically activate them, then archive the prior version snapshot to prevent archive-then-write data loss on write failure.
->
-> **Resolved in v0.11.0** (PR `fix/p1-symlink-following-writes`) — `write_private()` and `encrypt_to_file()` now use `O_NOFOLLOW` on Unix to refuse symlink following on sensitive writes. Unit tests verify rejection.
->
-> **Resolved in v0.11.0** (PR `docs/p1-upgrade-signature-verification-resolved`) — `xv upgrade` now verifies minisign signatures on release archives before installation. Public key embedded in binary; CI signs all releases. Full design in `docs/superpowers/specs/2026-05-04-upgrade-signature-verification.md`.
-
-### P2 — Local file metadata uses world-readable defaults
-
-> **Resolved in v0.11.0** (PR #222) — Local file metadata now written with 0600 permissions via `write_private`; permissions asserted in tests.
-
-`src/backend/local/files.rs:57`. Switch to `write_private`; assert
-permissions in tests.
-
-### P2 — Single-file blob download lacks traversal guard
-
-> **Resolved in v0.11.0** (PR #223) — Traversal guard added to single-file blob download; multi-download `--output` collision check enforced via shared containment helper.
-
-`src/cli/file_ops.rs:428`. Multi-download `--output` collisions
-(`src/cli/file_ops.rs:1162`). Share the recursive containment helper;
-require `--output` to be a directory for multi-downloads.
-
 ### P2 — Secret rename is non-atomic create + delete
 `src/secret/manager.rs:1959`. Surface recovery plan on partial failure or
 introduce a backend-level rename where APIs allow.
-
-### P2 — ARM resource IDs not URL-encoded
-
-> **Resolved in v0.11.0** (PR #225) — Every segment in ARM resource ID construction is now URL-encoded; wrong-path addressing via malformed names is prevented.
-
-`src/vault/operations.rs:133`. Lower-impact than the Azure URL issue
-(fixed host), but still allows wrong-path addressing. URL-encode every
-segment.
-
-### P2 — Scanner secret values held as plain `String`
-
-> **Resolved in v0.11.0** (PR #224) — Scanner `SecretRef.value` now wrapped in `Zeroizing<String>` end-to-end; engine is dropped promptly after use.
-
-`src/scan/engine.rs:17`, `src/scan/orchestrator.rs:61`. Defeats the
-project's `Zeroizing` posture. Store fetched values in
-`Zeroizing<String>` end-to-end; drop the engine promptly.
 
 ### P2 — Blob downloads buffer entire blob in memory
 `src/blob/manager.rs:393,568,654`. Stream to writer; bound chunk
@@ -85,27 +44,6 @@ Either accept vault per call, or rebuild per operation from resolved vault.
 ### P2 — Azure backend exposes stub list_deleted / backup / restore_from_backup
 `src/backend/azure/secrets.rs:204`. Either align capabilities with what's
 implemented or finish the REST paths.
-
-### P2 — Local soft-delete trash collisions
-
-> **Resolved in Unreleased** — Trash entries are now suffixed with the deletion timestamp (`<encoded_name>@<unix-millis>`), so delete/recreate/delete cycles preserve every deleted snapshot. Same-name+same-timestamp collisions are rejected with a `Conflict` error instead of overwriting. Recover restores the most recent entry; legacy un-suffixed entries remain listable and recoverable; purge removes all snapshots for a name. Unit tests cover the cycle, collision rejection, and legacy-format recovery.
-
-`src/backend/local/secrets.rs:514`. `xv delete <X>`, recreate, delete
-again clobbers prior deleted material. Suffix trash entries with
-deletion timestamp; reject on collision.
-
-### P3 — `--stdin` trims whitespace
-> **Resolved in Unreleased**
-
-`src/cli/secret_ops.rs:51,724`. Corrupts secrets where trailing newlines
-matter. Preserve bytes exactly by default; add explicit `--trim`.
-
-### P3 — No tri-state expiry update
-`src/cli/secret_ops.rs:723`, `src/backend/local/secrets.rs:611`. Can't
-distinguish "leave unchanged" from "clear." Model as
-`Unchanged | Set(T) | Clear` for expiry, not-before, note, folder.
-
-> **Resolved in Unreleased** — `SecretUpdateRequest` now models expiry, not-before, note, and folder as `FieldUpdate<T> { Unchanged, Set(T), Clear }`. CLI gains `--clear-note` / `--clear-folder` alongside the existing `--clear-expires` / `--clear-not-before`; setting and clearing the same field is rejected. Local, Azure, and AWS update paths honor all three states (Azure also stops silently dropping expiry/nbf on unrelated updates, since its update PUT must carry unchanged attributes forward). Round-trip tests on the local backend cover all four fields.
 
 ### P3 — Context files not written via private writer
 `src/config/context.rs:193,348`. Treat as user-private config; share the
@@ -139,12 +77,6 @@ batch with bounded concurrency + retry.
 ### P3 — `stream_and_mask` unbounded line buffer
 `src/cli/secret_ops.rs:2220`. Bounded chunked masking with overlap =
 longest secret length.
-
-### P3 — Env export emits unescaped `KEY=value`
-> **Resolved in Unreleased** — env export now emits POSIX single-quoted values (`KEY='val'`, embedded single quotes escaped as `'\''`); keys that are not valid shell identifiers are skipped with a warning on stderr. Round-trip through `sh` source verified byte-for-byte in tests.
-
-`src/cli/vault_ops.rs:644`. POSIX single-quote escaping or
-dotenv-quoted output; add tests for newlines, `#`, `$`, quotes.
 
 ### P3 — CSV output manually assembled
 `src/utils/format.rs:174`. Use the `csv` crate.
@@ -206,7 +138,7 @@ Each new backend appends to `docs/superpowers/specs/backend-trait-checklist.md`.
 
 ## UX & docs polish
 
-From `docs/UX-REVIEW.md` (2026-05-16, v0.10.0-rc.2 baseline):
+From `docs/UX-REVIEW.md` (2026-05-16 AWS-backend baseline):
 
 ### P2
 - **§P2-1 Top-level framing still says Azure-only.** README hero + `xv --help` intro need an AWS mention.
