@@ -23,6 +23,51 @@ pub(crate) fn use_vault_trait_path(registry: Option<&BackendRegistry>) -> bool {
     registry.is_some_and(|r| r.active().kind() != BackendKind::Azure)
 }
 
+/// Resolve the kind of the backend the user *requested*, from config alone.
+///
+/// Used when no registry exists (backend init failed or was skipped) so that
+/// capability checks still apply to the requested backend instead of silently
+/// falling through to the legacy Azure path. Returns `None` when the name is
+/// not a known backend or named-backend entry.
+pub(crate) fn requested_backend_kind(config: &Config) -> Option<BackendKind> {
+    use crate::config::settings::NamedBackendEntry;
+
+    let name = config.effective_backend_name();
+    if let Some(entry) = config.named_backends.get(name) {
+        return Some(match entry {
+            NamedBackendEntry::Aws(_) => BackendKind::Aws,
+            NamedBackendEntry::Local(_) => BackendKind::Local,
+        });
+    }
+    name.parse().ok()
+}
+
+/// Build the error returned when a share/RBAC operation is attempted on a
+/// backend without RBAC support (`has_rbac: false`).
+///
+/// `operation` is the lowercase noun for the failing surface: "access
+/// sharing" for `xv share`, "vault sharing" for `xv vault share`. AWS points
+/// at the native IAM / resource-policy equivalent; other backends keep the
+/// generic capability message.
+pub(crate) fn share_unsupported_error(
+    kind: BackendKind,
+    backend_name: &str,
+    operation: &str,
+) -> CrosstacheError {
+    match kind {
+        BackendKind::Aws => CrosstacheError::invalid_argument(format!(
+            "{operation} is not supported on the {backend_name} backend: AWS Secrets Manager \
+             manages access through IAM rather than vault RBAC.\n\
+             Grant access with a secret resource policy or an IAM policy instead, e.g.:\n  \
+             aws secretsmanager put-resource-policy --secret-id <secret-name> --resource-policy file://policy.json\n  \
+             aws iam attach-user-policy --user-name <user-name> --policy-arn <policy-arn>"
+        )),
+        _ => CrosstacheError::invalid_argument(format!(
+            "The {backend_name} backend does not support {operation}. Use the azure backend for RBAC."
+        )),
+    }
+}
+
 /// Resolve the vault name for the active backend trait path.
 ///
 /// Azure keeps the legacy resolver semantics: no implicit fallback is allowed,
@@ -437,4 +482,57 @@ pub(crate) fn mask_secrets(text: &str, secrets: &[Zeroizing<String>]) -> String 
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aws_share_error_names_backend_and_suggests_iam() {
+        let err = share_unsupported_error(BackendKind::Aws, "aws", "access sharing");
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("aws"), "should name the backend: {msg}");
+        assert!(msg.contains("not supported"), "{msg}");
+        assert!(
+            msg.contains("aws secretsmanager put-resource-policy"),
+            "should include a resource-policy example: {msg}"
+        );
+        assert!(
+            msg.contains("aws iam"),
+            "should include an IAM example: {msg}"
+        );
+    }
+
+    #[test]
+    fn aws_vault_share_error_names_operation() {
+        let err = share_unsupported_error(BackendKind::Aws, "aws", "vault sharing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("vault sharing is not supported on the aws backend"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("aws secretsmanager put-resource-policy"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn non_aws_share_error_keeps_generic_message() {
+        let err = share_unsupported_error(BackendKind::Local, "local", "access sharing");
+        assert_eq!(
+            err.to_string(),
+            "Invalid argument: The local backend does not support access sharing. \
+             Use the azure backend for RBAC."
+        );
+
+        let err = share_unsupported_error(BackendKind::Azure, "azure", "vault sharing");
+        assert_eq!(
+            err.to_string(),
+            "Invalid argument: The azure backend does not support vault sharing. \
+             Use the azure backend for RBAC."
+        );
+    }
 }

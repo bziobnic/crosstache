@@ -106,13 +106,13 @@ mod tests {
 
     #[test]
     fn validate_secret_name_rejects_reserved() {
-        assert!(matches!(validate_secret_name(".xv-vault"), Err(_)));
-        assert!(matches!(validate_secret_name(".xv-anything"), Err(_)));
+        assert!(validate_secret_name(".xv-vault").is_err());
+        assert!(validate_secret_name(".xv-anything").is_err());
     }
 
     #[test]
     fn validate_secret_name_rejects_empty() {
-        assert!(matches!(validate_secret_name(""), Err(_)));
+        assert!(validate_secret_name("").is_err());
     }
 
     #[test]

@@ -6,6 +6,7 @@
 pub const TAG_ORIGINAL_NAME: &str = "xv:original_name";
 pub const TAG_GROUPS: &str = "xv:groups";
 pub const TAG_FOLDER: &str = "xv:folder";
+#[allow(dead_code)] // reserved xv: tag key; exercised by the round-trip tests only
 pub const TAG_CREATED_BY: &str = "xv:created_by";
 pub const TAG_CONTENT_TYPE: &str = "xv:content_type";
 pub const TAG_EXPIRES_AT: &str = "xv:expires_at";
@@ -62,7 +63,8 @@ mod tests {
         folder: Option<String>,
         created_by: Option<String>,
         content_type: Option<String>,
-        note: Option<String>, // -> AWS Description, not a tag
+        #[allow(dead_code)] // -> AWS Description, not a tag; never decoded back
+        note: Option<String>,
         expires_at: Option<String>,
         user_tags: HashMap<String, String>,
     }

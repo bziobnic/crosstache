@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use crosstache::backend::aws::AwsBackend;
-use crosstache::backend::{Backend, SecretBackend, VaultBackend};
+use crosstache::backend::Backend;
 use crosstache::config::settings::AwsConfig;
 use crosstache::secret::manager::SecretRequest;
 use zeroize::Zeroizing;

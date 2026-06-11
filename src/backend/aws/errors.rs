@@ -260,7 +260,7 @@ mod tests {
     use aws_smithy_runtime_api::client::result::ConnectorError;
 
     fn make_user_dispatch_failure() -> SdkError<ListSecretsError, HttpResponse> {
-        let inner = std::io::Error::new(std::io::ErrorKind::Other, "no credentials in chain");
+        let inner = std::io::Error::other("no credentials in chain");
         SdkError::dispatch_failure(ConnectorError::user(Box::new(inner)))
     }
 
@@ -301,10 +301,7 @@ mod tests {
         // Build a non-user DispatchFailure carrying an inner error whose
         // Display contains a credential-provider hint. `ConnectorError::io`
         // does not set the user flag.
-        let inner = std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "CredentialsNotLoaded: failed to load credentials",
-        );
+        let inner = std::io::Error::other("CredentialsNotLoaded: failed to load credentials");
         let sdk: SdkError<ListSecretsError, HttpResponse> =
             SdkError::dispatch_failure(ConnectorError::io(Box::new(inner)));
         let err = from_list(sdk);

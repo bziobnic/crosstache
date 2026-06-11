@@ -4,7 +4,7 @@ use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, ShareCommands};
 use crate::cli::helpers::{
     copy_to_clipboard, generate_random_value, get_azure_auth_provider, mask_secrets,
-    resolve_vault_for_trait, schedule_clipboard_clear, use_trait_path,
+    resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error, use_trait_path,
 };
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
@@ -1249,14 +1249,26 @@ pub(crate) async fn execute_secret_share_direct(
     use crate::auth::provider::AzureAuthProvider;
     use crate::vault::manager::VaultManager;
 
-    // Capability check: sharing requires RBAC support
+    // Capability check: sharing requires RBAC support. When the registry is
+    // missing (the requested backend failed to initialize), resolve the
+    // requested backend from config so non-RBAC backends still get the
+    // capability hint instead of silently using the legacy Azure path.
     if let Some(registry) = registry {
-        let caps = registry.active().capabilities();
-        if !caps.has_rbac {
-            return Err(CrosstacheError::InvalidArgument(format!(
-                "The {} backend does not support access sharing. Use the azure backend for RBAC.",
-                registry.active().name()
-            )));
+        let active = registry.active();
+        if !active.capabilities().has_rbac {
+            return Err(share_unsupported_error(
+                active.kind(),
+                active.name(),
+                "access sharing",
+            ));
+        }
+    } else if let Some(kind) = crate::cli::helpers::requested_backend_kind(&config) {
+        if kind != BackendKind::Azure {
+            return Err(share_unsupported_error(
+                kind,
+                config.effective_backend_name(),
+                "access sharing",
+            ));
         }
     }
 
@@ -3912,6 +3924,12 @@ mod tests {
                 kind: BackendKind::Local,
             }
         }
+
+        fn aws() -> Self {
+            Self {
+                kind: BackendKind::Aws,
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -4125,6 +4143,126 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved, "local-vault");
+    }
+
+    #[tokio::test]
+    async fn aws_share_grant_returns_capability_hint() {
+        let registry = BackendRegistry::new(Arc::new(TestBackend::aws()));
+        let config = Config {
+            backend: Some("aws".to_string()),
+            ..Default::default()
+        };
+
+        let err = execute_secret_share_direct(
+            ShareCommands::Grant {
+                secret_name: "api-key".to_string(),
+                user: "user@example.com".to_string(),
+                level: "read".to_string(),
+            },
+            config,
+            Some(&registry),
+        )
+        .await
+        .expect_err("share grant on aws must be rejected");
+
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("aws"), "should name the backend: {msg}");
+        assert!(msg.contains("not supported"), "{msg}");
+        assert!(
+            msg.contains("aws secretsmanager put-resource-policy"),
+            "should suggest the native equivalent: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn aws_share_list_returns_capability_hint() {
+        let registry = BackendRegistry::new(Arc::new(TestBackend::aws()));
+        let config = Config {
+            backend: Some("aws".to_string()),
+            ..Default::default()
+        };
+
+        let err = execute_secret_share_direct(
+            ShareCommands::List {
+                secret_name: "api-key".to_string(),
+                all: false,
+                page: None,
+                page_size: None,
+                pager: false,
+            },
+            config,
+            Some(&registry),
+        )
+        .await
+        .expect_err("share list on aws must be rejected");
+
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("aws"), "should name the backend: {msg}");
+        assert!(msg.contains("not supported"), "{msg}");
+        assert!(
+            msg.contains("aws secretsmanager put-resource-policy"),
+            "should suggest the native equivalent: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_share_error_message_unchanged() {
+        let registry = BackendRegistry::new(Arc::new(TestBackend::local()));
+        let config = Config {
+            backend: Some("local".to_string()),
+            ..Default::default()
+        };
+
+        let err = execute_secret_share_direct(
+            ShareCommands::Revoke {
+                secret_name: "api-key".to_string(),
+                user: "user@example.com".to_string(),
+            },
+            config,
+            Some(&registry),
+        )
+        .await
+        .expect_err("share revoke on local must be rejected");
+
+        assert_eq!(
+            err.to_string(),
+            "Invalid argument: The local backend does not support access sharing. \
+             Use the azure backend for RBAC."
+        );
+    }
+
+    /// When `--backend aws` is requested but backend init failed (e.g. no
+    /// `[aws]` config block), the registry is `None`. Share must still return
+    /// the capability hint rather than fall through to the Azure path.
+    #[tokio::test]
+    async fn aws_share_without_registry_still_returns_capability_hint() {
+        let config = Config {
+            backend: Some("aws".to_string()),
+            ..Default::default()
+        };
+
+        let err = execute_secret_share_direct(
+            ShareCommands::Grant {
+                secret_name: "api-key".to_string(),
+                user: "user@example.com".to_string(),
+                level: "read".to_string(),
+            },
+            config,
+            None,
+        )
+        .await
+        .expect_err("share grant on aws without a registry must be rejected");
+
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("aws"), "should name the backend: {msg}");
+        assert!(msg.contains("not supported"), "{msg}");
+        assert!(
+            msg.contains("aws secretsmanager put-resource-policy"),
+            "should suggest the native equivalent: {msg}"
+        );
     }
 
     #[test]
