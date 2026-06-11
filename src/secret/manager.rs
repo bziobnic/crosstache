@@ -435,6 +435,190 @@ async fn read_error_body(response: reqwest::Response) -> String {
         .unwrap_or_else(|e| format!("(failed to read error body: {e})"))
 }
 
+/// Parse one entry of a `GET /deletedsecrets` response page into a
+/// [`SecretSummary`].
+///
+/// Deleted secret items carry the original secret `id`
+/// (`https://<vault>.vault.azure.net/secrets/<name>`) alongside their
+/// attributes and tags, so the summary can be built without a follow-up
+/// `get_secret` call (which would 404 for a deleted secret anyway).
+/// Returns `None` when the entry has no usable `id`.
+fn parse_deleted_secret_summary(item: &serde_json::Value) -> Option<SecretSummary> {
+    let id = item.get("id").and_then(|v| v.as_str())?;
+    let name = id.rsplit('/').next().unwrap_or(id).to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    let attributes = item.get("attributes").unwrap_or(&serde_json::Value::Null);
+    let enabled = attributes
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let updated_on = attributes
+        .get("updated")
+        .and_then(|v| v.as_i64())
+        .map(|ts| {
+            chrono::DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+        })
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let mut tags = HashMap::new();
+    if let Some(tags_obj) = item.get("tags").and_then(|v| v.as_object()) {
+        for (key, value) in tags_obj {
+            if let Some(tag_value) = value.as_str() {
+                tags.insert(key.clone(), tag_value.to_string());
+            }
+        }
+    }
+
+    let original_name = tags
+        .get("original_name")
+        .or_else(|| tags.get("name"))
+        .cloned()
+        .unwrap_or_else(|| name.clone());
+    let groups = tags
+        .get("groups")
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty());
+
+    Some(SecretSummary {
+        name: original_name.clone(),
+        original_name,
+        note: tags.get("note").cloned(),
+        folder: tags.get("folder").cloned(),
+        groups,
+        updated_on,
+        enabled,
+        content_type: item
+            .get("contentType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text/plain")
+            .to_string(),
+    })
+}
+
+/// Extract the raw backup bytes from a `POST /secrets/{name}/backup` response.
+///
+/// Azure returns the backup blob as a base64url-encoded string (RFC 4648 §5)
+/// in the `value` field; padding may be absent.
+fn decode_backup_value(json: &serde_json::Value) -> Result<Vec<u8>> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let value = json
+        .get("value")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CrosstacheError::azure_api("Backup response missing 'value' field"))?;
+    URL_SAFE_NO_PAD
+        .decode(value.trim_end_matches('='))
+        .map_err(|e| CrosstacheError::azure_api(format!("Failed to decode backup payload: {e}")))
+}
+
+/// Build the JSON body for `POST /secrets/restore` from raw backup bytes.
+///
+/// The inverse of [`decode_backup_value`]: Azure expects the blob re-encoded
+/// as base64url in the `value` field.
+fn build_restore_request_body(backup_data: &[u8]) -> serde_json::Value {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    serde_json::json!({ "value": URL_SAFE_NO_PAD.encode(backup_data) })
+}
+
+/// Parse the secret bundle returned by `POST /secrets/restore` into
+/// [`SecretProperties`].
+///
+/// The bundle `id` looks like
+/// `https://<vault>.vault.azure.net/secrets/<name>/<version>`; the restore
+/// response never includes the secret value.
+fn parse_restored_secret_properties(json: &serde_json::Value) -> Result<SecretProperties> {
+    let id = json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CrosstacheError::azure_api("Restore response missing secret 'id' field"))?;
+    let mut segments = id.rsplit('/');
+    let version = segments.next().unwrap_or("").to_string();
+    let name = segments.next().unwrap_or("").to_string();
+    if name.is_empty() {
+        return Err(CrosstacheError::azure_api(format!(
+            "Restore response contained unexpected secret id '{id}'"
+        )));
+    }
+
+    let attributes = json.get("attributes").unwrap_or(&serde_json::Value::Null);
+    let enabled = attributes
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let created_ts = attributes
+        .get("created")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let created_on = if created_ts > 0 {
+        chrono::DateTime::from_timestamp(created_ts, 0)
+            .map(|dt| dt.to_string())
+            .unwrap_or_else(|| "Unknown".to_string())
+    } else {
+        "Unknown".to_string()
+    };
+    let updated_on = attributes
+        .get("updated")
+        .and_then(|v| v.as_i64())
+        .map(|ts| {
+            chrono::DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+        })
+        .unwrap_or_else(|| "Unknown".to_string());
+    let expires_on = attributes
+        .get("exp")
+        .and_then(|v| v.as_i64())
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+    let not_before = attributes
+        .get("nbf")
+        .and_then(|v| v.as_i64())
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+    let recovery_level = attributes
+        .get("recoveryLevel")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let mut tags = HashMap::new();
+    if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
+        for (key, value) in tags_obj {
+            if let Some(tag_value) = value.as_str() {
+                tags.insert(key.clone(), tag_value.to_string());
+            }
+        }
+    }
+
+    let original_name = tags
+        .get("original_name")
+        .or_else(|| tags.get("name"))
+        .cloned()
+        .unwrap_or_else(|| name.clone());
+
+    Ok(SecretProperties {
+        name,
+        original_name,
+        value: None, // Restore operation doesn't return the secret value
+        version,
+        created_on,
+        updated_on,
+        enabled,
+        expires_on,
+        not_before,
+        tags,
+        content_type: json
+            .get("contentType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text/plain")
+            .to_string(),
+        version_number: None,
+        created_timestamp: created_ts,
+        recovery_level,
+    })
+}
+
 #[async_trait]
 impl SecretOperations for AzureSecretOperations {
     async fn set_secret(
@@ -1195,12 +1379,78 @@ impl SecretOperations for AzureSecretOperations {
     }
 
     async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<SecretSummary>> {
-        let _client = self.create_secret_client(vault_name).await?;
+        let vault_name = self.validated_vault_name(vault_name)?;
 
-        // Placeholder implementation
-        Err(CrosstacheError::azure_api(
-            "Secret operations not yet fully implemented for Azure SDK v0.20",
-        ))
+        // Use REST API to list soft-deleted secrets
+        let list_url = self.key_vault_api_url(&vault_name, &["deletedsecrets"])?;
+
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+
+        let mut summaries = Vec::new();
+        let mut next_url: Option<String> = Some(list_url);
+        let mut page_count: usize = 0;
+
+        while let Some(current_url) = next_url.take() {
+            page_count += 1;
+            if page_count > crate::utils::MAX_PAGES {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Pagination exceeded maximum of {} pages",
+                    crate::utils::MAX_PAGES
+                )));
+            }
+
+            let response = client
+                .get(&current_url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map_err(|e| classify_network_error(&e, &current_url))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = read_error_body(response).await;
+                return Err(CrosstacheError::azure_api(format!(
+                    "Failed to list deleted secrets: HTTP {status} - {error_text}"
+                )));
+            }
+
+            let json: serde_json::Value =
+                read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
+
+            if let Some(values) = json.get("value").and_then(|v| v.as_array()) {
+                for item in values {
+                    if let Some(summary) = parse_deleted_secret_summary(item) {
+                        summaries.push(summary);
+                    }
+                }
+            }
+
+            // Follow pagination nextLink if present
+            next_url = json
+                .get("nextLink")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+
+        // Sort by name for consistent output
+        summaries.sort_by(|a, b| a.original_name.cmp(&b.original_name));
+
+        Ok(summaries)
     }
 
     async fn secret_exists(&self, vault_name: &str, secret_name: &str) -> Result<bool> {
@@ -1381,26 +1631,117 @@ impl SecretOperations for AzureSecretOperations {
     }
 
     async fn backup_secret(&self, vault_name: &str, secret_name: &str) -> Result<Vec<u8>> {
-        let _client = self.create_secret_client(vault_name).await?;
-        let _sanitized_name = sanitize_secret_name(secret_name)?;
+        let vault_name = self.validated_vault_name(vault_name)?;
+        let sanitized_name = sanitize_secret_name(secret_name)?;
 
-        // Placeholder implementation
-        Err(CrosstacheError::azure_api(
-            "Secret operations not yet fully implemented for Azure SDK v0.20",
-        ))
+        // Use REST API to download a protected backup of the secret
+        let backup_url =
+            self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name, "backup"])?;
+
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+
+        // Make the REST API call to back up the secret
+        let response = client
+            .post(&backup_url)
+            .headers(headers)
+            .json(&serde_json::json!({})) // Empty JSON body to satisfy Content-Length requirement
+            .send()
+            .await
+            .map_err(|e| classify_network_error(&e, &backup_url))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            if status == 404 {
+                return Err(CrosstacheError::SecretNotFound {
+                    name: secret_name.to_string(),
+                    suggestion: None,
+                });
+            }
+            let error_text = read_error_body(response).await;
+            return Err(CrosstacheError::azure_api(format!(
+                "Failed to backup secret: HTTP {status} - {error_text}"
+            )));
+        }
+
+        // Parse the response and decode the base64url backup blob
+        let json: serde_json::Value =
+            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
+
+        decode_backup_value(&json)
     }
 
     async fn restore_secret_from_backup(
         &self,
         vault_name: &str,
-        _backup_data: &[u8],
+        backup_data: &[u8],
     ) -> Result<SecretProperties> {
-        let _client = self.create_secret_client(vault_name).await?;
+        let vault_name = self.validated_vault_name(vault_name)?;
 
-        // Placeholder implementation
-        Err(CrosstacheError::azure_api(
-            "Secret operations not yet fully implemented for Azure SDK v0.20",
-        ))
+        // Use REST API to restore a secret from a protected backup blob
+        let restore_url = self.key_vault_api_url(&vault_name, &["secrets", "restore"])?;
+
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+
+        // Make the REST API call to restore the secret from the backup
+        let response = client
+            .post(&restore_url)
+            .headers(headers)
+            .json(&build_restore_request_body(backup_data))
+            .send()
+            .await
+            .map_err(|e| classify_network_error(&e, &restore_url))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = read_error_body(response).await;
+            return Err(CrosstacheError::azure_api(format!(
+                "Failed to restore secret from backup: HTTP {status} - {error_text}"
+            )));
+        }
+
+        // Parse the response to get the restored secret properties
+        let json: serde_json::Value =
+            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
+
+        parse_restored_secret_properties(&json)
     }
 }
 
@@ -2421,5 +2762,208 @@ mod tests {
             ["legacy-name".to_string()]
         );
         assert!(ops.purge_attempts.lock().unwrap().is_empty());
+    }
+
+    fn test_ops() -> AzureSecretOperations {
+        AzureSecretOperations::new(Arc::new(
+            crate::auth::provider::DefaultAzureCredentialProvider::new().unwrap(),
+        ))
+    }
+
+    #[test]
+    fn test_deleted_backup_restore_url_construction() {
+        let ops = test_ops();
+        let vault = ops.validated_vault_name("myvault").unwrap();
+
+        assert_eq!(
+            ops.key_vault_api_url(&vault, &["deletedsecrets"]).unwrap(),
+            "https://myvault.vault.azure.net/deletedsecrets?api-version=7.4"
+        );
+        assert_eq!(
+            ops.key_vault_api_url(&vault, &["secrets", "my-secret", "backup"])
+                .unwrap(),
+            "https://myvault.vault.azure.net/secrets/my-secret/backup?api-version=7.4"
+        );
+        assert_eq!(
+            ops.key_vault_api_url(&vault, &["secrets", "restore"])
+                .unwrap(),
+            "https://myvault.vault.azure.net/secrets/restore?api-version=7.4"
+        );
+    }
+
+    #[test]
+    fn test_parse_deleted_secret_summary_full() {
+        let item = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/my-secret",
+            "recoveryId": "https://myvault.vault.azure.net/deletedsecrets/my-secret",
+            "deletedDate": 1_700_000_100,
+            "scheduledPurgeDate": 1_707_776_100,
+            "contentType": "application/json",
+            "attributes": {
+                "enabled": false,
+                "created": 1_700_000_000,
+                "updated": 1_700_000_050,
+                "recoveryLevel": "Recoverable+Purgeable"
+            },
+            "tags": {
+                "original_name": "My Secret",
+                "groups": "alpha,beta",
+                "note": "a note",
+                "folder": "apps/web"
+            }
+        });
+
+        let summary = parse_deleted_secret_summary(&item).unwrap();
+        assert_eq!(summary.name, "My Secret");
+        assert_eq!(summary.original_name, "My Secret");
+        assert_eq!(summary.note.as_deref(), Some("a note"));
+        assert_eq!(summary.folder.as_deref(), Some("apps/web"));
+        assert_eq!(summary.groups.as_deref(), Some("alpha,beta"));
+        assert!(!summary.enabled);
+        assert_eq!(summary.content_type, "application/json");
+        assert_eq!(
+            summary.updated_on,
+            chrono::DateTime::from_timestamp(1_700_000_050, 0)
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn test_parse_deleted_secret_summary_minimal() {
+        let item = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/bare-secret"
+        });
+
+        let summary = parse_deleted_secret_summary(&item).unwrap();
+        assert_eq!(summary.name, "bare-secret");
+        assert_eq!(summary.original_name, "bare-secret");
+        assert_eq!(summary.note, None);
+        assert_eq!(summary.folder, None);
+        assert_eq!(summary.groups, None);
+        assert!(summary.enabled);
+        assert_eq!(summary.content_type, "text/plain");
+        assert_eq!(summary.updated_on, "Unknown");
+    }
+
+    #[test]
+    fn test_parse_deleted_secret_summary_legacy_name_tag_and_empty_groups() {
+        let item = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/legacy",
+            "tags": { "name": "Legacy Name", "groups": "   " }
+        });
+
+        let summary = parse_deleted_secret_summary(&item).unwrap();
+        assert_eq!(summary.name, "Legacy Name");
+        // Whitespace-only groups tag is treated as no groups
+        assert_eq!(summary.groups, None);
+    }
+
+    #[test]
+    fn test_parse_deleted_secret_summary_missing_id() {
+        assert!(parse_deleted_secret_summary(&serde_json::json!({})).is_none());
+        assert!(parse_deleted_secret_summary(&serde_json::json!({ "id": 42 })).is_none());
+        assert!(parse_deleted_secret_summary(&serde_json::json!({ "id": "" })).is_none());
+    }
+
+    #[test]
+    fn test_decode_backup_value_roundtrip() {
+        let original: Vec<u8> = (0u8..=255).collect();
+        let body = build_restore_request_body(&original);
+        // The restore body re-encodes exactly what backup decoded
+        let decoded = decode_backup_value(&body).unwrap();
+        assert_eq!(decoded, original);
+        // Encoded value is base64url (no '+', '/', or '=')
+        let encoded = body.get("value").unwrap().as_str().unwrap();
+        assert!(!encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='));
+    }
+
+    #[test]
+    fn test_decode_backup_value_accepts_padding() {
+        // base64url of [0, 1, 2, 3]; Azure may or may not include padding
+        let unpadded = serde_json::json!({ "value": "AAECAw" });
+        let padded = serde_json::json!({ "value": "AAECAw==" });
+        assert_eq!(decode_backup_value(&unpadded).unwrap(), vec![0, 1, 2, 3]);
+        assert_eq!(decode_backup_value(&padded).unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_decode_backup_value_errors() {
+        // Missing value field
+        let err = decode_backup_value(&serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("missing 'value'"), "{err}");
+
+        // Invalid base64url payload
+        let err = decode_backup_value(&serde_json::json!({ "value": "!!!" })).unwrap_err();
+        assert!(err.to_string().contains("Failed to decode"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_restored_secret_properties_full() {
+        let json = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/my-secret/abc123def456",
+            "contentType": "application/json",
+            "attributes": {
+                "enabled": true,
+                "created": 1_700_000_000,
+                "updated": 1_700_000_050,
+                "exp": 1_800_000_000,
+                "nbf": 1_600_000_000,
+                "recoveryLevel": "Recoverable"
+            },
+            "tags": {
+                "original_name": "My Secret",
+                "groups": "alpha"
+            }
+        });
+
+        let props = parse_restored_secret_properties(&json).unwrap();
+        assert_eq!(props.name, "my-secret");
+        assert_eq!(props.original_name, "My Secret");
+        assert_eq!(props.version, "abc123def456");
+        assert!(props.value.is_none());
+        assert!(props.enabled);
+        assert_eq!(props.created_timestamp, 1_700_000_000);
+        assert_eq!(
+            props.expires_on,
+            chrono::DateTime::from_timestamp(1_800_000_000, 0)
+        );
+        assert_eq!(
+            props.not_before,
+            chrono::DateTime::from_timestamp(1_600_000_000, 0)
+        );
+        assert_eq!(props.content_type, "application/json");
+        assert_eq!(props.recovery_level.as_deref(), Some("Recoverable"));
+        assert_eq!(props.tags.get("groups").map(String::as_str), Some("alpha"));
+    }
+
+    #[test]
+    fn test_parse_restored_secret_properties_minimal() {
+        let json = serde_json::json!({
+            "id": "https://myvault.vault.azure.net/secrets/plain/v1"
+        });
+
+        let props = parse_restored_secret_properties(&json).unwrap();
+        assert_eq!(props.name, "plain");
+        assert_eq!(props.original_name, "plain");
+        assert_eq!(props.version, "v1");
+        assert!(props.enabled);
+        assert_eq!(props.created_on, "Unknown");
+        assert_eq!(props.updated_on, "Unknown");
+        assert_eq!(props.expires_on, None);
+        assert_eq!(props.not_before, None);
+        assert_eq!(props.content_type, "text/plain");
+    }
+
+    #[test]
+    fn test_parse_restored_secret_properties_errors() {
+        // Missing id entirely
+        let err = parse_restored_secret_properties(&serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("missing secret 'id'"), "{err}");
+
+        // Id without enough path segments to carry a secret name
+        let err =
+            parse_restored_secret_properties(&serde_json::json!({ "id": "abc" })).unwrap_err();
+        assert!(err.to_string().contains("unexpected secret id"), "{err}");
     }
 }
