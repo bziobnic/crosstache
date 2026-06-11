@@ -3,7 +3,7 @@
 use crate::auth::provider::AzureAuthProvider;
 use crate::backend::BackendRegistry;
 use crate::cli::commands::{VaultCommands, VaultShareCommands};
-use crate::cli::helpers::{get_azure_auth_provider, use_vault_trait_path};
+use crate::cli::helpers::{get_azure_auth_provider, share_unsupported_error, use_vault_trait_path};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
@@ -22,6 +22,20 @@ pub(crate) async fn execute_vault_command(
     // the legacy VaultManager path below.
     if use_vault_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
+
+        // Capability check: `vault share` needs RBAC, not vault CRUD, so it
+        // is answered before resolving general vault support.
+        if let VaultCommands::Share { .. } = command {
+            let active = reg.active();
+            if !active.capabilities().has_rbac {
+                return Err(share_unsupported_error(
+                    active.kind(),
+                    active.name(),
+                    "vault sharing",
+                ));
+            }
+        }
+
         let vaults_backend = reg.active().vaults().ok_or_else(|| {
             CrosstacheError::InvalidArgument(format!(
                 "The {} backend does not support vault operations.",
@@ -114,7 +128,8 @@ pub(crate) async fn execute_vault_command(
             }
             _other => {
                 // Commands not yet supported on non-Azure backends
-                // (Restore, Purge, Export, Import, Update, Share)
+                // (Restore, Purge, Export, Import, Update; Share is answered
+                // by the RBAC capability check above)
                 return Err(CrosstacheError::InvalidArgument(format!(
                     "The {} backend does not support this vault command yet.",
                     reg.active().name(),
@@ -263,14 +278,26 @@ pub(crate) async fn execute_vault_command(
             vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Share { command } => {
-            // Capability check: vault sharing requires RBAC support
+            // Capability check: vault sharing requires RBAC support. With no
+            // registry (requested backend failed to initialize), resolve the
+            // requested backend from config so non-RBAC backends still get
+            // the capability hint instead of the legacy Azure path.
             if let Some(registry) = registry {
-                let caps = registry.active().capabilities();
-                if !caps.has_rbac {
-                    return Err(CrosstacheError::InvalidArgument(format!(
-                        "The {} backend does not support vault sharing. Use the azure backend for RBAC.",
-                        registry.active().name()
-                    )));
+                let active = registry.active();
+                if !active.capabilities().has_rbac {
+                    return Err(share_unsupported_error(
+                        active.kind(),
+                        active.name(),
+                        "vault sharing",
+                    ));
+                }
+            } else if let Some(kind) = crate::cli::helpers::requested_backend_kind(&config) {
+                if kind != crate::backend::BackendKind::Azure {
+                    return Err(share_unsupported_error(
+                        kind,
+                        config.effective_backend_name(),
+                        "vault sharing",
+                    ));
                 }
             }
             execute_vault_share(&vault_manager, &auth_provider, command, &config).await?;
