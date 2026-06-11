@@ -8,13 +8,15 @@ use crate::backend::aws::config::AwsConfig;
 use crate::backend::error::BackendError;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 
-/// Build a `SecretsManagerClient` from the resolved `AwsConfig` plus
+/// Load the shared AWS `SdkConfig` from the resolved `AwsConfig` plus
 /// per-invocation overrides (region, profile from CLI flags or env vars).
-pub async fn build_client(
+/// Service clients (Secrets Manager, CloudTrail) are built from this one
+/// config so they share credentials, region, and endpoint settings.
+pub async fn load_sdk_config(
     aws_cfg: &AwsConfig,
     region_override: Option<String>,
     profile_override: Option<String>,
-) -> Result<SecretsManagerClient, BackendError> {
+) -> Result<aws_config::SdkConfig, BackendError> {
     let region = region_override
         .or_else(|| aws_cfg.region.clone())
         .or_else(|| std::env::var("AWS_REGION").ok())
@@ -39,6 +41,17 @@ pub async fn build_client(
         }
     }
 
-    let sdk_config = loader.load().await;
+    Ok(loader.load().await)
+}
+
+/// Build a `SecretsManagerClient` from the resolved `AwsConfig` plus
+/// per-invocation overrides (region, profile from CLI flags or env vars).
+#[allow(dead_code)] // Convenience wrapper retained for callers that need only Secrets Manager.
+pub async fn build_client(
+    aws_cfg: &AwsConfig,
+    region_override: Option<String>,
+    profile_override: Option<String>,
+) -> Result<SecretsManagerClient, BackendError> {
+    let sdk_config = load_sdk_config(aws_cfg, region_override, profile_override).await?;
     Ok(SecretsManagerClient::new(&sdk_config))
 }
