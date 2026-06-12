@@ -6,6 +6,7 @@
 
 use crate::backend::aws::config::AwsConfig;
 use crate::backend::error::BackendError;
+use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 
 /// Load the shared AWS `SdkConfig` from the resolved `AwsConfig` plus
 /// per-invocation overrides (region, profile from CLI flags or env vars).

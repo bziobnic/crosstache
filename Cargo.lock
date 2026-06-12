@@ -443,6 +443,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-cloudtrail"
+version = "1.107.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd81ebaf83622705249d1e935a6d37f275e6ab27cf78e595fa94300297abefb9"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand 2.4.1",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.119.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1670,6 +1694,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "aws-config",
+ "aws-sdk-cloudtrail",
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
  "aws-smithy-mocks-experimental",
