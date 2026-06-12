@@ -174,8 +174,9 @@ fn normalize_secret_id(id: &str) -> Option<String> {
 }
 
 /// Resolve the full (vault-prefixed) secret name an event refers to, trying
-/// the event's resource list first, then `requestParameters.secretId` from
-/// the raw CloudTrail record.
+/// the event's resource list first, then `requestParameters.secretId`, then
+/// `requestParameters.name` (CloudTrail logs `CreateSecret` with `name`
+/// rather than `secretId`) from the raw CloudTrail record.
 fn full_secret_name(event: &Event, raw: &serde_json::Value) -> Option<String> {
     for resource in event.resources() {
         if resource.resource_type() != Some("AWS::SecretsManager::Secret") {
@@ -185,9 +186,10 @@ fn full_secret_name(event: &Event, raw: &serde_json::Value) -> Option<String> {
             return Some(name);
         }
     }
-    raw.get("requestParameters")
-        .and_then(|p| p.get("secretId"))
-        .and_then(|v| v.as_str())
+    let params = raw.get("requestParameters")?;
+    ["secretId", "name"]
+        .iter()
+        .find_map(|key| params.get(key).and_then(|v| v.as_str()))
         .and_then(normalize_secret_id)
 }
 
@@ -396,6 +398,24 @@ mod tests {
             .cloud_trail_event(r#"{"eventName":"ListSecrets"}"#)
             .build();
         assert!(map_event(&event, VAULT, None).is_none());
+    }
+
+    #[test]
+    fn map_event_falls_back_to_request_parameters_name() {
+        // CreateSecret logs requestParameters.name (not secretId); with no
+        // resources list the name fallback must still resolve the secret.
+        let raw = format!(
+            r#"{{"eventName":"CreateSecret","requestParameters":{{"name":"{VAULT}/db-password"}},"userIdentity":{{"arn":"arn:aws:iam::123456789012:user/alice"}}}}"#
+        );
+        let event = Event::builder()
+            .event_id("evt-create")
+            .event_name("CreateSecret")
+            .event_time(AwsDateTime::from_secs(1_780_000_000))
+            .cloud_trail_event(raw)
+            .build();
+        let row = map_event(&event, VAULT, None).expect("CreateSecret event should map");
+        assert_eq!(row.resource_name, "db-password");
+        assert_eq!(row.operation, "CreateSecret");
     }
 
     #[test]
