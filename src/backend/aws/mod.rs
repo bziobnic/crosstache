@@ -1,5 +1,6 @@
 //! AWS Secrets Manager backend.
 
+pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod encoding;
@@ -13,14 +14,17 @@ use std::sync::Arc;
 
 use crate::backend::error::BackendError;
 use crate::backend::{
-    Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend, VaultBackend,
+    AuditBackend, Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend,
+    VaultBackend,
 };
 use crate::config::settings::AwsConfig;
+use aws_sdk_cloudtrail::Client as CloudTrailClient;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 
 pub struct AwsBackend {
     secrets_impl: Arc<secrets::AwsSecretBackend>,
     vaults_impl: Arc<vaults::AwsVaultBackend>,
+    audit_impl: Arc<audit::AwsAuditBackend>,
 }
 
 impl AwsBackend {
@@ -31,12 +35,13 @@ impl AwsBackend {
         region_override: Option<String>,
         profile_override: Option<String>,
     ) -> Result<Self, BackendError> {
-        let client: SecretsManagerClient =
-            auth::build_client(aws_cfg, region_override, profile_override).await?;
-        let client = Arc::new(client);
+        let sdk_config = auth::load_sdk_config(aws_cfg, region_override, profile_override).await?;
+        let client = Arc::new(SecretsManagerClient::new(&sdk_config));
+        let cloudtrail = Arc::new(CloudTrailClient::new(&sdk_config));
         Ok(Self {
             secrets_impl: Arc::new(secrets::AwsSecretBackend::new(client.clone())),
             vaults_impl: Arc::new(vaults::AwsVaultBackend::new(client)),
+            audit_impl: Arc::new(audit::AwsAuditBackend::new(cloudtrail)),
         })
     }
 }
@@ -56,7 +61,7 @@ impl Backend for AwsBackend {
             has_vaults: true,
             has_file_storage: false,
             has_rbac: false,
-            has_audit: false,
+            has_audit: true,
             has_versioning: true,
             has_soft_delete: true,
             has_secret_rotation: true,
@@ -76,6 +81,10 @@ impl Backend for AwsBackend {
 
     fn vaults(&self) -> Option<&dyn VaultBackend> {
         Some(self.vaults_impl.as_ref())
+    }
+
+    fn audit(&self) -> Option<&dyn AuditBackend> {
+        Some(self.audit_impl.as_ref())
     }
 
     async fn health_check(&self) -> Result<(), BackendError> {

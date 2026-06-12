@@ -16,6 +16,7 @@
 //! [`BackendRegistry`] for runtime backend resolution.
 
 pub mod addressing;
+pub mod audit;
 #[cfg(feature = "aws")]
 pub mod aws;
 pub mod azure;
@@ -29,6 +30,7 @@ pub mod vault;
 
 // Re-exports for convenience.
 pub use addressing::BackendRef;
+pub use audit::{AuditBackend, AuditEvent};
 pub use error::BackendError;
 pub use registry::BackendRegistry;
 pub use secret::SecretBackend;
@@ -198,6 +200,15 @@ pub trait Backend: Send + Sync {
 
     /// Access to vault/namespace operations (optional).
     fn vaults(&self) -> Option<&dyn VaultBackend> {
+        None
+    }
+
+    /// Access to audit log operations (optional).
+    ///
+    /// Backends returning `Some` here are dispatched generically by
+    /// `xv audit`; Azure keeps its legacy Activity Log path and returns
+    /// `None`.
+    fn audit(&self) -> Option<&dyn AuditBackend> {
         None
     }
 

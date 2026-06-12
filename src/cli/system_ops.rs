@@ -273,6 +273,12 @@ pub(crate) async fn execute_audit_command(
                 registry.active().name()
             )));
         }
+        // Backends that implement the audit trait (e.g. AWS via CloudTrail)
+        // are dispatched generically; Azure keeps its legacy Activity Log
+        // path below.
+        if let Some(auditor) = registry.active().audit() {
+            return execute_backend_audit(auditor, name, vault, days, operation, raw, config).await;
+        }
     }
 
     // Create authentication provider — reuse from registry when available
@@ -412,6 +418,102 @@ pub(crate) async fn execute_audit_command(
     }
 
     Ok(())
+}
+
+/// Render audit logs fetched through the backend-agnostic [`AuditBackend`]
+/// trait, mirroring the Azure Activity Log output shapes (table and `--raw`
+/// JSON).
+async fn execute_backend_audit(
+    auditor: &dyn crate::backend::AuditBackend,
+    name: Option<String>,
+    vault: Option<String>,
+    days: u32,
+    operation: Option<String>,
+    raw: bool,
+    config: Config,
+) -> Result<()> {
+    let vault_name = config.resolve_vault_name(vault).await?;
+
+    output::step(&format!("Fetching audit logs for {} days...", days));
+
+    let mut events: Vec<crate::backend::AuditEvent> = if let Some(secret_name) = name {
+        println!("  Secret: {}", secret_name);
+        println!("  Vault: {}", vault_name);
+        auditor
+            .get_secret_events(&vault_name, &secret_name, days)
+            .await?
+    } else {
+        println!("  Vault: {}", vault_name);
+        auditor.get_vault_events(&vault_name, days).await?
+    };
+
+    // Filter by operation if specified
+    if let Some(op_filter) = operation {
+        events.retain(|event| {
+            event
+                .operation
+                .to_lowercase()
+                .contains(&op_filter.to_lowercase())
+        });
+    }
+
+    if events.is_empty() {
+        output::info("No audit log entries found for the specified criteria");
+        return Ok(());
+    }
+
+    println!();
+    output::info(&format!("Found {} audit log entries:\n", events.len()));
+
+    if raw {
+        // Show raw JSON output
+        for event in events {
+            let json_output = serde_json::to_string_pretty(&event).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize log entry: {}", e))
+            })?;
+            println!("{}", json_output);
+            println!("---");
+        }
+    } else {
+        // Show formatted output (same shape as the Azure table)
+        println!(
+            "{:<20} | {:<25} | {:<20} | {:<30} | {:<10}",
+            "Timestamp", "Operation", "Resource", "Caller", "Status"
+        );
+        println!("{}", "-".repeat(120));
+
+        for event in events {
+            let operation = truncate_column(&event.operation, 25);
+            let resource = truncate_column(&event.resource_name, 20);
+            let caller = truncate_column(&event.caller, 30);
+
+            println!(
+                "{:<20} | {:<25} | {:<20} | {:<30} | {:<10}",
+                event.timestamp.format("%m-%d %H:%M:%S"),
+                operation,
+                resource,
+                caller,
+                event.status
+            );
+        }
+
+        println!();
+        output::hint(
+            "Use --raw to see full details, or --operation <type> to filter by operation type",
+        );
+    }
+
+    Ok(())
+}
+
+/// Truncate a table cell to `max` characters, appending `...` when cut.
+fn truncate_column(value: &str, max: usize) -> String {
+    if value.chars().count() > max {
+        let cut: String = value.chars().take(max.saturating_sub(3)).collect();
+        format!("{cut}...")
+    } else {
+        value.to_string()
+    }
 }
 
 pub(crate) async fn execute_init_command(_config: Config) -> Result<()> {

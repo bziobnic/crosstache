@@ -5,6 +5,7 @@
 //! readable and the mapping is exhaustive over the variants we observe.
 
 use crate::backend::error::BackendError;
+use aws_sdk_cloudtrail::operation::lookup_events::LookupEventsError;
 use aws_sdk_secretsmanager::operation::create_secret::CreateSecretError;
 use aws_sdk_secretsmanager::operation::delete_secret::DeleteSecretError;
 use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
@@ -329,6 +330,37 @@ pub fn from_rotate(
     handle_sdk("RotateSecret", e)
 }
 
+/// True when a CloudTrail service error code denotes an IAM authorization
+/// failure. CloudTrail does not model access denial as a typed variant on
+/// `LookupEventsError`, so it surfaces as an unmodeled code in the error
+/// metadata.
+pub(crate) fn is_cloudtrail_access_denied(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("AccessDeniedException") | Some("AccessDenied") | Some("UnauthorizedOperation")
+    )
+}
+
+/// The actionable message shown when the caller lacks CloudTrail read access.
+pub(crate) fn cloudtrail_permission_hint() -> String {
+    "CloudTrail access denied: the current AWS identity lacks the `cloudtrail:LookupEvents` \
+IAM permission required by `xv audit`. Attach a policy that allows cloudtrail:LookupEvents \
+(e.g. the AWSCloudTrail_ReadOnlyAccess managed policy) and retry."
+        .to_string()
+}
+
+pub fn from_lookup_events(e: SdkError<LookupEventsError, Response>) -> BackendError {
+    if let SdkError::ServiceError(svc) = &e {
+        if is_cloudtrail_access_denied(svc.err().meta().code()) {
+            return BackendError::PermissionDenied(cloudtrail_permission_hint());
+        }
+        if let LookupEventsError::InvalidTimeRangeException(inner) = svc.err() {
+            return BackendError::InvalidArgument(format!("invalid audit time range: {inner}"));
+        }
+    }
+    handle_sdk("LookupEvents", e)
+}
+
 #[cfg(all(test, feature = "aws"))]
 mod tests {
     use super::*;
@@ -389,6 +421,49 @@ mod tests {
             unreachable!()
         };
         assert!(msg.contains("aws configure"), "hint missing: {msg}");
+    }
+
+    #[test]
+    fn cloudtrail_access_denied_codes_classified() {
+        assert!(is_cloudtrail_access_denied(Some("AccessDeniedException")));
+        assert!(is_cloudtrail_access_denied(Some("AccessDenied")));
+        assert!(is_cloudtrail_access_denied(Some("UnauthorizedOperation")));
+        assert!(!is_cloudtrail_access_denied(Some(
+            "InvalidTimeRangeException"
+        )));
+        assert!(!is_cloudtrail_access_denied(None));
+    }
+
+    /// The permission hint must name the exact IAM permission so users can
+    /// fix their policy without digging through AWS docs.
+    #[test]
+    fn cloudtrail_permission_hint_names_iam_permission() {
+        let msg = cloudtrail_permission_hint();
+        assert!(msg.contains("cloudtrail:LookupEvents"), "got: {msg}");
+    }
+
+    #[test]
+    fn lookup_events_credential_failure_maps_to_auth() {
+        let inner = std::io::Error::other("no credentials in chain");
+        let sdk: SdkError<LookupEventsError, HttpResponse> =
+            SdkError::dispatch_failure(ConnectorError::user(Box::new(inner)));
+        let err = from_lookup_events(sdk);
+        assert!(
+            matches!(err, BackendError::AuthenticationFailed(_)),
+            "expected AuthenticationFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn lookup_events_timeout_maps_to_network() {
+        let inner = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        let sdk: SdkError<LookupEventsError, HttpResponse> =
+            SdkError::dispatch_failure(ConnectorError::timeout(Box::new(inner)));
+        let err = from_lookup_events(sdk);
+        assert!(
+            matches!(err, BackendError::Network(_)),
+            "expected Network, got: {err:?}"
+        );
     }
 
     /// Regression test: the `health_check` lightweight ping (used at backend
