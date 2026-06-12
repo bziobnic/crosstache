@@ -921,3 +921,94 @@ async fn update_vault_updates_tags() {
     assert_eq!(result.name, "myproj-kv");
     assert_eq!(result.id, "vault-myproj-kv");
 }
+
+// ---------------------------------------------------------------------------
+// Native rotation (`RotateSecret`)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn native_rotate_sends_rotate_secret_for_encoded_name() {
+    use aws_sdk_secretsmanager::operation::rotate_secret::RotateSecretOutput;
+    use crosstache::backend::SecretBackend;
+
+    let rule = mock!(Client::rotate_secret)
+        .match_requests(|req| req.secret_id() == Some("myproj-kv/db-password"))
+        .then_output(|| {
+            RotateSecretOutput::builder()
+                .name("myproj-kv/db-password")
+                .version_id("v2")
+                .build()
+        });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    backend
+        .native_rotate("myproj-kv", "db-password")
+        .await
+        .expect("native_rotate should accept the rotation request");
+}
+
+#[tokio::test]
+async fn native_rotate_not_found_maps_to_backend_not_found() {
+    use aws_sdk_secretsmanager::operation::rotate_secret::RotateSecretError;
+    use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
+    use crosstache::backend::error::BackendError;
+    use crosstache::backend::SecretBackend;
+
+    let rule = mock!(Client::rotate_secret).then_error(|| {
+        RotateSecretError::ResourceNotFoundException(
+            ResourceNotFoundException::builder()
+                .message("Secret not found")
+                .build(),
+        )
+    });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    let result = backend.native_rotate("myproj-kv", "missing-secret").await;
+
+    assert!(
+        matches!(result, Err(BackendError::NotFound { ref name, .. }) if name == "missing-secret"),
+        "expected NotFound error, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn native_rotate_without_lambda_explains_how_to_configure_one() {
+    use aws_sdk_secretsmanager::operation::rotate_secret::RotateSecretError;
+    use aws_sdk_secretsmanager::types::error::InvalidRequestException;
+    use crosstache::backend::error::BackendError;
+    use crosstache::backend::SecretBackend;
+
+    // AWS reports "no rotation Lambda configured" as InvalidRequestException.
+    let rule = mock!(Client::rotate_secret).then_error(|| {
+        RotateSecretError::InvalidRequestException(
+            InvalidRequestException::builder()
+                .message("No Lambda rotation function ARN is associated with this secret")
+                .build(),
+        )
+    });
+
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    let result = backend.native_rotate("myproj-kv", "db-password").await;
+
+    let Err(BackendError::InvalidArgument(msg)) = result else {
+        panic!("expected InvalidArgument error, got: {result:?}");
+    };
+    assert!(
+        msg.contains("aws secretsmanager rotate-secret"),
+        "remediation hint missing: {msg}"
+    );
+    assert!(
+        msg.contains("--secret-id myproj-kv/db-password"),
+        "hint should reference the AWS secret id: {msg}"
+    );
+    assert!(
+        msg.contains("--rotation-lambda-arn"),
+        "hint should mention the rotation Lambda flag: {msg}"
+    );
+}

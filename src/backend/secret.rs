@@ -124,4 +124,13 @@ pub trait SecretBackend: Send + Sync {
     ) -> Result<SecretProperties, BackendError> {
         Err(BackendError::Unsupported("restore from backup".into()))
     }
+
+    /// Trigger the backend's native rotation mechanism for a secret.
+    ///
+    /// On AWS this calls `RotateSecret`, which invokes the rotation Lambda
+    /// configured on the secret. Success means the rotation request was
+    /// accepted — the rotation itself may complete asynchronously.
+    async fn native_rotate(&self, _vault: &str, _name: &str) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported("native rotation".into()))
+    }
 }
