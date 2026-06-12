@@ -627,6 +627,7 @@ impl AwsFileBackend {
             .map_err(|e| errors::from_s3_get_object(name, e))?;
 
         let mut body = out.body;
+        let mut written: u64 = 0;
         while let Some(bytes) = body
             .try_next()
             .await
@@ -636,6 +637,7 @@ impl AwsFileBackend {
                 .write_all(&bytes)
                 .await
                 .map_err(|e| BackendError::Internal(format!("write downloaded data: {e}")))?;
+            written += bytes.len() as u64;
             reporter.advance(bytes.len() as u64);
         }
         writer
@@ -644,7 +646,15 @@ impl AwsFileBackend {
             .map_err(|e| BackendError::Internal(format!("flush downloaded data: {e}")))?;
         reporter.finish_clear();
 
-        Ok(content_length)
+        // A truncated body stream (connection drop mid-transfer) must not be
+        // reported as a successful full-size download.
+        if written != content_length {
+            return Err(BackendError::Network(format!(
+                "download of '{name}' truncated: expected {content_length} bytes, wrote {written}"
+            )));
+        }
+
+        Ok(written)
     }
 
     /// Hierarchical listing at one prefix level using S3's delimiter support.
