@@ -20,7 +20,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client as S3Client;
 use chrono::Utc;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
@@ -380,6 +380,11 @@ impl AwsFileBackend {
         reporter.set_total(file_size);
 
         let part_size = multipart_part_size(file_size, chunk_bytes(self.chunk_size_mb));
+        // Cap reads at the declared size so a stream that keeps growing (e.g.
+        // a file being appended to during upload) cannot make the S3 object
+        // diverge from the size we validated and report in FileInfo.
+        let mut reader = reader.take(file_size);
+        let reader = &mut reader;
         let etag = if file_size > part_size {
             self.multipart_upload(
                 &spec.name,
@@ -479,7 +484,7 @@ impl AwsFileBackend {
             }
         };
 
-        let out = self
+        let out = match self
             .client
             .complete_multipart_upload()
             .bucket(&self.bucket)
@@ -492,7 +497,22 @@ impl AwsFileBackend {
             )
             .send()
             .await
-            .map_err(|e| errors::from_s3_complete_multipart(name, e))?;
+        {
+            Ok(out) => out,
+            Err(e) => {
+                // Abort (best effort) so orphaned parts don't accrue storage
+                // charges; the completion error is what matters.
+                let _ = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await;
+                return Err(errors::from_s3_complete_multipart(name, e));
+            }
+        };
 
         Ok(out.e_tag().unwrap_or_default().to_string())
     }
@@ -646,6 +666,11 @@ impl AwsFileBackend {
         // normalize_prefix appends '/' the same way). The flat
         // `list_files` path keeps exact-prefix semantics intentionally.
         let full_prefix = ensure_folder_prefix(full_prefix, &user_prefix, &delimiter);
+        // Directory display names must be stripped with the SAME normalized
+        // folder prefix used for the API call — stripping the raw user
+        // prefix (`docs`) would leave a leading delimiter (`/api/` instead
+        // of `api/`).
+        let strip_base = ensure_folder_prefix(user_prefix.clone(), &user_prefix, &delimiter);
 
         let mut items: Vec<BlobListItem> = Vec::new();
         let mut continuation: Option<String> = None;
@@ -669,7 +694,7 @@ impl AwsFileBackend {
                     continue;
                 };
                 let dir_name = full_path
-                    .strip_prefix(&user_prefix)
+                    .strip_prefix(&strip_base)
                     .unwrap_or(&full_path)
                     .to_string();
                 items.push(BlobListItem::Directory {
