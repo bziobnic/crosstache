@@ -12,17 +12,23 @@ use crate::utils::pagination::Pagination;
 use crate::utils::progress::{self, MultiProgressContext, NoopReporter};
 use std::path::{Path, PathBuf};
 
-fn progress_threshold_bytes(config: &Config) -> u64 {
+pub(crate) fn progress_threshold_bytes(config: &Config) -> u64 {
     let blob_config = config.get_blob_config();
     (blob_config.progress_threshold_mb as u64) * 1024 * 1024
 }
 
-fn is_tty() -> bool {
+pub(crate) fn is_tty() -> bool {
     use std::io::IsTerminal;
     std::io::stdout().is_terminal()
 }
 
 pub(crate) async fn execute_file_command(command: FileCommands, config: Config) -> Result<()> {
+    // The AWS backend stores files in S3 — route to its own executor.
+    #[cfg(all(feature = "aws", feature = "file-ops"))]
+    if crate::cli::file_ops_aws::is_aws_backend_active(&config) {
+        return crate::cli::file_ops_aws::execute_file_command_aws(command, config).await;
+    }
+
     // Create blob manager
     let blob_manager = create_blob_manager(&config).map_err(|e| {
         if e.to_string().contains("No storage account configured") {
@@ -276,6 +282,11 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
 
 /// `xv info` when resource type is file/blob.
 pub(crate) async fn execute_file_info_from_root(file_name: &str, config: &Config) -> Result<()> {
+    #[cfg(all(feature = "aws", feature = "file-ops"))]
+    if crate::cli::file_ops_aws::is_aws_backend_active(config) {
+        return crate::cli::file_ops_aws::execute_file_info_aws(file_name, config).await;
+    }
+
     // Create blob manager
     let blob_manager = create_blob_manager(config).map_err(|e| {
         if e.to_string().contains("No storage account configured") {
@@ -297,6 +308,12 @@ pub(crate) async fn refresh_file_list(
 ) -> Result<()> {
     use crate::blob::models::{BlobListItem, FileListRequest};
     use crate::cache::{CacheKey, CacheManager};
+
+    #[cfg(all(feature = "aws", feature = "file-ops"))]
+    if crate::cli::file_ops_aws::is_aws_backend_active(&config) {
+        return crate::cli::file_ops_aws::refresh_file_list_aws(vault_name, recursive, config)
+            .await;
+    }
 
     let blob_manager = create_blob_manager(&config)?;
     let list_request = FileListRequest {
@@ -486,7 +503,7 @@ async fn execute_file_download_to_path(
     Ok(())
 }
 
-fn resolve_single_download_path(name: &str, output: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_single_download_path(name: &str, output: Option<&str>) -> Result<String> {
     use crate::utils::helpers::safe_join;
 
     // Determine output path with traversal guard.
@@ -507,7 +524,7 @@ fn resolve_single_download_path(name: &str, output: Option<&str>) -> Result<Stri
     }
 }
 
-fn display_file_list_items(
+pub(crate) fn display_file_list_items(
     items: &[crate::blob::models::BlobListItem],
     recursive: bool,
     config: &Config,
@@ -800,7 +817,14 @@ async fn execute_file_delete(
 async fn execute_file_info(blob_manager: &BlobManager, name: &str, config: &Config) -> Result<()> {
     // Get file info
     let file_info = blob_manager.get_file_info(name).await?;
+    display_file_info(&file_info, config)
+}
 
+/// Render a [`FileInfo`] to stdout (shared by the Azure and AWS executors).
+pub(crate) fn display_file_info(
+    file_info: &crate::blob::models::FileInfo,
+    config: &Config,
+) -> Result<()> {
     if config.output_json {
         let json_output = serde_json::to_string_pretty(&file_info).map_err(|e| {
             CrosstacheError::serialization(format!("Failed to serialize file info: {e}"))
@@ -841,13 +865,13 @@ async fn execute_file_info(blob_manager: &BlobManager, name: &str, config: &Conf
 
 /// Information about a file to upload with path tracking
 #[derive(Debug, Clone)]
-struct FileUploadInfo {
+pub(crate) struct FileUploadInfo {
     /// Full local file path
-    local_path: PathBuf,
+    pub(crate) local_path: PathBuf,
     /// Relative path from base directory (for blob name calculation)
     _relative_path: String,
     /// Final blob name (includes prefix and converted path separators)
-    blob_name: String,
+    pub(crate) blob_name: String,
 }
 
 /// Convert a path to blob name format (forward slashes, no leading slash)
@@ -888,7 +912,7 @@ fn path_to_blob_name(path: &Path, prefix: Option<&str>) -> String {
 ///
 /// # Returns
 /// Vector of FileUploadInfo with path mappings for blob storage
-fn collect_files_with_structure(
+pub(crate) fn collect_files_with_structure(
     path: &Path,
     base_path: &Path,
     prefix: Option<&str>,
@@ -1191,7 +1215,7 @@ async fn execute_file_upload_multiple(
 /// Returns an error if `output` names an existing non-directory path (which would
 /// cause every file to clobber the same destination). Creates the directory if it
 /// doesn't exist yet.
-fn resolve_multi_download_dir(output: Option<&str>) -> Result<PathBuf> {
+pub(crate) fn resolve_multi_download_dir(output: Option<&str>) -> Result<PathBuf> {
     use std::fs;
     use std::path::Path;
     match output {
@@ -2288,6 +2312,14 @@ pub(crate) async fn execute_file_upload_quick(
     metadata: Vec<String>,
     config: &Config,
 ) -> Result<()> {
+    #[cfg(all(feature = "aws", feature = "file-ops"))]
+    if crate::cli::file_ops_aws::is_aws_backend_active(config) {
+        return crate::cli::file_ops_aws::execute_file_upload_quick_aws(
+            file_path, name, groups, metadata, config,
+        )
+        .await;
+    }
+
     // Create blob manager
     let blob_manager = create_blob_manager(config).map_err(|e| {
         if e.to_string().contains("No storage account configured") {
@@ -2335,6 +2367,14 @@ pub(crate) async fn execute_file_download_quick(
     open: bool,
     config: &Config,
 ) -> Result<()> {
+    #[cfg(all(feature = "aws", feature = "file-ops"))]
+    if crate::cli::file_ops_aws::is_aws_backend_active(config) {
+        return crate::cli::file_ops_aws::execute_file_download_quick_aws(
+            name, output, open, config,
+        )
+        .await;
+    }
+
     // Create blob manager
     let blob_manager = create_blob_manager(config).map_err(|e| {
         if e.to_string().contains("No storage account configured") {

@@ -361,6 +361,170 @@ pub fn from_lookup_events(e: SdkError<LookupEventsError, Response>) -> BackendEr
     handle_sdk("LookupEvents", e)
 }
 
+// ---------------------------------------------------------------------------
+// S3 (file storage) error mapping
+// ---------------------------------------------------------------------------
+
+/// Classify an S3 service error by its error code.
+///
+/// S3 reports most failures through generic error codes rather than typed
+/// variants, so the mapping is code-based. `key` is the user-facing file
+/// name (used for NotFound); pass `None` for non-object operations (list,
+/// multipart bookkeeping).
+///
+/// Returns `None` when the code isn't recognised, so callers fall through to
+/// the transport-level handling in [`handle_sdk`].
+#[cfg(feature = "file-ops")]
+fn classify_s3_code(op: &str, key: Option<&str>, code: &str) -> Option<BackendError> {
+    match code {
+        "NoSuchKey" | "NotFound" => key.map(|k| BackendError::NotFound {
+            name: k.to_string(),
+            suggestion: None,
+        }),
+        "NoSuchBucket" => Some(BackendError::InvalidArgument(format!(
+            "S3 bucket not found (operation: {op}). Check [aws].s3_bucket / \
+             XV_AWS_S3_BUCKET — the bucket must already exist; xv does not create buckets."
+        ))),
+        "AccessDenied" | "AccessDeniedException" => Some(BackendError::PermissionDenied(format!(
+            "S3 access denied (operation: {op}). Ensure your credentials grant \
+             s3:GetObject, s3:PutObject, s3:DeleteObject, and s3:ListBucket on the \
+             configured bucket."
+        ))),
+        "SlowDown" | "ThrottlingException" | "RequestLimitExceeded" => {
+            Some(BackendError::RateLimited {
+                retry_after_secs: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Shared S3 mapping: code-based classification, then transport handling.
+#[cfg(feature = "file-ops")]
+fn handle_s3<E>(op: &str, key: Option<&str>, e: SdkError<E, Response>) -> BackendError
+where
+    E: std::fmt::Display + std::fmt::Debug + aws_sdk_s3::error::ProvideErrorMetadata,
+{
+    if let SdkError::ServiceError(svc) = &e {
+        if let Some(mapped) = classify_s3_code(op, key, svc.err().code().unwrap_or("")) {
+            return mapped;
+        }
+    }
+    handle_sdk(op, e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_head_object(
+    name: &str,
+    e: SdkError<aws_sdk_s3::operation::head_object::HeadObjectError, Response>,
+) -> BackendError {
+    // HEAD responses carry no body, so the SDK can't always parse an error
+    // code — match the typed NotFound variant explicitly.
+    if let SdkError::ServiceError(svc) = &e {
+        if matches!(
+            svc.err(),
+            aws_sdk_s3::operation::head_object::HeadObjectError::NotFound(_)
+        ) {
+            return BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            };
+        }
+    }
+    handle_s3("HeadObject", Some(name), e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_get_object(
+    name: &str,
+    e: SdkError<aws_sdk_s3::operation::get_object::GetObjectError, Response>,
+) -> BackendError {
+    if let SdkError::ServiceError(svc) = &e {
+        if matches!(
+            svc.err(),
+            aws_sdk_s3::operation::get_object::GetObjectError::NoSuchKey(_)
+        ) {
+            return BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            };
+        }
+    }
+    handle_s3("GetObject", Some(name), e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_put_object(
+    name: &str,
+    e: SdkError<aws_sdk_s3::operation::put_object::PutObjectError, Response>,
+) -> BackendError {
+    handle_s3("PutObject", Some(name), e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_list_objects(
+    e: SdkError<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error, Response>,
+) -> BackendError {
+    if let SdkError::ServiceError(svc) = &e {
+        if matches!(
+            svc.err(),
+            aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error::NoSuchBucket(_)
+        ) {
+            // Typed variant; route through the same message as the code path.
+            if let Some(mapped) = classify_s3_code("ListObjectsV2", None, "NoSuchBucket") {
+                return mapped;
+            }
+        }
+    }
+    handle_s3("ListObjectsV2", None, e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_delete_object(
+    name: &str,
+    e: SdkError<aws_sdk_s3::operation::delete_object::DeleteObjectError, Response>,
+) -> BackendError {
+    handle_s3("DeleteObject", Some(name), e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_create_multipart(
+    name: &str,
+    e: SdkError<
+        aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadError,
+        Response,
+    >,
+) -> BackendError {
+    handle_s3("CreateMultipartUpload", Some(name), e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_upload_part(
+    name: &str,
+    e: SdkError<aws_sdk_s3::operation::upload_part::UploadPartError, Response>,
+) -> BackendError {
+    handle_s3("UploadPart", Some(name), e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_complete_multipart(
+    name: &str,
+    e: SdkError<
+        aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError,
+        Response,
+    >,
+) -> BackendError {
+    handle_s3("CompleteMultipartUpload", Some(name), e)
+}
+
+#[cfg(feature = "file-ops")]
+pub fn from_s3_get_object_tagging(
+    name: &str,
+    e: SdkError<aws_sdk_s3::operation::get_object_tagging::GetObjectTaggingError, Response>,
+) -> BackendError {
+    handle_s3("GetObjectTagging", Some(name), e)
+}
+
 #[cfg(all(test, feature = "aws"))]
 mod tests {
     use super::*;
@@ -493,5 +657,57 @@ mod tests {
         assert!(hint.contains("aws secretsmanager rotate-secret"), "{hint}");
         assert!(hint.contains("--secret-id myproj-kv/db-password"), "{hint}");
         assert!(hint.contains("--rotation-lambda-arn"), "{hint}");
+    }
+
+    // ── S3 code classification ───────────────────────────────────────────────
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn s3_no_such_key_maps_to_not_found() {
+        let err = classify_s3_code("GetObject", Some("docs/readme.md"), "NoSuchKey").unwrap();
+        assert!(
+            matches!(err, BackendError::NotFound { ref name, .. } if name == "docs/readme.md"),
+            "got: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn s3_not_found_without_key_falls_through() {
+        assert!(classify_s3_code("ListObjectsV2", None, "NotFound").is_none());
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn s3_no_such_bucket_maps_to_invalid_argument_with_hint() {
+        let err = classify_s3_code("PutObject", Some("a.txt"), "NoSuchBucket").unwrap();
+        let BackendError::InvalidArgument(msg) = err else {
+            panic!("expected InvalidArgument, got something else");
+        };
+        assert!(msg.contains("s3_bucket"), "hint missing: {msg}");
+        assert!(msg.contains("does not create"), "hint missing: {msg}");
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn s3_access_denied_maps_to_permission_denied_with_hint() {
+        let err = classify_s3_code("GetObject", Some("a.txt"), "AccessDenied").unwrap();
+        let BackendError::PermissionDenied(msg) = err else {
+            panic!("expected PermissionDenied, got something else");
+        };
+        assert!(msg.contains("s3:GetObject"), "hint missing: {msg}");
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn s3_slow_down_maps_to_rate_limited() {
+        let err = classify_s3_code("PutObject", Some("a.txt"), "SlowDown").unwrap();
+        assert!(matches!(err, BackendError::RateLimited { .. }));
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn s3_unknown_code_falls_through() {
+        assert!(classify_s3_code("PutObject", Some("a.txt"), "SomethingElse").is_none());
     }
 }

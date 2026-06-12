@@ -54,6 +54,13 @@ pub struct AwsConfig {
     /// Default vault name (= prefix) used when no `--vault` / context is set.
     #[serde(default)]
     pub default_vault: Option<String>,
+
+    /// S3 bucket used for `xv file` storage. Files are stored under
+    /// `<vault>/files/<name>` so vaults stay isolated. Falls through to the
+    /// `XV_AWS_S3_BUCKET` env var. File operations error with a setup hint
+    /// when unset; the bucket is never auto-created.
+    #[serde(default)]
+    pub s3_bucket: Option<String>,
 }
 
 /// A named backend entry in `Config.named_backends`. Each entry is a

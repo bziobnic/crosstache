@@ -5,6 +5,8 @@ pub mod auth;
 pub mod config;
 pub mod encoding;
 pub mod errors;
+#[cfg(feature = "file-ops")]
+pub mod files;
 pub mod metadata;
 pub mod models;
 pub mod secrets;
@@ -21,10 +23,16 @@ use crate::config::settings::AwsConfig;
 use aws_sdk_cloudtrail::Client as CloudTrailClient;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 
+#[cfg(feature = "file-ops")]
+use crate::backend::FileBackend;
+
 pub struct AwsBackend {
     secrets_impl: Arc<secrets::AwsSecretBackend>,
     vaults_impl: Arc<vaults::AwsVaultBackend>,
     audit_impl: Arc<audit::AwsAuditBackend>,
+    /// S3 file storage — present only when an S3 bucket is configured.
+    #[cfg(feature = "file-ops")]
+    files_impl: Option<Arc<files::AwsFileBackend>>,
 }
 
 impl AwsBackend {
@@ -38,10 +46,21 @@ impl AwsBackend {
         let sdk_config = auth::load_sdk_config(aws_cfg, region_override, profile_override).await?;
         let client = Arc::new(SecretsManagerClient::new(&sdk_config));
         let cloudtrail = Arc::new(CloudTrailClient::new(&sdk_config));
+
+        // File storage is optional: it requires an S3 bucket to be
+        // configured. No bucket -> capability stays off.
+        #[cfg(feature = "file-ops")]
+        let files_impl = files::resolve_bucket(aws_cfg).ok().map(|bucket| {
+            let s3_client = auth::build_s3_client(aws_cfg, &sdk_config);
+            Arc::new(files::AwsFileBackend::new(s3_client, bucket))
+        });
+
         Ok(Self {
             secrets_impl: Arc::new(secrets::AwsSecretBackend::new(client.clone())),
             vaults_impl: Arc::new(vaults::AwsVaultBackend::new(client)),
             audit_impl: Arc::new(audit::AwsAuditBackend::new(cloudtrail)),
+            #[cfg(feature = "file-ops")]
+            files_impl,
         })
     }
 }
@@ -59,7 +78,16 @@ impl Backend for AwsBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             has_vaults: true,
-            has_file_storage: false,
+            has_file_storage: {
+                #[cfg(feature = "file-ops")]
+                {
+                    self.files_impl.is_some()
+                }
+                #[cfg(not(feature = "file-ops"))]
+                {
+                    false
+                }
+            },
             has_rbac: false,
             has_audit: true,
             has_versioning: true,
@@ -85,6 +113,11 @@ impl Backend for AwsBackend {
 
     fn audit(&self) -> Option<&dyn AuditBackend> {
         Some(self.audit_impl.as_ref())
+    }
+
+    #[cfg(feature = "file-ops")]
+    fn files(&self) -> Option<&dyn FileBackend> {
+        self.files_impl.as_deref().map(|fb| fb as &dyn FileBackend)
     }
 
     async fn health_check(&self) -> Result<(), BackendError> {

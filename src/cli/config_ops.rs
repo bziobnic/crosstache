@@ -402,7 +402,7 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
 
     // Backend-specific extras: region/profile for AWS; storage_account for Azure.
     //
-    // Resolution order must match `backend::aws::auth::build_client`:
+    // Resolution order must match `backend::aws::auth::load_sdk_config`:
     //   region:  CLI --region > config aws.region > AWS_REGION > AWS_DEFAULT_REGION
     //   profile: CLI --profile > config aws.profile > AWS_PROFILE (via SDK chain)
     // `--resolved` has no CLI flags in scope, so it reports the remaining order.
