@@ -720,6 +720,16 @@ pub(crate) async fn execute_secret_rotate_direct(
     Ok(())
 }
 
+/// Capability error for `xv rotate --native` on a backend without native
+/// rotation support.
+fn rotate_native_unsupported_error(backend_name: &str) -> CrosstacheError {
+    CrosstacheError::InvalidArgument(format!(
+        "The {backend_name} backend does not support native rotation. Native rotation is \
+         currently available on the aws backend only; without --native, 'xv rotate' generates \
+         a new value client-side on any backend."
+    ))
+}
+
 /// Trigger the backend's native rotation mechanism (`xv rotate --native`).
 ///
 /// Unlike the default rotate path (which generates a new value client-side
@@ -734,7 +744,18 @@ async fn execute_secret_rotate_native(
 ) -> Result<()> {
     use crate::utils::interactive::InteractivePrompt;
 
+    // Capability check: native rotation requires backend support. When the
+    // registry is missing (the requested backend failed to initialize),
+    // resolve the requested backend from config so non-rotation backends
+    // still get the capability hint instead of a generic config error.
     let Some(reg) = registry else {
+        if let Some(kind) = crate::cli::helpers::requested_backend_kind(&config) {
+            if kind != BackendKind::Aws {
+                return Err(rotate_native_unsupported_error(
+                    config.effective_backend_name(),
+                ));
+            }
+        }
         return Err(CrosstacheError::config(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         ));
@@ -743,12 +764,7 @@ async fn execute_secret_rotate_native(
     // Capability check: native rotation requires backend support
     let caps = reg.active().capabilities();
     if !caps.has_secret_rotation {
-        return Err(CrosstacheError::InvalidArgument(format!(
-            "The {} backend does not support native rotation. Native rotation is currently \
-             available on the aws backend only; without --native, 'xv rotate' generates a new \
-             value client-side on any backend.",
-            reg.active().name()
-        )));
+        return Err(rotate_native_unsupported_error(reg.active().name()));
     }
 
     let vault_name = resolve_vault_for_trait(&config, registry).await?;
@@ -4366,6 +4382,28 @@ mod tests {
         let err = execute_secret_rotate_native("db-password", true, config, Some(&registry))
             .await
             .expect_err("non-rotation backend must reject --native");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not support native rotation"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("local"), "should name the backend: {msg}");
+    }
+
+    /// When `--backend local` is requested but backend init failed (registry
+    /// is `None`), `--native` must still return the capability hint rather
+    /// than a generic "no backend registry" config error.
+    #[tokio::test]
+    async fn rotate_native_without_registry_still_returns_capability_hint() {
+        let config = Config {
+            backend: Some("local".to_string()),
+            default_vault: String::new(),
+            ..Default::default()
+        };
+
+        let err = execute_secret_rotate_native("db-password", true, config, None)
+            .await
+            .expect_err("non-rotation backend without a registry must reject --native");
         let msg = err.to_string();
         assert!(
             msg.contains("does not support native rotation"),
