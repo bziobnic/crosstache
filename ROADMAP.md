@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-06-11 · **Latest released version:** `v0.11.2` · **Branch protection:** `main` (all changes via PR)
+> **Last reviewed:** 2026-06-12 · **Latest released version:** `v0.12.0` · **Branch protection:** `main` (all changes via PR)
 
 Single source of truth for **unimplemented** ideas, deferred work, and known
 limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).
@@ -103,17 +103,39 @@ low-confidence (`src/scan/patterns.rs:62`).
 ### P1 — AWS capability matrix gaps (deferred from v0.10.0)
 Source: `CHANGELOG.md` § AWS capabilities matrix.
 
-| Feature           | AWS status today                                       | Next step                                                                    |
+All four gaps shipped in **v0.12.0** (2026-06-12, #248–#251). Retained here
+as history; current AWS capability state lives in `CHANGELOG.md`.
+
+| Feature           | AWS status                                             | Shipped                                                                       |
 | ----------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `xv share` (RBAC) | ❌ Use AWS IAM directly                                | Add capability-aware hint with `aws iam` example; longer term, wrapper UX.   |
-| `xv audit`        | ❌ Use AWS CloudTrail                                  | Read recent CloudTrail events for the vault; mirror Azure Activity Log UX.   |
-| Native rotation   | ❌ `xv rotate` writes new versions                     | Optional integration with Secrets Manager rotation Lambdas.                  |
-| File storage (S3) | ❌ Deferred                                            | Mirror Azure Blob backend; same containment fixes as local file backend.    |
+| `xv share` (RBAC) | ✅ Capability-aware hint with `aws secretsmanager put-resource-policy` example | v0.12.0 (#248) |
+| `xv audit`        | ✅ Reads CloudTrail `LookupEvents`, mirrors Azure Activity Log UX | v0.12.0 (#249) |
+| Native rotation   | ✅ `xv rotate --native` invokes Secrets Manager `RotateSecret` (Lambda) | v0.12.0 (#250) |
+| File storage (S3) | ✅ `xv file` on S3, vault-prefixed, streaming + containment | v0.12.0 (#251) |
+
+### P3 — `has_audit` capability flag is inconsistent across audit backends
+Surfaced during the v0.12.0 audit work (#249). AWS audit dispatches through
+the `AuditBackend` trait (`registry.active().audit()`), so AWS correctly sets
+`has_audit: true`. Azure audit still uses a **legacy Activity Log path** in
+`src/cli/system_ops.rs` that bypasses the capability system entirely, so
+`xv audit` works on Azure while the Azure backend reports `has_audit: false`.
+Harmless today (the CLI tries the trait first, then falls through to the Azure
+path), but the flag is a lie for Azure. Fix: either migrate Azure audit onto
+the trait and flip `has_audit: true`, or document the flag as "trait-dispatch
+only" so capability introspection isn't misleading.
 
 ### P2 — Local backend metadata encryption (opt-in)
 Source: `docs/reviews/2026-05-03-ux-review.md` §3 (since absorbed) and
 code-review P3 item above. Provide an opt-in encrypted index mode or, at
 minimum, a clear warning in `init` + docs.
+
+### P3 — TUI clippy lint debt
+`cargo clippy --features tui -- -D warnings` reports ~9 lints in `src/tui/`
+(collapsible-if, `.clone()` on `Copy` `ListState`, manual `div_ceil`,
+non-binding `let` on futures). Pre-existing and NOT gated by CI (which runs
+clippy on default features only; the tui feature is build-and-test-gated, not
+clippy-gated), so they don't block releases — but worth a sweep. Newer clippy
+versions surface them; same class as the AWS-files lints cleaned up in #250.
 
 ### P3 — Additional backends
 Open ground from `2026-04-29-strategic-improvements-phase-1-design.md`:

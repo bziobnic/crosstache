@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.12.0 — AWS capability matrix completion (2026-06-12)
+
+Closes all four P1 AWS capability gaps deferred since v0.10.0 (#248–#251).
+AWS is an opt-in Cargo feature (`aws`); these paths are absent from the
+default build.
+
+### Added
+
+- **`xv audit` on AWS via CloudTrail (#249)** — reads recent Secrets Manager events through CloudTrail `LookupEvents` (event-source filter + vault-prefix match), mirroring the Azure Activity Log output shapes (table/json, time-range/limit flags). `CreateSecret` events are resolved from `requestParameters.name` as well as `secretId`. Missing `cloudtrail:LookupEvents` permission yields an actionable error. AWS backend now reports `has_audit: true`. Adds optional dep `aws-sdk-cloudtrail`.
+- **Native rotation on AWS (#250)** — new `xv rotate --native` flag invokes Secrets Manager `RotateSecret` (the secret's configured rotation Lambda); rotation is asynchronous and the command says so. Clear errors for no-Lambda-configured (with `aws secretsmanager rotate-secret` setup hint), missing permissions, and non-AWS backends (capability message, including when the backend registry failed to initialize). Without `--native`, behavior is unchanged on all backends. AWS backend now reports `has_secret_rotation: true`.
+- **S3 file storage on AWS (#251)** — `xv file` upload/download/list/delete/info now work on the AWS backend, backed by S3 with vault-prefixed keys (`<vault>/files/<name>`) for per-vault isolation matching the local backend. Streaming both directions: multipart upload above the chunk threshold (reuses `chunk_size_mb`), streamed download with the same 5 GiB guard as the Azure path; containment via shared `safe_join` (no traversal/absolute-key escapes). Bucket comes from a new `aws_s3_bucket` config field / `--bucket` flag; unconfigured → clear setup hint; no bucket auto-creation. Truncated download bodies are rejected rather than reported as a full-size success. AWS backend now reports `has_file_storage: true`. Adds optional dep `aws-sdk-s3`.
+
+### Changed
+
+- **`xv share` on AWS returns a capability-aware hint (#248)** — share/grant/revoke/list operations on the AWS backend now exit 2 with a message naming the backend and giving a copyable `aws secretsmanager put-resource-policy` example, instead of failing opaquely. The hint is returned even when the AWS backend registry failed to initialize. Local secret-share messages are byte-identical; the vault-share message was unified to the share-specific text.
+
+### Known limitations
+
+- The `has_audit` capability flag is `false` for Azure even though `xv audit` works there, because Azure audit uses a legacy Activity Log path that bypasses the capability trait (AWS dispatches through the trait correctly). Tracked in `ROADMAP.md` (P3). Harmless — the CLI tries the trait first, then falls through.
+- `rustls-webpki 0.101.7` (RUSTSEC DoS via malformed CRL panic, GHSA high) remains pinned transitively by `rustls 0.21` inside `aws-smithy-http-client`. It enters the tree only under the opt-in `aws` feature, is **not** present in the released binaries (built `--features tui`, no `aws`), and is unreachable in practice (the AWS SDK only contacts trusted AWS TLS endpoints, never processing attacker-controlled CRLs). Will clear when the AWS SDK drops rustls 0.21 upstream — same posture as the documented `rand 0.7.3` pin.
+
+---
+
 ## v0.11.2 — P2 security-hardening completion (2026-06-11)
 
 Closes out all four remaining P2 items from the 2026-05-09 GPT-5.5 code
