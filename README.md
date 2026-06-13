@@ -211,7 +211,16 @@ cd crosstache
 cargo install --path .
 # With the read-only TUI:
 cargo install --path . --features tui
+# With AWS backend support (Secrets Manager / CloudTrail / S3):
+cargo install --path . --features tui,aws
 ```
+
+> **Note:** Pre-built release binaries (the downloads on the
+> [Releases](https://github.com/bziobnic/crosstache/releases) page) are
+> built with `--features tui,aws` — they support Azure, local, AND AWS
+> backends out of the box. You only need the `aws` feature flag above when
+> building from source; the default `cargo build` omits AWS to keep source
+> builds lean.
 
 ### macOS Gatekeeper note
 
