@@ -1141,7 +1141,7 @@ pub enum EnvCommands {
         /// Backend to use (azure | local | aws); defaults to azure
         #[arg(long)]
         backend: Option<String>,
-        /// Default secret group filter for this env
+        /// Default secret-group filter for this env (NOT the Azure resource group; see --resource-group)
         #[arg(long)]
         group: Option<String>,
         /// Default folder prefix for this env
