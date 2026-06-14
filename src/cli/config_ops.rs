@@ -471,6 +471,13 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
         println!("  env             : XV_ENV > --env flag > .xv.toml default_env");
         println!("  vault           : --vault arg > .xv.toml profile.vault > context > global default_vault");
         println!("  resource_group  : --resource-group > .xv.toml profile.resource_group > global default_resource_group");
+        println!();
+        println!("Naming convention: the global config uses a `default_` prefix (default_vault,");
+        println!("default_resource_group) because those values are fallbacks; a .xv.toml env");
+        println!("profile uses the bare name (vault, resource_group) because it sets a specific");
+        println!(
+            "value that overrides the global default. Same concept, the prefix signals the layer."
+        );
     }
 
     Ok(())
@@ -1187,19 +1194,49 @@ async fn execute_env_list(config: &Config) -> Result<()> {
         .map(|d| format!(", default: {d}"))
         .unwrap_or_default();
     println!("Project envs (from {}{}):", path.display(), default_label);
+    // Global backend (xv.conf / XV_BACKEND / top-level --backend) used as the
+    // fallback when an env profile doesn't pin its own backend.
+    let global_backend = config.effective_backend_name();
     for (name, profile) in &cfg.envs {
         let marker = if active.as_deref() == Some(name.as_str()) {
             "*"
         } else {
             " "
         };
-        let backend = profile.backend.as_deref().unwrap_or("azure");
+        // Show the EFFECTIVE backend each env resolves to, not just the
+        // profile's literal field. A profile with no `backend` inherits the
+        // global backend rather than silently defaulting to "azure" — flag
+        // that case so the displayed value matches what actually runs.
+        let (backend, backend_note) = match profile.backend.as_deref() {
+            Some(b) => (b.to_string(), String::new()),
+            None => (global_backend.to_string(), " (inherited)".to_string()),
+        };
         let vault = profile.vault.as_deref().unwrap_or("(unset)");
         let mut extras = String::new();
         if let Some(rg) = &profile.resource_group {
             extras.push_str(&format!("  resource_group={rg}"));
         }
-        println!("  {marker} {name}  backend={backend}  vault={vault}{extras}");
+        println!("  {marker} {name}  backend={backend}{backend_note}  vault={vault}{extras}");
+    }
+
+    // Summary: what the active env actually resolves to right now, after full
+    // precedence (this is the "effective profile" §P2-4 asks for). Only shown
+    // when an env is active so single-env or no-active-env cases stay terse.
+    if let Some(active_name) = &active {
+        if let Some(profile) = cfg.envs.get(active_name) {
+            let eff_backend = profile.backend.as_deref().unwrap_or(global_backend);
+            let eff_vault = profile
+                .vault
+                .as_deref()
+                .or(if config.default_vault.is_empty() {
+                    None
+                } else {
+                    Some(config.default_vault.as_str())
+                })
+                .unwrap_or("(unset)");
+            println!();
+            println!("Effective ({active_name}): backend={eff_backend}  vault={eff_vault}");
+        }
     }
     Ok(())
 }
