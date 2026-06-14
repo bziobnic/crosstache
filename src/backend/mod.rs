@@ -49,7 +49,7 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendKind {
-    /// Azure Key Vault (the original, and currently only, implementation).
+    /// Azure Key Vault (the original implementation).
     Azure,
     /// Local age-encrypted file backend (Phase 2).
     Local,

@@ -62,8 +62,12 @@ pub(crate) fn share_unsupported_error(
              aws secretsmanager put-resource-policy --secret-id <secret-name> --resource-policy file://policy.json\n  \
              aws iam attach-user-policy --user-name <user-name> --policy-arn <policy-arn>"
         )),
+        BackendKind::Azure => CrosstacheError::invalid_argument(format!(
+            "{operation} is not supported on the {backend_name} backend."
+        )),
         _ => CrosstacheError::invalid_argument(format!(
-            "The {backend_name} backend does not support {operation}. Use the azure backend for RBAC."
+            "The {backend_name} backend does not support {operation}. \
+             The azure backend offers RBAC-based sharing."
         )),
     }
 }
@@ -525,14 +529,16 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Invalid argument: The local backend does not support access sharing. \
-             Use the azure backend for RBAC."
+             The azure backend offers RBAC-based sharing."
         );
 
+        // The azure backend must NOT be told to "use the azure backend" — its
+        // message names the unsupported operation without a self-referential
+        // recommendation.
         let err = share_unsupported_error(BackendKind::Azure, "azure", "vault sharing");
         assert_eq!(
             err.to_string(),
-            "Invalid argument: The azure backend does not support vault sharing. \
-             Use the azure backend for RBAC."
+            "Invalid argument: vault sharing is not supported on the azure backend."
         );
     }
 }

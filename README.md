@@ -1,6 +1,6 @@
 # crosstache
 
-A cross-platform secrets manager for the command line, currently backed by Azure Key Vault. The binary is `xv`.
+A cross-platform secrets manager for the command line. Pluggable backends: Azure Key Vault, AWS Secrets Manager, or local age-encrypted files. The binary is `xv`.
 
 ```bash
 xv set DB_PASSWORD                     # store a secret (prompts for value)

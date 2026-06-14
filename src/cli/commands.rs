@@ -92,7 +92,9 @@ pub struct BuildInfo {
 
 #[derive(Parser)]
 #[command(name = "xv")]
-#[command(about = "A comprehensive tool for managing Azure Key Vault")]
+#[command(
+    about = "A comprehensive tool for managing secrets across Azure Key Vault, AWS Secrets Manager, and local age-encrypted storage"
+)]
 #[command(version = get_version(), author)]
 #[command(help_template = get_help_template())]
 pub struct Cli {
