@@ -4334,7 +4334,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Invalid argument: The local backend does not support access sharing. \
-             Use the azure backend for RBAC."
+             The azure backend offers RBAC-based sharing."
         );
     }
 
