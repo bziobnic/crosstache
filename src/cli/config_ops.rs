@@ -1194,9 +1194,16 @@ async fn execute_env_list(config: &Config) -> Result<()> {
         .map(|d| format!(", default: {d}"))
         .unwrap_or_default();
     println!("Project envs (from {}{}):", path.display(), default_label);
-    // Global backend (xv.conf / XV_BACKEND / top-level --backend) used as the
-    // fallback when an env profile doesn't pin its own backend.
-    let global_backend = config.effective_backend_name();
+    // Backend that envs WITHOUT their own `backend` field fall back to. Use
+    // the pre-profile snapshot (`disk_backend`: global config / XV_BACKEND /
+    // --backend) — NOT `effective_backend_name()`, which has already folded in
+    // the *active* env's profile backend in main.rs and would make inactive
+    // envs appear to inherit the active env's choice.
+    let global_backend = config
+        .disk_backend
+        .as_deref()
+        .or(config.cli_backend.as_deref())
+        .unwrap_or("azure");
     for (name, profile) in &cfg.envs {
         let marker = if active.as_deref() == Some(name.as_str()) {
             "*"
@@ -1225,9 +1232,17 @@ async fn execute_env_list(config: &Config) -> Result<()> {
     if let Some(active_name) = &active {
         if let Some(profile) = cfg.envs.get(active_name) {
             let eff_backend = profile.backend.as_deref().unwrap_or(global_backend);
+            // Vault resolution must mirror Config::resolve_vault_name and
+            // `config show --resolved`: profile.vault > context vault > global
+            // default_vault. Skipping the context layer made the summary
+            // disagree with what commands actually use.
+            let context_manager = crate::config::ContextManager::load()
+                .await
+                .unwrap_or_default();
             let eff_vault = profile
                 .vault
                 .as_deref()
+                .or_else(|| context_manager.current_vault())
                 .or(if config.default_vault.is_empty() {
                     None
                 } else {
