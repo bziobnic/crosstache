@@ -1215,11 +1215,17 @@ async fn execute_env_list(config: &Config) -> Result<()> {
         // an unset profile backend shows the inherited global value.
         let resolved =
             resolve_effective_backend(cli_backend, profile.backend.as_deref(), global_backend);
-        // "(inherited)" marks the case where the env profile itself set no
-        // backend and no CLI override applied — the value came from the global
-        // layer (or the built-in default).
-        let inherited = profile.backend.is_none() && cli_backend.is_none();
-        let backend_note = if inherited { " (inherited)" } else { "" };
+        // "(inherited)" marks rows whose env profile set no `backend` of its
+        // own — the displayed value came from outside the profile (CLI flag,
+        // XV_BACKEND, global config, or the built-in default). This must key
+        // strictly on the profile field below: the CLI override is populated
+        // from XV_BACKEND even when --backend is absent, so it is not a
+        // reliable signal for "this row has no profile-level backend".
+        let backend_note = if profile.backend.is_none() {
+            " (inherited)"
+        } else {
+            ""
+        };
         let vault = profile.vault.as_deref().unwrap_or("(unset)");
         let mut extras = String::new();
         if let Some(rg) = &profile.resource_group {
