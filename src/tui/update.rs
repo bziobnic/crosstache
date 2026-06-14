@@ -69,10 +69,6 @@ pub fn update(app: &mut App, msg: Message) -> Vec<Command> {
             app.secrets_loading = false;
             app.value_loading = false;
         }
-        Message::Quit => {
-            app.quit = true;
-            cmds.push(Command::Quit);
-        }
     }
     cmds
 }
@@ -123,11 +119,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
             cmds.push(Command::Quit);
         }
         KeyCode::Char('?') => app.overlay = Overlay::Help,
-        KeyCode::Char('/') => {
-            if app.pane == crate::tui::app::Pane::Secrets {
-                app.secret_filter_active = true;
-                app.secret_filter.clear();
-            }
+        KeyCode::Char('/') if app.pane == crate::tui::app::Pane::Secrets => {
+            app.secret_filter_active = true;
+            app.secret_filter.clear();
         }
         KeyCode::Char(' ') => app.value_revealed = !app.value_revealed,
         KeyCode::Tab => app.pane = next_pane(app.pane),
