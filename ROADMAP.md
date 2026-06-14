@@ -159,11 +159,11 @@ From `docs/UX-REVIEW.md` (2026-05-16 AWS-backend baseline):
 - **§P2-5 Backend-unsupported operations framed in Azure terms.** Use neutral language; surface the active backend in the error.
 
 ### P3
-- **§P3-1 Help hides global options by default**, including the `.xv.toml` activation flag. Promote critical globals.
-- **§P3-2 `xv env create` uses `--group`** where adjacent commands say `resource_group`. Align.
-- **§P3-3 Generic AWS inherited flags are visually louder** than command-specific flags in `--help`. Reorder.
-- **§P3-4 Build warnings on first source-install.** Sweep clippy/build warnings periodically.
-- **§P3-5 The CLI doesn't surface the env-vs-profile-vs-context distinction at the moment of confusion** — only docs do. Add inline hints.
+- **§P3-1 Help hides global options by default.** ✅ Resolved — the minimal help template advertises `--show-options` (twice: in the `-h` line and a trailing hint), so hidden globals are discoverable.
+- **§P3-2 `xv env create --group` reads ambiguously next to `--resource-group`.** ✅ Resolved (v0.12.x) — they are distinct concepts (secret-group filter vs Azure resource group); help text now says so explicitly. Not a rename.
+- **§P3-3 Generic AWS inherited flags visually louder in `--help`.** ✅ Obsoleted by §P2-2 — `--aws-profile`/`--region` are now hidden from default help entirely.
+- **§P3-4 Build warnings / clippy debt.** ✅ Resolved (v0.12.x) — `cargo clippy --features tui -- -D warnings` is clean; periodic sweeps still encouraged.
+- **§P3-5 The CLI doesn't surface the env-vs-profile-vs-context distinction at the moment of confusion** — only docs do. Add inline hints. *(Open — the remaining substantive UX item.)*
 
 ---
 
