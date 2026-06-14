@@ -1194,36 +1194,38 @@ async fn execute_env_list(config: &Config) -> Result<()> {
         .map(|d| format!(", default: {d}"))
         .unwrap_or_default();
     println!("Project envs (from {}{}):", path.display(), default_label);
-    // Backend that envs WITHOUT their own `backend` field fall back to. Use
-    // the pre-profile snapshot (`disk_backend`: global config / XV_BACKEND /
-    // --backend) — NOT `effective_backend_name()`, which has already folded in
-    // the *active* env's profile backend in main.rs and would make inactive
-    // envs appear to inherit the active env's choice.
-    let global_backend = config
-        .disk_backend
-        .as_deref()
-        .or(config.cli_backend.as_deref())
-        .unwrap_or("azure");
+    use crate::config::project::resolve_effective_backend;
+    // Precedence for every row mirrors `resolve_effective_backend`:
+    //   cli_backend (--backend / XV_BACKEND via clap) > profile.backend > global.
+    // `cli_backend` is the raw flag/env snapshot; `disk_backend` is the global
+    // config value taken BEFORE main.rs folded the active env's profile in
+    // (using `effective_backend_name()` here would make inactive envs inherit
+    // the active env's backend). A `None` profile backend falls through to the
+    // global layer rather than silently defaulting to "azure".
+    let cli_backend = config.cli_backend.as_deref();
+    let global_backend = config.disk_backend.as_deref();
     for (name, profile) in &cfg.envs {
         let marker = if active.as_deref() == Some(name.as_str()) {
             "*"
         } else {
             " "
         };
-        // Show the EFFECTIVE backend each env resolves to, not just the
-        // profile's literal field. A profile with no `backend` inherits the
-        // global backend rather than silently defaulting to "azure" — flag
-        // that case so the displayed value matches what actually runs.
-        let (backend, backend_note) = match profile.backend.as_deref() {
-            Some(b) => (b.to_string(), String::new()),
-            None => (global_backend.to_string(), " (inherited)".to_string()),
-        };
+        // Resolve through the canonical precedence helper so a --backend
+        // override is reflected even on rows that pin their own backend, and
+        // an unset profile backend shows the inherited global value.
+        let resolved =
+            resolve_effective_backend(cli_backend, profile.backend.as_deref(), global_backend);
+        // "(inherited)" marks the case where the env profile itself set no
+        // backend and no CLI override applied — the value came from the global
+        // layer (or the built-in default).
+        let inherited = profile.backend.is_none() && cli_backend.is_none();
+        let backend_note = if inherited { " (inherited)" } else { "" };
         let vault = profile.vault.as_deref().unwrap_or("(unset)");
         let mut extras = String::new();
         if let Some(rg) = &profile.resource_group {
             extras.push_str(&format!("  resource_group={rg}"));
         }
-        println!("  {marker} {name}  backend={backend}{backend_note}  vault={vault}{extras}");
+        println!("  {marker} {name}  backend={resolved}{backend_note}  vault={vault}{extras}");
     }
 
     // Summary: what the active env actually resolves to right now, after full
@@ -1231,7 +1233,8 @@ async fn execute_env_list(config: &Config) -> Result<()> {
     // when an env is active so single-env or no-active-env cases stay terse.
     if let Some(active_name) = &active {
         if let Some(profile) = cfg.envs.get(active_name) {
-            let eff_backend = profile.backend.as_deref().unwrap_or(global_backend);
+            let eff_backend =
+                resolve_effective_backend(cli_backend, profile.backend.as_deref(), global_backend);
             // Vault resolution must mirror Config::resolve_vault_name and
             // `config show --resolved`: profile.vault > context vault > global
             // default_vault. Skipping the context layer made the summary
