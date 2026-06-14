@@ -155,11 +155,11 @@ pub struct Cli {
     pub credential_type: Option<String>,
 
     /// Override the AWS profile for this invocation (only honored when active backend is aws)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = should_hide_options())]
     pub aws_profile: Option<String>,
 
     /// Override the AWS region for this invocation (only honored when active backend is aws)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = should_hide_options())]
     pub region: Option<String>,
 
     /// Show global options in help output
