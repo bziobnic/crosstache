@@ -122,32 +122,46 @@ async fn handle_command(
     match cmd {
         Command::Quit => {}
         Command::LoadVaults => {
-            let _ = data::spawn_load_vaults(app.config.clone(), tx.clone(), backend.clone());
+            // Detached background task; the JoinHandle is intentionally dropped.
+            drop(data::spawn_load_vaults(
+                app.config.clone(),
+                tx.clone(),
+                backend.clone(),
+            ));
         }
         Command::LoadSecrets { vault } => {
-            let _ =
-                data::spawn_load_secrets(app.config.clone(), vault, tx.clone(), backend.clone());
+            drop(data::spawn_load_secrets(
+                app.config.clone(),
+                vault,
+                tx.clone(),
+                backend.clone(),
+            ));
         }
         Command::LoadValue { vault, name } => {
-            let _ = data::spawn_load_value(
+            drop(data::spawn_load_value(
                 app.config.clone(),
                 vault,
                 name,
                 tx.clone(),
                 backend.clone(),
-            );
+            ));
         }
         Command::LoadHistory { vault, name } => {
-            let _ = data::spawn_load_history(
+            drop(data::spawn_load_history(
                 app.config.clone(),
                 vault,
                 name,
                 tx.clone(),
                 backend.clone(),
-            );
+            ));
         }
         Command::LoadAudit { vault, name } => {
-            let _ = data::spawn_load_audit(app.config.clone(), vault, name, tx.clone());
+            drop(data::spawn_load_audit(
+                app.config.clone(),
+                vault,
+                name,
+                tx.clone(),
+            ));
         }
         Command::CopyToClipboard(s) => {
             if let Err(e) = clipboard::copy_string(&s) {

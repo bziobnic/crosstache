@@ -62,7 +62,7 @@ fn render_vaults(app: &App, frame: &mut Frame, area: Rect) {
                 .border_style(border_for(app, Pane::Vaults)),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut s = app.vault_state.clone();
+    let mut s = app.vault_state;
     frame.render_stateful_widget(list, area, &mut s);
 }
 
@@ -96,7 +96,7 @@ fn render_secrets(app: &App, frame: &mut Frame, area: Rect) {
                 .border_style(border_for(app, Pane::Secrets)),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut s = app.secret_state.clone();
+    let mut s = app.secret_state;
     frame.render_stateful_widget(list, area, &mut s);
 }
 
@@ -156,7 +156,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         parts.push(format!("{} secrets", s.len()));
     }
     if let Some(n) = app.clipboard_countdown {
-        parts.push(format!("clipboard: {}s", (n + 9) / 10));
+        parts.push(format!("clipboard: {}s", n.div_ceil(10)));
     }
     parts.push("?:help q:quit".to_string());
     let p = Paragraph::new(parts.join("  ·  ")).style(Style::default().fg(Color::DarkGray));

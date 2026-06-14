@@ -26,5 +26,4 @@ pub enum Message {
     },
     Tick,
     Error(crate::error::CrosstacheError),
-    Quit,
 }
