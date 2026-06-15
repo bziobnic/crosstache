@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-06-14 · **Latest released version:** `v0.12.0` · **Branch protection:** `main` (all changes via PR)
+> **Last reviewed:** 2026-06-15 · **Latest released version:** `v0.13.0` · **Branch protection:** `main` (all changes via PR)
 
 Single source of truth for **unimplemented** ideas, deferred work, and known
 limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).

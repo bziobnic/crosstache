@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased — UX & docs polish (post-v0.12.0)
+## v0.13.0 — Local metadata encryption + UX & docs polish (2026-06-15)
 
-Closes the entire UX P2 lane and P3-1..4 from `docs/UX-REVIEW.md`
-(2026-05-16 AWS-backend baseline). Merged to `main`; not yet tagged.
+Adds opt-in local-backend metadata encryption (ROADMAP P2) and closes the
+entire UX P2 lane and P3-1..4 from `docs/UX-REVIEW.md` (2026-05-16
+AWS-backend baseline).
 
 ### Added
 
