@@ -239,6 +239,7 @@ mod tests {
                 store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
                 key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
                 default_vault: Some("default".into()),
+                encrypt_metadata: None,
             }),
             ..Default::default()
         };

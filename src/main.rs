@@ -182,6 +182,7 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
             | crate::cli::Commands::Completion { .. }
             | crate::cli::Commands::Parse { .. }
             | crate::cli::Commands::Cache { .. }
+            | crate::cli::Commands::Local { .. }
             | crate::cli::Commands::Context { .. }
             | crate::cli::Commands::Env { .. }
             | crate::cli::Commands::Migrate { .. }

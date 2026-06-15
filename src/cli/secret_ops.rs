@@ -4240,6 +4240,7 @@ mod tests {
                 store_path: None,
                 key_file: None,
                 default_vault: Some("local-vault".to_string()),
+                encrypt_metadata: None,
             }),
             ..Default::default()
         };

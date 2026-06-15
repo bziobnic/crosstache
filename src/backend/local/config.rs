@@ -18,6 +18,9 @@ pub struct ResolvedLocalConfig {
     pub recipients_file: PathBuf,
     /// Default vault name used when no `--vault` flag is given.
     pub default_vault: String,
+    /// Whether to encrypt secret metadata (`.meta.json`) at rest. Defaults to
+    /// `false` for backward compatibility with existing plaintext stores.
+    pub encrypt_metadata: bool,
 }
 
 impl ResolvedLocalConfig {
@@ -48,11 +51,14 @@ impl ResolvedLocalConfig {
             .unwrap_or("default")
             .to_string();
 
+        let encrypt_metadata = raw.and_then(|c| c.encrypt_metadata).unwrap_or(false);
+
         Self {
             store_path,
             key_file,
             recipients_file,
             default_vault,
+            encrypt_metadata,
         }
     }
 }
@@ -75,10 +81,24 @@ mod tests {
             store_path: Some("/tmp/my-store".into()),
             key_file: Some("/tmp/my-key.txt".into()),
             default_vault: Some("staging".into()),
+            encrypt_metadata: None,
         };
         let cfg = ResolvedLocalConfig::from_raw(Some(&raw));
         assert_eq!(cfg.store_path, PathBuf::from("/tmp/my-store"));
         assert_eq!(cfg.key_file, PathBuf::from("/tmp/my-key.txt"));
         assert_eq!(cfg.default_vault, "staging");
+        assert!(!cfg.encrypt_metadata);
+    }
+
+    #[test]
+    fn encrypt_metadata_opt_in() {
+        let raw = LocalConfig {
+            store_path: None,
+            key_file: None,
+            default_vault: None,
+            encrypt_metadata: Some(true),
+        };
+        let cfg = ResolvedLocalConfig::from_raw(Some(&raw));
+        assert!(cfg.encrypt_metadata);
     }
 }

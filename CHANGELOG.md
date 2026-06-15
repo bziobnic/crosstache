@@ -5,6 +5,10 @@
 Closes the entire UX P2 lane and P3-1..4 from `docs/UX-REVIEW.md`
 (2026-05-16 AWS-backend baseline). Merged to `main`; not yet tagged.
 
+### Added
+
+- **Opt-in local-backend metadata encryption at rest (ROADMAP P2).** A new `encrypt_metadata` key under `[local]` (default `false`, fully backward-compatible) makes the local backend age-encrypt each secret's `.meta.json` — note, tags, folder, expiry, content-type — to the same recipients as the secret value, instead of storing it as plaintext JSON. Reads auto-detect ciphertext vs plaintext via the age header, so stores can mix both formats freely (e.g. mid-migration). A new `xv local encrypt-metadata [--dry-run]` command walks every vault (including archived `.versions/` and `.trash/`) and re-encrypts existing plaintext metadata in place, atomically and idempotently. `xv init` now warns that metadata and secret *names* are plaintext by default and points at the flag + command. **Known limitation:** secret *names* remain visible as on-disk filenames regardless of this setting (filename opaquing is tracked separately).
+
 ### Changed
 
 - **crosstache no longer frames itself as Azure-only (§P2-1, §P2-5, #254)** — the README hero and `xv --help` intro mention AWS and local backends alongside Azure. Backend-unsupported operations are framed in neutral language and surface the active backend in the error instead of assuming Azure.

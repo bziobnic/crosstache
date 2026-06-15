@@ -130,6 +130,11 @@ backend = "local"
 store_path = "~/.xv/store"
 key_file = "~/.xv/key.txt"
 default_vault = "default"
+# Encrypt secret metadata (notes, tags, folders, expiry) at rest with the
+# same age key as the values. Default false. Secret *names* stay visible as
+# on-disk filenames either way. After enabling on an existing store, run
+# `xv local encrypt-metadata` to convert already-written metadata.
+encrypt_metadata = false
 ```
 
 ---
