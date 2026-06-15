@@ -1,8 +1,10 @@
 # `xv tui` — Read-Only Terminal UI
 
-Three-pane terminal browser for vaults and secrets. **Read-only** in v0.7 — write mode (create/edit/delete) is reserved for v0.8.
+Three-pane terminal browser for vaults and secrets. The TUI is **read-only**:
+create/edit/delete flows are reserved for a future write mode.
 
-Build with the `tui` feature flag:
+Release binaries include the TUI. When building from source, enable the `tui`
+feature flag:
 
 ```bash
 cargo install crosstache --features tui
@@ -38,9 +40,10 @@ status: dev-kv · 24 secrets                                ?:help
 | `e` | expand error toast |
 | `q` / `Esc` | quit (or close current overlay) |
 
-### Reserved for v0.8 (write mode)
+### Reserved for write mode
 
-`c` (create), `d` (delete), `r` (rename / rotate). Pressing one in v0.7 shows a "reserved for v0.8 write mode" toast.
+`c` (create), `d` (delete), `r` (rename / rotate). Pressing one shows a
+reserved-for-write-mode toast; the TUI does not mutate vault or secret state.
 
 ## On-demand value fetch
 
@@ -50,7 +53,9 @@ Values are wrapped in `Zeroizing<String>` end-to-end.
 
 ## Audit overlay limitation
 
-The audit overlay (`a`) ships as a **placeholder** in v0.7. Real Azure Activity Log integration needs a separate API surface and elevated RBAC; it lands in v0.7.1.
+The audit overlay (`a`) is still a **placeholder** inside the TUI. Use
+`xv audit` from the CLI for Azure Activity Log or AWS CloudTrail-backed audit
+history.
 
 ## Performance
 

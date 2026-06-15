@@ -139,7 +139,7 @@ encrypt_metadata = false
 
 ---
 
-## AWS Secrets Manager backend (v0.10)
+## AWS Secrets Manager backend
 
 Use AWS Secrets Manager as the underlying secret store.
 
@@ -151,6 +151,8 @@ xv init  # pick "aws" when prompted
 # region = "us-east-1"
 # profile = "default"
 # default_vault = "myproj-kv"
+# Optional: enable `xv file` on AWS with an existing S3 bucket
+# s3_bucket = "my-team-xv-files"
 ```
 
 Multi-region:
@@ -165,7 +167,29 @@ type = "aws"
 region = "us-west-2"
 ```
 
-`xv share` and `xv audit` are not supported on AWS in v0.10. Use AWS IAM and CloudTrail directly for those needs.
+### AWS-specific workflows
+
+```bash
+# CloudTrail-backed audit history (requires cloudtrail:LookupEvents)
+xv audit DB_PASSWORD --backend aws --days 7
+xv audit --vault myproj-kv --backend aws --operation PutSecretValue
+
+# Native AWS Secrets Manager rotation (requires a rotation Lambda on the secret)
+xv rotate DB_PASSWORD --backend aws --native
+
+# S3-backed file storage (requires [aws].s3_bucket or XV_AWS_S3_BUCKET)
+xv file upload ./config.json --backend aws
+xv file list --backend aws --prefix releases/
+```
+
+AWS file storage uses one configured, pre-existing S3 bucket and stores objects
+under `<vault>/files/<name>` so vaults stay isolated. `xv` does not create the
+bucket. `xv file sync` is not supported on AWS yet; use recursive upload/download
+for bulk transfers.
+
+`xv share` is still not implemented against AWS because crosstache does not
+manage IAM resource policies. The command returns a copyable
+`aws secretsmanager put-resource-policy` hint instead of attempting a grant.
 
 ### Cross-cloud migration
 
@@ -702,7 +726,15 @@ xv find db --all-vaults                          # rows prefixed 'vaultname/SECR
 
 ## Files (blob storage)
 
-Optional blob storage. Set up via `xv init` (creates a storage account + container).
+Optional file/blob storage. The backing service depends on the active backend:
+
+- **Azure**: Azure Blob Storage. `xv init` can create/configure the storage
+  account and container. All commands below, including `xv file sync`, use this
+  path.
+- **AWS**: S3. Set `[aws].s3_bucket` or `XV_AWS_S3_BUCKET` to an existing bucket;
+  `xv` never creates buckets. Upload/download/list/delete/info are supported and
+  objects are stored under `<vault>/files/<name>`. `xv file sync` is not
+  supported on AWS yet.
 
 ### Single files
 
@@ -867,11 +899,12 @@ status: dev-kv · 24 secrets · clipboard: 12s              ?:help
 | `e` | expand error toast into modal |
 | `q` / `Esc` | quit (or close current overlay) |
 
-`c`, `d`, `r` are reserved for v0.8 (write mode); pressing one shows a "coming in v0.8" toast.
+`c`, `d`, `r` are reserved for a future write mode; the current TUI remains read-only.
 
 Values load on demand: settle the cursor on a row for ~200 ms and the value fetches in the background, lands in an in-memory `Zeroizing` cache (cleared on quit), and the detail pane shows `●●●●●●` until you press `Space`.
 
-> **Audit overlay:** ships as a placeholder in v0.7.0 — real Azure Activity Log integration lands in v0.7.1. Use `xv audit` from the CLI in the meantime.
+> **Audit overlay:** the TUI overlay is still a placeholder. Use CLI
+> `xv audit` for Azure Activity Log and AWS CloudTrail history in the meantime.
 
 See [`docs/tui.md`](docs/tui.md) for the full reference.
 
@@ -1042,6 +1075,10 @@ xv config unset clipboard_timeout
 | `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_CONTAINER` | Blob storage destination |
 | `BLOB_CHUNK_SIZE_MB` | Upload chunk size |
 | `BLOB_MAX_CONCURRENT_UPLOADS` | Upload concurrency |
+| `XV_BACKEND` | Active backend override (`azure`, `aws`, `local`, or a named backend) |
+| `AWS_REGION` / `AWS_PROFILE` | AWS backend region/profile fallbacks |
+| `XV_AWS_S3_BUCKET` | Existing S3 bucket for AWS file storage |
+| `AGE_KEY` / `AGE_KEY_FILE` | Local backend age identity override |
 
 ### Global CLI flags
 
