@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — UX & docs polish (post-v0.12.0)
+
+Closes the entire UX P2 lane and P3-1..4 from `docs/UX-REVIEW.md`
+(2026-05-16 AWS-backend baseline). Merged to `main`; not yet tagged.
+
+### Changed
+
+- **crosstache no longer frames itself as Azure-only (§P2-1, §P2-5, #254)** — the README hero and `xv --help` intro mention AWS and local backends alongside Azure. Backend-unsupported operations are framed in neutral language and surface the active backend in the error instead of assuming Azure.
+- **AWS-inherited flags hidden where they do nothing (§P2-2, #255)** — `--aws-profile` and `--region` are hidden from the default help of commands that ignore them, so they no longer appear on Azure/local-only operations.
+- **`context envs` shows the effective profile (§P2-4) + config naming note (§P2-3, #256)** — the listing now displays the resolved backend (with an `(inherited)` marker for envs that set no `backend` of their own) and an `Effective (<env>): backend=… vault=…` summary that mirrors full `resolve_effective_backend` / vault-resolution precedence. A note disambiguates the overlapping `.xv.toml` vs `xv.conf` backend fields.
+
+### Fixed
+
+- **TUI clippy lint debt cleared (§P3-4, #257)** — `cargo clippy --features tui -- -D warnings` is clean (collapsible-if, `.clone()` on `Copy` `ListState`, manual `div_ceil`, non-binding `let` on futures).
+- **`xv env create --group` disambiguated (§P3-1..4, #258)** — help text now explains that `--group` (secret-group filter) and `--resource-group` (Azure resource group) are distinct concepts; the minimal help template advertises `--show-options` for discoverability of hidden globals.
+
+---
+
 ## v0.12.0 — AWS capability matrix completion (2026-06-12)
 
 Closes all four P1 AWS capability gaps deferred since v0.10.0 (#248–#251).

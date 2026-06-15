@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-06-12 · **Latest released version:** `v0.12.0` · **Branch protection:** `main` (all changes via PR)
+> **Last reviewed:** 2026-06-14 · **Latest released version:** `v0.12.0` · **Branch protection:** `main` (all changes via PR)
 
 Single source of truth for **unimplemented** ideas, deferred work, and known
 limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).
@@ -129,14 +129,6 @@ Source: `docs/reviews/2026-05-03-ux-review.md` §3 (since absorbed) and
 code-review P3 item above. Provide an opt-in encrypted index mode or, at
 minimum, a clear warning in `init` + docs.
 
-### P3 — TUI clippy lint debt
-`cargo clippy --features tui -- -D warnings` reports ~9 lints in `src/tui/`
-(collapsible-if, `.clone()` on `Copy` `ListState`, manual `div_ceil`,
-non-binding `let` on futures). Pre-existing and NOT gated by CI (which runs
-clippy on default features only; the tui feature is build-and-test-gated, not
-clippy-gated), so they don't block releases — but worth a sweep. Newer clippy
-versions surface them; same class as the AWS-files lints cleaned up in #250.
-
 ### P3 — Additional backends
 Open ground from `2026-04-29-strategic-improvements-phase-1-design.md`:
 - GCP Secret Manager
@@ -149,21 +141,15 @@ Each new backend appends to `docs/superpowers/specs/backend-trait-checklist.md`.
 
 ## UX & docs polish
 
-From `docs/UX-REVIEW.md` (2026-05-16 AWS-backend baseline):
+From `docs/UX-REVIEW.md` (2026-05-16 AWS-backend baseline).
 
-### P2
-- **§P2-1 Top-level framing still says Azure-only.** README hero + `xv --help` intro need an AWS mention.
-- **§P2-2 AWS flags appear on commands where they do nothing.** Hide `--aws-profile` / `--region` from commands that ignore them.
-- **§P2-3 `.xv.toml` and `xv.conf` overlapping backend fields** have inconsistent naming. Pick one canonical key per concept.
-- **§P2-4 `context envs` does not show the effective profile.** Include resolved backend + vault.
-- **§P2-5 Backend-unsupported operations framed in Azure terms.** Use neutral language; surface the active backend in the error.
+The full P2 lane and P3-1..4 shipped post-v0.12.0 (#254 §P2-1/§P2-5,
+#255 §P2-2, #256 §P2-3/§P2-4, #257 §P3-4, #258 §P3-1..3). They are
+recorded in [`CHANGELOG.md`](./CHANGELOG.md) under `Unreleased`. One
+substantive UX item remains open:
 
 ### P3
-- **§P3-1 Help hides global options by default.** ✅ Resolved — the minimal help template advertises `--show-options` (twice: in the `-h` line and a trailing hint), so hidden globals are discoverable.
-- **§P3-2 `xv env create --group` reads ambiguously next to `--resource-group`.** ✅ Resolved (v0.12.x) — they are distinct concepts (secret-group filter vs Azure resource group); help text now says so explicitly. Not a rename.
-- **§P3-3 Generic AWS inherited flags visually louder in `--help`.** ✅ Obsoleted by §P2-2 — `--aws-profile`/`--region` are now hidden from default help entirely.
-- **§P3-4 Build warnings / clippy debt.** ✅ Resolved (v0.12.x) — `cargo clippy --features tui -- -D warnings` is clean; periodic sweeps still encouraged.
-- **§P3-5 The CLI doesn't surface the env-vs-profile-vs-context distinction at the moment of confusion** — only docs do. Add inline hints. *(Open — the remaining substantive UX item.)*
+- **§P3-5 The CLI doesn't surface the env-vs-profile-vs-context distinction at the moment of confusion** — only docs do. Add inline hints at the point a user is likely to confuse env profiles, the active context, and global config (e.g. when `context envs` / `config show --resolved` disagree, or a vault/backend resolves from an unexpected layer).
 
 ---
 
