@@ -193,6 +193,7 @@ impl ConfigInitializer {
             store_path: Some(store_path.clone()),
             key_file: Some(key_file.clone()),
             default_vault: Some(default_vault.clone()),
+            encrypt_metadata: None,
         };
 
         let progress = ProgressIndicator::new("Setting up local backend...");
@@ -251,6 +252,15 @@ impl ConfigInitializer {
         if !public_key.is_empty() {
             println!("  Public key:    {public_key}");
         }
+
+        println!();
+        output::warn(
+            "Secret values are encrypted, but metadata (notes, tags, folders) and secret \
+             NAMES are stored in plaintext on disk by default.\n  To encrypt metadata at rest, \
+             set `encrypt_metadata = true` under [local] in your config, then run \
+             `xv local encrypt-metadata`.\n  (Secret names remain visible as filenames \
+             regardless.)",
+        );
 
         Ok(config)
     }

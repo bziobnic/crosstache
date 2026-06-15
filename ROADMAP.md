@@ -70,9 +70,15 @@ longest secret length.
 ### P3 — CSV output manually assembled
 `src/utils/format.rs:174`. Use the `csv` crate.
 
-### P3 — Local metadata plaintext disclosure
-`src/backend/local/secrets.rs:146`. Document the limitation in `init`
-and docs; opt-in encrypted metadata index.
+### P3 — Local secret *names* disclosed via filenames
+`src/backend/local/secrets.rs`. Metadata *content* encryption shipped
+post-v0.12.0 (opt-in `encrypt_metadata` under `[local]` + `xv local
+encrypt-metadata`; see `CHANGELOG.md`), so note/tags/folder/expiry are no
+longer plaintext when enabled. What remains: secret *names* are still visible
+as on-disk filenames (`<percent-encoded-name>.age` / `.meta.json`), leaking
+existence, count, and identity even with metadata encrypted. Closing this
+needs filename opaquing (e.g. hash names, store an encrypted hash→name index),
+which is a larger architectural change — track as its own design.
 
 ### P3 — Missing serialization guards for value-like fields
 `src/error.rs:637`. Extend the existing error-variant guard to cover
@@ -123,11 +129,6 @@ Harmless today (the CLI tries the trait first, then falls through to the Azure
 path), but the flag is a lie for Azure. Fix: either migrate Azure audit onto
 the trait and flip `has_audit: true`, or document the flag as "trait-dispatch
 only" so capability introspection isn't misleading.
-
-### P2 — Local backend metadata encryption (opt-in)
-Source: `docs/reviews/2026-05-03-ux-review.md` §3 (since absorbed) and
-code-review P3 item above. Provide an opt-in encrypted index mode or, at
-minimum, a clear warning in `init` + docs.
 
 ### P3 — Additional backends
 Open ground from `2026-04-29-strategic-improvements-phase-1-design.md`:

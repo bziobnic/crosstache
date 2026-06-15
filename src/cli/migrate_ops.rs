@@ -639,6 +639,7 @@ mod tests {
                     .to_string(),
             ),
             default_vault: Some("default".into()),
+            encrypt_metadata: None,
         };
         let target_config = LocalConfig {
             store_path: Some(
@@ -656,6 +657,7 @@ mod tests {
                     .to_string(),
             ),
             default_vault: Some("default".into()),
+            encrypt_metadata: None,
         };
 
         // Create source backend and seed it with secrets

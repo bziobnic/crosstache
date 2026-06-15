@@ -111,10 +111,11 @@ impl LocalBackend {
             .map_err(|e| BackendError::Internal(format!("write default vault meta: {e}")))?;
         }
 
-        let secret_backend = LocalSecretBackend::new(
+        let secret_backend = LocalSecretBackend::with_options(
             config.store_path.clone(),
             identity.clone(),
             recipients.clone(),
+            config.encrypt_metadata,
         );
         let vault_backend = LocalVaultBackend::new(config.store_path.clone());
 
@@ -128,6 +129,18 @@ impl LocalBackend {
             #[cfg(feature = "file-ops")]
             file_backend,
         })
+    }
+
+    /// Whether this backend was configured to encrypt metadata at rest.
+    pub fn encrypt_metadata_enabled(&self) -> bool {
+        self.config.encrypt_metadata
+    }
+
+    /// Re-encrypt all plaintext secret metadata under the store. See
+    /// [`LocalSecretBackend::reencrypt_all_metadata`]. Returns
+    /// `(converted, skipped)`.
+    pub fn reencrypt_all_metadata(&self, dry_run: bool) -> Result<(usize, usize), BackendError> {
+        self.secret_backend.reencrypt_all_metadata(dry_run)
     }
 
     /// Resolve age identity and recipients from env vars or files.
@@ -247,6 +260,7 @@ mod tests {
             store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
             key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
             default_vault: Some("default".into()),
+            encrypt_metadata: None,
         }
     }
 

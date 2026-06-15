@@ -32,6 +32,15 @@ pub struct LocalConfig {
     /// Default vault name used when no `--vault` / context is set.
     #[serde(default)]
     pub default_vault: Option<String>,
+
+    /// Encrypt secret metadata (`.meta.json`) at rest using the same age
+    /// recipients as secret values. When `false` (the default, for backward
+    /// compatibility), metadata — note, tags, folder, expiry, content-type —
+    /// is stored as plaintext JSON. Secret *names* remain visible as on-disk
+    /// filenames regardless of this setting. After enabling, run
+    /// `xv local encrypt-metadata` to convert existing plaintext metadata.
+    #[serde(default)]
+    pub encrypt_metadata: Option<bool>,
 }
 
 /// Configuration for the AWS Secrets Manager backend.

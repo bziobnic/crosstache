@@ -204,17 +204,52 @@ fn meta_to_summary(meta: &SecretMeta) -> SecretSummary {
     }
 }
 
-fn read_meta(path: &Path) -> Result<SecretMeta, BackendError> {
-    let data = fs::read_to_string(path)
+/// Read and deserialize secret metadata from `path`.
+///
+/// Auto-detects whether the file holds age ciphertext (encrypted metadata) or
+/// plaintext JSON by inspecting the age magic header, so a store may contain a
+/// mix of both during/after migration. `identity` is only used when the file
+/// is encrypted.
+fn read_meta(path: &Path, identity: &age::x25519::Identity) -> Result<SecretMeta, BackendError> {
+    let raw = fs::read(path)
         .map_err(|e| BackendError::Internal(format!("read meta {}: {e}", path.display())))?;
-    serde_json::from_str(&data)
-        .map_err(|e| BackendError::Internal(format!("parse meta {}: {e}", path.display())))
+
+    if crypto::is_age_encrypted(&raw) {
+        let plaintext = crypto::decrypt_bytes(&raw, identity)
+            .map_err(|e| BackendError::Internal(format!("decrypt meta {}: {e}", path.display())))?;
+        serde_json::from_slice(&plaintext)
+            .map_err(|e| BackendError::Internal(format!("parse meta {}: {e}", path.display())))
+    } else {
+        serde_json::from_slice(&raw)
+            .map_err(|e| BackendError::Internal(format!("parse meta {}: {e}", path.display())))
+    }
 }
 
-fn write_meta(path: &Path, meta: &SecretMeta) -> Result<(), BackendError> {
-    let json = serde_json::to_string_pretty(meta)
+/// How metadata should be written: which recipients to encrypt to, and whether
+/// to encrypt at all. Bundled so write paths don't sprout extra positional args.
+#[derive(Clone, Copy)]
+struct MetaCrypto<'a> {
+    recipients: &'a [age::x25519::Recipient],
+    encrypt: bool,
+}
+
+/// Serialize and write secret metadata to `path`.
+///
+/// When `crypto_opts.encrypt` is true, the JSON is age-encrypted to the given
+/// recipients before being written; otherwise it is written as plaintext JSON.
+/// Either way the file is created with private (0600) permissions.
+fn write_meta(path: &Path, meta: &SecretMeta, crypto_opts: MetaCrypto) -> Result<(), BackendError> {
+    let json = serde_json::to_vec_pretty(meta)
         .map_err(|e| BackendError::Internal(format!("serialize meta: {e}")))?;
-    write_private(path, json.as_bytes())
+
+    let bytes = if crypto_opts.encrypt {
+        crypto::encrypt_bytes(&json, crypto_opts.recipients)
+            .map_err(|e| BackendError::Internal(format!("encrypt meta: {e}")))?
+    } else {
+        json
+    };
+
+    write_private(path, &bytes)
         .map_err(|e| BackendError::Internal(format!("write meta {}: {e}", path.display())))
 }
 
@@ -238,6 +273,7 @@ fn archive_snapshot(
     version: &str,
     age_bytes: &[u8],
     meta: &SecretMeta,
+    crypto_opts: MetaCrypto,
 ) -> Result<(), BackendError> {
     let vdir = versions_dir(store_path, vault, name)?;
     fs::create_dir_all(&vdir)
@@ -248,7 +284,7 @@ fn archive_snapshot(
 
     write_private(&age_dest, age_bytes)
         .map_err(|e| BackendError::Internal(format!("archive age: {e}")))?;
-    write_meta(&meta_dest, meta)
+    write_meta(&meta_dest, meta, crypto_opts)
         .map_err(|e| BackendError::Internal(format!("archive meta: {e}")))?;
 
     Ok(())
@@ -336,19 +372,96 @@ pub struct LocalSecretBackend {
     store_path: PathBuf,
     identity: age::x25519::Identity,
     recipients: Vec<age::x25519::Recipient>,
+    encrypt_metadata: bool,
 }
 
 impl LocalSecretBackend {
-    pub fn new(
+    /// Construct a backend, choosing whether new metadata writes are encrypted.
+    pub fn with_options(
         store_path: PathBuf,
         identity: age::x25519::Identity,
         recipients: Vec<age::x25519::Recipient>,
+        encrypt_metadata: bool,
     ) -> Self {
         Self {
             store_path,
             identity,
             recipients,
+            encrypt_metadata,
         }
+    }
+
+    /// Re-encrypt every plaintext `.meta.json` under the store as age
+    /// ciphertext, in place. Walks all vaults, including archived versions
+    /// (`.versions/`) and trash (`.trash/`). Already-encrypted metadata is
+    /// skipped, so this is idempotent and safe to re-run.
+    ///
+    /// Returns `(converted, skipped)` counts. When `dry_run` is true, nothing
+    /// is written and `converted` reflects what *would* be converted.
+    pub fn reencrypt_all_metadata(&self, dry_run: bool) -> Result<(usize, usize), BackendError> {
+        let vaults_root = paths::vaults_dir(&self.store_path);
+        let mut converted = 0usize;
+        let mut skipped = 0usize;
+        if !vaults_root.exists() {
+            return Ok((0, 0));
+        }
+
+        // Collect every *.meta.json file anywhere under vaults/.
+        let mut stack = vec![vaults_root];
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let is_meta = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|n| n.ends_with(".meta.json"))
+                    .unwrap_or(false);
+                if !is_meta {
+                    continue;
+                }
+                // Skip symlinks defensively.
+                if fs::symlink_metadata(&path)
+                    .map(|m| m.is_symlink())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let raw = fs::read(&path).map_err(|e| {
+                    BackendError::Internal(format!("read meta {}: {e}", path.display()))
+                })?;
+                if crypto::is_age_encrypted(&raw) {
+                    skipped += 1;
+                    continue;
+                }
+                // Validate it parses before rewriting, so we never clobber a
+                // genuinely corrupt file silently.
+                let _meta: SecretMeta = serde_json::from_slice(&raw).map_err(|e| {
+                    BackendError::Internal(format!("parse meta {}: {e}", path.display()))
+                })?;
+                converted += 1;
+                if dry_run {
+                    continue;
+                }
+                let ciphertext = crypto::encrypt_bytes(&raw, &self.recipients)?;
+                // Write via a temp file + rename for atomicity.
+                let tmp = temp_path_for(&path)?;
+                write_private(&tmp, &ciphertext).map_err(|e| {
+                    BackendError::Internal(format!("write temp meta {}: {e}", tmp.display()))
+                })?;
+                fs::rename(&tmp, &path).map_err(|e| {
+                    BackendError::Internal(format!("activate meta {}: {e}", path.display()))
+                })?;
+            }
+        }
+        Ok((converted, skipped))
     }
 
     /// Soft-delete `name` into a trash entry stamped with `deleted_at_millis`.
@@ -455,7 +568,7 @@ impl SecretBackend for LocalSecretBackend {
 
         // Snapshot old state for transactional replace+archive.
         let old_snapshot = if mp.exists() {
-            let old_meta = read_meta(&mp)?;
+            let old_meta = read_meta(&mp, &self.identity)?;
             let old_age = fs::read(&ap).map_err(|e| {
                 BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
             })?;
@@ -498,7 +611,14 @@ impl SecretBackend for LocalSecretBackend {
         let mp_tmp = temp_path_for(&mp)?;
 
         crypto::encrypt_to_file(&ap_tmp, request.value.as_bytes(), &recipients)?;
-        write_meta(&mp_tmp, &meta)?;
+        write_meta(
+            &mp_tmp,
+            &meta,
+            MetaCrypto {
+                recipients: &recipients,
+                encrypt: self.encrypt_metadata,
+            },
+        )?;
 
         fs::rename(&ap_tmp, &ap)
             .map_err(|e| BackendError::Internal(format!("activate age {}: {e}", ap.display())))?;
@@ -507,7 +627,18 @@ impl SecretBackend for LocalSecretBackend {
 
         // Archive old version only after replacement is durable.
         if let Some((old_meta, old_age)) = old_snapshot {
-            archive_snapshot(&store, vault, &name, &old_meta.version, &old_age, &old_meta)?;
+            archive_snapshot(
+                &store,
+                vault,
+                &name,
+                &old_meta.version,
+                &old_age,
+                &old_meta,
+                MetaCrypto {
+                    recipients: &recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
         }
 
         Ok(meta_to_properties(&meta, None))
@@ -539,7 +670,7 @@ impl SecretBackend for LocalSecretBackend {
             )));
         }
 
-        let meta = read_meta(&mp)?;
+        let meta = read_meta(&mp, &self.identity)?;
 
         let value = if include_value {
             let ap = age_path(&self.store_path, vault, name)?;
@@ -572,7 +703,7 @@ impl SecretBackend for LocalSecretBackend {
         // First check if this is the current version.
         let mp = meta_path(&self.store_path, vault, name)?;
         if mp.exists() {
-            let meta = read_meta(&mp)?;
+            let meta = read_meta(&mp, &self.identity)?;
             if meta.version == version {
                 return self.get_secret(vault, name, include_value).await;
             }
@@ -598,7 +729,7 @@ impl SecretBackend for LocalSecretBackend {
             )));
         }
 
-        let meta = read_meta(&meta_file)?;
+        let meta = read_meta(&meta_file, &self.identity)?;
 
         let value = if include_value {
             let age_file = vdir.join(format!("{version}.age"));
@@ -641,7 +772,7 @@ impl SecretBackend for LocalSecretBackend {
                 continue;
             }
 
-            let meta = match read_meta(&entry.path()) {
+            let meta = match read_meta(&entry.path(), &self.identity) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!(
@@ -693,7 +824,7 @@ impl SecretBackend for LocalSecretBackend {
             });
         }
 
-        let mut meta = read_meta(&mp)?;
+        let mut meta = read_meta(&mp, &self.identity)?;
         let now = Utc::now();
 
         // If value is being updated, replace active first, then archive prior snapshot.
@@ -724,6 +855,10 @@ impl SecretBackend for LocalSecretBackend {
                 &old_meta.version,
                 &old_age,
                 &old_meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
             )?;
         }
 
@@ -763,7 +898,14 @@ impl SecretBackend for LocalSecretBackend {
         meta.folder = request.folder.apply(meta.folder.take());
 
         meta.updated_at = now;
-        write_meta(&mp, &meta)?;
+        write_meta(
+            &mp,
+            &meta,
+            MetaCrypto {
+                recipients: &self.recipients,
+                encrypt: self.encrypt_metadata,
+            },
+        )?;
 
         Ok(meta_to_properties(&meta, None))
     }
@@ -786,7 +928,7 @@ impl SecretBackend for LocalSecretBackend {
                 for entry in entries.flatten() {
                     let fname = entry.file_name().to_string_lossy().to_string();
                     if fname.ends_with(".meta.json") {
-                        if let Ok(meta) = read_meta(&entry.path()) {
+                        if let Ok(meta) = read_meta(&entry.path(), &self.identity) {
                             versions.push(meta_to_properties(&meta, None));
                         }
                     }
@@ -797,7 +939,7 @@ impl SecretBackend for LocalSecretBackend {
         // Add current version
         let mp = meta_path(&self.store_path, vault, name)?;
         if mp.exists() {
-            let meta = read_meta(&mp)?;
+            let meta = read_meta(&mp, &self.identity)?;
             versions.push(meta_to_properties(&meta, None));
         }
 
@@ -849,11 +991,18 @@ impl SecretBackend for LocalSecretBackend {
             .map_err(|e| BackendError::Internal(format!("restore meta: {e}")))?;
 
         // Update the version label to the next version number
-        let mut meta = read_meta(&mp)?;
+        let mut meta = read_meta(&mp, &self.identity)?;
         let next_ver = next_version(&self.store_path, vault, name)?;
         meta.version = format!("v{next_ver}");
         meta.updated_at = Utc::now();
-        write_meta(&mp, &meta)?;
+        write_meta(
+            &mp,
+            &meta,
+            MetaCrypto {
+                recipients: &self.recipients,
+                encrypt: self.encrypt_metadata,
+            },
+        )?;
 
         Ok(meta_to_properties(&meta, None))
     }
@@ -922,14 +1071,21 @@ impl SecretBackend for LocalSecretBackend {
         fs::remove_dir_all(&tdir)
             .map_err(|e| BackendError::Internal(format!("remove trash dir: {e}")))?;
 
-        let mut meta = read_meta(&mp)?;
+        let mut meta = read_meta(&mp, &self.identity)?;
         if had_active {
             // Relabel so the restored secret doesn't reuse a version label
             // already taken by the archived active secret.
             let next_ver = next_version(&self.store_path, vault, name)?;
             meta.version = format!("v{next_ver}");
             meta.updated_at = Utc::now();
-            write_meta(&mp, &meta)?;
+            write_meta(
+                &mp,
+                &meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
         }
         Ok(meta_to_properties(&meta, None))
     }
@@ -981,7 +1137,7 @@ impl SecretBackend for LocalSecretBackend {
                 for inner in inner_entries.flatten() {
                     let fname = inner.file_name().to_string_lossy().to_string();
                     if fname.ends_with(".meta.json") {
-                        if let Ok(meta) = read_meta(&inner.path()) {
+                        if let Ok(meta) = read_meta(&inner.path(), &self.identity) {
                             results.push(meta_to_summary(&meta));
                         }
                     }
@@ -1002,7 +1158,13 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test backend with a temp dir and return it along with the temp dir.
+    /// Metadata encryption is off (matches the default).
     fn test_backend() -> (LocalSecretBackend, TempDir) {
+        test_backend_opts(false)
+    }
+
+    /// Like [`test_backend`] but lets the caller opt into metadata encryption.
+    fn test_backend_opts(encrypt_metadata: bool) -> (LocalSecretBackend, TempDir) {
         let tmp = TempDir::new().unwrap();
         let store = tmp.path().to_path_buf();
         let key_path = tmp.path().join("key.txt");
@@ -1024,8 +1186,21 @@ mod tests {
         )
         .unwrap();
 
-        let backend = LocalSecretBackend::new(store, identity, recipients);
+        let backend =
+            LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata);
         (backend, tmp)
+    }
+
+    /// Re-open an existing store (created by [`test_backend_opts`]) reusing its
+    /// key files, optionally toggling metadata encryption. Used to simulate a
+    /// user flipping `encrypt_metadata` on and re-running against the same data.
+    fn test_backend_reopen(tmp: &TempDir, encrypt_metadata: bool) -> LocalSecretBackend {
+        let store = tmp.path().to_path_buf();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        let identity = crypto::load_identity(&key_path).unwrap();
+        let recipients = crypto::load_recipients(&recipients_path).unwrap();
+        LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata)
     }
 
     fn make_request(name: &str, value: &str) -> SecretRequest {
@@ -1041,6 +1216,196 @@ mod tests {
             note: Some("test note".into()),
             folder: Some("infra".into()),
         }
+    }
+
+    /// Path to the active `.meta.json` for a secret in the default vault.
+    fn meta_file_path(tmp: &TempDir, name: &str) -> std::path::PathBuf {
+        let enc = encode_name(name);
+        tmp.path()
+            .join("vaults")
+            .join("default")
+            .join("secrets")
+            .join(format!("{enc}.meta.json"))
+    }
+
+    #[tokio::test]
+    async fn encrypted_metadata_roundtrips_and_is_age_on_disk() {
+        let (backend, tmp) = test_backend_opts(true);
+
+        let props = backend
+            .set_secret("default", make_request("api-key", "s3cr3t"))
+            .await
+            .unwrap();
+        assert_eq!(props.name, "api-key");
+        assert_eq!(
+            props.tags.get("note").map(String::as_str),
+            Some("test note")
+        );
+
+        // On disk, the meta file must be age ciphertext, not readable JSON.
+        let raw = fs::read(meta_file_path(&tmp, "api-key")).unwrap();
+        assert!(
+            crypto::is_age_encrypted(&raw),
+            "meta file should be age-encrypted"
+        );
+        assert!(
+            serde_json::from_slice::<SecretMeta>(&raw).is_err(),
+            "encrypted meta must not parse as plaintext JSON"
+        );
+        // The sensitive note must not appear in cleartext anywhere in the file.
+        assert!(
+            !raw.windows(9).any(|w| w == b"test note"),
+            "note leaked in cleartext"
+        );
+
+        // Reading it back through the backend transparently decrypts.
+        let got = backend
+            .get_secret("default", "api-key", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            got.value.as_deref().map(|z| z.to_string()),
+            Some("s3cr3t".into())
+        );
+        assert_eq!(got.tags.get("note").map(String::as_str), Some("test note"));
+    }
+
+    #[tokio::test]
+    async fn plaintext_metadata_is_json_on_disk_by_default() {
+        let (backend, tmp) = test_backend_opts(false);
+
+        backend
+            .set_secret("default", make_request("api-key", "s3cr3t"))
+            .await
+            .unwrap();
+
+        let raw = fs::read(meta_file_path(&tmp, "api-key")).unwrap();
+        assert!(!crypto::is_age_encrypted(&raw));
+        // Plaintext mode must parse straight back as JSON.
+        let meta: SecretMeta = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(meta.name, "api-key");
+    }
+
+    #[tokio::test]
+    async fn mixed_mode_store_reads_both_plaintext_and_encrypted() {
+        // Write one secret in plaintext mode, then reopen the SAME store with
+        // encryption on and confirm the old plaintext secret is still readable
+        // and that a newly written secret is encrypted.
+        let tmp = TempDir::new().unwrap();
+        let store = tmp.path().to_path_buf();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        let (identity, recipients) = generate_keypair(&key_path, &recipients_path).unwrap();
+
+        let vault_dir = store.join("vaults").join("default");
+        fs::create_dir_all(vault_dir.join("secrets")).unwrap();
+        fs::write(
+            vault_dir.join(".vault.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": "default", "created_at": Utc::now().to_rfc3339(), "tags": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let plain = LocalSecretBackend::with_options(
+            store.clone(),
+            identity.clone(),
+            recipients.clone(),
+            false,
+        );
+        plain
+            .set_secret("default", make_request("old-plain", "v1"))
+            .await
+            .unwrap();
+
+        let enc = LocalSecretBackend::with_options(store.clone(), identity, recipients, true);
+        enc.set_secret("default", make_request("new-enc", "v2"))
+            .await
+            .unwrap();
+
+        // Both readable through the encryption-on backend.
+        let a = enc.get_secret("default", "old-plain", true).await.unwrap();
+        let b = enc.get_secret("default", "new-enc", true).await.unwrap();
+        assert_eq!(a.value.as_deref().map(|z| z.to_string()), Some("v1".into()));
+        assert_eq!(b.value.as_deref().map(|z| z.to_string()), Some("v2".into()));
+
+        // list_secrets sees both regardless of meta encoding.
+        let listed = enc.list_secrets("default", None).await.unwrap();
+        let names: Vec<&str> = listed.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"old-plain") && names.contains(&"new-enc"));
+    }
+
+    #[tokio::test]
+    async fn reencrypt_all_metadata_migrates_plaintext_and_is_idempotent() {
+        // Seed a plaintext store with two secrets (one updated, so it has an
+        // archived version), then migrate with the same key and verify every
+        // meta file becomes age ciphertext while values still decrypt.
+        let (plain, tmp) = test_backend_opts(false);
+        plain
+            .set_secret("default", make_request("a", "1"))
+            .await
+            .unwrap();
+        plain
+            .set_secret("default", make_request("b", "2"))
+            .await
+            .unwrap();
+        // Second write to "a" archives v1 under .versions/.
+        plain
+            .set_secret("default", make_request("a", "1b"))
+            .await
+            .unwrap();
+
+        // Every meta file is plaintext right now.
+        let metas: Vec<std::path::PathBuf> = {
+            let mut v = Vec::new();
+            let mut stack = vec![tmp.path().join("vaults")];
+            while let Some(d) = stack.pop() {
+                for e in fs::read_dir(&d).unwrap().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.to_string_lossy().ends_with(".meta.json") {
+                        v.push(p);
+                    }
+                }
+            }
+            v
+        };
+        assert!(metas.len() >= 3, "expected active + archived meta files");
+        for m in &metas {
+            assert!(!crypto::is_age_encrypted(&fs::read(m).unwrap()));
+        }
+
+        // Re-open with encryption enabled and run the migration.
+        let enc = test_backend_reopen(&tmp, true);
+
+        // Dry run reports work but changes nothing.
+        let (would, already0) = enc.reencrypt_all_metadata(true).unwrap();
+        assert_eq!(would, metas.len());
+        assert_eq!(already0, 0);
+        for m in &metas {
+            assert!(!crypto::is_age_encrypted(&fs::read(m).unwrap()));
+        }
+
+        // Real run converts everything.
+        let (converted, already1) = enc.reencrypt_all_metadata(false).unwrap();
+        assert_eq!(converted, metas.len());
+        assert_eq!(already1, 0);
+        for m in &metas {
+            assert!(crypto::is_age_encrypted(&fs::read(m).unwrap()));
+        }
+
+        // Idempotent: a second run converts nothing and skips all.
+        let (converted2, already2) = enc.reencrypt_all_metadata(false).unwrap();
+        assert_eq!(converted2, 0);
+        assert_eq!(already2, metas.len());
+
+        // Values and metadata still resolve correctly post-migration.
+        let a = enc.get_secret("default", "a", true).await.unwrap();
+        assert_eq!(a.value.as_deref().map(|z| z.to_string()), Some("1b".into()));
+        let listed = enc.list_secrets("default", None).await.unwrap();
+        assert_eq!(listed.len(), 2);
     }
 
     #[tokio::test]

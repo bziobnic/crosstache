@@ -693,6 +693,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: CacheCommands,
     },
+    /// Local backend maintenance commands (only relevant for `backend = "local"`)
+    Local {
+        #[command(subcommand)]
+        command: LocalCommands,
+    },
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
@@ -1064,6 +1069,22 @@ pub enum CacheCommands {
     Refresh {
         #[arg(long)]
         key: String,
+    },
+}
+
+/// Maintenance subcommands for the local age-encrypted backend.
+#[derive(Subcommand)]
+pub enum LocalCommands {
+    /// Re-encrypt existing plaintext secret metadata at rest.
+    ///
+    /// Requires `encrypt_metadata = true` under `[local]` in your config.
+    /// Walks every vault and rewrites any plaintext `.meta.json` (including
+    /// archived versions and trash) as age ciphertext. Already-encrypted
+    /// metadata is left untouched, so the command is safe to re-run.
+    EncryptMetadata {
+        /// Show what would be re-encrypted without modifying anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1548,6 +1569,9 @@ impl Cli {
             }
             Commands::Cache { command } => {
                 crate::cli::config_ops::execute_cache_command(command, config).await
+            }
+            Commands::Local { command } => {
+                crate::cli::local_ops::execute_local_command(command, config).await
             }
             #[cfg(feature = "file-ops")]
             Commands::Upload {

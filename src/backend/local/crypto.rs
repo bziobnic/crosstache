@@ -63,6 +63,76 @@ pub fn encrypt_to_file(
     Ok(())
 }
 
+/// The age v1 ASCII-armor / binary header prefix. Used to detect whether a
+/// `.meta.json` file on disk holds age ciphertext (encrypted metadata) or
+/// plaintext JSON, so a store can mix both during/after migration.
+pub const AGE_MAGIC: &[u8] = b"age-encryption.org/";
+
+/// Returns true if `data` begins with the age format header.
+pub fn is_age_encrypted(data: &[u8]) -> bool {
+    data.starts_with(AGE_MAGIC)
+}
+
+/// Encrypt `plaintext` to in-memory age ciphertext bytes for the given
+/// recipients. Used for small payloads (secret metadata) that are held in
+/// memory rather than streamed.
+pub fn encrypt_bytes(
+    plaintext: &[u8],
+    recipients: &[age::x25519::Recipient],
+) -> Result<Vec<u8>, BackendError> {
+    let boxed_recipients: Vec<Box<dyn age::Recipient + Send>> = recipients
+        .iter()
+        .map(|r| Box::new(r.clone()) as Box<dyn age::Recipient + Send>)
+        .collect();
+
+    let encryptor = age::Encryptor::with_recipients(boxed_recipients)
+        .ok_or_else(|| BackendError::Internal("no recipients provided".into()))?;
+
+    let mut out = Vec::new();
+    let mut writer = encryptor
+        .wrap_output(&mut out)
+        .map_err(|e| BackendError::Internal(format!("encrypt init: {e}")))?;
+    writer
+        .write_all(plaintext)
+        .map_err(|e| BackendError::Internal(format!("encrypt write: {e}")))?;
+    writer
+        .finish()
+        .map_err(|e| BackendError::Internal(format!("encrypt finish: {e}")))?;
+
+    Ok(out)
+}
+
+/// Decrypt in-memory age ciphertext `data` with `identity`, returning the
+/// plaintext bytes. The plaintext is wrapped in `Zeroizing` since metadata may
+/// contain sensitive notes/tags.
+pub fn decrypt_bytes(
+    data: &[u8],
+    identity: &age::x25519::Identity,
+) -> Result<Zeroizing<Vec<u8>>, BackendError> {
+    let decryptor = match age::Decryptor::new_buffered(data)
+        .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
+    {
+        age::Decryptor::Recipients(d) => d,
+        _other => {
+            eprintln!("warning: unexpected age decryptor variant (expected Recipients)");
+            return Err(BackendError::Internal(
+                "unexpected passphrase-encrypted data".into(),
+            ));
+        }
+    };
+
+    let mut decrypted = decryptor
+        .decrypt(std::iter::once(identity as &dyn age::Identity))
+        .map_err(|e| BackendError::Internal(format!("decrypt: {e}")))?;
+
+    let mut buf = Zeroizing::new(Vec::new());
+    decrypted
+        .read_to_end(&mut buf)
+        .map_err(|e| BackendError::Internal(format!("read plaintext: {e}")))?;
+
+    Ok(buf)
+}
+
 /// Read and decrypt the age file at `path`, returning the plaintext bytes.
 ///
 /// Used for file/blob storage where the content may not be valid UTF-8.
