@@ -391,15 +391,21 @@ impl LocalSecretBackend {
         }
     }
 
-    /// Re-encrypt every plaintext `.meta.json` under the store as age
-    /// ciphertext, in place. Walks all vaults, including archived versions
-    /// (`.versions/`) and trash (`.trash/`). Already-encrypted metadata is
-    /// skipped, so this is idempotent and safe to re-run.
+    /// Re-encrypt every plaintext secret `.meta.json` under the store as age
+    /// ciphertext, in place. Covers active secrets (`secrets/`), archived
+    /// versions (`secrets/.versions/`), and trashed secrets (`.trash/`).
+    /// Already-encrypted metadata is skipped, so this is idempotent and safe to
+    /// re-run.
     ///
-    /// Each vault's subtree is processed while holding that vault's `.lock`
-    /// (the same lock taken by `set_secret`/`update_secret`/etc.), so a
-    /// concurrent `xv` mutation cannot interleave a write between this
-    /// migration's read and its atomic rename.
+    /// File-storage metadata (`files/*.meta.json`, which holds `FileInfo`, not
+    /// `SecretMeta`) is deliberately left untouched — the file backend reads it
+    /// as plaintext JSON and is not part of the `encrypt_metadata` contract.
+    ///
+    /// Each vault is processed while holding its `.lock` (the same lock taken by
+    /// `set_secret`/`update_secret`/etc.), so a concurrent `xv` mutation cannot
+    /// interleave a write between this migration's read and its atomic rename.
+    /// If a vault's lock cannot be acquired (e.g. another process holds it), the
+    /// migration fails loudly rather than silently leaving that vault plaintext.
     ///
     /// Returns `(converted, skipped)` counts. When `dry_run` is true, nothing
     /// is written and `converted` reflects what *would* be converted.
@@ -411,25 +417,31 @@ impl LocalSecretBackend {
             return Ok((0, 0));
         }
 
-        // Top-level entries under vaults/ are the per-vault directories. Lock
-        // each vault for the duration of its subtree migration.
         let vault_dirs = fs::read_dir(&vaults_root)
             .map_err(|e| BackendError::Internal(format!("read vaults dir: {e}")))?;
         for vault_entry in vault_dirs.flatten() {
             let vault_dir = vault_entry.path();
-            if !vault_dir.is_dir() {
+            // Only directories that look like vaults (have a .vault.json).
+            if !vault_dir.join(".vault.json").exists() {
                 continue;
             }
-            // Serialize against concurrent mutations of this vault. The lock is
-            // held until `_lock` drops at the end of this iteration. Skip
-            // vaults that were removed between read_dir and lock.
-            let _lock = match lock_vault(&vault_dir) {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
+            // Serialize against concurrent mutations of this vault. Fail loudly
+            // on lock errors so the caller never reports success while leaving a
+            // vault's metadata plaintext. The lock is held until `_lock` drops
+            // at the end of this iteration.
+            let _lock = lock_vault(&vault_dir).map_err(|e| {
+                BackendError::Internal(format!(
+                    "could not lock vault {} for metadata migration (another xv process may be \
+                     running): {e}",
+                    vault_dir.display()
+                ))
+            })?;
 
-            // Walk this vault's subtree (secrets/, .versions/, .trash/).
-            let mut stack = vec![vault_dir];
+            // Walk only the secret-metadata subtrees: active + archived secrets
+            // live under secrets/ (which contains .versions/), trashed secrets
+            // under .trash/. files/ is intentionally excluded (FileInfo JSON).
+            let roots = [vault_dir.join("secrets"), vault_dir.join(".trash")];
+            let mut stack: Vec<PathBuf> = roots.into_iter().filter(|p| p.exists()).collect();
             while let Some(dir) = stack.pop() {
                 let entries = match fs::read_dir(&dir) {
                     Ok(e) => e,
@@ -1379,11 +1391,29 @@ mod tests {
             .await
             .unwrap();
 
-        // Every meta file is plaintext right now.
+        // Simulate a file upload: files/<x>.meta.json holds FileInfo JSON, not
+        // SecretMeta. The migration must NOT touch it (the file backend reads
+        // it as plaintext), and must not abort trying to parse it as SecretMeta.
+        let files_dir = tmp.path().join("vaults").join("default").join("files");
+        fs::create_dir_all(&files_dir).unwrap();
+        let file_meta = files_dir.join("upload.meta.json");
+        fs::write(
+            &file_meta,
+            br#"{"name":"upload","size":3,"not_a_secret":true}"#,
+        )
+        .unwrap();
+
+        // Every secret meta file is plaintext right now (under secrets/ + .trash/).
         let metas: Vec<std::path::PathBuf> = {
             let mut v = Vec::new();
-            let mut stack = vec![tmp.path().join("vaults")];
+            let mut stack = vec![
+                tmp.path().join("vaults").join("default").join("secrets"),
+                tmp.path().join("vaults").join("default").join(".trash"),
+            ];
             while let Some(d) = stack.pop() {
+                if !d.exists() {
+                    continue;
+                }
                 for e in fs::read_dir(&d).unwrap().flatten() {
                     let p = e.path();
                     if p.is_dir() {
@@ -1429,6 +1459,18 @@ mod tests {
         assert_eq!(a.value.as_deref().map(|z| z.to_string()), Some("1b".into()));
         let listed = enc.list_secrets("default", None).await.unwrap();
         assert_eq!(listed.len(), 2);
+
+        // The file-storage meta (FileInfo JSON under files/) was left untouched:
+        // still plaintext, still parses, and the migration didn't abort on it.
+        let file_raw = fs::read(&file_meta).unwrap();
+        assert!(
+            !crypto::is_age_encrypted(&file_raw),
+            "files/*.meta.json must not be encrypted by the secret migration"
+        );
+        assert_eq!(
+            file_raw,
+            br#"{"name":"upload","size":3,"not_a_secret":true}"#
+        );
     }
 
     #[tokio::test]
