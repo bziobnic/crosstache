@@ -396,6 +396,11 @@ impl LocalSecretBackend {
     /// (`.versions/`) and trash (`.trash/`). Already-encrypted metadata is
     /// skipped, so this is idempotent and safe to re-run.
     ///
+    /// Each vault's subtree is processed while holding that vault's `.lock`
+    /// (the same lock taken by `set_secret`/`update_secret`/etc.), so a
+    /// concurrent `xv` mutation cannot interleave a write between this
+    /// migration's read and its atomic rename.
+    ///
     /// Returns `(converted, skipped)` counts. When `dry_run` is true, nothing
     /// is written and `converted` reflects what *would* be converted.
     pub fn reencrypt_all_metadata(&self, dry_run: bool) -> Result<(usize, usize), BackendError> {
@@ -406,59 +411,77 @@ impl LocalSecretBackend {
             return Ok((0, 0));
         }
 
-        // Collect every *.meta.json file anywhere under vaults/.
-        let mut stack = vec![vaults_root];
-        while let Some(dir) = stack.pop() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(e) => e,
+        // Top-level entries under vaults/ are the per-vault directories. Lock
+        // each vault for the duration of its subtree migration.
+        let vault_dirs = fs::read_dir(&vaults_root)
+            .map_err(|e| BackendError::Internal(format!("read vaults dir: {e}")))?;
+        for vault_entry in vault_dirs.flatten() {
+            let vault_dir = vault_entry.path();
+            if !vault_dir.is_dir() {
+                continue;
+            }
+            // Serialize against concurrent mutations of this vault. The lock is
+            // held until `_lock` drops at the end of this iteration. Skip
+            // vaults that were removed between read_dir and lock.
+            let _lock = match lock_vault(&vault_dir) {
+                Ok(l) => l,
                 Err(_) => continue,
             };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
+
+            // Walk this vault's subtree (secrets/, .versions/, .trash/).
+            let mut stack = vec![vault_dir];
+            while let Some(dir) = stack.pop() {
+                let entries = match fs::read_dir(&dir) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    let is_meta = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|n| n.ends_with(".meta.json"))
+                        .unwrap_or(false);
+                    if !is_meta {
+                        continue;
+                    }
+                    // Skip symlinks defensively.
+                    if fs::symlink_metadata(&path)
+                        .map(|m| m.is_symlink())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let raw = fs::read(&path).map_err(|e| {
+                        BackendError::Internal(format!("read meta {}: {e}", path.display()))
+                    })?;
+                    if crypto::is_age_encrypted(&raw) {
+                        skipped += 1;
+                        continue;
+                    }
+                    // Validate it parses before rewriting, so we never clobber a
+                    // genuinely corrupt file silently.
+                    let _meta: SecretMeta = serde_json::from_slice(&raw).map_err(|e| {
+                        BackendError::Internal(format!("parse meta {}: {e}", path.display()))
+                    })?;
+                    converted += 1;
+                    if dry_run {
+                        continue;
+                    }
+                    let ciphertext = crypto::encrypt_bytes(&raw, &self.recipients)?;
+                    // Write via a temp file + rename for atomicity.
+                    let tmp = temp_path_for(&path)?;
+                    write_private(&tmp, &ciphertext).map_err(|e| {
+                        BackendError::Internal(format!("write temp meta {}: {e}", tmp.display()))
+                    })?;
+                    fs::rename(&tmp, &path).map_err(|e| {
+                        BackendError::Internal(format!("activate meta {}: {e}", path.display()))
+                    })?;
                 }
-                let is_meta = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(|n| n.ends_with(".meta.json"))
-                    .unwrap_or(false);
-                if !is_meta {
-                    continue;
-                }
-                // Skip symlinks defensively.
-                if fs::symlink_metadata(&path)
-                    .map(|m| m.is_symlink())
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                let raw = fs::read(&path).map_err(|e| {
-                    BackendError::Internal(format!("read meta {}: {e}", path.display()))
-                })?;
-                if crypto::is_age_encrypted(&raw) {
-                    skipped += 1;
-                    continue;
-                }
-                // Validate it parses before rewriting, so we never clobber a
-                // genuinely corrupt file silently.
-                let _meta: SecretMeta = serde_json::from_slice(&raw).map_err(|e| {
-                    BackendError::Internal(format!("parse meta {}: {e}", path.display()))
-                })?;
-                converted += 1;
-                if dry_run {
-                    continue;
-                }
-                let ciphertext = crypto::encrypt_bytes(&raw, &self.recipients)?;
-                // Write via a temp file + rename for atomicity.
-                let tmp = temp_path_for(&path)?;
-                write_private(&tmp, &ciphertext).map_err(|e| {
-                    BackendError::Internal(format!("write temp meta {}: {e}", tmp.display()))
-                })?;
-                fs::rename(&tmp, &path).map_err(|e| {
-                    BackendError::Internal(format!("activate meta {}: {e}", path.display()))
-                })?;
             }
         }
         Ok((converted, skipped))
