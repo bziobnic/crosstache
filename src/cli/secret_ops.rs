@@ -2480,7 +2480,7 @@ fn stream_and_mask(
     mut child: std::process::Child,
     secret_values: Vec<Zeroizing<String>>,
 ) -> Result<i32> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
 
     let stdout = child.stdout.take().ok_or_else(|| {
         CrosstacheError::config("failed to capture child stdout: pipe was not set")
@@ -2496,26 +2496,18 @@ fn stream_and_mask(
 
     // Thread 1: stream stdout
     let stdout_thread = std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut buf = Vec::new();
-        while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
-            let line = String::from_utf8_lossy(&buf);
-            let masked = mask_secrets(&line, &secrets);
-            print!("{}", masked);
-            buf.clear();
-        }
+        let mut out = std::io::stdout();
+        mask_stream_bounded(stdout, &secrets, |masked| {
+            let _ = out.write_all(masked.as_bytes());
+        });
     });
 
     // Thread 2: stream stderr
     let stderr_thread = std::thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut buf = Vec::new();
-        while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
-            let line = String::from_utf8_lossy(&buf);
-            let masked = mask_secrets(&line, &secrets_for_stderr);
-            eprint!("{}", masked);
-            buf.clear();
-        }
+        let mut err = std::io::stderr();
+        mask_stream_bounded(stderr, &secrets_for_stderr, |masked| {
+            let _ = err.write_all(masked.as_bytes());
+        });
     });
 
     // Wait for child to exit
@@ -2532,6 +2524,114 @@ fn stream_and_mask(
     let _ = std::io::stderr().flush();
 
     Ok(status.code().unwrap_or(1))
+}
+
+/// Read `src` in bounded chunks, mask any secret values, and hand each masked
+/// chunk to `emit`. Memory is bounded regardless of the child's output shape:
+/// the old implementation used `read_until(b'\n', ..)`, which buffers an entire
+/// "line" in RAM — a child that emits gigabytes with no newline (binary output,
+/// a hung process spewing) would OOM. Here we cap the working buffer and flush
+/// in fixed-size chunks, carrying an overlap of `longest_secret - 1` bytes
+/// across flush boundaries so a secret straddling two chunks is still masked.
+fn mask_stream_bounded<R: std::io::Read>(
+    src: R,
+    secrets: &[Zeroizing<String>],
+    mut emit: impl FnMut(&str),
+) {
+    // Read granularity. Small enough to bound memory, large enough to amortize
+    // syscalls. The working buffer never exceeds CHUNK + a small carry.
+    const CHUNK: usize = 64 * 1024;
+
+    // The maximum maskable secret length. A secret can straddle a read
+    // boundary, so we always retain at least this many trailing bytes as a
+    // carry until they're confirmed not to start a secret completed by the
+    // next read.
+    let longest = secrets.iter().map(|s| s.len()).max().unwrap_or(0);
+
+    let mut reader = src;
+    let mut read_buf = [0u8; CHUNK];
+    // `carry` holds raw (unmasked) bytes retained from the previous flush.
+    let mut carry: Vec<u8> = Vec::new();
+
+    loop {
+        let n = match reader.read(&mut read_buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        // Working window = carried-over tail + freshly read bytes.
+        let mut window = std::mem::take(&mut carry);
+        window.extend_from_slice(&read_buf[..n]);
+
+        // Provisional split: hold back the last `longest` bytes, which could be
+        // the start of a secret completed by the next read.
+        let mut split = window.len().saturating_sub(longest);
+
+        // A naive prefix mask would cut any secret occurrence that *straddles*
+        // `split` (starts before it, ends after it) — masking the prefix alone
+        // wouldn't see the full value and would leak it. Move `split` left to
+        // the start of any straddling occurrence so the whole occurrence stays
+        // in the carry and gets masked once it's fully buffered.
+        split = clean_split(&window, secrets, split);
+
+        if split > 0 {
+            let masked = mask_secrets(&String::from_utf8_lossy(&window[..split]), secrets);
+            emit(&masked);
+            carry = window[split..].to_vec();
+        } else {
+            // Nothing safely committable yet; keep accumulating.
+            carry = window;
+        }
+    }
+
+    // Flush whatever remains (EOF: everything is now complete).
+    if !carry.is_empty() {
+        let masked = mask_secrets(&String::from_utf8_lossy(&carry), secrets);
+        emit(&masked);
+    }
+}
+
+/// Find a flush boundary at or before `split` that does not fall inside any
+/// secret occurrence in `window`. If a secret value occurs straddling `split`
+/// (its bytes start before `split` and end after it), the boundary is moved
+/// left to the occurrence's start so the entire value stays together (in the
+/// carry) and is masked once fully buffered. Returns the adjusted split.
+fn clean_split(window: &[u8], secrets: &[Zeroizing<String>], mut split: usize) -> usize {
+    if split == 0 || split >= window.len() {
+        return split.min(window.len());
+    }
+    // Iterate to a fixed point: moving the split left can expose a different
+    // straddling occurrence. Bounded by the number of secrets per pass.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for s in secrets {
+            let v = s.as_bytes();
+            let len = v.len();
+            // mask_secrets ignores values < 4 bytes.
+            if len < 4 {
+                continue;
+            }
+            // A straddling occurrence has start `p` with p < split < p+len.
+            // Candidate starts are p in [split-len+1, split-1].
+            let lo = split.saturating_sub(len - 1);
+            let mut new_split = None;
+            for p in lo..split {
+                if p + len <= window.len() && &window[p..p + len] == v && p + len > split {
+                    // Occurrence straddles `split`; move boundary to its start.
+                    new_split = Some(p);
+                    break;
+                }
+            }
+            if let Some(p) = new_split {
+                split = p;
+                changed = true;
+                break;
+            }
+        }
+    }
+    split
 }
 
 async fn execute_secret_inject(
@@ -4143,7 +4243,7 @@ mod tests {
         stderr_file: &std::path::Path,
     ) -> i32 {
         use std::fs::OpenOptions;
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::Write;
 
         let stdout_handle = child.stdout.take().expect("stdout was piped");
         let stderr_handle = child.stderr.take().expect("stderr was piped");
@@ -4161,14 +4261,10 @@ mod tests {
                 .write(true)
                 .open(&stdout_path)
                 .unwrap();
-            let mut reader = BufReader::new(stdout_handle);
-            let mut buf = Vec::new();
-            while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
-                let line = String::from_utf8_lossy(&buf);
-                let masked = mask_secrets(&line, &secrets);
-                write!(out, "{}", masked).unwrap();
-                buf.clear();
-            }
+            // Exercise the same bounded path as production.
+            mask_stream_bounded(stdout_handle, &secrets, |masked| {
+                out.write_all(masked.as_bytes()).unwrap();
+            });
         });
 
         let stderr_thread = std::thread::spawn(move || {
@@ -4178,14 +4274,9 @@ mod tests {
                 .write(true)
                 .open(&stderr_path)
                 .unwrap();
-            let mut reader = BufReader::new(stderr_handle);
-            let mut buf = Vec::new();
-            while reader.read_until(b'\n', &mut buf).unwrap_or(0) > 0 {
-                let line = String::from_utf8_lossy(&buf);
-                let masked = mask_secrets(&line, &secrets_for_stderr);
-                write!(out, "{}", masked).unwrap();
-                buf.clear();
-            }
+            mask_stream_bounded(stderr_handle, &secrets_for_stderr, |masked| {
+                out.write_all(masked.as_bytes()).unwrap();
+            });
         });
 
         let status = child.wait().expect("failed to wait on child");
@@ -4581,6 +4672,58 @@ mod tests {
 
         let exit_code = stream_and_mask(child, secrets).unwrap();
         assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn mask_stream_bounded_masks_secret_across_chunk_boundary() {
+        // Place a secret so it straddles the 64 KiB read boundary: the first
+        // half lands at the end of one chunk, the second half at the start of
+        // the next. The overlap carry must still mask it.
+        let secret = "SUPERSECRETVALUE1234567890";
+        let secrets = vec![Zeroizing::new(secret.to_string())];
+
+        // 64 KiB chunk; position the secret to span the boundary.
+        let chunk = 64 * 1024;
+        let half = secret.len() / 2;
+        let prefix_len = chunk - half; // secret begins `half` bytes before the boundary
+        let mut input = vec![b'a'; prefix_len];
+        input.extend_from_slice(secret.as_bytes());
+        input.extend_from_slice(b" trailing\n");
+
+        let mut out = Vec::new();
+        mask_stream_bounded(std::io::Cursor::new(input), &secrets, |m| {
+            out.extend_from_slice(m.as_bytes())
+        });
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("[MASKED]"),
+            "boundary-spanning secret not masked"
+        );
+        assert!(
+            !s.contains(secret),
+            "secret leaked across the chunk boundary"
+        );
+    }
+
+    #[test]
+    fn mask_stream_bounded_handles_no_newline_input() {
+        // A large input with NO newline must still stream/mask without relying
+        // on line boundaries (the old read_until-based code would buffer it all).
+        let secret = "NOLINESECRET";
+        let secrets = vec![Zeroizing::new(secret.to_string())];
+        let mut input = vec![b'x'; 200 * 1024];
+        input.extend_from_slice(secret.as_bytes()); // no trailing newline
+
+        let mut out = Vec::new();
+        mask_stream_bounded(std::io::Cursor::new(input), &secrets, |m| {
+            out.extend_from_slice(m.as_bytes())
+        });
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("[MASKED]"),
+            "secret in newline-less input not masked"
+        );
+        assert!(!s.contains(secret), "secret leaked in newline-less input");
     }
 
     #[test]
