@@ -39,10 +39,7 @@ mod version_command_tests {
             stdout.contains("Git Hash:"),
             "Should contain Git Hash field"
         );
-        assert!(
-            stdout.contains("Git Branch:"),
-            "Should contain Git Branch field"
-        );
+        assert!(stdout.contains("Git Ref:"), "Should contain Git Ref field");
     }
 
     /// Test that version string is a valid semver

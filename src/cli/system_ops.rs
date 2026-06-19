@@ -644,7 +644,7 @@ pub(crate) async fn execute_version_command() -> Result<()> {
     println!("===================");
     println!("Version:      {}", build_info.version);
     println!("Git Hash:     {}", build_info.git_hash);
-    println!("Git Branch:   {}", build_info.git_branch);
+    println!("Git Ref:      {}", build_info.git_ref);
     println!("Backends:     {}", backends.join(", "));
 
     Ok(())

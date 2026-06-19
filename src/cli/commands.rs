@@ -77,8 +77,9 @@ pub fn get_build_info() -> BuildInfo {
     BuildInfo {
         version: built_info::PKG_VERSION,
         git_hash: built_info::GIT_COMMIT_HASH_SHORT.unwrap_or("unknown"),
-        git_branch: built_info::GIT_HEAD_REF
+        git_ref: built_info::GIT_HEAD_REF
             .map(|r| r.strip_prefix("refs/heads/").unwrap_or(r))
+            .or(built_info::GIT_VERSION)
             .unwrap_or("unknown"),
     }
 }
@@ -87,7 +88,7 @@ pub fn get_build_info() -> BuildInfo {
 pub struct BuildInfo {
     pub version: &'static str,
     pub git_hash: &'static str,
-    pub git_branch: &'static str,
+    pub git_ref: &'static str,
 }
 
 #[derive(Parser)]
