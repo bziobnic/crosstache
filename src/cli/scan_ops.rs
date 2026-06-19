@@ -84,9 +84,27 @@ async fn execute_scan_paths(
     }
     let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
     let walked = walk(&path_refs, &walk_cfg)?;
-    let findings = scan_paths(&walked, &engine)?;
+    let outcome = scan_paths(&walked, &engine)?;
 
-    render_findings(&findings, hook, format)
+    // Fail loud in hook/CI mode if any file could not be scanned — an
+    // unscanned file could conceal a leak, so silence is unacceptable there.
+    if outcome.skipped_count() > 0 {
+        if hook {
+            return Err(crate::scan::orchestrator::skipped_files_error(&outcome));
+        }
+        for (p, sz) in &outcome.skipped_too_large {
+            eprintln!(
+                "xv scan: skipped {} (too large: {sz} bytes, cap {})",
+                p.display(),
+                crate::scan::orchestrator::MAX_SCAN_FILE_SIZE
+            );
+        }
+        for p in &outcome.skipped_unreadable {
+            eprintln!("xv scan: skipped {} (unreadable)", p.display());
+        }
+    }
+
+    render_findings(&outcome.findings, hook, format)
 }
 
 async fn execute_scan_staged(
