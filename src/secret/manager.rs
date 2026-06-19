@@ -1042,7 +1042,16 @@ impl SecretOperations for AzureSecretOperations {
                 .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
         );
 
-        let mut secret_summaries = Vec::new();
+        // Bounded concurrency for the per-secret detail fetch below. Azure Key
+        // Vault's list response does NOT include tags, so the original_name /
+        // groups / folder / note (all stored in tags) require a per-secret GET.
+        // We collect the lightweight per-item fields during pagination, then
+        // fetch the tag-bearing details concurrently instead of serially — the
+        // old code awaited get_secret once per secret in sequence (N+1 latency).
+        const LIST_DETAIL_CONCURRENCY: usize = 10;
+
+        // (name, enabled, updated_on) gathered cheaply from the list response.
+        let mut pending: Vec<(String, bool, String)> = Vec::new();
         let mut next_url: Option<String> = Some(list_url);
         let mut page_count: usize = 0;
 
@@ -1095,42 +1104,9 @@ impl SecretOperations for AzureSecretOperations {
                             })
                             .unwrap_or_else(|| "Unknown".to_string());
 
-                        match self.get_secret(vault_name.as_str(), &name, false).await {
-                            Ok(secret_details) => {
-                                let original_name =
-                                    self.get_original_name(&name, &secret_details.tags);
-                                let folder = self.get_folder(&secret_details.tags);
-                                let group =
-                                    self.get_group_name(&original_name, &secret_details.tags);
-                                let note = self.get_note(&secret_details.tags);
-
-                                secret_summaries.push(SecretSummary {
-                                    name: original_name.clone(),
-                                    original_name,
-                                    note,
-                                    folder,
-                                    groups: group,
-                                    updated_on: updated,
-                                    enabled,
-                                    content_type: secret_details.content_type,
-                                });
-                            }
-                            Err(e) => {
-                                crate::utils::output::warn(&format!(
-                                    "Failed to get details for secret '{name}': {e}"
-                                ));
-                                secret_summaries.push(SecretSummary {
-                                    name: name.clone(),
-                                    original_name: name,
-                                    note: None,
-                                    folder: None,
-                                    groups: None,
-                                    updated_on: updated,
-                                    enabled,
-                                    content_type: "text/plain".to_string(),
-                                });
-                            }
-                        }
+                        // Defer the tag-bearing get_secret to a bounded-concurrency
+                        // pass after pagination, instead of awaiting it serially here.
+                        pending.push((name, enabled, updated));
                     }
                 }
             }
@@ -1141,6 +1117,59 @@ impl SecretOperations for AzureSecretOperations {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
         }
+
+        // Fetch per-secret details (tags → original_name/groups/folder/note)
+        // concurrently with a bounded number of in-flight requests, preserving
+        // the original per-secret error degradation (a failed detail fetch
+        // falls back to the bare list fields with a warning).
+        use futures::stream::StreamExt;
+        let vault_for_fetch = vault_name.clone();
+        let mut secret_summaries: Vec<SecretSummary> = futures::stream::iter(pending)
+            .map(|(name, enabled, updated)| {
+                let vault = vault_for_fetch.clone();
+                async move {
+                    match self.get_secret(vault.as_str(), &name, false).await {
+                        Ok(secret_details) => {
+                            let original_name = self.get_original_name(&name, &secret_details.tags);
+                            let folder = self.get_folder(&secret_details.tags);
+                            let group = self.get_group_name(&original_name, &secret_details.tags);
+                            let note = self.get_note(&secret_details.tags);
+
+                            SecretSummary {
+                                name: original_name.clone(),
+                                original_name,
+                                note,
+                                folder,
+                                groups: group,
+                                updated_on: updated,
+                                enabled,
+                                content_type: secret_details.content_type,
+                            }
+                        }
+                        Err(e) => {
+                            crate::utils::output::warn(&format!(
+                                "Failed to get details for secret '{name}': {e}"
+                            ));
+                            SecretSummary {
+                                name: name.clone(),
+                                original_name: name,
+                                note: None,
+                                folder: None,
+                                groups: None,
+                                updated_on: updated,
+                                enabled,
+                                content_type: "text/plain".to_string(),
+                            }
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(LIST_DETAIL_CONCURRENCY)
+            .collect()
+            .await;
+        // buffer_unordered yields completion-order; restore a stable name order
+        // so output is deterministic regardless of network timing.
+        secret_summaries.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Apply group filter if specified
         let filtered_summaries: Vec<SecretSummary> = if let Some(filter) = group_filter {
