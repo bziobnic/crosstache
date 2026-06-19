@@ -31,6 +31,17 @@ pub fn write_private(
     }
     #[cfg(not(unix))]
     {
+        // If the file already exists it may be read-only from a previous
+        // sensitive write; clear the read-only attribute first so the
+        // overwrite does not fail with a permission error (e.g. a second
+        // context `save` after `set_context` on Windows).
+        if let Ok(meta) = std::fs::metadata(path.as_ref()) {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                std::fs::set_permissions(path.as_ref(), perms)?;
+            }
+        }
         std::fs::write(path.as_ref(), bytes.as_ref())?;
         let mut perms = std::fs::metadata(path.as_ref())?.permissions();
         perms.set_readonly(true);
