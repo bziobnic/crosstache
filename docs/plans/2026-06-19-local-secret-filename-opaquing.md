@@ -107,6 +107,11 @@ becomes a hard requirement.
   it. Written via the existing `write_private` (0600, O_NOFOLLOW) +
   `encrypt_bytes` path already used for `.meta.json`.
 - `list_secrets` reads + decrypts the index instead of scanning filenames.
+  During the back-compat window (see Migration), it also scans for any legacy
+  `encode_name` files whose secrets are not yet represented in the index and
+  folds them into the result, so a half-migrated store never reports a secret
+  via `get` that is missing from `list_secrets`. The scan is dropped once the
+  back-compat read path is removed.
 - `get/set/delete` compute `file_stem` directly from the name (no index needed
   on the hot path); `set`/`delete` additionally update the index entry.
 - Index updates happen under the existing `fs2` file lock (already used in this
@@ -129,7 +134,9 @@ This changes the on-disk layout, so it must be explicit and reversible:
    under the new stem. Idempotent; safe to re-run.
 3. Keep a one-release back-compat read path that falls back to the old
    `encode_name` filename if the hashed stem is absent, so a half-migrated or
-   un-migrated store still reads. Remove in the following release.
+   un-migrated store still reads. While this fallback is active, `list_secrets`
+   also enumerates legacy-named files (see The index) so listing stays
+   consistent with `get`. Remove both in the following release.
 4. `--dry-run` prints the rename plan without touching disk.
 
 ## Security analysis
