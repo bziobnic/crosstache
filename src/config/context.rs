@@ -184,13 +184,18 @@ impl ContextManager {
     /// Save current context
     pub async fn save(&self) -> Result<()> {
         if let Some(ref path) = self.context_file {
-            // Ensure parent directory exists
+            // Ensure parent directory exists with private (0700) permissions —
+            // context files hold the user's active vault/subscription state and
+            // are treated as user-private config.
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+                crate::utils::helpers::create_private_dir(parent)?;
             }
 
             let content = serde_json::to_string_pretty(self)?;
-            tokio::fs::write(path, content).await?;
+            // Route through the sensitive-file writer: atomic 0600 create with
+            // O_NOFOLLOW, so the context file is never group/world-readable and
+            // a symlinked path cannot redirect the write.
+            crate::utils::helpers::write_sensitive_file_async(path, content.as_bytes()).await?;
 
             debug!("Saved context to: {}", path.display());
         }
@@ -337,7 +342,9 @@ impl ContextManager {
     #[allow(dead_code)]
     pub async fn init_local_context() -> Result<PathBuf> {
         let context_dir = std::env::current_dir()?.join(".xv");
-        tokio::fs::create_dir_all(&context_dir).await?;
+        // 0700 dir — the local context lives under the project's .xv/ but holds
+        // the user's active vault state, treated as user-private.
+        crate::utils::helpers::create_private_dir(&context_dir)?;
 
         let context_path = context_dir.join("context");
 
@@ -345,7 +352,9 @@ impl ContextManager {
         if !context_path.exists() {
             let empty_context = ContextManager::default();
             let content = serde_json::to_string_pretty(&empty_context)?;
-            tokio::fs::write(&context_path, content).await?;
+            // 0600, O_NOFOLLOW, atomic — never group/world-readable.
+            crate::utils::helpers::write_sensitive_file_async(&context_path, content.as_bytes())
+                .await?;
         }
 
         Ok(context_path)
@@ -519,5 +528,42 @@ mod tests {
         );
         manager.set_context(context2).await.unwrap();
         assert_eq!(manager.current_storage_container(), Some("my-container"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_saved_context_file_is_private_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        // Nest under a subdir so the private-dir creation path is exercised too.
+        let context_path = temp_dir.path().join("nested").join("context");
+
+        let manager = ContextManager {
+            context_file: Some(context_path.clone()),
+            ..Default::default()
+        };
+        manager.save().await.unwrap();
+
+        let mode = std::fs::metadata(&context_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "context file must be owner-only (0600), got {:03o}",
+            mode & 0o777
+        );
+        // Parent directory must be 0700.
+        let dir_mode = std::fs::metadata(context_path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            dir_mode & 0o777,
+            0o700,
+            "context dir must be owner-only (0700), got {:03o}",
+            dir_mode & 0o777
+        );
     }
 }
