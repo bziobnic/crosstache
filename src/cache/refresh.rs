@@ -13,6 +13,17 @@ use crate::cache::models::CacheKey;
 /// Age threshold for lock file staleness (60 seconds).
 const LOCK_MAX_AGE_SECS: u64 = 60;
 
+#[cfg(test)]
+static STALE_LOCK_CLEARED_HOOK: std::sync::Mutex<Option<fn(&Path)>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn notify_stale_lock_cleared(lock_path: &Path) {
+    let hook = *STALE_LOCK_CLEARED_HOOK.lock().unwrap();
+    if let Some(hook) = hook {
+        hook(lock_path);
+    }
+}
+
 /// Spawn a detached `xv cache refresh --key <key>` child process.
 ///
 /// The child runs independently; any error spawning it is logged at debug
@@ -94,10 +105,12 @@ pub fn acquire_lock(lock_path: &Path) -> bool {
         }
     }
 
-    // Try once, then — only if the failure was a pre-existing *stale* lock —
-    // remove it and try a second time. Capped at one retry so a live
-    // contender can never spin.
-    for attempt in 0..2 {
+    // Try once, then retry after clearing stale locks. Capped so a sequence of
+    // abandoned locks cannot spin forever, while still allowing a create after
+    // a stale lock is cleared on the retry path.
+    const MAX_STALE_RECLAIMS: usize = 2;
+    let mut stale_reclaims = 0;
+    loop {
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -122,7 +135,10 @@ pub fn acquire_lock(lock_path: &Path) -> bool {
                     debug!("acquire_lock: lock held and fresh: {}", lock_path.display());
                     return false;
                 }
-                if attempt == 1 {
+                #[cfg(test)]
+                notify_stale_lock_cleared(lock_path);
+                stale_reclaims += 1;
+                if stale_reclaims > MAX_STALE_RECLAIMS {
                     // Removed a stale lock but still lost the re-create race to
                     // another contender — treat as locked rather than spin.
                     debug!(
@@ -139,7 +155,6 @@ pub fn acquire_lock(lock_path: &Path) -> bool {
             }
         }
     }
-    false
 }
 
 /// Remove the lock file at `lock_path` (errors silently ignored).
@@ -153,7 +168,32 @@ pub fn release_lock(lock_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
+
+    static RECREATED_STALE_LOCK: AtomicBool = AtomicBool::new(false);
+
+    struct StaleLockClearedHookGuard;
+
+    impl Drop for StaleLockClearedHookGuard {
+        fn drop(&mut self) {
+            *STALE_LOCK_CLEARED_HOOK.lock().unwrap() = None;
+        }
+    }
+
+    fn recreate_stale_lock_once(lock_path: &Path) {
+        if lock_path.file_name().and_then(|name| name.to_str()) != Some("retry-stale.lock") {
+            return;
+        }
+        if RECREATED_STALE_LOCK.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let mut f = std::fs::File::create(lock_path).unwrap();
+        f.write_all(b"pid=888888 created_at=0\n").unwrap();
+        let stale = SystemTime::now() - Duration::from_secs(LOCK_MAX_AGE_SECS + 30);
+        f.set_modified(stale).unwrap();
+    }
 
     #[test]
     fn test_lock_acquire_and_release() {
@@ -211,6 +251,35 @@ mod tests {
             "stale lock should be reclaimed atomically"
         );
         // The new lock records our PID, not the stale 999999.
+        let body = std::fs::read_to_string(&lock_path).unwrap();
+        assert!(
+            body.contains(&format!("pid={}", std::process::id())),
+            "lock body should record acquiring PID, got: {body}"
+        );
+        release_lock(&lock_path);
+    }
+
+    #[test]
+    fn test_stale_lock_recreated_during_retry_is_reclaimed() {
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join("retry-stale.lock");
+
+        {
+            let mut f = std::fs::File::create(&lock_path).unwrap();
+            f.write_all(b"pid=999999 created_at=0\n").unwrap();
+            let stale = SystemTime::now() - Duration::from_secs(LOCK_MAX_AGE_SECS + 30);
+            f.set_modified(stale).unwrap();
+        }
+
+        RECREATED_STALE_LOCK.store(false, Ordering::SeqCst);
+        *STALE_LOCK_CLEARED_HOOK.lock().unwrap() = Some(recreate_stale_lock_once);
+        let _hook_guard = StaleLockClearedHookGuard;
+
+        assert!(
+            acquire_lock(&lock_path),
+            "second stale lock should be reclaimed and followed by another create attempt"
+        );
+
         let body = std::fs::read_to_string(&lock_path).unwrap();
         assert!(
             body.contains(&format!("pid={}", std::process::id())),
