@@ -109,6 +109,97 @@ fn create_user_friendly_token_error(error: azure_core::Error) -> CrosstacheError
     CrosstacheError::authentication(format!("{error}\n\n{help_message}"))
 }
 
+/// Maximum time to wait for an `az` CLI invocation before giving up.
+///
+/// The Azure CLI can hang indefinitely on a stuck network call or an
+/// interactive auth prompt; without a bound, a single `az account show` would
+/// wedge the whole process. 10s is generous for a local metadata query.
+const AZ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Maximum bytes of `az` stderr we retain for diagnostics (avoid unbounded
+/// capture if the CLI spews).
+const AZ_STDERR_CAP: usize = 4096;
+
+/// Run `az <args>` with a bounded timeout and return trimmed stdout on success.
+///
+/// Centralizes every `az` subprocess invocation so the timeout and stderr cap
+/// are enforced uniformly. The child is spawned with stdin closed (so it can
+/// never block waiting for interactive input) and is killed if it does not
+/// finish within [`AZ_TIMEOUT`]. Returns `None` on any failure (spawn error,
+/// non-zero exit, timeout) — callers treat `az` as a best-effort tenant hint
+/// and fall back to other sources, so a soft failure is the correct contract.
+fn az_output(args: &[&str]) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("az")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    // Poll for completion up to AZ_TIMEOUT, then kill. std's Child has no
+    // wait-with-timeout, so poll try_wait on a short interval — cheap for a
+    // sub-second-to-few-second command and avoids pulling in an extra crate.
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= AZ_TIMEOUT {
+                    // Best-effort kill + reap so we don't leak a zombie.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::debug!("az {:?} timed out after {:?}", args, AZ_TIMEOUT);
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                tracing::debug!("az {:?} wait failed: {e}", args);
+                return None;
+            }
+        }
+    };
+
+    if !status.success() {
+        if let Some(err) = child.stderr.take() {
+            let mut buf = Vec::new();
+            let _ = err.take(AZ_STDERR_CAP as u64).read_to_end(&mut buf);
+            tracing::debug!(
+                "az {:?} exited {}: {}",
+                args,
+                status,
+                String::from_utf8_lossy(&buf).trim()
+            );
+        }
+        return None;
+    }
+
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    let trimmed = out.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Resolve the current tenant id via `az account show`, rejecting the nil GUID
+/// and anything that is not a well-formed GUID. Centralized so both the
+/// constructor and `get_tenant_id` share one bounded, validated path.
+fn az_account_tenant_id() -> Option<String> {
+    let tid = az_output(&["account", "show", "--query", "tenantId", "-o", "tsv"])?;
+    if tid != "00000000-0000-0000-0000-000000000000" && crate::utils::helpers::is_guid(&tid) {
+        Some(tid)
+    } else {
+        None
+    }
+}
+
 /// Pre-compiled UUID regex, reused across all resolve_user_to_object_id calls.
 static UUID_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -151,21 +242,10 @@ impl DefaultAzureCredentialProvider {
     pub fn with_credential_priority(
         priority: crate::config::settings::AzureCredentialType,
     ) -> Result<Self> {
-        // Try to get tenant ID from Azure CLI to configure the credential
-        let tenant_id = match std::process::Command::new("az")
-            .args(["account", "show", "--query", "tenantId", "-o", "tsv"])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let tid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !tid.is_empty() && tid != "00000000-0000-0000-0000-000000000000" {
-                    Some(tid)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
+        // Try to get tenant ID from Azure CLI to configure the credential.
+        // Uses the centralized, timeout-bounded helper so a hung `az` cannot
+        // wedge construction; failure is soft (tenant_id stays None).
+        let tenant_id = az_account_tenant_id();
 
         let credential = Self::create_prioritized_credential(priority)?;
         let network_config = NetworkConfig::default();
@@ -287,54 +367,97 @@ impl DefaultAzureCredentialProvider {
         Ok(user_info)
     }
 
-    /// Extract tenant ID from JWT token
+    /// Extract the tenant id (`tid` claim) from an Azure AD access token.
+    ///
+    /// ## Trust boundary
+    ///
+    /// This decodes the JWT payload **without verifying the signature**, which
+    /// is safe *only because of where the token comes from*: it is a token this
+    /// process just obtained from Azure AD through the credential SDK over TLS
+    /// (`get_token`), not an attacker-supplied value. We are not authenticating
+    /// the caller with it — we use the `tid` claim purely as a last-resort hint
+    /// to discover our own tenant when `az` and `AZURE_TENANT_ID` are both
+    /// unavailable. The token is never trusted for authorization decisions.
+    ///
+    /// Prefer, in order: the cached `tenant_id`, `AZURE_TENANT_ID`, and
+    /// `az account show` — all wired ahead of this in `get_tenant_id`. This
+    /// path is the final fallback.
+    ///
+    /// Even so, we validate the claim *shape* (a well-formed, non-nil GUID and
+    /// a sane `exp`) rather than blindly trusting whatever the payload decodes
+    /// to, so a malformed or truncated token yields a clear error instead of a
+    /// garbage tenant id flowing downstream.
     fn extract_tenant_from_token(&self, token: &str) -> Result<String> {
-        // JWT tokens have three parts separated by dots: header.payload.signature
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 3 {
-            return Err(CrosstacheError::authentication(
-                "Invalid JWT token format".to_string(),
-            ));
-        }
+        tenant_id_from_jwt(token)
+    }
+}
 
-        // Decode the payload (second part)
-        let payload = parts[1];
+/// Pure claim-extraction core of [`DefaultAzureCredentialProvider::extract_tenant_from_token`],
+/// split out as a free function so the trust-boundary validation is unit-testable
+/// without constructing a credential provider. See that method for the full
+/// trust-boundary rationale.
+fn tenant_id_from_jwt(token: &str) -> Result<String> {
+    // JWT tokens have three parts separated by dots: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(CrosstacheError::authentication(
+            "Invalid JWT token format".to_string(),
+        ));
+    }
 
-        // For base64url decoding, add padding if needed
-        let mut payload_padded = payload.to_string();
-        while !payload_padded.len().is_multiple_of(4) {
-            payload_padded.push('=');
-        }
+    // Decode the payload (second part)
+    let payload = parts[1];
 
-        let decoded_bytes = base64::engine::general_purpose::URL_SAFE
-            .decode(payload_padded)
-            .map_err(|e| {
-                CrosstacheError::authentication(format!("Failed to decode JWT payload: {e}"))
-            })?;
+    // For base64url decoding, add padding if needed
+    let mut payload_padded = payload.to_string();
+    while !payload_padded.len().is_multiple_of(4) {
+        payload_padded.push('=');
+    }
 
-        // Parse JSON
-        let claims: Value = serde_json::from_slice(&decoded_bytes).map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to parse JWT claims: {e}"))
+    let decoded_bytes = base64::engine::general_purpose::URL_SAFE
+        .decode(payload_padded)
+        .map_err(|e| {
+            CrosstacheError::authentication(format!("Failed to decode JWT payload: {e}"))
         })?;
 
-        // Extract tenant ID from 'tid' claim
-        let tenant_id = claims
-            .get("tid")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                CrosstacheError::authentication("Unable to find tenant ID in token".to_string())
-            })?;
+    // Parse JSON
+    let claims: Value = serde_json::from_slice(&decoded_bytes)
+        .map_err(|e| CrosstacheError::authentication(format!("Failed to parse JWT claims: {e}")))?;
 
-        // Validate the tenant ID is a proper GUID and not nil
-        if tenant_id == "00000000-0000-0000-0000-000000000000" || tenant_id.is_empty() {
+    // Validate the `exp` claim shape if present: it must be a positive
+    // integer (seconds since epoch). A token whose `exp` is malformed is not
+    // the well-formed AAD token we expect; reject rather than read a tenant id
+    // out of a suspect payload.
+    if let Some(exp) = claims.get("exp") {
+        let exp_ok = exp.as_u64().map(|v| v > 0).unwrap_or(false);
+        if !exp_ok {
             return Err(CrosstacheError::authentication(
-                "Invalid or empty tenant ID in token".to_string(),
+                "JWT 'exp' claim is malformed".to_string(),
             ));
         }
-
-        Ok(tenant_id)
     }
+
+    // Extract tenant ID from 'tid' claim
+    let tenant_id = claims
+        .get("tid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            CrosstacheError::authentication("Unable to find tenant ID in token".to_string())
+        })?;
+
+    // Validate claim SHAPE: the tenant id must be a well-formed, non-nil GUID.
+    // The old check only rejected the nil GUID and empty string, letting any
+    // arbitrary string through as a "tenant id".
+    if tenant_id == "00000000-0000-0000-0000-000000000000"
+        || !crate::utils::helpers::is_guid(&tenant_id)
+    {
+        return Err(CrosstacheError::authentication(
+            "Invalid or malformed tenant ID in token".to_string(),
+        ));
+    }
+
+    Ok(tenant_id)
 }
 
 #[async_trait]
@@ -362,18 +485,10 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
             }
         }
 
-        // Use Azure CLI as the primary method since it's most reliable
-        match std::process::Command::new("az")
-            .args(["account", "show", "--query", "tenantId", "-o", "tsv"])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let tenant_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !tenant_id.is_empty() && tenant_id != "00000000-0000-0000-0000-000000000000" {
-                    return Ok(tenant_id);
-                }
-            }
-            _ => {}
+        // Use Azure CLI as the primary method since it's most reliable.
+        // Centralized helper enforces a timeout so a hung `az` can't block.
+        if let Some(tenant_id) = az_account_tenant_id() {
+            return Ok(tenant_id);
         }
 
         // Fallback: try to get tenant ID from token claims
@@ -460,5 +575,64 @@ impl AzureAuthProvider for DefaultAzureCredentialProvider {
                     "Could not resolve object ID for user '{user}'"
                 ))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    /// Build a fake JWT (header.payload.signature) with the given payload JSON.
+    /// Signature is a placeholder — `tenant_id_from_jwt` does not verify it (by
+    /// design; see the trust-boundary docs), so the value is irrelevant.
+    fn make_jwt(payload_json: &str) -> String {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        format!(
+            "{}.{}.{}",
+            b64(br#"{"alg":"RS256","typ":"JWT"}"#),
+            b64(payload_json.as_bytes()),
+            b64(b"not-verified")
+        )
+    }
+
+    #[test]
+    fn extracts_valid_tenant_guid() {
+        let jwt = make_jwt(r#"{"tid":"72f988bf-86f1-41af-91ab-2d7cd011db47","exp":9999999999}"#);
+        let tid = tenant_id_from_jwt(&jwt).unwrap();
+        assert_eq!(tid, "72f988bf-86f1-41af-91ab-2d7cd011db47");
+    }
+
+    #[test]
+    fn rejects_non_guid_tid() {
+        // A `tid` that decodes fine but isn't a GUID must be rejected, not
+        // passed through as a "tenant id".
+        let jwt = make_jwt(r#"{"tid":"not-a-guid","exp":9999999999}"#);
+        assert!(tenant_id_from_jwt(&jwt).is_err());
+    }
+
+    #[test]
+    fn rejects_nil_guid_tid() {
+        let jwt = make_jwt(r#"{"tid":"00000000-0000-0000-0000-000000000000","exp":9999999999}"#);
+        assert!(tenant_id_from_jwt(&jwt).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_exp() {
+        // exp present but not a positive integer → reject.
+        let jwt = make_jwt(r#"{"tid":"72f988bf-86f1-41af-91ab-2d7cd011db47","exp":"soon"}"#);
+        assert!(tenant_id_from_jwt(&jwt).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_tid() {
+        let jwt = make_jwt(r#"{"exp":9999999999}"#);
+        assert!(tenant_id_from_jwt(&jwt).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_segment_count() {
+        assert!(tenant_id_from_jwt("only.two").is_err());
+        assert!(tenant_id_from_jwt("a.b.c.d").is_err());
     }
 }
