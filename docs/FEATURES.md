@@ -181,6 +181,7 @@ See [migration.md](migration.md) for the full guide.
 | `xv config show` | Show current config |
 | `xv config set <key> <value>` | Set a config value |
 | `xv config path` | Show config file location |
+| `xv config edit` | Open the config file in `$VISUAL`/`$EDITOR` (or a platform default) |
 
 ### Hierarchy
 

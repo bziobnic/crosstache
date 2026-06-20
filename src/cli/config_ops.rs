@@ -27,6 +27,9 @@ pub(crate) async fn execute_config_command(command: ConfigCommands, config: Conf
         ConfigCommands::Path => {
             execute_config_path().await?;
         }
+        ConfigCommands::Edit => {
+            execute_config_edit(&config).await?;
+        }
     }
     Ok(())
 }
@@ -176,6 +179,95 @@ async fn execute_config_path() -> Result<()> {
     let config_path = Config::get_config_path()?;
     println!("{}", config_path.display());
     Ok(())
+}
+
+/// `xv config edit` — open the config file in the user's editor.
+///
+/// Editor resolution, highest priority first:
+///   1. `$VISUAL`
+///   2. `$EDITOR`
+///   3. platform default (`nano` on Unix, `notepad` on Windows)
+///
+/// When the config file does not yet exist it is seeded with a valid,
+/// serialized default configuration (NOT an empty file — an empty file
+/// fails to parse on the next load with "missing field `debug`"). The
+/// parent directory is created as needed so the editor always opens on a
+/// real, writable path. `$VISUAL`/`$EDITOR` may contain arguments (e.g.
+/// `code --wait`), so the value is split on whitespace: the first token is
+/// the program and the rest are passed as leading arguments.
+async fn execute_config_edit(config: &Config) -> Result<()> {
+    use std::process::Command;
+
+    let config_path = Config::get_config_path()?;
+
+    // Seed a missing config file with a VALID default so the editor opens on
+    // a real path and the next `xv` invocation can still parse it. We never
+    // clobber an existing file. `save_config` handles parent-dir creation
+    // and the 0600 sensitive-file write.
+    if !config_path.exists() {
+        crate::config::settings::save_config(config)
+            .await
+            .map_err(|e| {
+                CrosstacheError::config(format!(
+                    "Failed to create config file {}: {e}",
+                    config_path.display()
+                ))
+            })?;
+    }
+
+    let editor = resolve_editor();
+    // Split so `$EDITOR` values like `code --wait` or `emacs -nw` work.
+    let mut parts = editor.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| CrosstacheError::config("Resolved editor command was empty".to_string()))?;
+
+    let status = Command::new(program)
+        .args(parts)
+        .arg(&config_path)
+        .status()
+        .map_err(|e| {
+            CrosstacheError::config(format!(
+                "Failed to launch editor '{program}': {e}. \
+                 Set $EDITOR or $VISUAL to a valid editor command."
+            ))
+        })?;
+
+    if !status.success() {
+        return Err(CrosstacheError::config(format!(
+            "Editor '{program}' exited with a non-zero status: {status}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Resolve the editor command from `$VISUAL`, then `$EDITOR`, then a
+/// platform default. Empty/whitespace-only env values are ignored.
+fn resolve_editor() -> String {
+    resolve_editor_from(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok())
+}
+
+/// Pure resolution logic for [`resolve_editor`], split out so it can be
+/// unit-tested without mutating process-global environment variables.
+///
+/// Precedence: `visual` (`$VISUAL`) > `editor` (`$EDITOR`) > platform
+/// default. Empty or whitespace-only values are treated as unset.
+fn resolve_editor_from(visual: Option<String>, editor: Option<String>) -> String {
+    for candidate in [visual, editor].into_iter().flatten() {
+        if !candidate.trim().is_empty() {
+            return candidate;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        "notepad".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "nano".to_string()
+    }
 }
 
 /// `xv config show --resolved` — prints the effective active backend,
@@ -1774,4 +1866,53 @@ async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_editor_from;
+
+    #[cfg(not(windows))]
+    const DEFAULT_EDITOR: &str = "nano";
+    #[cfg(windows)]
+    const DEFAULT_EDITOR: &str = "notepad";
+
+    #[test]
+    fn visual_takes_precedence_over_editor() {
+        let got = resolve_editor_from(Some("vim".into()), Some("emacs".into()));
+        assert_eq!(got, "vim");
+    }
+
+    #[test]
+    fn falls_back_to_editor_when_visual_unset() {
+        let got = resolve_editor_from(None, Some("emacs".into()));
+        assert_eq!(got, "emacs");
+    }
+
+    #[test]
+    fn empty_or_whitespace_values_are_ignored() {
+        // Empty VISUAL and whitespace-only EDITOR -> platform default.
+        let got = resolve_editor_from(Some(String::new()), Some("   ".into()));
+        assert_eq!(got, DEFAULT_EDITOR);
+    }
+
+    #[test]
+    fn empty_visual_falls_through_to_editor() {
+        let got = resolve_editor_from(Some("  ".into()), Some("micro".into()));
+        assert_eq!(got, "micro");
+    }
+
+    #[test]
+    fn platform_default_when_both_unset() {
+        let got = resolve_editor_from(None, None);
+        assert_eq!(got, DEFAULT_EDITOR);
+    }
+
+    #[test]
+    fn editor_with_arguments_is_preserved_verbatim() {
+        // The command-with-args string is returned intact; argument splitting
+        // happens at the call site in execute_config_edit.
+        let got = resolve_editor_from(Some("code --wait".into()), None);
+        assert_eq!(got, "code --wait");
+    }
 }

@@ -1054,6 +1054,14 @@ pub enum ConfigCommands {
     },
     /// Show configuration file path
     Path,
+    /// Open the configuration file in your default editor
+    ///
+    /// Picks the editor from `$VISUAL`, then `$EDITOR`. When neither is
+    /// set, falls back to a sensible platform default (`nano` on
+    /// Linux/macOS, `notepad` on Windows). The config file (and its parent
+    /// directory) is created if it does not yet exist so the editor always
+    /// opens on a real path.
+    Edit,
 }
 
 #[derive(Subcommand)]
