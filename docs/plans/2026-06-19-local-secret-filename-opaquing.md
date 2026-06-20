@@ -141,8 +141,17 @@ becomes a hard requirement.
   when index-first migration left both legacy and opaque files briefly present.
   Drop both scans once the back-compat read path is removed.
 - All mutators compute `file_stem` directly from the name (no index needed on the
-  hot path). Mutators that create, restore, or re-activate a secret also update
-  the index entry; `delete` drops the active entry.
+  hot path). **Active index lifecycle** (must stay consistent with `get` /
+  `list_secrets`):
+  - **Add or refresh entry** (`{ file_stem → name }`): `set`, `update_secret`,
+    `rollback`, `restore_secret`, and the shared `ensure_opaque_layout` helper
+    when it re-activates an active pair.
+  - **Remove entry:** soft `delete` (secret moves to trash; not listed as active).
+  - **No index change:** `get`, `list_secrets`, `list_versions`,
+    `list_deleted_secrets`, hard `purge_secret` (trash-only; entry already absent).
+  Soft `delete` + `restore_secret` are a matched pair: delete drops the active
+  entry; restore **must** re-add it before returning, or the secret is readable
+  via `get` but missing from `list_secrets`.
 - Index updates happen under the existing `fs2` file lock (already used in this
   module) to stay consistent with concurrent writers.
 
@@ -162,12 +171,16 @@ Opaque stems apply to **every** secret-related path, not only active
   `list_deleted_secrets` recover the name from the (encrypted) `.meta.json`
   content, same as today but without dirname assistance.
 
-Lookup helpers (`trash_entries_for`, restore, purge) derive `<file_stem>` from
-the secret name and scan `.trash/` for `{file_stem}@*` dirs (plus a back-compat
-window for legacy `{encode_name}@*` / unsuffixed `{encode_name}` dirs during
-migration). `list_deleted_secrets` already reads metadata inside each trash
-entry rather than parsing directory names; opaque trash dirs do not change that
-flow beyond requiring decrypted metadata.
+`trash_entries_for` (used by `restore_secret` and `purge_secret`) derives
+`<file_stem>` from the secret name and scans `.trash/` for `{file_stem}@*` dirs
+(plus a back-compat window for legacy `{encode_name}@*` / unsuffixed
+`{encode_name}` dirs during migration). `list_deleted_secrets` already reads
+metadata inside each trash entry rather than parsing directory names; opaque
+trash dirs do not change that flow beyond requiring decrypted metadata.
+`restore_secret` is a write mutator: it moves the chosen trash pair back to
+`<file_stem>.{age,meta.json}` and **re-adds the active index entry** (see Active
+index lifecycle). `purge_secret` only removes trash/version dirs; the active
+index entry is already absent after soft delete.
 
 ### Legacy cleanup on write paths
 
@@ -273,10 +286,13 @@ This changes the on-disk layout, so it must be explicit and reversible:
      entry); `list_deleted_secrets` reads metadata inside each trash dir.
    - **Recovery pass (idempotent):** scan `secrets/` for opaque-stem
      `.age`/`.meta.json` pairs whose stem is not in the index; decrypt
-     metadata and append the missing index entries (handles stores already
-     stuck in rename-before-index state from an interrupted run or from the
-     original rename-then-append ordering). Then drop any duplicate legacy pair
-     for the same name if both layouts coexist.
+     `.meta.json` and **persist** the missing index entries (handles stores
+     already stuck in rename-before-index state from an interrupted run or from
+     a buggy rename-then-append ordering). Without this pass (or the orphan scan
+     + a subsequent write/migrate), legacy names are unrecoverable once renamed
+     away, yet `get` would still resolve the stem — listing and re-migration
+     would omit the secret. Then drop any duplicate legacy pair for the same
+     name if both layouts coexist.
    Safe to re-run.
 3. Keep a one-release back-compat **read** path: `get` falls back to the old
    `encode_name` filename if the hashed stem is absent, so a half-migrated or
@@ -340,6 +356,9 @@ This changes the on-disk layout, so it must be explicit and reversible:
   `.versions/<file_stem>/`, legacy paths removed.
 - Upgrade-on-write (`rollback` / `restore_secret`): legacy layout (active and/or
   trash) → mutator succeeds → opaque stems only; index consistent with `get`.
+- Index lifecycle (`restore_secret`): soft-delete removes active index entry →
+  `restore_secret` → secret readable via `get` **and** present in `list_secrets`
+  (entry re-added).
 - Delete of unmigrated secret: legacy active pair removed; trash entry uses
   opaque stem; no orphaned `encode_name` files under `secrets/` or `.trash/`.
 - Soft-delete then list `.trash/`: directory names contain no URL-encoded secret
