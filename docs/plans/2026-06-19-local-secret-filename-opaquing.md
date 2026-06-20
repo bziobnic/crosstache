@@ -117,6 +117,36 @@ becomes a hard requirement.
 - Index updates happen under the existing `fs2` file lock (already used in this
   module) to stay consistent with concurrent writers.
 
+### Legacy cleanup on write paths
+
+The back-compat **read** fallback (`get` tries the hashed stem first, then the
+legacy `encode_name` path) must not leave reversible filenames on disk after a
+write. If `set` or `delete` wrote only the hashed stem and updated the index
+while legacy `<encode_name>.{age,meta.json}` pairs remained, a partial migration
+or a single `set` on an unmigrated secret would **still disclose the name** in
+directory listings — defeating the goal even though reads and the index looked
+correct.
+
+Therefore, whenever opaque filenames are active, **`set` and `delete` always
+upgrade the on-disk layout for that secret** (under the same `fs2` lock as index
+updates):
+
+- **`set`:** write/update `<file_stem>.{age,meta.json}` and the index entry;
+  then **remove** any legacy `<encode_name>.age`, `<encode_name>.meta.json`, and
+  rename or merge `.versions/<encode_name>/` into `.versions/<file_stem>/` if
+  present. Idempotent: no-op if legacy files are already absent.
+- **`delete`:** remove the hashed-stem pair, index entry, and version archive;
+  also remove any legacy `<encode_name>.{age,meta.json}` and
+  `.versions/<encode_name>/` if they still exist (e.g. delete without a prior
+  upgrade write).
+- **`get`:** read-only fallback to legacy paths is allowed during the back-compat
+  window; it must **not** create or retain legacy files.
+
+`list_secrets` continues to scan legacy filenames only for secrets **not yet
+represented in the index** (unmigrated, never written since opaque mode was
+enabled). After `set` upgrades a secret, its legacy pair is gone and the index
+entry is authoritative — the legacy scan must not double-count it.
+
 ### Name normalization
 
 HMAC the **NFC-normalized, original** name bytes (not the percent-encoded form)
@@ -132,11 +162,15 @@ This changes the on-disk layout, so it must be explicit and reversible:
    detected): for each `<encoded_name>.{age,meta.json}`, compute the new
    `file_stem`, rename both files, append to `.index.age`, archive versions
    under the new stem. Idempotent; safe to re-run.
-3. Keep a one-release back-compat read path that falls back to the old
+3. Keep a one-release back-compat **read** path: `get` falls back to the old
    `encode_name` filename if the hashed stem is absent, so a half-migrated or
-   un-migrated store still reads. While this fallback is active, `list_secrets`
-   also enumerates legacy-named files (see The index) so listing stays
-   consistent with `get`. Remove both in the following release.
+   un-migrated store still reads. **`set`/`delete` do not use this fallback for
+   writes** — they always target hashed stems and remove matching legacy pairs
+   (see Legacy cleanup on write paths), so any write upgrades that secret and
+   clears the name leak. While the read fallback is active, `list_secrets`
+   also enumerates legacy-named files not yet in the index (see The index) so
+   listing stays consistent with `get`. Remove the read fallback and legacy scan
+   in the following release.
 4. `--dry-run` prints the rename plan without touching disk.
 
 ## Security analysis
@@ -146,7 +180,9 @@ This changes the on-disk layout, so it must be explicit and reversible:
   still bounded by file count (accepted non-goal). The index is age-encrypted →
   opaque.
 - **With the identity:** full functionality; names live only inside the
-  encrypted index and encrypted metadata, never as a plaintext filename.
+  encrypted index and encrypted metadata, never as a plaintext filename. Write
+  paths (`set`/`delete`) must purge legacy `encode_name` files so upgrading a
+  secret cannot leave reversible filenames alongside opaque stems.
 - **Collision risk:** 128-bit HMAC stems → negligible collision probability for
   realistic secret counts; `set` should still detect a stem collision with a
   different name (via the index) and error rather than overwrite.
@@ -161,6 +197,12 @@ This changes the on-disk layout, so it must be explicit and reversible:
 - Migration: old-layout fixture → migrate → all secrets readable, index correct,
   re-running migrate is a no-op; back-compat read path serves an un-migrated
   secret.
+- Upgrade-on-write: fixture with legacy-named files only → `set` same name →
+  hashed-stem files exist, legacy pair and `.versions/<encode_name>/` removed
+  (or merged), index updated; directory listing contains no URL-encoded secret
+  name substring.
+- Delete of unmigrated secret: legacy pair removed; no orphaned `encode_name`
+  files remain.
 - Concurrent `set` of two names with index updates stays consistent under the
   `fs2` lock.
 
