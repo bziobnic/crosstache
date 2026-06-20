@@ -133,14 +133,16 @@ becomes a hard requirement.
     rename completed but the index update did not: legacy files are gone so the
     legacy scan cannot help, yet `get` still finds the stem via HMAC(name).
     The orphan scan is **read-only for listing**; persisting missing index
-    entries is handled by the migration recovery pass (below), by `set` on that
-    name, or by re-running `xv local migrate` — all rebuild from decrypted
+    entries is handled by the migration recovery pass (below), by any write
+    mutator on that name (see Legacy cleanup on write paths), or by re-running
+    `xv local migrate` — all rebuild from decrypted
     metadata, not from reversible filenames.
   Skip pairs already represented in the index (by stem) to avoid double-counting
   when index-first migration left both legacy and opaque files briefly present.
   Drop both scans once the back-compat read path is removed.
-- `get/set/delete` compute `file_stem` directly from the name (no index needed
-  on the hot path); `set`/`delete` additionally update the index entry.
+- All mutators compute `file_stem` directly from the name (no index needed on the
+  hot path). Mutators that create, restore, or re-activate a secret also update
+  the index entry; `delete` drops the active entry.
 - Index updates happen under the existing `fs2` file lock (already used in this
   module) to stay consistent with concurrent writers.
 
@@ -171,35 +173,58 @@ flow beyond requiring decrypted metadata.
 
 The back-compat **read** fallback (`get` tries the hashed stem first, then the
 legacy `encode_name` path) must not leave reversible filenames on disk after a
-write. If `set` or `delete` wrote only the hashed stem and updated the index
-while legacy `<encode_name>.{age,meta.json}` pairs remained, a partial migration
-or a single `set` on an unmigrated secret would **still disclose the name** in
-directory listings — defeating the goal even though reads and the index looked
-correct.
+write. If only some mutators upgraded layout while others still wrote legacy
+paths, a metadata-only `update_secret` on an unmigrated secret would refresh
+`<encode_name>.meta.json` in place and **still disclose the name** in directory
+listings — defeating the goal even though reads and the index looked correct.
 
-Therefore, whenever opaque filenames are active, **`set` and `delete` always
-upgrade the on-disk layout for that secret** (under the same `fs2` lock as index
-updates):
+Therefore, whenever opaque filenames are active, **every write mutator upgrades
+the on-disk layout for that secret** (under the same `fs2` lock as index
+updates). Implement this once as a shared helper (e.g. `ensure_opaque_layout`)
+invoked after the mutator's primary work; do not duplicate cleanup logic across
+call sites.
+
+**Shared upgrade steps** (idempotent — no-op when legacy paths are already
+absent):
+
+1. Ensure active files live at `<file_stem>.{age,meta.json}` (rename or rewrite
+   from legacy paths when the read fallback was used).
+2. Ensure the index contains `{ file_stem → name }` for active secrets.
+3. **Remove** legacy `<encode_name>.age`, `<encode_name>.meta.json`, and rename
+   or merge `.versions/<encode_name>/` into `.versions/<file_stem>/` when
+   present.
+4. **Remove or rename** legacy trash dirs (`.trash/<encode_name>@*`, unsuffixed
+   `.trash/<encode_name>/`) for that secret when applicable.
+
+Mutator-specific behavior on top of the shared helper:
 
 - **`set`:** write/update `<file_stem>.{age,meta.json}` and the index entry;
-  then **remove** any legacy `<encode_name>.age`, `<encode_name>.meta.json`, and
-  rename or merge `.versions/<encode_name>/` into `.versions/<file_stem>/` if
-  present. Idempotent: no-op if legacy files are already absent.
+  then run the shared upgrade (covers recreate-over-legacy and version merge).
+- **`update_secret`:** resolve the active pair via the read fallback if needed,
+  apply the metadata/value mutation to `<file_stem>.*` (archiving prior
+  snapshots under `.versions/<file_stem>/`), update the index entry, then run the
+  shared upgrade. **Metadata-only updates must upgrade too** — they are a
+  common path for long-lived legacy files to stay on disk if cleanup is limited
+  to `set`/`delete`.
 - **`delete` (soft):** move the hashed-stem pair into
   `.trash/<file_stem>@<deleted_at_millis>/` (not `{encode_name}@…`), drop the
-  active index entry, and **remove or rename** any legacy active pair,
-  `.versions/<encode_name>/`, and legacy trash dirs
-  (`.trash/<encode_name>@*`, unsuffixed `.trash/<encode_name>/`) for that
-  secret. Idempotent when legacy paths are already absent.
+  active index entry, then run the shared upgrade.
 - **`delete` (hard / purge):** same stem-based trash and version paths; purge
   all `{file_stem}@*` trash entries and legacy `{encode_name}@*` leftovers.
+- **`rollback`:** read the target version from `.versions/<file_stem>/` (read
+  fallback: `.versions/<encode_name>/`), archive the current active pair under
+  the opaque version path, write the rolled-back active pair at
+  `<file_stem>.*`, refresh the index entry, then run the shared upgrade.
+- **`restore_secret`:** restore from the newest matching trash entry (opaque or
+  legacy dirname) into `<file_stem>.{age,meta.json}`, re-add the index entry,
+  then run the shared upgrade so no legacy active or trash paths remain.
 - **`get`:** read-only fallback to legacy paths is allowed during the back-compat
   window; it must **not** create or retain legacy files.
 
 `list_secrets` reconciles on-disk pairs missing from the index via the legacy
-and orphan-opaque scans (see The index). After `set` upgrades a secret, its
-legacy pair is gone and the index entry is authoritative — scans must not
-double-count stems already in the index.
+and orphan-opaque scans (see The index). After any write mutator upgrades a
+secret, its legacy pair is gone and the index entry is authoritative — scans
+must not double-count stems already in the index.
 
 ### Name byte identity
 
@@ -255,10 +280,11 @@ This changes the on-disk layout, so it must be explicit and reversible:
    Safe to re-run.
 3. Keep a one-release back-compat **read** path: `get` falls back to the old
    `encode_name` filename if the hashed stem is absent, so a half-migrated or
-   un-migrated store still reads. **`set`/`delete` do not use this fallback for
-   writes** — they always target hashed stems and remove matching legacy pairs
-   (see Legacy cleanup on write paths), so any write upgrades that secret and
-   clears the name leak. While the read fallback is active, `list_secrets`
+   un-migrated store still reads. **Write mutators do not use this fallback for
+   their output paths** — they always target hashed stems and remove matching
+   legacy pairs (see Legacy cleanup on write paths), so any mutation upgrades
+   that secret and clears the name leak. While the read fallback is active,
+   `list_secrets`
    also reconciles legacy-named and orphan opaque pairs not yet in the index
    (see The index) so listing stays consistent with `get`. Remove the read
    fallback and both reconciliation scans in the following release.
@@ -272,10 +298,11 @@ This changes the on-disk layout, so it must be explicit and reversible:
   opaque.
 - **With the identity:** full functionality; names live only inside the
   encrypted index and encrypted metadata — not in any filename under `secrets/`,
-  `.versions/`, or `.trash/`, and not in plaintext `.deleted.json`. Write paths
-  (`set`/`delete`) must purge legacy `encode_name` paths (active, version
-  archive, and trash) so upgrading or re-deleting a secret cannot leave
-  reversible directory names alongside opaque stems.
+  `.versions/`, or `.trash/`, and not in plaintext `.deleted.json`. All write
+  mutators (`set`, `update_secret`, `delete`, `rollback`, `restore_secret`,
+  `purge_secret`) must purge legacy `encode_name` paths (active, version
+  archive, and trash) so any mutation cannot leave reversible directory names
+  alongside opaque stems.
 - **Collision risk:** 128-bit HMAC stems → negligible collision probability for
   realistic secret counts; `set` should still detect a stem collision with a
   different name (via the index) and error rather than overwrite.
@@ -300,10 +327,19 @@ This changes the on-disk layout, so it must be explicit and reversible:
 - Unicode byte identity: a vault with both NFC and NFD forms of the same
   grapheme as separate legacy secrets migrates to two distinct stems; neither
   overwrites the other and both remain readable by their original names.
-- Upgrade-on-write: fixture with legacy-named files only → `set` same name →
-  hashed-stem files exist, legacy pair and `.versions/<encode_name>/` removed
-  (or merged), index updated; directory listing contains no URL-encoded secret
-  name substring.
+- Upgrade-on-write (`set`): fixture with legacy-named files only → `set` same
+  name → hashed-stem files exist, legacy pair and `.versions/<encode_name>/`
+  removed (or merged), index updated; directory listing contains no URL-encoded
+  secret name substring.
+- Upgrade-on-write (`update_secret`, metadata-only): legacy active pair only →
+  `update_secret` changes tags/note/enabled with no value change → hashed-stem
+  files exist, legacy pair removed, index updated; directory listing still
+  contains no URL-encoded name substring.
+- Upgrade-on-write (`update_secret`, value): legacy pair with
+  `.versions/<encode_name>/` → value update archives under
+  `.versions/<file_stem>/`, legacy paths removed.
+- Upgrade-on-write (`rollback` / `restore_secret`): legacy layout (active and/or
+  trash) → mutator succeeds → opaque stems only; index consistent with `get`.
 - Delete of unmigrated secret: legacy active pair removed; trash entry uses
   opaque stem; no orphaned `encode_name` files under `secrets/` or `.trash/`.
 - Soft-delete then list `.trash/`: directory names contain no URL-encoded secret
