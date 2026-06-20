@@ -67,7 +67,7 @@ get/set/delete by name and the existing version/trash semantics.
 Derive the filename from a **keyed** hash of the secret name:
 
 ```
-file_stem = base32_nopad( HMAC-SHA256(index_key, normalized_name) )[..26]   // 128 bits
+file_stem = base32_nopad( HMAC-SHA256(index_key, name.as_bytes()) )[..26]   // 128 bits
 <file_stem>.age
 <file_stem>.meta.json
 ```
@@ -186,11 +186,18 @@ represented in the index** (unmigrated, never written since opaque mode was
 enabled). After `set` upgrades a secret, its legacy pair is gone and the index
 entry is authoritative — the legacy scan must not double-count it.
 
-### Name normalization
+### Name byte identity
 
-HMAC the **NFC-normalized, original** name bytes (not the percent-encoded form)
-so two encodings of the same name map to one stem. Document that names are
-case-sensitive (consistent with current behavior).
+HMAC the **raw UTF-8 name bytes** — the same bytes `encode_name` uses via
+`name.as_bytes()` — not the percent-encoded form and **not** Unicode-normalized.
+The current backend treats names as byte-exact: two canonically equivalent forms
+(e.g. NFC vs NFD `"é"`) are distinct secrets with separate on-disk pairs. Opaque
+stems must preserve that 1:1 mapping; normalizing to NFC would collapse them to
+one stem during migration and cause overwrites or collision errors.
+
+Names remain case-sensitive (consistent with current behavior). During migration,
+derive the name from decrypted metadata (`original_name`) or by decoding the
+legacy filename; compute the stem from those exact bytes.
 
 ## Migration
 
@@ -198,8 +205,10 @@ This changes the on-disk layout, so it must be explicit and reversible:
 
 1. New store format version (bump the store's `format`/schema marker).
 2. `xv local migrate` (or auto-migrate on first write when an old layout is
-   detected): for each active `<encoded_name>.{age,meta.json}` pair, compute
-   `file_stem`, rename both files, append to `.index.age`, and rename
+   detected): for each active `<encoded_name>.{age,meta.json}` pair, read the
+   exact name from metadata (or decode the legacy filename), compute
+   `file_stem` from its raw UTF-8 bytes, rename both files, append to
+   `.index.age`, and rename
    `.versions/<encode_name>/` → `.versions/<file_stem>/`. **Also** walk
    `.trash/`: for each legacy `<encode_name>@<millis>/` (and unsuffixed
    `<encode_name>/`), rename the directory to `<file_stem>@<millis>/`, rename
@@ -244,6 +253,9 @@ This changes the on-disk layout, so it must be explicit and reversible:
 - Migration: old-layout fixture → migrate → all secrets readable, index correct,
   re-running migrate is a no-op; back-compat read path serves an un-migrated
   secret.
+- Unicode byte identity: a vault with both NFC and NFD forms of the same
+  grapheme as separate legacy secrets migrates to two distinct stems; neither
+  overwrites the other and both remain readable by their original names.
 - Upgrade-on-write: fixture with legacy-named files only → `set` same name →
   hashed-stem files exist, legacy pair and `.versions/<encode_name>/` removed
   (or merged), index updated; directory listing contains no URL-encoded secret
