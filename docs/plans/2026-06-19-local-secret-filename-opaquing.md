@@ -119,11 +119,26 @@ becomes a hard requirement.
   it. Written via the existing `write_private` (0600, O_NOFOLLOW) +
   `encrypt_bytes` path already used for `.meta.json`.
 - `list_secrets` reads + decrypts the index instead of scanning filenames.
-  During the back-compat window (see Migration), it also scans for any legacy
-  `encode_name` files whose secrets are not yet represented in the index and
-  folds them into the result, so a half-migrated store never reports a secret
-  via `get` that is missing from `list_secrets`. The scan is dropped once the
-  back-compat read path is removed.
+  During the back-compat window (see Migration), it also reconciles on-disk
+  pairs that are **missing from the index** so a half-migrated or crash-interrupted
+  store never reports a secret via `get` that is missing from `list_secrets`:
+  - **Legacy scan:** any `encode_name`-named `.age`/`.meta.json` pair not yet
+    in the index (unmigrated secrets).
+  - **Orphan opaque scan:** any opaque-stem `.age`/`.meta.json` pair whose stem
+    is absent from the index — recover the name by decrypting `.meta.json`
+    (same as today's metadata-driven listing). Classify stems as opaque when
+    they match the fixed base32 pattern (26 chars `[a-z2-7]+`); legacy
+    `encode_name` stems contain `%` or other URL-encoding characters and are
+    handled by the legacy scan instead. This covers the failure mode where a
+    rename completed but the index update did not: legacy files are gone so the
+    legacy scan cannot help, yet `get` still finds the stem via HMAC(name).
+    The orphan scan is **read-only for listing**; persisting missing index
+    entries is handled by the migration recovery pass (below), by `set` on that
+    name, or by re-running `xv local migrate` — all rebuild from decrypted
+    metadata, not from reversible filenames.
+  Skip pairs already represented in the index (by stem) to avoid double-counting
+  when index-first migration left both legacy and opaque files briefly present.
+  Drop both scans once the back-compat read path is removed.
 - `get/set/delete` compute `file_stem` directly from the name (no index needed
   on the hot path); `set`/`delete` additionally update the index entry.
 - Index updates happen under the existing `fs2` file lock (already used in this
@@ -181,10 +196,10 @@ updates):
 - **`get`:** read-only fallback to legacy paths is allowed during the back-compat
   window; it must **not** create or retain legacy files.
 
-`list_secrets` continues to scan legacy filenames only for secrets **not yet
-represented in the index** (unmigrated, never written since opaque mode was
-enabled). After `set` upgrades a secret, its legacy pair is gone and the index
-entry is authoritative — the legacy scan must not double-count it.
+`list_secrets` reconciles on-disk pairs missing from the index via the legacy
+and orphan-opaque scans (see The index). After `set` upgrades a secret, its
+legacy pair is gone and the index entry is authoritative — scans must not
+double-count stems already in the index.
 
 ### Name byte identity
 
@@ -201,29 +216,52 @@ legacy filename; compute the stem from those exact bytes.
 
 ## Migration
 
+**Ordering invariant:** migration must never leave opaque stems on disk without a
+matching index entry when legacy filenames are already gone. A rename-then-append
+sequence loses the only recoverable name source (legacy dirname) while `get`
+still resolves the secret by HMAC(name); listing and idempotent re-migration
+then fail unless metadata-driven orphan recovery exists. The steps below enforce
+index-before-rename and a metadata-based recovery pass.
+
 This changes the on-disk layout, so it must be explicit and reversible:
 
 1. New store format version (bump the store's `format`/schema marker).
 2. `xv local migrate` (or auto-migrate on first write when an old layout is
-   detected): for each active `<encoded_name>.{age,meta.json}` pair, read the
-   exact name from metadata (or decode the legacy filename), compute
-   `file_stem` from its raw UTF-8 bytes, rename both files, append to
-   `.index.age`, and rename
-   `.versions/<encode_name>/` → `.versions/<file_stem>/`. **Also** walk
-   `.trash/`: for each legacy `<encode_name>@<millis>/` (and unsuffixed
-   `<encode_name>/`), rename the directory to `<file_stem>@<millis>/`, rename
-   inner `{encode_name}.{age,meta.json}` to `{file_stem}.*`, and strip
-   plaintext `original_name` from `.deleted.json` when present. Idempotent;
-   safe to re-run.
+   detected), **per secret under the vault `fs2` lock** (same lock as runtime
+   index updates):
+   - Read the exact name from metadata (or decode the legacy filename) and
+     compute `file_stem` from its raw UTF-8 bytes.
+   - **Append/update the index entry first**, then rename active
+     `<encoded_name>.{age,meta.json}` → `<file_stem>.*`, then rename
+     `.versions/<encode_name>/` → `.versions/<file_stem>/`. Index-before-rename
+     ensures a crash after the index write still lists the secret (from the
+     index); a crash before rename leaves legacy files in place so the legacy
+     scan still lists it. **Never rename away legacy filenames before the index
+     records the stem** — otherwise `list_secrets` loses the only recoverable
+     name source and idempotent re-migration cannot rebuild the index.
+   - **Also** walk `.trash/`: for each legacy `<encode_name>@<millis>/` (and
+     unsuffixed `<encode_name>/`), read the name from inner metadata (or decode
+     the dirname), compute `file_stem`, rename the directory to
+     `<file_stem>@<millis>/`, rename inner `{encode_name}.{age,meta.json}` to
+     `{file_stem}.*`, and strip plaintext `original_name` from `.deleted.json`
+     when present. Trash is not in the active index (`delete` already dropped the
+     entry); `list_deleted_secrets` reads metadata inside each trash dir.
+   - **Recovery pass (idempotent):** scan `secrets/` for opaque-stem
+     `.age`/`.meta.json` pairs whose stem is not in the index; decrypt
+     metadata and append the missing index entries (handles stores already
+     stuck in rename-before-index state from an interrupted run or from the
+     original rename-then-append ordering). Then drop any duplicate legacy pair
+     for the same name if both layouts coexist.
+   Safe to re-run.
 3. Keep a one-release back-compat **read** path: `get` falls back to the old
    `encode_name` filename if the hashed stem is absent, so a half-migrated or
    un-migrated store still reads. **`set`/`delete` do not use this fallback for
    writes** — they always target hashed stems and remove matching legacy pairs
    (see Legacy cleanup on write paths), so any write upgrades that secret and
    clears the name leak. While the read fallback is active, `list_secrets`
-   also enumerates legacy-named files not yet in the index (see The index) so
-   listing stays consistent with `get`. Remove the read fallback and legacy scan
-   in the following release.
+   also reconciles legacy-named and orphan opaque pairs not yet in the index
+   (see The index) so listing stays consistent with `get`. Remove the read
+   fallback and both reconciliation scans in the following release.
 4. `--dry-run` prints the rename plan without touching disk.
 
 ## Security analysis
@@ -253,6 +291,12 @@ This changes the on-disk layout, so it must be explicit and reversible:
 - Migration: old-layout fixture → migrate → all secrets readable, index correct,
   re-running migrate is a no-op; back-compat read path serves an un-migrated
   secret.
+- Migration ordering: interrupt after index write but before rename →
+  `list_secrets` includes the secret via the index; `get` still reads (legacy
+  fallback or stem once renamed).
+- Migration crash recovery: fixture with opaque stems on disk but empty/partial
+  index (simulating rename-before-index) → re-run migrate or `list_secrets`
+  orphan scan → index rebuilt from metadata, listing matches `get`.
 - Unicode byte identity: a vault with both NFC and NFD forms of the same
   grapheme as separate legacy secrets migrates to two distinct stems; neither
   overwrites the other and both remain readable by their original names.
