@@ -880,12 +880,14 @@ async fn get_current_subscription_details(token: &str) -> Result<(String, String
     Err(CrosstacheError::azure_api("No subscriptions found"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_gen_command(
     length: usize,
     charset: Option<CharsetType>,
     save: Option<String>,
     vault: Option<String>,
     raw: bool,
+    meta: crate::cli::commands::SecretWriteArgs,
     config: Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
@@ -893,6 +895,16 @@ pub(crate) async fn execute_gen_command(
     if !(6..=100).contains(&length) {
         return Err(CrosstacheError::invalid_argument(
             "Length must be between 6 and 100",
+        ));
+    }
+
+    // Metadata flags only make sense when saving — there is nothing to attach
+    // them to otherwise. Reject early with a clear message instead of silently
+    // ignoring them.
+    if save.is_none() && meta.has_any() {
+        return Err(CrosstacheError::invalid_argument(
+            "--group/--note/--folder/--expires/--not-before require --save (there is no \
+             secret to attach metadata to without it)",
         ));
     }
 
@@ -914,25 +926,17 @@ pub(crate) async fn execute_gen_command(
 
     // Handle --save
     if let Some(ref name) = save {
-        use crate::secret::manager::SecretManager;
-
-        let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
-        let secret_manager = SecretManager::new(auth_provider, config.no_color);
-        let vault_name = config.resolve_vault_name(vault).await?;
-
-        // Print raw password first so it appears before set_secret_safe's info messages
+        // Print raw password first so it appears before any info messages
         if raw {
             println!("{}", password.as_str());
         }
 
-        match secret_manager
-            .set_secret_safe(&vault_name, name, password.as_str(), None)
-            .await
-        {
-            Ok(_) => {
-                if raw {
-                    // Password already printed above
-                } else {
+        let save_result =
+            save_generated_secret(name, password.as_str(), vault, &meta, &config, registry).await;
+
+        match save_result {
+            Ok(()) => {
+                if !raw {
                     match copy_to_clipboard(password.as_str()) {
                         Ok(()) => {
                             let timeout = config.clipboard_timeout;
@@ -956,8 +960,10 @@ pub(crate) async fn execute_gen_command(
             }
             Err(e) => {
                 output::warn(&format!("Failed to save secret '{name}': {e}"));
-                output::warn("Generated password (save this now):");
-                println!("{}", password.as_str());
+                if !raw {
+                    output::warn("Generated password (save this now):");
+                    println!("{}", password.as_str());
+                }
             }
         }
         return Ok(());
@@ -987,5 +993,55 @@ pub(crate) async fn execute_gen_command(
         }
     }
 
+    Ok(())
+}
+
+/// Persist a generated secret with full write-time metadata, routing through
+/// the same code paths `xv set` uses:
+///   - trait backend (local/aws and Azure-via-registry) → `set_secret`
+///   - legacy Azure fallback (no registry) → `set_secret_safe` with options
+///
+/// This is what makes `gen --save` a true superset of `set`: groups, note,
+/// folder, expires, and not-before are all carried through, instead of the
+/// old behavior that dropped every piece of metadata.
+async fn save_generated_secret(
+    name: &str,
+    value: &str,
+    vault: Option<String>,
+    meta: &crate::cli::commands::SecretWriteArgs,
+    config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<()> {
+    use crate::cli::helpers::{resolve_vault_for_trait, use_trait_path};
+
+    let request = meta.to_secret_request(name, zeroize::Zeroizing::new(value.to_string()))?;
+
+    // Trait path: any backend exposed through the registry (local, aws, and
+    // Azure once it has a registry). A --vault flag overrides the resolved
+    // context/config vault.
+    if use_trait_path(registry) {
+        let reg = registry.expect("use_trait_path guarantees Some");
+        let vault_name = match vault {
+            Some(v) => v,
+            None => resolve_vault_for_trait(config, registry).await?,
+        };
+        reg.active()
+            .secrets()
+            .set_secret(&vault_name, request)
+            .await?;
+        crate::cli::secret_ops::invalidate_trait_secret_cache(config, &vault_name);
+        return Ok(());
+    }
+
+    // Legacy Azure fallback (registry construction failed / skipped): create
+    // an auth provider on demand and use set_secret_safe with the metadata
+    // options so groups/note/folder/expiry still apply.
+    use crate::secret::manager::SecretManager;
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    let vault_name = config.resolve_vault_name(vault).await?;
+    secret_manager
+        .set_secret_safe(&vault_name, name, value, Some(request))
+        .await?;
     Ok(())
 }

@@ -23,7 +23,8 @@
 
 | Command | Description |
 |---------|-------------|
-| `xv set <name>` | Create a secret (interactive prompt, `--stdin`, or bulk `K1=v1 K2=v2`) |
+| `xv set <name>` | Create a secret (interactive prompt, `--stdin`, or bulk `K1=v1 K2=v2`); write-time metadata via `--group` (repeatable), `--note`, `--folder`, `--expires`, `--not-before` |
+| `xv gen` | Generate a random password to the clipboard (`--length`, `--charset`, `--raw`); `--save <name>` stores it as a secret with the same write-time metadata flags as `set` (`--group`, `--note`, `--folder`, `--expires`, `--not-before`, `--vault`) |
 | `xv get <name>` | Retrieve a secret (clipboard by default; `--raw` for stdout) |
 | `xv list` | List secrets (`--group`, `--all`, `--expiring <period>`, `--expired`, `--page-size`, `--page`) |
 | `xv delete <name>` | Soft-delete a secret (`--force` to skip confirmation) |

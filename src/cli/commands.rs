@@ -268,6 +268,88 @@ impl std::str::FromStr for CharsetType {
     }
 }
 
+/// Write-time metadata flags shared by the secret-creating commands
+/// (`set` and `gen --save`).
+///
+/// Flattened into both commands with `#[command(flatten)]` so they expose an
+/// identical metadata surface and can never drift apart. Both build a single
+/// [`crate::secret::manager::SecretRequest`] from these fields through the same
+/// backend trait path.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct SecretWriteArgs {
+    /// Group to assign the secret to (repeatable; e.g. `-g db -g prod`)
+    #[arg(short, long)]
+    pub group: Vec<String>,
+    /// Note to attach to the secret
+    #[arg(long)]
+    pub note: Option<String>,
+    /// Folder path for the secret (e.g., 'app/database', 'config/dev')
+    #[arg(long)]
+    pub folder: Option<String>,
+    /// Set expiration date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+    #[arg(long)]
+    pub expires: Option<String>,
+    /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+    #[arg(long)]
+    pub not_before: Option<String>,
+}
+
+impl SecretWriteArgs {
+    /// True when the user supplied at least one metadata flag. Used by `gen`
+    /// to reject metadata passed without `--save` (nothing to attach it to).
+    pub fn has_any(&self) -> bool {
+        !self.group.is_empty()
+            || self.note.is_some()
+            || self.folder.is_some()
+            || self.expires.is_some()
+            || self.not_before.is_some()
+    }
+
+    /// The groups as an `Option<Vec<String>>` matching `SecretRequest.groups`
+    /// (None when no `--group` was given, so existing groups are untouched).
+    pub fn groups_opt(&self) -> Option<Vec<String>> {
+        if self.group.is_empty() {
+            None
+        } else {
+            Some(self.group.clone())
+        }
+    }
+
+    /// Build a [`crate::secret::manager::SecretRequest`] for a single secret
+    /// from these write-time flags, parsing the `--expires` / `--not-before`
+    /// date strings. Shared by `set` (single-secret path) and `gen --save`
+    /// so both produce byte-identical requests from the same flags.
+    pub fn to_secret_request(
+        &self,
+        name: &str,
+        value: zeroize::Zeroizing<String>,
+    ) -> Result<crate::secret::manager::SecretRequest> {
+        use crate::utils::datetime::parse_datetime_or_duration;
+
+        let expires_on = match self.expires.as_deref() {
+            Some(s) => Some(parse_datetime_or_duration(s)?),
+            None => None,
+        };
+        let not_before_on = match self.not_before.as_deref() {
+            Some(s) => Some(parse_datetime_or_duration(s)?),
+            None => None,
+        };
+
+        Ok(crate::secret::manager::SecretRequest {
+            name: name.to_string(),
+            value,
+            content_type: None,
+            enabled: Some(true),
+            expires_on,
+            not_before: not_before_on,
+            tags: None,
+            groups: self.groups_opt(),
+            note: self.note.clone(),
+            folder: self.folder.clone(),
+        })
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Set a secret in the current vault context
@@ -283,18 +365,9 @@ pub enum Commands {
         /// Trim leading/trailing whitespace from the value read via --stdin
         #[arg(long, requires = "stdin")]
         trim: bool,
-        /// Note to attach to the secret(s)
-        #[arg(long)]
-        note: Option<String>,
-        /// Folder path for the secret(s) (e.g., 'app/database', 'config/dev')
-        #[arg(long)]
-        folder: Option<String>,
-        /// Set expiration date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
-        #[arg(long)]
-        expires: Option<String>,
-        /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
-        #[arg(long)]
-        not_before: Option<String>,
+        /// Write-time metadata (group/note/folder/expires/not-before)
+        #[command(flatten)]
+        meta: SecretWriteArgs,
     },
     /// Get a secret from the current vault context
     Get {
@@ -450,6 +523,9 @@ pub enum Commands {
         /// Print to stdout instead of copying to clipboard
         #[arg(long)]
         raw: bool,
+        /// Write-time metadata for --save (group/note/folder/expires/not-before)
+        #[command(flatten)]
+        meta: SecretWriteArgs,
     },
     /// Run a command with secrets injected as environment variables
     Run {
@@ -1283,13 +1359,10 @@ impl Cli {
                 args,
                 stdin,
                 trim,
-                note,
-                folder,
-                expires,
-                not_before,
+                meta,
             } => {
                 crate::cli::secret_ops::execute_secret_set_direct(
-                    args, stdin, trim, note, folder, expires, not_before, config, registry,
+                    args, stdin, trim, meta, config, registry,
                 )
                 .await
             }
@@ -1377,9 +1450,10 @@ impl Cli {
                 save,
                 vault,
                 raw,
+                meta,
             } => {
                 crate::cli::system_ops::execute_gen_command(
-                    length, charset, save, vault, raw, config, registry,
+                    length, charset, save, vault, raw, meta, config, registry,
                 )
                 .await
             }
@@ -2075,5 +2149,114 @@ mod tests {
                 "Unexpected char '{ch}' in base64 output"
             );
         }
+    }
+
+    // ── shared SecretWriteArgs (set / gen --save parity) ─────────────────────
+
+    #[test]
+    fn test_gen_accepts_group_and_metadata_flags() {
+        // gen --save must now accept the same metadata surface as set.
+        let cli = Cli::try_parse_from([
+            "xv",
+            "gen",
+            "--save",
+            "db-pass",
+            "-g",
+            "db",
+            "-g",
+            "prod",
+            "--note",
+            "n",
+            "--folder",
+            "app/db",
+            "--expires",
+            "2030-01-01",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Gen { save, meta, .. } => {
+                assert_eq!(save.as_deref(), Some("db-pass"));
+                assert_eq!(meta.group, vec!["db".to_string(), "prod".to_string()]);
+                assert_eq!(meta.note.as_deref(), Some("n"));
+                assert_eq!(meta.folder.as_deref(), Some("app/db"));
+                assert_eq!(meta.expires.as_deref(), Some("2030-01-01"));
+                assert!(meta.has_any());
+            }
+            _ => panic!("Expected Gen command"),
+        }
+    }
+
+    #[test]
+    fn test_set_accepts_group_flag() {
+        // set gained --group as the symmetric bonus of the shared struct.
+        let cli =
+            Cli::try_parse_from(["xv", "set", "api-key", "-g", "web", "--folder", "svc"]).unwrap();
+        match cli.command {
+            Commands::Set { args, meta, .. } => {
+                assert_eq!(args, vec!["api-key".to_string()]);
+                assert_eq!(meta.group, vec!["web".to_string()]);
+                assert_eq!(meta.folder.as_deref(), Some("svc"));
+            }
+            _ => panic!("Expected Set command"),
+        }
+    }
+
+    #[test]
+    fn test_secret_write_args_has_any() {
+        assert!(!SecretWriteArgs::default().has_any());
+
+        let with_group = SecretWriteArgs {
+            group: vec!["x".into()],
+            ..Default::default()
+        };
+        assert!(with_group.has_any());
+
+        let with_note = SecretWriteArgs {
+            note: Some("hi".into()),
+            ..Default::default()
+        };
+        assert!(with_note.has_any());
+    }
+
+    #[test]
+    fn test_secret_write_args_groups_opt() {
+        assert_eq!(SecretWriteArgs::default().groups_opt(), None);
+        let a = SecretWriteArgs {
+            group: vec!["a".into(), "b".into()],
+            ..Default::default()
+        };
+        assert_eq!(a.groups_opt(), Some(vec!["a".into(), "b".into()]));
+    }
+
+    #[test]
+    fn test_to_secret_request_populates_metadata() {
+        let meta = SecretWriteArgs {
+            group: vec!["db".into()],
+            note: Some("note".into()),
+            folder: Some("f".into()),
+            expires: None,
+            not_before: None,
+        };
+        let req = meta
+            .to_secret_request("name", zeroize::Zeroizing::new("val".to_string()))
+            .unwrap();
+        assert_eq!(req.name, "name");
+        assert_eq!(req.value.as_str(), "val");
+        assert_eq!(req.groups, Some(vec!["db".to_string()]));
+        assert_eq!(req.note.as_deref(), Some("note"));
+        assert_eq!(req.folder.as_deref(), Some("f"));
+        assert!(req.expires_on.is_none());
+        assert!(req.not_before.is_none());
+        assert_eq!(req.enabled, Some(true));
+    }
+
+    #[test]
+    fn test_to_secret_request_rejects_bad_date() {
+        let meta = SecretWriteArgs {
+            expires: Some("not-a-date".into()),
+            ..Default::default()
+        };
+        let res = meta.to_secret_request("n", zeroize::Zeroizing::new("v".to_string()));
+        assert!(res.is_err(), "invalid --expires should be rejected");
     }
 }

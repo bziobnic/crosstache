@@ -1,7 +1,7 @@
 //! Secret command execution handlers.
 
 use crate::backend::{BackendKind, BackendRef, BackendRegistry};
-use crate::cli::commands::{CharsetType, ShareCommands};
+use crate::cli::commands::{CharsetType, SecretWriteArgs, ShareCommands};
 use crate::cli::helpers::{
     copy_to_clipboard, generate_random_value, get_azure_auth_provider, mask_secrets,
     resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error, use_trait_path,
@@ -37,31 +37,23 @@ pub(crate) async fn execute_secret_set_direct(
     args: Vec<String>,
     stdin: bool,
     trim: bool,
-    note: Option<String>,
-    folder: Option<String>,
-    expires: Option<String>,
-    not_before: Option<String>,
+    meta: SecretWriteArgs,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    let SecretWriteArgs {
+        note,
+        folder,
+        expires,
+        not_before,
+        ..
+    } = meta.clone();
+    let groups = meta.groups_opt();
+
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
-
-        // Parse expiry dates if provided
-        let expires_on = if let Some(expires_str) = expires.as_deref() {
-            use crate::utils::datetime::parse_datetime_or_duration;
-            Some(parse_datetime_or_duration(expires_str)?)
-        } else {
-            None
-        };
-        let not_before_on = if let Some(not_before_str) = not_before.as_deref() {
-            use crate::utils::datetime::parse_datetime_or_duration;
-            Some(parse_datetime_or_duration(not_before_str)?)
-        } else {
-            None
-        };
 
         if args.len() == 1 && !args[0].contains('=') {
             // Single secret set
@@ -74,18 +66,9 @@ pub(crate) async fn execute_secret_set_direct(
             if value.is_empty() {
                 return Err(CrosstacheError::config("Secret value cannot be empty"));
             }
-            let request = crate::secret::manager::SecretRequest {
-                name: name.to_string(),
-                value: Zeroizing::new(value),
-                content_type: None,
-                enabled: Some(true),
-                expires_on,
-                not_before: not_before_on,
-                tags: None,
-                groups: None,
-                note,
-                folder,
-            };
+            // Build the request via the shared helper so `set` and `gen --save`
+            // construct identical requests from the same metadata flags.
+            let request = meta.to_secret_request(name, Zeroizing::new(value))?;
             let props = reg
                 .active()
                 .secrets()
@@ -127,7 +110,7 @@ pub(crate) async fn execute_secret_set_direct(
                     expires_on: None,
                     not_before: None,
                     tags: None,
-                    groups: None,
+                    groups: groups.clone(),
                     note: note.clone(),
                     folder: folder.clone(),
                 };
@@ -237,7 +220,7 @@ fn trait_secret_cache_key(vault_name: &str) -> crate::cache::CacheKey {
     }
 }
 
-fn invalidate_trait_secret_cache(config: &Config, vault_name: &str) {
+pub(crate) fn invalidate_trait_secret_cache(config: &Config, vault_name: &str) {
     let cache_manager = crate::cache::CacheManager::from_config(config);
     cache_manager.invalidate(&trait_secret_cache_key(vault_name));
 }
