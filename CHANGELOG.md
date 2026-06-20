@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.14.0 — `gen`/`set` parity, `config edit`, and reliability fixes (2026-06-20)
+
+Makes `xv gen --save` a complete replacement for `xv set`, adds an `xv config edit`
+convenience command, and lands a batch of reliability/security hardening fixes
+across the secret, cache, scan, auth, and config paths.
+
+### Added
+
+- **`xv gen --save` now carries full write-time metadata, matching `xv set` (#273).** A shared `SecretWriteArgs` clap struct (`--group` (repeatable), `--note`, `--folder`, `--expires`, `--not-before`) is flattened into both `set` and `gen`, so the two commands expose an identical metadata surface and cannot drift. Previously `gen --save` dropped all metadata and routed only through the Azure-only path; it now builds the same `SecretRequest` and goes through the same backend trait path as `set` (local/aws/azure), with a legacy Azure fallback when no backend registry is present. As the symmetric bonus, **`xv set` gains `--group`**, closing the create-time group gap (groups previously required a follow-up `xv update`). `gen` rejects metadata flags passed without `--save`.
+- **`xv config edit` (#272)** — opens the config file in your editor, resolving `$VISUAL` → `$EDITOR` → a platform default (`nano` on Unix, `notepad` on Windows). Editor strings with arguments (e.g. `code --wait`) are supported. A missing config file is seeded with a valid serialized default (never an empty file, which would fail the next load); an existing config is never clobbered.
+
+### Changed
+
+- **`list_secrets` fetches per-secret details with bounded concurrency (#269)** — large vaults list materially faster while keeping a cap on in-flight requests.
+- **`xv version` shows the Git ref (tag or branch) instead of `unknown` on release builds (#263).**
+- **Transitive dependencies refreshed to clear Dependabot alerts (#271).**
+- **Backend capability reference docs refreshed (#262); opaque-on-disk-filename design documented for the local backend (#268).**
+
+### Fixed
+
+- **`xv run` output masking buffer is now bounded (#270)** — the stream-masking buffer can no longer grow without limit on high-volume child output.
+- **Config context files are written via the private 0600 writer (#266)** — context state lands with owner-only permissions, matching the rest of the config writes.
+- **Azure auth hardening (#267)** — the `az` helper subprocess is time-bounded and JWT claim shapes are validated before use.
+- **Scanner memory is bounded and fails loud on unscanned files (#265)** — the secret scanner no longer risks unbounded memory and surfaces files it could not scan instead of silently skipping them.
+- **Cache lock acquisition closes a TOCTOU via atomic `create_new` (#264).**
+
+---
+
 ## v0.13.0 — Local metadata encryption + UX & docs polish (2026-06-15)
 
 Adds opt-in local-backend metadata encryption (ROADMAP P2) and closes the
