@@ -352,7 +352,7 @@ async fn execute_vault_create(
     println!("   URI: {}", vault.uri);
 
     output::hint(&format!(
-        "Start using it with 'xv use {}' or 'xv set <name> <value>'",
+        "Start using it with 'xv cx use {}' or 'xv set <name> <value>'",
         vault.name
     ));
 
