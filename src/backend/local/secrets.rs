@@ -26,7 +26,7 @@ use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
 use crate::secret::manager::{SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest};
 
-use super::{crypto, paths};
+use super::{crypto, opaque, paths};
 
 // ---------------------------------------------------------------------------
 // Metadata persisted alongside each secret
@@ -62,13 +62,19 @@ pub struct SecretMeta {
 // ---------------------------------------------------------------------------
 
 /// URL-encode a secret name for safe use as a filename component.
+///
+/// This is the **legacy** (reversible) filename scheme. It is still used as the
+/// on-disk stem when `opaque_filenames` is off, and as the stem an opaque store
+/// migrates *away from* (see [`opaque`]).
 fn encode_name(name: &str) -> String {
     // Percent-encode everything except unreserved characters per RFC 3986.
     url::form_urlencoded::byte_serialize(name.as_bytes()).collect()
 }
 
-/// Decode a URL-encoded filename back to the original secret name.
-#[cfg(test)]
+/// Decode a URL-encoded (legacy) filename back to the original secret name.
+///
+/// Used by the migration path to recover a name from a legacy stem when the
+/// `.meta.json` is unavailable, and by tests.
 fn decode_name(encoded: &str) -> String {
     url::form_urlencoded::parse(encoded.as_bytes())
         .map(|(k, _)| k.into_owned())
@@ -79,19 +85,19 @@ fn secrets_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> 
     paths::secrets_dir(store_path, vault)
 }
 
-fn age_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
-    let enc = encode_name(name);
-    Ok(secrets_dir(store_path, vault)?.join(format!("{enc}.age")))
+/// Active value-file path for a given filename `stem` (already encoded/hashed).
+fn age_path(store_path: &Path, vault: &str, stem: &str) -> Result<PathBuf, BackendError> {
+    Ok(secrets_dir(store_path, vault)?.join(format!("{stem}.age")))
 }
 
-fn meta_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
-    let enc = encode_name(name);
-    Ok(secrets_dir(store_path, vault)?.join(format!("{enc}.meta.json")))
+/// Active metadata-file path for a given filename `stem`.
+fn meta_path(store_path: &Path, vault: &str, stem: &str) -> Result<PathBuf, BackendError> {
+    Ok(secrets_dir(store_path, vault)?.join(format!("{stem}.meta.json")))
 }
 
-fn versions_dir(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
-    let enc = encode_name(name);
-    Ok(secrets_dir(store_path, vault)?.join(".versions").join(enc))
+/// Version-archive directory for a given filename `stem`.
+fn versions_dir(store_path: &Path, vault: &str, stem: &str) -> Result<PathBuf, BackendError> {
+    Ok(secrets_dir(store_path, vault)?.join(".versions").join(stem))
 }
 
 fn trash_base_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
@@ -100,25 +106,25 @@ fn trash_base_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendErro
 
 /// Directory for a single trash entry, suffixed with the deletion timestamp so
 /// repeated delete/recreate/delete cycles never collide. `@` cannot appear in a
-/// percent-encoded name (it encodes as `%40`), so the suffix is unambiguous.
+/// percent-encoded name or a base32 opaque stem, so the suffix is unambiguous.
 fn trash_entry_dir(
     store_path: &Path,
     vault: &str,
-    name: &str,
+    stem: &str,
     deleted_at_millis: u128,
 ) -> Result<PathBuf, BackendError> {
-    let enc = encode_name(name);
-    Ok(trash_base_dir(store_path, vault)?.join(format!("{enc}@{deleted_at_millis}")))
+    Ok(trash_base_dir(store_path, vault)?.join(format!("{stem}@{deleted_at_millis}")))
 }
 
-/// All trash entries for a secret, as `(deleted_at_millis, dir)` pairs.
+/// All trash entries for a given filename `stem`, as `(deleted_at_millis, dir)`
+/// pairs.
 ///
-/// Handles both naming formats: legacy un-suffixed dirs (`<enc>`, written by
-/// older versions, treated as timestamp 0) and suffixed dirs (`<enc>@<millis>`).
-fn trash_entries_for(
+/// Handles both naming formats: legacy un-suffixed dirs (`<stem>`, written by
+/// older versions, treated as timestamp 0) and suffixed dirs (`<stem>@<millis>`).
+fn trash_entries_for_stem(
     store_path: &Path,
     vault: &str,
-    name: &str,
+    stem: &str,
 ) -> Result<Vec<(u128, PathBuf)>, BackendError> {
     let tbase = trash_base_dir(store_path, vault)?;
     let mut entries = Vec::new();
@@ -126,8 +132,7 @@ fn trash_entries_for(
         return Ok(entries);
     }
 
-    let enc = encode_name(name);
-    let prefix = format!("{enc}@");
+    let prefix = format!("{stem}@");
     let dir_entries =
         fs::read_dir(&tbase).map_err(|e| BackendError::Internal(format!("read trash dir: {e}")))?;
     for entry in dir_entries.flatten() {
@@ -135,7 +140,7 @@ fn trash_entries_for(
             continue;
         }
         let fname = entry.file_name().to_string_lossy().to_string();
-        if fname == enc {
+        if fname == stem {
             entries.push((0, entry.path()));
         } else if let Some(ts) = fname
             .strip_prefix(&prefix)
@@ -145,6 +150,125 @@ fn trash_entries_for(
         }
     }
     Ok(entries)
+}
+
+/// Locate the inner `.age` and `.meta.json` files inside a trash entry dir,
+/// regardless of the stem they are named with (legacy or opaque). `.deleted.json`
+/// is ignored.
+fn trash_inner_files(tdir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
+    let mut age_file = None;
+    let mut meta_file = None;
+    if let Ok(entries) = fs::read_dir(tdir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname == ".deleted.json" {
+                continue;
+            }
+            if fname.ends_with(".meta.json") {
+                meta_file = Some(entry.path());
+            } else if fname.ends_with(".age") {
+                age_file = Some(entry.path());
+            }
+        }
+    }
+    (age_file, meta_file)
+}
+
+/// Move every entry from a legacy version-archive dir into the opaque one, then
+/// remove the (now-empty) legacy dir. Files already present at the destination
+/// (same `v<N>.*` label = identical archived content) are left in place and the
+/// legacy duplicate dropped, so this is safe to re-run.
+fn merge_versions_dir(legacy_vdir: &Path, opaque_vdir: &Path) -> Result<(), BackendError> {
+    fs::create_dir_all(opaque_vdir)
+        .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+    let entries = fs::read_dir(legacy_vdir)
+        .map_err(|e| BackendError::Internal(format!("read legacy versions: {e}")))?;
+    for entry in entries.flatten() {
+        let src = entry.path();
+        let Some(fname) = src.file_name() else {
+            continue;
+        };
+        let dest = opaque_vdir.join(fname);
+        if dest.exists() {
+            if src.is_dir() {
+                fs::remove_dir_all(&src).ok();
+            } else {
+                fs::remove_file(&src).ok();
+            }
+        } else {
+            fs::rename(&src, &dest).map_err(|e| {
+                BackendError::Internal(format!(
+                    "merge version {} -> {}: {e}",
+                    src.display(),
+                    dest.display()
+                ))
+            })?;
+        }
+    }
+    fs::remove_dir_all(legacy_vdir)
+        .map_err(|e| BackendError::Internal(format!("remove legacy versions dir: {e}")))?;
+    Ok(())
+}
+
+/// Rename a legacy-named trash entry to the opaque scheme: rename inner files to
+/// `<opaque_stem>.{age,meta.json}`, strip plaintext `original_name` from
+/// `.deleted.json`, then rename the dir itself to `<opaque_stem>@<millis>`.
+/// Skips (leaves untouched) if the opaque target dir already exists, to avoid
+/// clobbering a distinct entry.
+fn migrate_trash_dir(
+    tdir: &Path,
+    legacy_stem: &str,
+    opaque_stem: &str,
+    millis: u128,
+) -> Result<(), BackendError> {
+    let target = tdir.with_file_name(format!("{opaque_stem}@{millis}"));
+    if target == tdir {
+        return Ok(());
+    }
+    if target.exists() {
+        return Ok(());
+    }
+
+    // Rename inner age/meta files to the opaque stem.
+    let (age_file, meta_file) = trash_inner_files(tdir);
+    for (src, ext) in [(age_file, "age"), (meta_file, "meta.json")] {
+        let Some(src) = src else { continue };
+        let dest = tdir.join(format!("{opaque_stem}.{ext}"));
+        if src != dest {
+            fs::rename(&src, &dest).map_err(|e| {
+                BackendError::Internal(format!("rename trash inner {}: {e}", src.display()))
+            })?;
+        }
+    }
+    let _ = legacy_stem; // inner files located by extension, not by stem name.
+
+    // Strip plaintext original_name from .deleted.json (keep deleted_at).
+    let deleted = tdir.join(".deleted.json");
+    if deleted.exists() {
+        if let Ok(raw) = fs::read(&deleted) {
+            if let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                if let Some(obj) = val.as_object_mut() {
+                    if obj.remove("original_name").is_some() {
+                        let bytes = serde_json::to_vec_pretty(&val).map_err(|e| {
+                            BackendError::Internal(format!("serialize deleted meta: {e}"))
+                        })?;
+                        write_private(&deleted, &bytes).map_err(|e| {
+                            BackendError::Internal(format!("rewrite deleted meta: {e}"))
+                        })?;
+                    }
+                }
+            }
+        }
+    }
+
+    fs::rename(tdir, &target).map_err(|e| {
+        BackendError::Internal(format!(
+            "rename trash dir {} -> {}: {e}",
+            tdir.display(),
+            target.display()
+        ))
+    })?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -269,13 +393,13 @@ fn temp_path_for(path: &Path) -> Result<PathBuf, BackendError> {
 fn archive_snapshot(
     store_path: &Path,
     vault: &str,
-    name: &str,
+    stem: &str,
     version: &str,
     age_bytes: &[u8],
     meta: &SecretMeta,
     crypto_opts: MetaCrypto,
 ) -> Result<(), BackendError> {
-    let vdir = versions_dir(store_path, vault, name)?;
+    let vdir = versions_dir(store_path, vault, stem)?;
     fs::create_dir_all(&vdir)
         .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
 
@@ -290,9 +414,9 @@ fn archive_snapshot(
     Ok(())
 }
 
-/// Determine the next version number by scanning `.versions/<name>/`.
-fn next_version(store_path: &Path, vault: &str, name: &str) -> Result<u32, BackendError> {
-    let vdir = versions_dir(store_path, vault, name)?;
+/// Determine the next version number by scanning `.versions/<stem>/`.
+fn next_version(store_path: &Path, vault: &str, stem: &str) -> Result<u32, BackendError> {
+    let vdir = versions_dir(store_path, vault, stem)?;
     if !vdir.exists() {
         return Ok(1);
     }
@@ -322,17 +446,17 @@ fn next_version(store_path: &Path, vault: &str, name: &str) -> Result<u32, Backe
     Ok(max + 1)
 }
 
-/// Archive the current secret to `.versions/<name>/v<N>.*`.
-fn archive_current(store_path: &Path, vault: &str, name: &str) -> Result<u32, BackendError> {
-    let ap = age_path(store_path, vault, name)?;
-    let mp = meta_path(store_path, vault, name)?;
+/// Archive the current secret to `.versions/<stem>/v<N>.*`.
+fn archive_current(store_path: &Path, vault: &str, stem: &str) -> Result<u32, BackendError> {
+    let ap = age_path(store_path, vault, stem)?;
+    let mp = meta_path(store_path, vault, stem)?;
 
     if !ap.exists() && !mp.exists() {
         return Ok(1);
     }
 
-    let ver = next_version(store_path, vault, name)?;
-    let vdir = versions_dir(store_path, vault, name)?;
+    let ver = next_version(store_path, vault, stem)?;
+    let vdir = versions_dir(store_path, vault, stem)?;
     fs::create_dir_all(&vdir)
         .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
 
@@ -367,28 +491,221 @@ fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
 // LocalSecretBackend
 // ---------------------------------------------------------------------------
 
+/// Summary of an `xv local migrate` run (or dry-run plan).
+#[derive(Debug, Default)]
+pub struct MigrationReport {
+    /// Active legacy secrets renamed to opaque stems.
+    pub migrated: usize,
+    /// Orphan opaque stems whose missing index entry was rebuilt from metadata.
+    pub recovered: usize,
+    /// Legacy trash entries renamed to opaque stems.
+    pub trash_migrated: usize,
+    /// Human-readable lines describing each planned/performed action.
+    pub plan: Vec<String>,
+}
+
+impl MigrationReport {
+    /// Total number of on-disk changes (would-be changes for a dry run).
+    pub fn total(&self) -> usize {
+        self.migrated + self.recovered + self.trash_migrated
+    }
+}
+
 /// File-backed secret operations using age encryption.
 pub struct LocalSecretBackend {
     store_path: PathBuf,
     identity: age::x25519::Identity,
     recipients: Vec<age::x25519::Recipient>,
     encrypt_metadata: bool,
+    /// Whether on-disk filenames are opaque keyed-hash stems (see [`opaque`]).
+    opaque_filenames: bool,
+    /// HMAC key for opaque stems, derived from `identity`. `None` when
+    /// `opaque_filenames` is off, so the legacy path never computes it.
+    index_key: Option<[u8; 32]>,
 }
 
 impl LocalSecretBackend {
-    /// Construct a backend, choosing whether new metadata writes are encrypted.
+    /// Construct a backend, choosing whether new metadata writes are encrypted
+    /// and whether on-disk filenames are opaque.
     pub fn with_options(
         store_path: PathBuf,
         identity: age::x25519::Identity,
         recipients: Vec<age::x25519::Recipient>,
         encrypt_metadata: bool,
+        opaque_filenames: bool,
     ) -> Self {
+        let index_key = if opaque_filenames {
+            Some(opaque::derive_index_key(&identity))
+        } else {
+            None
+        };
         Self {
             store_path,
             identity,
             recipients,
             encrypt_metadata,
+            opaque_filenames,
+            index_key,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Opaque-filename helpers
+    //
+    // When `opaque_filenames` is off, `active_stem` == `encode_name`, the index
+    // is never touched, and `ensure_opaque_layout`/reconciliation are no-ops —
+    // so behavior is byte-for-byte identical to the legacy layout.
+    // -----------------------------------------------------------------------
+
+    /// The preferred on-disk stem for `name`: the opaque keyed-hash stem when
+    /// `opaque_filenames` is on, else the legacy URL-encoded stem.
+    fn active_stem(&self, name: &str) -> String {
+        match self.index_key.as_ref() {
+            Some(key) => opaque::opaque_stem(key, name),
+            None => encode_name(name),
+        }
+    }
+
+    /// Resolve the stem of an existing active secret, honoring the read-only
+    /// back-compat fallback to the legacy stem. Returns the stem whose
+    /// `.meta.json` exists; otherwise the preferred (active) stem (caller checks
+    /// existence). Never creates or renames anything.
+    fn resolve_active_stem(&self, vault: &str, name: &str) -> Result<String, BackendError> {
+        let primary = self.active_stem(name);
+        if meta_path(&self.store_path, vault, &primary)?.exists() {
+            return Ok(primary);
+        }
+        if self.opaque_filenames {
+            let legacy = encode_name(name);
+            if meta_path(&self.store_path, vault, &legacy)?.exists() {
+                return Ok(legacy);
+            }
+        }
+        Ok(primary)
+    }
+
+    /// Locate the version-archive directory for `name`, preferring the active
+    /// stem but falling back to the legacy stem (read-only) so version reads
+    /// work on a not-yet-fully-migrated store.
+    fn resolve_versions_dir(&self, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
+        let active = self.active_stem(name);
+        let dir = versions_dir(&self.store_path, vault, &active)?;
+        if dir.exists() {
+            return Ok(dir);
+        }
+        if self.opaque_filenames {
+            let legacy_dir = versions_dir(&self.store_path, vault, &encode_name(name))?;
+            if legacy_dir.exists() {
+                return Ok(legacy_dir);
+            }
+        }
+        Ok(dir)
+    }
+
+    /// All trash entries for `name`, covering opaque and (when opaque is on)
+    /// legacy stems. `(deleted_at_millis, dir)` pairs.
+    fn trash_entries_for(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<Vec<(u128, PathBuf)>, BackendError> {
+        let mut entries = trash_entries_for_stem(&self.store_path, vault, &self.active_stem(name))?;
+        if self.opaque_filenames {
+            entries.extend(trash_entries_for_stem(
+                &self.store_path,
+                vault,
+                &encode_name(name),
+            )?);
+        }
+        Ok(entries)
+    }
+
+    /// Bring a single secret's on-disk layout up to the opaque scheme and keep
+    /// the encrypted index consistent. Idempotent; a no-op when
+    /// `opaque_filenames` is off. **The caller must already hold the vault
+    /// `fs2` lock.**
+    ///
+    /// Steps (all keyed on `name`, no metadata decryption required):
+    /// 1. Move any legacy active pair to the opaque stem (or drop it if the
+    ///    opaque pair already exists).
+    /// 2. Set the index entry `{opaque_stem → name}` when an active pair exists,
+    ///    or remove it when none does (e.g. just soft-deleted).
+    /// 3. Merge a legacy `.versions/<encode_name>/` dir into the opaque one.
+    /// 4. Rename legacy trash dirs (`<encode_name>@*`, unsuffixed) to the opaque
+    ///    stem and strip plaintext `original_name` from their `.deleted.json`.
+    fn ensure_opaque_layout(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        let Some(key) = self.index_key.as_ref() else {
+            return Ok(());
+        };
+        let opaque_stem = opaque::opaque_stem(key, name);
+        let legacy_stem = encode_name(name);
+        let store = &self.store_path;
+
+        // 1. Active pair: legacy -> opaque (or remove legacy dup).
+        if legacy_stem != opaque_stem {
+            for ext in ["age", "meta.json"] {
+                let legacy = secrets_dir(store, vault)?.join(format!("{legacy_stem}.{ext}"));
+                if !legacy.exists() {
+                    continue;
+                }
+                let opaque_path = secrets_dir(store, vault)?.join(format!("{opaque_stem}.{ext}"));
+                if opaque_path.exists() {
+                    fs::remove_file(&legacy).map_err(|e| {
+                        BackendError::Internal(format!("remove legacy {}: {e}", legacy.display()))
+                    })?;
+                } else {
+                    fs::rename(&legacy, &opaque_path).map_err(|e| {
+                        BackendError::Internal(format!(
+                            "migrate {} -> {}: {e}",
+                            legacy.display(),
+                            opaque_path.display()
+                        ))
+                    })?;
+                }
+            }
+        }
+
+        // 3. Version archive: merge legacy dir into the opaque dir.
+        if legacy_stem != opaque_stem {
+            let legacy_vdir = versions_dir(store, vault, &legacy_stem)?;
+            if legacy_vdir.exists() {
+                let opaque_vdir = versions_dir(store, vault, &opaque_stem)?;
+                merge_versions_dir(&legacy_vdir, &opaque_vdir)?;
+            }
+        }
+
+        // 4. Trash: rename legacy-named entries to the opaque stem.
+        if legacy_stem != opaque_stem {
+            for (millis, tdir) in trash_entries_for_stem(store, vault, &legacy_stem)? {
+                migrate_trash_dir(&tdir, &legacy_stem, &opaque_stem, millis)?;
+            }
+        }
+
+        // 2. Index entry follows the active pair's presence.
+        let sdir = secrets_dir(store, vault)?;
+        let mut index = opaque::load_index(&sdir, &self.identity)?;
+        let active_exists = meta_path(store, vault, &opaque_stem)?.exists();
+        let changed = if active_exists {
+            let entry = index.get(&opaque_stem);
+            if entry.map(|e| e.name.as_str()) != Some(name) {
+                index.insert(
+                    opaque_stem.clone(),
+                    opaque::IndexEntry {
+                        name: name.to_string(),
+                        v: 1,
+                    },
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            index.remove(&opaque_stem).is_some()
+        };
+        if changed {
+            opaque::save_index(&sdir, &index, &self.recipients)?;
+        }
+        Ok(())
     }
 
     /// Re-encrypt every plaintext secret `.meta.json` under the store as age
@@ -499,6 +816,198 @@ impl LocalSecretBackend {
         Ok((converted, skipped))
     }
 
+    /// Migrate every vault in the store to the opaque-filename layout.
+    ///
+    /// Per vault, under its `fs2` lock: rename legacy `encode_name` active +
+    /// version + trash paths to opaque stems, (re)build the encrypted index,
+    /// and run an idempotent metadata-based recovery pass for opaque stems
+    /// missing from the index. Safe to re-run. With `dry_run`, nothing is
+    /// written and the returned report's `plan` describes what *would* change.
+    ///
+    /// Requires `opaque_filenames` to be enabled (the CLI verifies this).
+    pub fn migrate_all(&self, dry_run: bool) -> Result<MigrationReport, BackendError> {
+        if !self.opaque_filenames {
+            return Err(BackendError::Internal(
+                "opaque_filenames is disabled; enable it under [local] before migrating".into(),
+            ));
+        }
+
+        let mut report = MigrationReport::default();
+        let vaults_root = paths::vaults_dir(&self.store_path);
+        if !vaults_root.exists() {
+            return Ok(report);
+        }
+
+        let vault_dirs = fs::read_dir(&vaults_root)
+            .map_err(|e| BackendError::Internal(format!("read vaults dir: {e}")))?;
+        for vault_entry in vault_dirs.flatten() {
+            let vault_dir = vault_entry.path();
+            if !vault_dir.join(".vault.json").exists() {
+                continue;
+            }
+            let vault = vault_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| {
+                    BackendError::Internal(format!("invalid vault dir {}", vault_dir.display()))
+                })?
+                .to_string();
+
+            // Same lock as runtime mutations, so a migration step can't race a
+            // concurrent write. Held until `_lock` drops at iteration end.
+            let _lock = lock_vault(&vault_dir).map_err(|e| {
+                BackendError::Internal(format!(
+                    "could not lock vault {} for migration (another xv process may be \
+                     running): {e}",
+                    vault_dir.display()
+                ))
+            })?;
+
+            self.migrate_vault(&vault, dry_run, &mut report)?;
+        }
+        Ok(report)
+    }
+
+    /// Migrate a single vault. Caller must hold the vault `fs2` lock.
+    fn migrate_vault(
+        &self,
+        vault: &str,
+        dry_run: bool,
+        report: &mut MigrationReport,
+    ) -> Result<(), BackendError> {
+        let key = self
+            .index_key
+            .as_ref()
+            .ok_or_else(|| BackendError::Internal("opaque filenames disabled".into()))?;
+        let store = &self.store_path;
+        let sdir = secrets_dir(store, vault)?;
+        if !sdir.exists() {
+            return Ok(());
+        }
+
+        let mut index = opaque::load_index(&sdir, &self.identity)?;
+
+        // Collect active stems once (read_dir is invalidated by renames).
+        let mut active_stems: Vec<String> = Vec::new();
+        for entry in fs::read_dir(&sdir)
+            .map_err(|e| BackendError::Internal(format!("read secrets dir: {e}")))?
+            .flatten()
+        {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if let Some(stem) = fname.strip_suffix(".meta.json") {
+                active_stems.push(stem.to_string());
+            }
+        }
+        active_stems.sort();
+
+        // Pass A: legacy active pairs → opaque (index entry FIRST, then rename).
+        for stem in &active_stems {
+            if opaque::is_opaque_stem(stem) {
+                continue; // handled by the recovery pass
+            }
+            let mp = meta_path(store, vault, stem)?;
+            let name = match read_meta(&mp, &self.identity) {
+                Ok(m) => m.name,
+                Err(_) => decode_name(stem),
+            };
+            let opaque_stem = opaque::opaque_stem(key, &name);
+            report
+                .plan
+                .push(format!("secret: {stem}.* -> {opaque_stem}.* ({name:?})"));
+            report.migrated += 1;
+            if dry_run {
+                continue;
+            }
+            // Index-before-rename: a crash after this still lists the secret
+            // from the index; a crash before it leaves legacy files for the
+            // legacy scan. Never rename away the only recoverable name source
+            // before the index records the stem.
+            index.insert(
+                opaque_stem.clone(),
+                opaque::IndexEntry {
+                    name: name.clone(),
+                    v: 1,
+                },
+            );
+            opaque::save_index(&sdir, &index, &self.recipients)?;
+            self.ensure_opaque_layout(vault, &name)?;
+        }
+
+        // Pass B (recovery): opaque stems on disk but missing from the index.
+        for stem in &active_stems {
+            if !opaque::is_opaque_stem(stem) || index.contains_key(stem) {
+                continue;
+            }
+            let mp = meta_path(store, vault, stem)?;
+            if !mp.exists() {
+                continue;
+            }
+            let name = match read_meta(&mp, &self.identity) {
+                Ok(m) => m.name,
+                Err(e) => {
+                    eprintln!("warning: cannot recover name for opaque stem {stem:?}: {e}");
+                    continue;
+                }
+            };
+            report
+                .plan
+                .push(format!("recover index: {stem} ({name:?})"));
+            report.recovered += 1;
+            if dry_run {
+                continue;
+            }
+            index.insert(stem.clone(), opaque::IndexEntry { name, v: 1 });
+        }
+
+        // Pass C: legacy trash dirs → opaque stems.
+        let tbase = trash_base_dir(store, vault)?;
+        if tbase.exists() {
+            let mut trash_dirs: Vec<PathBuf> = fs::read_dir(&tbase)
+                .map_err(|e| BackendError::Internal(format!("read trash dir: {e}")))?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            trash_dirs.sort();
+            for tdir in trash_dirs {
+                let dname = tdir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let (base, millis) = match dname.rsplit_once('@') {
+                    Some((b, ms)) => match ms.parse::<u128>() {
+                        Ok(n) => (b.to_string(), n),
+                        Err(_) => (dname.clone(), 0),
+                    },
+                    None => (dname.clone(), 0),
+                };
+                if opaque::is_opaque_stem(&base) {
+                    continue; // already migrated
+                }
+                // Recover the name: prefer inner metadata, fall back to decode.
+                let (_, meta_file) = trash_inner_files(&tdir);
+                let name = meta_file
+                    .and_then(|p| read_meta(&p, &self.identity).ok())
+                    .map(|m| m.name)
+                    .unwrap_or_else(|| decode_name(&base));
+                let opaque_stem = opaque::opaque_stem(key, &name);
+                report.plan.push(format!(
+                    "trash: {dname} -> {opaque_stem}@{millis} ({name:?})"
+                ));
+                report.trash_migrated += 1;
+                if dry_run {
+                    continue;
+                }
+                migrate_trash_dir(&tdir, &base, &opaque_stem, millis)?;
+            }
+        }
+
+        if !dry_run {
+            opaque::save_index(&sdir, &index, &self.recipients)?;
+        }
+        Ok(())
+    }
+
     /// Soft-delete `name` into a trash entry stamped with `deleted_at_millis`.
     ///
     /// Rejects with [`BackendError::Conflict`] if an entry with the same name
@@ -518,8 +1027,11 @@ impl LocalSecretBackend {
         }
         let _lock = lock_vault(&vault_dir)?;
 
-        let mp = meta_path(&self.store_path, vault, name)?;
-        let ap = age_path(&self.store_path, vault, name)?;
+        // Where the active pair currently lives (opaque stem, or legacy via the
+        // read fallback on an un-migrated store).
+        let src_stem = self.resolve_active_stem(vault, name)?;
+        let mp = meta_path(&self.store_path, vault, &src_stem)?;
+        let ap = age_path(&self.store_path, vault, &src_stem)?;
 
         if !mp.exists() && !ap.exists() {
             return Err(BackendError::NotFound {
@@ -528,8 +1040,10 @@ impl LocalSecretBackend {
             });
         }
 
-        // Soft delete: move files to .trash/{encoded_name}@{deleted_at_millis}/
-        let tdir = trash_entry_dir(&self.store_path, vault, name, deleted_at_millis)?;
+        // The trash entry is named with the active (opaque when enabled) stem so
+        // no legacy name leaks into `.trash/`.
+        let trash_stem = self.active_stem(name);
+        let tdir = trash_entry_dir(&self.store_path, vault, &trash_stem, deleted_at_millis)?;
         if tdir.exists() {
             return Err(BackendError::Conflict(format!(
                 "trash entry for '{name}' at timestamp {deleted_at_millis} already exists; \
@@ -539,23 +1053,26 @@ impl LocalSecretBackend {
         fs::create_dir_all(&tdir)
             .map_err(|e| BackendError::Internal(format!("mkdir trash: {e}")))?;
 
-        let enc = encode_name(name);
         if ap.exists() {
-            let dest = tdir.join(format!("{enc}.age"));
+            let dest = tdir.join(format!("{trash_stem}.age"));
             fs::rename(&ap, &dest)
                 .map_err(|e| BackendError::Internal(format!("move age to trash: {e}")))?;
         }
         if mp.exists() {
-            let dest = tdir.join(format!("{enc}.meta.json"));
+            let dest = tdir.join(format!("{trash_stem}.meta.json"));
             fs::rename(&mp, &dest)
                 .map_err(|e| BackendError::Internal(format!("move meta to trash: {e}")))?;
         }
 
-        // Write deletion metadata
-        let deleted_meta = serde_json::json!({
-            "deleted_at": Utc::now().to_rfc3339(),
-            "original_name": name,
-        });
+        // Write deletion metadata. With opaque filenames on, the trash dir name
+        // is opaque and `.deleted.json` must NOT carry plaintext `original_name`
+        // (the name is recovered from the encrypted `.meta.json`). Legacy mode
+        // keeps the field for byte-for-byte back-compat.
+        let deleted_meta = if self.opaque_filenames {
+            serde_json::json!({ "deleted_at": Utc::now().to_rfc3339() })
+        } else {
+            serde_json::json!({ "deleted_at": Utc::now().to_rfc3339(), "original_name": name })
+        };
         let deleted_path = tdir.join(".deleted.json");
         write_private(
             &deleted_path,
@@ -564,6 +1081,10 @@ impl LocalSecretBackend {
                 .as_bytes(),
         )
         .map_err(|e| BackendError::Internal(format!("write deleted meta: {e}")))?;
+
+        // Drop the active index entry and clean up any legacy layout (versions,
+        // other legacy trash dirs) for this name.
+        self.ensure_opaque_layout(vault, name)?;
 
         Ok(())
     }
@@ -598,8 +1119,12 @@ impl SecretBackend for LocalSecretBackend {
             .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
 
         let name = request.name.clone();
-        let ap = age_path(&store, vault, &name)?;
-        let mp = meta_path(&store, vault, &name)?;
+        // Resolve where an existing pair lives (opaque stem, or legacy via the
+        // read fallback). A brand-new secret resolves to the active stem. The
+        // trailing `ensure_opaque_layout` migrates any legacy stem to opaque.
+        let stem = self.resolve_active_stem(vault, &name)?;
+        let ap = age_path(&store, vault, &stem)?;
+        let mp = meta_path(&store, vault, &stem)?;
 
         // Snapshot old state for transactional replace+archive.
         let old_snapshot = if mp.exists() {
@@ -665,7 +1190,7 @@ impl SecretBackend for LocalSecretBackend {
             archive_snapshot(
                 &store,
                 vault,
-                &name,
+                &stem,
                 &old_meta.version,
                 &old_age,
                 &old_meta,
@@ -676,6 +1201,10 @@ impl SecretBackend for LocalSecretBackend {
             )?;
         }
 
+        // Upgrade this secret's on-disk layout to opaque stems + refresh the
+        // index entry (no-op when opaque filenames are off).
+        self.ensure_opaque_layout(vault, &name)?;
+
         Ok(meta_to_properties(&meta, None))
     }
 
@@ -685,7 +1214,10 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
-        let mp = meta_path(&self.store_path, vault, name)?;
+        // Resolve the on-disk stem (opaque, or legacy via the read-only
+        // back-compat fallback). Reads never create or upgrade legacy files.
+        let stem = self.resolve_active_stem(vault, name)?;
+        let mp = meta_path(&self.store_path, vault, &stem)?;
         if !mp.exists() {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
@@ -708,7 +1240,7 @@ impl SecretBackend for LocalSecretBackend {
         let meta = read_meta(&mp, &self.identity)?;
 
         let value = if include_value {
-            let ap = age_path(&self.store_path, vault, name)?;
+            let ap = age_path(&self.store_path, vault, &stem)?;
 
             if fs::symlink_metadata(&ap)
                 .map(|m| m.is_symlink())
@@ -736,7 +1268,8 @@ impl SecretBackend for LocalSecretBackend {
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
         // First check if this is the current version.
-        let mp = meta_path(&self.store_path, vault, name)?;
+        let stem = self.resolve_active_stem(vault, name)?;
+        let mp = meta_path(&self.store_path, vault, &stem)?;
         if mp.exists() {
             let meta = read_meta(&mp, &self.identity)?;
             if meta.version == version {
@@ -744,8 +1277,8 @@ impl SecretBackend for LocalSecretBackend {
             }
         }
 
-        // Look in .versions/
-        let vdir = versions_dir(&self.store_path, vault, name)?;
+        // Look in .versions/ (opaque, or legacy via read fallback).
+        let vdir = self.resolve_versions_dir(vault, name)?;
         let meta_file = vdir.join(format!("{version}.meta.json"));
         if !meta_file.exists() {
             return Err(BackendError::NotFound {
@@ -798,12 +1331,51 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         let mut results = Vec::new();
+        let push_meta = |meta: &SecretMeta, results: &mut Vec<SecretSummary>| {
+            if let Some(group) = group_filter {
+                if !meta.groups.iter().any(|g| g == group) {
+                    return;
+                }
+            }
+            results.push(meta_to_summary(meta));
+        };
+
+        // Track stems already accounted for so reconciliation never
+        // double-counts a secret present both in the index and on disk.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        if self.opaque_filenames {
+            // Primary source: the decrypted reverse index.
+            let index = opaque::load_index(&sdir, &self.identity)?;
+            for stem in index.keys() {
+                let mp = meta_path(&self.store_path, vault, stem)?;
+                if !mp.exists() {
+                    continue;
+                }
+                match read_meta(&mp, &self.identity) {
+                    Ok(meta) => {
+                        seen.insert(stem.clone());
+                        push_meta(&meta, &mut results);
+                    }
+                    Err(e) => {
+                        eprintln!("warning: indexed secret {stem:?} has corrupted metadata: {e}");
+                    }
+                }
+            }
+        }
+
+        // Reconciliation (always for legacy mode; back-compat window for opaque
+        // mode): pick up any on-disk pair not already represented in the index —
+        // legacy `encode_name` pairs and orphan opaque-stem pairs alike. The
+        // real name comes from the decrypted metadata, never from the filename.
         let entries = fs::read_dir(&sdir)
             .map_err(|e| BackendError::Internal(format!("read secrets dir: {e}")))?;
-
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
-            if !fname.ends_with(".meta.json") {
+            let Some(stem) = fname.strip_suffix(".meta.json") else {
+                continue;
+            };
+            if seen.contains(stem) {
                 continue;
             }
 
@@ -817,15 +1389,8 @@ impl SecretBackend for LocalSecretBackend {
                     continue;
                 }
             };
-
-            // Apply group filter
-            if let Some(group) = group_filter {
-                if !meta.groups.iter().any(|g| g == group) {
-                    continue;
-                }
-            }
-
-            results.push(meta_to_summary(&meta));
+            seen.insert(stem.to_string());
+            push_meta(&meta, &mut results);
         }
 
         // Sort by name for deterministic output
@@ -851,7 +1416,11 @@ impl SecretBackend for LocalSecretBackend {
         let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         let _lock = lock_vault(&vault_dir)?;
 
-        let mp = meta_path(&self.store_path, vault, name)?;
+        // Resolve where the active pair lives (opaque, or legacy via the read
+        // fallback). The trailing `ensure_opaque_layout` migrates legacy → opaque
+        // so even a metadata-only update upgrades the layout and clears the leak.
+        let stem = self.resolve_active_stem(vault, name)?;
+        let mp = meta_path(&self.store_path, vault, &stem)?;
         if !mp.exists() {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
@@ -864,7 +1433,7 @@ impl SecretBackend for LocalSecretBackend {
 
         // If value is being updated, replace active first, then archive prior snapshot.
         if let Some(ref new_value) = request.value {
-            let ap = age_path(&self.store_path, vault, name)?;
+            let ap = age_path(&self.store_path, vault, &stem)?;
             let old_age = fs::read(&ap).map_err(|e| {
                 BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
             })?;
@@ -886,7 +1455,7 @@ impl SecretBackend for LocalSecretBackend {
             archive_snapshot(
                 &self.store_path,
                 vault,
-                name,
+                &stem,
                 &old_meta.version,
                 &old_age,
                 &old_meta,
@@ -942,6 +1511,9 @@ impl SecretBackend for LocalSecretBackend {
             },
         )?;
 
+        // Upgrade legacy layout → opaque and refresh the index entry.
+        self.ensure_opaque_layout(vault, name)?;
+
         Ok(meta_to_properties(&meta, None))
     }
 
@@ -956,8 +1528,8 @@ impl SecretBackend for LocalSecretBackend {
     ) -> Result<Vec<SecretProperties>, BackendError> {
         let mut versions = Vec::new();
 
-        // Collect archived versions
-        let vdir = versions_dir(&self.store_path, vault, name)?;
+        // Collect archived versions (opaque, or legacy via read fallback)
+        let vdir = self.resolve_versions_dir(vault, name)?;
         if vdir.exists() {
             if let Ok(entries) = fs::read_dir(&vdir) {
                 for entry in entries.flatten() {
@@ -972,7 +1544,8 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         // Add current version
-        let mp = meta_path(&self.store_path, vault, name)?;
+        let stem = self.resolve_active_stem(vault, name)?;
+        let mp = meta_path(&self.store_path, vault, &stem)?;
         if mp.exists() {
             let meta = read_meta(&mp, &self.identity)?;
             versions.push(meta_to_properties(&meta, None));
@@ -985,7 +1558,8 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
-        let mp = meta_path(&self.store_path, vault, name)?;
+        let stem = self.resolve_active_stem(vault, name)?;
+        let mp = meta_path(&self.store_path, vault, &stem)?;
         Ok(mp.exists())
     }
 
@@ -999,8 +1573,13 @@ impl SecretBackend for LocalSecretBackend {
         let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         let _lock = lock_vault(&vault_dir)?;
 
-        // Find the target version in .versions/
-        let vdir = versions_dir(&self.store_path, vault, name)?;
+        // Operate on the stem where this secret currently lives (opaque, or
+        // legacy via the read fallback). `ensure_opaque_layout` migrates to
+        // opaque afterwards.
+        let stem = self.resolve_active_stem(vault, name)?;
+
+        // Find the target version in .versions/<stem>/
+        let vdir = versions_dir(&self.store_path, vault, &stem)?;
         let ver_age = vdir.join(format!("{version}.age"));
         let ver_meta = vdir.join(format!("{version}.meta.json"));
 
@@ -1012,11 +1591,11 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         // Archive current as the next version
-        archive_current(&self.store_path, vault, name)?;
+        archive_current(&self.store_path, vault, &stem)?;
 
         // Copy the target version files to current
-        let ap = age_path(&self.store_path, vault, name)?;
-        let mp = meta_path(&self.store_path, vault, name)?;
+        let ap = age_path(&self.store_path, vault, &stem)?;
+        let mp = meta_path(&self.store_path, vault, &stem)?;
 
         if ver_age.exists() {
             fs::copy(&ver_age, &ap)
@@ -1027,7 +1606,7 @@ impl SecretBackend for LocalSecretBackend {
 
         // Update the version label to the next version number
         let mut meta = read_meta(&mp, &self.identity)?;
-        let next_ver = next_version(&self.store_path, vault, name)?;
+        let next_ver = next_version(&self.store_path, vault, &stem)?;
         meta.version = format!("v{next_ver}");
         meta.updated_at = Utc::now();
         write_meta(
@@ -1038,6 +1617,9 @@ impl SecretBackend for LocalSecretBackend {
                 encrypt: self.encrypt_metadata,
             },
         )?;
+
+        // Upgrade legacy layout → opaque and refresh the index entry.
+        self.ensure_opaque_layout(vault, name)?;
 
         Ok(meta_to_properties(&meta, None))
     }
@@ -1058,8 +1640,9 @@ impl SecretBackend for LocalSecretBackend {
 
         // Restore the most recent trash entry for this name (legacy un-suffixed
         // entries sort as oldest). Ties on timestamp break by path so the
-        // choice is deterministic regardless of read_dir order.
-        let mut entries = trash_entries_for(&self.store_path, vault, name)?;
+        // choice is deterministic regardless of read_dir order. Covers both
+        // opaque and legacy trash stems.
+        let mut entries = self.trash_entries_for(vault, name)?;
         entries.sort();
         let Some((_, tdir)) = entries.pop() else {
             return Err(BackendError::NotFound {
@@ -1068,34 +1651,37 @@ impl SecretBackend for LocalSecretBackend {
             });
         };
 
-        let enc = encode_name(name);
-        let trash_age = tdir.join(format!("{enc}.age"));
-        let trash_meta = tdir.join(format!("{enc}.meta.json"));
-
-        if !trash_meta.exists() {
+        // Inner files may be named with an opaque or legacy stem; locate by
+        // extension rather than recomputing a stem.
+        let (trash_age, trash_meta) = trash_inner_files(&tdir);
+        let Some(trash_meta) = trash_meta.filter(|p| p.exists()) else {
             return Err(BackendError::NotFound {
                 name: format!("{name} (deleted)"),
                 suggestion: Some("Trash metadata not found".into()),
             });
-        }
+        };
 
-        // Move files back to secrets/
+        // Move files back to secrets/ at the active (opaque when enabled) stem.
         let sdir = secrets_dir(&self.store_path, vault)?;
         fs::create_dir_all(&sdir)
             .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
 
-        let ap = age_path(&self.store_path, vault, name)?;
-        let mp = meta_path(&self.store_path, vault, name)?;
+        let target_stem = self.active_stem(name);
+        let ap = age_path(&self.store_path, vault, &target_stem)?;
+        let mp = meta_path(&self.store_path, vault, &target_stem)?;
 
         // If an active secret with this name exists (delete → recreate →
         // restore), archive it to .versions/ instead of silently destroying
         // it, mirroring the rollback path.
-        let had_active = ap.exists() || mp.exists();
+        let existing_stem = self.resolve_active_stem(vault, name)?;
+        let existing_ap = age_path(&self.store_path, vault, &existing_stem)?;
+        let existing_mp = meta_path(&self.store_path, vault, &existing_stem)?;
+        let had_active = existing_ap.exists() || existing_mp.exists();
         if had_active {
-            archive_current(&self.store_path, vault, name)?;
+            archive_current(&self.store_path, vault, &existing_stem)?;
         }
 
-        if trash_age.exists() {
+        if let Some(trash_age) = trash_age.filter(|p| p.exists()) {
             fs::rename(&trash_age, &ap)
                 .map_err(|e| BackendError::Internal(format!("restore age from trash: {e}")))?;
         }
@@ -1110,7 +1696,7 @@ impl SecretBackend for LocalSecretBackend {
         if had_active {
             // Relabel so the restored secret doesn't reuse a version label
             // already taken by the archived active secret.
-            let next_ver = next_version(&self.store_path, vault, name)?;
+            let next_ver = next_version(&self.store_path, vault, &target_stem)?;
             meta.version = format!("v{next_ver}");
             meta.updated_at = Utc::now();
             write_meta(
@@ -1122,6 +1708,10 @@ impl SecretBackend for LocalSecretBackend {
                 },
             )?;
         }
+
+        // Re-add the active index entry and upgrade any remaining legacy layout.
+        self.ensure_opaque_layout(vault, name)?;
+
         Ok(meta_to_properties(&meta, None))
     }
 
@@ -1135,17 +1725,24 @@ impl SecretBackend for LocalSecretBackend {
         }
         let _lock = lock_vault(&vault_dir)?;
 
-        // Permanently remove every trash entry for this name (both naming formats).
-        for (_, tdir) in trash_entries_for(&self.store_path, vault, name)? {
+        // Permanently remove every trash entry for this name (opaque + legacy
+        // stems, suffixed and unsuffixed).
+        for (_, tdir) in self.trash_entries_for(vault, name)? {
             fs::remove_dir_all(&tdir)
                 .map_err(|e| BackendError::Internal(format!("purge trash: {e}")))?;
         }
 
-        // Also remove any .versions/ for that secret
-        let vdir = versions_dir(&self.store_path, vault, name)?;
-        if vdir.exists() {
-            fs::remove_dir_all(&vdir)
-                .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+        // Also remove any .versions/ for that secret, under both stems.
+        let mut version_stems = vec![self.active_stem(name)];
+        if self.opaque_filenames {
+            version_stems.push(encode_name(name));
+        }
+        for stem in version_stems {
+            let vdir = versions_dir(&self.store_path, vault, &stem)?;
+            if vdir.exists() {
+                fs::remove_dir_all(&vdir)
+                    .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+            }
         }
 
         Ok(())
@@ -1222,8 +1819,49 @@ mod tests {
         .unwrap();
 
         let backend =
-            LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata);
+            LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata, false);
         (backend, tmp)
+    }
+
+    /// Create a test backend with opaque filenames enabled (metadata encryption
+    /// off unless `encrypt_metadata` is set), returning it with its temp dir.
+    fn test_backend_opaque() -> (LocalSecretBackend, TempDir) {
+        test_backend_opaque_opts(false)
+    }
+
+    fn test_backend_opaque_opts(encrypt_metadata: bool) -> (LocalSecretBackend, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let store = tmp.path().to_path_buf();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        let (identity, recipients) = generate_keypair(&key_path, &recipients_path).unwrap();
+
+        let vault_dir = store.join("vaults").join("default");
+        fs::create_dir_all(vault_dir.join("secrets")).unwrap();
+        fs::write(
+            vault_dir.join(".vault.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": "default", "created_at": Utc::now().to_rfc3339(), "tags": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let backend =
+            LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata, true);
+        (backend, tmp)
+    }
+
+    /// Re-open an existing store with opaque filenames enabled, reusing its key
+    /// files. Used to migrate a legacy-layout store created by
+    /// [`test_backend_opts`].
+    fn reopen_opaque(tmp: &TempDir, encrypt_metadata: bool) -> LocalSecretBackend {
+        let store = tmp.path().to_path_buf();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        let identity = crypto::load_identity(&key_path).unwrap();
+        let recipients = crypto::load_recipients(&recipients_path).unwrap();
+        LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata, true)
     }
 
     /// Re-open an existing store (created by [`test_backend_opts`]) reusing its
@@ -1235,7 +1873,7 @@ mod tests {
         let recipients_path = tmp.path().join("recipients.txt");
         let identity = crypto::load_identity(&key_path).unwrap();
         let recipients = crypto::load_recipients(&recipients_path).unwrap();
-        LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata)
+        LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata, false)
     }
 
     fn make_request(name: &str, value: &str) -> SecretRequest {
@@ -1348,13 +1986,15 @@ mod tests {
             identity.clone(),
             recipients.clone(),
             false,
+            false,
         );
         plain
             .set_secret("default", make_request("old-plain", "v1"))
             .await
             .unwrap();
 
-        let enc = LocalSecretBackend::with_options(store.clone(), identity, recipients, true);
+        let enc =
+            LocalSecretBackend::with_options(store.clone(), identity, recipients, true, false);
         enc.set_secret("default", make_request("new-enc", "v2"))
             .await
             .unwrap();
@@ -2255,5 +2895,658 @@ mod tests {
             let decoded = decode_name(&encoded);
             assert_eq!(decoded, name, "roundtrip failed for: {name}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Opaque-filename tests (design test plan:
+    // docs/plans/2026-06-19-local-secret-filename-opaquing.md)
+    // -----------------------------------------------------------------------
+
+    /// Path to a vault's `secrets/` dir in a test store.
+    fn secrets_path(tmp: &TempDir, vault: &str) -> std::path::PathBuf {
+        tmp.path().join("vaults").join(vault).join("secrets")
+    }
+
+    /// Path to a vault's `.trash/` dir in a test store.
+    fn trash_path(tmp: &TempDir, vault: &str) -> std::path::PathBuf {
+        tmp.path().join("vaults").join(vault).join(".trash")
+    }
+
+    /// Every file/dir entry name (non-recursive-aware: collects names at all
+    /// depths) under `root`. Used to assert no secret name leaks into a listing.
+    fn all_entry_names(root: &Path) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    names.push(entry.file_name().to_string_lossy().to_string());
+                    if entry.path().is_dir() {
+                        stack.push(entry.path());
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    /// Assert no entry name under `root` contains `name` or its percent-encoding
+    /// as a substring.
+    fn assert_no_name_leak(root: &Path, name: &str) {
+        let enc = encode_name(name);
+        for entry in all_entry_names(root) {
+            assert!(
+                !entry.contains(name),
+                "raw name {name:?} leaked in entry {entry:?}"
+            );
+            assert!(
+                !entry.contains(&enc),
+                "percent-encoded name {enc:?} leaked in entry {entry:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn opaque_off_is_byte_for_byte_legacy_layout() {
+        let (backend, tmp) = test_backend(); // opaque off
+        backend
+            .set_secret("default", make_request("DB-PASSWORD", "v"))
+            .await
+            .unwrap();
+
+        // Legacy filename is the (here unchanged) URL-encoding of the name.
+        let enc = encode_name("DB-PASSWORD");
+        assert!(secrets_path(&tmp, "default")
+            .join(format!("{enc}.meta.json"))
+            .exists());
+        // No encrypted index is written in legacy mode.
+        assert!(!secrets_path(&tmp, "default")
+            .join(opaque::INDEX_FILE)
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn opaque_roundtrip_and_index_maps_stem_to_name() {
+        let (backend, tmp) = test_backend_opaque();
+        backend
+            .set_secret("default", make_request("DB-PASSWORD", "s3cret"))
+            .await
+            .unwrap();
+
+        let sdir = secrets_path(&tmp, "default");
+        // Listing shows only a 26-char opaque stem + the index, no name.
+        let mut stems: Vec<String> = fs::read_dir(&sdir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        stems.sort();
+        assert!(stems.contains(&opaque::INDEX_FILE.to_string()));
+        let stem = backend.active_stem("DB-PASSWORD");
+        assert!(opaque::is_opaque_stem(&stem));
+        assert!(sdir.join(format!("{stem}.age")).exists());
+        assert!(sdir.join(format!("{stem}.meta.json")).exists());
+        assert_no_name_leak(&sdir, "DB-PASSWORD");
+
+        // The encrypted index maps the stem back to the real name.
+        let index = opaque::load_index(&sdir, &backend.identity).unwrap();
+        assert_eq!(
+            index.get(&stem).map(|e| e.name.as_str()),
+            Some("DB-PASSWORD")
+        );
+
+        // get + list still return the real name and value.
+        let got = backend
+            .get_secret("default", "DB-PASSWORD", true)
+            .await
+            .unwrap();
+        assert_eq!(&*got.value.unwrap(), "s3cret");
+        let listed = backend.list_secrets("default", None).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "DB-PASSWORD");
+    }
+
+    #[tokio::test]
+    async fn opaque_listing_has_no_name_substring_property() {
+        let (backend, tmp) = test_backend_opaque();
+        // A spread of awkward names: percent-y, unicode (NFC), spaces, slashes.
+        let names = [
+            "DB-PASSWORD",
+            "api/key:prod",
+            "spaced secret name",
+            "weird%2Dlooking",
+            "café-token",
+            "Ω-omega-secret",
+            "emoji-🔑-key",
+        ];
+        for name in names {
+            backend
+                .set_secret("default", make_request(name, "value"))
+                .await
+                .unwrap();
+        }
+        // Delete one so .trash/ is exercised too.
+        backend
+            .delete_secret("default", "café-token")
+            .await
+            .unwrap();
+
+        let vault_dir = tmp.path().join("vaults").join("default");
+        for name in names {
+            assert_no_name_leak(&vault_dir, name);
+        }
+    }
+
+    #[tokio::test]
+    async fn opaque_wrong_key_yields_different_stem() {
+        let (backend, _tmp) = test_backend_opaque();
+        let stem = backend.active_stem("aws-key");
+        // A stem computed under a different identity must not match.
+        let other = opaque::derive_index_key(&age::x25519::Identity::generate());
+        assert_ne!(stem, opaque::opaque_stem(&other, "aws-key"));
+    }
+
+    #[tokio::test]
+    async fn unicode_nfc_nfd_map_to_distinct_stems() {
+        let (backend, tmp) = test_backend_opaque();
+        let nfc = "caf\u{e9}"; // é as one code point
+        let nfd = "cafe\u{301}"; // e + combining acute
+        assert_ne!(nfc, nfd);
+
+        backend
+            .set_secret("default", make_request(nfc, "one"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request(nfd, "two"))
+            .await
+            .unwrap();
+
+        let stem_nfc = backend.active_stem(nfc);
+        let stem_nfd = backend.active_stem(nfd);
+        assert_ne!(stem_nfc, stem_nfd, "NFC and NFD must not collide");
+
+        // Both readable by their exact byte-identity names.
+        assert_eq!(
+            &*backend
+                .get_secret("default", nfc, true)
+                .await
+                .unwrap()
+                .value
+                .unwrap(),
+            "one"
+        );
+        assert_eq!(
+            &*backend
+                .get_secret("default", nfd, true)
+                .await
+                .unwrap()
+                .value
+                .unwrap(),
+            "two"
+        );
+        let listed = backend.list_secrets("default", None).await.unwrap();
+        assert_eq!(listed.len(), 2);
+
+        let sdir = secrets_path(&tmp, "default");
+        let index = opaque::load_index(&sdir, &backend.identity).unwrap();
+        assert_eq!(index.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn migration_old_to_new_idempotent_with_back_compat_read() {
+        // Build a legacy-layout store with a couple secrets (one versioned).
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("alpha", "a1"))
+            .await
+            .unwrap();
+        legacy
+            .set_secret("default", make_request("alpha", "a2"))
+            .await
+            .unwrap(); // archives v1
+        legacy
+            .set_secret("default", make_request("bravo", "b1"))
+            .await
+            .unwrap();
+
+        let sdir = secrets_path(&tmp, "default");
+        // Legacy filenames present.
+        assert!(sdir.join("alpha.meta.json").exists());
+        assert!(sdir.join("bravo.meta.json").exists());
+
+        // Re-open with opaque enabled: back-compat read works *before* migration.
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let pre = opaque_backend
+            .get_secret("default", "alpha", true)
+            .await
+            .unwrap();
+        assert_eq!(&*pre.value.unwrap(), "a2");
+
+        // Migrate.
+        let report = opaque_backend.migrate_all(false).unwrap();
+        assert!(report.migrated >= 2);
+
+        // No legacy filenames remain; opaque stems + index do.
+        assert!(!sdir.join("alpha.meta.json").exists());
+        assert!(!sdir.join("bravo.meta.json").exists());
+        assert!(sdir.join(opaque::INDEX_FILE).exists());
+        let alpha_stem = opaque_backend.active_stem("alpha");
+        assert!(sdir.join(format!("{alpha_stem}.meta.json")).exists());
+        assert!(sdir.join(format!("{alpha_stem}.age")).exists());
+        // Version archive moved under the opaque stem.
+        assert!(sdir.join(".versions").join(&alpha_stem).exists());
+
+        // Values + listing intact.
+        assert_eq!(
+            &*opaque_backend
+                .get_secret("default", "alpha", true)
+                .await
+                .unwrap()
+                .value
+                .unwrap(),
+            "a2"
+        );
+        let listed = opaque_backend.list_secrets("default", None).await.unwrap();
+        assert_eq!(listed.len(), 2);
+
+        // Re-running migrate is a no-op.
+        let again = opaque_backend.migrate_all(false).unwrap();
+        assert_eq!(again.total(), 0, "re-running migrate must be a no-op");
+
+        // Dry-run also reports nothing now.
+        let dry = opaque_backend.migrate_all(true).unwrap();
+        assert_eq!(dry.total(), 0);
+    }
+
+    #[tokio::test]
+    async fn migration_dry_run_touches_nothing() {
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("dry-secret", "v"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let report = opaque_backend.migrate_all(true).unwrap();
+        assert_eq!(report.migrated, 1);
+        assert!(!report.plan.is_empty());
+
+        // Disk unchanged: legacy file still there, no index, no opaque stem.
+        let sdir = secrets_path(&tmp, "default");
+        assert!(sdir.join("dry-secret.meta.json").exists());
+        assert!(!sdir.join(opaque::INDEX_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn migration_interrupt_after_index_before_rename_still_lists() {
+        // Simulate a crash that wrote the index entry but had not yet renamed
+        // the legacy files: list_secrets must still include the secret exactly
+        // once, and get must still read it (legacy fallback).
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("halfway", "hv"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let sdir = secrets_path(&tmp, "default");
+        let stem = opaque_backend.active_stem("halfway");
+
+        // Hand-write an index entry for the opaque stem while the legacy files
+        // remain in place (index-before-rename, rename not yet done).
+        let mut index = opaque::Index::new();
+        index.insert(
+            stem.clone(),
+            opaque::IndexEntry {
+                name: "halfway".into(),
+                v: 1,
+            },
+        );
+        opaque::save_index(&sdir, &index, &opaque_backend.recipients).unwrap();
+        assert!(sdir.join("halfway.meta.json").exists());
+        assert!(!sdir.join(format!("{stem}.meta.json")).exists());
+
+        // Listed exactly once (no double-count of index + legacy reconciliation).
+        let listed = opaque_backend.list_secrets("default", None).await.unwrap();
+        assert_eq!(listed.iter().filter(|s| s.name == "halfway").count(), 1);
+        // Still readable via the legacy fallback.
+        assert_eq!(
+            &*opaque_backend
+                .get_secret("default", "halfway", true)
+                .await
+                .unwrap()
+                .value
+                .unwrap(),
+            "hv"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_crash_recovery_rebuilds_index_from_metadata() {
+        // Opaque store with secrets, then delete the index to simulate a
+        // rename-before-index crash: list still works (orphan scan) and migrate
+        // rebuilds the index from metadata.
+        let (backend, tmp) = test_backend_opaque();
+        backend
+            .set_secret("default", make_request("recover-me", "rv"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("also-me", "av"))
+            .await
+            .unwrap();
+
+        let sdir = secrets_path(&tmp, "default");
+        fs::remove_file(sdir.join(opaque::INDEX_FILE)).unwrap();
+
+        // Listing still finds both via the orphan opaque scan.
+        let listed = backend.list_secrets("default", None).await.unwrap();
+        assert_eq!(listed.len(), 2);
+
+        // migrate rebuilds the index from metadata.
+        let report = backend.migrate_all(false).unwrap();
+        assert!(report.recovered >= 2);
+        let index = opaque::load_index(&sdir, &backend.identity).unwrap();
+        assert_eq!(index.len(), 2);
+        // Listing matches get for both.
+        for name in ["recover-me", "also-me"] {
+            assert!(backend.secret_exists("default", name).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_on_write_set_removes_legacy_pair() {
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("upg-set", "old"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        opaque_backend
+            .set_secret("default", make_request("upg-set", "new"))
+            .await
+            .unwrap();
+
+        let sdir = secrets_path(&tmp, "default");
+        assert!(
+            !sdir.join("upg-set.meta.json").exists(),
+            "legacy pair removed"
+        );
+        let stem = opaque_backend.active_stem("upg-set");
+        assert!(sdir.join(format!("{stem}.meta.json")).exists());
+        assert_no_name_leak(&sdir, "upg-set");
+        let index = opaque::load_index(&sdir, &opaque_backend.identity).unwrap();
+        assert_eq!(index.get(&stem).map(|e| e.name.as_str()), Some("upg-set"));
+    }
+
+    #[tokio::test]
+    async fn upgrade_on_write_metadata_only_update_removes_legacy_pair() {
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("upg-meta", "v"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let mut update = unchanged_update("upg-meta");
+        update.note = FieldUpdate::Set("metadata-only".into());
+        opaque_backend
+            .update_secret("default", "upg-meta", update)
+            .await
+            .unwrap();
+
+        let sdir = secrets_path(&tmp, "default");
+        assert!(
+            !sdir.join("upg-meta.meta.json").exists(),
+            "metadata-only update must still upgrade the layout"
+        );
+        let stem = opaque_backend.active_stem("upg-meta");
+        assert!(sdir.join(format!("{stem}.meta.json")).exists());
+        assert_no_name_leak(&sdir, "upg-meta");
+    }
+
+    #[tokio::test]
+    async fn upgrade_on_write_value_update_archives_under_opaque() {
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("upg-val", "v1"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let mut update = unchanged_update("upg-val");
+        update.value = Some(Zeroizing::new("v2".into()));
+        opaque_backend
+            .update_secret("default", "upg-val", update)
+            .await
+            .unwrap();
+
+        let sdir = secrets_path(&tmp, "default");
+        let stem = opaque_backend.active_stem("upg-val");
+        assert!(!sdir.join("upg-val.meta.json").exists());
+        // Prior snapshot archived under the opaque version dir; legacy gone.
+        assert!(!sdir.join(".versions").join("upg-val").exists());
+        assert!(sdir.join(".versions").join(&stem).exists());
+        let versions = opaque_backend
+            .list_versions("default", "upg-val")
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn upgrade_on_write_rollback_and_restore_opaque_only() {
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("rbr", "v1"))
+            .await
+            .unwrap();
+        legacy
+            .set_secret("default", make_request("rbr", "v2"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        opaque_backend
+            .rollback("default", "rbr", "v1")
+            .await
+            .unwrap();
+        let after = opaque_backend
+            .get_secret("default", "rbr", true)
+            .await
+            .unwrap();
+        assert_eq!(&*after.value.unwrap(), "v1");
+
+        let sdir = secrets_path(&tmp, "default");
+        assert!(!sdir.join("rbr.meta.json").exists());
+        assert_no_name_leak(&sdir, "rbr");
+    }
+
+    #[tokio::test]
+    async fn restore_readds_index_entry() {
+        let (backend, tmp) = test_backend_opaque();
+        backend
+            .set_secret("default", make_request("restore-idx", "v"))
+            .await
+            .unwrap();
+        let sdir = secrets_path(&tmp, "default");
+        let stem = backend.active_stem("restore-idx");
+
+        backend
+            .delete_secret("default", "restore-idx")
+            .await
+            .unwrap();
+        let index = opaque::load_index(&sdir, &backend.identity).unwrap();
+        assert!(!index.contains_key(&stem), "soft-delete drops the entry");
+
+        backend
+            .restore_secret("default", "restore-idx")
+            .await
+            .unwrap();
+        let index = opaque::load_index(&sdir, &backend.identity).unwrap();
+        assert_eq!(
+            index.get(&stem).map(|e| e.name.as_str()),
+            Some("restore-idx"),
+            "restore must re-add the index entry"
+        );
+        let listed = backend.list_secrets("default", None).await.unwrap();
+        assert!(listed.iter().any(|s| s.name == "restore-idx"));
+    }
+
+    #[tokio::test]
+    async fn delete_of_unmigrated_secret_leaves_no_legacy_files() {
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("del-legacy", "v"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        opaque_backend
+            .delete_secret("default", "del-legacy")
+            .await
+            .unwrap();
+
+        let enc = encode_name("del-legacy");
+        let sdir = secrets_path(&tmp, "default");
+        assert!(!sdir.join(format!("{enc}.age")).exists());
+        assert!(!sdir.join(format!("{enc}.meta.json")).exists());
+        assert_no_name_leak(&trash_path(&tmp, "default"), "del-legacy");
+        // Still recoverable.
+        let deleted = opaque_backend
+            .list_deleted_secrets("default")
+            .await
+            .unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].name, "del-legacy");
+    }
+
+    #[tokio::test]
+    async fn soft_delete_trash_has_no_name_substring() {
+        let (backend, tmp) = test_backend_opaque();
+        backend
+            .set_secret("default", make_request("trash-secret", "v"))
+            .await
+            .unwrap();
+        backend
+            .delete_secret("default", "trash-secret")
+            .await
+            .unwrap();
+
+        assert_no_name_leak(&trash_path(&tmp, "default"), "trash-secret");
+        // Name still recoverable from encrypted metadata.
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].name, "trash-secret");
+    }
+
+    #[tokio::test]
+    async fn deleted_json_has_no_plaintext_name_when_opaque() {
+        let (backend, tmp) = test_backend_opaque();
+        backend
+            .set_secret("default", make_request("no-name-json", "v"))
+            .await
+            .unwrap();
+        backend
+            .delete_secret("default", "no-name-json")
+            .await
+            .unwrap();
+
+        // Find the .deleted.json under .trash/ and confirm it lacks original_name.
+        let tbase = trash_path(&tmp, "default");
+        let entry = fs::read_dir(&tbase).unwrap().flatten().next().unwrap();
+        let deleted_json = entry.path().join(".deleted.json");
+        let raw = fs::read(&deleted_json).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert!(val.get("original_name").is_none());
+        assert!(val.get("deleted_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn migration_with_preexisting_trash() {
+        // Legacy store with a soft-deleted secret (legacy trash dir + plaintext
+        // original_name), then migrate.
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("trashed-legacy", "v"))
+            .await
+            .unwrap();
+        legacy
+            .delete_secret("default", "trashed-legacy")
+            .await
+            .unwrap();
+
+        // Legacy trash dir carries the percent name + original_name.
+        let enc = encode_name("trashed-legacy");
+        let tbase = trash_path(&tmp, "default");
+        let legacy_dir = fs::read_dir(&tbase)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with(&enc))
+            .unwrap()
+            .path();
+        let dj: serde_json::Value =
+            serde_json::from_slice(&fs::read(legacy_dir.join(".deleted.json")).unwrap()).unwrap();
+        assert_eq!(
+            dj.get("original_name").and_then(|v| v.as_str()),
+            Some("trashed-legacy")
+        );
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        opaque_backend.migrate_all(false).unwrap();
+
+        // Trash dir renamed to an opaque stem; no name substring; no
+        // original_name in .deleted.json.
+        assert_no_name_leak(&tbase, "trashed-legacy");
+        for entry in fs::read_dir(&tbase).unwrap().flatten() {
+            let dj_path = entry.path().join(".deleted.json");
+            if dj_path.exists() {
+                let v: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&dj_path).unwrap()).unwrap();
+                assert!(v.get("original_name").is_none());
+            }
+        }
+        // Still recoverable by name.
+        let deleted = opaque_backend
+            .list_deleted_secrets("default")
+            .await
+            .unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].name, "trashed-legacy");
+        opaque_backend
+            .restore_secret("default", "trashed-legacy")
+            .await
+            .unwrap();
+        assert_eq!(
+            &*opaque_backend
+                .get_secret("default", "trashed-legacy", true)
+                .await
+                .unwrap()
+                .value
+                .unwrap(),
+            "v"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_set_stays_consistent_under_lock() {
+        let (_backend, tmp) = test_backend_opaque();
+        let b1 = reopen_opaque(&tmp, false);
+        let b2 = reopen_opaque(&tmp, false);
+
+        let (r1, r2) = tokio::join!(
+            b1.set_secret("default", make_request("conc-one", "1")),
+            b2.set_secret("default", make_request("conc-two", "2")),
+        );
+        r1.unwrap();
+        r2.unwrap();
+
+        let sdir = secrets_path(&tmp, "default");
+        let index = opaque::load_index(&sdir, &b1.identity).unwrap();
+        assert_eq!(index.len(), 2, "both secrets indexed");
+        let listed = b1.list_secrets("default", None).await.unwrap();
+        assert_eq!(listed.len(), 2);
     }
 }

@@ -1,6 +1,9 @@
 # Design: Opaque on-disk filenames for the local secret backend
 
-**Status:** Proposed (design only — no implementation in this PR)
+**Status:** Implemented — Option A (keyed-hash stems + age-encrypted index),
+behind the opt-in `[local].opaque_filenames` flag, with `xv local migrate`
+(+ `--dry-run`) and a one-release back-compat read path. See
+`src/backend/local/opaque.rs` and `src/backend/local/secrets.rs`.
 **ROADMAP item:** P3 — "Local secret NAMES disclosed via filenames"
 **Author:** Hermes Agent
 **Date:** 2026-06-19

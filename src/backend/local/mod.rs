@@ -25,6 +25,7 @@ pub mod config;
 pub mod crypto;
 #[cfg(feature = "file-ops")]
 pub mod files;
+pub mod opaque;
 pub mod paths;
 pub mod secrets;
 pub mod vaults;
@@ -116,6 +117,7 @@ impl LocalBackend {
             identity.clone(),
             recipients.clone(),
             config.encrypt_metadata,
+            config.opaque_filenames,
         );
         let vault_backend = LocalVaultBackend::new(config.store_path.clone());
 
@@ -141,6 +143,20 @@ impl LocalBackend {
     /// `(converted, skipped)`.
     pub fn reencrypt_all_metadata(&self, dry_run: bool) -> Result<(usize, usize), BackendError> {
         self.secret_backend.reencrypt_all_metadata(dry_run)
+    }
+
+    /// Whether this backend was configured to use opaque on-disk filenames.
+    pub fn opaque_filenames_enabled(&self) -> bool {
+        self.config.opaque_filenames
+    }
+
+    /// Migrate every vault to the opaque-filename layout. See
+    /// [`LocalSecretBackend::migrate_all`].
+    pub fn migrate_all(
+        &self,
+        dry_run: bool,
+    ) -> Result<self::secrets::MigrationReport, BackendError> {
+        self.secret_backend.migrate_all(dry_run)
     }
 
     /// Resolve age identity and recipients from env vars or files.
@@ -261,6 +277,7 @@ mod tests {
             key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
             default_vault: Some("default".into()),
             encrypt_metadata: None,
+            opaque_filenames: None,
         }
     }
 

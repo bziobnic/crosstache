@@ -41,6 +41,16 @@ pub struct LocalConfig {
     /// `xv local encrypt-metadata` to convert existing plaintext metadata.
     #[serde(default)]
     pub encrypt_metadata: Option<bool>,
+
+    /// Make on-disk filenames opaque so a directory listing reveals no secret
+    /// names. When `false` (the default, for backward compatibility), secret
+    /// names are stored verbatim as URL-encoded filenames. When `true`, each
+    /// secret's files are named by a keyed hash (HMAC-SHA256 over the secret
+    /// name, base32) and an age-encrypted `.index.age` maps stems back to
+    /// names. After enabling, run `xv local migrate` to convert an existing
+    /// store; new writes upgrade each secret's layout on touch.
+    #[serde(default)]
+    pub opaque_filenames: Option<bool>,
 }
 
 /// Configuration for the AWS Secrets Manager backend.
