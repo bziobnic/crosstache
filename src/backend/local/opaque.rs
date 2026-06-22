@@ -85,13 +85,19 @@ pub fn opaque_stem(index_key: &[u8; 32], name: &str) -> String {
 
 /// Whether `stem` matches the fixed opaque pattern `^[a-z2-7]{26}$`.
 ///
-/// Used to classify on-disk stems: opaque stems match this; legacy
-/// `encode_name` stems contain `%` (and other URL-encoding artifacts) so they
-/// do not. (A 26-char all-lowercase-letter secret name could coincidentally
-/// match; callers recover the real name from decrypted metadata regardless, so
-/// such a stem is merely treated as already-opaque, never mis-decoded.)
+/// Used as a cheap on-disk shape heuristic only. Legacy `encode_name` stems
+/// usually contain `%`, but a 26-character secret name using only `a-z` and
+/// `2-7` can match this pattern without being the HMAC stem — migration and
+/// layout code must compare against [`is_canonical_stem`] (or [`opaque_stem`])
+/// after resolving the real name from metadata, not rely on this alone.
+#[allow(dead_code)] // public shape heuristic; production paths use is_canonical_stem
 pub fn is_opaque_stem(stem: &str) -> bool {
     stem.len() == STEM_LEN && stem.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
+}
+
+/// Whether `stem` is the canonical HMAC stem for `name` under `index_key`.
+pub fn is_canonical_stem(index_key: &[u8; 32], stem: &str, name: &str) -> bool {
+    stem == opaque_stem(index_key, name)
 }
 
 // ---------------------------------------------------------------------------
@@ -218,5 +224,15 @@ mod tests {
         // Uppercase / digits outside 2-7 are rejected.
         assert!(!is_opaque_stem(&"A".repeat(26)));
         assert!(!is_opaque_stem(&"1".repeat(26)));
+    }
+
+    #[test]
+    fn opaque_looking_legacy_name_is_not_canonical() {
+        let id = test_identity();
+        let key = derive_index_key(&id);
+        let name = "abcdefghijklmnopqrstuvwxyz";
+        assert!(is_opaque_stem(name));
+        assert!(!is_canonical_stem(&key, name, name));
+        assert!(is_canonical_stem(&key, &opaque_stem(&key, name), name));
     }
 }

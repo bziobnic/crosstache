@@ -902,15 +902,15 @@ impl LocalSecretBackend {
 
         // Pass A: legacy active pairs → opaque (index entry FIRST, then rename).
         for stem in &active_stems {
-            if opaque::is_opaque_stem(stem) {
-                continue; // handled by the recovery pass
-            }
             let mp = meta_path(store, vault, stem)?;
             let name = match read_meta(&mp, &self.identity) {
                 Ok(m) => m.name,
                 Err(_) => decode_name(stem),
             };
             let opaque_stem = opaque::opaque_stem(key, &name);
+            if opaque::is_canonical_stem(key, stem, &name) {
+                continue; // already at the HMAC stem (Pass B recovers a missing index)
+            }
             report
                 .plan
                 .push(format!("secret: {stem}.* -> {opaque_stem}.* ({name:?})"));
@@ -933,9 +933,9 @@ impl LocalSecretBackend {
             self.ensure_opaque_layout(vault, &name)?;
         }
 
-        // Pass B (recovery): opaque stems on disk but missing from the index.
+        // Pass B (recovery): HMAC stems on disk but missing from the index.
         for stem in &active_stems {
-            if !opaque::is_opaque_stem(stem) || index.contains_key(stem) {
+            if index.contains_key(stem) {
                 continue;
             }
             let mp = meta_path(store, vault, stem)?;
@@ -945,10 +945,13 @@ impl LocalSecretBackend {
             let name = match read_meta(&mp, &self.identity) {
                 Ok(m) => m.name,
                 Err(e) => {
-                    eprintln!("warning: cannot recover name for opaque stem {stem:?}: {e}");
+                    eprintln!("warning: cannot recover name for stem {stem:?}: {e}");
                     continue;
                 }
             };
+            if !opaque::is_canonical_stem(key, stem, &name) {
+                continue; // opaque-looking legacy stem; Pass A handles migration
+            }
             report
                 .plan
                 .push(format!("recover index: {stem} ({name:?})"));
@@ -981,9 +984,6 @@ impl LocalSecretBackend {
                     },
                     None => (dname.clone(), 0),
                 };
-                if opaque::is_opaque_stem(&base) {
-                    continue; // already migrated
-                }
                 // Recover the name: prefer inner metadata, fall back to decode.
                 let (_, meta_file) = trash_inner_files(&tdir);
                 let name = meta_file
@@ -991,6 +991,9 @@ impl LocalSecretBackend {
                     .map(|m| m.name)
                     .unwrap_or_else(|| decode_name(&base));
                 let opaque_stem = opaque::opaque_stem(key, &name);
+                if opaque::is_canonical_stem(key, &base, &name) {
+                    continue; // already at the HMAC stem
+                }
                 report.plan.push(format!(
                     "trash: {dname} -> {opaque_stem}@{millis} ({name:?})"
                 ));
@@ -3157,6 +3160,57 @@ mod tests {
         // Dry-run also reports nothing now.
         let dry = opaque_backend.migrate_all(true).unwrap();
         assert_eq!(dry.total(), 0);
+    }
+
+    #[tokio::test]
+    async fn migration_opaque_looking_legacy_name_is_renamed() {
+        // A 26-char secret name using only a-z matches is_opaque_stem but is
+        // not the HMAC stem; migrate must rename it, not treat it as done.
+        let legacy_name = "abcdefghijklmnopqrstuvwxyz";
+        assert_eq!(legacy_name.len(), opaque::STEM_LEN);
+        assert!(opaque::is_opaque_stem(legacy_name));
+
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request(legacy_name, "secret"))
+            .await
+            .unwrap();
+
+        let sdir = secrets_path(&tmp, "default");
+        assert!(sdir.join(format!("{legacy_name}.meta.json")).exists());
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let expected_stem = opaque_backend.active_stem(legacy_name);
+        assert_ne!(
+            expected_stem, legacy_name,
+            "HMAC stem must differ from the legacy on-disk stem"
+        );
+
+        let report = opaque_backend.migrate_all(false).unwrap();
+        assert_eq!(report.migrated, 1, "must migrate the opaque-looking legacy stem");
+        assert_eq!(report.recovered, 0, "index entry comes from Pass A, not recovery");
+
+        assert!(
+            !sdir.join(format!("{legacy_name}.meta.json")).exists(),
+            "legacy filename must be removed"
+        );
+        assert!(sdir.join(format!("{expected_stem}.meta.json")).exists());
+        assert_no_name_leak(&sdir, legacy_name);
+
+        let index = opaque::load_index(&sdir, &opaque_backend.identity).unwrap();
+        assert_eq!(
+            index.get(&expected_stem).map(|e| e.name.as_str()),
+            Some(legacy_name)
+        );
+        assert_eq!(
+            &*opaque_backend
+                .get_secret("default", legacy_name, true)
+                .await
+                .unwrap()
+                .value
+                .unwrap(),
+            "secret"
+        );
     }
 
     #[tokio::test]
