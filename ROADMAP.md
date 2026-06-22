@@ -31,41 +31,14 @@ fixing as code drifts.
 
 All four P2 items from this review shipped on 2026-06-11 (#242 rename
 recoverability, #243 blob download streaming, #244 per-call file vault
-resolution, #245 Azure deleted/backup/restore REST paths). Remaining items
-are P3 and below.
-
-### P3 — Context files not written via private writer
-`src/config/context.rs:193,348`. Treat as user-private config; share the
-sensitive-file helper.
-
-### P3 — `az` subprocess calls have no timeout
-`src/backend/azure/auth.rs:155,366`. Centralize `az` execution with a
-timeout and stderr cap.
-
-### P3 — JWT payloads decoded without signature validation
-`src/backend/azure/auth.rs:300`. Document boundary; prefer SDK metadata;
-validate claim shapes.
+resolution, #245 Azure deleted/backup/restore REST paths). Several P3
+hardening items shipped in v0.14.0; see [Shipped history](#shipped-history).
+Remaining items are P3 and below.
 
 ### P3 — Age identity files not zeroized
 `src/backend/local/crypto.rs:138,139`. Load into `Zeroizing<String>`;
 open with no-follow and read from the file handle to close the TOCTOU
 window.
-
-### P3 — Cache lock TOCTOU
-`src/cache/refresh.rs:77`. `OpenOptions::create_new(true)` with PID +
-timestamp metadata for stale-lock diagnostics.
-
-### P3 — Scanner reads whole files into RAM
-`src/scan/orchestrator.rs:19`. Stream; enforce max file size; report
-skipped files; fail-loud in CI/hook mode.
-
-### P3 — `list_secrets` does N+1 `get_secret` for tags
-`src/secret/manager.rs:802`. Use list-response metadata when sufficient;
-batch with bounded concurrency + retry.
-
-### P3 — `stream_and_mask` unbounded line buffer
-`src/cli/secret_ops.rs:2220`. Bounded chunked masking with overlap =
-longest secret length.
 
 ### P3 — CSV output manually assembled
 `src/utils/format.rs:174`. Use the `csv` crate.
@@ -132,6 +105,12 @@ Each new backend appends to `docs/superpowers/specs/backend-trait-checklist.md`.
 
 ## Shipped history
 
+- **v0.14.0 security hardening** — closed review items for private context
+  writes (#266), bounded `xv run` stream masking (#270), atomic cache-lock
+  acquisition (#264), scanner memory/file-size bounds with fail-loud reporting
+  (#265), Azure `az` subprocess/JWT claim hardening (#267), and bounded
+  `list_secrets` detail fetch concurrency (#269). Release notes live in
+  [`CHANGELOG.md`](./CHANGELOG.md#v0140--genset-parity-config-edit-and-reliability-fixes-2026-06-20).
 - **Local secret names disclosed via filenames** — closed post-v0.14.0 by
   opaque local-backend filenames in #276. The retained design plan is
   [`docs/plans/2026-06-19-local-secret-filename-opaquing.md`](./docs/plans/2026-06-19-local-secret-filename-opaquing.md);

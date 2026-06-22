@@ -89,7 +89,9 @@ xv list
 
 ### How it works
 
-Secrets are encrypted with [age](https://age-encryption.org/) and stored as individual files:
+Secrets are encrypted with [age](https://age-encryption.org/) and stored as
+individual files. By default, existing stores keep the legacy reversible
+filename layout for compatibility:
 
 ```
 ~/.xv/
@@ -103,6 +105,25 @@ Secrets are encrypted with [age](https://age-encryption.org/) and stored as indi
                 ├── DB_PASSWORD.age          # Encrypted value
                 └── DB_PASSWORD.meta.json    # Metadata (name, groups, tags)
 ```
+
+For stronger local-at-rest privacy, enable opaque filenames. With
+`[local].opaque_filenames = true`, active secrets, versions, and trash entries
+use keyed-hash stems instead of secret names, and `secrets/.index.age` stores
+the encrypted stem-to-name index needed for listing:
+
+```text
+secrets/
+├── mjw4v2q6m4w7n6k5z3c2b7a8nq.age
+├── mjw4v2q6m4w7n6k5z3c2b7a8nq.meta.json
+├── .index.age
+└── .versions/
+    └── mjw4v2q6m4w7n6k5z3c2b7a8nq/
+```
+
+Use `xv local migrate --dry-run` before changing an existing store, then
+`xv local migrate` to rename legacy active files, version archives, and trash
+entries. New writes also upgrade the touched secret when opaque filenames are
+enabled.
 
 ### Migrating between backends
 
@@ -132,9 +153,23 @@ key_file = "~/.xv/key.txt"
 default_vault = "default"
 # Encrypt secret metadata (notes, tags, folders, expiry) at rest with the
 # same age key as the values. Default false. Secret *names* stay visible as
-# on-disk filenames either way. After enabling on an existing store, run
-# `xv local encrypt-metadata` to convert already-written metadata.
+# on-disk filenames unless opaque_filenames is also enabled. After enabling on
+# an existing store, run `xv local encrypt-metadata` to convert already-written
+# metadata.
 encrypt_metadata = false
+# Store active secrets, versions, and trash entries under opaque keyed-hash
+# stems plus an encrypted `.index.age`. Default false so existing stores are
+# unchanged until you opt in and migrate.
+opaque_filenames = false
+```
+
+Local maintenance commands:
+
+```bash
+xv local encrypt-metadata --dry-run     # preview metadata encryption changes
+xv local encrypt-metadata               # encrypt existing .meta.json files
+xv local migrate --dry-run              # preview opaque filename renames
+xv local migrate                        # apply opaque filename layout
 ```
 
 ---
@@ -348,6 +383,8 @@ xv set API_KEY --stdin < key.txt         # from stdin (e.g. piped from openssl)
 xv set API_KEY --value "literal-value"   # inline (avoid; appears in shell history)
 xv set DB_HOST=db.prod DB_PORT=5432 DB_PASSWORD=@/etc/secret/db-pw  # bulk + file refs
 xv set CONFIG --folder myapp/database    # organize hierarchically
+xv set API_KEY --group production --group api-tier
+xv set API_KEY --expires 2026-12-31 --not-before 2026-06-01
 xv set DB_USER --note "primary db reader" --tag owner=team-data --tag env=prod
 ```
 
@@ -356,6 +393,17 @@ The `@filepath` syntax loads from a file at create time — useful for keys, cer
 ```bash
 xv set TLS_CERT=@/etc/ssl/cert.pem JWT_PRIVATE_KEY=@./jwt.key
 ```
+
+`xv gen --save` stores a generated value through the same secret-write path as
+`xv set`, including write-time metadata:
+
+```bash
+xv gen --length 32 --save API_KEY --group production --note "rotated"
+xv gen --charset base64 --save WEBHOOK_SECRET --folder integrations/payments
+```
+
+Metadata flags on `xv gen` require `--save`; plain `xv gen --group production`
+is rejected because there is no saved secret to annotate.
 
 ### Update
 
@@ -542,7 +590,11 @@ xv run --no-masking -- ./debug.sh                 # don't mask values in stdout/
 xv run --vault other-vault -- env                 # one-off vault override
 ```
 
-Values are masked in stdout/stderr by default — accidental `echo $DB_PASSWORD` shows `[REDACTED]`. Use `--no-masking` only when you understand the consequences.
+Values are masked in stdout/stderr by default — accidental `echo $DB_PASSWORD`
+shows `[REDACTED]`. Masking streams in bounded chunks (64 KiB read windows with
+overlap for secrets split across chunk boundaries), so newline-free or very
+large child output does not grow memory without limit. Use `--no-masking` only
+when you understand the consequences.
 
 ---
 
@@ -1054,8 +1106,15 @@ xv config set default_vault my-vault
 xv config set clipboard_timeout 60
 xv config set azure_credential_priority cli
 xv config path                           # path to the config file
+xv config edit                           # open xv.conf in $VISUAL/$EDITOR
 xv config unset clipboard_timeout
 ```
+
+`xv config edit` creates the parent directory and seeds a missing config with a
+valid default file before opening it. Editor resolution is `$VISUAL`, then
+`$EDITOR`, then `nano` on Unix or `notepad` on Windows; values with arguments
+such as `code --wait` are supported. A non-zero editor exit is surfaced as a
+configuration error.
 
 ### Key environment variables
 
@@ -1208,10 +1267,13 @@ XV_NO_PARENT_CONFIG=1 xv list            # only the cwd's .xv.toml is considered
 
 - **Memory hygiene.** Secret values are wrapped in `Zeroizing<String>` and zeroed on drop. The TUI's value cache, the scanner's match-engine, and the run-time injection layer all use this.
 - **Clipboard auto-clear.** Default 30 s; configurable via `clipboard_timeout` (`0` to disable).
-- **File permissions.** Config and export files are written `0600` (owner-only).
+- **File permissions.** Config, context, and export files are written `0600`
+  (owner-only); config/context parent directories are created `0700`.
 - **Path traversal.** Recursive downloads validate paths to prevent `../../../etc/passwd` shenanigans.
 - **Generator scripts.** `xv rotate --generator <script>` validates the script is owned by you and `0700`.
-- **`xv run` masking.** Secret values are masked in stdout/stderr by default; use `--no-masking` only when you understand the consequences.
+- **`xv run` masking.** Secret values are masked in stdout/stderr by default
+  using bounded streaming chunks, including values split across chunk
+  boundaries; use `--no-masking` only when you understand the consequences.
 - **`xv scan` value-never-leaked invariant.** The `Finding` struct never contains the matched value — only file/line/col + the secret's *name*. Enforced by a hand-maintained banned-key test on the on-disk schema.
 - **Secret-name handling.** Names are sanitized for Azure (alphanumeric + hyphens; original preserved in tags); names > 127 chars are SHA256-hashed.
 
