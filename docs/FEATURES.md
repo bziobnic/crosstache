@@ -39,11 +39,11 @@
 
 ### Metadata & Organization
 
-- **Folders** — `--folder "app/database"` on `set` or `update`
-- **Groups** — `--group <name>` on `update` (multiple allowed); filter with `list --group`
-- **Notes** — `--note "description"` on `set` or `update`
+- **Folders** — `--folder "app/database"` on `set`, `gen --save`, or `update`
+- **Groups** — `--group <name>` on `set`, `gen --save`, or `update` (multiple allowed); filter with `list --group`
+- **Notes** — `--note "description"` on `set`, `gen --save`, or `update`
 - **Tags** — `-t key=value` on `update`; `--replace-tags` / `--replace-groups` for replace mode
-- **Expiry** — `--expires YYYY-MM-DD` on `set` or `update`; `--clear-expires` to remove
+- **Expiry** — `--expires YYYY-MM-DD` on `set`, `gen --save`, or `update`; `--clear-expires` to remove
 
 ### Name Sanitization
 
