@@ -100,6 +100,16 @@ fn versions_dir(store_path: &Path, vault: &str, stem: &str) -> Result<PathBuf, B
     Ok(secrets_dir(store_path, vault)?.join(".versions").join(stem))
 }
 
+/// Whether a version-archive directory exists and contains at least one entry.
+///
+/// An empty directory (e.g. left by an interrupted `merge_versions_dir`) must
+/// not win over a populated legacy archive dir during read resolution.
+fn versions_dir_nonempty(vdir: &Path) -> bool {
+    fs::read_dir(vdir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 fn trash_base_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
     paths::trash_base_dir(store_path, vault)
 }
@@ -179,11 +189,15 @@ fn trash_inner_files(tdir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
 /// (same `v<N>.*` label = identical archived content) are left in place and the
 /// legacy duplicate dropped, so this is safe to re-run.
 fn merge_versions_dir(legacy_vdir: &Path, opaque_vdir: &Path) -> Result<(), BackendError> {
-    fs::create_dir_all(opaque_vdir)
-        .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
     let entries = fs::read_dir(legacy_vdir)
         .map_err(|e| BackendError::Internal(format!("read legacy versions: {e}")))?;
+    let mut created_opaque = false;
     for entry in entries.flatten() {
+        if !created_opaque {
+            fs::create_dir_all(opaque_vdir)
+                .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+            created_opaque = true;
+        }
         let src = entry.path();
         let Some(fname) = src.file_name() else {
             continue;
@@ -587,17 +601,25 @@ impl LocalSecretBackend {
     /// Locate the version-archive directory for `name`, preferring the active
     /// stem but falling back to the legacy stem (read-only) so version reads
     /// work on a not-yet-fully-migrated store.
+    ///
+    /// An empty active-stem directory (e.g. after `merge_versions_dir` created
+    /// the destination then failed before moving entries) must not hide a
+    /// populated legacy archive directory.
     fn resolve_versions_dir(&self, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
         let active = self.active_stem(name);
         let dir = versions_dir(&self.store_path, vault, &active)?;
-        if dir.exists() {
-            return Ok(dir);
-        }
         if self.opaque_filenames {
             let legacy_dir = versions_dir(&self.store_path, vault, &encode_name(name))?;
-            if legacy_dir.exists() {
+            let active_has = versions_dir_nonempty(&dir);
+            let legacy_has = versions_dir_nonempty(&legacy_dir);
+            if active_has {
+                return Ok(dir);
+            }
+            if legacy_has {
                 return Ok(legacy_dir);
             }
+        } else if dir.exists() {
+            return Ok(dir);
         }
         Ok(dir)
     }
@@ -3300,6 +3322,61 @@ mod tests {
             sdir.join(".versions").join(&opaque_stem).exists(),
             "rollback should merge archives under opaque stem"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_versions_dir_falls_back_when_opaque_versions_dir_empty() {
+        // merge_versions_dir used to mkdir the opaque archive dir before moving
+        // legacy entries; an interrupted merge left an empty opaque dir that
+        // hid populated legacy archives from list/get/rollback.
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("split-empty", "v1-value"))
+            .await
+            .unwrap();
+        legacy
+            .set_secret("default", make_request("split-empty", "v2-value"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let sdir = secrets_path(&tmp, "default");
+        let opaque_stem = opaque_backend.active_stem("split-empty");
+        let legacy_stem = encode_name("split-empty");
+
+        for ext in ["age", "meta.json"] {
+            fs::rename(
+                sdir.join(format!("{legacy_stem}.{ext}")),
+                sdir.join(format!("{opaque_stem}.{ext}")),
+            )
+            .unwrap();
+        }
+        assert!(sdir.join(".versions").join(&legacy_stem).exists());
+
+        // Simulate interrupted merge_versions_dir: empty opaque dir, legacy still populated.
+        fs::create_dir_all(sdir.join(".versions").join(&opaque_stem)).unwrap();
+
+        let versions = opaque_backend
+            .list_versions("default", "split-empty")
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 2, "must list archived v1 plus current v2");
+
+        let v1 = opaque_backend
+            .get_secret_version("default", "split-empty", "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(&*v1.value.unwrap(), "v1-value");
+
+        opaque_backend
+            .rollback("default", "split-empty", "v1")
+            .await
+            .unwrap();
+        let current = opaque_backend
+            .get_secret("default", "split-empty", true)
+            .await
+            .unwrap();
+        assert_eq!(&*current.value.unwrap(), "v1-value");
     }
 
     #[tokio::test]
