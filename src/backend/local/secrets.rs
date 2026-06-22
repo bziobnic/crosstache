@@ -1426,11 +1426,24 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn delete_secret(&self, vault: &str, name: &str) -> Result<(), BackendError> {
-        let deleted_at_millis = SystemTime::now()
+        let mut deleted_at_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?
             .as_millis();
-        self.delete_secret_at(vault, name, deleted_at_millis)
+
+        // Millisecond clocks can repeat during tight delete/recreate/delete
+        // cycles. Keep explicit timestamp collisions fail-closed in
+        // `delete_secret_at`, but make the normal API choose the next free
+        // suffix so rapid successive deletes preserve every trash snapshot.
+        for _ in 0..1000 {
+            match self.delete_secret_at(vault, name, deleted_at_millis) {
+                Err(BackendError::Conflict(_)) => deleted_at_millis += 1,
+                other => return other,
+            }
+        }
+        Err(BackendError::Conflict(format!(
+            "could not allocate a unique trash entry timestamp for '{name}'"
+        )))
     }
 
     async fn update_secret(
@@ -1558,14 +1571,15 @@ impl SecretBackend for LocalSecretBackend {
         // Collect archived versions (opaque, or legacy via read fallback)
         let vdir = self.resolve_versions_dir(vault, name)?;
         if vdir.exists() {
-            if let Ok(entries) = fs::read_dir(&vdir) {
-                for entry in entries.flatten() {
-                    let fname = entry.file_name().to_string_lossy().to_string();
-                    if fname.ends_with(".meta.json") {
-                        if let Ok(meta) = read_meta(&entry.path(), &self.identity) {
-                            versions.push(meta_to_properties(&meta, None));
-                        }
-                    }
+            let entries = fs::read_dir(&vdir)
+                .map_err(|e| BackendError::Internal(format!("read versions dir: {e}")))?;
+            for entry in entries {
+                let entry = entry
+                    .map_err(|e| BackendError::Internal(format!("read versions entry: {e}")))?;
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".meta.json") {
+                    let meta = read_meta(&entry.path(), &self.identity)?;
+                    versions.push(meta_to_properties(&meta, None));
                 }
             }
         }
@@ -2385,6 +2399,39 @@ mod tests {
         assert_eq!(versions[0].version_number, Some(1));
         assert_eq!(versions[1].version_number, Some(2));
         assert_eq!(versions[2].version_number, Some(3));
+    }
+
+    #[tokio::test]
+    async fn list_versions_surfaces_corrupt_archived_metadata() {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("corrupt-ver", "v1"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("corrupt-ver", "v2"))
+            .await
+            .unwrap();
+
+        let enc = encode_name("corrupt-ver");
+        let archived_meta = tmp
+            .path()
+            .join("vaults")
+            .join("default")
+            .join("secrets")
+            .join(".versions")
+            .join(enc)
+            .join("v1.meta.json");
+        fs::write(&archived_meta, b"not json").unwrap();
+
+        let err = backend
+            .list_versions("default", "corrupt-ver")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("parse meta"),
+            "corrupt archived metadata should be surfaced, got: {err}"
+        );
     }
 
     #[tokio::test]

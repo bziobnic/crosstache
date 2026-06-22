@@ -59,10 +59,10 @@ pub fn builtin_patterns() -> Vec<BuiltinPattern> {
             r"-----BEGIN (?:OPENSSH |RSA |DSA |EC |PGP )?PRIVATE KEY-----",
             Severity::High,
         ),
-        // High-entropy fallback: long base64-ish or hex-ish runs.
-        // 32+ chars from base64url alphabet.
+        // Low-confidence entropy fallback: this is a regex-only candidate for
+        // long base64-ish or hex-ish runs, not a Shannon-entropy calculation.
         r(
-            "high-entropy",
+            "low-confidence-high-entropy",
             r"\b[A-Za-z0-9+/_-]{32,}\b",
             Severity::Medium,
         ),
@@ -150,7 +150,7 @@ mod tests {
         let hay = "This is just normal English text with no secrets in it. \
                    The quick brown fox jumps over the lazy dog 1234567890.";
         for p in &patterns {
-            if p.name == "high-entropy" {
+            if p.name == "low-confidence-high-entropy" {
                 continue; // tested separately
             }
             assert_eq!(

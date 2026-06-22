@@ -241,6 +241,9 @@ fn init_logging() {
 /// (e.g., `head`, `echo`) closes early, instead of panicking on write.
 #[cfg(unix)]
 fn reset_sigpipe() {
+    // SAFETY: This installs the process-wide default disposition for SIGPIPE
+    // before any worker threads are spawned. Both the signal number and handler
+    // constant come from libc, and no Rust references or memory are touched.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
