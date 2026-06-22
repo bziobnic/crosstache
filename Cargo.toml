@@ -102,6 +102,7 @@ strsim = "0.11"
 flate2 = "1"
 tar = "0.4"
 opener = "0.7"
+csv = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 zip = "2"
