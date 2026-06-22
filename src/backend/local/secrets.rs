@@ -1581,8 +1581,9 @@ impl SecretBackend for LocalSecretBackend {
         // opaque afterwards.
         let stem = self.resolve_active_stem(vault, name)?;
 
-        // Find the target version in .versions/<stem>/
-        let vdir = versions_dir(&self.store_path, vault, &stem)?;
+        // Find the target version (opaque or legacy archive dir — same fallback
+        // as get_secret_version / list_versions).
+        let vdir = self.resolve_versions_dir(vault, name)?;
         let ver_age = vdir.join(format!("{version}.age"));
         let ver_meta = vdir.join(format!("{version}.meta.json"));
 
@@ -3230,6 +3231,75 @@ mod tests {
         let sdir = secrets_path(&tmp, "default");
         assert!(sdir.join("dry-secret.meta.json").exists());
         assert!(!sdir.join(opaque::INDEX_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn rollback_finds_versions_in_legacy_archive_dir() {
+        // Active pair on the opaque stem but archives still under the legacy
+        // `.versions/<encode_name>/` dir (e.g. ensure_opaque_layout moved active
+        // files then failed during merge_versions_dir). Reads use
+        // resolve_versions_dir; rollback must too.
+        let (legacy, tmp) = test_backend_opts(false);
+        legacy
+            .set_secret("default", make_request("split-ver", "v1-value"))
+            .await
+            .unwrap();
+        legacy
+            .set_secret("default", make_request("split-ver", "v2-value"))
+            .await
+            .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let sdir = secrets_path(&tmp, "default");
+        let opaque_stem = opaque_backend.active_stem("split-ver");
+        let legacy_stem = encode_name("split-ver");
+
+        // Simulate partial migration: active on opaque stem, v1 still archived
+        // under the legacy versions dir only.
+        for ext in ["age", "meta.json"] {
+            fs::rename(
+                sdir.join(format!("{legacy_stem}.{ext}")),
+                sdir.join(format!("{opaque_stem}.{ext}")),
+            )
+            .unwrap();
+        }
+        assert!(
+            sdir.join(".versions").join(&legacy_stem).exists(),
+            "v1 archive must remain under legacy stem"
+        );
+        assert!(
+            !sdir.join(".versions").join(&opaque_stem).exists(),
+            "opaque versions dir must not exist yet"
+        );
+
+        // Reads succeed via legacy fallback.
+        let versions = opaque_backend
+            .list_versions("default", "split-ver")
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 2);
+        let v1 = opaque_backend
+            .get_secret_version("default", "split-ver", "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(&*v1.value.unwrap(), "v1-value");
+
+        // Rollback must restore v1, not report not found.
+        opaque_backend
+            .rollback("default", "split-ver", "v1")
+            .await
+            .unwrap();
+        let current = opaque_backend
+            .get_secret("default", "split-ver", true)
+            .await
+            .unwrap();
+        assert_eq!(&*current.value.unwrap(), "v1-value");
+
+        // ensure_opaque_layout at end of rollback merges legacy archives forward.
+        assert!(
+            sdir.join(".versions").join(&opaque_stem).exists(),
+            "rollback should merge archives under opaque stem"
+        );
     }
 
     #[tokio::test]
