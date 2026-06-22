@@ -203,20 +203,35 @@ impl TableFormatter {
 
     /// Format data as CSV
     fn format_as_csv<T: Tabled>(&self, data: &[T]) -> Result<String> {
-        let mut output = String::new();
-        // Header row from Tabled trait
+        let mut writer = csv::WriterBuilder::new()
+            .terminator(csv::Terminator::Any(b'\n'))
+            .from_writer(Vec::new());
+
         let headers = T::headers();
-        let header_row: Vec<String> = headers.iter().map(|h| csv_escape(h.as_ref())).collect();
-        output.push_str(&header_row.join(","));
-        output.push('\n');
-        // Data rows
+        writer
+            .write_record(headers.iter().map(|header| header.as_ref()))
+            .map_err(|err| {
+                crate::error::CrosstacheError::SerializationError(format!("CSV error: {err}"))
+            })?;
+
         for item in data {
             let fields = item.fields();
-            let row: Vec<String> = fields.iter().map(|f| csv_escape(f.as_ref())).collect();
-            output.push_str(&row.join(","));
-            output.push('\n');
+            writer
+                .write_record(fields.iter().map(|field| field.as_ref()))
+                .map_err(|err| {
+                    crate::error::CrosstacheError::SerializationError(format!("CSV error: {err}"))
+                })?;
         }
-        Ok(output)
+
+        let bytes = writer.into_inner().map_err(|err| {
+            crate::error::CrosstacheError::SerializationError(format!("CSV error: {}", err.error()))
+        })?;
+
+        String::from_utf8(bytes).map_err(|err| {
+            crate::error::CrosstacheError::SerializationError(format!(
+                "CSV output was not UTF-8: {err}"
+            ))
+        })
     }
 
     /// Format data as plain text
@@ -277,15 +292,6 @@ impl TableFormatter {
         let mut table = Table::new(data);
         table.with(Style::empty());
         Ok(table.to_string())
-    }
-}
-
-/// Escape a value for CSV output (RFC 4180)
-fn csv_escape(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
     }
 }
 
@@ -488,6 +494,29 @@ mod tests {
         let formatter = TableFormatter::new(OutputFormat::Json, true, None);
         let out = formatter.format_table(&data).expect("format");
         assert_eq!(out.trim(), "[]");
+    }
+
+    #[test]
+    fn csv_output_uses_rfc4180_escaping() {
+        let data = vec![
+            TestData {
+                name: "plain".to_string(),
+                value: "contains,comma".to_string(),
+                status: "active".to_string(),
+            },
+            TestData {
+                name: "quoted".to_string(),
+                value: "has \"quotes\"".to_string(),
+                status: "line\nbreak".to_string(),
+            },
+        ];
+        let formatter = TableFormatter::new(OutputFormat::Csv, true, None);
+        let out = formatter.format_table(&data).expect("format");
+
+        assert_eq!(
+            out,
+            "Name,Value,Status\nplain,\"contains,comma\",active\nquoted,\"has \"\"quotes\"\"\",\"line\nbreak\"\n"
+        );
     }
 
     #[test]
