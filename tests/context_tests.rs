@@ -233,6 +233,43 @@ fn context_envs_lists_envs() {
         stdout.contains("* dev"),
         "active env should be starred: {stdout}"
     );
+    assert!(
+        stdout.contains("not the vault context") && stdout.contains("config show --resolved"),
+        "context envs should explain env-vs-context and point to resolved config: {stdout}"
+    );
+}
+
+#[test]
+fn config_show_resolved_notes_env_fallback_layers() {
+    let (mut cmd, temp) = xv_isolated();
+    write_local_global_config(temp.path());
+    std::fs::write(
+        temp.path().join(".xv.toml"),
+        r#"default_env = "dev"
+
+[env.dev]
+"#,
+    )
+    .expect("write .xv.toml");
+
+    let out = cmd
+        .args(["--format", "table", "config", "show", "--resolved"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let stdout = stdout_str(&out);
+    assert!(
+        stdout.contains("resource_group  : --resource-group > .xv.toml profile.resource_group > context > global default_resource_group"),
+        "resolved config should document the context fallback for resource_group: {stdout}"
+    );
+    assert!(
+        stdout.contains("active env has no backend"),
+        "resolved config should explain inherited backend: {stdout}"
+    );
+    assert!(
+        stdout.contains("active env has no vault") && stdout.contains("global config"),
+        "resolved config should explain vault fallback to global config: {stdout}"
+    );
 }
 
 #[test]
