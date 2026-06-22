@@ -3,9 +3,8 @@
 //! This module provides the main BlobManager struct and basic file operations
 //! including upload, download, list, and delete functionality.
 //!
-//! This is currently a working placeholder implementation that demonstrates
-//! the expected interface. The actual Azure Blob Storage integration would
-//! be implemented here using the azure_storage_blobs crate.
+//! Azure Blob Storage integration is implemented directly with the
+//! `azure_storage_blobs` crate, including block uploads for large files.
 
 use crate::auth::provider::AzureAuthProvider;
 use crate::blob::models::*;

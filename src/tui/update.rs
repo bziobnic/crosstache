@@ -9,7 +9,7 @@ pub enum Command {
     LoadValue { vault: String, name: String },
     LoadHistory { vault: String, name: String },
     LoadAudit { vault: String, name: Option<String> },
-    CopyToClipboard(String),
+    CopyToClipboard(zeroize::Zeroizing<String>),
     Quit,
 }
 
@@ -133,7 +133,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
         KeyCode::Char('y') => {
             if let Some((v, n)) = app.selected_vault_and_name() {
                 if let Some(val) = app.values.get(&(v.clone(), n.clone())) {
-                    cmds.push(Command::CopyToClipboard(val.as_str().to_string()));
+                    cmds.push(Command::CopyToClipboard(zeroize::Zeroizing::new(
+                        val.to_string(),
+                    )));
                     let timeout_ticks = (app.config.clipboard_timeout * 10) as u32;
                     if timeout_ticks > 0 {
                         app.clipboard_countdown = Some(timeout_ticks);
@@ -143,7 +145,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
         }
         KeyCode::Char('Y') => {
             if let Some((_v, n)) = app.selected_vault_and_name() {
-                cmds.push(Command::CopyToClipboard(n));
+                cmds.push(Command::CopyToClipboard(zeroize::Zeroizing::new(n)));
             }
         }
         KeyCode::Char('R') => match app.pane {
@@ -260,7 +262,9 @@ fn tick_clipboard(app: &mut App) -> Vec<Command> {
     if let Some(n) = app.clipboard_countdown {
         if n <= 1 {
             app.clipboard_countdown = None;
-            cmds.push(Command::CopyToClipboard(String::new())); // clear
+            cmds.push(Command::CopyToClipboard(zeroize::Zeroizing::new(
+                String::new(),
+            ))); // clear
         } else {
             app.clipboard_countdown = Some(n - 1);
         }

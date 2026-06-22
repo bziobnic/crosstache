@@ -874,23 +874,37 @@ pub(crate) struct FileUploadInfo {
     pub(crate) blob_name: String,
 }
 
-/// Convert a path to blob name format (forward slashes, no leading slash)
-fn path_to_blob_name(path: &Path, prefix: Option<&str>) -> String {
-    // Convert path components to forward-slash separated string
-    let components: Vec<String> = path
-        .components()
-        .filter_map(|c| {
-            match c {
-                std::path::Component::Normal(s) => Some(s.to_string_lossy().to_string()),
-                _ => None, // Skip prefix, root, current dir, parent dir components
+/// Convert a relative path to blob name format (forward slashes, no leading slash).
+fn path_to_blob_name(path: &Path, prefix: Option<&str>) -> Result<String> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(s) => components.push(s.to_string_lossy().to_string()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "upload path '{}' contains '..' and cannot be converted to a blob name",
+                    path.display()
+                )));
             }
-        })
-        .collect();
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "upload path '{}' must be relative to the upload root",
+                    path.display()
+                )));
+            }
+        }
+    }
 
     let relative_path = components.join("/");
+    if relative_path.is_empty() {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "upload path '{}' does not contain a file name",
+            path.display()
+        )));
+    }
 
-    // Add prefix if provided
-    if let Some(p) = prefix {
+    Ok(if let Some(p) = prefix {
         let p = p.trim_matches('/');
         if p.is_empty() {
             relative_path
@@ -899,7 +913,7 @@ fn path_to_blob_name(path: &Path, prefix: Option<&str>) -> String {
         }
     } else {
         relative_path
-    }
+    })
 }
 
 /// Recursively collect files with path structure information
@@ -934,12 +948,18 @@ pub(crate) fn collect_files_with_structure(
         let blob_name = if flatten {
             // Use only filename
             path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    CrosstacheError::invalid_argument(format!(
+                        "upload path '{}' does not contain a file name",
+                        path.display()
+                    ))
+                })?
         } else {
             // Preserve structure with forward slashes
-            path_to_blob_name(relative, prefix)
+            path_to_blob_name(relative, prefix)?
         };
 
         files.push(FileUploadInfo {
@@ -2492,5 +2512,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = resolve_multi_download_dir(Some(dir.path().to_str().unwrap())).unwrap();
         assert_eq!(result, dir.path());
+    }
+
+    #[test]
+    fn path_to_blob_name_rejects_parent_components() {
+        let err = path_to_blob_name(std::path::Path::new("safe/../escape.txt"), None).unwrap_err();
+        assert!(err.to_string().contains(".."));
+    }
+
+    #[test]
+    fn path_to_blob_name_preserves_relative_structure_with_prefix() {
+        let name =
+            path_to_blob_name(std::path::Path::new("docs/readme.md"), Some("release/")).unwrap();
+        assert_eq!(name, "release/docs/readme.md");
     }
 }

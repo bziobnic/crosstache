@@ -328,6 +328,9 @@ impl AzureSecretOperations {
             segments.clear();
             segments.extend(path_segments.iter().copied());
         }
+        // Key Vault REST API 7.4 is stable and covers the operations we use;
+        // keep this explicit so SDK crate version bumps do not silently change
+        // the wire contract.
         url.query_pairs_mut().append_pair("api-version", "7.4");
         Ok(url.to_string())
     }
@@ -500,6 +503,106 @@ fn parse_deleted_secret_summary(item: &serde_json::Value) -> Option<SecretSummar
     })
 }
 
+fn json_string_tags(json: &serde_json::Value) -> HashMap<String, String> {
+    let mut tags = HashMap::new();
+    if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
+        for (key, value) in tags_obj {
+            if let Some(tag_value) = value.as_str() {
+                tags.insert(key.clone(), tag_value.to_string());
+            }
+        }
+    }
+    tags
+}
+
+fn original_name_from_tags(fallback: &str, tags: &HashMap<String, String>) -> String {
+    tags.get("original_name")
+        .or_else(|| tags.get("name"))
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn timestamp_string(attributes: &serde_json::Value, field: &str) -> String {
+    attributes
+        .get(field)
+        .and_then(|v| v.as_i64())
+        .map(|ts| {
+            DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+        })
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+fn optional_timestamp(attributes: &serde_json::Value, field: &str) -> Option<DateTime<Utc>> {
+    attributes
+        .get(field)
+        .and_then(|v| v.as_i64())
+        .and_then(|ts| DateTime::from_timestamp(ts, 0))
+}
+
+fn parse_secret_properties_bundle(
+    json: &serde_json::Value,
+    fallback_name: &str,
+    include_value: bool,
+    default_version: &str,
+) -> Result<SecretProperties> {
+    let id = json.get("id").and_then(|v| v.as_str());
+    let name = id
+        .and_then(|id| id.rsplit('/').nth(1))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_name)
+        .to_string();
+    let version = id
+        .and_then(|id| id.split('/').next_back())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_version)
+        .to_string();
+
+    let attributes = json.get("attributes").unwrap_or(&serde_json::Value::Null);
+    let enabled = attributes
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let created_ts = attributes
+        .get("created")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let tags = json_string_tags(json);
+    let original_name = original_name_from_tags(&name, &tags);
+    let value = if include_value {
+        json.get("value")
+            .and_then(|v| v.as_str())
+            .map(|s| Zeroizing::new(s.to_string()))
+    } else {
+        None
+    };
+
+    Ok(SecretProperties {
+        name,
+        original_name,
+        value,
+        version,
+        created_on: timestamp_string(attributes, "created"),
+        updated_on: timestamp_string(attributes, "updated"),
+        enabled,
+        expires_on: optional_timestamp(attributes, "exp"),
+        not_before: optional_timestamp(attributes, "nbf"),
+        tags,
+        content_type: json
+            .get("contentType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text/plain")
+            .to_string(),
+        version_number: None,
+        created_timestamp: created_ts,
+        recovery_level: attributes
+            .get("recoveryLevel")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
 /// Extract the raw backup bytes from a `POST /secrets/{name}/backup` response.
 ///
 /// Azure returns the backup blob as a base64url-encoded string (RFC 4648 §5)
@@ -629,7 +732,8 @@ impl SecretOperations for AzureSecretOperations {
         let vault_name = self.validated_vault_name(vault_name)?;
         let (sanitized_name, tags) = self.prepare_secret_request(request)?;
 
-        // Since Azure SDK v0.20 doesn't properly support tags, we'll use the REST API directly
+        // The Azure Key Vault SDK crate does not expose the full tag-bearing
+        // SecretBundle shape for this flow, so use REST directly.
         let secret_url = self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name])?;
 
         // Get an access token for Key Vault
@@ -664,11 +768,7 @@ impl SecretOperations for AzureSecretOperations {
         if let Some(not_before) = request.not_before {
             attributes["nbf"] = serde_json::json!(not_before.timestamp());
         }
-        if !attributes
-            .as_object()
-            .expect("json!({}) always produces an Object")
-            .is_empty()
-        {
+        if attributes.as_object().is_some_and(|obj| !obj.is_empty()) {
             body["attributes"] = attributes;
         }
 
@@ -722,8 +822,8 @@ impl SecretOperations for AzureSecretOperations {
         let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
-        // Since Azure SDK v0.20 doesn't properly return tags with get_secret,
-        // we'll use the REST API directly to get full secret details including tags
+        // The Azure Key Vault SDK crate does not expose all tags consistently here,
+        // so use REST directly to get full secret details including tags
         let secret_url = self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name])?;
 
         // Get an access token for Key Vault
@@ -769,102 +869,7 @@ impl SecretOperations for AzureSecretOperations {
         let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
-        // Extract secret properties from JSON response
-        let value = if include_value {
-            json.get("value")
-                .and_then(|v| v.as_str())
-                .map(|s| Zeroizing::new(s.to_string()))
-        } else {
-            None
-        };
-
-        // Extract the bare version segment from the id URL. Key Vault ids
-        // look like `https://<vault>.vault.azure.net/secrets/<name>/<version>`;
-        // `get_secret_version` / `rollback` expect just the trailing
-        // `<version>` segment, so we normalise here for consistency.
-        let version = json
-            .get("id")
-            .and_then(|v| v.as_str())
-            .and_then(|id| id.split('/').next_back())
-            .unwrap_or("")
-            .to_string();
-
-        let attributes = json.get("attributes").unwrap_or(&serde_json::Value::Null);
-        let enabled = attributes
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let created_ts = attributes
-            .get("created")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let created_on = if created_ts > 0 {
-            chrono::DateTime::from_timestamp(created_ts, 0)
-                .map(|dt| dt.to_string())
-                .unwrap_or_else(|| "Unknown".to_string())
-        } else {
-            "Unknown".to_string()
-        };
-        let updated_on = attributes
-            .get("updated")
-            .and_then(|v| v.as_i64())
-            .map(|ts| {
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.to_string())
-                    .unwrap_or_else(|| "Unknown".to_string())
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
-
-        // Extract tags
-        let mut tags = HashMap::new();
-        if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
-            for (key, value) in tags_obj {
-                if let Some(tag_value) = value.as_str() {
-                    tags.insert(key.clone(), tag_value.to_string());
-                }
-            }
-        }
-
-        // Extract expiry dates from attributes
-        let expires_on = attributes
-            .get("exp")
-            .and_then(|v| v.as_i64())
-            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-
-        let not_before = attributes
-            .get("nbf")
-            .and_then(|v| v.as_i64())
-            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-
-        // Extract recovery level from attributes
-        let recovery_level = attributes
-            .get("recoveryLevel")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // Get original name from tags
-        let original_name = self.get_original_name(&sanitized_name, &tags);
-
-        Ok(SecretProperties {
-            name: sanitized_name,
-            original_name,
-            value,
-            version,
-            created_on,
-            updated_on,
-            enabled,
-            expires_on,
-            not_before,
-            tags,
-            content_type: json
-                .get("contentType")
-                .and_then(|v| v.as_str())
-                .unwrap_or("text/plain")
-                .to_string(),
-            version_number: None,
-            created_timestamp: created_ts,
-            recovery_level,
-        })
+        parse_secret_properties_bundle(&json, &sanitized_name, include_value, "")
     }
 
     async fn get_secret_version(
@@ -923,96 +928,7 @@ impl SecretOperations for AzureSecretOperations {
         let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
-        // Extract the secret value if requested
-        let value = if include_value {
-            json.get("value")
-                .and_then(|v| v.as_str())
-                .map(|s| Zeroizing::new(s.to_string()))
-        } else {
-            None
-        };
-
-        // Extract the version from the id
-        let version = json
-            .get("id")
-            .and_then(|id| id.as_str())
-            .and_then(|id| id.split('/').next_back())
-            .unwrap_or(version)
-            .to_string();
-
-        let attributes = json.get("attributes").unwrap_or(&serde_json::Value::Null);
-        let enabled = attributes
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let created_ts = attributes
-            .get("created")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let created_on = if created_ts > 0 {
-            DateTime::from_timestamp(created_ts, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                .unwrap_or_else(|| "Unknown".to_string())
-        } else {
-            "Unknown".to_string()
-        };
-
-        let updated_on = attributes
-            .get("updated")
-            .and_then(|v| v.as_i64())
-            .and_then(|ts| {
-                DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
-
-        // Extract expiry dates from attributes
-        let expires_on = attributes
-            .get("exp")
-            .and_then(|v| v.as_i64())
-            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-
-        let not_before = attributes
-            .get("nbf")
-            .and_then(|v| v.as_i64())
-            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-
-        // Extract tags
-        let mut tags = HashMap::new();
-        if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
-            for (key, value) in tags_obj {
-                if let Some(tag_value) = value.as_str() {
-                    tags.insert(key.clone(), tag_value.to_string());
-                }
-            }
-        }
-
-        let recovery_level = attributes
-            .get("recoveryLevel")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        Ok(SecretProperties {
-            name: secret_name.to_string(),
-            original_name: secret_name.to_string(),
-            value,
-            version,
-            created_on,
-            updated_on,
-            enabled,
-            expires_on,
-            not_before,
-            tags,
-            content_type: json
-                .get("contentType")
-                .and_then(|v| v.as_str())
-                .unwrap_or("text/plain")
-                .to_string(),
-            version_number: None,
-            created_timestamp: created_ts,
-            recovery_level,
-        })
+        parse_secret_properties_bundle(&json, secret_name, include_value, version)
     }
 
     async fn list_secrets(
@@ -1021,8 +937,8 @@ impl SecretOperations for AzureSecretOperations {
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>> {
         let vault_name = self.validated_vault_name(vault_name)?;
-        // Since Azure SDK v0.20 doesn't properly support list operations,
-        // we'll use the REST API directly
+        // The Azure Key Vault SDK crate list shape omits the tag details this CLI
+        // displays, so use REST directly
         let list_url = self.key_vault_api_url(&vault_name, &["secrets"])?;
 
         // Get an access token for Key Vault
@@ -1280,82 +1196,7 @@ impl SecretOperations for AzureSecretOperations {
         let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
 
-        // Extract secret properties from JSON response
-        // Extract the bare version segment from the id URL. Key Vault ids
-        // look like `https://<vault>.vault.azure.net/secrets/<name>/<version>`;
-        // `get_secret_version` / `rollback` expect just the trailing
-        // `<version>` segment, so we normalise here for consistency.
-        let version = json
-            .get("id")
-            .and_then(|v| v.as_str())
-            .and_then(|id| id.split('/').next_back())
-            .unwrap_or("")
-            .to_string();
-
-        let attributes = json.get("attributes").unwrap_or(&serde_json::Value::Null);
-        let enabled = attributes
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let created_ts = attributes
-            .get("created")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let created_on = if created_ts > 0 {
-            chrono::DateTime::from_timestamp(created_ts, 0)
-                .map(|dt| dt.to_string())
-                .unwrap_or_else(|| "Unknown".to_string())
-        } else {
-            "Unknown".to_string()
-        };
-        let updated_on = attributes
-            .get("updated")
-            .and_then(|v| v.as_i64())
-            .map(|ts| {
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.to_string())
-                    .unwrap_or_else(|| "Unknown".to_string())
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
-
-        // Extract tags
-        let mut tags = HashMap::new();
-        if let Some(tags_obj) = json.get("tags").and_then(|v| v.as_object()) {
-            for (key, value) in tags_obj {
-                if let Some(tag_value) = value.as_str() {
-                    tags.insert(key.clone(), tag_value.to_string());
-                }
-            }
-        }
-
-        // Get original name from tags
-        let original_name = self.get_original_name(&sanitized_name, &tags);
-
-        let recovery_level = attributes
-            .get("recoveryLevel")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        Ok(SecretProperties {
-            name: sanitized_name,
-            original_name,
-            value: None, // Restore operation doesn't return the secret value
-            version,
-            created_on,
-            updated_on,
-            enabled,
-            expires_on: None, // Not extracted from this API
-            not_before: None, // Not extracted from this API
-            tags,
-            content_type: json
-                .get("contentType")
-                .and_then(|v| v.as_str())
-                .unwrap_or("text/plain")
-                .to_string(),
-            version_number: None,
-            created_timestamp: created_ts,
-            recovery_level,
-        })
+        parse_secret_properties_bundle(&json, &sanitized_name, false, "")
     }
 
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()> {
