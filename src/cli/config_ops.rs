@@ -347,6 +347,8 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
         .and_then(|p| p.backend.as_deref().map(String::from));
     let effective_backend = config.effective_backend_name().to_string();
 
+    let mut resolution_notes: Vec<String> = Vec::new();
+
     let backend_source = if config.cli_backend_was_arg && config.cli_backend.is_some() {
         // --backend was explicitly passed; it wins over everything below.
         "--backend CLI flag".to_string()
@@ -380,6 +382,15 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
         "built-in default".to_string()
     };
 
+    if active_profile
+        .as_ref()
+        .is_some_and(|profile| profile.backend.is_none())
+    {
+        resolution_notes.push(
+            "active env has no backend, so backend falls through to --backend/XV_BACKEND/global config/built-in default".to_string(),
+        );
+    }
+
     // --- Vault & resource_group resolution ---
     // Bugbot finding #4 on PR #216: if .xv.toml exists but resolve_env
     // failed (unknown XV_ENV / --env), real commands error out via
@@ -396,6 +407,12 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
             format!("env resolution failed: {err}"),
         )
     } else if let Some(v) = active_profile.as_ref().and_then(|p| p.vault.as_deref()) {
+        if context_manager.current_vault().is_some() || !config.default_vault.is_empty() {
+            resolution_notes.push(format!(
+                "active env `{}` supplies vault `{v}`, so vault context/global default are ignored",
+                active_env_name.as_deref().unwrap_or("?")
+            ));
+        }
         (
             v.to_string(),
             format!(
@@ -404,11 +421,22 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
             ),
         )
     } else if let Some(v) = context_manager.current_vault() {
+        if active_env_name.is_some() {
+            resolution_notes.push(
+                "active env has no vault, so vault falls through to the current context"
+                    .to_string(),
+            );
+        }
         (
             v.to_string(),
             context_manager.scope_description().to_string(),
         )
     } else if !config.default_vault.is_empty() {
+        if active_env_name.is_some() {
+            resolution_notes.push(
+                "active env has no vault and no context is set, so vault falls through to global config".to_string(),
+            );
+        }
         (
             config.default_vault.clone(),
             "global config `default_vault`".to_string(),
@@ -429,6 +457,14 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
         .as_ref()
         .and_then(|p| p.resource_group.as_deref())
     {
+        if context_manager.current_resource_group().is_some()
+            || !config.default_resource_group.is_empty()
+        {
+            resolution_notes.push(format!(
+                "active env `{}` supplies resource_group `{rg}`, so context/global resource_group are ignored",
+                active_env_name.as_deref().unwrap_or("?")
+            ));
+        }
         (
             rg.to_string(),
             format!(
@@ -437,11 +473,21 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
             ),
         )
     } else if let Some(rg) = context_manager.current_resource_group() {
+        if active_env_name.is_some() {
+            resolution_notes.push(
+                "active env has no resource_group, so resource_group falls through to the current context".to_string(),
+            );
+        }
         (
             rg.to_string(),
             context_manager.scope_description().to_string(),
         )
     } else if !config.default_resource_group.is_empty() {
+        if active_env_name.is_some() {
+            resolution_notes.push(
+                "active env has no resource_group and no context is set, so resource_group falls through to global config".to_string(),
+            );
+        }
         (
             config.default_resource_group.clone(),
             "global config `default_resource_group`".to_string(),
@@ -562,7 +608,7 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
         println!("  backend         : --backend flag > .xv.toml profile > XV_BACKEND / global config > built-in (azure)");
         println!("  env             : XV_ENV > --env flag > .xv.toml default_env");
         println!("  vault           : --vault arg > .xv.toml profile.vault > context > global default_vault");
-        println!("  resource_group  : --resource-group > .xv.toml profile.resource_group > global default_resource_group");
+        println!("  resource_group  : --resource-group > .xv.toml profile.resource_group > context > global default_resource_group");
         println!();
         println!("Naming convention: the global config uses a `default_` prefix (default_vault,");
         println!("default_resource_group) because those values are fallbacks; a .xv.toml env");
@@ -570,6 +616,15 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
         println!(
             "value that overrides the global default. Same concept, the prefix signals the layer."
         );
+        if !resolution_notes.is_empty() {
+            println!();
+            println!("Layer notes:");
+            resolution_notes.sort();
+            resolution_notes.dedup();
+            for note in resolution_notes {
+                println!("  - {note}");
+            }
+        }
     }
 
     Ok(())
@@ -926,6 +981,9 @@ async fn execute_context_show(config: &Config) -> Result<()> {
                 if let Some(f) = &profile.folder {
                     println!("  folder: {f}");
                 }
+                println!(
+                    "  hint: env profiles override context/global defaults when a field is set; missing env fields fall back to the vault context, then global config."
+                );
             }
             Err(e) => {
                 println!();
@@ -1354,6 +1412,9 @@ async fn execute_env_list(config: &Config) -> Result<()> {
             println!("Effective ({active_name}): backend={eff_backend}  vault={eff_vault}");
         }
     }
+    output::hint(
+        "`context envs` lists .xv.toml env profiles, not the vault context; run `xv config show --resolved` to see the effective backend/vault after env → context → global fallbacks.",
+    );
     Ok(())
 }
 

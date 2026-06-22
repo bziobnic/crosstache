@@ -117,11 +117,13 @@ From `docs/UX-REVIEW.md` (2026-05-16 AWS-backend baseline).
 
 The full P2 lane and P3-1..4 shipped post-v0.12.0 (#254 §P2-1/§P2-5,
 #255 §P2-2, #256 §P2-3/§P2-4, #257 §P3-4, #258 §P3-1..3). They are
-recorded in [`CHANGELOG.md`](./CHANGELOG.md) under `v0.13.0`. One
-substantive UX item remains open:
+recorded in [`CHANGELOG.md`](./CHANGELOG.md) under `v0.13.0`. §P3-5 is
+also addressed in unreleased CLI output by inline hints on
+`config show --resolved`, `context show`, and `context envs` that explain
+env profile vs vault context vs global config precedence where users see the
+resolved values.
 
-### P3
-- **§P3-5 The CLI doesn't surface the env-vs-profile-vs-context distinction at the moment of confusion** — only docs do. Add inline hints at the point a user is likely to confuse env profiles, the active context, and global config (e.g. when `context envs` / `config show --resolved` disagree, or a vault/backend resolves from an unexpected layer).
+No substantive UX review items remain open.
 
 ---
 

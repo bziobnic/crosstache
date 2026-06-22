@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `xv config show --resolved`, `xv context show`, and `xv context envs` now surface inline hints for the confusing env-profile vs vault-context vs global-config layers, including notes when active `.xv.toml` env fields override context/global fallbacks or inherit from them.
+
+---
+
 ## v0.15.0 — Opaque local filenames (2026-06-22)
 
 Adds opt-in opaque on-disk filenames for the local backend and includes a
