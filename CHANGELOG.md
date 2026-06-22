@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Opt-in opaque on-disk filenames for the local backend (#276).** Setting `[local].opaque_filenames = true` stores active secrets, version archives, and trash entries under keyed-hash stems instead of reversible secret-name filenames, with an age-encrypted index for name lookup. Existing stores remain unchanged until `xv local migrate` runs; `xv local migrate --dry-run` prints the rename plan first. See [`docs/FEATURES.md`](./docs/FEATURES.md#local-backend-maintenance) and the retained design plan in [`docs/plans/2026-06-19-local-secret-filename-opaquing.md`](./docs/plans/2026-06-19-local-secret-filename-opaquing.md).
+
+### Fixed
+
+- **Vault-create follow-up hint now suggests the real context command (#275).** After creating a vault, the CLI now points users to `xv cx use <name>` instead of the nonexistent `xv use <name>`.
+
 ## v0.14.0 — `gen`/`set` parity, `config edit`, and reliability fixes (2026-06-20)
 
 Makes `xv gen --save` a complete replacement for `xv set`, adds an `xv config edit`
