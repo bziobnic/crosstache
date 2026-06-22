@@ -25,6 +25,7 @@ fn make_backend(tmp: &TempDir) -> crosstache::backend::local::LocalBackend {
         key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
         default_vault: Some("default".into()),
         encrypt_metadata: None,
+        opaque_filenames: None,
     };
     crosstache::backend::local::LocalBackend::new(Some(&cfg)).expect("create backend")
 }

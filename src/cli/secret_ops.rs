@@ -4315,6 +4315,7 @@ mod tests {
                 key_file: None,
                 default_vault: Some("local-vault".to_string()),
                 encrypt_metadata: None,
+                opaque_filenames: None,
             }),
             ..Default::default()
         };

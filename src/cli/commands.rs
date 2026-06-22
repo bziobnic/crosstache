@@ -1171,6 +1171,18 @@ pub enum LocalCommands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Migrate an existing store to opaque on-disk filenames.
+    ///
+    /// Requires `opaque_filenames = true` under `[local]` in your config.
+    /// Renames every secret's active, version, and trash files to keyed-hash
+    /// stems, builds the encrypted `.index.age`, and rebuilds any missing index
+    /// entries from metadata. Idempotent and safe to re-run.
+    Migrate {
+        /// Print the rename plan without touching anything on disk.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]

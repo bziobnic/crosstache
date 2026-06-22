@@ -48,6 +48,7 @@ async fn local_to_aws_round_trip() {
         key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
         default_vault: Some("test-vault".into()),
         encrypt_metadata: None,
+        opaque_filenames: None,
     };
     let local = LocalBackend::new(Some(&local_cfg)).unwrap();
 

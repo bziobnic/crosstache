@@ -21,6 +21,10 @@ pub struct ResolvedLocalConfig {
     /// Whether to encrypt secret metadata (`.meta.json`) at rest. Defaults to
     /// `false` for backward compatibility with existing plaintext stores.
     pub encrypt_metadata: bool,
+    /// Whether on-disk filenames are opaque (keyed-hash stems + encrypted
+    /// index). Defaults to `false`, leaving existing stores byte-for-byte
+    /// unchanged until migrated.
+    pub opaque_filenames: bool,
 }
 
 impl ResolvedLocalConfig {
@@ -52,6 +56,7 @@ impl ResolvedLocalConfig {
             .to_string();
 
         let encrypt_metadata = raw.and_then(|c| c.encrypt_metadata).unwrap_or(false);
+        let opaque_filenames = raw.and_then(|c| c.opaque_filenames).unwrap_or(false);
 
         Self {
             store_path,
@@ -59,6 +64,7 @@ impl ResolvedLocalConfig {
             recipients_file,
             default_vault,
             encrypt_metadata,
+            opaque_filenames,
         }
     }
 }
@@ -82,6 +88,7 @@ mod tests {
             key_file: Some("/tmp/my-key.txt".into()),
             default_vault: Some("staging".into()),
             encrypt_metadata: None,
+            opaque_filenames: None,
         };
         let cfg = ResolvedLocalConfig::from_raw(Some(&raw));
         assert_eq!(cfg.store_path, PathBuf::from("/tmp/my-store"));
@@ -97,8 +104,10 @@ mod tests {
             key_file: None,
             default_vault: None,
             encrypt_metadata: Some(true),
+            opaque_filenames: None,
         };
         let cfg = ResolvedLocalConfig::from_raw(Some(&raw));
         assert!(cfg.encrypt_metadata);
+        assert!(!cfg.opaque_filenames);
     }
 }

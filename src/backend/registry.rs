@@ -240,6 +240,7 @@ mod tests {
                 key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
                 default_vault: Some("default".into()),
                 encrypt_metadata: None,
+                opaque_filenames: None,
             }),
             ..Default::default()
         };

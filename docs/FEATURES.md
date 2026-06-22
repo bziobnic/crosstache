@@ -156,6 +156,16 @@ recursive upload/download as the current bulk-transfer path.
 |---------|-------------|
 | `xv local encrypt-metadata` | Re-encrypt existing plaintext local secret metadata after enabling `[local].encrypt_metadata = true`; safe to re-run |
 | `xv local encrypt-metadata --dry-run` | Count plaintext metadata files without modifying the store |
+| `xv local migrate` | Convert an existing store to opaque on-disk filenames after enabling `[local].opaque_filenames = true`; renames secret/version/trash files to keyed-hash stems and builds the encrypted index. Idempotent; safe to re-run |
+| `xv local migrate --dry-run` | Print the rename plan without modifying the store |
+
+With `[local].opaque_filenames = true`, a directory listing of the store reveals
+no secret names: each secret's files are named by `HMAC-SHA256(key, name)` (base32,
+keyed by the age identity), and an age-encrypted `.index.age` maps stems back to
+names. Existing stores are unaffected until you set the flag and run
+`xv local migrate`; afterwards any write upgrades that secret's layout
+automatically and a one-release back-compat read path keeps un-migrated secrets
+readable.
 
 ---
 
@@ -209,6 +219,7 @@ store_path = "~/.xv/store"
 key_file = "~/.xv/key.txt"
 default_vault = "default"
 encrypt_metadata = false   # when true, run `xv local encrypt-metadata`
+opaque_filenames = false   # when true, run `xv local migrate` to hide names on disk
 ```
 
 ---

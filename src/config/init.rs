@@ -194,6 +194,7 @@ impl ConfigInitializer {
             key_file: Some(key_file.clone()),
             default_vault: Some(default_vault.clone()),
             encrypt_metadata: None,
+            opaque_filenames: None,
         };
 
         let progress = ProgressIndicator::new("Setting up local backend...");
