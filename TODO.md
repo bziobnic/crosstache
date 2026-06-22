@@ -18,5 +18,5 @@ changes without adding redundant pages.
       shipped history.
 - [x] Update CLAUDE.md current-status notes so future agents see the v0.14+
       implementation state.
-- [ ] Verify documentation diffs for accuracy against source and run an
+- [x] Verify documentation diffs for accuracy against source and run an
       appropriate docs-only validation command.
