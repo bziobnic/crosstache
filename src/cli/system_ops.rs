@@ -273,11 +273,16 @@ pub(crate) async fn execute_audit_command(
                 registry.active().name()
             )));
         }
-        // Backends that implement the audit trait (e.g. AWS via CloudTrail)
-        // are dispatched generically; Azure keeps its legacy Activity Log
-        // path below.
-        if let Some(auditor) = registry.active().audit() {
-            return execute_backend_audit(auditor, name, vault, days, operation, raw, config).await;
+        // Backends that implement the audit trait are dispatched generically.
+        // Azure supports audit through the trait for the configured default
+        // resource group; keep the legacy path only for explicit
+        // `--resource-group` overrides because the trait API has no override
+        // parameter yet.
+        if resource_group_override.is_none() {
+            if let Some(auditor) = registry.active().audit() {
+                return execute_backend_audit(auditor, name, vault, days, operation, raw, config)
+                    .await;
+            }
         }
     }
 
