@@ -1002,7 +1002,9 @@ impl LocalSecretBackend {
                 let (base, millis) = match dname.rsplit_once('@') {
                     Some((b, ms)) => match ms.parse::<u128>() {
                         Ok(n) => (b.to_string(), n),
-                        Err(_) => (dname.clone(), 0),
+                        // Suffix is not a timestamp; treat as legacy unsuffixed stem
+                        // `<base>@<garbage>` with millis 0 (same as trash_entries_for_stem).
+                        Err(_) => (b.to_string(), 0),
                     },
                     None => (dname.clone(), 0),
                 };
@@ -3663,6 +3665,56 @@ mod tests {
         let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert!(val.get("original_name").is_none());
         assert!(val.get("deleted_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn migration_trash_dir_with_invalid_millis_suffix_uses_stem_before_at() {
+        // Pass C must recover the secret name from the stem before `@` when the
+        // suffix is not a valid u128 and inner metadata is unavailable.
+        let (legacy, tmp) = test_backend_opts(false);
+        let name = "trash-at";
+        legacy
+            .set_secret("default", make_request(name, "v"))
+            .await
+            .unwrap();
+        legacy.delete_secret("default", name).await.unwrap();
+
+        let enc = encode_name(name);
+        let tbase = trash_path(&tmp, "default");
+        let trash_dir = fs::read_dir(&tbase)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with(&enc))
+            .unwrap()
+            .path();
+        // Corrupt the suffix so it is not a valid u128 timestamp.
+        let bad_name = format!("{enc}@not-a-timestamp");
+        fs::rename(&trash_dir, tbase.join(&bad_name)).unwrap();
+        // Force decode_name fallback by corrupting inner metadata.
+        write_private(
+            tbase.join(&bad_name).join(format!("{enc}.meta.json")).as_path(),
+            b"not-valid-meta",
+        )
+        .unwrap();
+
+        let opaque_backend = reopen_opaque(&tmp, false);
+        let expected_stem = opaque_backend.active_stem(name);
+        let report = opaque_backend.migrate_all(false).unwrap();
+        assert_eq!(report.trash_migrated, 1);
+        assert!(
+            report.plan.iter().any(|line| {
+                line.contains(&expected_stem) && line.contains("\"trash-at\"")
+            }),
+            "plan must migrate using the stem before @, not the full dir name: {:?}",
+            report.plan
+        );
+        assert!(
+            fs::read_dir(&tbase)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(&expected_stem)),
+            "trash dir must be renamed to the opaque stem for {name:?}"
+        );
     }
 
     #[tokio::test]
