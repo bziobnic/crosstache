@@ -3212,8 +3212,14 @@ mod tests {
         );
 
         let report = opaque_backend.migrate_all(false).unwrap();
-        assert_eq!(report.migrated, 1, "must migrate the opaque-looking legacy stem");
-        assert_eq!(report.recovered, 0, "index entry comes from Pass A, not recovery");
+        assert_eq!(
+            report.migrated, 1,
+            "must migrate the opaque-looking legacy stem"
+        );
+        assert_eq!(
+            report.recovered, 0,
+            "index entry comes from Pass A, not recovery"
+        );
 
         assert!(
             !sdir.join(format!("{legacy_name}.meta.json")).exists(),
@@ -3692,7 +3698,10 @@ mod tests {
         fs::rename(&trash_dir, tbase.join(&bad_name)).unwrap();
         // Force decode_name fallback by corrupting inner metadata.
         write_private(
-            tbase.join(&bad_name).join(format!("{enc}.meta.json")).as_path(),
+            tbase
+                .join(&bad_name)
+                .join(format!("{enc}.meta.json"))
+                .as_path(),
             b"not-valid-meta",
         )
         .unwrap();
@@ -3702,9 +3711,10 @@ mod tests {
         let report = opaque_backend.migrate_all(false).unwrap();
         assert_eq!(report.trash_migrated, 1);
         assert!(
-            report.plan.iter().any(|line| {
-                line.contains(&expected_stem) && line.contains("\"trash-at\"")
-            }),
+            report
+                .plan
+                .iter()
+                .any(|line| { line.contains(&expected_stem) && line.contains("\"trash-at\"") }),
             "plan must migrate using the stem before @, not the full dir name: {:?}",
             report.plan
         );

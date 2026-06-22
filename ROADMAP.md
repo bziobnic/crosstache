@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-06-15 · **Latest released version:** `v0.14.0` · **Branch protection:** `main` (all changes via PR)
+> **Last reviewed:** 2026-06-15 · **Latest released version:** `v0.15.0` · **Branch protection:** `main` (all changes via PR)
 
 Single source of truth for **unimplemented** ideas, deferred work, and known
 limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).
@@ -17,9 +17,8 @@ Severity legend (mirrors the UX/code reviews):
 
 ## In flight
 
-No active release-soak lane. Implemented-but-unreleased fixes are tracked in
-[`CHANGELOG.md`](./CHANGELOG.md) under `Unreleased`; this roadmap only tracks
-open work.
+No active release-soak lane. Implemented work is tracked in
+[`CHANGELOG.md`](./CHANGELOG.md); this roadmap only tracks open work.
 
 ---
 
@@ -105,16 +104,10 @@ Each new backend appends to `docs/superpowers/specs/backend-trait-checklist.md`.
 
 ## Shipped history
 
-- **v0.14.0 security hardening** — closed review items for private context
-  writes (#266), bounded `xv run` stream masking (#270), atomic cache-lock
-  acquisition (#264), scanner memory/file-size bounds with fail-loud reporting
-  (#265), Azure `az` subprocess/JWT claim hardening (#267), and bounded
-  `list_secrets` detail fetch concurrency (#269). Release notes live in
-  [`CHANGELOG.md`](./CHANGELOG.md#v0140--genset-parity-config-edit-and-reliability-fixes-2026-06-20).
-- **Local secret names disclosed via filenames** — closed post-v0.14.0 by
+- **Local secret names disclosed via filenames** — closed in v0.15.0 by
   opaque local-backend filenames in #276. The retained design plan is
   [`docs/plans/2026-06-19-local-secret-filename-opaquing.md`](./docs/plans/2026-06-19-local-secret-filename-opaquing.md);
-  release notes live in [`CHANGELOG.md`](./CHANGELOG.md) under `Unreleased`.
+  release notes live in [`CHANGELOG.md`](./CHANGELOG.md) under `v0.15.0`.
 
 ---
 
@@ -124,7 +117,7 @@ From `docs/UX-REVIEW.md` (2026-05-16 AWS-backend baseline).
 
 The full P2 lane and P3-1..4 shipped post-v0.12.0 (#254 §P2-1/§P2-5,
 #255 §P2-2, #256 §P2-3/§P2-4, #257 §P3-4, #258 §P3-1..3). They are
-recorded in [`CHANGELOG.md`](./CHANGELOG.md) under `Unreleased`. One
+recorded in [`CHANGELOG.md`](./CHANGELOG.md) under `v0.13.0`. One
 substantive UX item remains open:
 
 ### P3
