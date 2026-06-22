@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.15.0 — Opaque local filenames (2026-06-22)
+
+Adds opt-in opaque on-disk filenames for the local backend and includes a
+small vault-create UX fix.
 
 ### Added
 
