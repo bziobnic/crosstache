@@ -42,10 +42,6 @@ window.
 ### P3 — CSV output manually assembled
 `src/utils/format.rs:174`. Use the `csv` crate.
 
-### P3 — Missing serialization guards for value-like fields
-`src/error.rs:637`. Extend the existing error-variant guard to cover
-cache entries, scan findings, structured output, logs, tracing.
-
 ### P4 — Code-quality polish
 Deduplicate Azure secret response parsing
 (`src/secret/manager.rs:493`); update stale "placeholder" comments in
@@ -104,6 +100,9 @@ Each new backend appends to `docs/superpowers/specs/backend-trait-checklist.md`.
 
 ## Shipped history
 
+- **Missing serialization guards for value-like fields** — closed after the
+  `src/error.rs` guard was expanded to cover cache entries, scan findings,
+  structured output, log output, and tracing diagnostics.
 - **Local secret names disclosed via filenames** — closed in v0.15.0 by
   opaque local-backend filenames in #276. The retained design plan is
   [`docs/plans/2026-06-19-local-secret-filename-opaquing.md`](./docs/plans/2026-06-19-local-secret-filename-opaquing.md);

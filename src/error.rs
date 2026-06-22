@@ -664,59 +664,376 @@ mod tests {
         assert_eq!(err.suggestion(), None);
     }
 
-    // --- Security: no error variant carries a secret value ---
+    // --- Security: serialized/diagnostic surfaces must not grow secret values ---
 
-    #[test]
-    fn no_variant_has_a_secret_value_field() {
-        // This is a hand-maintained list of variant fields. If you add a
-        // variant whose payload could carry a secret value, this test will
-        // fail in code review — keep the list updated.
-        //
-        // The check is structural: we simply confirm that the only
-        // string fields on every variant are message/name/details fields,
-        // never anything called "value", "secret", "password", or "token".
-        let variant_field_names = [
-            ("AuthenticationError", vec!["msg"]),
-            ("AzureApiError", vec!["msg"]),
-            ("Conflict", vec!["msg"]),
-            ("RateLimited", vec!["msg"]),
-            ("ConfigError", vec!["msg"]),
-            ("ConfigLoadError", vec!["source"]),
-            ("SecretNotFound", vec!["name", "suggestion"]),
-            ("VaultNotFound", vec!["name", "suggestion"]),
-            ("InvalidSecretName", vec!["name"]),
-            ("PermissionDenied", vec!["msg"]),
-            ("NetworkError", vec!["msg"]),
-            ("DnsResolutionError", vec!["vault_name", "details"]),
-            ("ConnectionTimeout", vec!["msg"]),
-            ("ConnectionRefused", vec!["msg"]),
-            ("SslError", vec!["msg"]),
-            ("InvalidUrl", vec!["msg"]),
-            ("SerializationError", vec!["msg"]),
-            ("IoError", vec!["source"]),
-            ("JsonError", vec!["source"]),
-            ("YamlError", vec!["source"]),
-            ("HttpError", vec!["source"]),
-            ("UuidError", vec!["source"]),
-            ("RegexError", vec!["source"]),
-            ("InvalidArgument", vec!["msg"]),
-            ("Upgrade", vec!["msg"]),
-            ("ScanLeakDetected", vec!["count"]),
-            ("BackendUnavailable", vec!["backend", "reason"]),
-            ("Unknown", vec!["msg"]),
-            ("EnvNotDefined", vec!["name", "available"]),
+    #[derive(Clone, Copy)]
+    struct SecuritySurface<'a> {
+        category: &'a str,
+        name: &'a str,
+        fields: &'a [&'a str],
+        allowed_value_like_fields: &'a [&'a str],
+    }
+
+    fn assert_no_value_like_fields(surfaces: &[SecuritySurface<'_>]) {
+        let banned = [
+            "value", "secret", "password", "token", "key", "raw", "match",
         ];
-        let banned = ["value", "secret", "password", "token", "key"];
-        for (variant, fields) in variant_field_names {
-            for f in fields {
-                for b in banned {
+        for surface in surfaces {
+            for field in surface.fields {
+                for token in banned {
+                    let value_like = field.to_lowercase().contains(token);
+                    let explicitly_allowed = surface.allowed_value_like_fields.contains(field);
                     assert!(
-                        !f.contains(b),
-                        "variant {variant} field {f:?} contains banned token {b:?}"
+                        !value_like || explicitly_allowed,
+                        "{} {} field {field:?} contains value-like token {token:?}; \
+                         either rename it or explicitly justify it in allowed_value_like_fields",
+                        surface.category,
+                        surface.name,
                     );
                 }
             }
         }
+    }
+
+    #[test]
+    fn serialized_security_surfaces_have_no_value_like_fields() {
+        // Hand-maintained structural guard for surfaces that are safe only if
+        // they carry metadata, never secret material. If a future field really
+        // is metadata despite a scary name (for example `secret_name`), add a
+        // local allowlist entry so code review sees the justification.
+        let surfaces = [
+            // Error variants: all payloads are names, messages, counts, causes,
+            // or suggestions. No variant should carry a secret value.
+            SecuritySurface {
+                category: "error variant",
+                name: "AuthenticationError",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "AzureApiError",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "Conflict",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "RateLimited",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "ConfigError",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "BackendUnavailable",
+                fields: &["backend", "reason"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "SecretNotFound",
+                fields: &["name", "suggestion"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "VaultNotFound",
+                fields: &["name", "suggestion"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "InvalidSecretName",
+                fields: &["name"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "EnvNotDefined",
+                fields: &["name", "available"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "PermissionDenied",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "NetworkError",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "DnsResolutionError",
+                fields: &["vault_name", "details"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "ConnectionTimeout",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "ConnectionRefused",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "SslError",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "InvalidUrl",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "SerializationError",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "IoError",
+                fields: &["source"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "JsonError",
+                fields: &["source"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "YamlError",
+                fields: &["source"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "HttpError",
+                fields: &["source"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "UuidError",
+                fields: &["source"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "RegexError",
+                fields: &["source"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "ConfigLoadError",
+                fields: &["source"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "InvalidArgument",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "Upgrade",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "ScanLeakDetected",
+                fields: &["count"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "RenameIncomplete",
+                fields: &["source", "destination", "vault", "cause"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "Unknown",
+                fields: &["msg"],
+                allowed_value_like_fields: &[],
+            },
+            // Cache entries/status are safe metadata envelopes. `data` is the
+            // typed payload selected by callers; the envelope itself must not
+            // introduce a value/secret/password/token field.
+            SecuritySurface {
+                category: "cache entry",
+                name: "CacheEntry",
+                fields: &["created_at", "ttl_secs", "vault_name", "entry_type", "data"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "cache entry",
+                name: "CacheEntryInfo",
+                fields: &["key", "created_at", "expires_at", "size_bytes", "is_stale"],
+                allowed_value_like_fields: &["key"],
+            },
+            SecuritySurface {
+                category: "cache entry",
+                name: "CacheStatus",
+                fields: &[
+                    "cache_dir",
+                    "enabled",
+                    "ttl_secs",
+                    "entry_count",
+                    "total_size_bytes",
+                    "entries",
+                ],
+                allowed_value_like_fields: &[],
+            },
+            // Scan findings are serialized to JSON/YAML and printed to stderr;
+            // they may identify the secret by name but must never carry bytes
+            // that matched the scanner.
+            SecuritySurface {
+                category: "scan finding",
+                name: "Finding",
+                fields: &[
+                    "file",
+                    "line",
+                    "col",
+                    "secret_name",
+                    "vault",
+                    "kind",
+                    "severity",
+                ],
+                allowed_value_like_fields: &["secret_name"],
+            },
+            SecuritySurface {
+                category: "scan finding",
+                name: "FindingKind",
+                fields: &["secret-value", "pattern", "high-entropy"],
+                allowed_value_like_fields: &["secret-value"],
+            },
+            SecuritySurface {
+                category: "scan finding",
+                name: "Severity",
+                fields: &["critical", "high", "medium", "low"],
+                allowed_value_like_fields: &[],
+            },
+            // Common structured output/cache payloads are metadata summaries.
+            // SecretSummary intentionally contains only names/properties; full
+            // SecretProperties/SecretRequest can carry values and must never be
+            // added here as cache-safe or leak-scan-safe payloads.
+            SecuritySurface {
+                category: "structured output",
+                name: "SecretSummary",
+                fields: &[
+                    "name",
+                    "original_name",
+                    "note",
+                    "folder",
+                    "groups",
+                    "updated_on",
+                    "enabled",
+                    "content_type",
+                ],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "VaultSummary",
+                fields: &["name", "location", "resource_group", "status", "created_at"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "FileInfo",
+                fields: &[
+                    "name",
+                    "size",
+                    "content_type",
+                    "last_modified",
+                    "etag",
+                    "groups",
+                    "metadata",
+                    "tags",
+                ],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "BlobListItem::Directory",
+                fields: &["name", "full_path"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "FileListCsvRow",
+                fields: &[
+                    "kind",
+                    "name",
+                    "size",
+                    "content_type",
+                    "last_modified",
+                    "etag",
+                    "groups",
+                    "full_path",
+                    "metadata",
+                    "tags",
+                ],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "FileListTableRow",
+                fields: &["name", "size", "content_type", "modified", "groups"],
+                allowed_value_like_fields: &[],
+            },
+            // Structured error output and diagnostics expose only envelope
+            // metadata. Logs/tracing should log messages, codes, and safe names
+            // rather than adding fields for raw values or matched bytes.
+            SecuritySurface {
+                category: "structured output",
+                name: "error envelope",
+                fields: &["error", "code", "message", "exit_code", "suggestion"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "log output",
+                name: "plain error",
+                fields: &["code", "message", "hint", "suggestion"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "tracing output",
+                name: "diagnostic event",
+                fields: &["target", "level", "message", "error", "backend"],
+                allowed_value_like_fields: &[],
+            },
+        ];
+
+        assert_no_value_like_fields(&surfaces);
     }
 
     // --- EnvNotDefined ---
