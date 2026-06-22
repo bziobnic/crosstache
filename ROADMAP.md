@@ -70,16 +70,6 @@ longest secret length.
 ### P3 — CSV output manually assembled
 `src/utils/format.rs:174`. Use the `csv` crate.
 
-### P3 — Local secret *names* disclosed via filenames
-`src/backend/local/secrets.rs`. Metadata *content* encryption shipped
-post-v0.12.0 (opt-in `encrypt_metadata` under `[local]` + `xv local
-encrypt-metadata`; see `CHANGELOG.md`), so note/tags/folder/expiry are no
-longer plaintext when enabled. What remains: secret *names* are still visible
-as on-disk filenames (`<percent-encoded-name>.age` / `.meta.json`), leaking
-existence, count, and identity even with metadata encrypted. Closing this
-needs filename opaquing (e.g. hash names, store an encrypted hash→name index),
-which is a larger architectural change — track as its own design.
-
 ### P3 — Missing serialization guards for value-like fields
 `src/error.rs:637`. Extend the existing error-variant guard to cover
 cache entries, scan findings, structured output, logs, tracing.
@@ -137,6 +127,15 @@ Open ground from `2026-04-29-strategic-improvements-phase-1-design.md`:
 - 1Password CLI bridge
 
 Each new backend appends to `docs/superpowers/specs/backend-trait-checklist.md`.
+
+---
+
+## Shipped history
+
+- **Local secret names disclosed via filenames** — closed post-v0.14.0 by
+  opaque local-backend filenames in #276. The retained design plan is
+  [`docs/plans/2026-06-19-local-secret-filename-opaquing.md`](./docs/plans/2026-06-19-local-secret-filename-opaquing.md);
+  release notes live in [`CHANGELOG.md`](./CHANGELOG.md) under `Unreleased`.
 
 ---
 
