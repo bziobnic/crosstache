@@ -257,6 +257,103 @@ fn secret_count_label(
     }
 }
 
+const SECRET_LIST_NOTE_WRAP_WIDTH: usize = 40;
+
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct SecretListDisplayRow {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Note")]
+    note: String,
+    #[tabled(rename = "Folder")]
+    folder: String,
+    #[tabled(rename = "Groups")]
+    groups: String,
+    #[tabled(rename = "Updated")]
+    updated_on: String,
+}
+
+fn format_secret_list_rows_for_human(
+    secrets: &[crate::secret::manager::SecretSummary],
+) -> Vec<SecretListDisplayRow> {
+    secrets
+        .iter()
+        .map(|secret| SecretListDisplayRow {
+            name: secret.name.clone(),
+            note: secret
+                .note
+                .as_deref()
+                .map(|note| wrap_text_to_width(note, SECRET_LIST_NOTE_WRAP_WIDTH))
+                .unwrap_or_default(),
+            folder: secret.folder.clone().unwrap_or_default(),
+            groups: secret.groups.clone().unwrap_or_default(),
+            updated_on: secret.updated_on.clone(),
+        })
+        .collect()
+}
+
+fn wrap_text_to_width(input: &str, width: usize) -> String {
+    if width == 0 || input.is_empty() {
+        return input.to_string();
+    }
+
+    input
+        .split('\n')
+        .map(|paragraph| wrap_paragraph_to_width(paragraph, width))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn wrap_paragraph_to_width(paragraph: &str, width: usize) -> String {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in paragraph.split_whitespace() {
+        push_wrapped_word(word, width, &mut current, &mut lines);
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    lines.join("\n")
+}
+
+fn push_wrapped_word(word: &str, width: usize, current: &mut String, lines: &mut Vec<String>) {
+    let word_len = word.chars().count();
+
+    if word_len > width {
+        if !current.is_empty() {
+            lines.push(std::mem::take(current));
+        }
+        let mut chunk = String::new();
+        for ch in word.chars() {
+            chunk.push(ch);
+            if chunk.chars().count() == width {
+                lines.push(std::mem::take(&mut chunk));
+            }
+        }
+        if !chunk.is_empty() {
+            *current = chunk;
+        }
+        return;
+    }
+
+    if current.is_empty() {
+        current.push_str(word);
+        return;
+    }
+
+    let projected_len = current.chars().count() + 1 + word_len;
+    if projected_len <= width {
+        current.push(' ');
+        current.push_str(word);
+    } else {
+        lines.push(std::mem::take(current));
+        current.push_str(word);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn display_cached_secret_list(
     secrets: Vec<crate::secret::manager::SecretSummary>,
@@ -322,7 +419,8 @@ pub(crate) fn display_cached_secret_list(
         }
 
         let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-        output.push_str(&formatter.format_table(&page.items)?);
+        let display_rows = format_secret_list_rows_for_human(&page.items);
+        output.push_str(&formatter.format_table(&display_rows)?);
         output.push('\n');
         let _ = writeln!(
             output,
@@ -4552,6 +4650,28 @@ mod tests {
             "Showing 10 of 137 secret(s)"
         );
         assert_eq!(secret_count_label(137, 137, None, false), "137 secret(s)");
+    }
+
+    #[test]
+    fn human_secret_list_rows_wrap_long_notes() {
+        let mut secret = summary_named("api-key", Some("prod"), true);
+        secret.note = Some(
+            "This note is intentionally long so the secret list display wraps it across multiple lines"
+                .to_string(),
+        );
+
+        let rows = format_secret_list_rows_for_human(&[secret]);
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].note.contains('\n'), "long notes should wrap");
+        assert!(
+            rows[0]
+                .note
+                .lines()
+                .all(|line| line.chars().count() <= SECRET_LIST_NOTE_WRAP_WIDTH),
+            "wrapped note lines should fit the notes column width: {:?}",
+            rows[0].note
+        );
     }
 
     #[test]
