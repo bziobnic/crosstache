@@ -37,12 +37,12 @@ impl AzureAuditBackend {
         }
     }
 
-    async fn get_vault_audit_logs(
+    async fn fetch_raw_events(
         &self,
         resource_group: &str,
         vault_name: &str,
         days: u32,
-    ) -> Result<Vec<AuditEvent>> {
+    ) -> Result<Vec<Value>> {
         let end_time = chrono::Utc::now();
         let start_time = end_time - chrono::Duration::days(days as i64);
 
@@ -84,7 +84,21 @@ impl AzureAuditBackend {
             CrosstacheError::serialization(format!("Failed to parse activity logs: {e}"))
         })?;
 
-        parse_activity_log_response(activity_response)
+        Ok(activity_response
+            .get("value")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn get_vault_audit_logs(
+        &self,
+        resource_group: &str,
+        vault_name: &str,
+        days: u32,
+    ) -> Result<Vec<AuditEvent>> {
+        let raw_events = self.fetch_raw_events(resource_group, vault_name, days).await?;
+        parse_raw_events(raw_events)
     }
 
     async fn get_secret_audit_logs(
@@ -94,14 +108,14 @@ impl AzureAuditBackend {
         secret_name: &str,
         days: u32,
     ) -> Result<Vec<AuditEvent>> {
-        let vault_logs = self
-            .get_vault_audit_logs(resource_group, vault_name, days)
-            .await?;
+        let raw_events = self.fetch_raw_events(resource_group, vault_name, days).await?;
 
-        Ok(vault_logs
+        let filtered: Vec<Value> = raw_events
             .into_iter()
-            .filter(|log| log.resource_name.contains(secret_name))
-            .collect())
+            .filter(|event| event_matches_secret(event, secret_name))
+            .collect();
+
+        parse_raw_events(filtered)
     }
 }
 
@@ -129,14 +143,30 @@ impl AuditBackend for AzureAuditBackend {
     }
 }
 
-fn parse_activity_log_response(response: Value) -> Result<Vec<AuditEvent>> {
+/// Returns true if the raw Activity Log event references the given secret,
+/// either via the `resourceId` path or the `properties.secretName` field.
+fn event_matches_secret(event: &Value, secret_name: &str) -> bool {
+    let resource_id_match = event
+        .get("resourceId")
+        .and_then(|v| v.as_str())
+        .map(|rid| rid.split('/').next_back().unwrap_or(""))
+        .is_some_and(|last_seg| last_seg.contains(secret_name));
+
+    let properties_match = event
+        .get("properties")
+        .and_then(|p| p.get("secretName"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|name| name == secret_name);
+
+    resource_id_match || properties_match
+}
+
+fn parse_raw_events(events: Vec<Value>) -> Result<Vec<AuditEvent>> {
     let mut entries = Vec::new();
 
-    if let Some(value) = response.get("value").and_then(|v| v.as_array()) {
-        for event in value {
-            if let Ok(entry) = parse_activity_log_entry(event) {
-                entries.push(entry);
-            }
+    for event in &events {
+        if let Ok(entry) = parse_activity_log_entry(event) {
+            entries.push(entry);
         }
     }
 
