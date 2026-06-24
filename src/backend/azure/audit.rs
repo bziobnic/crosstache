@@ -108,7 +108,9 @@ impl AzureAuditBackend {
         vault_name: &str,
         days: u32,
     ) -> Result<Vec<AuditEvent>> {
-        let raw_events = self.fetch_raw_events(resource_group, vault_name, days).await?;
+        let raw_events = self
+            .fetch_raw_events(resource_group, vault_name, days)
+            .await?;
         parse_raw_events(raw_events)
     }
 
@@ -119,7 +121,9 @@ impl AzureAuditBackend {
         secret_name: &str,
         days: u32,
     ) -> Result<Vec<AuditEvent>> {
-        let raw_events = self.fetch_raw_events(resource_group, vault_name, days).await?;
+        let raw_events = self
+            .fetch_raw_events(resource_group, vault_name, days)
+            .await?;
 
         let filtered: Vec<Value> = raw_events
             .into_iter()
