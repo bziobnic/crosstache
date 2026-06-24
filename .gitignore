@@ -28,3 +28,4 @@ spikes/
 
 # CodeGraph local index/runtime data — machine-specific SQLite DB, logs, daemon state
 .codegraph/
+.claude
