@@ -6,8 +6,9 @@
 //! [`AuditEvent`] rows in the same table/JSON shapes as the Azure
 //! Activity Log path.
 //!
-//! Azure currently keeps its legacy Activity Log client in
-//! `cli::system_ops` and does not implement this trait.
+//! Azure implements this trait with its Activity Log adapter; the CLI keeps a
+//! small legacy fallback only for explicit Azure `--resource-group` overrides
+//! because this trait is intentionally backend-agnostic.
 
 use async_trait::async_trait;
 

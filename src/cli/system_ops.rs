@@ -273,11 +273,20 @@ pub(crate) async fn execute_audit_command(
                 registry.active().name()
             )));
         }
-        // Backends that implement the audit trait (e.g. AWS via CloudTrail)
-        // are dispatched generically; Azure keeps its legacy Activity Log
-        // path below.
-        if let Some(auditor) = registry.active().audit() {
-            return execute_backend_audit(auditor, name, vault, days, operation, raw, config).await;
+        // Backends that implement the audit trait are dispatched generically.
+        // For Azure specifically, keep the legacy Activity Log path when the
+        // caller passes an explicit `--resource-group` override or when no
+        // default resource group is configured (the legacy path produces a
+        // clear ConfigError for that).  Non-Azure backends always use the
+        // trait path — `--resource-group` is an Azure-only concept.
+        let use_legacy_azure_path = registry.active().kind() == crate::backend::BackendKind::Azure
+            && (resource_group_override.is_some() || config.default_resource_group.is_empty());
+
+        if !use_legacy_azure_path {
+            if let Some(auditor) = registry.active().audit() {
+                return execute_backend_audit(auditor, name, vault, days, operation, raw, config)
+                    .await;
+            }
         }
     }
 
@@ -1044,4 +1053,186 @@ async fn save_generated_secret(
         .set_secret_safe(&vault_name, name, value, Some(request))
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::backend::{
+        AuditBackend, AuditEvent, Backend, BackendCapabilities, BackendError, BackendKind,
+        BackendRegistry, NameCharset, SecretBackend,
+    };
+    use crate::secret::manager::{
+        SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+    };
+
+    struct StubSecretBackend;
+
+    #[async_trait]
+    impl SecretBackend for StubSecretBackend {
+        async fn set_secret(
+            &self,
+            _vault: &str,
+            _request: SecretRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("audit routing must not call secret operations")
+        }
+
+        async fn get_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("audit routing must not call secret operations")
+        }
+
+        async fn get_secret_version(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("audit routing must not call secret operations")
+        }
+
+        async fn list_secrets(
+            &self,
+            _vault: &str,
+            _group_filter: Option<&str>,
+        ) -> std::result::Result<Vec<SecretSummary>, BackendError> {
+            unreachable!("audit routing must not call secret operations")
+        }
+
+        async fn delete_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<(), BackendError> {
+            unreachable!("audit routing must not call secret operations")
+        }
+
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _request: SecretUpdateRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("audit routing must not call secret operations")
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct StubAuditCalls {
+        vault_events: Arc<AtomicUsize>,
+        secret_events: Arc<AtomicUsize>,
+    }
+
+    struct StubAuditBackend {
+        calls: StubAuditCalls,
+    }
+
+    #[async_trait]
+    impl AuditBackend for StubAuditBackend {
+        async fn get_vault_events(
+            &self,
+            vault: &str,
+            days: u32,
+        ) -> std::result::Result<Vec<AuditEvent>, BackendError> {
+            assert_eq!(vault, "test-vault");
+            assert_eq!(days, 7);
+            self.calls.vault_events.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn get_secret_events(
+            &self,
+            _vault: &str,
+            _secret_name: &str,
+            _days: u32,
+        ) -> std::result::Result<Vec<AuditEvent>, BackendError> {
+            self.calls.secret_events.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    struct StubAuditedBackend {
+        secret_backend: StubSecretBackend,
+        audit_backend: StubAuditBackend,
+    }
+
+    impl StubAuditedBackend {
+        fn new(calls: StubAuditCalls) -> Self {
+            Self {
+                secret_backend: StubSecretBackend,
+                audit_backend: StubAuditBackend { calls },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Backend for StubAuditedBackend {
+        fn name(&self) -> &'static str {
+            "aws"
+        }
+
+        fn kind(&self) -> BackendKind {
+            BackendKind::Aws
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                has_audit: true,
+                name_charset: NameCharset::AwsRelaxed,
+                ..BackendCapabilities::default()
+            }
+        }
+
+        fn secrets(&self) -> &dyn SecretBackend {
+            &self.secret_backend
+        }
+
+        fn audit(&self) -> Option<&dyn AuditBackend> {
+            Some(&self.audit_backend)
+        }
+
+        async fn health_check(&self) -> std::result::Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn non_azure_audit_with_resource_group_uses_backend_trait() {
+        let calls = StubAuditCalls::default();
+        let registry = BackendRegistry::new(Arc::new(StubAuditedBackend::new(calls.clone())));
+        let config = Config {
+            default_vault: "test-vault".to_string(),
+            default_resource_group: "default-rg".to_string(),
+            ..Config::default()
+        };
+
+        execute_audit_command(
+            None,
+            Some("test-vault".to_string()),
+            7,
+            None,
+            Some("ignored-for-non-azure".to_string()),
+            false,
+            config,
+            Some(&registry),
+        )
+        .await
+        .expect("non-Azure auditors must not fall through to Azure Activity Log routing");
+
+        assert_eq!(calls.vault_events.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.secret_events.load(Ordering::SeqCst), 0);
+    }
 }

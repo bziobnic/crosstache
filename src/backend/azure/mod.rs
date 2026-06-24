@@ -7,6 +7,7 @@
 //!
 //! This is a *thin adapter layer* — no business logic is duplicated.
 
+pub mod audit;
 pub mod auth;
 pub mod detect;
 #[allow(clippy::module_inception)]
@@ -22,7 +23,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::error::BackendError;
-use super::{Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend, VaultBackend};
+use super::{
+    AuditBackend, Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend,
+    VaultBackend,
+};
 use crate::auth::provider::AzureAuthProvider;
 use crate::config::settings::Config;
 use crate::error::CrosstacheError;
@@ -66,6 +70,7 @@ pub fn map_error(err: CrosstacheError) -> BackendError {
     }
 }
 
+use self::audit::AzureAuditBackend;
 use self::secrets::AzureSecretBackend;
 use self::vaults::AzureVaultBackend;
 
@@ -82,6 +87,7 @@ use crate::blob::manager::BlobManager;
 pub struct AzureBackend {
     secret_backend: AzureSecretBackend,
     vault_backend: AzureVaultBackend,
+    audit_backend: AzureAuditBackend,
     #[cfg(feature = "file-ops")]
     file_backend: Option<AzureFileBackend>,
     auth_provider: Arc<dyn AzureAuthProvider>,
@@ -114,6 +120,12 @@ impl AzureBackend {
             config,
         );
 
+        let audit_backend = AzureAuditBackend::new(
+            auth_provider.clone(),
+            config.subscription_id.clone(),
+            config.default_resource_group.clone(),
+        );
+
         // File backend (only when file-ops feature is enabled)
         #[cfg(feature = "file-ops")]
         let file_backend = {
@@ -138,6 +150,7 @@ impl AzureBackend {
         Ok(Self {
             secret_backend,
             vault_backend,
+            audit_backend,
             #[cfg(feature = "file-ops")]
             file_backend,
             auth_provider,
@@ -179,7 +192,7 @@ impl Backend for AzureBackend {
                 }
             },
             has_rbac: true,
-            has_audit: false,
+            has_audit: true,
             has_versioning: true,
             has_soft_delete: true,
             has_secret_rotation: false,
@@ -201,6 +214,10 @@ impl Backend for AzureBackend {
         Some(&self.vault_backend)
     }
 
+    fn audit(&self) -> Option<&dyn AuditBackend> {
+        Some(&self.audit_backend)
+    }
+
     #[cfg(feature = "file-ops")]
     fn files(&self) -> Option<&dyn FileBackend> {
         self.file_backend.as_ref().map(|fb| fb as &dyn FileBackend)
@@ -213,5 +230,46 @@ impl Backend for AzureBackend {
             .await
             .map_err(|e| BackendError::AuthenticationFailed(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azure_core::auth::{AccessToken, TokenCredential};
+    use azure_identity::AzureCliCredential;
+
+    struct StubAzureAuthProvider;
+
+    #[async_trait]
+    impl AzureAuthProvider for StubAzureAuthProvider {
+        async fn get_token(&self, _scopes: &[&str]) -> crate::error::Result<AccessToken> {
+            unreachable!("capability checks must not request Azure tokens")
+        }
+
+        async fn get_tenant_id(&self) -> crate::error::Result<String> {
+            unreachable!("capability checks must not request Azure tenant IDs")
+        }
+
+        async fn get_object_id(&self) -> crate::error::Result<String> {
+            unreachable!("capability checks must not request Azure object IDs")
+        }
+
+        fn get_token_credential(&self) -> Arc<dyn TokenCredential> {
+            Arc::new(AzureCliCredential::new())
+        }
+
+        async fn resolve_user_to_object_id(&self, _user: &str) -> crate::error::Result<String> {
+            unreachable!("capability checks must not resolve Azure users")
+        }
+    }
+
+    #[test]
+    fn azure_backend_declares_and_exposes_audit_backend() {
+        let backend = AzureBackend::new(&Config::default(), Arc::new(StubAzureAuthProvider))
+            .expect("default Azure backend should construct for capability inspection");
+
+        assert!(backend.capabilities().has_audit);
+        assert!(backend.audit().is_some());
     }
 }

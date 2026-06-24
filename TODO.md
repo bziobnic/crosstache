@@ -20,3 +20,19 @@ changes without adding redundant pages.
       implementation state.
 - [x] Verify documentation diffs for accuracy against source and run an
       appropriate docs-only validation command.
+
+## Audit Backend Routing Fix Plan
+
+### Audit Routing Goal
+
+Ensure `xv audit --resource-group ...` only uses the legacy Azure Activity Log
+fallback for Azure, and keeps auditor-backed non-Azure backends on the generic
+`AuditBackend` path.
+
+### Audit Routing Steps
+
+- [x] Confirm the baseline routing bug: the old condition skipped generic audit
+      dispatch for any backend when `--resource-group` was supplied.
+- [x] Add a regression test with an auditor-backed non-Azure backend and a
+      resource-group override.
+- [x] Verify the routing fix with targeted tests and lint diagnostics.
