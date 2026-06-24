@@ -43,6 +43,17 @@ impl AzureAuditBackend {
         vault_name: &str,
         days: u32,
     ) -> Result<Vec<Value>> {
+        if resource_group.is_empty() {
+            return Err(CrosstacheError::config(
+                "No resource group specified. Use --resource-group or 'xv init' to configure",
+            ));
+        }
+        if self.subscription_id.is_empty() {
+            return Err(CrosstacheError::config(
+                "No subscription ID configured. Use 'xv init' to configure",
+            ));
+        }
+
         let end_time = chrono::Utc::now();
         let start_time = end_time - chrono::Duration::days(days as i64);
 
