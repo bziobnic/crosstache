@@ -1,10 +1,29 @@
 # Changelog
 
-## Unreleased
+## v0.16.0 — Cross-backend advanced commands, new flags, and UX fixes (2026-06-29)
+
+Advanced commands now work on every backend, the CLI's documented-but-missing
+flags are implemented, and a batch of output/exit-code/confirmation issues are
+fixed. Surfaced by a multi-model UX review and hardened against Cursor Bugbot
+findings (#286).
+
+### Added
+
+- **Advanced commands work on local & AWS backends (#286).** `xv run`, `xv inject`, `xv rotate` (default), `xv scan`, and `xv env pull`/`env push` now route through the active backend trait instead of hardcoding Azure Key Vault, so they no longer fail with Azure auth errors on the local or AWS backends. Azure behavior is unchanged (its trait impl delegates to the same operations).
+- **New flags (#286):** `set --value`, `set --tag`, `run --include`/`--exclude`, `update --tag` (alias of `--tags`), and `--pager [auto|always|never]`.
+- **`xv scan --all` (#286)** performs a full `HEAD`-tree scan (`git ls-tree HEAD` + `git show HEAD:PATH`), honoring `[scan].exclude` and the default exclude globs. `scan --staged --all` is now a clap conflict instead of silently ignoring `--all`.
 
 ### Changed
 
-- `xv config show --resolved`, `xv context show`, and `xv context envs` now surface inline hints for the confusing env-profile vs vault-context vs global-config layers, including notes when active `.xv.toml` env fields override context/global fallbacks or inherit from them.
+- **Log output goes to stderr (#286).** `success`/`warn`/`info`/`hint`/`step` chrome now writes to stderr so stdout stays clean for pipes and redirects (`xv get X > file`, `xv ... | jq`); only data lands on stdout.
+- **`run --include`/`--exclude` name matching (#286)** accepts either the original (user-facing) name shown by `xv list` or the backend name.
+- `xv config show --resolved`, `xv context show`, and `xv context envs` now surface inline hints for the confusing env-profile vs vault-context vs global-config layers, including notes when active `.xv.toml` env fields override context/global fallbacks or inherit from them (#283).
+
+### Fixed
+
+- **`xv run` no longer exits 0 without running the child (#286).** An explicit `--group`/`--include` filter that matches nothing now errors; an empty vault (or `--exclude` removing everything) warns but still runs the command.
+- **Partial failures now exit non-zero (#286)** for bulk `set`, `gen --save`, `vault import`, and `env push`, instead of reporting success; bulk `set` also persists `--tag`, and `vault import` no longer prints an `[ok]` summary on partial failure.
+- **Destructive ops prompt or refuse (#286).** Trait-path `delete`/group-delete/`rollback`/`purge`/vault-delete now prompt on a TTY and refuse with a non-zero exit in non-interactive sessions instead of silently no-opping.
 
 ---
 
