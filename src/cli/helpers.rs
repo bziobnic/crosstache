@@ -101,6 +101,32 @@ pub(crate) async fn resolve_vault_for_trait(
     Ok("default".to_string())
 }
 
+/// Decide whether a destructive operation may proceed, prompting when possible.
+///
+/// Behaviour, matching the Azure legacy delete/purge paths so confirmation is
+/// uniform across every backend:
+/// * `force == true` → proceed unconditionally (`Ok(true)`).
+/// * interactive stdin (a TTY) → prompt `y/N` (default no); return the answer.
+/// * non-interactive (pipe/CI, no TTY) → refuse with a non-zero
+///   [`CrosstacheError::InvalidArgument`] (exit code 2) telling the user to
+///   pass `--force`, instead of silently no-opping.
+///
+/// `prompt` is the full confirmation question (e.g. `"Delete secret 'X'?"`).
+pub(crate) fn confirm_destructive(force: bool, prompt: &str) -> Result<bool> {
+    use std::io::IsTerminal;
+
+    if force {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "Refusing to proceed without confirmation in a non-interactive session ({prompt}). \
+             Re-run with --force to confirm."
+        )));
+    }
+    crate::utils::interactive::InteractivePrompt::new().confirm(prompt, false)
+}
+
 /// Obtain the Azure auth provider, preferring the one from the
 /// [`BackendRegistry`] (which was built once at startup) and falling back
 /// to creating a fresh provider from the config when the registry is absent.

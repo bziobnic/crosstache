@@ -3,8 +3,9 @@
 use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, SecretWriteArgs, ShareCommands};
 use crate::cli::helpers::{
-    copy_to_clipboard, generate_random_value, get_azure_auth_provider, mask_secrets,
-    resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error, use_trait_path,
+    confirm_destructive, copy_to_clipboard, generate_random_value, get_azure_auth_provider,
+    mask_secrets, resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error,
+    use_trait_path,
 };
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
@@ -33,10 +34,12 @@ fn read_secret_value_from_stdin(trim: bool) -> Result<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_set_direct(
     args: Vec<String>,
     stdin: bool,
     trim: bool,
+    value: Option<String>,
     meta: SecretWriteArgs,
     config: Config,
     registry: Option<&BackendRegistry>,
@@ -50,6 +53,15 @@ pub(crate) async fn execute_secret_set_direct(
     } = meta.clone();
     let groups = meta.groups_opt();
 
+    // `--value` is only meaningful for a single secret; reject it alongside
+    // bulk KEY=value arguments so the inline value can't be silently dropped.
+    let is_bulk = args.len() > 1 || args.iter().any(|a| a.contains('='));
+    if value.is_some() && is_bulk {
+        return Err(CrosstacheError::invalid_argument(
+            "--value can only be used when setting a single secret (not with KEY=value bulk args)",
+        ));
+    }
+
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
@@ -58,17 +70,19 @@ pub(crate) async fn execute_secret_set_direct(
         if args.len() == 1 && !args[0].contains('=') {
             // Single secret set
             let name = &args[0];
-            let value = if stdin {
+            let secret_value = if let Some(v) = value.clone() {
+                v
+            } else if stdin {
                 read_secret_value_from_stdin(trim)?
             } else {
                 rpassword::prompt_password(format!("Enter value for secret '{name}': "))?
             };
-            if value.is_empty() {
+            if secret_value.is_empty() {
                 return Err(CrosstacheError::config("Secret value cannot be empty"));
             }
             // Build the request via the shared helper so `set` and `gen --save`
             // construct identical requests from the same metadata flags.
-            let request = meta.to_secret_request(name, Zeroizing::new(value))?;
+            let request = meta.to_secret_request(name, Zeroizing::new(secret_value))?;
             let props = reg
                 .active()
                 .secrets()
@@ -130,7 +144,18 @@ pub(crate) async fn execute_secret_set_direct(
                     }
                 }
             }
-            println!();
+            if error_count > 0 {
+                output::warn(&format!(
+                    "Bulk set complete: {success_count} succeeded, {error_count} failed"
+                ));
+                // Any failed write must surface as a non-zero exit so scripts
+                // and CI don't treat a partial failure as success.
+                invalidate_trait_secret_cache(&config, &vault_name);
+                return Err(CrosstacheError::unknown(format!(
+                    "{error_count} of {} secret(s) failed to set",
+                    success_count + error_count
+                )));
+            }
             output::success(&format!(
                 "Bulk set complete: {success_count} succeeded, {error_count} failed"
             ));
@@ -597,11 +622,14 @@ pub(crate) async fn execute_secret_delete_direct(
                 output::info(&format!("No secrets found in group '{group_name}'"));
                 return Ok(());
             }
-            if !force {
-                output::warn(&format!(
-                    "About to delete {} secret(s) in group '{group_name}'. Use --force to confirm.",
+            if !confirm_destructive(
+                force,
+                &format!(
+                    "Delete {} secret(s) in group '{group_name}'?",
                     secrets.len()
-                ));
+                ),
+            )? {
+                output::info("Aborted; no secrets deleted.");
                 return Ok(());
             }
             for s in &secrets {
@@ -612,10 +640,8 @@ pub(crate) async fn execute_secret_delete_direct(
                 output::success(&format!("Deleted '{}'", s.name));
             }
         } else if let Some(secret_name) = name {
-            if !force {
-                output::warn(&format!(
-                    "About to delete secret '{secret_name}'. Use --force to confirm."
-                ));
+            if !confirm_destructive(force, &format!("Delete secret '{secret_name}'?"))? {
+                output::info("Aborted; secret not deleted.");
                 return Ok(());
             }
             reg.active()
@@ -710,10 +736,11 @@ pub(crate) async fn execute_secret_rollback_direct(
             return execute_secret_rollback_legacy(name, version, force, config, registry).await;
         }
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
-        if !force {
-            output::warn(&format!(
-                "About to roll back secret '{name}' to version {version}. Use --force to confirm."
-            ));
+        if !confirm_destructive(
+            force,
+            &format!("Roll back secret '{name}' to version {version}?"),
+        )? {
+            output::info("Aborted; no rollback performed.");
             return Ok(());
         }
         let props = reg
@@ -888,8 +915,11 @@ async fn execute_secret_rotate_native(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_run_direct(
     group: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
     no_masking: bool,
     inherit_env: bool,
     command: Vec<String>,
@@ -905,6 +935,8 @@ pub(crate) async fn execute_secret_run_direct(
         &secret_manager,
         None,
         group,
+        include,
+        exclude,
         no_masking,
         inherit_env,
         command,
@@ -1095,10 +1127,11 @@ pub(crate) async fn execute_secret_purge_direct(
             return execute_secret_purge_legacy(name, force, config, registry).await;
         }
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
-        if !force {
-            output::warn(&format!(
-                "About to PERMANENTLY DELETE secret '{name}'. This cannot be undone. Use --force to confirm."
-            ));
+        if !confirm_destructive(
+            force,
+            &format!("PERMANENTLY DELETE secret '{name}'? This cannot be undone."),
+        )? {
+            output::info("Aborted; secret not purged.");
             return Ok(());
         }
         reg.active()
@@ -2306,10 +2339,13 @@ async fn resolve_uri_secret(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_run(
     secret_manager: &crate::secret::manager::SecretManager,
     vault: Option<String>,
     groups: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
     no_masking: bool,
     inherit_env: bool,
     command: Vec<String>,
@@ -2387,15 +2423,40 @@ async fn execute_secret_run(
         secrets
     };
 
-    if filtered_secrets.is_empty() {
-        output::info("No secrets found to inject");
-        return Ok(());
-    }
+    // Apply name-based --include / --exclude on top of the group filter.
+    // --include restricts to the named secrets; --exclude removes them.
+    // Both match against the secret's name (the canonical key).
+    let filtered_secrets: Vec<_> = filtered_secrets
+        .into_iter()
+        .filter(|secret| include.is_empty() || include.iter().any(|n| n == &secret.name))
+        .filter(|secret| !exclude.iter().any(|n| n == &secret.name))
+        .collect();
 
-    output::step(&format!(
-        "Injecting {} secret(s) as environment variables...",
-        filtered_secrets.len()
-    ));
+    // An explicit `--group` filter that matches nothing is almost always a
+    // mistake (typo'd group, wrong vault). Silently running the child command
+    // with no secrets injected — and exiting 0 — is dangerous in scripts/CI, so
+    // fail loud instead. When no filter was given, an empty vault is a legitimate
+    // state: warn, but still run the requested command (with no injected vars).
+    if filtered_secrets.is_empty() {
+        let has_explicit_filter =
+            !groups.is_empty() || !include.is_empty() || !exclude.is_empty();
+        if has_explicit_filter {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "No secrets matched the requested filters in vault '{vault_name}' \
+                 (group={groups:?}, include={include:?}, exclude={exclude:?}). \
+                 Refusing to run the command with nothing injected — \
+                 check the filter values."
+            )));
+        }
+        output::warn(&format!(
+            "No secrets found in vault '{vault_name}'; running command with no injected secrets."
+        ));
+    } else {
+        output::step(&format!(
+            "Injecting {} secret(s) as environment variables...",
+            filtered_secrets.len()
+        ));
+    }
 
     // Fetch secret values and build environment map
     let mut env_vars: HashMap<String, Zeroizing<String>> = HashMap::new();
@@ -3784,6 +3845,9 @@ async fn execute_secret_share(
             use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
             use std::fmt::Write as _;
 
+            let pager = pager
+                .map(crate::cli::commands::PagerWhen::wants_pager)
+                .unwrap_or(false);
             let mut roles = vault_manager
                 .list_secret_access(&vault_name, &resource_group, &secret_name)
                 .await?;
@@ -4468,7 +4532,7 @@ mod tests {
                 all: false,
                 page: None,
                 page_size: None,
-                pager: false,
+                pager: None,
             },
             config,
             Some(&registry),

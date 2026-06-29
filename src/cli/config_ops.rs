@@ -1915,16 +1915,17 @@ async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config
     }
 
     if error_count > 0 {
-        println!(
-            "Completed with {} successful and {} failed operations",
-            success_count, error_count
-        );
-    } else {
-        output::success(&format!(
-            "Successfully pushed {} secret(s) to vault '{}'",
-            success_count, vault_name
-        ));
+        // Surface partial failures as a non-zero exit so CI/scripts don't treat
+        // a half-finished push as success.
+        return Err(CrosstacheError::unknown(format!(
+            "env push: {error_count} of {} secret(s) failed to set in vault '{vault_name}'",
+            success_count + error_count
+        )));
     }
+    output::success(&format!(
+        "Successfully pushed {} secret(s) to vault '{}'",
+        success_count, vault_name
+    ));
 
     Ok(())
 }

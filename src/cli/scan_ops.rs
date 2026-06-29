@@ -14,7 +14,7 @@ use std::path::PathBuf;
 pub(crate) async fn execute_scan_command(
     paths: Vec<PathBuf>,
     staged: bool,
-    _all: bool,
+    all: bool,
     hook: bool,
     all_vaults: bool,
     command: Option<ScanCommands>,
@@ -30,6 +30,9 @@ pub(crate) async fn execute_scan_command(
     }
     if staged {
         return execute_scan_staged(hook, all_vaults, format, &config, registry).await;
+    }
+    if all {
+        return execute_scan_head(hook, all_vaults, format, &config, registry).await;
     }
     execute_scan_paths(paths, hook, all_vaults, format, &config, registry).await
 }
@@ -145,6 +148,48 @@ async fn execute_scan_staged(
     let patterns = builtin_patterns();
     let engine = MatchEngine::new(&secrets, &patterns);
     let findings = scan_staged(&engine)?;
+
+    render_findings(&findings, hook, format)
+}
+
+async fn execute_scan_head(
+    hook: bool,
+    all_vaults: bool,
+    format: crate::utils::format::OutputFormat,
+    config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<()> {
+    use crate::scan::staged::scan_head;
+    use crate::secret::manager::SecretManager;
+
+    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
+    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+
+    let vault_names: Vec<String> = if all_vaults {
+        let auth = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
+        let vault_manager = crate::vault::manager::VaultManager::new(
+            auth,
+            config.subscription_id.clone(),
+            config.no_color,
+        )?;
+        vault_manager
+            .vault_ops()
+            .list_vaults(Some(&config.subscription_id), None)
+            .await?
+            .into_iter()
+            .map(|v| v.name)
+            .collect()
+    } else {
+        vec![config.resolve_vault_name(None).await?]
+    };
+
+    let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");
+    let secrets = fetch_secret_values(&secret_manager, &vault_names, 10).await?;
+    progress.finish_clear();
+
+    let patterns = builtin_patterns();
+    let engine = MatchEngine::new(&secrets, &patterns);
+    let findings = scan_head(&engine)?;
 
     render_findings(&findings, hook, format)
 }

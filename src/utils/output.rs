@@ -73,11 +73,17 @@ pub fn format_line(level: Level, msg: &str, rich: bool) -> String {
     }
 }
 
-/// Print a success message to stdout
+// NOTE: All decorative log helpers below write to STDERR, never stdout.
+// stdout is reserved for machine-consumable data (secret values, JSON/YAML/
+// CSV/table payloads) so that `xv get X > file` or `xv ... | jq` is never
+// polluted by `[ok]`/`::`/`[info]` chrome. Only `error` previously went to
+// stderr; `success`/`warn`/`info`/`hint`/`step` were moved here to match.
+
+/// Print a success message to stderr
 pub fn success(msg: &str) {
-    println!(
+    eprintln!(
         "{}",
-        format_line(Level::Success, msg, should_use_rich(is_tty()))
+        format_line(Level::Success, msg, should_use_rich(is_tty_stderr()))
     );
 }
 
@@ -89,35 +95,35 @@ pub fn error(msg: &str) {
     );
 }
 
-/// Print a warning message to stdout
+/// Print a warning message to stderr
 pub fn warn(msg: &str) {
-    println!(
+    eprintln!(
         "{}",
-        format_line(Level::Warn, msg, should_use_rich(is_tty()))
+        format_line(Level::Warn, msg, should_use_rich(is_tty_stderr()))
     );
 }
 
-/// Print an info message to stdout
+/// Print an info message to stderr
 pub fn info(msg: &str) {
-    println!(
+    eprintln!(
         "{}",
-        format_line(Level::Info, msg, should_use_rich(is_tty()))
+        format_line(Level::Info, msg, should_use_rich(is_tty_stderr()))
     );
 }
 
-/// Print a hint message to stdout
+/// Print a hint message to stderr
 pub fn hint(msg: &str) {
-    println!(
+    eprintln!(
         "{}",
-        format_line(Level::Hint, msg, should_use_rich(is_tty()))
+        format_line(Level::Hint, msg, should_use_rich(is_tty_stderr()))
     );
 }
 
-/// Print a step/action message to stdout (e.g., "Rotating secret...")
+/// Print a step/action message to stderr (e.g., "Rotating secret...")
 pub fn step(msg: &str) {
-    println!(
+    eprintln!(
         "{}",
-        format_line(Level::Step, msg, should_use_rich(is_tty()))
+        format_line(Level::Step, msg, should_use_rich(is_tty_stderr()))
     );
 }
 
