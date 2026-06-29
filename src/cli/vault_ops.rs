@@ -1012,9 +1012,16 @@ async fn execute_vault_import(
         }
     }
 
-    output::success(&format!(
-        "Import completed: {imported_count} imported, {skipped_count} skipped, {failed_count} failed"
-    ));
+    // Don't dress a partial failure up as success: use a warning summary when
+    // any secret failed (the non-zero exit is returned below), and reserve the
+    // `[ok]` success line for a fully clean import.
+    let summary =
+        format!("Import completed: {imported_count} imported, {skipped_count} skipped, {failed_count} failed");
+    if failed_count > 0 {
+        output::warn(&summary);
+    } else {
+        output::success(&summary);
+    }
 
     // Invalidate the secrets list cache for the target vault
     if imported_count > 0 {
