@@ -861,7 +861,7 @@ pub enum Commands {
         #[arg(default_value = ".", num_args = 1..)]
         paths: Vec<std::path::PathBuf>,
         /// Scan only files staged for commit (`git diff --cached`).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         staged: bool,
         /// Scan the full HEAD tree.
         #[arg(long)]
@@ -1939,6 +1939,21 @@ mod tests {
             }
             _ => panic!("Expected List command"),
         }
+    }
+
+    #[test]
+    fn test_scan_staged_and_all_conflict() {
+        // `--staged` and `--all` select different scan sources; passing both
+        // must be a hard clap error rather than silently honoring one.
+        let result = Cli::try_parse_from(["xv", "scan", "--staged", "--all"]);
+        assert!(
+            result.is_err(),
+            "scan --staged --all should be rejected as a conflict"
+        );
+
+        // Each on its own still parses.
+        assert!(Cli::try_parse_from(["xv", "scan", "--staged"]).is_ok());
+        assert!(Cli::try_parse_from(["xv", "scan", "--all"]).is_ok());
     }
 
     #[test]

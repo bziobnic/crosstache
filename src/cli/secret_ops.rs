@@ -43,14 +43,14 @@ pub(crate) async fn execute_secret_set_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Only `--expires` / `--not-before` are inspected directly here (to reject
+    // them for bulk set); all other write-time metadata is applied uniformly via
+    // `meta.to_secret_request`.
     let SecretWriteArgs {
-        note,
-        folder,
         expires,
         not_before,
         ..
     } = meta.clone();
-    let groups = meta.groups_opt();
 
     // `--value` is only meaningful for a single secret; reject it alongside
     // bulk KEY=value arguments so the inline value can't be silently dropped.
@@ -115,18 +115,11 @@ pub(crate) async fn execute_secret_set_direct(
             let mut success_count = 0usize;
             let mut error_count = 0usize;
             for (key, value) in pairs {
-                let request = crate::secret::manager::SecretRequest {
-                    name: key.clone(),
-                    value: Zeroizing::new(value),
-                    content_type: None,
-                    enabled: Some(true),
-                    expires_on: None,
-                    not_before: None,
-                    tags: None,
-                    groups: groups.clone(),
-                    note: note.clone(),
-                    folder: folder.clone(),
-                };
+                // Build each request via the shared helper so bulk set applies
+                // the same write-time metadata (--group/--note/--folder/--tag)
+                // as the single-secret path. (--expires/--not-before are rejected
+                // for bulk above, so they're always None here.)
+                let request = meta.to_secret_request(&key, Zeroizing::new(value))?;
                 match reg
                     .active()
                     .secrets()
