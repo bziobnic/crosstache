@@ -802,15 +802,7 @@ pub(crate) async fn execute_secret_rotate_direct(
     })?;
 
     execute_secret_rotate(
-        reg,
-        name,
-        None,
-        length,
-        charset,
-        generator,
-        show_value,
-        force,
-        &config,
+        reg, name, None, length, charset, generator, show_value, force, &config,
     )
     .await?;
 

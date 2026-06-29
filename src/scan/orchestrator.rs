@@ -127,7 +127,11 @@ pub async fn fetch_secret_values(
             let backend = backend.clone();
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.ok()?;
-                match backend.secrets().get_secret(&vault, &backend_name, true).await {
+                match backend
+                    .secrets()
+                    .get_secret(&vault, &backend_name, true)
+                    .await
+                {
                     Ok(props) => props.value.map(|v| SecretRef {
                         name: secret_name,
                         vault,

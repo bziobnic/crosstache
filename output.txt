@@ -1,0 +1,1 @@
+[ok] Secret 'MY_VAR' copied to clipboard (auto-clears in 30s)

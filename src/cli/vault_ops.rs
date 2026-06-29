@@ -180,7 +180,8 @@ pub(crate) async fn execute_vault_command(
                 no_cache,
                 page,
                 page_size,
-                pager.map(crate::cli::commands::PagerWhen::wants_pager)
+                pager
+                    .map(crate::cli::commands::PagerWhen::wants_pager)
                     .unwrap_or(false),
                 &config,
             )

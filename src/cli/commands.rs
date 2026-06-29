@@ -2339,7 +2339,10 @@ mod tests {
         assert!(req.not_before.is_none());
         assert_eq!(req.enabled, Some(true));
         assert_eq!(
-            req.tags.as_ref().and_then(|t| t.get("owner")).map(String::as_str),
+            req.tags
+                .as_ref()
+                .and_then(|t| t.get("owner"))
+                .map(String::as_str),
             Some("team-data")
         );
     }
