@@ -872,3 +872,45 @@ fn vault_info() {
         output,
     );
 }
+
+// ===========================================================================
+// env pull / env push — must route through the active backend on local.
+// Regression guard: these once required a registry the CLI never built for
+// Env commands, so they always failed with "No backend registry available".
+// ===========================================================================
+
+#[test]
+fn env_pull_exports_secrets_dotenv() {
+    let env = TestEnv::new();
+    env.set_secret("ALPHA", "one");
+    env.set_secret("BETA", "two");
+
+    // Default format is dotenv (plain); values go to stdout.
+    let out = env.xv_ok(&["env", "pull"]);
+    assert!(
+        out.contains("ALPHA=one"),
+        "env pull should export ALPHA, got:\n{out}"
+    );
+    assert!(
+        out.contains("BETA=two"),
+        "env pull should export BETA, got:\n{out}"
+    );
+}
+
+#[test]
+fn env_push_imports_secrets() {
+    let env = TestEnv::new();
+    let dotenv = "GAMMA=three\nDELTA=four\n";
+    let output = env.xv_with_stdin(&["env", "push"], dotenv);
+    assert!(
+        output.status.success(),
+        "env push failed (exit {:?}):\nstdout: {}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Both secrets must now be retrievable from the local backend.
+    assert_eq!(env.get_raw("GAMMA"), "three");
+    assert_eq!(env.get_raw("DELTA"), "four");
+}
