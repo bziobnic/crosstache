@@ -486,7 +486,7 @@ pub enum Commands {
         page_size: Option<usize>,
         /// Use an interactive pager for output. Optional WHEN is auto (default
         /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
-        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "always")]
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
         pager: Option<PagerWhen>,
         /// Print one name per line, no headers, no ANSI. Pipe-friendly.
         /// Overrides --format and disables auto-format-resolution.
@@ -942,7 +942,7 @@ pub enum VaultCommands {
         page_size: Option<usize>,
         /// Use an interactive pager for output. Optional WHEN is auto (default
         /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
-        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "always")]
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
         pager: Option<PagerWhen>,
     },
     /// Delete a vault
@@ -1117,7 +1117,7 @@ pub enum VaultShareCommands {
         page_size: Option<usize>,
         /// Use an interactive pager for output. Optional WHEN is auto (default
         /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
-        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "always")]
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
         pager: Option<PagerWhen>,
     },
 }
@@ -1156,7 +1156,7 @@ pub enum ShareCommands {
         page_size: Option<usize>,
         /// Use an interactive pager for output. Optional WHEN is auto (default
         /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
-        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "always")]
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
         pager: Option<PagerWhen>,
     },
 }
@@ -1935,7 +1935,7 @@ mod tests {
             } => {
                 assert_eq!(page, Some(2));
                 assert_eq!(page_size, Some(25));
-                assert_eq!(pager, Some(PagerWhen::Always));
+                assert_eq!(pager, Some(PagerWhen::Auto));
             }
             _ => panic!("Expected List command"),
         }
@@ -1982,7 +1982,7 @@ mod tests {
             } => {
                 assert_eq!(page, Some(3));
                 assert_eq!(page_size, Some(50));
-                assert_eq!(pager, Some(PagerWhen::Always));
+                assert_eq!(pager, Some(PagerWhen::Auto));
             }
             _ => panic!("Expected vault list command"),
         }
@@ -2017,7 +2017,7 @@ mod tests {
                 assert_eq!(secret_name, "api-key");
                 assert_eq!(page, Some(2));
                 assert_eq!(page_size, Some(10));
-                assert_eq!(pager, Some(PagerWhen::Always));
+                assert_eq!(pager, Some(PagerWhen::Auto));
             }
             _ => panic!("Expected share list command"),
         }
@@ -2056,7 +2056,7 @@ mod tests {
                 assert_eq!(vault_name, "prod-vault");
                 assert_eq!(page, Some(2));
                 assert_eq!(page_size, Some(10));
-                assert_eq!(pager, Some(PagerWhen::Always));
+                assert_eq!(pager, Some(PagerWhen::Auto));
             }
             _ => panic!("Expected vault share list command"),
         }

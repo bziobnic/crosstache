@@ -159,9 +159,22 @@ async fn execute_scan_head(
 
     let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
 
+    // Apply the same [scan].exclude + default globs the filesystem walk uses,
+    // so `scan --all` doesn't scan target/, node_modules/, or user-excluded
+    // committed paths that `scan .` would skip.
+    let mut extra_excludes: Vec<String> = Vec::new();
+    if let Ok(Some((_, project))) =
+        crate::config::project::find_project_config(&std::env::current_dir()?).await
+    {
+        if let Some(scan) = &project.scan {
+            extra_excludes = scan.exclude.clone();
+        }
+    }
+    let excludes = crate::scan::walker::build_exclude_set(&extra_excludes)?;
+
     let patterns = builtin_patterns();
     let engine = MatchEngine::new(&secrets, &patterns);
-    let findings = scan_head(&engine)?;
+    let findings = scan_head(&engine, &excludes)?;
 
     render_findings(&findings, hook, format)
 }

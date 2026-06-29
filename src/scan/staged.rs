@@ -117,7 +117,14 @@ pub fn scan_staged(engine: &MatchEngine) -> Result<Vec<Finding>> {
 /// Scan every file tracked at `HEAD` (`xv scan --all`). Content comes from the
 /// committed tree via `git show HEAD:PATH`, so this reflects what is already
 /// committed rather than the working tree or index.
-pub fn scan_head(engine: &MatchEngine) -> Result<Vec<Finding>> {
-    let files = list_head_files()?;
+///
+/// `excludes` carries the same default + `[scan].exclude` globs the filesystem
+/// walker applies (see `walker::build_exclude_set`), so `--all` does not scan
+/// `target/`, `node_modules/`, or user-excluded paths that `scan .` skips.
+pub fn scan_head(engine: &MatchEngine, excludes: &globset::GlobSet) -> Result<Vec<Finding>> {
+    let files: Vec<String> = list_head_files()?
+        .into_iter()
+        .filter(|f| !excludes.is_match(f))
+        .collect();
     Ok(scan_git_paths(&files, read_head_file, engine))
 }
