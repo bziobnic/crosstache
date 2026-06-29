@@ -56,4 +56,4 @@ new secret write/run/pager flags, scan `--all`, and stdout/stderr separation.
       command backend support, `--pager`, and clean stdout piping.
 - [x] Update `docs/scan.md` with the `--all` HEAD-tree mode, staged/all
       conflict, backend support, exclude behavior, and hook/CI pitfalls.
-- [ ] Verify documentation diffs and run a docs-only validation command.
+- [x] Verify documentation diffs and run a docs-only validation command.
