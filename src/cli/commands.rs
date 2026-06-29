@@ -576,11 +576,13 @@ pub enum Commands {
         group: Vec<String>,
         /// Inject only these secrets by name (repeatable). When given, the set
         /// of injected secrets is restricted to these names (still subject to
-        /// --group). Names are matched against the original secret name.
+        /// --group). Names match either the original (user-facing) name shown by
+        /// `xv list` or the backend name.
         #[arg(long)]
         include: Vec<String>,
         /// Exclude these secrets by name (repeatable). Applied after --group and
-        /// --include. Matched against the original secret name.
+        /// --include. Names match either the original (user-facing) name shown by
+        /// `xv list` or the backend name.
         #[arg(long)]
         exclude: Vec<String>,
         /// Disable masking of secret values in output

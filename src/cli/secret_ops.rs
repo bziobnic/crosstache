@@ -2428,14 +2428,22 @@ async fn execute_secret_run(
 
     // Apply name-based --include / --exclude on top of the group filter.
     // --include restricts to the named secrets; --exclude removes them.
-    // Both match against the secret's name (the canonical key).
+    //
+    // Match against EITHER the user-facing original name (what `xv list` prints
+    // and what the flag help documents) OR the backend name, so a name copied
+    // from list output always resolves — `original_name` falls back to `name`
+    // when unset, mirroring the list display logic.
+    let name_matches = |secret: &crate::secret::manager::SecretSummary, n: &str| -> bool {
+        n == secret.name || (!secret.original_name.is_empty() && n == secret.original_name)
+    };
+
     // Positive selection first: --group (already applied above) plus --include.
     // If a positive selector was given but matched nothing, that's almost always
     // a mistake (typo'd group/name, wrong vault); silently running the child with
     // no secrets — and exiting 0 — is dangerous in scripts/CI, so fail loud.
     let selected: Vec<_> = filtered_secrets
         .into_iter()
-        .filter(|secret| include.is_empty() || include.iter().any(|n| n == &secret.name))
+        .filter(|secret| include.is_empty() || include.iter().any(|n| name_matches(secret, n)))
         .collect();
     let positive_selector = !groups.is_empty() || !include.is_empty();
     if selected.is_empty() && positive_selector {
@@ -2451,7 +2459,7 @@ async fn execute_secret_run(
     // so it behaves like an empty vault: warn, but still run the command.
     let filtered_secrets: Vec<_> = selected
         .into_iter()
-        .filter(|secret| !exclude.iter().any(|n| n == &secret.name))
+        .filter(|secret| !exclude.iter().any(|n| name_matches(secret, n)))
         .collect();
 
     if filtered_secrets.is_empty() {
