@@ -2429,30 +2429,34 @@ async fn execute_secret_run(
     // Apply name-based --include / --exclude on top of the group filter.
     // --include restricts to the named secrets; --exclude removes them.
     // Both match against the secret's name (the canonical key).
-    let filtered_secrets: Vec<_> = filtered_secrets
+    // Positive selection first: --group (already applied above) plus --include.
+    // If a positive selector was given but matched nothing, that's almost always
+    // a mistake (typo'd group/name, wrong vault); silently running the child with
+    // no secrets — and exiting 0 — is dangerous in scripts/CI, so fail loud.
+    let selected: Vec<_> = filtered_secrets
         .into_iter()
         .filter(|secret| include.is_empty() || include.iter().any(|n| n == &secret.name))
+        .collect();
+    let positive_selector = !groups.is_empty() || !include.is_empty();
+    if selected.is_empty() && positive_selector {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "No secrets matched the requested selection in vault '{vault_name}' \
+             (group={groups:?}, include={include:?}). \
+             Refusing to run the command with nothing injected — check the values."
+        )));
+    }
+
+    // Negative filter: --exclude. Excluding every selected secret (leaving
+    // nothing to inject) is a legitimate "run without these secrets" workflow,
+    // so it behaves like an empty vault: warn, but still run the command.
+    let filtered_secrets: Vec<_> = selected
+        .into_iter()
         .filter(|secret| !exclude.iter().any(|n| n == &secret.name))
         .collect();
 
-    // An explicit `--group` filter that matches nothing is almost always a
-    // mistake (typo'd group, wrong vault). Silently running the child command
-    // with no secrets injected — and exiting 0 — is dangerous in scripts/CI, so
-    // fail loud instead. When no filter was given, an empty vault is a legitimate
-    // state: warn, but still run the requested command (with no injected vars).
     if filtered_secrets.is_empty() {
-        let has_explicit_filter =
-            !groups.is_empty() || !include.is_empty() || !exclude.is_empty();
-        if has_explicit_filter {
-            return Err(CrosstacheError::invalid_argument(format!(
-                "No secrets matched the requested filters in vault '{vault_name}' \
-                 (group={groups:?}, include={include:?}, exclude={exclude:?}). \
-                 Refusing to run the command with nothing injected — \
-                 check the filter values."
-            )));
-        }
         output::warn(&format!(
-            "No secrets found in vault '{vault_name}'; running command with no injected secrets."
+            "No secrets to inject in vault '{vault_name}'; running command with no injected secrets."
         ));
     } else {
         output::step(&format!(
