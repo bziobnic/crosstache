@@ -36,3 +36,24 @@ fallback for Azure, and keeps auditor-backed non-Azure backends on the generic
 - [x] Add a regression test with an auditor-backed non-Azure backend and a
       resource-group override.
 - [x] Verify the routing fix with targeted tests and lint diagnostics.
+
+## v0.16 Public Workflow Documentation Refresh
+
+### Documentation Goal
+
+Refresh existing engineering/user docs for v0.16 public workflow changes that
+are already implemented in source: backend-trait routing for advanced commands,
+new secret write/run/pager flags, scan `--all`, and stdout/stderr separation.
+
+### Documentation Steps
+
+- [x] Confirm branch cleanliness and recent v0.16 changes against `origin/main`.
+- [x] Verify the exact CLI behavior in `src/cli/commands.rs`,
+      `src/cli/secret_ops.rs`, `src/cli/scan_ops.rs`, `src/scan/staged.rs`,
+      `src/utils/output.rs`, and `src/utils/pager.rs`.
+- [x] Update `docs/FEATURES.md` with concise examples and constraints for
+      `set --value`, write-time `--tag`, `run --include/--exclude`, advanced
+      command backend support, `--pager`, and clean stdout piping.
+- [x] Update `docs/scan.md` with the `--all` HEAD-tree mode, staged/all
+      conflict, backend support, exclude behavior, and hook/CI pitfalls.
+- [ ] Verify documentation diffs and run a docs-only validation command.
