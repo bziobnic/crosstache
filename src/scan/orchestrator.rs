@@ -99,7 +99,7 @@ pub fn skipped_files_error(outcome: &ScanOutcome) -> CrosstacheError {
 /// semaphore. Failures for individual vaults / secrets degrade
 /// silently with a debug log.
 pub async fn fetch_secret_values(
-    secret_manager: &crate::secret::manager::SecretManager,
+    backend: std::sync::Arc<dyn crate::backend::Backend>,
     vault_names: &[String],
     concurrency: usize,
 ) -> Result<Vec<SecretRef>> {
@@ -107,8 +107,8 @@ pub async fn fetch_secret_values(
     let sem = std::sync::Arc::new(Semaphore::new(concurrency.max(1)));
     let mut handles = Vec::new();
     for vault in vault_names {
-        // List secrets for this vault.
-        let summaries = match secret_manager.secret_ops().list_secrets(vault, None).await {
+        // List secrets for this vault via the active backend trait.
+        let summaries = match backend.secrets().list_secrets(vault, None).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!("list_secrets failed for vault {vault}: {e}");
@@ -124,10 +124,10 @@ pub async fn fetch_secret_values(
                 s.original_name.clone()
             };
             let backend_name = s.name.clone();
-            let ops = secret_manager.secret_ops().clone();
+            let backend = backend.clone();
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.ok()?;
-                match ops.get_secret(&vault, &backend_name, true).await {
+                match backend.secrets().get_secret(&vault, &backend_name, true).await {
                     Ok(props) => props.value.map(|v| SecretRef {
                         name: secret_name,
                         vault,

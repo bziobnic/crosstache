@@ -801,13 +801,16 @@ pub(crate) async fn execute_secret_rotate_direct(
         return execute_secret_rotate_native(name, force, config, registry).await;
     }
 
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    // Route through the active backend trait so default (client-side) rotation
+    // works on every backend; the Azure trait impl delegates to the same ops.
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
 
     execute_secret_rotate(
-        &secret_manager,
+        reg,
         name,
         None,
         length,
@@ -2204,7 +2207,7 @@ async fn execute_secret_rollback(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_secret_rotate(
-    secret_manager: &crate::secret::manager::SecretManager,
+    reg: &BackendRegistry,
     name: &str,
     vault: Option<String>,
     length: usize,
@@ -2226,8 +2229,9 @@ async fn execute_secret_rotate(
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Check if the secret exists first
-    let existing_secret = secret_manager
-        .secret_ops()
+    let existing_secret = reg
+        .active()
+        .secrets()
         .get_secret(&vault_name, name, true)
         .await
         .map_err(|e| {
@@ -2290,10 +2294,12 @@ async fn execute_secret_rotate(
     };
 
     // Set the rotated secret
-    let result = secret_manager
-        .secret_ops()
-        .set_secret(&vault_name, &set_request)
-        .await?;
+    let result = reg
+        .active()
+        .secrets()
+        .set_secret(&vault_name, set_request)
+        .await
+        .map_err(CrosstacheError::from)?;
 
     output::success(&format!("Successfully rotated secret '{}'", name));
     println!("New version: {}", result.version);

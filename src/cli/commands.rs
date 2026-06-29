@@ -1672,7 +1672,7 @@ impl Cli {
                 crate::cli::config_ops::execute_context_command(command, config).await
             }
             Commands::Env { command } => {
-                crate::cli::config_ops::execute_env_command(command, config).await
+                crate::cli::config_ops::execute_env_command(command, config, registry).await
             }
             Commands::Audit {
                 name,
