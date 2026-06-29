@@ -926,13 +926,17 @@ pub(crate) async fn execute_secret_run_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    // Route through the active backend trait so `xv run` works on every backend
+    // (azure/local/aws). The Azure trait impl delegates to the same secret ops
+    // the legacy path used, so Azure behaviour is unchanged.
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
 
     execute_secret_run(
-        &secret_manager,
+        reg,
         None,
         group,
         include,
@@ -952,12 +956,15 @@ pub(crate) async fn execute_secret_inject_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
+    // Route through the active backend trait so `xv inject` works on every
+    // backend (azure/local/aws), not just Azure.
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
 
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    execute_secret_inject(&secret_manager, None, template, out, group, &config).await
+    execute_secret_inject(reg, None, template, out, group, &config).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2311,7 +2318,7 @@ async fn execute_secret_rotate(
 async fn resolve_uri_secret(
     backend_ref: &BackendRef,
     secret_name: &str,
-    secret_manager: &crate::secret::manager::SecretManager,
+    active_secrets: &dyn crate::backend::SecretBackend,
     config: &Config,
     active_kind: BackendKind,
     cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
@@ -2333,15 +2340,15 @@ async fn resolve_uri_secret(
                 .map_err(CrosstacheError::from);
         }
     }
-    secret_manager
-        .secret_ops()
+    active_secrets
         .get_secret(&backend_ref.vault, secret_name, true)
         .await
+        .map_err(CrosstacheError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_secret_run(
-    secret_manager: &crate::secret::manager::SecretManager,
+    reg: &BackendRegistry,
     vault: Option<String>,
     groups: Vec<String>,
     include: Vec<String>,
@@ -2393,14 +2400,12 @@ async fn execute_secret_run(
         }
     }
 
-    // Get all secrets from the vault
+    // Get all secrets from the active backend (trait path — works for azure,
+    // local, and aws alike).
     let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
-    let secrets = secret_manager
-        .secret_ops()
-        .list_secrets(&vault_name, None)
-        .await;
+    let secrets = reg.active().secrets().list_secrets(&vault_name, None).await;
     progress.finish_clear();
-    let secrets = secrets?;
+    let secrets = secrets.map_err(CrosstacheError::from)?;
 
     // Filter secrets by groups if specified
     let filtered_secrets = if !groups.is_empty() {
@@ -2466,8 +2471,9 @@ async fn execute_secret_run(
     // Fetch secrets from current vault (group-filtered)
     for secret in filtered_secrets {
         // Get the secret value
-        match secret_manager
-            .secret_ops()
+        match reg
+            .active()
+            .secrets()
             .get_secret(&vault_name, &secret.name, true)
             .await
         {
@@ -2498,10 +2504,7 @@ async fn execute_secret_run(
             uri_refs.len()
         ));
 
-        let active_kind: BackendKind = config
-            .effective_backend_name()
-            .parse()
-            .unwrap_or(BackendKind::Azure);
+        let active_kind: BackendKind = reg.active().kind();
 
         // Cache backends by kind — avoids re-initialising the SDK per URI
         let mut cross_backends: std::collections::HashMap<
@@ -2521,7 +2524,7 @@ async fn execute_secret_run(
             let fetch_result = resolve_uri_secret(
                 backend_ref,
                 &secret_name,
-                secret_manager,
+                reg.active().secrets(),
                 config,
                 active_kind,
                 &mut cross_backends,
@@ -2777,7 +2780,7 @@ fn clean_split(window: &[u8], secrets: &[Zeroizing<String>], mut split: usize) -
 }
 
 async fn execute_secret_inject(
-    secret_manager: &crate::secret::manager::SecretManager,
+    reg: &BackendRegistry,
     vault: Option<String>,
     template_file: Option<String>,
     output_file: Option<String>,
@@ -2890,14 +2893,12 @@ async fn execute_secret_inject(
         );
     }
 
-    // Get all secrets from the vault
+    // Get all secrets from the active backend (trait path — works for azure,
+    // local, and aws alike).
     let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
-    let secrets = secret_manager
-        .secret_ops()
-        .list_secrets(&vault_name, None)
-        .await;
+    let secrets = reg.active().secrets().list_secrets(&vault_name, None).await;
     progress.finish_clear();
-    let secrets = secrets?;
+    let secrets = secrets.map_err(CrosstacheError::from)?;
 
     // Filter secrets by groups if specified
     let available_secrets = if !groups.is_empty() {
@@ -2929,8 +2930,9 @@ async fn execute_secret_inject(
         // Check if the secret exists in the available secrets
         if let Some(secret_summary) = available_secrets.iter().find(|s| s.name == *secret_name) {
             // Get the secret value
-            match secret_manager
-                .secret_ops()
+            match reg
+                .active()
+                .secrets()
                 .get_secret(&vault_name, &secret_summary.name, true)
                 .await
             {
@@ -2956,10 +2958,7 @@ async fn execute_secret_inject(
 
     // Fetch URI-referenced secrets (supports optional backend prefix)
     {
-        let active_kind: BackendKind = config
-            .effective_backend_name()
-            .parse()
-            .unwrap_or(BackendKind::Azure);
+        let active_kind: BackendKind = reg.active().kind();
 
         // Cache backends by kind — avoids re-initialising the SDK per URI
         let mut cross_backends: std::collections::HashMap<
@@ -2980,7 +2979,7 @@ async fn execute_secret_inject(
             let fetch_result = resolve_uri_secret(
                 backend_ref,
                 &secret_name,
-                secret_manager,
+                reg.active().secrets(),
                 config,
                 active_kind,
                 &mut cross_backends,
