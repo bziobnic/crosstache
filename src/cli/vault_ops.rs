@@ -74,6 +74,9 @@ pub(crate) async fn execute_vault_command(
                     paginate_slice, pagination_footer_text, Pagination,
                 };
 
+                let pager = pager
+                    .map(crate::cli::commands::PagerWhen::wants_pager)
+                    .unwrap_or(false);
                 let vaults = vaults_backend.list_vaults().await?;
                 let output_format = format.resolve_for_stdout();
                 let pagination = Pagination::from_args(page, page_size)?;
@@ -97,10 +100,11 @@ pub(crate) async fn execute_vault_command(
                 }
             }
             VaultCommands::Delete { name, force, .. } => {
-                if !force {
-                    output::warn(&format!(
-                        "About to delete vault '{name}'. Use --force to confirm."
-                    ));
+                if !crate::cli::helpers::confirm_destructive(
+                    force,
+                    &format!("Delete vault '{name}'?"),
+                )? {
+                    output::info("Aborted; vault not deleted.");
                     return Ok(());
                 }
                 vaults_backend.delete_vault(&name).await?;
@@ -176,7 +180,9 @@ pub(crate) async fn execute_vault_command(
                 no_cache,
                 page,
                 page_size,
-                pager,
+                pager
+                    .map(crate::cli::commands::PagerWhen::wants_pager)
+                    .unwrap_or(false),
                 &config,
             )
             .await?;
@@ -968,6 +974,7 @@ async fn execute_vault_import(
 
     let mut imported_count = 0;
     let mut skipped_count = 0;
+    let mut failed_count = 0;
 
     for secret_request in secrets_to_import {
         let secret_name = secret_request.name.clone();
@@ -1000,13 +1007,21 @@ async fn execute_vault_import(
             }
             Err(e) => {
                 output::error(&format!("Failed to import secret '{secret_name}': {e}"));
+                failed_count += 1;
             }
         }
     }
 
-    output::success(&format!(
-        "Import completed: {imported_count} imported, {skipped_count} skipped"
-    ));
+    // Don't dress a partial failure up as success: use a warning summary when
+    // any secret failed (the non-zero exit is returned below), and reserve the
+    // `[ok]` success line for a fully clean import.
+    let summary =
+        format!("Import completed: {imported_count} imported, {skipped_count} skipped, {failed_count} failed");
+    if failed_count > 0 {
+        output::warn(&summary);
+    } else {
+        output::success(&summary);
+    }
 
     // Invalidate the secrets list cache for the target vault
     if imported_count > 0 {
@@ -1014,6 +1029,14 @@ async fn execute_vault_import(
         cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
             vault_name: name.to_string(),
         });
+    }
+
+    // Any failed secret import must surface as a non-zero exit so scripted
+    // imports don't silently drop secrets.
+    if failed_count > 0 {
+        return Err(CrosstacheError::unknown(format!(
+            "vault import: {failed_count} secret(s) failed to import into vault '{name}'"
+        )));
     }
 
     Ok(())
@@ -1159,6 +1182,9 @@ async fn execute_vault_share(
             use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
             use std::fmt::Write as _;
 
+            let pager = pager
+                .map(crate::cli::commands::PagerWhen::wants_pager)
+                .unwrap_or(false);
             let resource_group =
                 resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 

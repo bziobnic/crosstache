@@ -14,7 +14,7 @@ use std::path::PathBuf;
 pub(crate) async fn execute_scan_command(
     paths: Vec<PathBuf>,
     staged: bool,
-    _all: bool,
+    all: bool,
     hook: bool,
     all_vaults: bool,
     command: Option<ScanCommands>,
@@ -31,7 +31,56 @@ pub(crate) async fn execute_scan_command(
     if staged {
         return execute_scan_staged(hook, all_vaults, format, &config, registry).await;
     }
+    if all {
+        return execute_scan_head(hook, all_vaults, format, &config, registry).await;
+    }
     execute_scan_paths(paths, hook, all_vaults, format, &config, registry).await
+}
+
+/// Resolve the active backend and the set of vaults to scan, then fetch every
+/// secret value across them through the backend trait.
+///
+/// Works on any backend (azure/local/aws). `--all-vaults` requires a backend
+/// that can enumerate vaults (`Backend::vaults()`); backends without that
+/// capability return a clear capability error instead of silently scanning a
+/// single vault.
+async fn fetch_scan_secrets(
+    all_vaults: bool,
+    config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<Vec<crate::scan::engine::SecretRef>> {
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
+    let backend = reg.active_arc();
+
+    let vault_names: Vec<String> = if all_vaults {
+        match backend.vaults() {
+            Some(vaults) => vaults
+                .list_vaults()
+                .await
+                .map_err(CrosstacheError::from)?
+                .into_iter()
+                .map(|v| v.name)
+                .collect(),
+            None => {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "--all-vaults is not supported on the {} backend (it cannot enumerate \
+                     vaults). Scan a single vault instead.",
+                    backend.name()
+                )))
+            }
+        }
+    } else {
+        vec![config.resolve_vault_name(None).await?]
+    };
+
+    let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");
+    let secrets = fetch_secret_values(backend, &vault_names, 10).await?;
+    progress.finish_clear();
+    Ok(secrets)
 }
 
 async fn execute_scan_paths(
@@ -42,33 +91,7 @@ async fn execute_scan_paths(
     config: &Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use crate::secret::manager::SecretManager;
-
-    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    // Pick which vaults to fetch from.
-    let vault_names: Vec<String> = if all_vaults {
-        let auth = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
-        let vault_manager = crate::vault::manager::VaultManager::new(
-            auth,
-            config.subscription_id.clone(),
-            config.no_color,
-        )?;
-        vault_manager
-            .vault_ops()
-            .list_vaults(Some(&config.subscription_id), None)
-            .await?
-            .into_iter()
-            .map(|v| v.name)
-            .collect()
-    } else {
-        vec![config.resolve_vault_name(None).await?]
-    };
-
-    let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");
-    let secrets = fetch_secret_values(&secret_manager, &vault_names, 10).await?;
-    progress.finish_clear();
+    let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
 
     let patterns = builtin_patterns();
     let engine = MatchEngine::new(&secrets, &patterns);
@@ -115,36 +138,43 @@ async fn execute_scan_staged(
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
     use crate::scan::staged::scan_staged;
-    use crate::secret::manager::SecretManager;
 
-    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    let vault_names: Vec<String> = if all_vaults {
-        let auth = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
-        let vault_manager = crate::vault::manager::VaultManager::new(
-            auth,
-            config.subscription_id.clone(),
-            config.no_color,
-        )?;
-        vault_manager
-            .vault_ops()
-            .list_vaults(Some(&config.subscription_id), None)
-            .await?
-            .into_iter()
-            .map(|v| v.name)
-            .collect()
-    } else {
-        vec![config.resolve_vault_name(None).await?]
-    };
-
-    let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");
-    let secrets = fetch_secret_values(&secret_manager, &vault_names, 10).await?;
-    progress.finish_clear();
+    let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
 
     let patterns = builtin_patterns();
     let engine = MatchEngine::new(&secrets, &patterns);
     let findings = scan_staged(&engine)?;
+
+    render_findings(&findings, hook, format)
+}
+
+async fn execute_scan_head(
+    hook: bool,
+    all_vaults: bool,
+    format: crate::utils::format::OutputFormat,
+    config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<()> {
+    use crate::scan::staged::scan_head;
+
+    let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
+
+    // Apply the same [scan].exclude + default globs the filesystem walk uses,
+    // so `scan --all` doesn't scan target/, node_modules/, or user-excluded
+    // committed paths that `scan .` would skip.
+    let mut extra_excludes: Vec<String> = Vec::new();
+    if let Ok(Some((_, project))) =
+        crate::config::project::find_project_config(&std::env::current_dir()?).await
+    {
+        if let Some(scan) = &project.scan {
+            extra_excludes = scan.exclude.clone();
+        }
+    }
+    let excludes = crate::scan::walker::build_exclude_set(&extra_excludes)?;
+
+    let patterns = builtin_patterns();
+    let engine = MatchEngine::new(&secrets, &patterns);
+    let findings = scan_head(&engine, &excludes)?;
 
     render_findings(&findings, hook, format)
 }

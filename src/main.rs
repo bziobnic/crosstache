@@ -184,7 +184,16 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
             | crate::cli::Commands::Cache { .. }
             | crate::cli::Commands::Local { .. }
             | crate::cli::Commands::Context { .. }
-            | crate::cli::Commands::Env { .. }
+            // Env subcommands that only read/write `.xv.toml` need no backend.
+            // `env pull` / `env push` DO talk to the active backend, so they are
+            // intentionally excluded here and get a registry built below.
+            | crate::cli::Commands::Env {
+                command: crate::cli::commands::EnvCommands::List
+                    | crate::cli::commands::EnvCommands::Use { .. }
+                    | crate::cli::commands::EnvCommands::Create { .. }
+                    | crate::cli::commands::EnvCommands::Delete { .. }
+                    | crate::cli::commands::EnvCommands::Show,
+            }
             | crate::cli::Commands::Migrate { .. }
             | crate::cli::Commands::Scan {
                 command: Some(crate::cli::commands::ScanCommands::Install { .. }),

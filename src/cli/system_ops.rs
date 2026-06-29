@@ -973,6 +973,12 @@ pub(crate) async fn execute_gen_command(
                     output::warn("Generated password (save this now):");
                     println!("{}", password.as_str());
                 }
+                // `gen --save` was asked to persist the secret; the save failed,
+                // so exit non-zero (after printing the value for recovery) rather
+                // than reporting success.
+                return Err(CrosstacheError::unknown(format!(
+                    "failed to save generated secret '{name}': {e}"
+                )));
             }
         }
         return Ok(());

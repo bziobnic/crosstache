@@ -3,8 +3,9 @@
 use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, SecretWriteArgs, ShareCommands};
 use crate::cli::helpers::{
-    copy_to_clipboard, generate_random_value, get_azure_auth_provider, mask_secrets,
-    resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error, use_trait_path,
+    confirm_destructive, copy_to_clipboard, generate_random_value, get_azure_auth_provider,
+    mask_secrets, resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error,
+    use_trait_path,
 };
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
@@ -37,18 +38,28 @@ pub(crate) async fn execute_secret_set_direct(
     args: Vec<String>,
     stdin: bool,
     trim: bool,
+    value: Option<String>,
     meta: SecretWriteArgs,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Only `--expires` / `--not-before` are inspected directly here (to reject
+    // them for bulk set); all other write-time metadata is applied uniformly via
+    // `meta.to_secret_request`.
     let SecretWriteArgs {
-        note,
-        folder,
         expires,
         not_before,
         ..
     } = meta.clone();
-    let groups = meta.groups_opt();
+
+    // `--value` is only meaningful for a single secret; reject it alongside
+    // bulk KEY=value arguments so the inline value can't be silently dropped.
+    let is_bulk = args.len() > 1 || args.iter().any(|a| a.contains('='));
+    if value.is_some() && is_bulk {
+        return Err(CrosstacheError::invalid_argument(
+            "--value can only be used when setting a single secret (not with KEY=value bulk args)",
+        ));
+    }
 
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
@@ -58,17 +69,19 @@ pub(crate) async fn execute_secret_set_direct(
         if args.len() == 1 && !args[0].contains('=') {
             // Single secret set
             let name = &args[0];
-            let value = if stdin {
+            let secret_value = if let Some(v) = value.clone() {
+                v
+            } else if stdin {
                 read_secret_value_from_stdin(trim)?
             } else {
                 rpassword::prompt_password(format!("Enter value for secret '{name}': "))?
             };
-            if value.is_empty() {
+            if secret_value.is_empty() {
                 return Err(CrosstacheError::config("Secret value cannot be empty"));
             }
             // Build the request via the shared helper so `set` and `gen --save`
             // construct identical requests from the same metadata flags.
-            let request = meta.to_secret_request(name, Zeroizing::new(value))?;
+            let request = meta.to_secret_request(name, Zeroizing::new(secret_value))?;
             let props = reg
                 .active()
                 .secrets()
@@ -102,18 +115,11 @@ pub(crate) async fn execute_secret_set_direct(
             let mut success_count = 0usize;
             let mut error_count = 0usize;
             for (key, value) in pairs {
-                let request = crate::secret::manager::SecretRequest {
-                    name: key.clone(),
-                    value: Zeroizing::new(value),
-                    content_type: None,
-                    enabled: Some(true),
-                    expires_on: None,
-                    not_before: None,
-                    tags: None,
-                    groups: groups.clone(),
-                    note: note.clone(),
-                    folder: folder.clone(),
-                };
+                // Build each request via the shared helper so bulk set applies
+                // the same write-time metadata (--group/--note/--folder/--tag)
+                // as the single-secret path. (--expires/--not-before are rejected
+                // for bulk above, so they're always None here.)
+                let request = meta.to_secret_request(&key, Zeroizing::new(value))?;
                 match reg
                     .active()
                     .secrets()
@@ -130,7 +136,18 @@ pub(crate) async fn execute_secret_set_direct(
                     }
                 }
             }
-            println!();
+            if error_count > 0 {
+                output::warn(&format!(
+                    "Bulk set complete: {success_count} succeeded, {error_count} failed"
+                ));
+                // Any failed write must surface as a non-zero exit so scripts
+                // and CI don't treat a partial failure as success.
+                invalidate_trait_secret_cache(&config, &vault_name);
+                return Err(CrosstacheError::unknown(format!(
+                    "{error_count} of {} secret(s) failed to set",
+                    success_count + error_count
+                )));
+            }
             output::success(&format!(
                 "Bulk set complete: {success_count} succeeded, {error_count} failed"
             ));
@@ -597,11 +614,14 @@ pub(crate) async fn execute_secret_delete_direct(
                 output::info(&format!("No secrets found in group '{group_name}'"));
                 return Ok(());
             }
-            if !force {
-                output::warn(&format!(
-                    "About to delete {} secret(s) in group '{group_name}'. Use --force to confirm.",
+            if !confirm_destructive(
+                force,
+                &format!(
+                    "Delete {} secret(s) in group '{group_name}'?",
                     secrets.len()
-                ));
+                ),
+            )? {
+                output::info("Aborted; no secrets deleted.");
                 return Ok(());
             }
             for s in &secrets {
@@ -612,10 +632,8 @@ pub(crate) async fn execute_secret_delete_direct(
                 output::success(&format!("Deleted '{}'", s.name));
             }
         } else if let Some(secret_name) = name {
-            if !force {
-                output::warn(&format!(
-                    "About to delete secret '{secret_name}'. Use --force to confirm."
-                ));
+            if !confirm_destructive(force, &format!("Delete secret '{secret_name}'?"))? {
+                output::info("Aborted; secret not deleted.");
                 return Ok(());
             }
             reg.active()
@@ -710,10 +728,11 @@ pub(crate) async fn execute_secret_rollback_direct(
             return execute_secret_rollback_legacy(name, version, force, config, registry).await;
         }
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
-        if !force {
-            output::warn(&format!(
-                "About to roll back secret '{name}' to version {version}. Use --force to confirm."
-            ));
+        if !confirm_destructive(
+            force,
+            &format!("Roll back secret '{name}' to version {version}?"),
+        )? {
+            output::info("Aborted; no rollback performed.");
             return Ok(());
         }
         let props = reg
@@ -774,21 +793,16 @@ pub(crate) async fn execute_secret_rotate_direct(
         return execute_secret_rotate_native(name, force, config, registry).await;
     }
 
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    // Route through the active backend trait so default (client-side) rotation
+    // works on every backend; the Azure trait impl delegates to the same ops.
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
 
     execute_secret_rotate(
-        &secret_manager,
-        name,
-        None,
-        length,
-        charset,
-        generator,
-        show_value,
-        force,
-        &config,
+        reg, name, None, length, charset, generator, show_value, force, &config,
     )
     .await?;
 
@@ -888,23 +902,32 @@ async fn execute_secret_rotate_native(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_run_direct(
     group: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
     no_masking: bool,
     inherit_env: bool,
     command: Vec<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
-
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    // Route through the active backend trait so `xv run` works on every backend
+    // (azure/local/aws). The Azure trait impl delegates to the same secret ops
+    // the legacy path used, so Azure behaviour is unchanged.
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
 
     execute_secret_run(
-        &secret_manager,
+        reg,
         None,
         group,
+        include,
+        exclude,
         no_masking,
         inherit_env,
         command,
@@ -920,12 +943,15 @@ pub(crate) async fn execute_secret_inject_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    let auth_provider = get_azure_auth_provider(registry, &config)?;
+    // Route through the active backend trait so `xv inject` works on every
+    // backend (azure/local/aws), not just Azure.
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        )
+    })?;
 
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    execute_secret_inject(&secret_manager, None, template, out, group, &config).await
+    execute_secret_inject(reg, None, template, out, group, &config).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1095,10 +1121,11 @@ pub(crate) async fn execute_secret_purge_direct(
             return execute_secret_purge_legacy(name, force, config, registry).await;
         }
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
-        if !force {
-            output::warn(&format!(
-                "About to PERMANENTLY DELETE secret '{name}'. This cannot be undone. Use --force to confirm."
-            ));
+        if !confirm_destructive(
+            force,
+            &format!("PERMANENTLY DELETE secret '{name}'? This cannot be undone."),
+        )? {
+            output::info("Aborted; secret not purged.");
             return Ok(());
         }
         reg.active()
@@ -2164,7 +2191,7 @@ async fn execute_secret_rollback(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_secret_rotate(
-    secret_manager: &crate::secret::manager::SecretManager,
+    reg: &BackendRegistry,
     name: &str,
     vault: Option<String>,
     length: usize,
@@ -2186,8 +2213,9 @@ async fn execute_secret_rotate(
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Check if the secret exists first
-    let existing_secret = secret_manager
-        .secret_ops()
+    let existing_secret = reg
+        .active()
+        .secrets()
         .get_secret(&vault_name, name, true)
         .await
         .map_err(|e| {
@@ -2250,10 +2278,12 @@ async fn execute_secret_rotate(
     };
 
     // Set the rotated secret
-    let result = secret_manager
-        .secret_ops()
-        .set_secret(&vault_name, &set_request)
-        .await?;
+    let result = reg
+        .active()
+        .secrets()
+        .set_secret(&vault_name, set_request)
+        .await
+        .map_err(CrosstacheError::from)?;
 
     output::success(&format!("Successfully rotated secret '{}'", name));
     println!("New version: {}", result.version);
@@ -2278,7 +2308,7 @@ async fn execute_secret_rotate(
 async fn resolve_uri_secret(
     backend_ref: &BackendRef,
     secret_name: &str,
-    secret_manager: &crate::secret::manager::SecretManager,
+    active_secrets: &dyn crate::backend::SecretBackend,
     config: &Config,
     active_kind: BackendKind,
     cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
@@ -2300,16 +2330,19 @@ async fn resolve_uri_secret(
                 .map_err(CrosstacheError::from);
         }
     }
-    secret_manager
-        .secret_ops()
+    active_secrets
         .get_secret(&backend_ref.vault, secret_name, true)
         .await
+        .map_err(CrosstacheError::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_run(
-    secret_manager: &crate::secret::manager::SecretManager,
+    reg: &BackendRegistry,
     vault: Option<String>,
     groups: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
     no_masking: bool,
     inherit_env: bool,
     command: Vec<String>,
@@ -2357,14 +2390,12 @@ async fn execute_secret_run(
         }
     }
 
-    // Get all secrets from the vault
+    // Get all secrets from the active backend (trait path — works for azure,
+    // local, and aws alike).
     let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
-    let secrets = secret_manager
-        .secret_ops()
-        .list_secrets(&vault_name, None)
-        .await;
+    let secrets = reg.active().secrets().list_secrets(&vault_name, None).await;
     progress.finish_clear();
-    let secrets = secrets?;
+    let secrets = secrets.map_err(CrosstacheError::from)?;
 
     // Filter secrets by groups if specified
     let filtered_secrets = if !groups.is_empty() {
@@ -2387,15 +2418,52 @@ async fn execute_secret_run(
         secrets
     };
 
-    if filtered_secrets.is_empty() {
-        output::info("No secrets found to inject");
-        return Ok(());
+    // Apply name-based --include / --exclude on top of the group filter.
+    // --include restricts to the named secrets; --exclude removes them.
+    //
+    // Match against EITHER the user-facing original name (what `xv list` prints
+    // and what the flag help documents) OR the backend name, so a name copied
+    // from list output always resolves — `original_name` falls back to `name`
+    // when unset, mirroring the list display logic.
+    let name_matches = |secret: &crate::secret::manager::SecretSummary, n: &str| -> bool {
+        n == secret.name || (!secret.original_name.is_empty() && n == secret.original_name)
+    };
+
+    // Positive selection first: --group (already applied above) plus --include.
+    // If a positive selector was given but matched nothing, that's almost always
+    // a mistake (typo'd group/name, wrong vault); silently running the child with
+    // no secrets — and exiting 0 — is dangerous in scripts/CI, so fail loud.
+    let selected: Vec<_> = filtered_secrets
+        .into_iter()
+        .filter(|secret| include.is_empty() || include.iter().any(|n| name_matches(secret, n)))
+        .collect();
+    let positive_selector = !groups.is_empty() || !include.is_empty();
+    if selected.is_empty() && positive_selector {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "No secrets matched the requested selection in vault '{vault_name}' \
+             (group={groups:?}, include={include:?}). \
+             Refusing to run the command with nothing injected — check the values."
+        )));
     }
 
-    output::step(&format!(
-        "Injecting {} secret(s) as environment variables...",
-        filtered_secrets.len()
-    ));
+    // Negative filter: --exclude. Excluding every selected secret (leaving
+    // nothing to inject) is a legitimate "run without these secrets" workflow,
+    // so it behaves like an empty vault: warn, but still run the command.
+    let filtered_secrets: Vec<_> = selected
+        .into_iter()
+        .filter(|secret| !exclude.iter().any(|n| name_matches(secret, n)))
+        .collect();
+
+    if filtered_secrets.is_empty() {
+        output::warn(&format!(
+            "No secrets to inject in vault '{vault_name}'; running command with no injected secrets."
+        ));
+    } else {
+        output::step(&format!(
+            "Injecting {} secret(s) as environment variables...",
+            filtered_secrets.len()
+        ));
+    }
 
     // Fetch secret values and build environment map
     let mut env_vars: HashMap<String, Zeroizing<String>> = HashMap::new();
@@ -2405,8 +2473,9 @@ async fn execute_secret_run(
     // Fetch secrets from current vault (group-filtered)
     for secret in filtered_secrets {
         // Get the secret value
-        match secret_manager
-            .secret_ops()
+        match reg
+            .active()
+            .secrets()
             .get_secret(&vault_name, &secret.name, true)
             .await
         {
@@ -2437,10 +2506,7 @@ async fn execute_secret_run(
             uri_refs.len()
         ));
 
-        let active_kind: BackendKind = config
-            .effective_backend_name()
-            .parse()
-            .unwrap_or(BackendKind::Azure);
+        let active_kind: BackendKind = reg.active().kind();
 
         // Cache backends by kind — avoids re-initialising the SDK per URI
         let mut cross_backends: std::collections::HashMap<
@@ -2460,7 +2526,7 @@ async fn execute_secret_run(
             let fetch_result = resolve_uri_secret(
                 backend_ref,
                 &secret_name,
-                secret_manager,
+                reg.active().secrets(),
                 config,
                 active_kind,
                 &mut cross_backends,
@@ -2716,7 +2782,7 @@ fn clean_split(window: &[u8], secrets: &[Zeroizing<String>], mut split: usize) -
 }
 
 async fn execute_secret_inject(
-    secret_manager: &crate::secret::manager::SecretManager,
+    reg: &BackendRegistry,
     vault: Option<String>,
     template_file: Option<String>,
     output_file: Option<String>,
@@ -2829,14 +2895,12 @@ async fn execute_secret_inject(
         );
     }
 
-    // Get all secrets from the vault
+    // Get all secrets from the active backend (trait path — works for azure,
+    // local, and aws alike).
     let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
-    let secrets = secret_manager
-        .secret_ops()
-        .list_secrets(&vault_name, None)
-        .await;
+    let secrets = reg.active().secrets().list_secrets(&vault_name, None).await;
     progress.finish_clear();
-    let secrets = secrets?;
+    let secrets = secrets.map_err(CrosstacheError::from)?;
 
     // Filter secrets by groups if specified
     let available_secrets = if !groups.is_empty() {
@@ -2868,8 +2932,9 @@ async fn execute_secret_inject(
         // Check if the secret exists in the available secrets
         if let Some(secret_summary) = available_secrets.iter().find(|s| s.name == *secret_name) {
             // Get the secret value
-            match secret_manager
-                .secret_ops()
+            match reg
+                .active()
+                .secrets()
                 .get_secret(&vault_name, &secret_summary.name, true)
                 .await
             {
@@ -2895,10 +2960,7 @@ async fn execute_secret_inject(
 
     // Fetch URI-referenced secrets (supports optional backend prefix)
     {
-        let active_kind: BackendKind = config
-            .effective_backend_name()
-            .parse()
-            .unwrap_or(BackendKind::Azure);
+        let active_kind: BackendKind = reg.active().kind();
 
         // Cache backends by kind — avoids re-initialising the SDK per URI
         let mut cross_backends: std::collections::HashMap<
@@ -2919,7 +2981,7 @@ async fn execute_secret_inject(
             let fetch_result = resolve_uri_secret(
                 backend_ref,
                 &secret_name,
-                secret_manager,
+                reg.active().secrets(),
                 config,
                 active_kind,
                 &mut cross_backends,
@@ -3784,6 +3846,9 @@ async fn execute_secret_share(
             use crate::utils::pagination::{paginate_slice, pagination_footer_text, Pagination};
             use std::fmt::Write as _;
 
+            let pager = pager
+                .map(crate::cli::commands::PagerWhen::wants_pager)
+                .unwrap_or(false);
             let mut roles = vault_manager
                 .list_secret_access(&vault_name, &resource_group, &secret_name)
                 .await?;
@@ -4468,7 +4533,7 @@ mod tests {
                 all: false,
                 page: None,
                 page_size: None,
-                pager: false,
+                pager: None,
             },
             config,
             Some(&registry),

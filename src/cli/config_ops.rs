@@ -1284,7 +1284,11 @@ async fn execute_context_init(
 
 // ── Env Commands ─────────────────────────────────────────────────────────────
 
-pub(crate) async fn execute_env_command(command: EnvCommands, config: Config) -> Result<()> {
+pub(crate) async fn execute_env_command(
+    command: EnvCommands,
+    config: Config,
+    registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<()> {
     match command {
         EnvCommands::List => execute_env_list(&config).await,
         EnvCommands::Use { name } => execute_env_use(&name, &config).await,
@@ -1317,8 +1321,10 @@ pub(crate) async fn execute_env_command(command: EnvCommands, config: Config) ->
             format,
             group,
             output,
-        } => execute_env_pull(&format, group, output, &config).await,
-        EnvCommands::Push { file, overwrite } => execute_env_push(file, overwrite, &config).await,
+        } => execute_env_pull(&format, group, output, &config, registry).await,
+        EnvCommands::Push { file, overwrite } => {
+            execute_env_push(file, overwrite, &config, registry).await
+        }
     }
 }
 
@@ -1604,22 +1610,18 @@ async fn execute_env_pull(
     groups: Vec<String>,
     output: Option<String>,
     config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
-    use crate::secret::manager::SecretManager;
     use crate::utils::format::OutputFormat;
-    use std::sync::Arc;
 
-    // Create authentication provider and secret manager
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
+    // Route through the active backend trait so `xv env pull` works on every
+    // backend (azure/local/aws), not just Azure.
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
         )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    })?;
+    let secrets_backend = reg.active().secrets();
 
     // Determine vault name
     let vault_name = config.resolve_vault_name(None).await?;
@@ -1630,18 +1632,13 @@ async fn execute_env_pull(
     let mut all_secrets = Vec::new();
     if groups.is_empty() {
         // Get all secrets
-        let secrets = secret_manager
-            .list_secrets_formatted(
-                &vault_name,
-                None,
-                crate::utils::format::OutputFormat::Json, // We don't use the output, just need the list
-                false,
-                true,
-            )
-            .await?;
+        let secrets = secrets_backend
+            .list_secrets(&vault_name, None)
+            .await
+            .map_err(CrosstacheError::from)?;
         for secret_summary in secrets {
-            match secret_manager
-                .get_secret_safe(&vault_name, &secret_summary.name, true, true)
+            match secrets_backend
+                .get_secret(&vault_name, &secret_summary.name, true)
                 .await
             {
                 Ok(secret) => all_secrets.push(secret),
@@ -1654,18 +1651,13 @@ async fn execute_env_pull(
     } else {
         // Get secrets filtered by groups
         for group in &groups {
-            let secrets = secret_manager
-                .list_secrets_formatted(
-                    &vault_name,
-                    Some(group),
-                    crate::utils::format::OutputFormat::Json, // We don't use the output, just need the list
-                    false,
-                    true,
-                )
-                .await?;
+            let secrets = secrets_backend
+                .list_secrets(&vault_name, Some(group))
+                .await
+                .map_err(CrosstacheError::from)?;
             for secret_summary in secrets {
-                match secret_manager
-                    .get_secret_safe(&vault_name, &secret_summary.name, true, true)
+                match secrets_backend
+                    .get_secret(&vault_name, &secret_summary.name, true)
                     .await
                 {
                     Ok(secret) => all_secrets.push(secret),
@@ -1762,24 +1754,24 @@ async fn execute_env_pull(
     Ok(())
 }
 
-async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
-    use crate::secret::manager::SecretManager;
+async fn execute_env_push(
+    file: Option<String>,
+    overwrite: bool,
+    config: &Config,
+    registry: Option<&crate::backend::BackendRegistry>,
+) -> Result<()> {
     use crate::secret::manager::SecretRequest;
     use std::collections::HashMap;
     use std::io::Read;
-    use std::sync::Arc;
 
-    // Create authentication provider and secret manager
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
+    // Route through the active backend trait so `xv env push` works on every
+    // backend (azure/local/aws), not just Azure.
+    let reg = registry.ok_or_else(|| {
+        CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
         )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    })?;
+    let secrets_backend = reg.active().secrets();
 
     // Determine vault name
     let vault_name = config.resolve_vault_name(None).await?;
@@ -1853,8 +1845,8 @@ async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config
     if !overwrite {
         let mut existing_secrets = Vec::new();
         for key in secrets.keys() {
-            if secret_manager
-                .get_secret_safe(&vault_name, key, false, false)
+            if secrets_backend
+                .get_secret(&vault_name, key, false)
                 .await
                 .is_ok()
             {
@@ -1892,8 +1884,8 @@ async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config
             folder: None,
         };
 
-        match secret_manager
-            .set_secret_safe(&vault_name, &key, &value, Some(secret_request))
+        match secrets_backend
+            .set_secret(&vault_name, secret_request)
             .await
         {
             Ok(_) => {
@@ -1915,16 +1907,17 @@ async fn execute_env_push(file: Option<String>, overwrite: bool, config: &Config
     }
 
     if error_count > 0 {
-        println!(
-            "Completed with {} successful and {} failed operations",
-            success_count, error_count
-        );
-    } else {
-        output::success(&format!(
-            "Successfully pushed {} secret(s) to vault '{}'",
-            success_count, vault_name
-        ));
+        // Surface partial failures as a non-zero exit so CI/scripts don't treat
+        // a half-finished push as success.
+        return Err(CrosstacheError::unknown(format!(
+            "env push: {error_count} of {} secret(s) failed to set in vault '{vault_name}'",
+            success_count + error_count
+        )));
     }
+    output::success(&format!(
+        "Successfully pushed {} secret(s) to vault '{}'",
+        success_count, vault_name
+    ));
 
     Ok(())
 }

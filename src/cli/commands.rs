@@ -22,6 +22,27 @@ fn get_version() -> &'static str {
     built_info::PKG_VERSION
 }
 
+/// When to route long output through an interactive pager.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
+pub enum PagerWhen {
+    /// Page only when stdout is an interactive terminal (default for `--pager`).
+    #[default]
+    Auto,
+    /// Always attempt to page (still falls back to direct print when not a TTY).
+    Always,
+    /// Never page; print directly.
+    Never,
+}
+
+impl PagerWhen {
+    /// Map to the boolean the pager plumbing expects. `print_output` already
+    /// gates paging on `can_page()`, so Auto and Always both request paging and
+    /// only Never disables it outright.
+    pub fn wants_pager(self) -> bool {
+        !matches!(self, PagerWhen::Never)
+    }
+}
+
 #[derive(Debug, Clone, clap::ValueEnum, PartialEq, Eq, Default)]
 pub enum OnConflict {
     /// Skip secrets that already exist in the target (default)
@@ -292,6 +313,9 @@ pub struct SecretWriteArgs {
     /// Set not-before date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
     #[arg(long)]
     pub not_before: Option<String>,
+    /// Custom tag in key=value format (repeatable; e.g. `--tag owner=team-data`)
+    #[arg(long = "tag", value_name = "KEY=VALUE", value_parser = parse_key_val::<String, String>)]
+    pub tag: Vec<(String, String)>,
 }
 
 impl SecretWriteArgs {
@@ -303,6 +327,7 @@ impl SecretWriteArgs {
             || self.folder.is_some()
             || self.expires.is_some()
             || self.not_before.is_some()
+            || !self.tag.is_empty()
     }
 
     /// The groups as an `Option<Vec<String>>` matching `SecretRequest.groups`
@@ -335,6 +360,17 @@ impl SecretWriteArgs {
             None => None,
         };
 
+        let tags = if self.tag.is_empty() {
+            None
+        } else {
+            Some(
+                self.tag
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashMap<String, String>>(),
+            )
+        };
+
         Ok(crate::secret::manager::SecretRequest {
             name: name.to_string(),
             value,
@@ -342,7 +378,7 @@ impl SecretWriteArgs {
             enabled: Some(true),
             expires_on,
             not_before: not_before_on,
-            tags: None,
+            tags,
             groups: self.groups_opt(),
             note: self.note.clone(),
             folder: self.folder.clone(),
@@ -365,6 +401,11 @@ pub enum Commands {
         /// Trim leading/trailing whitespace from the value read via --stdin
         #[arg(long, requires = "stdin")]
         trim: bool,
+        /// Inline value for a single secret (avoid: appears in shell history —
+        /// prefer the interactive prompt or --stdin). Only valid with a single
+        /// secret name; mutually exclusive with --stdin.
+        #[arg(long, conflicts_with = "stdin")]
+        value: Option<String>,
         /// Write-time metadata (group/note/folder/expires/not-before)
         #[command(flatten)]
         meta: SecretWriteArgs,
@@ -443,9 +484,10 @@ pub enum Commands {
         /// Number of rows per page
         #[arg(long)]
         page_size: Option<usize>,
-        /// Use an interactive pager for TTY output
-        #[arg(long)]
-        pager: bool,
+        /// Use an interactive pager for output. Optional WHEN is auto (default
+        /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
+        pager: Option<PagerWhen>,
         /// Print one name per line, no headers, no ANSI. Pipe-friendly.
         /// Overrides --format and disables auto-format-resolution.
         #[arg(long)]
@@ -532,6 +574,17 @@ pub enum Commands {
         /// Filter secrets by group (can be specified multiple times)
         #[arg(short, long)]
         group: Vec<String>,
+        /// Inject only these secrets by name (repeatable). When given, the set
+        /// of injected secrets is restricted to these names (still subject to
+        /// --group). Names match either the original (user-facing) name shown by
+        /// `xv list` or the backend name.
+        #[arg(long)]
+        include: Vec<String>,
+        /// Exclude these secrets by name (repeatable). Applied after --group and
+        /// --include. Names match either the original (user-facing) name shown by
+        /// `xv list` or the backend name.
+        #[arg(long)]
+        exclude: Vec<String>,
         /// Disable masking of secret values in output
         #[arg(long)]
         no_masking: bool,
@@ -567,8 +620,8 @@ pub enum Commands {
         /// Trim leading/trailing whitespace from the value read via --stdin
         #[arg(long, requires = "stdin")]
         trim: bool,
-        /// Tags for the secret in key=value format
-        #[arg(short, long, value_parser = parse_key_val::<String, String>)]
+        /// Tags for the secret in key=value format (repeatable)
+        #[arg(short, long, visible_alias = "tag", value_parser = parse_key_val::<String, String>)]
         tags: Vec<(String, String)>,
         /// Groups for the secret (can be specified multiple times)
         #[arg(short, long)]
@@ -810,7 +863,7 @@ pub enum Commands {
         #[arg(default_value = ".", num_args = 1..)]
         paths: Vec<std::path::PathBuf>,
         /// Scan only files staged for commit (`git diff --cached`).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "all")]
         staged: bool,
         /// Scan the full HEAD tree.
         #[arg(long)]
@@ -889,9 +942,10 @@ pub enum VaultCommands {
         /// Number of rows per page
         #[arg(long)]
         page_size: Option<usize>,
-        /// Use an interactive pager for TTY output
-        #[arg(long)]
-        pager: bool,
+        /// Use an interactive pager for output. Optional WHEN is auto (default
+        /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
+        pager: Option<PagerWhen>,
     },
     /// Delete a vault
     Delete {
@@ -1063,9 +1117,10 @@ pub enum VaultShareCommands {
         /// Number of rows per page
         #[arg(long)]
         page_size: Option<usize>,
-        /// Use an interactive pager for TTY output
-        #[arg(long)]
-        pager: bool,
+        /// Use an interactive pager for output. Optional WHEN is auto (default
+        /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
+        pager: Option<PagerWhen>,
     },
 }
 
@@ -1101,9 +1156,10 @@ pub enum ShareCommands {
         /// Number of rows per page
         #[arg(long)]
         page_size: Option<usize>,
-        /// Use an interactive pager for TTY output
-        #[arg(long)]
-        pager: bool,
+        /// Use an interactive pager for output. Optional WHEN is auto (default
+        /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
+        pager: Option<PagerWhen>,
     },
 }
 
@@ -1371,10 +1427,11 @@ impl Cli {
                 args,
                 stdin,
                 trim,
+                value,
                 meta,
             } => {
                 crate::cli::secret_ops::execute_secret_set_direct(
-                    args, stdin, trim, meta, config, registry,
+                    args, stdin, trim, value, meta, config, registry,
                 )
                 .await
             }
@@ -1417,6 +1474,7 @@ impl Cli {
                 names_only,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
+                let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
                 crate::cli::secret_ops::execute_secret_list_direct(
                     group, all, expiring, expired, no_cache, pagination, pager, names_only, config,
                     registry,
@@ -1471,12 +1529,16 @@ impl Cli {
             }
             Commands::Run {
                 group,
+                include,
+                exclude,
                 no_masking,
                 inherit_env,
                 command,
             } => {
                 crate::cli::secret_ops::execute_secret_run_direct(
                     group,
+                    include,
+                    exclude,
                     no_masking,
                     inherit_env,
                     command,
@@ -1612,7 +1674,7 @@ impl Cli {
                 crate::cli::config_ops::execute_context_command(command, config).await
             }
             Commands::Env { command } => {
-                crate::cli::config_ops::execute_env_command(command, config).await
+                crate::cli::config_ops::execute_env_command(command, config, registry).await
             }
             Commands::Audit {
                 name,
@@ -1875,10 +1937,25 @@ mod tests {
             } => {
                 assert_eq!(page, Some(2));
                 assert_eq!(page_size, Some(25));
-                assert!(pager);
+                assert_eq!(pager, Some(PagerWhen::Auto));
             }
             _ => panic!("Expected List command"),
         }
+    }
+
+    #[test]
+    fn test_scan_staged_and_all_conflict() {
+        // `--staged` and `--all` select different scan sources; passing both
+        // must be a hard clap error rather than silently honoring one.
+        let result = Cli::try_parse_from(["xv", "scan", "--staged", "--all"]);
+        assert!(
+            result.is_err(),
+            "scan --staged --all should be rejected as a conflict"
+        );
+
+        // Each on its own still parses.
+        assert!(Cli::try_parse_from(["xv", "scan", "--staged"]).is_ok());
+        assert!(Cli::try_parse_from(["xv", "scan", "--all"]).is_ok());
     }
 
     #[test]
@@ -1907,7 +1984,7 @@ mod tests {
             } => {
                 assert_eq!(page, Some(3));
                 assert_eq!(page_size, Some(50));
-                assert!(pager);
+                assert_eq!(pager, Some(PagerWhen::Auto));
             }
             _ => panic!("Expected vault list command"),
         }
@@ -1942,7 +2019,7 @@ mod tests {
                 assert_eq!(secret_name, "api-key");
                 assert_eq!(page, Some(2));
                 assert_eq!(page_size, Some(10));
-                assert!(pager);
+                assert_eq!(pager, Some(PagerWhen::Auto));
             }
             _ => panic!("Expected share list command"),
         }
@@ -1981,7 +2058,7 @@ mod tests {
                 assert_eq!(vault_name, "prod-vault");
                 assert_eq!(page, Some(2));
                 assert_eq!(page_size, Some(10));
-                assert!(pager);
+                assert_eq!(pager, Some(PagerWhen::Auto));
             }
             _ => panic!("Expected vault share list command"),
         }
@@ -2248,6 +2325,7 @@ mod tests {
             folder: Some("f".into()),
             expires: None,
             not_before: None,
+            tag: vec![("owner".into(), "team-data".into())],
         };
         let req = meta
             .to_secret_request("name", zeroize::Zeroizing::new("val".to_string()))
@@ -2260,6 +2338,22 @@ mod tests {
         assert!(req.expires_on.is_none());
         assert!(req.not_before.is_none());
         assert_eq!(req.enabled, Some(true));
+        assert_eq!(
+            req.tags
+                .as_ref()
+                .and_then(|t| t.get("owner"))
+                .map(String::as_str),
+            Some("team-data")
+        );
+    }
+
+    #[test]
+    fn test_has_any_detects_tag() {
+        let with_tag = SecretWriteArgs {
+            tag: vec![("k".into(), "v".into())],
+            ..Default::default()
+        };
+        assert!(with_tag.has_any());
     }
 
     #[test]

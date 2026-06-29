@@ -29,25 +29,33 @@ pub struct WalkConfig {
     pub extra_excludes: Vec<String>,
 }
 
-/// Walk one or more roots and return the paths to scan, with all the
-/// exclusion rules applied (gitignore, xvignore, defaults, custom,
-/// binary skip).
-pub fn walk(roots: &[&Path], cfg: &WalkConfig) -> Result<Vec<PathBuf>> {
-    // Build the exclude globset.
+/// Build the scanner's exclude globset: [`DEFAULT_EXCLUDES`] plus any extra
+/// globs (e.g. `[scan].exclude` from `.xv.toml`).
+///
+/// Shared by the filesystem walker and the git-tree scans (`scan --all`) so
+/// every scan source applies the same exclusion rules. Match paths against it
+/// relative to the scan root / repo root.
+pub fn build_exclude_set(extra_excludes: &[String]) -> Result<globset::GlobSet> {
     let mut gs = GlobSetBuilder::new();
     for g in DEFAULT_EXCLUDES
         .iter()
         .copied()
-        .chain(cfg.extra_excludes.iter().map(|s| s.as_str()))
+        .chain(extra_excludes.iter().map(|s| s.as_str()))
     {
         let glob = Glob::new(g).map_err(|e| {
             CrosstacheError::config(format!("invalid scan exclude glob '{g}': {e}"))
         })?;
         gs.add(glob);
     }
-    let excludes = gs
-        .build()
-        .map_err(|e| CrosstacheError::config(format!("scan glob build failed: {e}")))?;
+    gs.build()
+        .map_err(|e| CrosstacheError::config(format!("scan glob build failed: {e}")))
+}
+
+/// Walk one or more roots and return the paths to scan, with all the
+/// exclusion rules applied (gitignore, xvignore, defaults, custom,
+/// binary skip).
+pub fn walk(roots: &[&Path], cfg: &WalkConfig) -> Result<Vec<PathBuf>> {
+    let excludes = build_exclude_set(&cfg.extra_excludes)?;
 
     let mut out: Vec<PathBuf> = Vec::new();
     for root in roots {
@@ -152,6 +160,20 @@ mod tests {
         .unwrap();
         let lines = read_xvignore(temp.path());
         assert_eq!(lines, vec!["target/", "*.bak"]);
+    }
+
+    #[test]
+    fn build_exclude_set_matches_defaults_and_custom() {
+        let set = build_exclude_set(&["secrets/**".to_string()]).unwrap();
+        // Defaults
+        assert!(set.is_match("target/debug/app"));
+        assert!(set.is_match("node_modules/pkg/index.js"));
+        assert!(set.is_match("Cargo.lock"));
+        assert!(set.is_match(".git/config"));
+        // Custom [scan].exclude glob
+        assert!(set.is_match("secrets/prod.env"));
+        // Normal source is not excluded
+        assert!(!set.is_match("src/main.rs"));
     }
 
     #[test]
