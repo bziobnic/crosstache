@@ -111,7 +111,7 @@ where
 /// will be committed.
 pub fn scan_staged(engine: &MatchEngine) -> Result<Vec<Finding>> {
     let files = list_staged_files()?;
-    Ok(scan_git_paths(&files, |p| read_staged_file(p), engine))
+    Ok(scan_git_paths(&files, read_staged_file, engine))
 }
 
 /// Scan every file tracked at `HEAD` (`xv scan --all`). Content comes from the
@@ -119,5 +119,5 @@ pub fn scan_staged(engine: &MatchEngine) -> Result<Vec<Finding>> {
 /// committed rather than the working tree or index.
 pub fn scan_head(engine: &MatchEngine) -> Result<Vec<Finding>> {
     let files = list_head_files()?;
-    Ok(scan_git_paths(&files, |p| read_head_file(p), engine))
+    Ok(scan_git_paths(&files, read_head_file, engine))
 }

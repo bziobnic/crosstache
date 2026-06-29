@@ -233,9 +233,12 @@ fn context_envs_lists_envs() {
         stdout.contains("* dev"),
         "active env should be starred: {stdout}"
     );
+    // The explanatory hint is informational chrome and goes to stderr (so the
+    // env list on stdout stays pipe-clean).
+    let stderr = stderr_str(&out);
     assert!(
-        stdout.contains("not the vault context") && stdout.contains("config show --resolved"),
-        "context envs should explain env-vs-context and point to resolved config: {stdout}"
+        stderr.contains("not the vault context") && stderr.contains("config show --resolved"),
+        "context envs should explain env-vs-context and point to resolved config: {stderr}"
     );
 }
 

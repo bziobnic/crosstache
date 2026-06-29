@@ -543,22 +543,24 @@ fn set_with_metadata() {
 }
 
 // ===========================================================================
-// Delete without --force should NOT delete (prompt guard)
+// Delete without --force in a non-interactive session should REFUSE (exit
+// non-zero) and not delete — never silently no-op.
 // ===========================================================================
 
 #[test]
-fn delete_without_force_is_noop() {
+fn delete_without_force_refuses_noninteractive() {
     let env = TestEnv::new();
     env.set_secret("SAFE_SECRET", "safe-value");
 
-    // Delete WITHOUT --force should succeed (prints warning) but not delete
-    let output = env.xv_ok(&["delete", "SAFE_SECRET"]);
+    // Delete WITHOUT --force in a non-TTY (test harness) must fail loudly and
+    // point at --force, instead of silently no-opping with exit 0.
+    let (_stdout, stderr) = env.xv_fail(&["delete", "SAFE_SECRET"]);
     assert!(
-        output.contains("--force") || output.contains("force"),
-        "should mention --force requirement"
+        stderr.contains("--force") || stderr.contains("force"),
+        "should mention --force requirement, got stderr:\n{stderr}"
     );
 
-    // Secret should still be there
+    // Secret must still be there (refusal must not delete).
     let value = env.get_raw("SAFE_SECRET");
     assert_eq!(value, "safe-value");
 }

@@ -34,7 +34,6 @@ fn read_secret_value_from_stdin(trim: bool) -> Result<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_set_direct(
     args: Vec<String>,
     stdin: bool,
