@@ -29,7 +29,7 @@ use tabled::{
 /// (e.g. U+009B CSI). Newlines and tabs are kept: they only affect layout,
 /// not terminal state. Machine-readable formats (JSON/YAML/CSV) are left
 /// untouched so scripts see the raw values.
-fn sanitize_control_chars(input: &str) -> String {
+pub(crate) fn sanitize_control_chars(input: &str) -> String {
     fn is_dangerous(c: char) -> bool {
         c.is_control() && c != '\n' && c != '\t'
     }

@@ -304,29 +304,9 @@ fn format_secret_list_rows_for_human(
                 .unwrap_or_default(),
             folder: secret.folder.clone().unwrap_or_default(),
             groups: secret.groups.clone().unwrap_or_default(),
-            updated_on: date_portion_for_display(&secret.updated_on),
+            updated_on: crate::cli::ls_view::date_portion_for_display(&secret.updated_on),
         })
         .collect()
-}
-
-/// Reduce a backend timestamp like "2026-05-17 01:19:00 UTC" to its date
-/// portion for human tables. Values that don't lead with a YYYY-MM-DD token
-/// pass through unmodified; machine formats always get the full timestamp.
-fn date_portion_for_display(timestamp: &str) -> String {
-    let first = timestamp.split_whitespace().next().unwrap_or("");
-    let is_date_shaped = first.len() == 10
-        && first.chars().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                c == '-'
-            } else {
-                c.is_ascii_digit()
-            }
-        });
-    if is_date_shaped {
-        first.to_string()
-    } else {
-        timestamp.to_string()
-    }
 }
 
 fn wrap_text_to_width(input: &str, width: usize) -> String {
@@ -4963,24 +4943,5 @@ mod tests {
         assert_eq!(read_secret_value(&mut reader, false).unwrap(), "");
         let mut reader = std::io::Cursor::new("  \n  ");
         assert_eq!(read_secret_value(&mut reader, true).unwrap(), "");
-    }
-
-    #[test]
-    fn date_portion_truncates_standard_timestamp() {
-        assert_eq!(
-            date_portion_for_display("2026-05-17 01:19:00 UTC"),
-            "2026-05-17"
-        );
-        assert_eq!(date_portion_for_display("2026-05-17"), "2026-05-17");
-    }
-
-    #[test]
-    fn date_portion_passes_through_nonstandard_values() {
-        // Not date-shaped: return the raw value unmodified, never error.
-        assert_eq!(date_portion_for_display("yesterday"), "yesterday");
-        assert_eq!(date_portion_for_display("2026-5-7 01:19"), "2026-5-7 01:19");
-        assert_eq!(date_portion_for_display("N/A"), "N/A");
-        // Empty stays empty.
-        assert_eq!(date_portion_for_display(""), "");
     }
 }
