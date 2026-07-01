@@ -431,7 +431,13 @@ pub(crate) fn display_cached_secret_list(
 
     if scoped.subtree.is_empty() {
         let msg = if !path.is_empty() {
-            format!("No secrets found in folder '{path}'.")
+            if all {
+                format!("No secrets found in folder '{path}'.")
+            } else {
+                format!(
+                    "No enabled secrets found in folder '{path}'. Use --all to show disabled secrets."
+                )
+            }
         } else if all {
             "No secrets found in vault.".to_string()
         } else {
