@@ -142,6 +142,10 @@ pub(crate) fn render_grid(entries: &[LsEntry], width: usize, color: bool) -> Str
         if total <= width || widths.len() <= 1 {
             break (rows, widths);
         }
+        // Safe to jump to widths.len()-1: trailing empty columns mean the
+        // measured layout already collapsed to widths.len() effective
+        // columns, and intermediate cols values in the same rows bucket
+        // (rows = n.div_ceil(cols)) produce identical layouts.
         cols = widths.len() - 1;
     };
 
@@ -289,6 +293,19 @@ mod tests {
         assert_eq!(scoped.secrets.len(), 1);
         assert_eq!(scoped.secrets[0].name, "root-a");
         assert_eq!(scoped.subtree.len(), 4);
+    }
+
+    #[test]
+    fn root_subtree_includes_folder_tagged_secrets() {
+        let scoped = scope_secrets(
+            vec![summary("root-a", None), summary("tucked", Some("prod/db"))],
+            "",
+        );
+        assert_eq!(
+            scoped.subtree.len(),
+            2,
+            "explicit table renders the subtree — folder-tagged secrets must be present at root"
+        );
     }
 
     #[test]

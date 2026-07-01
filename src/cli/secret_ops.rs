@@ -408,6 +408,9 @@ pub(crate) fn display_cached_secret_list(
     );
 
     if !human_table_like {
+        if long {
+            crate::utils::output::warn("--long is ignored for machine-readable formats");
+        }
         let page = paginate_slice(&scoped.subtree, pagination);
         let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
         let output = formatter.format_table(&page.items)?;
@@ -445,11 +448,7 @@ pub(crate) fn display_cached_secret_list(
 
     // Legacy rounded table only on explicit --format table|plain|raw.
     if config.format_explicit && !long {
-        let table_secrets = if recursive {
-            &scoped.subtree
-        } else {
-            &scoped.secrets
-        };
+        let table_secrets = &scoped.subtree;
         let page = paginate_slice(table_secrets, pagination);
         let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
         let display_rows = format_secret_list_rows_for_human(&page.items);

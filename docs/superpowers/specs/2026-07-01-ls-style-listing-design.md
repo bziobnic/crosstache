@@ -49,7 +49,7 @@ For a requested path `P` (empty at root) and a secret with folder tag `F` (absen
 - **Direct child secret:** `F == P` (root: no folder tag).
 - **Child folder entry:** the next path segment of every in-scope `F` strictly longer than `P`. Distinct set, e.g. at root, tags `prod/db` and `prod/api` yield one entry `prod/`.
 
-A path with no in-scope secrets prints `No secrets found in folder '<P>'` (plus the existing `--all` hint when disabled-only) via `output::info` (stderr), exit 0. Machine formats print valid-empty (`[]`) on stdout instead, matching the P0 `share list` pattern.
+A path with no in-scope secrets prints `No secrets found in folder '<P>'` (plus the existing `--all` hint when disabled-only). The message is emitted in the human output (stdout, matching `xv ls`'s existing empty-state behavior), exit 0. Machine formats print valid-empty (`[]`) on stdout instead, matching the P0 `share list` pattern.
 
 ### 3. Rendering (human, resolved format = Table)
 
@@ -64,7 +64,7 @@ Mode selection: `-l` → long; explicit `--format table` → legacy table; other
 
 **3b. Long (`-l`).** Borderless, space-aligned columns: `NAME  UPDATED  GROUPS  NOTE` — name (folders as `name/`), date-only updated (reusing P0's `date_portion_for_display`), groups, first line of note (truncated with `…` past 60 chars). Folder rows show `-` in the non-name columns (mirroring `file list`'s `<DIR>` rows). Same header/footer as grid. No box-drawing characters.
 
-**3c. Legacy table (explicit `--format table`).** The P0-fixed rounded table over the scoped direct children (folder entries excluded; the Folder column already carries that information), plus the existing count line. Distinguishing "explicit table" from auto-resolved requires a new `Config.format_explicit: bool` set at dispatch next to `runtime_output_format` (`src/cli/commands.rs` dispatch, currently resolving at ~line 1372).
+**3c. Legacy table (explicit `--format table`).** The P0-fixed rounded table over the scoped recursive subtree (folder entries excluded; the Folder column carries each secret's folder), so the classic table always shows everything in scope and `-r` is a no-op for it, plus the existing count line. Distinguishing "explicit table" from auto-resolved requires a new `Config.format_explicit: bool` set at dispatch next to `runtime_output_format` (`src/cli/commands.rs` dispatch, currently resolving at ~line 1372).
 
 ### 4. Machine formats and `--names-only`
 

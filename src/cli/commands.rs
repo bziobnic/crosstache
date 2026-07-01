@@ -459,7 +459,9 @@ pub enum Commands {
     /// List secrets in the current vault context (alias: ls)
     #[command(alias = "ls")]
     List {
-        /// Folder path to list (e.g. `prod` or `prod/db`). Omit for the vault root.
+        /// Folder path to list (e.g. `prod` or `prod/db`). Omit for the vault
+        /// root. The active env's write-side `folder` default does not scope
+        /// listings.
         #[arg(value_name = "FOLDER")]
         path: Option<String>,
         /// Long listing: name, updated date, groups, note
