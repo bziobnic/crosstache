@@ -4,6 +4,7 @@
 //! `folder` tag (e.g. `prod/db`). Nothing here talks to a backend.
 
 use crate::secret::manager::SecretSummary;
+use crate::utils::format::sanitize_control_chars;
 
 /// The result of scoping a secret list to a folder path.
 pub(crate) struct ScopedList {
@@ -81,6 +82,92 @@ pub(crate) fn date_portion_for_display(timestamp: &str) -> String {
     } else {
         timestamp.to_string()
     }
+}
+
+/// One row/cell in the ls-style views.
+#[derive(Clone)]
+pub(crate) enum LsEntry {
+    Folder(String),
+    Secret(SecretSummary),
+}
+
+/// Folders first (already sorted), then direct-child secrets (already sorted).
+pub(crate) fn entries_for_display(scoped: &ScopedList) -> Vec<LsEntry> {
+    let mut entries: Vec<LsEntry> = scoped
+        .folders
+        .iter()
+        .cloned()
+        .map(LsEntry::Folder)
+        .collect();
+    entries.extend(scoped.secrets.iter().cloned().map(LsEntry::Secret));
+    entries
+}
+
+fn entry_label(entry: &LsEntry) -> String {
+    match entry {
+        LsEntry::Folder(name) => format!("{}/", sanitize_control_chars(name)),
+        LsEntry::Secret(s) => sanitize_control_chars(display_name(s)),
+    }
+}
+
+const GRID_GUTTER: usize = 2;
+const CYAN: &str = "\x1b[36m";
+const RESET: &str = "\x1b[0m";
+
+/// ls -C style column-major grid fitted to `width` display columns.
+pub(crate) fn render_grid(entries: &[LsEntry], width: usize, color: bool) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let labels: Vec<String> = entries.iter().map(entry_label).collect();
+    let lens: Vec<usize> = labels.iter().map(|l| l.chars().count()).collect();
+    let n = labels.len();
+
+    // Find the largest column count whose per-column max widths fit.
+    let mut cols = n;
+    let (rows, col_widths) = loop {
+        let rows = n.div_ceil(cols);
+        let mut widths: Vec<usize> = Vec::new();
+        for c in 0..cols {
+            let w = (0..rows)
+                .filter_map(|r| lens.get(c * rows + r).copied())
+                .max();
+            match w {
+                Some(w) => widths.push(w),
+                None => break, // trailing empty column; stop
+            }
+        }
+        let total: usize =
+            widths.iter().sum::<usize>() + GRID_GUTTER * widths.len().saturating_sub(1);
+        if total <= width || widths.len() <= 1 {
+            break (rows, widths);
+        }
+        cols = widths.len() - 1;
+    };
+    let cols = col_widths.len();
+
+    let mut out = String::new();
+    for r in 0..rows {
+        let mut line = String::new();
+        for c in 0..cols {
+            let idx = c * rows + r;
+            let Some(label) = labels.get(idx) else {
+                continue;
+            };
+            let pad = col_widths[c].saturating_sub(lens[idx]);
+            if color && matches!(entries[idx], LsEntry::Folder(_)) {
+                line.push_str(CYAN);
+                line.push_str(label);
+                line.push_str(RESET);
+            } else {
+                line.push_str(label);
+            }
+            line.push_str(&" ".repeat(pad + GRID_GUTTER));
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -177,5 +264,80 @@ mod tests {
         assert_eq!(date_portion_for_display("2026-5-7 01:19"), "2026-5-7 01:19");
         assert_eq!(date_portion_for_display("N/A"), "N/A");
         assert_eq!(date_portion_for_display(""), "");
+    }
+
+    fn folder(name: &str) -> LsEntry {
+        LsEntry::Folder(name.to_string())
+    }
+    fn secret_entry(name: &str) -> LsEntry {
+        LsEntry::Secret(summary(name, None))
+    }
+
+    #[test]
+    fn grid_fills_column_major_within_width() {
+        let entries = vec![
+            folder("dev"),
+            folder("prod"),
+            secret_entry("alpha"),
+            secret_entry("beta"),
+            secret_entry("gamma-long-name"),
+            secret_entry("delta"),
+        ];
+        // Width 40: expect multiple columns, folders first, trailing slashes.
+        let out = render_grid(&entries, 40, false);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.len() < entries.len(), "should use >1 column:\n{out}");
+        assert!(out.starts_with("dev/"), "folders come first:\n{out}");
+        assert!(out.contains("prod/"));
+        assert!(out.contains("gamma-long-name"));
+        for line in &lines {
+            assert_eq!(line.trim_end(), *line, "no trailing whitespace");
+            assert!(line.chars().count() <= 40, "line exceeds width:\n{out}");
+        }
+    }
+
+    #[test]
+    fn grid_degrades_to_single_column_when_narrow() {
+        let entries = vec![
+            secret_entry("an-extremely-long-secret-name-beyond-width"),
+            secret_entry("short"),
+        ];
+        let out = render_grid(&entries, 10, false);
+        assert_eq!(out.lines().count(), 2);
+    }
+
+    #[test]
+    fn grid_colors_folders_when_enabled() {
+        let entries = vec![folder("prod"), secret_entry("alpha")];
+        let out = render_grid(&entries, 80, true);
+        assert!(out.contains("\x1b[36mprod/\x1b[0m"), "{out}");
+        assert!(!out.contains("\x1b[36malpha"), "secrets uncolored: {out}");
+    }
+
+    #[test]
+    fn grid_sanitizes_control_characters_in_names() {
+        let entries = vec![secret_entry("evil\x1b[31mname")];
+        let out = render_grid(&entries, 80, false);
+        assert!(
+            !out.contains('\x1b'),
+            "raw ESC must not reach output: {out:?}"
+        );
+        assert!(out.contains("\\x1B"), "escaped form visible: {out}");
+    }
+
+    #[test]
+    fn grid_of_nothing_is_empty() {
+        assert_eq!(render_grid(&[], 80, false), "");
+    }
+
+    #[test]
+    fn entries_for_display_orders_folders_before_secrets() {
+        let scoped = scope_secrets(
+            vec![summary("root-a", None), summary("x", Some("prod"))],
+            "",
+        );
+        let entries = entries_for_display(&scoped);
+        assert!(matches!(&entries[0], LsEntry::Folder(f) if f == "prod"));
+        assert!(matches!(&entries[1], LsEntry::Secret(s) if s.name == "root-a"));
     }
 }
