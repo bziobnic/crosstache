@@ -12,7 +12,7 @@ A holistic UX review of the `xv` list commands found four defects that are broke
 1. **The human table render is broken in practice.** Real `xv --format table ls` output on a typical terminal shows two columns (Folder, Groups) crushed to zero width with blank headers, and the `Updated` column hard-wrapped mid-token (`2026-05-17 01:19:00 UT` / `C`), so every row occupies three lines.
 2. **The global `--columns` flag is a no-op.** It is defined at `src/cli/commands.rs:164-166` and advertised in `--help --show-options` ("Select specific columns for table output"), but nothing anywhere in the codebase reads it.
 3. **`xv share list` ignores `--format` entirely.** The handler (`src/cli/secret_ops.rs:3839-3892`) hard-codes `OutputFormat::Table`, so `xv share list foo --format json` still prints a table — share audits cannot be scripted. Its sibling `xv vault share list` (`src/cli/vault_ops.rs:1173-1225`) honors format correctly. The empty-state message also goes to stdout via `println!`, unlike every other list command, which routes empties to stderr via `output::info`.
-4. **`xv context list` ignores color settings.** `execute_context_list` (`src/cli/config_ops.rs:1063-1132`) passes a hard-coded `false` as `no_color` to `format_table` (line 1123), so `--no-color` and `NO_COLOR` have no effect on the table body.
+4. **`xv context list` ignores color settings.** `execute_context_list` (`src/cli/config_ops.rs:1063-1132`) passes a hard-coded `false` as `no_color` to `format_table` (line 1123), so the config `no_color` setting and the `NO_COLOR` convention have no effect on the table body.
 
 ## Decisions (settled with Scott, 2026-07-01)
 
@@ -66,7 +66,7 @@ Manual verification (real terminal, real vault):
 
 - `xv --format table ls`: no blank-header columns; `Updated` shows `YYYY-MM-DD` on one line; rows with short notes occupy one line each at 80+ columns.
 - `xv share list <secret> --format json` emits JSON (including `[]` when there are no assignments); with no `--format` and piped stdout, emits JSON via auto-resolution.
-- `NO_COLOR=1 xv context list` and `xv --no-color context list` emit no ANSI escapes.
+- `NO_COLOR=1 xv context list` emits no ANSI escapes.
 - `xv --columns Name ls` fails with an unexpected-argument error.
 
 Gates: `cargo fmt`, `cargo clippy --all-targets`, `cargo test`.
@@ -77,3 +77,4 @@ Gates: `cargo fmt`, `cargo clippy --all-targets`, `cargo test`.
 - Folder-aware listing / `--folder` filter (P1 spec).
 - Format-flag, pager-flag, count/header/empty-state unification across list commands (P2 spec).
 - Re-introducing column selection (returns with the P2 shared-renderer work).
+- A real `--no-color` CLI flag (candidate for the P2 flag-unification pass).

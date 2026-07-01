@@ -309,6 +309,9 @@ fn format_secret_list_rows_for_human(
         .collect()
 }
 
+/// Reduce a backend timestamp like "2026-05-17 01:19:00 UTC" to its date
+/// portion for human tables. Values that don't lead with a YYYY-MM-DD token
+/// pass through unmodified; machine formats always get the full timestamp.
 fn date_portion_for_display(timestamp: &str) -> String {
     let first = timestamp.split_whitespace().next().unwrap_or("");
     let is_date_shaped = first.len() == 10
