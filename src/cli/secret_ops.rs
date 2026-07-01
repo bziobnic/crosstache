@@ -376,6 +376,9 @@ pub(crate) fn display_cached_secret_list(
     secrets: Vec<crate::secret::manager::SecretSummary>,
     group: Option<String>,
     all: bool,
+    path: &str,
+    long: bool,
+    recursive: bool,
     pagination: Pagination,
     pager: bool,
     vault_name: &str,
@@ -467,6 +470,7 @@ pub(crate) fn display_cached_secret_list(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_list_direct(
+    path: String,
     group: Option<String>,
     all: bool,
     expiring: Option<String>,
@@ -475,6 +479,8 @@ pub(crate) async fn execute_secret_list_direct(
     pagination: Pagination,
     pager: bool,
     names_only: bool,
+    long: bool,
+    recursive: bool,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -497,6 +503,9 @@ pub(crate) async fn execute_secret_list_direct(
                     cached,
                     group,
                     all,
+                    &path,
+                    long,
+                    recursive,
                     pagination,
                     pager,
                     &vault_name,
@@ -578,6 +587,9 @@ pub(crate) async fn execute_secret_list_direct(
             } else {
                 all
             },
+            "",
+            false,
+            false,
             pagination,
             pager,
             &vault_name,
