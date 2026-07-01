@@ -639,9 +639,9 @@ pub(crate) async fn execute_secret_list_direct(
             } else {
                 all
             },
-            "",
-            false,
-            false,
+            &path,
+            long,
+            recursive,
             pagination,
             pager,
             &vault_name,

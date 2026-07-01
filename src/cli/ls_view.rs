@@ -144,17 +144,16 @@ pub(crate) fn render_grid(entries: &[LsEntry], width: usize, color: bool) -> Str
         }
         cols = widths.len() - 1;
     };
-    let cols = col_widths.len();
 
     let mut out = String::new();
     for r in 0..rows {
         let mut line = String::new();
-        for c in 0..cols {
+        for (c, col_width) in col_widths.iter().enumerate() {
             let idx = c * rows + r;
             let Some(label) = labels.get(idx) else {
                 continue;
             };
-            let pad = col_widths[c].saturating_sub(lens[idx]);
+            let pad = col_width.saturating_sub(lens[idx]);
             if color && matches!(entries[idx], LsEntry::Folder(_)) {
                 line.push_str(CYAN);
                 line.push_str(label);
