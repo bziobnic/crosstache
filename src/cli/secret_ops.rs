@@ -304,9 +304,29 @@ fn format_secret_list_rows_for_human(
                 .unwrap_or_default(),
             folder: secret.folder.clone().unwrap_or_default(),
             groups: secret.groups.clone().unwrap_or_default(),
-            updated_on: secret.updated_on.clone(),
+            updated_on: date_portion_for_display(&secret.updated_on),
         })
         .collect()
+}
+
+/// Reduce a backend timestamp like "2026-05-17 01:19:00 UTC" to its date
+/// portion for human tables. Values that don't lead with a YYYY-MM-DD token
+/// pass through unmodified; machine formats always get the full timestamp.
+fn date_portion_for_display(timestamp: &str) -> String {
+    let first = timestamp.split_whitespace().next().unwrap_or("");
+    let is_date_shaped = first.len() == 10
+        && first.chars().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                c == '-'
+            } else {
+                c.is_ascii_digit()
+            }
+        });
+    if is_date_shaped {
+        first.to_string()
+    } else {
+        timestamp.to_string()
+    }
 }
 
 fn wrap_text_to_width(input: &str, width: usize) -> String {
@@ -3860,30 +3880,40 @@ async fn execute_secret_share(
             let pagination = Pagination::from_args(page, page_size)?;
             let paged = paginate_slice(&roles, pagination);
 
+            let fmt = config.runtime_output_format;
+            let human_table_like = matches!(
+                fmt,
+                crate::utils::format::OutputFormat::Table
+                    | crate::utils::format::OutputFormat::Plain
+                    | crate::utils::format::OutputFormat::Raw
+            );
+            let formatter = crate::utils::format::TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+            );
+
             if roles.is_empty() {
-                println!(
-                    "No access assignments found for secret '{}' in vault '{}'",
-                    secret_name, vault_name
-                );
+                if human_table_like {
+                    // Chrome goes to stderr; stdout stays clean for pipes.
+                    crate::utils::output::info(&format!(
+                        "No access assignments found for secret '{secret_name}' in vault '{vault_name}'"
+                    ));
+                } else {
+                    // Machine formats emit valid empty output (e.g. `[]`).
+                    println!("{}", formatter.format_table(&paged.items)?);
+                }
             } else {
                 let mut output = String::new();
-                let _ = writeln!(
-                    output,
-                    "Access assignments for secret '{}' in vault '{}':",
-                    secret_name, vault_name
-                );
-                let formatter = crate::utils::format::TableFormatter::new(
-                    crate::utils::format::OutputFormat::Table,
-                    config.no_color,
-                    None,
-                );
+                if human_table_like {
+                    let _ = writeln!(
+                        output,
+                        "Access assignments for secret '{secret_name}' in vault '{vault_name}':"
+                    );
+                }
                 let table_output = formatter.format_table(&paged.items)?;
                 output.push_str(&table_output);
-                if let Some(footer) = pagination_footer_text(
-                    &paged,
-                    "assignment",
-                    crate::utils::format::OutputFormat::Table,
-                ) {
+                if let Some(footer) = pagination_footer_text(&paged, "assignment", fmt) {
                     output.push('\n');
                     output.push_str(&footer);
                 }
@@ -4933,5 +4963,24 @@ mod tests {
         assert_eq!(read_secret_value(&mut reader, false).unwrap(), "");
         let mut reader = std::io::Cursor::new("  \n  ");
         assert_eq!(read_secret_value(&mut reader, true).unwrap(), "");
+    }
+
+    #[test]
+    fn date_portion_truncates_standard_timestamp() {
+        assert_eq!(
+            date_portion_for_display("2026-05-17 01:19:00 UTC"),
+            "2026-05-17"
+        );
+        assert_eq!(date_portion_for_display("2026-05-17"), "2026-05-17");
+    }
+
+    #[test]
+    fn date_portion_passes_through_nonstandard_values() {
+        // Not date-shaped: return the raw value unmodified, never error.
+        assert_eq!(date_portion_for_display("yesterday"), "yesterday");
+        assert_eq!(date_portion_for_display("2026-5-7 01:19"), "2026-5-7 01:19");
+        assert_eq!(date_portion_for_display("N/A"), "N/A");
+        // Empty stays empty.
+        assert_eq!(date_portion_for_display(""), "");
     }
 }

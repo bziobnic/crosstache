@@ -608,6 +608,10 @@ fn load_from_env(config: &mut Config) {
         config.debug = value.to_lowercase() == "true" || value == "1";
     }
 
+    if std::env::var("NO_COLOR").is_ok() {
+        config.no_color = true;
+    }
+
     if let Ok(value) = std::env::var("AZURE_SUBSCRIPTION_ID") {
         config.subscription_id = value;
     }

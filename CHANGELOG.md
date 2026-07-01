@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`xv ls` table rendering.** Columns whose cells are all empty are no longer rendered as blank zero-width headers, narrow terminals now shrink the widest column first instead of chopping every column (no more `UT`/`C` timestamp wrapping), and the `Updated` column shows the date only (`2026-05-17`). Machine formats (JSON/YAML/CSV) are unchanged.
+- **`xv share list` honors the global `--format`** (json/yaml/csv/…) like `xv vault share list` already did; its empty-state message now goes to stderr, and machine formats emit valid empty output (`[]`) for pipes.
+- **`NO_COLOR` now disables color for all table output.** The environment variable was previously honored only by status messages; it now also sets the config's `no_color`, and `xv context list` no longer hard-codes colored output.
+
+### Removed
+
+- The global `--columns` flag, which was documented but never implemented (a silent no-op since introduction). Column selection will return with the planned list-renderer unification.
+
+---
+
 ## v0.16.0 — Cross-backend advanced commands, new flags, and UX fixes (2026-06-29)
 
 Advanced commands now work on every backend, the CLI's documented-but-missing

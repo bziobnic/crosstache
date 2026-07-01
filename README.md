@@ -1131,6 +1131,7 @@ configuration error.
 | `XV_NO_PARENT_CONFIG` | `1` disables `.xv.toml` walk-up |
 | `CACHE_TTL` | Cache TTL in seconds |
 | `DEBUG` | `true` / `1` enables debug logging |
+| `NO_COLOR` | Disable colored output (any value; standard [NO_COLOR](https://no-color.org/) convention) |
 | `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_CONTAINER` | Blob storage destination |
 | `BLOB_CHUNK_SIZE_MB` | Upload chunk size |
 | `BLOB_MAX_CONCURRENT_UPLOADS` | Upload concurrency |
@@ -1146,7 +1147,6 @@ These work with any command:
 | Flag | Purpose |
 |------|---------|
 | `--format <FORMAT>` | `table` / `json` / `yaml` / `csv` / `plain` / `raw` / `template` (default: `auto` — table on TTY, json for pipes) |
-| `--columns <COLS>` | Select specific columns for table output (comma-separated) |
 | `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
 | `--template <TEMPLATE>` | Custom template string for template format |
 | `--env <NAME>` | Active env from `.xv.toml` (overridden by `XV_ENV`) |

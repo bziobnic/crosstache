@@ -161,10 +161,6 @@ pub struct Cli {
     #[arg(long, global = true, hide = should_hide_options())]
     pub template: Option<String>,
 
-    /// Select specific columns for table output (comma-separated)
-    #[arg(long, global = true, hide = should_hide_options())]
-    pub columns: Option<String>,
-
     /// Azure credential type to use first (cli, managed_identity, environment, default)
     #[arg(
         long,

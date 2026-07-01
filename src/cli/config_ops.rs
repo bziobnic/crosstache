@@ -1060,7 +1060,7 @@ Use `xv --env {vault_name} <command>` to activate it, or set XV_ENV={vault_name}
     Ok(())
 }
 
-async fn execute_context_list(_config: &Config) -> Result<()> {
+async fn execute_context_list(config: &Config) -> Result<()> {
     use crate::config::ContextManager;
     use crate::utils::format::format_table;
     use tabled::{Table, Tabled};
@@ -1120,7 +1120,7 @@ async fn execute_context_list(_config: &Config) -> Result<()> {
 
     if !items.is_empty() {
         let table = Table::new(&items);
-        println!("{}", format_table(table, false));
+        println!("{}", format_table(table, config.no_color));
 
         println!("\nScope: {}", context_manager.scope_description());
         if ContextManager::local_context_exists() {
