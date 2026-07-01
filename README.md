@@ -1146,7 +1146,6 @@ These work with any command:
 | Flag | Purpose |
 |------|---------|
 | `--format <FORMAT>` | `table` / `json` / `yaml` / `csv` / `plain` / `raw` / `template` (default: `auto` — table on TTY, json for pipes) |
-| `--columns <COLS>` | Select specific columns for table output (comma-separated) |
 | `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
 | `--template <TEMPLATE>` | Custom template string for template format |
 | `--env <NAME>` | Active env from `.xv.toml` (overridden by `XV_ENV`) |
