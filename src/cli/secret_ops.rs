@@ -3877,30 +3877,40 @@ async fn execute_secret_share(
             let pagination = Pagination::from_args(page, page_size)?;
             let paged = paginate_slice(&roles, pagination);
 
+            let fmt = config.runtime_output_format;
+            let human_table_like = matches!(
+                fmt,
+                crate::utils::format::OutputFormat::Table
+                    | crate::utils::format::OutputFormat::Plain
+                    | crate::utils::format::OutputFormat::Raw
+            );
+            let formatter = crate::utils::format::TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+            );
+
             if roles.is_empty() {
-                println!(
-                    "No access assignments found for secret '{}' in vault '{}'",
-                    secret_name, vault_name
-                );
+                if human_table_like {
+                    // Chrome goes to stderr; stdout stays clean for pipes.
+                    crate::utils::output::info(&format!(
+                        "No access assignments found for secret '{secret_name}' in vault '{vault_name}'"
+                    ));
+                } else {
+                    // Machine formats emit valid empty output (e.g. `[]`).
+                    println!("{}", formatter.format_table(&paged.items)?);
+                }
             } else {
                 let mut output = String::new();
-                let _ = writeln!(
-                    output,
-                    "Access assignments for secret '{}' in vault '{}':",
-                    secret_name, vault_name
-                );
-                let formatter = crate::utils::format::TableFormatter::new(
-                    crate::utils::format::OutputFormat::Table,
-                    config.no_color,
-                    None,
-                );
+                if human_table_like {
+                    let _ = writeln!(
+                        output,
+                        "Access assignments for secret '{secret_name}' in vault '{vault_name}':"
+                    );
+                }
                 let table_output = formatter.format_table(&paged.items)?;
                 output.push_str(&table_output);
-                if let Some(footer) = pagination_footer_text(
-                    &paged,
-                    "assignment",
-                    crate::utils::format::OutputFormat::Table,
-                ) {
+                if let Some(footer) = pagination_footer_text(&paged, "assignment", fmt) {
                     output.push('\n');
                     output.push_str(&footer);
                 }
