@@ -507,7 +507,11 @@ The "did you mean" suggestion uses fuzzy matching (Levenshtein, distance ≤ 2).
 ### List
 
 ```bash
-xv list                                  # default table; also alias: xv ls
+xv ls                                    # grid of folders (prod/) and root secrets
+xv ls prod                               # inside a folder
+xv ls prod -l                            # long listing: name, updated, groups, note
+xv ls -r                                 # every secret, flattened
+xv ls --format table                     # the classic table
 xv list --group production               # filter by group
 xv list --all                            # include disabled / soft-deleted
 xv list --expiring 30d                   # secrets with expiry in next 30 days
