@@ -170,6 +170,94 @@ pub(crate) fn render_grid(entries: &[LsEntry], width: usize, color: bool) -> Str
     out
 }
 
+const LONG_NOTE_MAX: usize = 60;
+
+fn truncate_note(note: &str, max: usize) -> String {
+    let first = note.lines().next().unwrap_or("");
+    if first.chars().count() <= max {
+        first.to_string()
+    } else {
+        let cut: String = first.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Borderless long listing: NAME  UPDATED  GROUPS  NOTE. Folders render as
+/// `name/` with `-` placeholders, mirroring `xv file list`'s <DIR> rows.
+pub(crate) fn render_long(entries: &[LsEntry], color: bool) -> String {
+    struct Row {
+        name: String,
+        updated: String,
+        groups: String,
+        note: String,
+        is_folder: bool,
+    }
+    let rows: Vec<Row> = entries
+        .iter()
+        .map(|entry| match entry {
+            LsEntry::Folder(name) => Row {
+                name: format!("{}/", sanitize_control_chars(name)),
+                updated: "-".to_string(),
+                groups: "-".to_string(),
+                note: "-".to_string(),
+                is_folder: true,
+            },
+            LsEntry::Secret(s) => Row {
+                name: sanitize_control_chars(display_name(s)),
+                updated: date_portion_for_display(&s.updated_on),
+                groups: sanitize_control_chars(s.groups.as_deref().unwrap_or("-")),
+                note: sanitize_control_chars(&truncate_note(
+                    s.note.as_deref().unwrap_or(""),
+                    LONG_NOTE_MAX,
+                )),
+                is_folder: false,
+            },
+        })
+        .collect();
+
+    let name_w = rows
+        .iter()
+        .map(|r| r.name.chars().count())
+        .chain(["NAME".len()])
+        .max()
+        .unwrap_or(4);
+    let updated_w = rows
+        .iter()
+        .map(|r| r.updated.chars().count())
+        .chain(["UPDATED".len()])
+        .max()
+        .unwrap_or(7);
+    let groups_w = rows
+        .iter()
+        .map(|r| r.groups.chars().count())
+        .chain(["GROUPS".len()])
+        .max()
+        .unwrap_or(6);
+
+    let mut out = String::new();
+    let header = format!(
+        "{:<name_w$}  {:<updated_w$}  {:<groups_w$}  NOTE",
+        "NAME", "UPDATED", "GROUPS"
+    );
+    out.push_str(header.trim_end());
+    out.push('\n');
+    for row in rows {
+        let padded_name = format!("{:<name_w$}", row.name);
+        let name_cell = if color && row.is_folder {
+            format!("{CYAN}{padded_name}{RESET}")
+        } else {
+            padded_name
+        };
+        let line = format!(
+            "{name_cell}  {:<updated_w$}  {:<groups_w$}  {}",
+            row.updated, row.groups, row.note
+        );
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +427,48 @@ mod tests {
         let entries = entries_for_display(&scoped);
         assert!(matches!(&entries[0], LsEntry::Folder(f) if f == "prod"));
         assert!(matches!(&entries[1], LsEntry::Secret(s) if s.name == "root-a"));
+    }
+
+    #[test]
+    fn long_listing_aligns_columns_and_marks_folders() {
+        let mut with_meta = summary("api-key", None);
+        with_meta.groups = Some("team-a".to_string());
+        with_meta.note = Some("rotate quarterly".to_string());
+        let entries = vec![folder("prod"), LsEntry::Secret(with_meta)];
+        let out = render_long(&entries, false);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("NAME"), "header row: {out}");
+        assert!(
+            lines[0].contains("UPDATED")
+                && lines[0].contains("GROUPS")
+                && lines[0].contains("NOTE")
+        );
+        assert!(lines[1].starts_with("prod/"), "folders first: {out}");
+        assert!(lines[1].contains('-'), "folder placeholder columns: {out}");
+        assert!(lines[2].starts_with("api-key"));
+        assert!(lines[2].contains("2026-05-17"), "date-only: {out}");
+        assert!(lines[2].contains("team-a") && lines[2].contains("rotate quarterly"));
+        for line in &lines {
+            assert_eq!(line.trim_end(), *line, "no trailing whitespace");
+        }
+    }
+
+    #[test]
+    fn long_listing_truncates_multiline_and_overlong_notes() {
+        let mut s = summary("a", None);
+        s.note = Some(format!("{}\nsecond line", "x".repeat(80)));
+        let out = render_long(&[LsEntry::Secret(s)], false);
+        assert!(!out.contains("second line"), "only first note line: {out}");
+        assert!(out.contains('…'), "ellipsis on truncation: {out}");
+        let data_line = out.lines().nth(1).unwrap();
+        assert!(data_line.chars().count() < 80 + 40, "note capped: {out}");
+    }
+
+    #[test]
+    fn long_listing_sanitizes_note_text() {
+        let mut s = summary("a", None);
+        s.note = Some("bad\x1b]0;title\x07note".to_string());
+        let out = render_long(&[LsEntry::Secret(s)], false);
+        assert!(!out.contains('\x1b') && !out.contains('\x07'), "{out:?}");
     }
 }
