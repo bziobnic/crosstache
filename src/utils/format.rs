@@ -17,6 +17,7 @@ use std::sync::LazyLock;
 use tabled::{
     settings::{
         object::{Rows, Segment},
+        peaker::PriorityMax,
         Alignment, Color, Format, Modify, Padding, Style, Width,
     },
     Table, Tabled,
@@ -117,6 +118,38 @@ impl Default for ColorTheme {
     }
 }
 
+/// Column indices that contain at least one non-empty cell across all rows.
+/// If every column is empty (impossible for real listings, where Name is
+/// always populated), keep all columns rather than rendering an empty table.
+fn visible_column_indices(column_count: usize, rows: &[Vec<String>]) -> Vec<usize> {
+    let keep: Vec<usize> = (0..column_count)
+        .filter(|&i| rows.iter().any(|row| !row[i].trim().is_empty()))
+        .collect();
+    if keep.is_empty() {
+        (0..column_count).collect()
+    } else {
+        keep
+    }
+}
+
+/// Build a `Table` from `data`, omitting columns whose cells are all empty.
+/// Human table/plain views only — machine formats keep the full field set.
+fn table_hiding_empty_columns<T: Tabled>(data: &[T]) -> Table {
+    let headers: Vec<String> = T::headers().iter().map(|h| h.to_string()).collect();
+    let rows: Vec<Vec<String>> = data
+        .iter()
+        .map(|item| item.fields().iter().map(|f| f.to_string()).collect())
+        .collect();
+    let keep = visible_column_indices(headers.len(), &rows);
+
+    let mut builder = tabled::builder::Builder::default();
+    builder.push_record(keep.iter().map(|&i| headers[i].clone()));
+    for row in &rows {
+        builder.push_record(keep.iter().map(|&i| row[i].clone()));
+    }
+    builder.build()
+}
+
 /// Table formatter with color support
 pub struct TableFormatter {
     _theme: ColorTheme,
@@ -167,7 +200,7 @@ impl TableFormatter {
 
     /// Format data as a styled table
     fn format_as_table<T: Tabled>(&self, data: &[T]) -> Result<String> {
-        let mut table = Table::new(data);
+        let mut table = table_hiding_empty_columns(data);
 
         // Neutralize terminal escape sequences in untrusted cell content
         table.with(Modify::new(Segment::all()).with(Format::content(sanitize_control_chars)));
@@ -183,9 +216,10 @@ impl TableFormatter {
             table.with(Modify::new(Rows::first()).with(Color::FG_CYAN));
         }
 
-        // Auto-adjust width to terminal
+        // Auto-adjust width to terminal, shrinking the widest column first
+        // (Note in practice) instead of chopping fixed-width columns like dates.
         if let Ok((width, _)) = size() {
-            table.with(Width::wrap(width as usize));
+            table.with(Width::wrap(width as usize).priority::<PriorityMax>());
         }
 
         Ok(table.to_string())
@@ -236,7 +270,7 @@ impl TableFormatter {
 
     /// Format data as plain text
     fn format_as_plain<T: Tabled>(&self, data: &[T]) -> Result<String> {
-        let mut table = Table::new(data);
+        let mut table = table_hiding_empty_columns(data);
         // Neutralize terminal escape sequences in untrusted cell content
         table.with(Modify::new(Segment::all()).with(Format::content(sanitize_control_chars)));
         table.with(Style::ascii()).with(Padding::new(1, 1, 0, 0));
@@ -666,5 +700,99 @@ mod tests {
         );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "api-key by admin");
+    }
+
+    #[test]
+    fn table_hides_all_empty_columns() {
+        let data = vec![
+            TestData {
+                name: "alpha".to_string(),
+                value: String::new(),
+                status: "ok".to_string(),
+            },
+            TestData {
+                name: "beta".to_string(),
+                value: String::new(),
+                status: "ok".to_string(),
+            },
+        ];
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None);
+        let out = formatter.format_table(&data).unwrap();
+        assert!(
+            !out.contains("Value"),
+            "all-empty column must be hidden from table output:\n{out}"
+        );
+        assert!(out.contains("Name"), "populated columns stay:\n{out}");
+        assert!(out.contains("Status"), "populated columns stay:\n{out}");
+    }
+
+    #[test]
+    fn plain_hides_all_empty_columns() {
+        let data = vec![TestData {
+            name: "alpha".to_string(),
+            value: String::new(),
+            status: "ok".to_string(),
+        }];
+        let formatter = TableFormatter::new(OutputFormat::Plain, true, None);
+        let out = formatter.format_table(&data).unwrap();
+        assert!(
+            !out.contains("Value"),
+            "plain output hides empty columns too:\n{out}"
+        );
+        assert!(out.contains("Name"));
+    }
+
+    #[test]
+    fn table_keeps_partially_filled_columns() {
+        let data = vec![
+            TestData {
+                name: "alpha".to_string(),
+                value: String::new(),
+                status: "ok".to_string(),
+            },
+            TestData {
+                name: "beta".to_string(),
+                value: "present".to_string(),
+                status: "ok".to_string(),
+            },
+        ];
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None);
+        let out = formatter.format_table(&data).unwrap();
+        assert!(
+            out.contains("Value"),
+            "column with any content must remain:\n{out}"
+        );
+    }
+
+    #[test]
+    fn machine_formats_keep_empty_columns() {
+        let data = vec![TestData {
+            name: "alpha".to_string(),
+            value: String::new(),
+            status: "ok".to_string(),
+        }];
+        let csv = TableFormatter::new(OutputFormat::Csv, true, None)
+            .format_table(&data)
+            .unwrap();
+        assert!(csv.contains("Value"), "CSV keeps the full schema:\n{csv}");
+        let json = TableFormatter::new(OutputFormat::Json, true, None)
+            .format_table(&data)
+            .unwrap();
+        assert!(
+            json.contains("\"value\""),
+            "JSON keeps the full schema:\n{json}"
+        );
+    }
+
+    #[test]
+    fn visible_columns_fall_back_when_every_column_is_empty() {
+        let rows = vec![vec![String::new(), String::new()]];
+        assert_eq!(visible_column_indices(2, &rows), vec![0, 1]);
+    }
+
+    #[test]
+    fn whitespace_only_cells_count_as_empty() {
+        let rows = vec![vec!["  ".to_string(), "x".to_string()]];
+        assert_eq!(visible_column_indices(2, &rows), vec![1]);
     }
 }
