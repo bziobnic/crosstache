@@ -360,33 +360,6 @@ impl ContextManager {
         Ok(context_path)
     }
 
-    /// Migrate from old configuration format
-    #[allow(dead_code)]
-    pub async fn migrate_from_config(
-        default_vault: &str,
-        default_resource_group: Option<&str>,
-        subscription_id: Option<&str>,
-    ) -> Result<Self> {
-        if default_vault.is_empty() {
-            return Self::new_global();
-        }
-
-        let context = VaultContext::new(
-            default_vault.to_string(),
-            default_resource_group.map(|s| s.to_string()),
-            subscription_id.map(|s| s.to_string()),
-        );
-
-        let mut context_manager = Self::new_global()?;
-        context_manager.set_context(context).await?;
-
-        info!(
-            "Migrated default vault '{}' to context system",
-            default_vault
-        );
-        Ok(context_manager)
-    }
-
     /// Get context scope description for display
     pub fn scope_description(&self) -> &'static str {
         if self.is_local {

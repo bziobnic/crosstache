@@ -1829,40 +1829,6 @@ impl SecretManager {
         Ok(secret)
     }
 
-    /// Get a secret with optional version support
-    pub async fn get_secret_with_version(
-        &self,
-        vault_name: &str,
-        secret_name: &str,
-        version: Option<&str>,
-        show_value: bool,
-        raw_output: bool,
-    ) -> Result<SecretProperties> {
-        let mut secret = match version {
-            Some(ver) => {
-                self.secret_ops
-                    .get_secret_version(vault_name, secret_name, ver, show_value)
-                    .await?
-            }
-            None => {
-                self.secret_ops
-                    .get_secret(vault_name, secret_name, show_value)
-                    .await?
-            }
-        };
-
-        if !raw_output {
-            self.display_secret_details(&secret, show_value)?;
-        }
-
-        // Clear sensitive data if not showing value
-        if !show_value {
-            secret.value = None;
-        }
-
-        Ok(secret)
-    }
-
     /// Get detailed secret information without the secret value
     pub async fn get_secret_info(&self, vault_name: &str, secret_name: &str) -> Result<SecretInfo> {
         let validated_vault_name = AzureVaultName::try_from(vault_name)?;
