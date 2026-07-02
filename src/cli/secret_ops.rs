@@ -418,6 +418,27 @@ pub(crate) fn display_cached_secret_list(
         return Ok(());
     }
 
+    if scoped.subtree.is_empty() {
+        let scope_desc = if !path.is_empty() {
+            format!("folder '{path}'")
+        } else {
+            format!("vault '{vault_name}'")
+        };
+        let msg = if all {
+            crate::utils::list_output::empty_state_message("secrets", Some(&scope_desc))
+        } else {
+            format!(
+                "{} Use --all to show disabled secrets.",
+                crate::utils::list_output::empty_state_message(
+                    "enabled secrets",
+                    Some(&scope_desc)
+                )
+            )
+        };
+        crate::utils::output::info(&msg);
+        return Ok(());
+    }
+
     let mut output = String::new();
     output.push('\n');
     // Color only for styled table/grid; plain/raw must not emit ANSI escapes
@@ -428,29 +449,6 @@ pub(crate) fn display_cached_secret_list(
         let _ = writeln!(output, "Vault: {}", vault_name);
     }
     output.push('\n');
-
-    if scoped.subtree.is_empty() {
-        let msg = if !path.is_empty() {
-            if all {
-                format!("No secrets found in folder '{path}'.")
-            } else {
-                format!(
-                    "No enabled secrets found in folder '{path}'. Use --all to show disabled secrets."
-                )
-            }
-        } else if all {
-            "No secrets found in vault.".to_string()
-        } else {
-            "No enabled secrets found in vault. Use --all to show disabled secrets.".to_string()
-        };
-        output.push_str(&output::format_line(
-            output::Level::Info,
-            &msg,
-            output::should_use_rich_stdout(),
-        ));
-        crate::utils::pager::print_output(&output, pager)?;
-        return Ok(());
-    }
 
     // Legacy rounded table only on explicit --format table|plain|raw.
     if config.format_explicit && !long {
@@ -463,9 +461,10 @@ pub(crate) fn display_cached_secret_list(
         let _ = writeln!(
             output,
             "{} in vault '{}'",
-            secret_count_label(
+            crate::utils::list_output::count_label(
                 page.items.len(),
                 page.total_items,
+                "secret",
                 None,
                 page.page_size.is_some(),
             ),
@@ -504,12 +503,13 @@ pub(crate) fn display_cached_secret_list(
     };
     output.push_str(&rendered);
     output.push('\n');
-    let mut count_line = secret_count_label(
+    let mut count_line = crate::utils::list_output::count_label(
         page.items
             .iter()
             .filter(|e| matches!(e, LsEntry::Secret(_)))
             .count(),
         secret_count,
+        "secret",
         None,
         page.page_size.is_some(),
     );
@@ -762,7 +762,22 @@ pub(crate) async fn execute_secret_history_direct(
             );
             let table = formatter.format_table(&versions)?;
             println!("{table}");
-            output::info(&format!("{} version(s) of '{name}'", versions.len()));
+            let fmt = config.runtime_output_format;
+            if matches!(
+                fmt,
+                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+            ) {
+                println!(
+                    "{} of '{name}'",
+                    crate::utils::list_output::count_label(
+                        versions.len(),
+                        versions.len(),
+                        "version",
+                        None,
+                        false
+                    )
+                );
+            }
         }
         return Ok(());
     }
@@ -2043,9 +2058,9 @@ async fn execute_secret_find(
     if matches.is_empty() {
         if all_vaults {
             if let Some(p) = pattern {
-                output::info(&format!("No secrets match '{p}' across all vaults"));
+                output::info(&format!("No secrets match '{p}' across all vaults."));
             } else {
-                output::info("No secrets found across all vaults");
+                output::info("No secrets found across all vaults.");
             }
         } else {
             let vault_name = single_vault.as_ref().ok_or_else(|| {
@@ -2054,9 +2069,9 @@ async fn execute_secret_find(
                 )
             })?;
             if let Some(p) = pattern {
-                output::info(&format!("No secrets match '{p}' in vault '{vault_name}'"));
+                output::info(&format!("No secrets match '{p}' in vault '{vault_name}'."));
             } else {
-                output::info(&format!("No secrets in vault '{vault_name}'"));
+                output::info(&format!("No secrets in vault '{vault_name}'."));
             }
         }
         return Ok(());

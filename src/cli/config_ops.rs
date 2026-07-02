@@ -1068,8 +1068,11 @@ async fn execute_context_list(config: &Config) -> Result<()> {
     let context_manager = ContextManager::load().await.unwrap_or_default();
 
     if context_manager.recent.is_empty() && context_manager.current.is_none() {
-        output::info("No vault contexts found");
-        println!("Hint: Use 'xv context use <vault-name>' to create a context");
+        output::info(&crate::utils::list_output::empty_state_message(
+            "vault contexts",
+            None,
+        ));
+        output::hint("Use 'xv context use <vault-name>' to create a context");
         return Ok(());
     }
 
