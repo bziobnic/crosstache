@@ -1213,7 +1213,6 @@ async fn execute_vault_share(
         VaultShareCommands::List {
             vault_name,
             resource_group,
-            format,
             all,
             page,
             page_size,
@@ -1238,13 +1237,7 @@ async fn execute_vault_share(
                 .resolve_and_filter_roles(&mut roles, all)
                 .await?;
 
-            let fmt = match format {
-                Some(f) => {
-                    crate::utils::output::warn("--fmt is deprecated; use the global --format");
-                    f.resolve_for_stdout()
-                }
-                None => config.runtime_output_format,
-            };
+            let fmt = config.runtime_output_format;
             let human_table_like = matches!(
                 fmt,
                 crate::utils::format::OutputFormat::Table

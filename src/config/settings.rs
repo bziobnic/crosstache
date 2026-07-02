@@ -723,21 +723,6 @@ pub async fn save_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-pub async fn init_default_config() -> Result<()> {
-    let config_path = Config::get_config_path()?;
-
-    // Don't overwrite existing configuration
-    if config_path.exists() {
-        return Ok(());
-    }
-
-    let config = Config::default();
-    save_config(&config).await?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{NamedBackendEntry, *};

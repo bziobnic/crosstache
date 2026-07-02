@@ -139,7 +139,6 @@ and still runs the child process.
 | `xv share revoke` | Revoke secret-level access |
 | `xv share list` | List secret permissions (`--page-size`, `--page`) |
 
-`vault share list -f`/`--fmt` is deprecated in favor of the global `--format`; `--fmt` still works with a warning, `-f` is removed.
 
 ---
 
@@ -159,8 +158,7 @@ and still runs the child process.
 | `xv env pull` | Download secrets as `.env` file |
 | `xv env push <file>` | Upload `.env` contents as secrets |
 
-Aliases: `xv cx` for `xv context`, `xv ls` for `xv list`. `xv context envs` is
-deprecated (hidden from help, warns, delegates to `xv env list` unchanged).
+Aliases: `xv cx` for `xv context`, `xv ls` for `xv list`.
 
 ---
 
@@ -200,7 +198,7 @@ JSON/YAML keep the full-fidelity serialization (etags, raw byte sizes, extra met
 | Command | Description |
 |---------|-------------|
 | `xv whoami` | Show authenticated identity and context |
-| `xv audit <name>` | Access/change history for a secret or vault (Azure Activity Log or AWS CloudTrail; unsupported on local); `--vault`, `--days`, `--operation`; honors the global `--format` (JSON = array of `{timestamp, operation, resource, caller, status}` rows). `--raw` is a deprecated hidden alias that warns and implies `--format json` |
+| `xv audit <name>` | Access/change history for a secret or vault (Azure Activity Log or AWS CloudTrail; unsupported on local); `--vault`, `--days`, `--operation`; honors the global `--format` (JSON = array of `{timestamp, operation, resource, caller, status}` rows). |
 | `xv info <resource>` | Auto-detect and display info for a vault or secret |
 | `xv parse <conn-string>` | Parse and display connection string components |
 | `xv completion <shell>` | Generate shell completions (bash, zsh, fish, powershell) |

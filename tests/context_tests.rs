@@ -3,7 +3,7 @@ mod common;
 use common::{parse_json_envelope, stderr_str, stdout_str, write_xv_toml, xv_isolated};
 
 /// Fake Azure creds that satisfy config validation without hitting any real endpoint.
-/// Commands that only touch the filesystem (context init, context envs) exit before
+/// Commands that only touch the filesystem (context init, env list) exit before
 /// any network call, so these values never reach Azure.
 const FAKE_SUB: &str = "00000000-0000-0000-0000-000000000001";
 const FAKE_TENANT: &str = "00000000-0000-0000-0000-000000000002";
@@ -213,64 +213,19 @@ fn context_init_non_interactive_requires_vault() {
 }
 
 #[test]
-fn context_envs_lists_envs() {
+fn context_envs_alias_is_removed() {
+    // The `context envs` alias was removed outright; clap now rejects it as
+    // an unrecognized subcommand. Equivalent listing coverage lives in
+    // `env_list_shows_xv_toml_project_envs` / `_table_format` below.
     let (mut cmd, temp) = xv_isolated();
     write_xv_toml(temp.path(), "dev", &[("dev", "vdev"), ("prod", "vprod")]);
     let out = cmd
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
-        .args(["context", "envs", "--format", "json"])
+        .args(["context", "envs"])
         .output()
         .expect("spawn");
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = stdout_str(&out);
-    let rows: serde_json::Value = serde_json::from_str(&stdout).expect("stdout must be JSON");
-    let rows = rows.as_array().expect("rows must be a JSON array");
-    let find = |name: &str| {
-        rows.iter()
-            .find(|r| r["name"] == name)
-            .unwrap_or_else(|| panic!("expected env '{name}' in rows: {rows:?}"))
-    };
-    let dev = find("dev");
-    assert_eq!(dev["vault"], "vdev");
-    assert_eq!(dev["active"], "*", "dev should be the active env: {dev:?}");
-    let prod = find("prod");
-    assert_eq!(prod["vault"], "vprod");
-    assert_eq!(
-        prod["active"], "",
-        "prod should not be marked active: {prod:?}"
-    );
-
-    // The explanatory hint is informational chrome and goes to stderr (so the
-    // env list on stdout stays pipe-clean).
-    let stderr = stderr_str(&out);
-    assert!(
-        stderr.contains("not the vault context") && stderr.contains("config show --resolved"),
-        "context envs should explain env-vs-context and point to resolved config: {stderr}"
-    );
-}
-
-#[test]
-fn context_envs_lists_envs_table_format() {
-    let (mut cmd, temp) = xv_isolated();
-    write_xv_toml(temp.path(), "dev", &[("dev", "vdev"), ("prod", "vprod")]);
-    let out = cmd
-        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
-        .env("AZURE_TENANT_ID", FAKE_TENANT)
-        .args(["context", "envs", "--format", "table"])
-        .output()
-        .expect("spawn");
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
-    let stdout = stdout_str(&out);
-    assert!(stdout.contains("Name"), "expected table header: {stdout}");
-    let dev_row = stdout
-        .lines()
-        .find(|line| line.contains("│ dev") && !line.contains("prod"))
-        .unwrap_or_else(|| panic!("expected a 'dev' row in table output: {stdout}"));
-    assert!(
-        dev_row.contains('*'),
-        "active env row should contain the '*' marker: {dev_row}"
-    );
+    assert!(!out.status.success(), "context envs unexpectedly succeeded");
 }
 
 #[test]
@@ -303,25 +258,6 @@ fn config_show_resolved_notes_env_fallback_layers() {
     assert!(
         stdout.contains("active env has no vault") && stdout.contains("global config"),
         "resolved config should explain vault fallback to global config: {stdout}"
-    );
-}
-
-#[test]
-fn context_envs_no_xv_toml_warns() {
-    let (mut cmd, _temp) = xv_isolated();
-    let out = cmd
-        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
-        .env("AZURE_TENANT_ID", FAKE_TENANT)
-        .args(["context", "envs"])
-        .output()
-        .expect("spawn");
-    assert_eq!(out.status.code(), Some(0));
-    let stderr = stderr_str(&out);
-    let stdout = stdout_str(&out);
-    let combined = format!("{stderr}{stdout}");
-    assert!(
-        combined.contains(".xv.toml") || combined.contains("no .xv.toml"),
-        "must mention missing config: {combined}"
     );
 }
 
@@ -383,7 +319,7 @@ fn xv_no_parent_config_disables_walkup() {
     let out = cmd
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
-        .args(["context", "envs"])
+        .args(["env", "list"])
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0));

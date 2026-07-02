@@ -244,7 +244,6 @@ pub(crate) async fn execute_migrate(
     on_conflict: crate::cli::commands::OnConflict,
     force_replace: bool,
     concurrency: usize,
-    legacy_overwrite: bool,
     config: Config,
 ) -> Result<()> {
     if concurrency == 0 {
@@ -253,13 +252,6 @@ pub(crate) async fn execute_migrate(
         ));
     }
 
-    // Compatibility shim: --overwrite -> --on-conflict replace + warn
-    let on_conflict = if legacy_overwrite {
-        eprintln!("warning: --overwrite is deprecated; use --on-conflict replace");
-        crate::cli::commands::OnConflict::Replace
-    } else {
-        on_conflict
-    };
     // 1. Parse backend kinds (accepting bare `backend` or `backend:vault` form)
     let (from_kind, from_vault_override) =
         BackendRef::parse_migrate_endpoint(&from).map_err(CrosstacheError::invalid_argument)?;
@@ -608,7 +600,6 @@ mod tests {
             crate::cli::commands::OnConflict::Skip,
             false,
             0,
-            false,
             Config::default(),
         )
         .await;

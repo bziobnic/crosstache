@@ -271,15 +271,10 @@ struct AuditRow {
 /// Render audit rows through the shared TableFormatter: global `--format`
 /// honored (JSON = array of rows), `--columns`/`--no-color` inherited, valid
 /// empty machine output, human count/empty on stderr.
-fn render_audit_rows(rows: &[AuditRow], raw: bool, config: &Config) -> Result<()> {
+fn render_audit_rows(rows: &[AuditRow], config: &Config) -> Result<()> {
     use crate::utils::format::{OutputFormat, TableFormatter};
 
-    let fmt = if raw {
-        output::warn("--raw is deprecated; use the global --format json");
-        OutputFormat::Json
-    } else {
-        config.runtime_output_format
-    };
+    let fmt = config.runtime_output_format;
     let human_table_like = matches!(
         fmt,
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
@@ -332,7 +327,6 @@ pub(crate) async fn execute_audit_command(
     days: u32,
     operation: Option<String>,
     resource_group_override: Option<String>,
-    raw: bool,
     config: Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
@@ -358,8 +352,7 @@ pub(crate) async fn execute_audit_command(
 
         if !use_legacy_azure_path {
             if let Some(auditor) = registry.active().audit() {
-                return execute_backend_audit(auditor, name, vault, days, operation, raw, config)
-                    .await;
+                return execute_backend_audit(auditor, name, vault, days, operation, config).await;
             }
         }
     }
@@ -451,7 +444,7 @@ pub(crate) async fn execute_audit_command(
         })
         .collect();
 
-    render_audit_rows(&rows, raw, &config)
+    render_audit_rows(&rows, &config)
 }
 
 /// Render audit logs fetched through the backend-agnostic [`AuditBackend`]
@@ -462,7 +455,6 @@ async fn execute_backend_audit(
     vault: Option<String>,
     days: u32,
     operation: Option<String>,
-    raw: bool,
     config: Config,
 ) -> Result<()> {
     let vault_name = config.resolve_vault_name(vault).await?;
@@ -501,7 +493,7 @@ async fn execute_backend_audit(
         })
         .collect();
 
-    render_audit_rows(&rows, raw, &config)
+    render_audit_rows(&rows, &config)
 }
 
 pub(crate) async fn execute_init_command(_config: Config) -> Result<()> {
@@ -1210,7 +1202,6 @@ mod tests {
             7,
             None,
             Some("ignored-for-non-azure".to_string()),
-            false,
             config,
             Some(&registry),
         )

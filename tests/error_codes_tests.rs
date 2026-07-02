@@ -161,7 +161,7 @@ fn config_invalid_xv_toml_exits_3() {
     let (mut cmd, temp) = common::xv_isolated();
     // Malformed .xv.toml — TOML parser should fail.
     std::fs::write(temp.path().join(".xv.toml"), "not = valid = toml [[").unwrap();
-    let out = cmd.args(["context", "envs"]).output().expect("spawn");
+    let out = cmd.args(["env", "list"]).output().expect("spawn");
     assert_eq!(
         out.status.code(),
         Some(3),

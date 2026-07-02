@@ -63,10 +63,9 @@ impl AzureSecretBackend {
     }
 }
 
-/// Build the full replacement tag map for an attributes-only `PATCH`,
-/// mirroring the legacy full-write pipeline: resolve merge/replace semantics
-/// against the current tags, then stamp crosstache's metadata tags exactly as
-/// `prepare_secret_request` does.
+/// Build the full replacement tag map for an attributes-only `PATCH`:
+/// resolve merge/replace semantics against the current tags, then stamp
+/// crosstache's metadata tags exactly as `prepare_secret_request` does.
 fn build_patched_tags(
     request: &SecretUpdateRequest,
     current_tags: &HashMap<String, String>,

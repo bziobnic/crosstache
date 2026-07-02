@@ -20,7 +20,7 @@ pub fn hint_for(code: &str) -> Option<&'static str> {
             "Check TLS configuration and any corporate proxy with TLS interception."
         }
         "xv-config-invalid" => "Run 'xv config show' to inspect, or 'xv init' to reinitialize.",
-        "xv-env-not-defined" => "Run 'xv context envs' to see defined environments.",
+        "xv-env-not-defined" => "Run 'xv env list' to see defined environments.",
         "xv-azure-api" => "Check Azure service status and your subscription quotas.",
         "xv-scan-leak-detected" => "Findings printed to stderr; review and remove the leak before committing. Use 'xv scan --hook' for CI integration.",
         _ => return None,
