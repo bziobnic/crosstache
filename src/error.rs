@@ -989,26 +989,49 @@ mod tests {
             },
             SecuritySurface {
                 category: "structured output",
-                name: "FileListCsvRow",
-                fields: &[
-                    "kind",
-                    "name",
-                    "size",
-                    "content_type",
-                    "last_modified",
-                    "etag",
-                    "groups",
-                    "full_path",
-                    "metadata",
-                    "tags",
-                ],
+                name: "FileRow",
+                fields: &["kind", "name", "size", "content_type", "modified", "groups"],
                 allowed_value_like_fields: &[],
             },
             SecuritySurface {
                 category: "structured output",
-                name: "FileListTableRow",
-                fields: &["name", "size", "content_type", "modified", "groups"],
+                name: "AuditRow",
+                fields: &["timestamp", "operation", "resource", "caller", "status"],
                 allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "FindRow",
+                fields: &["name", "score", "folder", "groups"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "EnvRow",
+                fields: &["name", "active", "backend", "vault", "resource_group"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "structured output",
+                name: "ContextItem",
+                fields: &[
+                    "status",
+                    "vault",
+                    "resource_group",
+                    "last_used",
+                    "usage_count",
+                ],
+                allowed_value_like_fields: &[],
+            },
+            // `config show`'s row type intentionally carries non-secret
+            // config settings (booleans, paths, ttls) under generic
+            // `key`/`value` column names; it never carries secret material,
+            // so both value-like tokens are explicitly allowed here.
+            SecuritySurface {
+                category: "structured output",
+                name: "ConfigItem",
+                fields: &["key", "value", "source"],
+                allowed_value_like_fields: &["key", "value"],
             },
             // Structured error output and diagnostics expose only envelope
             // metadata. Logs/tracing should log messages, codes, and safe names

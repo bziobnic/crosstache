@@ -22,7 +22,7 @@
   - **`xv audit`**: honors the global `--format` (JSON = one array of `{timestamp, operation, resource, caller, status}` rows). `--raw` is deprecated to a hidden alias that warns and implies `--format json`; its old per-entry documents with `---` separators (and rich fields like `correlation_id`/`properties`) are no longer emitted. The contextual `Vault:`/`Secret:` lines moved to stderr so `xv audit --format json | jq` sees pure JSON, and the human timestamp is now full-date (`%Y-%m-%d %H:%M:%S`).
   - **`xv file list --format csv`**: columns now match the table — `Kind,Name,Size,Content-Type,Modified,Groups` (was a snake_case kitchen-sink set with raw byte sizes, etags, and JSON-blob metadata columns). JSON/YAML keep the rich full-fidelity serialization. The human table gains the leading `Kind` column.
 - **Counts are plural-aware**: `1 vault`, `3 vaults`, `5 audit log entries` — the `"N noun(s)"` style from the previous pass is gone.
-- **`xv config show` human table** renders through the shared formatter (uniform `--columns`/`--no-color` behavior); same for `config show --resolved`.
+- **`xv config show` human table** renders through the shared formatter (uniform `--columns`/`--no-color` behavior); same for `config show --resolved`. `config show --format csv|plain` now emits `Setting`/`Value`/`Source` rows via the shared formatter (previously fell back to the human table).
 
 ### Fixed
 

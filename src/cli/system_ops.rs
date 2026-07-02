@@ -1254,7 +1254,7 @@ mod tests {
 
         // Verify at least one cell value is present
         assert!(
-            output.contains("SecretRead") || output.contains("mySecret"),
+            output.contains("SecretRead") || output.contains("mysecret"),
             "Table output should contain audit row data"
         );
     }

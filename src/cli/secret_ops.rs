@@ -472,6 +472,11 @@ pub(crate) fn display_cached_secret_list(
     }
 
     // ls-style grid / long listing.
+    if config.runtime_columns.is_some() {
+        crate::utils::output::warn(
+            "--columns is ignored for the grid/long view; use --format table",
+        );
+    }
     let entries: Vec<LsEntry> = if recursive {
         scoped
             .subtree
