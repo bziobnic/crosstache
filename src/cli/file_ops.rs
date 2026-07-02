@@ -189,9 +189,14 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             page_size,
             pager,
             recursive,
+            names_only,
             no_cache,
         } => {
             use crate::utils::pagination::Pagination;
+
+            let pager = pager
+                .map(crate::cli::commands::PagerWhen::wants_pager)
+                .unwrap_or(false);
 
             if limit.is_some() && page_size.is_some() {
                 return Err(CrosstacheError::invalid_argument(
@@ -218,6 +223,7 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
                 pagination,
                 pager,
                 recursive,
+                names_only,
                 no_cache,
                 &config,
             )
@@ -536,12 +542,19 @@ pub(crate) fn display_file_list_items(
     use std::fmt::Write as _;
     use tabled::Tabled;
 
-    if items.is_empty() {
-        output::info("No files found");
+    let fmt = config.runtime_output_format.resolve_for_stdout();
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+
+    if items.is_empty() && human_table_like {
+        output::info(&crate::utils::list_output::empty_state_message(
+            "files", None,
+        ));
         return Ok(String::new());
     }
 
-    let fmt = config.runtime_output_format.resolve_for_stdout();
     let mut output = String::new();
 
     // Rows for `--format csv`: machine-oriented fields (not `format_size()` / joined strings).
@@ -659,20 +672,13 @@ pub(crate) fn display_file_list_items(
                 .filter(|i| matches!(i, BlobListItem::Directory { .. }))
                 .count();
 
-            if recursive {
-                output.push('\n');
-                let _ = writeln!(output, "Total files: {}", file_count);
-            } else if dir_count > 0 {
-                output.push('\n');
-                let _ = writeln!(
-                    output,
-                    "Total: {} directories, {} files",
-                    dir_count, file_count
-                );
-            } else {
-                output.push('\n');
-                let _ = writeln!(output, "Total files: {}", file_count);
+            output.push('\n');
+            let mut count_line =
+                crate::utils::list_output::count_label(file_count, file_count, "file", None, false);
+            if !recursive && dir_count > 0 {
+                let _ = write!(count_line, ", {} directory(ies)", dir_count);
             }
+            let _ = writeln!(output, "{}", count_line);
         }
         OutputFormat::Template => {
             let display_items: Vec<ListItem> = items
@@ -711,12 +717,16 @@ async fn execute_file_list(
     pagination: Pagination,
     pager: bool,
     recursive: bool,
+    names_only: bool,
     no_cache: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::blob::models::{BlobListItem, FileListRequest};
     use crate::cache::{CacheKey, CacheManager};
     use crate::utils::pagination::{paginate_slice, pagination_footer_text};
+
+    // `--names-only` always needs the full recursive item set (no directory entries).
+    let recursive = recursive || names_only;
 
     let cache_manager = CacheManager::from_config(config);
     let vault_name = config.resolve_vault_name(None).await.unwrap_or_default();
@@ -730,6 +740,15 @@ async fn execute_file_list(
 
     if use_cache && is_unfiltered {
         if let Some(cached) = cache_manager.get::<Vec<BlobListItem>>(&cache_key) {
+            if names_only {
+                for item in &cached {
+                    if let BlobListItem::File(file) = item {
+                        println!("{}", file.name);
+                    }
+                }
+                return Ok(());
+            }
+
             let page = paginate_slice(&cached, pagination);
             let mut output = display_file_list_items(&page.items, recursive, config)?;
             if !output.is_empty() {
@@ -772,6 +791,15 @@ async fn execute_file_list(
 
     if use_cache && is_unfiltered {
         cache_manager.set(&cache_key, &items);
+    }
+
+    if names_only {
+        for item in &items {
+            if let BlobListItem::File(file) = item {
+                println!("{}", file.name);
+            }
+        }
+        return Ok(());
     }
 
     let page = paginate_slice(&items, pagination);

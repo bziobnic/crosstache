@@ -86,12 +86,17 @@ pub enum FileCommands {
         /// Number of rows per page
         #[arg(long)]
         page_size: Option<usize>,
-        /// Use an interactive pager for TTY output
-        #[arg(long)]
-        pager: bool,
+        /// Use an interactive pager for output. Optional WHEN is auto (default
+        /// when the flag is given), always, or never. e.g. `--pager` or `--pager auto`.
+        #[arg(long, value_name = "WHEN", num_args = 0..=1, default_missing_value = "auto")]
+        pager: Option<crate::cli::commands::PagerWhen>,
         /// List all files recursively (show all nested files instead of directory structure)
         #[arg(short, long)]
         recursive: bool,
+        /// Print one file name per line, no headers, no ANSI. Pipe-friendly.
+        /// Lists recursively; directory entries are omitted.
+        #[arg(long)]
+        names_only: bool,
         /// Bypass the local cache and fetch fresh data
         #[arg(long)]
         no_cache: bool,

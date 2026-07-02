@@ -234,9 +234,14 @@ pub(crate) async fn execute_file_command_aws(command: FileCommands, config: Conf
             page_size,
             pager,
             recursive,
+            names_only,
             no_cache,
         } => {
             use crate::utils::pagination::Pagination;
+
+            let pager = pager
+                .map(crate::cli::commands::PagerWhen::wants_pager)
+                .unwrap_or(false);
 
             if limit.is_some() && page_size.is_some() {
                 return Err(CrosstacheError::invalid_argument(
@@ -255,7 +260,8 @@ pub(crate) async fn execute_file_command_aws(command: FileCommands, config: Conf
             };
 
             execute_list(
-                &backend, &vault, prefix, group, pagination, pager, recursive, no_cache, &config,
+                &backend, &vault, prefix, group, pagination, pager, recursive, names_only,
+                no_cache, &config,
             )
             .await?;
         }
@@ -1042,11 +1048,15 @@ async fn execute_list(
     pagination: crate::utils::pagination::Pagination,
     pager: bool,
     recursive: bool,
+    names_only: bool,
     no_cache: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
     use crate::utils::pagination::{paginate_slice, pagination_footer_text};
+
+    // `--names-only` always needs the full recursive item set (no directory entries).
+    let recursive = recursive || names_only;
 
     let cache_manager = CacheManager::from_config(config);
     let cache_key = CacheKey::FileList {
@@ -1091,6 +1101,15 @@ async fn execute_list(
             fetched
         }
     };
+
+    if names_only {
+        for item in &items {
+            if let BlobListItem::File(file) = item {
+                println!("{}", file.name);
+            }
+        }
+        return Ok(());
+    }
 
     let page = paginate_slice(&items, pagination);
     let mut rendered = display_file_list_items(&page.items, recursive, config)?;
