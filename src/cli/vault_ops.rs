@@ -411,6 +411,7 @@ fn render_vault_list(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_vault_list(
     vault_manager: &VaultManager,
     resource_group: Option<String>,
