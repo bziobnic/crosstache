@@ -1771,6 +1771,79 @@ async fn execute_secret_get(
     Ok(())
 }
 
+/// One `xv find` result as rendered by every output format. Serde keys match
+/// the pre-unification JSON envelope (`name`/`score`/`folder`/`groups`);
+/// `score` is a 2-decimal string for stable CSV/table output and `folder`/
+/// `groups` are empty strings instead of null (changelog-documented).
+#[derive(tabled::Tabled, serde::Serialize)]
+struct FindRow {
+    #[tabled(rename = "Name")]
+    #[serde(rename = "name")]
+    name: String,
+    #[tabled(rename = "Score")]
+    #[serde(rename = "score")]
+    score: String,
+    #[tabled(rename = "Folder")]
+    #[serde(rename = "folder")]
+    folder: String,
+    #[tabled(rename = "Groups")]
+    #[serde(rename = "groups")]
+    groups: String,
+}
+
+/// Empty-state wording for `xv find`, shared by the trait and legacy paths.
+fn find_empty_message(pattern: Option<&str>, all_vaults: bool, vault_name: Option<&str>) -> String {
+    match (all_vaults, pattern, vault_name) {
+        (true, Some(p), _) => format!("No secrets match '{p}' across all vaults."),
+        (true, None, _) => "No secrets found across all vaults.".to_string(),
+        (false, Some(p), Some(v)) => format!("No secrets match '{p}' in vault '{v}'."),
+        (false, None, Some(v)) => format!("No secrets in vault '{v}'."),
+        (false, _, None) => "No matching secrets found.".to_string(),
+    }
+}
+
+/// Render find matches through the shared TableFormatter: all formats work
+/// (CSV included), `--columns`/`--no-color` inherited, machine formats emit
+/// valid-empty output on stdout when nothing matched.
+fn render_find_matches(
+    matches: &[crate::utils::fuzzy::Match<'_>],
+    format: crate::utils::format::OutputFormat,
+    empty_msg: &str,
+    config: &Config,
+) -> Result<()> {
+    let rows: Vec<FindRow> = matches
+        .iter()
+        .map(|m| FindRow {
+            name: m.item.name.clone(),
+            score: format!("{:.2}", m.score as f64),
+            folder: m.item.folder.clone().unwrap_or_default(),
+            groups: m.item.groups.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    let fmt = format.resolve_for_stdout();
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+
+    if rows.is_empty() && human_table_like {
+        output::info(empty_msg);
+        return Ok(());
+    }
+
+    let formatter = crate::utils::format::TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+    // Non-empty rows render for every format; empty rows reach here only on
+    // machine formats, where format_table emits valid-empty output.
+    println!("{}", formatter.format_table(&rows)?);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_find_direct(
     pattern: Option<String>,
@@ -1808,6 +1881,7 @@ pub(crate) async fn execute_secret_find_direct(
             }
         }
 
+        let mut scope_vault: Option<String> = None;
         let items: Vec<CandidateItem> = if all_vaults {
             // List all vaults and collect secrets
             let mut combined = Vec::new();
@@ -1831,6 +1905,7 @@ pub(crate) async fn execute_secret_find_direct(
             combined
         } else {
             let vault_name = resolve_vault_for_trait(&config, registry).await?;
+            scope_vault = Some(vault_name.clone());
             let all_secrets = reg
                 .active()
                 .secrets()
@@ -1861,32 +1936,8 @@ pub(crate) async fn execute_secret_find_direct(
             return Ok(());
         }
 
-        let resolved = format.resolve_for_stdout();
-        if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
-            let envelope: Vec<serde_json::Value> = matches
-                .iter()
-                .map(|m| {
-                    serde_json::json!({
-                        "name": m.item.name,
-                        "score": m.score,
-                        "folder": m.item.folder,
-                        "groups": m.item.groups,
-                    })
-                })
-                .collect();
-            let rendered = match resolved {
-                OutputFormat::Json => serde_json::to_string_pretty(&envelope).unwrap_or_default(),
-                OutputFormat::Yaml => serde_yaml::to_string(&envelope).unwrap_or_default(),
-                _ => unreachable!(),
-            };
-            println!("{rendered}");
-        } else if matches.is_empty() {
-            output::info("No matching secrets found");
-        } else {
-            for m in &matches {
-                println!("{}", m.item.name);
-            }
-        }
+        let empty_msg = find_empty_message(pattern.as_deref(), all_vaults, scope_vault.as_deref());
+        render_find_matches(&matches, format, &empty_msg, &config)?;
         return Ok(());
     }
 
@@ -2048,62 +2099,8 @@ async fn execute_secret_find(
         return Ok(());
     }
 
-    // Format-aware rendering.
-    let resolved = format.resolve_for_stdout();
-    use crate::utils::format::OutputFormat;
-    if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
-        let envelope: Vec<serde_json::Value> = matches
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "name": m.item.name,
-                    "score": m.score,
-                    "folder": m.item.folder,
-                    "groups": m.item.groups,
-                })
-            })
-            .collect();
-        let rendered = match resolved {
-            OutputFormat::Json => serde_json::to_string_pretty(&envelope).unwrap_or_default(),
-            OutputFormat::Yaml => serde_yaml::to_string(&envelope).unwrap_or_default(),
-            _ => unreachable!(),
-        };
-        println!("{rendered}");
-        return Ok(());
-    }
-
-    // Plain/table fallback (Task 7 polishes the score-bar column).
-    if matches.is_empty() {
-        if all_vaults {
-            if let Some(p) = pattern {
-                output::info(&format!("No secrets match '{p}' across all vaults."));
-            } else {
-                output::info("No secrets found across all vaults.");
-            }
-        } else {
-            let vault_name = single_vault.as_ref().ok_or_else(|| {
-                CrosstacheError::config(
-                    "vault name not resolved for single-vault search".to_string(),
-                )
-            })?;
-            if let Some(p) = pattern {
-                output::info(&format!("No secrets match '{p}' in vault '{vault_name}'."));
-            } else {
-                output::info(&format!("No secrets in vault '{vault_name}'."));
-            }
-        }
-        return Ok(());
-    }
-    use crate::utils::fuzzy::score_bar;
-    let top = matches.iter().map(|m| m.score).max().unwrap_or(1).max(1) as f32;
-    println!("{:<40}  {:<10}  {:<24}  GROUPS", "NAME", "SCORE", "FOLDER");
-    for m in &matches {
-        let folder = m.item.folder.as_deref().unwrap_or("");
-        let groups = m.item.groups.as_deref().unwrap_or("");
-        let bar = score_bar(m.score as f32 / top);
-        println!("{:<40}  {bar}  {:<24}  {}", m.item.name, folder, groups);
-    }
-    Ok(())
+    let empty_msg = find_empty_message(pattern, all_vaults, single_vault.as_deref());
+    render_find_matches(&matches, format, &empty_msg, config)
 }
 
 #[allow(dead_code)] // called from src/main.rs::run_complete_secrets (binary-only path)
