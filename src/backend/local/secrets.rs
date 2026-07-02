@@ -3903,4 +3903,67 @@ mod tests {
         let listed = b1.list_secrets("default", None).await.unwrap();
         assert_eq!(listed.len(), 2);
     }
+
+    /// Shared rename assertions, run against both store layouts.
+    async fn assert_rename_roundtrip(backend: &LocalSecretBackend) {
+        let mut req = make_request("old-name", "v1");
+        req.groups = Some(vec!["team".to_string()]);
+        req.note = Some("keep".to_string());
+        req.folder = Some("proj".to_string());
+        backend.set_secret("default", req).await.unwrap();
+
+        let created = backend
+            .rename_secret("default", "old-name", "new-name")
+            .await
+            .unwrap();
+        assert_eq!(created.name, "new-name");
+
+        let got = backend
+            .get_secret("default", "new-name", true)
+            .await
+            .unwrap();
+        assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("v1"));
+        assert_eq!(got.tags.get("groups").map(String::as_str), Some("team"));
+        assert_eq!(got.tags.get("note").map(String::as_str), Some("keep"));
+        assert_eq!(got.tags.get("folder").map(String::as_str), Some("proj"));
+        assert_eq!(got.original_name, "new-name");
+
+        // Old name is out of the active set and waiting in trash.
+        assert!(matches!(
+            backend.get_secret("default", "old-name", false).await,
+            Err(BackendError::NotFound { .. })
+        ));
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert!(
+            deleted.iter().any(|d| d.name == "old-name"),
+            "old name must land in trash: {deleted:?}"
+        );
+
+        // Version history does not carry over — the new name starts fresh.
+        let versions = backend.list_versions("default", "new-name").await.unwrap();
+        assert_eq!(versions.len(), 1, "{versions:?}");
+    }
+
+    #[tokio::test]
+    async fn rename_moves_secret_in_plaintext_store() {
+        let (backend, _tmp) = test_backend();
+        assert_rename_roundtrip(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn rename_moves_secret_in_opaque_store_without_leaking_names() {
+        let (backend, tmp) = test_backend_opaque();
+        assert_rename_roundtrip(&backend).await;
+
+        // Opaque property holds after a rename: no on-disk filename under the
+        // secrets dir contains either the old or the new secret name.
+        let sdir = tmp.path().join("vaults").join("default").join("secrets");
+        for entry in fs::read_dir(&sdir).unwrap().flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                !fname.contains("new-name") && !fname.contains("old-name"),
+                "leaky stem after rename: {fname}"
+            );
+        }
+    }
 }
