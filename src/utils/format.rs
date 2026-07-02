@@ -210,10 +210,15 @@ impl TableFormatter {
                 OutputFormat::Json => self.format_as_json(data),
                 OutputFormat::Yaml => self.format_as_yaml(data),
                 OutputFormat::Csv => self.format_as_csv(data),
-                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => Ok(
-                    "No results found. If this is unexpected, check your vault permissions or filter criteria."
-                        .to_string(),
-                ),
+                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => {
+                    // Validate --columns selection even with no rows.
+                    let headers: Vec<String> = T::headers().iter().map(|h| h.to_string()).collect();
+                    let _ = self.selected_indices(&headers)?;
+                    Ok(
+                        "No results found. If this is unexpected, check your vault permissions or filter criteria."
+                            .to_string(),
+                    )
+                }
                 OutputFormat::Template => self.format_as_template(data),
             };
         }
@@ -934,5 +939,23 @@ mod tests {
         let empty: Vec<ColRow> = vec![];
         let out = formatter.format_table(&empty).unwrap();
         assert_eq!(out.trim_end(), "Name");
+    }
+
+    #[test]
+    fn columns_validated_even_when_table_data_is_empty() {
+        let formatter = TableFormatter::new(
+            OutputFormat::Table,
+            true,
+            None,
+            Some(vec!["Bogus".to_string()]),
+        );
+        let empty: Vec<ColRow> = vec![];
+        let result = formatter.format_table(&empty);
+        assert!(
+            result.is_err(),
+            "unknown column must error even with no rows"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Bogus"), "{msg}");
     }
 }
