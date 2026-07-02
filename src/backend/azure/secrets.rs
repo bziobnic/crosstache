@@ -211,7 +211,7 @@ impl SecretBackend for AzureSecretBackend {
         name: &str,
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
-        // Attributes/tags-only updates (no value change, no rename) go
+        // Attributes/tags-only updates (no value change) go
         // through `PATCH {vault}/secrets/{name}` instead of the full-write
         // path below: the full write must read the current value first and
         // confirm afterwards, both of which return HTTP 403 `SecretDisabled`
@@ -221,7 +221,7 @@ impl SecretBackend for AzureSecretBackend {
         //
         // Clearing exp/nbf still needs the full write: omitted PATCH
         // attribute fields are left unchanged, so a clear cannot be expressed.
-        let attributes_only = request.value.is_none() && request.new_name.is_none();
+        let attributes_only = request.value.is_none();
         let clears_dates = matches!(request.expires_on, FieldUpdate::Clear)
             || matches!(request.not_before, FieldUpdate::Clear);
         if attributes_only && !clears_dates {
@@ -329,7 +329,7 @@ impl SecretBackend for AzureSecretBackend {
         };
 
         let compat_request = SecretRequest {
-            name: request.new_name.unwrap_or_else(|| request.name.clone()),
+            name: request.name.clone(),
             value,
             content_type: request.content_type,
             enabled: request.enabled,
@@ -443,7 +443,6 @@ mod build_patched_tags_tests {
     fn base_request(name: &str) -> SecretUpdateRequest {
         SecretUpdateRequest {
             name: name.to_string(),
-            new_name: None,
             value: None,
             content_type: None,
             enabled: None,

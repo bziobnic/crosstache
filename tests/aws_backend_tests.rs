@@ -478,7 +478,6 @@ async fn update_secret_enabled_flag_is_unsupported() {
 
     let request = SecretUpdateRequest {
         name: "db-password".to_string(),
-        new_name: None,
         value: None,
         content_type: None,
         enabled: Some(false),

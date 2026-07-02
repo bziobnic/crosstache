@@ -1247,3 +1247,99 @@ fn complete_folders_is_silent_without_cache() {
     let out = env.xv_ok(&["__complete-folders"]);
     assert_eq!(out.trim(), "", "cache disabled → no completions, no errors");
 }
+
+#[test]
+fn update_rename_moves_secret_and_metadata() {
+    let env = TestEnv::new();
+    env.set_secret_with_args(
+        "old-name",
+        "rename-me",
+        &["--note", "keep this note", "--group", "team-a"],
+    );
+
+    // NOTE: output::success prints to STDERR (src/utils/output.rs), so run
+    // the raw command to assert the rename success line.
+    let output = env
+        .xv()
+        .args(["update", "old-name", "--rename", "new-name"])
+        .output()
+        .expect("run xv update --rename");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(output.status.success(), "update --rename failed:\n{stderr}");
+    assert!(
+        stderr.contains("renamed") && stderr.contains("new-name"),
+        "expected a rename success line on stderr:\n{stderr}"
+    );
+
+    // Value moved.
+    assert_eq!(env.get_raw("new-name"), "rename-me");
+
+    // Metadata rode along, and the old name is out of the listing.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        json.contains("new-name") && json.contains("keep this note") && json.contains("team-a"),
+        "metadata missing after rename:\n{json}"
+    );
+    assert!(!json.contains("old-name"), "old name still listed:\n{json}");
+
+    // The old name no longer resolves.
+    let (_, stderr) = env.xv_fail(&["get", "old-name"]);
+    assert!(stderr.to_lowercase().contains("not found"), "{stderr}");
+}
+
+#[test]
+fn update_rename_applies_other_flags_first() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("combo", "v1", &["--note", "old note"]);
+
+    // Success lines go to stderr; the behavioral assertions below are the
+    // real check, so xv_ok (which only asserts exit status) is enough here.
+    env.xv_ok(&[
+        "update",
+        "combo",
+        "--note",
+        "new note",
+        "--rename",
+        "combo-renamed",
+    ]);
+
+    assert_eq!(env.get_raw("combo-renamed"), "v1");
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        json.contains("combo-renamed") && json.contains("new note"),
+        "{json}"
+    );
+    assert!(
+        !json.contains("old note"),
+        "stale note survived the update:\n{json}"
+    );
+}
+
+#[test]
+fn update_rename_refuses_to_overwrite_an_existing_secret() {
+    let env = TestEnv::new();
+    env.set_secret("keep-me", "original");
+    env.set_secret("mover", "moving");
+
+    let (_, stderr) = env.xv_fail(&["update", "mover", "--rename", "keep-me"]);
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    // Nothing was clobbered or deleted.
+    assert_eq!(env.get_raw("keep-me"), "original");
+    assert_eq!(env.get_raw("mover"), "moving");
+}
+
+#[test]
+fn update_rename_to_the_same_name_is_an_error() {
+    let env = TestEnv::new();
+    env.set_secret("same", "v");
+    let (_, stderr) = env.xv_fail(&["update", "same", "--rename", "same"]);
+    assert!(stderr.contains("already named"), "{stderr}");
+}
+
+#[test]
+fn update_rename_of_a_missing_secret_fails() {
+    let env = TestEnv::new();
+    let (_, stderr) = env.xv_fail(&["update", "ghost", "--rename", "anything"]);
+    assert!(stderr.to_lowercase().contains("not found"), "{stderr}");
+}

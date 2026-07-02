@@ -1528,30 +1528,57 @@ pub(crate) async fn execute_secret_update_direct(
             Some(groups)
         };
 
-        let request = crate::secret::manager::SecretUpdateRequest {
-            name: name.to_string(),
-            new_name: rename,
-            value: resolved_value,
-            content_type: None,
-            enabled,
-            expires_on: expires_update,
-            not_before: not_before_update,
-            tags: merged_tags,
-            groups: merged_groups,
-            note: note_update,
-            folder: folder_update,
-            replace_tags,
-            replace_groups,
-        };
-        let props = reg
-            .active()
-            .secrets()
-            .update_secret(&vault_name, name, request)
-            .await?;
-        output::success(&format!(
-            "Successfully updated secret '{}'",
-            props.original_name
-        ));
+        let renaming = rename.is_some();
+        let has_other_updates = resolved_value.is_some()
+            || merged_tags.is_some()
+            || merged_groups.is_some()
+            || enabled.is_some()
+            || !expires_update.is_unchanged()
+            || !not_before_update.is_unchanged()
+            || !note_update.is_unchanged()
+            || !folder_update.is_unchanged();
+
+        // Apply in-place updates first, under the old name; then rename.
+        // `--rename` alone skips the no-op update round-trip, and a bare
+        // `xv update NAME` keeps its historical all-unchanged update call.
+        if has_other_updates || !renaming {
+            let request = crate::secret::manager::SecretUpdateRequest {
+                name: name.to_string(),
+                value: resolved_value,
+                content_type: None,
+                enabled,
+                expires_on: expires_update,
+                not_before: not_before_update,
+                tags: merged_tags,
+                groups: merged_groups,
+                note: note_update,
+                folder: folder_update,
+                replace_tags,
+                replace_groups,
+            };
+            let props = reg
+                .active()
+                .secrets()
+                .update_secret(&vault_name, name, request)
+                .await?;
+            output::success(&format!(
+                "Successfully updated secret '{}'",
+                props.original_name
+            ));
+        }
+
+        if let Some(ref new_name) = rename {
+            let props = reg
+                .active()
+                .secrets()
+                .rename_secret(&vault_name, name, new_name)
+                .await?;
+            output::success(&format!(
+                "Successfully renamed secret '{name}' to '{}'",
+                props.original_name
+            ));
+        }
+
         // Invalidate the secrets list cache for metadata, value, rename, or enablement changes.
         invalidate_trait_secret_cache(&config, &vault_name);
         return Ok(());

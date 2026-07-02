@@ -2515,7 +2515,6 @@ mod tests {
 
         let update = SecretUpdateRequest {
             name: "upd".into(),
-            new_name: None,
             value: None,
             content_type: Some("application/json".into()),
             enabled: Some(false),
@@ -2551,7 +2550,6 @@ mod tests {
 
         let update = SecretUpdateRequest {
             name: "versioned".into(),
-            new_name: None,
             value: Some(Zeroizing::new("new".into())),
             content_type: None,
             enabled: None,
@@ -2582,7 +2580,6 @@ mod tests {
     fn unchanged_update(name: &str) -> SecretUpdateRequest {
         SecretUpdateRequest {
             name: name.into(),
-            new_name: None,
             value: None,
             content_type: None,
             enabled: None,

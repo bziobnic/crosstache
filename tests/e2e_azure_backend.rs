@@ -209,7 +209,6 @@ async fn e2e_azure_secret_full_lifecycle() {
     // --- UPDATE METADATA (note + groups) ---
     let update = SecretUpdateRequest {
         name: secret.clone(),
-        new_name: None,
         value: None,
         content_type: None,
         enabled: None,
