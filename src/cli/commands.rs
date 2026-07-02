@@ -1112,14 +1112,9 @@ pub enum VaultShareCommands {
         /// Resource group
         #[arg(short, long)]
         resource_group: Option<String>,
-        /// Output format
-        #[arg(
-            short = 'f',
-            long = "fmt",
-            default_value = "auto",
-            id = "share_list_format"
-        )]
-        format: crate::utils::format::OutputFormat,
+        /// Deprecated: use the global --format
+        #[arg(long = "fmt", hide = true, id = "share_list_format")]
+        format: Option<crate::utils::format::OutputFormat>,
         /// Include service accounts in output
         #[arg(long)]
         all: bool,

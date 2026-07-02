@@ -1229,26 +1229,55 @@ async fn execute_vault_share(
                 .resolve_and_filter_roles(&mut roles, all)
                 .await?;
 
+            let fmt = match format {
+                Some(f) => {
+                    crate::utils::output::warn("--fmt is deprecated; use the global --format");
+                    f.resolve_for_stdout()
+                }
+                None => config.runtime_output_format,
+            };
+            let human_table_like = matches!(
+                fmt,
+                crate::utils::format::OutputFormat::Table
+                    | crate::utils::format::OutputFormat::Plain
+                    | crate::utils::format::OutputFormat::Raw
+            );
+
             let pagination = Pagination::from_args(page, page_size)?;
             let paged = paginate_slice(&roles, pagination);
 
+            let formatter = crate::utils::format::TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+            );
+
             if roles.is_empty() {
-                output::info(&format!(
-                    "No access assignments found for vault '{vault_name}'"
-                ));
+                if human_table_like {
+                    output::info(&format!(
+                        "No access assignments found for vault '{vault_name}'"
+                    ));
+                } else {
+                    println!("{}", formatter.format_table(&paged.items)?);
+                }
             } else {
-                let formatter = crate::utils::format::TableFormatter::new(
-                    format,
-                    config.no_color,
-                    config.template.clone(),
-                );
                 let table_output = formatter.format_table(&paged.items)?;
                 let mut output = String::new();
-                if format.resolve_for_stdout() == crate::utils::format::OutputFormat::Table {
+                if human_table_like {
                     let _ = writeln!(output, "Access assignments for vault '{vault_name}':");
                 }
                 output.push_str(&table_output);
-                if let Some(footer) = pagination_footer_text(&paged, "assignment", format) {
+                if human_table_like {
+                    output.push('\n');
+                    output.push_str(&crate::utils::list_output::count_label(
+                        paged.items.len(),
+                        paged.total_items,
+                        "assignment",
+                        None,
+                        paged.page_size.is_some(),
+                    ));
+                }
+                if let Some(footer) = pagination_footer_text(&paged, "assignment", fmt) {
                     output.push('\n');
                     output.push_str(&footer);
                 }
