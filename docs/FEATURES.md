@@ -26,9 +26,9 @@
 | `xv set <name>` | Create a secret (interactive prompt, `--stdin`, `--value`, or bulk `K1=v1 K2=v2`); write-time metadata via `--group` (repeatable), `--note`, `--folder`, `--expires`, `--not-before`, `--tag key=value` |
 | `xv gen` | Generate a random password to the clipboard (`--length`, `--charset`, `--raw`); `--save <name>` stores it as a secret with the same write-time metadata flags as `set` (`--group`, `--note`, `--folder`, `--expires`, `--not-before`, `--tag`, `--vault`) |
 | `xv get <name>` | Retrieve a secret (clipboard by default; `--raw` for stdout) |
-| `xv list` | List secrets (`--group`, `--all`, `--expiring <period>`, `--expired`, `--page-size`, `--page`, `--pager [auto|always|never]`) |
+| `xv list` (alias `xv ls`) | List secrets. Default TTY output is a folder-aware grid (folders first, shown as `prod/`); pass a `[FOLDER]` positional to list inside a folder. `-l` for a long listing (name, updated, groups, note), `-r` to recurse (folder-qualified names in the grid/long/`--names-only` views), `--format table` for the classic table. Filters: `--group`, `--all` (include disabled), `--expiring <period>`, `--expired`, `--deleted` (soft-deleted secrets; conflicts with `FOLDER`, `-r`, `--group`, `--all`, `--expiring`, `--expired`). `--sort name\|updated` (default `name`). `--names-only`, `--page-size`, `--page`, `--pager [auto\|always\|never]`, `--no-cache` |
 | `xv delete <name>` | Soft-delete a secret (`--force` to skip confirmation) |
-| `xv update <name>` | Update value, groups, folder, note, tags, expiry; supports `--rename`, `--tag`/`--tags`, and clear flags such as `--clear-note` |
+| `xv update <name>` | Update value, groups, folder, note, tags, expiry; supports `--rename`, `--tag`/`--tags`, `--enabled <true\|false>` (disable/enable — disabled secrets are excluded from `xv ls` and `xv group list` by default, `--all` reveals them), and clear flags such as `--clear-note` |
 | `xv purge <name>` | Permanently delete a soft-deleted secret |
 | `xv restore <name>` | Restore a soft-deleted secret |
 | `xv history <name>` | Show version history |
@@ -36,6 +36,7 @@
 | `xv rotate <name>` | Generate new random value (`--length`, `--charset`, `--generator`); `--native` triggers AWS Secrets Manager rotation |
 | `xv copy <name>` | Copy a secret between vaults (`--from`, `--to`) |
 | `xv move <name>` | Move a secret between vaults (`--from`, `--to`) |
+| `xv group list` | List secret groups with member counts, derived from the `groups` metadata (`--no-cache`; full `--format`/`--columns` support) |
 
 ### Metadata & Organization
 
@@ -64,6 +65,27 @@ alphanumeric + hyphen and hashes names beyond 127 characters; AWS accepts its
 broader Secrets Manager charset and percent-encodes unsupported bytes; local
 storage uses filename-safe encoding. Original names are preserved in metadata
 where a backend needs reverse lookup.
+
+### Search — `xv find`
+
+Ranked fuzzy search over secrets (alias `xv search`); non-interactive, pipe
+the output through `fzf` for an interactive picker. Default field is the
+secret name; opt in to others with repeated `--in <field>` (`name`, `folder`,
+`groups`, `note`, `tags`).
+
+```bash
+xv find db                    # rank by name
+xv find db --in folder --in groups
+xv find db --folder prod      # scope to the prod/ subtree (segment-boundary match)
+xv find db --limit 10         # cap rows (default 50)
+xv find db --min-score 0.5    # drop matches below this fraction of the top score (default 0.3)
+xv find db --all-vaults       # search every vault the caller can list
+xv find db --names-only       # pipe-friendly
+xv find db --format csv       # standard row shape across json/yaml/csv
+```
+
+Machine formats (`json`/`yaml`/`csv`) emit the standard row shape: `score` is
+a two-decimal string, `folder`/`groups` default to empty strings.
 
 ---
 
@@ -97,7 +119,7 @@ and still runs the child process.
 | Command | Description |
 |---------|-------------|
 | `xv vault create <name>` | Create a new vault (`--resource-group`, `--location`) |
-| `xv vault list` | List vaults (`--page-size`, `--page`) |
+| `xv vault list` | List vaults (`--resource-group`, `--names-only`, `--no-cache`, `--page-size`, `--page`, `--pager [auto\|always\|never]`) |
 | `xv vault info <name>` | Show vault details |
 | `xv vault delete <name>` | Soft-delete a vault |
 | `xv vault restore <name>` | Restore a soft-deleted vault |
@@ -117,6 +139,8 @@ and still runs the child process.
 | `xv share revoke` | Revoke secret-level access |
 | `xv share list` | List secret permissions (`--page-size`, `--page`) |
 
+`vault share list -f`/`--fmt` is deprecated in favor of the global `--format`; `--fmt` still works with a warning, `-f` is removed.
+
 ---
 
 ## Context & Environments
@@ -125,9 +149,9 @@ and still runs the child process.
 |---------|-------------|
 | `xv context use <vault>` | Switch vault context (`--global`, `--local`) |
 | `xv context show` | Show current context |
-| `xv context list` | Recent contexts |
+| `xv context list` | Recent contexts; honors the global `--format` (`{status, vault, resource_group, last_used, usage_count}` rows) |
 | `xv context clear` | Clear context |
-| `xv env list` | List `[env.*]` blocks in the resolved `.xv.toml` (`xv context envs` is an alias) |
+| `xv env list` | List `[env.*]` blocks in the resolved `.xv.toml`; honors the global `--format` (`Name`/`Active`/`Backend`/`Vault`/`Resource Group` rows) |
 | `xv env use <name>` | Set `default_env = "<name>"` in the nearest `.xv.toml` |
 | `xv env create <name>` | Add `[env.<name>]` to the nearest `.xv.toml` (`--vault`, `--resource-group`, `--backend`, `--default`) |
 | `xv env delete <name>` | Remove `[env.<name>]` from the resolved `.xv.toml` (`-f` to skip confirmation) |
@@ -135,7 +159,8 @@ and still runs the child process.
 | `xv env pull` | Download secrets as `.env` file |
 | `xv env push <file>` | Upload `.env` contents as secrets |
 
-Aliases: `xv cx` for `xv context`, `xv ls` for `xv list`.
+Aliases: `xv cx` for `xv context`, `xv ls` for `xv list`. `xv context envs` is
+deprecated (hidden from help, warns, delegates to `xv env list` unchanged).
 
 ---
 
@@ -156,7 +181,7 @@ active backend:
 | `xv download <file>` | Quick download (alias for `xv file download`) |
 | `xv file upload` | Upload files (`--recursive`, `--prefix`, `--flatten`) |
 | `xv file download` | Download files (`--recursive`, `--flatten`, `--output`, `--force`) |
-| `xv file list` | List files (hierarchical by default; `--recursive` for flat; `--page-size`, `--page`, `--limit`) |
+| `xv file list` | List files (hierarchical by default; `--recursive` for flat; `--names-only` (recursive, pipe-friendly), `--pager [auto\|always\|never]`, `--page-size`, `--page`, `--limit`, `--no-cache`) |
 | `xv file delete` | Delete files (`--force`, `--continue-on-error`) |
 | `xv file info` | File metadata |
 | `xv file sync` | Sync local directory with blob prefix (`--direction` up/down/both, `--dry-run`, `--delete`); Azure path only today |
@@ -165,6 +190,9 @@ AWS supports upload/download/list/delete/info through S3. Attempting
 `xv file sync` on the AWS backend returns a setup-neutral error that recommends
 recursive upload/download as the current bulk-transfer path.
 
+`xv file list --format csv` columns match the table: `Kind,Name,Size,Content-Type,Modified,Groups`.
+JSON/YAML keep the full-fidelity serialization (etags, raw byte sizes, extra metadata).
+
 ---
 
 ## Utilities
@@ -172,7 +200,7 @@ recursive upload/download as the current bulk-transfer path.
 | Command | Description |
 |---------|-------------|
 | `xv whoami` | Show authenticated identity and context |
-| `xv audit <name>` | Access/change history for a secret or vault (Azure Activity Log or AWS CloudTrail; unsupported on local) |
+| `xv audit <name>` | Access/change history for a secret or vault (Azure Activity Log or AWS CloudTrail; unsupported on local); `--vault`, `--days`, `--operation`; honors the global `--format` (JSON = array of `{timestamp, operation, resource, caller, status}` rows). `--raw` is a deprecated hidden alias that warns and implies `--format json` |
 | `xv info <resource>` | Auto-detect and display info for a vault or secret |
 | `xv parse <conn-string>` | Parse and display connection string components |
 | `xv completion <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
@@ -265,12 +293,31 @@ xv get DB_PASSWORD --raw > db_password.txt
 xv list --format json | jq '.[].name'
 ```
 
+`--format json|yaml|csv` works across all list-style commands, including
+`xv audit`, `xv find`, `xv share list`, `xv vault share list`,
+`xv context list`, and `xv env list`. Empty results are
+valid-empty on machine formats (`[]` for JSON, headers-only for CSV) instead of
+nothing, so `| jq` works on empty results; the corresponding empty-state
+message for human formats goes to stderr. Counts are plural-aware (`1 vault`,
+`3 vaults`, `5 audit log entries`).
+
+One documented exception: `xv config show --format json|yaml` serializes the
+full configuration object (it is a resource view, not a list). Its human table
+and the `--resolved` rows render through the shared formatter, so `--columns`
+and `--no-color` apply there like everywhere else.
+
 Long list-style output can be paged when both stdin and stdout are terminals:
 
 ```bash
 xv list --pager              # same as --pager auto
 xv vault list --pager never  # force direct printing
 ```
+
+Global `--columns <COLS>` selects and orders columns for `table`/`plain`/`csv`
+output on any list command (case-insensitive, e.g. `--columns Name,Updated`);
+unknown names error and list the available columns. JSON/YAML/template ignore
+it. Global `--no-color` disables colored output (same effect as `NO_COLOR`,
+including stderr chrome).
 
 ---
 
