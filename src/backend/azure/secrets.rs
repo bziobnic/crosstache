@@ -79,7 +79,11 @@ fn build_patched_tags(
             merged
         }
         Some(new_tags) => new_tags.clone(),
-        None => HashMap::new(),
+        // No tag change requested: preserve every existing tag (including
+        // custom user tags and `groups`) rather than starting from an empty
+        // map. The crosstache-managed keys below are re-stamped on top, and
+        // note/folder/groups overrides (if any) still apply after that.
+        None => current_tags.clone(),
     };
 
     // Resolve groups: honor replace_groups semantics.
@@ -406,5 +410,112 @@ impl SecretBackend for AzureSecretBackend {
             .restore_secret_from_backup(vault, backup)
             .await
             .map_err(map_error)
+    }
+}
+
+#[cfg(test)]
+mod build_patched_tags_tests {
+    use super::*;
+    use crate::secret::manager::FieldUpdate;
+
+    fn base_request(name: &str) -> SecretUpdateRequest {
+        SecretUpdateRequest {
+            name: name.to_string(),
+            new_name: None,
+            value: None,
+            content_type: None,
+            enabled: None,
+            expires_on: FieldUpdate::Unchanged,
+            not_before: FieldUpdate::Unchanged,
+            tags: None,
+            groups: None,
+            note: FieldUpdate::Unchanged,
+            folder: FieldUpdate::Unchanged,
+            replace_tags: false,
+            replace_groups: false,
+        }
+    }
+
+    fn current_tags() -> HashMap<String, String> {
+        let mut tags = HashMap::new();
+        tags.insert("groups".to_string(), "team-a".to_string());
+        tags.insert("custom".to_string(), "keep".to_string());
+        tags.insert("note".to_string(), "old".to_string());
+        tags
+    }
+
+    #[test]
+    fn none_tags_preserves_existing_custom_tags_and_groups() {
+        let current = current_tags();
+        let mut request = base_request("my-secret");
+        request.note = FieldUpdate::Set("new".to_string());
+
+        let result = build_patched_tags(&request, &current);
+
+        assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
+        assert_eq!(result.get("groups").map(String::as_str), Some("team-a"));
+        assert_eq!(result.get("note").map(String::as_str), Some("new"));
+        assert_eq!(
+            result.get("original_name").map(String::as_str),
+            Some("my-secret")
+        );
+        assert_eq!(
+            result.get("created_by").map(String::as_str),
+            Some("crosstache")
+        );
+    }
+
+    #[test]
+    fn some_tags_without_replace_merges_over_current() {
+        let current = current_tags();
+        let mut request = base_request("my-secret");
+        let mut new_tags = HashMap::new();
+        new_tags.insert("x".to_string(), "1".to_string());
+        request.tags = Some(new_tags);
+        request.replace_tags = false;
+
+        let result = build_patched_tags(&request, &current);
+
+        assert_eq!(result.get("x").map(String::as_str), Some("1"));
+        // Existing custom tag and groups survive the merge.
+        assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
+        assert_eq!(result.get("groups").map(String::as_str), Some("team-a"));
+    }
+
+    #[test]
+    fn some_tags_with_replace_drops_current_custom_tags() {
+        let current = current_tags();
+        let mut request = base_request("my-secret");
+        let mut new_tags = HashMap::new();
+        new_tags.insert("x".to_string(), "1".to_string());
+        request.tags = Some(new_tags);
+        request.replace_tags = true;
+
+        let result = build_patched_tags(&request, &current);
+
+        assert_eq!(result.get("x").map(String::as_str), Some("1"));
+        // Full replacement: old custom tag is gone...
+        assert!(!result.contains_key("custom"));
+        // ...but crosstache-managed keys are always re-stamped.
+        assert_eq!(
+            result.get("original_name").map(String::as_str),
+            Some("my-secret")
+        );
+        assert_eq!(
+            result.get("created_by").map(String::as_str),
+            Some("crosstache")
+        );
+    }
+
+    #[test]
+    fn groups_merge_appends_to_existing_groups() {
+        let current = current_tags();
+        let mut request = base_request("my-secret");
+        request.groups = Some(vec!["b".to_string()]);
+        request.replace_groups = false;
+
+        let result = build_patched_tags(&request, &current);
+
+        assert_eq!(result.get("groups").map(String::as_str), Some("team-a,b"));
     }
 }

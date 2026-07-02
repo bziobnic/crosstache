@@ -231,6 +231,30 @@ fn update_secret_metadata() {
 }
 
 #[test]
+fn update_note_only_preserves_group_membership() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("GROUPED_KEY", "original", &["--group", "team-a"]);
+
+    // Sanity check: the secret starts out counted in its group.
+    let before = env.xv_ok(&["group", "list", "--format", "csv"]);
+    assert!(before.contains("team-a,1"), "before update: {before}");
+
+    // A note-only update must not silently drop the existing `groups` tag
+    // (or any other tag) via a full-replacement PATCH/write.
+    env.xv_ok(&["update", "GROUPED_KEY", "--note", "note only update"]);
+
+    let after = env.xv_ok(&["group", "list", "--format", "csv"]);
+    assert!(
+        after.contains("team-a,1"),
+        "group membership should survive a note-only update: {after}"
+    );
+
+    // Value and note should both reflect the expected post-update state.
+    let value = env.get_raw("GROUPED_KEY");
+    assert_eq!(value, "original");
+}
+
+#[test]
 fn delete_and_verify() {
     let env = TestEnv::new();
     env.set_secret("TEMP_SECRET", "temp-value");
