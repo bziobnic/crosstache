@@ -57,7 +57,7 @@ Adopters and their conventions after this change (human formats):
 | `history` | existing wording | count moves from stderr to stdout, `N version(s) of 'name'` |
 | `audit`, `find`, `context list`, `env list` | wording normalized to the pattern; streams already stderr | unchanged (audit keeps its `Found N…` header position but reworded via helper) |
 
-Machine formats: every adopter prints its format's valid-empty output on stdout (`[]` for JSON — via `TableFormatter` where used, via the command's own serializer for `find`) and never the info message — this fixes the `vault share list` defect. Counts never appear in machine output.
+Machine formats: adopters with machine-format support this phase (`ls`, `vault list`, `vault share list`, `share list`, `file list`) print their format's valid-empty output on stdout (`[]` for JSON — via `TableFormatter` where used) and never the info message — this fixes the `vault share list` defect. Counts never appear in machine output.
 
 **`ls` stream change called out:** its human empty message moves from the stdout buffer to stderr `output::info`, aligning with the v0.16.0 stdout-purity rule. `xv ls > file` on an empty vault now produces an empty file. The P1 spec's §2 note about "existing stdout convention" is superseded by this spec.
 
@@ -66,6 +66,7 @@ Machine formats: every adopter prints its format's valid-empty output on stdout 
 - Routing `audit`/`find`/`config show`/`context list`/`env list`/`file list` rendering through `TableFormatter`; adding JSON/YAML/CSV to commands that lack them; any change to `find`'s JSON envelope or `file list`'s CSV header casing.
 - `--columns` column selection (returns with the shared renderer).
 - `find --folder`, TUI folder tree, folder completion (P1 deferrals, unchanged).
+- Machine-format valid-empty output for `history`, `find`, and `audit` (their machine paths are untouched this phase; Phase B).
 
 ## Testing
 

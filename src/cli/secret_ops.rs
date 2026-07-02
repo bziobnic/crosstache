@@ -3977,6 +3977,16 @@ async fn execute_secret_share(
                 }
                 let table_output = formatter.format_table(&paged.items)?;
                 output.push_str(&table_output);
+                if human_table_like {
+                    output.push('\n');
+                    output.push_str(&crate::utils::list_output::count_label(
+                        paged.items.len(),
+                        paged.total_items,
+                        "assignment",
+                        None,
+                        paged.page_size.is_some(),
+                    ));
+                }
                 if let Some(footer) = pagination_footer_text(&paged, "assignment", fmt) {
                     output.push('\n');
                     output.push_str(&footer);

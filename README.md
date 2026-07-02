@@ -710,6 +710,7 @@ xv vault create my-vault --resource-group my-rg --location eastus
 xv vault list                                  # all vaults you can see
 xv vault list --resource-group my-rg
 xv vault list --page-size 25 --page 2          # pagination
+xv vault list --names-only      # one vault name per line
 xv vault info my-vault                         # detail
 xv vault info my-vault --format json
 xv vault delete my-vault                       # soft-delete
@@ -817,6 +818,8 @@ xv file list
 xv file list --prefix backup/
 xv file list --page-size 100 --page 3
 xv file list --limit 100                         # legacy alias for first-page page-size 100
+xv file list --names-only       # one file name per line (recursive)
+xv file list --pager never       # never page output
 ```
 
 ### Sync

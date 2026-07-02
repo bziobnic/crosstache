@@ -1395,6 +1395,7 @@ impl Cli {
         // Disable colors if --no-color flag is set
         if self.no_color {
             config.no_color = true;
+            crate::utils::output::disable_color();
         }
 
         // Warn if --template given without --format template
