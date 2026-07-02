@@ -1590,9 +1590,18 @@ pub(crate) async fn execute_secret_update_direct(
                 }
                 Err(e) => {
                     if has_other_updates {
-                        output::warn(
-                            "the metadata update was applied; the rename did not complete — the secret keeps its original name",
-                        );
+                        // RenameIncomplete means the new copy WAS created and
+                        // only the old-name delete failed — both names exist,
+                        // so don't claim the name is unchanged.
+                        let msg = if matches!(
+                            e,
+                            crate::backend::error::BackendError::RenameIncomplete { .. }
+                        ) {
+                            "the metadata update was applied; the rename did not complete cleanly — both names currently exist (see the error below for recovery)"
+                        } else {
+                            "the metadata update was applied; the rename did not complete — the secret keeps its original name"
+                        };
+                        output::warn(msg);
                     }
                     return Err(e.into());
                 }
