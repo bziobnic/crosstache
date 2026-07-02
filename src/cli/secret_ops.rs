@@ -405,10 +405,25 @@ pub(crate) fn display_cached_secret_list(
         return Ok(());
     }
 
+    // Grid/long views ignore --columns for rendering, but an unknown column
+    // name must still error like every other view. Validate up front — before
+    // the empty-scope early return below — so empty scopes reject typos too;
+    // the "ignored for the grid/long view" warning (below) only fires once we
+    // know the selection is valid.
+    let is_grid_or_long_view = !config.format_explicit || long;
+    if config.runtime_columns.is_some() && is_grid_or_long_view {
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        formatter.validate_columns::<SecretListDisplayRow>()?;
+    }
+
     if scoped.subtree.is_empty() {
-        // Grid/long views ignore --columns (warned above); only the explicit
-        // table/plain/raw view renders via TableFormatter, so only that path
-        // needs to validate an unknown --columns selection here.
+        // Explicit table/plain/raw view: validate an unknown --columns
+        // selection here too (grid/long already validated above).
         if config.format_explicit && !long {
             let formatter = TableFormatter::new(
                 fmt,
@@ -768,20 +783,21 @@ pub(crate) async fn execute_secret_history_direct(
             .await?;
         if versions.is_empty() {
             let fmt = config.runtime_output_format;
+            use crate::utils::format::TableFormatter;
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
             if matches!(
                 fmt,
                 OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
             ) {
+                formatter.validate_columns::<crate::secret::manager::SecretProperties>()?;
                 output::info(&format!("No version history for '{name}'"));
             } else {
                 // Valid-empty machine output on stdout (e.g. `[]` for JSON).
-                use crate::utils::format::TableFormatter;
-                let formatter = TableFormatter::new(
-                    fmt,
-                    config.no_color,
-                    config.template.clone(),
-                    config.runtime_columns.clone(),
-                );
                 println!("{}", formatter.format_table(&versions)?);
             }
         } else {

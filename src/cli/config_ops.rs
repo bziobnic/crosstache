@@ -1173,6 +1173,7 @@ async fn execute_context_list(config: &Config) -> Result<()> {
 
     if items.is_empty() {
         if human_table_like {
+            formatter.validate_columns::<ContextItem>()?;
             output::info(&crate::utils::list_output::empty_state_message(
                 "vault contexts",
                 None,
