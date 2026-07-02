@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`xv update --rename` works again on every backend (#295).** Rename is now a real trait-level operation (`SecretBackend::rename_secret`): read value + metadata, create under the new name (user tags, groups, note, folder, content type, and expiry ride along), then delete the old name with the backend's normal delete. Previously Azure created the duplicate and never deleted the original, while local and AWS silently ignored the flag; the `SecretUpdateRequest.new_name` field is gone so a backend can never ignore a rename again. Combined with other update flags, the in-place updates apply first, then the rename. Renaming onto an existing name is refused (`xv-conflict`); version history does not carry over. On Azure the old name is left soft-deleted (visible in `xv ls --deleted`; renaming back within the retention window conflicts); on AWS it sits in the standard 30-day recovery window; on local it lands in trash.
+- **`RenameIncomplete` is restored** (removed in the v0.17.0 legacy cleanup while unreachable): if the new secret is created but deleting the original fails, `xv update --rename` exits 43 with code `xv-rename-incomplete`, names both copies and the vault, and prints the recovery steps (`xv get <new>`, then `xv delete <old>` or retry). The new secret is deliberately never rolled back. The 43 row is back in `docs/exit-codes.md`.
+
 ## v0.17.0 — Folder-aware listing, unified renderers, and legacy cleanup (2026-07-02)
 
 ### Added

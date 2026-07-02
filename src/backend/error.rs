@@ -58,6 +58,17 @@ pub enum BackendError {
     #[error("network error: {0}")]
     Network(String),
 
+    /// A rename created the new secret but failed to delete the original.
+    /// Both copies exist; `cause` is the delete failure.
+    #[error("rename of '{source}' to '{destination}' in vault '{vault}' is incomplete: deleting the original failed: {cause}")]
+    RenameIncomplete {
+        source: String,
+        destination: String,
+        vault: String,
+        #[source]
+        cause: Box<BackendError>,
+    },
+
     /// An internal error inside the backend implementation.
     #[error("backend internal error: {0}")]
     Internal(String),
@@ -91,6 +102,17 @@ impl From<BackendError> for CrosstacheError {
                 CrosstacheError::RateLimited(detail)
             }
             BackendError::Network(msg) => CrosstacheError::NetworkError(msg),
+            BackendError::RenameIncomplete {
+                source,
+                destination,
+                vault,
+                cause,
+            } => CrosstacheError::RenameIncomplete {
+                source,
+                destination,
+                vault,
+                cause: Box::new((*cause).into()),
+            },
             BackendError::Internal(msg) => CrosstacheError::Unknown(msg),
             BackendError::Other(err) => CrosstacheError::Unknown(err.to_string()),
         }
@@ -115,6 +137,34 @@ mod tests {
                 ref suggestion,
             } if name == "my-key" && suggestion.as_deref() == Some("my-key-v2")
         ));
+    }
+
+    #[test]
+    fn rename_incomplete_maps_preserving_names_and_cause() {
+        let be = BackendError::RenameIncomplete {
+            source: "old".into(),
+            destination: "new".into(),
+            vault: "v".into(),
+            cause: Box::new(BackendError::Network("dial timeout".into())),
+        };
+        let ce: CrosstacheError = be.into();
+        match ce {
+            CrosstacheError::RenameIncomplete {
+                source,
+                destination,
+                vault,
+                cause,
+            } => {
+                assert_eq!(source, "old");
+                assert_eq!(destination, "new");
+                assert_eq!(vault, "v");
+                assert!(
+                    matches!(*cause, CrosstacheError::NetworkError(_)),
+                    "cause must convert recursively: {cause:?}"
+                );
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]

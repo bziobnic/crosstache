@@ -131,7 +131,6 @@ pub struct SecretAttributesUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretUpdateRequest {
     pub name: String,
-    pub new_name: Option<String>, // For renaming
     pub value: Option<Zeroizing<String>>,
     pub content_type: Option<String>,
     pub enabled: Option<bool>,
