@@ -83,6 +83,65 @@ async fn localstack_set_get_round_trip() {
 }
 
 #[tokio::test]
+async fn localstack_rename_round_trip() {
+    if skip_unless_enabled() {
+        return;
+    }
+    let backend = build_backend().await;
+    let vault = format!("xv-test-{}", uuid::Uuid::new_v4());
+
+    let request = SecretRequest {
+        name: "rename-src".into(),
+        value: Zeroizing::new("rename-value".into()),
+        groups: Some(vec!["team".into()]),
+        note: Some("ride along".into()),
+        content_type: None,
+        enabled: None,
+        expires_on: None,
+        not_before: None,
+        tags: None,
+        folder: None,
+    };
+    backend.secrets().set_secret(&vault, request).await.unwrap();
+
+    let created = backend
+        .secrets()
+        .rename_secret(&vault, "rename-src", "rename-dst")
+        .await
+        .unwrap();
+    assert_eq!(created.name, "rename-dst");
+
+    let got = backend
+        .secrets()
+        .get_secret(&vault, "rename-dst", true)
+        .await
+        .unwrap();
+    assert_eq!(
+        got.value.as_ref().map(|v| v.as_str().to_string()),
+        Some("rename-value".to_string())
+    );
+    // props_from_describe re-exposes xv: tags under the canonical keys.
+    assert_eq!(got.tags.get("groups").map(String::as_str), Some("team"));
+    assert_eq!(got.tags.get("note").map(String::as_str), Some("ride along"));
+
+    // The old name is scheduled for deletion (30-day recovery window — the
+    // same delete `xv delete` performs), so it drops out of ListSecrets.
+    // NOTE: don't assert via secret_exists — DescribeSecret still returns
+    // scheduled-deletion entries, which is what makes the rename-back-within-
+    // the-window case a Conflict by design.
+    let listed = backend.secrets().list_secrets(&vault, None).await.unwrap();
+    assert!(
+        !listed.iter().any(|s| s.name == "rename-src"),
+        "old name still listed: {listed:?}"
+    );
+    assert!(listed.iter().any(|s| s.name == "rename-dst"));
+
+    // Cleanup: force-purge both names so reruns never hit the recovery window.
+    let _ = backend.secrets().purge_secret(&vault, "rename-dst").await;
+    let _ = backend.secrets().purge_secret(&vault, "rename-src").await;
+}
+
+#[tokio::test]
 async fn localstack_list_paginates() {
     if skip_unless_enabled() {
         return;
