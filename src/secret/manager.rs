@@ -1969,11 +1969,6 @@ impl SecretManager {
             });
         }
 
-        // Display formatted table
-        let formatter = TableFormatter::new(OutputFormat::Table, self.no_color, None, None);
-        let table_output = formatter.format_table(&result)?;
-        println!("{table_output}");
-
         Ok(result)
     }
 

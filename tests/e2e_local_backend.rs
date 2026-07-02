@@ -914,3 +914,22 @@ fn env_push_imports_secrets() {
     assert_eq!(env.get_raw("GAMMA"), "three");
     assert_eq!(env.get_raw("DELTA"), "four");
 }
+
+#[test]
+fn parse_prints_exactly_one_table() {
+    let env = TestEnv::new();
+    // `xv parse` has its own local `--fmt` flag (default "table").
+    let out = env.xv_ok(&["parse", "Server=myhost;Database=mydb"]);
+    assert_eq!(
+        out.matches("myhost").count(),
+        1,
+        "connection-string table printed more than once:\n{out}"
+    );
+
+    // JSON format must not leak a human table before the JSON document.
+    let json_out = env.xv_ok(&["parse", "Server=myhost;Database=mydb", "--fmt", "json"]);
+    assert!(
+        json_out.trim_start().starts_with('['),
+        "json output polluted by a table:\n{json_out}"
+    );
+}
