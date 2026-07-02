@@ -941,9 +941,10 @@ pub enum VaultCommands {
         /// Resource group
         #[arg(short, long)]
         resource_group: Option<String>,
-        /// Output format (default: auto = table on TTY, json for pipes/redirects)
-        #[arg(long, value_enum, default_value = "auto")]
-        format: OutputFormat,
+        /// Print one name per line, no headers, no ANSI. Pipe-friendly.
+        /// Overrides --format and disables auto-format-resolution.
+        #[arg(long)]
+        names_only: bool,
         /// Bypass the local cache and fetch fresh data
         #[arg(long)]
         no_cache: bool,
