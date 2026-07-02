@@ -77,6 +77,16 @@ pub(crate) fn scope_secrets(secrets: Vec<SecretSummary>, path: &str) -> ScopedLi
     }
 }
 
+/// `--sort updated`: newest first (backend timestamps are ISO-shaped, so
+/// lexicographic order is chronological), display-name ascending on ties.
+pub(crate) fn sort_secrets_by_updated_desc(secrets: &mut [SecretSummary]) {
+    secrets.sort_by(|a, b| {
+        b.updated_on
+            .cmp(&a.updated_on)
+            .then_with(|| display_name(a).cmp(display_name(b)))
+    });
+}
+
 /// Reduce a backend timestamp like "2026-05-17 01:19:00 UTC" to its date
 /// portion for human tables. Values that don't lead with a YYYY-MM-DD token
 /// pass through unmodified; machine formats always get the full timestamp.
@@ -561,5 +571,21 @@ mod tests {
             "note not width-capped:\n{out}"
         );
         assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn updated_sort_is_descending_with_name_tiebreak() {
+        let mut a = summary("alpha", None);
+        a.updated_on = "2026-06-01 10:00:00 UTC".to_string();
+        let mut b = summary("beta", None);
+        b.updated_on = "2026-06-30 10:00:00 UTC".to_string();
+        let mut c = summary("charlie", None);
+        c.updated_on = "2026-06-01 10:00:00 UTC".to_string();
+
+        let mut secrets = vec![c, a, b];
+        sort_secrets_by_updated_desc(&mut secrets);
+        assert_eq!(secrets[0].name, "beta"); // newest first
+        assert_eq!(secrets[1].name, "alpha"); // tie → name ascending
+        assert_eq!(secrets[2].name, "charlie");
     }
 }

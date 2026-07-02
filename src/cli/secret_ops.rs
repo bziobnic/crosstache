@@ -367,6 +367,7 @@ pub(crate) fn display_cached_secret_list(
     path: &str,
     long: bool,
     recursive: bool,
+    sort: crate::cli::commands::LsSort,
     pagination: Pagination,
     pager: bool,
     vault_name: &str,
@@ -379,7 +380,11 @@ pub(crate) fn display_cached_secret_list(
     use std::fmt::Write as _;
 
     let filtered = filter_secret_summaries_for_display(secrets, group.as_deref(), all);
-    let scoped = ls_view::scope_secrets(filtered, path);
+    let mut scoped = ls_view::scope_secrets(filtered, path);
+    if sort == crate::cli::commands::LsSort::Updated {
+        ls_view::sort_secrets_by_updated_desc(&mut scoped.secrets);
+        ls_view::sort_secrets_by_updated_desc(&mut scoped.subtree);
+    }
 
     // Pipe-friendly modes: flat recursive subtree, unchanged schema.
     if names_only {
@@ -574,6 +579,7 @@ pub(crate) async fn execute_secret_list_direct(
     names_only: bool,
     long: bool,
     recursive: bool,
+    sort: crate::cli::commands::LsSort,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -599,6 +605,7 @@ pub(crate) async fn execute_secret_list_direct(
                     &path,
                     long,
                     recursive,
+                    sort,
                     pagination,
                     pager,
                     &vault_name,
@@ -683,6 +690,7 @@ pub(crate) async fn execute_secret_list_direct(
             &path,
             long,
             recursive,
+            sort,
             pagination,
             pager,
             &vault_name,

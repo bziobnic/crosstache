@@ -43,6 +43,16 @@ impl PagerWhen {
     }
 }
 
+/// Sort order for `xv ls`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
+pub enum LsSort {
+    /// Alphabetical by display name (default).
+    #[default]
+    Name,
+    /// Most recently updated first (deleted date in `--deleted` mode).
+    Updated,
+}
+
 #[derive(Debug, Clone, clap::ValueEnum, PartialEq, Eq, Default)]
 pub enum OnConflict {
     /// Skip secrets that already exist in the target (default)
@@ -509,6 +519,9 @@ pub enum Commands {
         /// Overrides --format and disables auto-format-resolution.
         #[arg(long)]
         names_only: bool,
+        /// Sort order: name (A→Z, default) or updated (newest first)
+        #[arg(long, value_enum, default_value_t = LsSort::Name)]
+        sort: LsSort,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -1510,6 +1523,7 @@ impl Cli {
                 page_size,
                 pager,
                 names_only,
+                sort,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
@@ -1525,7 +1539,7 @@ impl Cli {
                 };
                 crate::cli::secret_ops::execute_secret_list_direct(
                     path, group, all, expiring, expired, no_cache, pagination, pager, names_only,
-                    long, recursive, config, registry,
+                    long, recursive, sort, config, registry,
                 )
                 .await
             }

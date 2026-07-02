@@ -933,3 +933,22 @@ fn parse_prints_exactly_one_table() {
         "json output polluted by a table:\n{json_out}"
     );
 }
+
+#[test]
+fn ls_sort_flag_is_accepted_and_lists_everything() {
+    let env = TestEnv::new();
+    env.set_secret("older", "v");
+    env.set_secret("newer", "v");
+
+    // Local timestamps have minute resolution, so ordering is covered by the
+    // unit test; here we assert the flag parses and output is complete.
+    let out = env.xv_ok(&["ls", "--sort", "updated"]);
+    assert!(out.contains("older") && out.contains("newer"), "{out}");
+
+    let json = env.xv_ok(&["ls", "--sort", "updated", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed.as_array().map(Vec::len), Some(2));
+
+    let (_, stderr) = env.xv_fail(&["ls", "--sort", "bogus"]);
+    assert!(stderr.contains("possible values"), "{stderr}");
+}
