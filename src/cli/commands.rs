@@ -161,6 +161,10 @@ pub struct Cli {
     #[arg(long, global = true, hide = should_hide_options())]
     pub template: Option<String>,
 
+    /// Disable colored output (same effect as the NO_COLOR env var)
+    #[arg(long, global = true, hide = should_hide_options())]
+    pub no_color: bool,
+
     /// Azure credential type to use first (cli, managed_identity, environment, default)
     #[arg(
         long,
@@ -937,9 +941,10 @@ pub enum VaultCommands {
         /// Resource group
         #[arg(short, long)]
         resource_group: Option<String>,
-        /// Output format (default: auto = table on TTY, json for pipes/redirects)
-        #[arg(long, value_enum, default_value = "auto")]
-        format: OutputFormat,
+        /// Print one name per line, no headers, no ANSI. Pipe-friendly.
+        /// Overrides --format and disables auto-format-resolution.
+        #[arg(long)]
+        names_only: bool,
         /// Bypass the local cache and fetch fresh data
         #[arg(long)]
         no_cache: bool,
@@ -1107,14 +1112,9 @@ pub enum VaultShareCommands {
         /// Resource group
         #[arg(short, long)]
         resource_group: Option<String>,
-        /// Output format
-        #[arg(
-            short = 'f',
-            long = "fmt",
-            default_value = "auto",
-            id = "share_list_format"
-        )]
-        format: crate::utils::format::OutputFormat,
+        /// Deprecated: use the global --format
+        #[arg(long = "fmt", hide = true, id = "share_list_format")]
+        format: Option<crate::utils::format::OutputFormat>,
         /// Include service accounts in output
         #[arg(long)]
         all: bool,
@@ -1391,6 +1391,12 @@ impl Cli {
 
         // Wire template string
         config.template = self.template.clone();
+
+        // Disable colors if --no-color flag is set
+        if self.no_color {
+            config.no_color = true;
+            crate::utils::output::disable_color();
+        }
 
         // Warn if --template given without --format template
         if config.template.is_some() && resolved != OutputFormat::Template {

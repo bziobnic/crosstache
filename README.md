@@ -710,6 +710,7 @@ xv vault create my-vault --resource-group my-rg --location eastus
 xv vault list                                  # all vaults you can see
 xv vault list --resource-group my-rg
 xv vault list --page-size 25 --page 2          # pagination
+xv vault list --names-only      # one vault name per line
 xv vault info my-vault                         # detail
 xv vault info my-vault --format json
 xv vault delete my-vault                       # soft-delete
@@ -817,6 +818,8 @@ xv file list
 xv file list --prefix backup/
 xv file list --page-size 100 --page 3
 xv file list --limit 100                         # legacy alias for first-page page-size 100
+xv file list --names-only       # one file name per line (recursive)
+xv file list --pager never       # never page output
 ```
 
 ### Sync
@@ -1153,6 +1156,7 @@ These work with any command:
 | `--format <FORMAT>` | `table` / `json` / `yaml` / `csv` / `plain` / `raw` / `template` (default: `auto` — table on TTY, json for pipes) |
 | `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
 | `--template <TEMPLATE>` | Custom template string for template format |
+| `--no-color` | Disable colored output (same effect as the `NO_COLOR` env var) |
 | `--env <NAME>` | Active env from `.xv.toml` (overridden by `XV_ENV`) |
 | `--debug` | Enable debug logging |
 | `--show-options` | Show global options in `--help` output |

@@ -359,12 +359,24 @@ pub(crate) async fn execute_audit_command(
     }
 
     if logs.is_empty() {
-        output::info("No audit log entries found for the specified criteria");
+        output::info(&crate::utils::list_output::empty_state_message(
+            "audit log entries",
+            None,
+        ));
         return Ok(());
     }
 
     println!();
-    output::info(&format!("Found {} audit log entries:\n", logs.len()));
+    output::info(&format!(
+        "{}:\n",
+        crate::utils::list_output::count_label(
+            logs.len(),
+            logs.len(),
+            "audit log entry",
+            None,
+            false
+        )
+    ));
 
     if raw {
         // Show raw JSON output
@@ -467,12 +479,24 @@ async fn execute_backend_audit(
     }
 
     if events.is_empty() {
-        output::info("No audit log entries found for the specified criteria");
+        output::info(&crate::utils::list_output::empty_state_message(
+            "audit log entries",
+            None,
+        ));
         return Ok(());
     }
 
     println!();
-    output::info(&format!("Found {} audit log entries:\n", events.len()));
+    output::info(&format!(
+        "{}:\n",
+        crate::utils::list_output::count_label(
+            events.len(),
+            events.len(),
+            "audit log entry",
+            None,
+            false
+        )
+    ));
 
     if raw {
         // Show raw JSON output

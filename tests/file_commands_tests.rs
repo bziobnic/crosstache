@@ -389,8 +389,9 @@ async fn test_file_list_command() -> Result<()> {
         limit: Some(50),
         page: None,
         page_size: None,
-        pager: false,
+        pager: None,
         recursive: false,
+        names_only: false,
         no_cache: false,
     };
 
@@ -403,6 +404,7 @@ async fn test_file_list_command() -> Result<()> {
             page_size,
             pager,
             recursive: _,
+            names_only: _,
             no_cache: _,
         } => {
             assert_eq!(prefix, Some("config/".to_string()));
@@ -410,7 +412,7 @@ async fn test_file_list_command() -> Result<()> {
             assert_eq!(limit, Some(50));
             assert_eq!(page, None);
             assert_eq!(page_size, None);
-            assert!(!pager);
+            assert!(pager.is_none());
         }
         _ => panic!("Expected List command"),
     }

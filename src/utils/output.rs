@@ -5,7 +5,17 @@
 
 use crossterm::style::{Color as CrosstermColor, Stylize};
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+
+/// Set once at CLI dispatch when the user passes --no-color; consulted by
+/// should_use_rich alongside the NO_COLOR env var.
+static COLOR_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Disable colored/rich output process-wide (the --no-color flag).
+pub fn disable_color() {
+    COLOR_DISABLED.store(true, Ordering::Relaxed);
+}
 
 /// Message severity level
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,6 +44,9 @@ pub fn is_tty_stderr() -> bool {
 
 /// Whether to use rich (emoji + color) output
 fn should_use_rich(is_tty: bool) -> bool {
+    if COLOR_DISABLED.load(Ordering::Relaxed) {
+        return false;
+    }
     if std::env::var("NO_COLOR").is_ok() {
         return false;
     }
