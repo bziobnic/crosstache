@@ -459,6 +459,17 @@ pub enum Commands {
     /// List secrets in the current vault context (alias: ls)
     #[command(alias = "ls")]
     List {
+        /// Folder path to list (e.g. `prod` or `prod/db`). Omit for the vault
+        /// root. The active env's write-side `folder` default does not scope
+        /// listings.
+        #[arg(value_name = "FOLDER")]
+        path: Option<String>,
+        /// Long listing: name, updated date, groups, note
+        #[arg(short = 'l', long)]
+        long: bool,
+        /// List every secret in scope recursively (flatten folders)
+        #[arg(short = 'r', long)]
+        recursive: bool,
         /// Filter by group
         #[arg(short, long)]
         group: Option<String>,
@@ -1375,6 +1386,7 @@ impl Cli {
     ) -> Result<()> {
         let resolved = self.format.resolve_for_stdout();
         config.runtime_output_format = resolved;
+        config.format_explicit = !matches!(self.format, OutputFormat::Auto);
         config.output_json = matches!(resolved, OutputFormat::Json);
 
         // Wire template string
@@ -1459,6 +1471,9 @@ impl Cli {
                 .await
             }
             Commands::List {
+                path,
+                long,
+                recursive,
                 group,
                 all,
                 expiring,
@@ -1471,9 +1486,19 @@ impl Cli {
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
+                let path = match path {
+                    Some(raw) => {
+                        let trimmed = raw.trim_end_matches('/').to_string();
+                        if !trimmed.is_empty() {
+                            crate::utils::helpers::validate_folder_path(&trimmed)?;
+                        }
+                        trimmed
+                    }
+                    None => String::new(),
+                };
                 crate::cli::secret_ops::execute_secret_list_direct(
-                    group, all, expiring, expired, no_cache, pagination, pager, names_only, config,
-                    registry,
+                    path, group, all, expiring, expired, no_cache, pagination, pager, names_only,
+                    long, recursive, config, registry,
                 )
                 .await
             }

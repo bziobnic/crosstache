@@ -304,29 +304,9 @@ fn format_secret_list_rows_for_human(
                 .unwrap_or_default(),
             folder: secret.folder.clone().unwrap_or_default(),
             groups: secret.groups.clone().unwrap_or_default(),
-            updated_on: date_portion_for_display(&secret.updated_on),
+            updated_on: crate::cli::ls_view::date_portion_for_display(&secret.updated_on),
         })
         .collect()
-}
-
-/// Reduce a backend timestamp like "2026-05-17 01:19:00 UTC" to its date
-/// portion for human tables. Values that don't lead with a YYYY-MM-DD token
-/// pass through unmodified; machine formats always get the full timestamp.
-fn date_portion_for_display(timestamp: &str) -> String {
-    let first = timestamp.split_whitespace().next().unwrap_or("");
-    let is_date_shaped = first.len() == 10
-        && first.chars().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                c == '-'
-            } else {
-                c.is_ascii_digit()
-            }
-        });
-    if is_date_shaped {
-        first.to_string()
-    } else {
-        timestamp.to_string()
-    }
 }
 
 fn wrap_text_to_width(input: &str, width: usize) -> String {
@@ -396,32 +376,30 @@ pub(crate) fn display_cached_secret_list(
     secrets: Vec<crate::secret::manager::SecretSummary>,
     group: Option<String>,
     all: bool,
+    path: &str,
+    long: bool,
+    recursive: bool,
     pagination: Pagination,
     pager: bool,
     vault_name: &str,
     config: &Config,
     names_only: bool,
 ) -> Result<()> {
+    use crate::cli::ls_view::{self, LsEntry};
     use crate::utils::format::TableFormatter;
     use crate::utils::pagination::{paginate_slice, pagination_footer_text};
     use std::fmt::Write as _;
 
     let filtered = filter_secret_summaries_for_display(secrets, group.as_deref(), all);
+    let scoped = ls_view::scope_secrets(filtered, path);
 
-    // Early exit for names-only mode (no pagination for pipe-friendly output)
+    // Pipe-friendly modes: flat recursive subtree, unchanged schema.
     if names_only {
-        for s in &filtered {
-            let display = if s.original_name.is_empty() {
-                &s.name
-            } else {
-                &s.original_name
-            };
-            println!("{display}");
+        for s in &scoped.subtree {
+            println!("{}", ls_view::display_name(s));
         }
         return Ok(());
     }
-
-    let page = paginate_slice(&filtered, pagination);
 
     let fmt = config.runtime_output_format;
     let human_table_like = matches!(
@@ -429,32 +407,55 @@ pub(crate) fn display_cached_secret_list(
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
     );
 
-    if human_table_like {
-        let mut output = String::new();
-        output.push('\n');
-        // Color only for styled table; plain/raw must not emit ANSI escapes
-        if !config.no_color && fmt == OutputFormat::Table {
-            let _ = writeln!(output, "\x1b[36mVault: {}\x1b[0m", vault_name);
-        } else {
-            let _ = writeln!(output, "Vault: {}", vault_name);
+    if !human_table_like {
+        if long {
+            crate::utils::output::warn("--long is ignored for machine-readable formats");
         }
-        output.push('\n');
+        let page = paginate_slice(&scoped.subtree, pagination);
+        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+        let output = formatter.format_table(&page.items)?;
+        crate::utils::pager::print_output(&output, pager)?;
+        return Ok(());
+    }
 
-        if page.total_items == 0 {
-            let msg = if all {
-                "No secrets found in vault."
+    let mut output = String::new();
+    output.push('\n');
+    // Color only for styled table/grid; plain/raw must not emit ANSI escapes
+    let color = !config.no_color && fmt == OutputFormat::Table;
+    if color {
+        let _ = writeln!(output, "\x1b[36mVault: {}\x1b[0m", vault_name);
+    } else {
+        let _ = writeln!(output, "Vault: {}", vault_name);
+    }
+    output.push('\n');
+
+    if scoped.subtree.is_empty() {
+        let msg = if !path.is_empty() {
+            if all {
+                format!("No secrets found in folder '{path}'.")
             } else {
-                "No enabled secrets found in vault. Use --all to show disabled secrets."
-            };
-            output.push_str(&output::format_line(
-                output::Level::Info,
-                msg,
-                output::should_use_rich_stdout(),
-            ));
-            crate::utils::pager::print_output(&output, pager)?;
-            return Ok(());
-        }
+                format!(
+                    "No enabled secrets found in folder '{path}'. Use --all to show disabled secrets."
+                )
+            }
+        } else if all {
+            "No secrets found in vault.".to_string()
+        } else {
+            "No enabled secrets found in vault. Use --all to show disabled secrets.".to_string()
+        };
+        output.push_str(&output::format_line(
+            output::Level::Info,
+            &msg,
+            output::should_use_rich_stdout(),
+        ));
+        crate::utils::pager::print_output(&output, pager)?;
+        return Ok(());
+    }
 
+    // Legacy rounded table only on explicit --format table|plain|raw.
+    if config.format_explicit && !long {
+        let table_secrets = &scoped.subtree;
+        let page = paginate_slice(table_secrets, pagination);
         let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
         let display_rows = format_secret_list_rows_for_human(&page.items);
         output.push_str(&formatter.format_table(&display_rows)?);
@@ -478,15 +479,55 @@ pub(crate) fn display_cached_secret_list(
         return Ok(());
     }
 
-    let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-    let output = formatter.format_table(&page.items)?;
-    crate::utils::pager::print_output(&output, pager)?;
+    // ls-style grid / long listing.
+    let entries: Vec<LsEntry> = if recursive {
+        scoped
+            .subtree
+            .iter()
+            .cloned()
+            .map(LsEntry::Secret)
+            .collect()
+    } else {
+        ls_view::entries_for_display(&scoped)
+    };
+    let folder_count = if recursive { 0 } else { scoped.folders.len() };
+    let secret_count = entries.len() - folder_count;
 
+    let page = paginate_slice(&entries, pagination);
+    let rendered = if long {
+        ls_view::render_long(&page.items, color)
+    } else {
+        let width = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80);
+        ls_view::render_grid(&page.items, width, color)
+    };
+    output.push_str(&rendered);
+    output.push('\n');
+    let mut count_line = secret_count_label(
+        page.items
+            .iter()
+            .filter(|e| matches!(e, LsEntry::Secret(_)))
+            .count(),
+        secret_count,
+        None,
+        page.page_size.is_some(),
+    );
+    if folder_count > 0 {
+        let _ = write!(count_line, ", {} folder(s)", folder_count);
+    }
+    let _ = writeln!(output, "{} in vault '{}'", count_line, vault_name);
+    if let Some(footer) = pagination_footer_text(&page, "entry", fmt) {
+        output.push('\n');
+        output.push_str(&footer);
+    }
+    crate::utils::pager::print_output(&output, pager)?;
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_list_direct(
+    path: String,
     group: Option<String>,
     all: bool,
     expiring: Option<String>,
@@ -495,6 +536,8 @@ pub(crate) async fn execute_secret_list_direct(
     pagination: Pagination,
     pager: bool,
     names_only: bool,
+    long: bool,
+    recursive: bool,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -517,6 +560,9 @@ pub(crate) async fn execute_secret_list_direct(
                     cached,
                     group,
                     all,
+                    &path,
+                    long,
+                    recursive,
                     pagination,
                     pager,
                     &vault_name,
@@ -598,6 +644,9 @@ pub(crate) async fn execute_secret_list_direct(
             } else {
                 all
             },
+            &path,
+            long,
+            recursive,
             pagination,
             pager,
             &vault_name,
@@ -4963,24 +5012,5 @@ mod tests {
         assert_eq!(read_secret_value(&mut reader, false).unwrap(), "");
         let mut reader = std::io::Cursor::new("  \n  ");
         assert_eq!(read_secret_value(&mut reader, true).unwrap(), "");
-    }
-
-    #[test]
-    fn date_portion_truncates_standard_timestamp() {
-        assert_eq!(
-            date_portion_for_display("2026-05-17 01:19:00 UTC"),
-            "2026-05-17"
-        );
-        assert_eq!(date_portion_for_display("2026-05-17"), "2026-05-17");
-    }
-
-    #[test]
-    fn date_portion_passes_through_nonstandard_values() {
-        // Not date-shaped: return the raw value unmodified, never error.
-        assert_eq!(date_portion_for_display("yesterday"), "yesterday");
-        assert_eq!(date_portion_for_display("2026-5-7 01:19"), "2026-5-7 01:19");
-        assert_eq!(date_portion_for_display("N/A"), "N/A");
-        // Empty stays empty.
-        assert_eq!(date_portion_for_display(""), "");
     }
 }

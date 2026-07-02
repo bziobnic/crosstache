@@ -203,6 +203,11 @@ pub struct Config {
     #[serde(skip)]
     #[tabled(skip)]
     pub template: Option<String>,
+    /// True when the user passed an explicit `--format` (not `auto`).
+    /// Set in `Cli::execute`, not persisted.
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub format_explicit: bool,
     #[tabled(rename = "No Color")]
     pub no_color: bool,
     #[tabled(skip)]
@@ -302,6 +307,7 @@ impl Default for Config {
             output_json: false,
             runtime_output_format: OutputFormat::Auto,
             template: None,
+            format_explicit: false,
             no_color: false,
             blob_config: None,
             azure_credential_priority: AzureCredentialType::Default,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **`xv ls` is folder-aware and ls-styled.** The default TTY output is now a multi-column name grid with folders listed first (`prod/`), derived from each secret's `folder` tag. `xv ls prod` lists inside a folder, `xv ls -l` is a borderless long listing (name, updated date, groups, note), `xv ls -r` flattens recursively, and the previous rounded table remains available via explicit `--format table`. Piped/machine output (`--format json|yaml|csv`, `--names-only`) keeps the flat schema unchanged, scoped to the requested subtree. Machine output rows are now sorted by display name (previously backend order).
+
 ### Fixed
 
 - **`xv ls` table rendering.** Columns whose cells are all empty are no longer rendered as blank zero-width headers, narrow terminals now shrink the widest column first instead of chopping every column (no more `UT`/`C` timestamp wrapping), and the `Updated` column shows the date only (`2026-05-17`). Machine formats (JSON/YAML/CSV) are unchanged.
