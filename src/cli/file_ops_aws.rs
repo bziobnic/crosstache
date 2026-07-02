@@ -1115,7 +1115,9 @@ async fn execute_list(
     let mut rendered = display_file_list_items(&page.items, recursive, config)?;
     if !rendered.is_empty() {
         rendered.push('\n');
-        if let Some(footer) = pagination_footer_text(&page, "item", config.runtime_output_format) {
+        if let Some(footer) =
+            pagination_footer_text(&page, "item", "items", config.runtime_output_format)
+        {
             rendered.push_str(&footer);
         }
         crate::utils::pager::print_output(&rendered, pager)?;

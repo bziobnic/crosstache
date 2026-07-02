@@ -54,19 +54,24 @@ pub struct Page<T> {
 }
 
 impl<T> Page<T> {
-    pub fn human_summary(&self, noun: &str) -> Option<String> {
+    pub fn human_summary(&self, noun_singular: &str, noun_plural: &str) -> Option<String> {
         let page_size = self.page_size?;
         let total_pages = self.total_pages.unwrap_or(0);
+        let noun = if self.total_items == 1 {
+            noun_singular
+        } else {
+            noun_plural
+        };
 
         if self.total_items == 0 || self.items.is_empty() {
             return Some(format!(
-                "Showing 0 of {} {}(s) — page {} of {}",
+                "Showing 0 of {} {} — page {} of {}",
                 self.total_items, noun, self.page, total_pages
             ));
         }
 
         Some(format!(
-            "Showing {}-{} of {} {}(s) — page {} of {} (page size {})",
+            "Showing {}-{} of {} {} — page {} of {} (page size {})",
             self.start_index_1_based.unwrap_or(0),
             self.end_index_1_based.unwrap_or(0),
             self.total_items,
@@ -131,17 +136,11 @@ pub fn paginate_slice<T: Clone>(items: &[T], pagination: Pagination) -> Page<T> 
     }
 }
 
-#[allow(dead_code)]
-pub fn print_pagination_footer<T>(page: &Page<T>, noun: &str, output_format: OutputFormat) {
-    if let Some(text) = pagination_footer_text(page, noun, output_format) {
-        println!("\n{text}");
-    }
-}
-
 /// Return footer text for human-readable output formats.
 pub fn pagination_footer_text<T>(
     page: &Page<T>,
-    noun: &str,
+    noun_singular: &str,
+    noun_plural: &str,
     output_format: OutputFormat,
 ) -> Option<String> {
     let human_output = matches!(
@@ -149,7 +148,9 @@ pub fn pagination_footer_text<T>(
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
     );
 
-    human_output.then(|| page.human_summary(noun)).flatten()
+    human_output
+        .then(|| page.human_summary(noun_singular, noun_plural))
+        .flatten()
 }
 
 #[cfg(test)]
@@ -199,5 +200,26 @@ mod tests {
         assert!(Pagination::from_args(Some(0), Some(10)).is_err());
         assert!(Pagination::from_args(Some(1), Some(0)).is_err());
         assert!(Pagination::from_args(Some(1), None).is_err());
+    }
+
+    #[test]
+    fn human_summary_is_plural_aware() {
+        let one = paginate_slice(&[1], Pagination::from_args(None, Some(5)).unwrap());
+        assert_eq!(
+            one.human_summary("secret", "secrets").unwrap(),
+            "Showing 1-1 of 1 secret — page 1 of 1 (page size 5)"
+        );
+
+        let many = paginate_slice(&[1, 2, 3], Pagination::from_args(None, Some(2)).unwrap());
+        assert_eq!(
+            many.human_summary("secret", "secrets").unwrap(),
+            "Showing 1-2 of 3 secrets — page 1 of 2 (page size 2)"
+        );
+
+        let empty = paginate_slice(&[] as &[i32], Pagination::from_args(None, Some(2)).unwrap());
+        assert_eq!(
+            empty.human_summary("entry", "entries").unwrap(),
+            "Showing 0 of 0 entries — page 1 of 0"
+        );
     }
 }

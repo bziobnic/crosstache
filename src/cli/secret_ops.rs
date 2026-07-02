@@ -496,7 +496,7 @@ pub(crate) fn display_cached_secret_list(
             ),
             vault_name
         );
-        if let Some(footer) = pagination_footer_text(&page, "secret", fmt) {
+        if let Some(footer) = pagination_footer_text(&page, "secret", "secrets", fmt) {
             output.push('\n');
             output.push_str(&footer);
         }
@@ -553,7 +553,7 @@ pub(crate) fn display_cached_secret_list(
         );
     }
     let _ = writeln!(output, "{} in vault '{}'", count_line, vault_name);
-    if let Some(footer) = pagination_footer_text(&page, "entry", fmt) {
+    if let Some(footer) = pagination_footer_text(&page, "entry", "entries", fmt) {
         output.push('\n');
         output.push_str(&footer);
     }
@@ -3796,7 +3796,9 @@ async fn execute_secret_share(
                         paged.page_size.is_some(),
                     ));
                 }
-                if let Some(footer) = pagination_footer_text(&paged, "assignment", fmt) {
+                if let Some(footer) =
+                    pagination_footer_text(&paged, "assignment", "assignments", fmt)
+                {
                     output.push('\n');
                     output.push_str(&footer);
                 }

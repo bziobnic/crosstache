@@ -704,7 +704,7 @@ async fn execute_file_list(
             if !output.is_empty() {
                 output.push('\n');
                 if let Some(footer) =
-                    pagination_footer_text(&page, "item", config.runtime_output_format)
+                    pagination_footer_text(&page, "item", "items", config.runtime_output_format)
                 {
                     output.push_str(&footer);
                 }
@@ -756,7 +756,9 @@ async fn execute_file_list(
     let mut output = display_file_list_items(&page.items, recursive, config)?;
     if !output.is_empty() {
         output.push('\n');
-        if let Some(footer) = pagination_footer_text(&page, "item", config.runtime_output_format) {
+        if let Some(footer) =
+            pagination_footer_text(&page, "item", "items", config.runtime_output_format)
+        {
             output.push_str(&footer);
         }
         crate::utils::pager::print_output(&output, pager)?;
