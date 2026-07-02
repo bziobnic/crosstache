@@ -1227,6 +1227,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
 }
 
 async fn execute_context_envs(config: &Config) -> Result<()> {
+    crate::utils::output::warn("context envs is deprecated; use env list");
     execute_env_list(config).await
 }
 

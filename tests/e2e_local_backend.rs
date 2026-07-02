@@ -1107,3 +1107,28 @@ fn group_list_excludes_disabled_secrets() {
         "disabled secret should not contribute to count: {json}"
     );
 }
+
+#[test]
+fn context_envs_is_hidden_and_warns() {
+    let env = TestEnv::new();
+
+    // Hidden from help.
+    let help = env.xv_ok(&["context", "--help"]);
+    assert!(
+        !help.contains("envs"),
+        "context envs still visible in help:\n{help}"
+    );
+
+    // Still works, but warns on stderr.
+    let output = env
+        .xv()
+        .args(["context", "envs"])
+        .output()
+        .expect("run context envs");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("context envs is deprecated; use env list"),
+        "missing deprecation warning:\n{stderr}"
+    );
+}

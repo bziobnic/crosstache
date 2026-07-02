@@ -1308,7 +1308,8 @@ pub enum ContextCommands {
         #[arg(long)]
         global: bool,
     },
-    /// List environment profiles in the resolved .xv.toml
+    /// (deprecated) List environment profiles in the resolved .xv.toml — use `env list`
+    #[command(hide = true)]
     Envs,
     /// Create a new .xv.toml in the current directory
     Init {
