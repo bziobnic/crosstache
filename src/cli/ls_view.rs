@@ -55,9 +55,6 @@ pub(crate) fn relative_to_scope<'a>(folder: &'a str, path: &str) -> Option<&'a s
 
 /// True when `folder` is at or under scope `path` (exact-or-prefix with
 /// segment boundary — the `xv ls` scoping rule, shared with `find --folder`).
-/// Not yet called outside tests: reused by the upcoming `find --folder`
-/// implementation (Task 11).
-#[allow(dead_code)]
 pub(crate) fn folder_in_scope(folder: &str, path: &str) -> bool {
     relative_to_scope(folder, path).is_some()
 }

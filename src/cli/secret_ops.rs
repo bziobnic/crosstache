@@ -2192,13 +2192,30 @@ struct FindRow {
 }
 
 /// Empty-state wording for `xv find`, shared by the trait and legacy paths.
-fn find_empty_message(pattern: Option<&str>, all_vaults: bool, vault_name: Option<&str>) -> String {
-    match (all_vaults, pattern, vault_name) {
-        (true, Some(p), _) => format!("No secrets match '{p}' across all vaults."),
-        (true, None, _) => "No secrets found across all vaults.".to_string(),
-        (false, Some(p), Some(v)) => format!("No secrets match '{p}' in vault '{v}'."),
-        (false, None, Some(v)) => format!("No secrets in vault '{v}'."),
-        (false, _, None) => "No matching secrets found.".to_string(),
+fn find_empty_message(
+    pattern: Option<&str>,
+    all_vaults: bool,
+    vault_name: Option<&str>,
+    folder_scope: Option<&str>,
+) -> String {
+    match (all_vaults, pattern, vault_name, folder_scope) {
+        // All vaults cases
+        (true, Some(p), _, Some(f)) => {
+            format!("No secrets match '{p}' in folder '{f}' across all vaults.")
+        }
+        (true, Some(p), _, None) => format!("No secrets match '{p}' across all vaults."),
+        (true, None, _, Some(f)) => format!("No secrets found in folder '{f}' across all vaults."),
+        (true, None, _, None) => "No secrets found across all vaults.".to_string(),
+        // Single vault cases
+        (false, Some(p), Some(v), Some(f)) => {
+            format!("No secrets match '{p}' in folder '{f}' of vault '{v}'.")
+        }
+        (false, Some(p), Some(v), None) => format!("No secrets match '{p}' in vault '{v}'."),
+        (false, None, Some(v), Some(f)) => {
+            format!("No secrets found in folder '{f}' of vault '{v}'.")
+        }
+        (false, None, Some(v), None) => format!("No secrets in vault '{v}'."),
+        (false, _, None, _) => "No matching secrets found.".to_string(),
     }
 }
 
@@ -2363,7 +2380,12 @@ pub(crate) async fn execute_secret_find_direct(
             return Ok(());
         }
 
-        let empty_msg = find_empty_message(pattern.as_deref(), all_vaults, scope_vault.as_deref());
+        let empty_msg = find_empty_message(
+            pattern.as_deref(),
+            all_vaults,
+            scope_vault.as_deref(),
+            folder_scope.as_deref(),
+        );
         render_find_matches(&matches, format, &empty_msg, &config)?;
         return Ok(());
     }
@@ -2539,7 +2561,12 @@ async fn execute_secret_find(
         return Ok(());
     }
 
-    let empty_msg = find_empty_message(pattern, all_vaults, single_vault.as_deref());
+    let empty_msg = find_empty_message(
+        pattern,
+        all_vaults,
+        single_vault.as_deref(),
+        folder.as_deref(),
+    );
     render_find_matches(&matches, format, &empty_msg, config)
 }
 
