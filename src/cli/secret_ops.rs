@@ -4859,22 +4859,21 @@ mod tests {
         // leaves stray state in the real OS cache dir.
         let cleanup = || cache_manager.invalidate(&cache_key);
 
+        // Observe the cache and clean up BEFORE any assertion, so a failing
+        // assertion can never leave stray state in the real OS cache dir.
+        let cache_still_present = cache_manager
+            .get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+            .is_some();
+        cleanup();
+
         let err = match result {
-            Ok(()) => {
-                cleanup();
-                panic!("rename phase must fail for this backend");
-            }
+            Ok(()) => panic!("rename phase must fail for this backend"),
             Err(e) => e,
         };
         assert!(
             err.to_string().contains("Conflict") || err.to_string().contains("already exists"),
             "unexpected error: {err}"
         );
-
-        let cache_still_present = cache_manager
-            .get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
-            .is_some();
-        cleanup();
 
         assert!(
             !cache_still_present,
