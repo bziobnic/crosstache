@@ -23,12 +23,12 @@
 
 | Command | Description |
 |---------|-------------|
-| `xv set <name>` | Create a secret (interactive prompt, `--stdin`, or bulk `K1=v1 K2=v2`); write-time metadata via `--group` (repeatable), `--note`, `--folder`, `--expires`, `--not-before` |
-| `xv gen` | Generate a random password to the clipboard (`--length`, `--charset`, `--raw`); `--save <name>` stores it as a secret with the same write-time metadata flags as `set` (`--group`, `--note`, `--folder`, `--expires`, `--not-before`, `--vault`) |
+| `xv set <name>` | Create a secret (interactive prompt, `--stdin`, `--value`, or bulk `K1=v1 K2=v2`); write-time metadata via `--group` (repeatable), `--note`, `--folder`, `--expires`, `--not-before`, `--tag key=value` |
+| `xv gen` | Generate a random password to the clipboard (`--length`, `--charset`, `--raw`); `--save <name>` stores it as a secret with the same write-time metadata flags as `set` (`--group`, `--note`, `--folder`, `--expires`, `--not-before`, `--tag`, `--vault`) |
 | `xv get <name>` | Retrieve a secret (clipboard by default; `--raw` for stdout) |
-| `xv list` | List secrets (`--group`, `--all`, `--expiring <period>`, `--expired`, `--page-size`, `--page`) |
+| `xv list` | List secrets (`--group`, `--all`, `--expiring <period>`, `--expired`, `--page-size`, `--page`, `--pager [auto|always|never]`) |
 | `xv delete <name>` | Soft-delete a secret (`--force` to skip confirmation) |
-| `xv update <name>` | Update value, groups, folder, note, tags, expiry; supports `--rename` |
+| `xv update <name>` | Update value, groups, folder, note, tags, expiry; supports `--rename`, `--tag`/`--tags`, and clear flags such as `--clear-note` |
 | `xv purge <name>` | Permanently delete a soft-deleted secret |
 | `xv restore <name>` | Restore a soft-deleted secret |
 | `xv history <name>` | Show version history |
@@ -42,8 +42,20 @@
 - **Folders** — `--folder "app/database"` on `set`, `gen --save`, or `update`
 - **Groups** — `--group <name>` on `set`, `gen --save`, or `update` (multiple allowed); filter with `list --group`
 - **Notes** — `--note "description"` on `set`, `gen --save`, or `update`
-- **Tags** — `-t key=value` on `update`; `--replace-tags` / `--replace-groups` for replace mode
+- **Tags** — `--tag key=value` on `set` or `gen --save`; `-t key=value`,
+  `--tags key=value`, or `--tag key=value` on `update`; `--replace-tags` /
+  `--replace-groups` for replace mode
 - **Expiry** — `--expires YYYY-MM-DD` on `set`, `gen --save`, or `update`; `--clear-expires` to remove
+
+`--value` is for a single non-interactive write:
+
+```bash
+xv set API_TOKEN --value "$TOKEN" --tag owner=platform --group prod
+```
+
+Prefer the prompt or `--stdin` for sensitive values when shell history is a
+concern. `--value` is rejected with bulk `KEY=value` writes, and bulk writes do
+not accept `--expires` / `--not-before`.
 
 ### Name Sanitization
 
@@ -59,8 +71,24 @@ where a backend needs reverse lookup.
 
 | Command | Description |
 |---------|-------------|
-| `xv run -- <command>` | Run a process with secrets as env vars (`--group`, `--no-masking`) |
+| `xv run -- <command>` | Run a process with secrets as env vars (`--group`, `--include`, `--exclude`, `--no-masking`) |
 | `xv inject` | Render templates with `{{ secret:name }}` and `xv://vault/secret` refs |
+
+Advanced workflows (`run`, `inject`, default `rotate`, `scan`, `env pull`, and
+`env push`) route through the active backend trait. They work with Azure, AWS,
+and local backends; capability-gated variants still say so explicitly (for
+example, `rotate --native` is AWS-only).
+
+```bash
+xv run --include DB_PASSWORD --include API_KEY -- ./script.sh
+xv run --group prod --exclude LEGACY_TOKEN -- ./deploy.sh
+```
+
+`--include` narrows the candidate set before `--exclude` is applied. Both match
+the original user-facing name shown by `xv list` or the backend-specific stored
+name. If an explicit `--group`/`--include` filter matches nothing, `xv run`
+exits non-zero; an empty vault or an exclusion that removes everything warns
+and still runs the child process.
 
 ---
 
@@ -227,6 +255,22 @@ opaque_filenames = false   # when true, run `xv local migrate` to hide names on 
 ## Output Formats
 
 Table (default), JSON (`--format json`), YAML (`--format yaml`), CSV (`--format csv`), plain (`--format plain`), raw (`--format raw`).
+
+Human-readable status chrome (`[ok]`, warnings, hints, progress steps) writes to
+stderr. Stdout is reserved for command data such as raw secret values, JSON,
+YAML, CSV, table output, or names-only lists, so redirects and pipes stay clean:
+
+```bash
+xv get DB_PASSWORD --raw > db_password.txt
+xv list --format json | jq '.[].name'
+```
+
+Long list-style output can be paged when both stdin and stdout are terminals:
+
+```bash
+xv list --pager              # same as --pager auto
+xv vault list --pager never  # force direct printing
+```
 
 ---
 

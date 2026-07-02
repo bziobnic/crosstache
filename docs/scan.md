@@ -14,11 +14,29 @@ secret DB_PASSWORD from vault dev-kv"* — not just "high-entropy string."
 ```bash
 xv scan [PATH]...           # scan paths (default: .)
 xv scan --staged            # scan only files staged for commit
+xv scan --all               # scan the full tracked HEAD tree
 xv scan --hook              # quiet on no findings; exit 50 on findings
 xv scan --all-vaults        # match against every vault you can list
+xv scan --format json       # machine-readable findings on stdout
 xv scan install [--force]   # write .git/hooks/pre-commit
 xv scan uninstall           # remove the managed hook
 ```
+
+## Scan modes
+
+| Mode | Reads from | Typical use | Notes |
+|------|------------|-------------|-------|
+| `xv scan [PATH]...` | Working tree files under the requested paths | Local checks before staging | Honors default excludes, `.xvignore`, and `[scan].exclude`; prints skipped-file warnings outside hook mode. |
+| `xv scan --staged` | Git index via `git diff --cached` + `git show :PATH` | Pre-commit hooks | Scans exactly what would be committed, not unstaged edits. |
+| `xv scan --all` | Committed `HEAD` tree via `git ls-tree HEAD` + `git show HEAD:PATH` | CI sweeps of the current revision | Ignores unstaged and staged-but-uncommitted edits; honors the same default and `[scan].exclude` globs as path scans. |
+
+`--staged` and `--all` are mutually exclusive. Use a path scan for working-tree
+content, `--staged` for index content, and `--all` for the last committed tree.
+
+`--all-vaults` broadens the secret-value match set by enumerating vaults through
+the active backend. It works only when the backend can list vaults; otherwise
+the command fails with a capability error instead of silently scanning one
+vault.
 
 ## Exit codes
 
@@ -38,6 +56,10 @@ src/config.js:42:10: matches DB_PASSWORD (kind=SecretValue, severity=Critical, v
 JSON (`--format json`): array of `{file, line, col, secret_name, vault, kind, severity}` on **stdout**.
 
 **Findings never echo the matched value.** That invariant is enforced by a hand-maintained banned-key test against the `Finding` struct's serialized form.
+
+In hook mode, skipped/unreadable files are treated as a failure because an
+unscanned file could hide a leak. Outside hook mode, skipped files are reported
+on stderr and the command continues.
 
 ## `.xv.toml` `[scan]` block
 
