@@ -8,11 +8,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use std::collections::HashMap;
+
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
 use crate::secret::manager::{
-    DeletedSecretSummary, SecretOperations, SecretProperties, SecretRequest, SecretSummary,
-    SecretUpdateRequest,
+    DeletedSecretSummary, FieldUpdate, SecretAttributesUpdate, SecretOperations, SecretProperties,
+    SecretRequest, SecretSummary, SecretUpdateRequest,
 };
 
 use super::map_error;
@@ -30,6 +32,95 @@ impl AzureSecretBackend {
     pub fn new(inner: Arc<dyn SecretOperations>) -> Self {
         Self { inner }
     }
+
+    /// Fetch the current tags of a secret, tolerating disabled secrets.
+    ///
+    /// `GET {vault}/secrets/{name}` returns HTTP 403 `SecretDisabled` for a
+    /// disabled secret, but the versions list (`GET .../versions`) still
+    /// exposes attributes and tags, so use it as the second source.
+    async fn current_tags(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<HashMap<String, String>, BackendError> {
+        let get_err = match self.inner.get_secret(vault, name, false).await {
+            Ok(current) => return Ok(current.tags),
+            Err(e) => e,
+        };
+        let mut versions = self
+            .inner
+            .get_secret_versions(vault, name)
+            .await
+            .map_err(|_| map_error(get_err))?;
+        versions.sort_by_key(|v| v.created_timestamp);
+        versions
+            .pop()
+            .map(|v| v.tags)
+            .ok_or_else(|| BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            })
+    }
+}
+
+/// Build the full replacement tag map for an attributes-only `PATCH`,
+/// mirroring the legacy full-write pipeline: resolve merge/replace semantics
+/// against the current tags, then stamp crosstache's metadata tags exactly as
+/// `prepare_secret_request` does.
+fn build_patched_tags(
+    request: &SecretUpdateRequest,
+    current_tags: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    // Resolve tags: honor replace_tags semantics.
+    let mut tags = match &request.tags {
+        Some(new_tags) if !request.replace_tags => {
+            let mut merged = current_tags.clone();
+            merged.extend(new_tags.clone());
+            merged
+        }
+        Some(new_tags) => new_tags.clone(),
+        None => HashMap::new(),
+    };
+
+    // Resolve groups: honor replace_groups semantics.
+    let groups = match &request.groups {
+        Some(new_groups) if !request.replace_groups => {
+            let mut existing: Vec<String> = current_tags
+                .get("groups")
+                .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_default();
+            for g in new_groups {
+                if !existing.contains(g) {
+                    existing.push(g.clone());
+                }
+            }
+            Some(existing)
+        }
+        other => other.clone(),
+    };
+
+    tags.insert("original_name".to_string(), request.name.clone());
+    tags.insert("created_by".to_string(), "crosstache".to_string());
+    if let Some(groups) = groups {
+        if !groups.is_empty() {
+            tags.insert("groups".to_string(), groups.join(","));
+        }
+    }
+    if let Some(note) = request
+        .note
+        .clone()
+        .apply(current_tags.get("note").cloned())
+    {
+        tags.insert("note".to_string(), note);
+    }
+    if let Some(folder) = request
+        .folder
+        .clone()
+        .apply(current_tags.get("folder").cloned())
+    {
+        tags.insert("folder".to_string(), folder);
+    }
+    tags
 }
 
 #[async_trait]
@@ -94,6 +185,53 @@ impl SecretBackend for AzureSecretBackend {
         name: &str,
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
+        // Attributes/tags-only updates (no value change, no rename) go
+        // through `PATCH {vault}/secrets/{name}` instead of the full-write
+        // path below: the full write must read the current value first and
+        // confirm afterwards, both of which return HTTP 403 `SecretDisabled`
+        // on a disabled secret — making `xv update --enabled true` (re-enable)
+        // impossible. PATCH touches only attributes/tags, works on disabled
+        // secrets, and creates no new version.
+        //
+        // Clearing exp/nbf still needs the full write: omitted PATCH
+        // attribute fields are left unchanged, so a clear cannot be expressed.
+        let attributes_only = request.value.is_none() && request.new_name.is_none();
+        let clears_dates = matches!(request.expires_on, FieldUpdate::Clear)
+            || matches!(request.not_before, FieldUpdate::Clear);
+        if attributes_only && !clears_dates {
+            // PATCH replaces the whole tag map when `tags` is present, so a
+            // tag-affecting change needs the current tags to build the full
+            // desired map; otherwise omit `tags` and Azure leaves them as-is.
+            let tag_affecting = request.tags.is_some()
+                || request.groups.is_some()
+                || !request.note.is_unchanged()
+                || !request.folder.is_unchanged();
+            let tags = if tag_affecting {
+                let current_tags = self.current_tags(vault, name).await?;
+                Some(build_patched_tags(&request, &current_tags))
+            } else {
+                None
+            };
+            let update = SecretAttributesUpdate {
+                enabled: request.enabled,
+                content_type: request.content_type.clone(),
+                expires_on: match request.expires_on {
+                    FieldUpdate::Set(v) => Some(v),
+                    _ => None,
+                },
+                not_before: match request.not_before {
+                    FieldUpdate::Set(v) => Some(v),
+                    _ => None,
+                },
+                tags,
+            };
+            return self
+                .inner
+                .update_secret_attributes(vault, name, &update)
+                .await
+                .map_err(map_error);
+        }
+
         // The old SecretOperations::update_secret takes &SecretRequest, but
         // the new trait takes SecretUpdateRequest. Translate by building a
         // SecretRequest from the update request fields.

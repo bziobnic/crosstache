@@ -70,6 +70,33 @@ pub(crate) fn qualified_display_name(s: &SecretSummary, root: &str) -> String {
     }
 }
 
+/// Subtree secrets with display names qualified relative to `root`, for the
+/// recursive (`-r`) views. `scope_secrets` sorts the subtree by the
+/// *unqualified* name, which would print `zeta/alpha` before `beta` — when
+/// `sort_by_name`, re-sort by the qualified label so output order matches
+/// what is displayed. Pass `false` to preserve the incoming order (e.g.
+/// `--sort updated`).
+pub(crate) fn qualified_subtree(
+    subtree: &[SecretSummary],
+    root: &str,
+    sort_by_name: bool,
+) -> Vec<SecretSummary> {
+    let mut qualified: Vec<SecretSummary> = subtree
+        .iter()
+        .map(|s| {
+            // Grid/long render `display_name` (== original_name when set);
+            // overriding it here is how the qualified label reaches them.
+            let mut q = s.clone();
+            q.original_name = qualified_display_name(s, root);
+            q
+        })
+        .collect();
+    if sort_by_name {
+        qualified.sort_by(|a, b| display_name(a).cmp(display_name(b)));
+    }
+    qualified
+}
+
 /// Partition `secrets` relative to folder `path` ("" = vault root).
 /// A secret with folder tag F is in scope when F == path or F starts with
 /// "path/" (segment boundary enforced); its next path segment becomes a
@@ -466,6 +493,27 @@ mod tests {
         assert_eq!(qualified_display_name(&nested, ""), "prod/db/db-pass");
         assert_eq!(qualified_display_name(&nested, "prod"), "db/db-pass");
         assert_eq!(qualified_display_name(&nested, "prod/db"), "db-pass");
+    }
+
+    #[test]
+    fn recursive_subtree_sorts_by_qualified_label() {
+        // Unqualified sort puts `alpha` (in zeta/) before `beta`; the
+        // recursive view prints `zeta/alpha`, so name sort must use the
+        // qualified label: beta < zeta/alpha.
+        let scoped = scope_secrets(
+            vec![summary("beta", None), summary("alpha", Some("zeta"))],
+            "",
+        );
+        assert_eq!(display_name(&scoped.subtree[0]), "alpha");
+
+        let by_name = qualified_subtree(&scoped.subtree, "", true);
+        assert_eq!(display_name(&by_name[0]), "beta");
+        assert_eq!(display_name(&by_name[1]), "zeta/alpha");
+
+        // sort_by_name=false (e.g. --sort updated) keeps the incoming order.
+        let stable = qualified_subtree(&scoped.subtree, "", false);
+        assert_eq!(display_name(&stable[0]), "zeta/alpha");
+        assert_eq!(display_name(&stable[1]), "beta");
     }
 
     #[test]

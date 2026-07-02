@@ -1106,6 +1106,27 @@ fn group_list_excludes_disabled_secrets() {
         Some(&serde_json::json!(2)),
         "disabled secret should not contribute to count: {json}"
     );
+
+    // ls (default view) must exclude it while disabled...
+    let ls = env.xv_ok(&["ls", "--names-only"]);
+    assert!(
+        !ls.lines().any(|l| l == "disabled-member"),
+        "disabled secret should not be listed: {ls}"
+    );
+
+    // ...and the full roundtrip must work: RE-ENABLE and reappear.
+    env.xv_ok(&["update", "disabled-member", "--enabled", "true"]);
+
+    let csv = env.xv_ok(&["group", "list", "--format", "csv"]);
+    assert!(
+        csv.contains("team-x,3"),
+        "re-enabled secret should be counted again: {csv}"
+    );
+    let ls = env.xv_ok(&["ls", "--names-only"]);
+    assert!(
+        ls.lines().any(|l| l == "disabled-member"),
+        "re-enabled secret should be listed again: {ls}"
+    );
 }
 
 #[test]

@@ -644,17 +644,14 @@ pub(crate) fn display_cached_secret_list(
         );
     }
     let entries: Vec<LsEntry> = if recursive {
-        scoped
-            .subtree
-            .iter()
-            .map(|s| {
-                // Grid/long render `display_name` (== original_name when set);
-                // overriding it here is how the qualified label reaches them.
-                let mut q = s.clone();
-                q.original_name = ls_view::qualified_display_name(s, path);
-                LsEntry::Secret(q)
-            })
-            .collect()
+        ls_view::qualified_subtree(
+            &scoped.subtree,
+            path,
+            sort == crate::cli::commands::LsSort::Name,
+        )
+        .into_iter()
+        .map(LsEntry::Secret)
+        .collect()
     } else {
         ls_view::entries_for_display(&scoped)
     };
@@ -1561,6 +1558,13 @@ pub(crate) async fn execute_secret_update_direct(
     }
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
+    // The legacy signature has no enabled parameter; erroring here beats
+    // silently dropping the flag when the registry failed to initialize.
+    if enabled.is_some() {
+        return Err(CrosstacheError::config(
+            "--enabled requires the backend registry",
+        ));
+    }
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -2590,7 +2594,7 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
             } else {
                 &s.original_name
             };
-            println!("{display}");
+            println!("{}", crate::utils::format::sanitize_control_chars(display));
         }
     }
     Ok(())
@@ -2633,7 +2637,7 @@ pub(crate) async fn execute_complete_folders(config: Config) -> Result<()> {
         cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
     {
         for f in folder_completion_paths(&cached) {
-            println!("{f}");
+            println!("{}", crate::utils::format::sanitize_control_chars(&f));
         }
     }
     Ok(())

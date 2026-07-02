@@ -663,6 +663,14 @@ impl SecretBackend for AwsSecretBackend {
         use crate::backend::aws::metadata::{TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS};
         use aws_sdk_secretsmanager::types::Tag;
 
+        // AWS Secrets Manager has no enable/disable concept — fail loudly
+        // instead of silently dropping the flag.
+        if request.enabled.is_some() {
+            return Err(BackendError::Unsupported(
+                "enable/disable secrets".to_string(),
+            ));
+        }
+
         let aws_full_name = aws_name(vault, name);
 
         // Update description (note): Set writes the new text, Clear empties it.
