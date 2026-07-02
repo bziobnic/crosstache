@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 
-use crate::secret::manager::{SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest};
+use crate::secret::manager::{
+    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+};
 
 use super::error::BackendError;
 
@@ -107,7 +109,10 @@ pub trait SecretBackend: Send + Sync {
     }
 
     /// List deleted secrets (only meaningful when soft-delete is supported).
-    async fn list_deleted_secrets(&self, _vault: &str) -> Result<Vec<SecretSummary>, BackendError> {
+    async fn list_deleted_secrets(
+        &self,
+        _vault: &str,
+    ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
         Err(BackendError::Unsupported("list deleted secrets".into()))
     }
 

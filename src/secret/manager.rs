@@ -168,6 +168,17 @@ pub struct SecretSummary {
     pub content_type: String,
 }
 
+/// Summary of a soft-deleted secret awaiting purge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedSecretSummary {
+    pub name: String,
+    pub original_name: String,
+    /// When the secret was deleted (backend-formatted timestamp), when known.
+    pub deleted_on: Option<String>,
+    /// When the backend will permanently purge it (None = no schedule).
+    pub scheduled_purge_on: Option<String>,
+}
+
 /// Connection string component
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
 pub struct ConnectionComponent {
@@ -231,9 +242,8 @@ pub trait SecretOperations: Send + Sync {
     /// Permanently purge a deleted secret
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()>;
 
-    /// List deleted secrets
-    #[allow(dead_code)]
-    async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<SecretSummary>>;
+    /// List soft-deleted secrets awaiting purge.
+    async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<DeletedSecretSummary>>;
 
     /// Check if secret exists
     async fn secret_exists(&self, vault_name: &str, secret_name: &str) -> Result<bool>;
@@ -438,68 +448,39 @@ async fn read_error_body(response: reqwest::Response) -> String {
         .unwrap_or_else(|e| format!("(failed to read error body: {e})"))
 }
 
-/// Parse one entry of a `GET /deletedsecrets` response page into a
-/// [`SecretSummary`].
-///
-/// Deleted secret items carry the original secret `id`
-/// (`https://<vault>.vault.azure.net/secrets/<name>`) alongside their
-/// attributes and tags, so the summary can be built without a follow-up
-/// `get_secret` call (which would 404 for a deleted secret anyway).
-/// Returns `None` when the entry has no usable `id`.
-fn parse_deleted_secret_summary(item: &serde_json::Value) -> Option<SecretSummary> {
+/// Parse one item from Azure's `GET {vault}/deletedsecrets` (api 7.4).
+/// `deletedDate`/`scheduledPurgeDate` are top-level epoch-second fields on
+/// the deleted-secret item (not under `attributes`).
+fn parse_deleted_secret_summary(item: &serde_json::Value) -> Option<DeletedSecretSummary> {
     let id = item.get("id").and_then(|v| v.as_str())?;
     let name = id.rsplit('/').next().unwrap_or(id).to_string();
     if name.is_empty() {
         return None;
     }
 
-    let attributes = item.get("attributes").unwrap_or(&serde_json::Value::Null);
-    let enabled = attributes
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let updated_on = attributes
-        .get("updated")
-        .and_then(|v| v.as_i64())
-        .map(|ts| {
-            chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.to_string())
-                .unwrap_or_else(|| "Unknown".to_string())
+    let epoch_string = |key: &str| {
+        item.get(key)
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|dt| dt.to_string())
+    };
+
+    let original_name = item
+        .get("tags")
+        .and_then(|v| v.as_object())
+        .and_then(|tags| {
+            tags.get("original_name")
+                .or_else(|| tags.get("name"))
+                .and_then(|v| v.as_str())
         })
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    let mut tags = HashMap::new();
-    if let Some(tags_obj) = item.get("tags").and_then(|v| v.as_object()) {
-        for (key, value) in tags_obj {
-            if let Some(tag_value) = value.as_str() {
-                tags.insert(key.clone(), tag_value.to_string());
-            }
-        }
-    }
-
-    let original_name = tags
-        .get("original_name")
-        .or_else(|| tags.get("name"))
-        .cloned()
+        .map(str::to_string)
         .unwrap_or_else(|| name.clone());
-    let groups = tags
-        .get("groups")
-        .map(|g| g.trim().to_string())
-        .filter(|g| !g.is_empty());
 
-    Some(SecretSummary {
-        name: original_name.clone(),
+    Some(DeletedSecretSummary {
+        name,
         original_name,
-        note: tags.get("note").cloned(),
-        folder: tags.get("folder").cloned(),
-        groups,
-        updated_on,
-        enabled,
-        content_type: item
-            .get("contentType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("text/plain")
-            .to_string(),
+        deleted_on: epoch_string("deletedDate"),
+        scheduled_purge_on: epoch_string("scheduledPurgeDate"),
     })
 }
 
@@ -1248,7 +1229,7 @@ impl SecretOperations for AzureSecretOperations {
         Ok(())
     }
 
-    async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<SecretSummary>> {
+    async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<DeletedSecretSummary>> {
         let vault_name = self.validated_vault_name(vault_name)?;
 
         // Use REST API to list soft-deleted secrets
@@ -2481,7 +2462,10 @@ mod tests {
             Ok(())
         }
 
-        async fn list_deleted_secrets(&self, _vault_name: &str) -> Result<Vec<SecretSummary>> {
+        async fn list_deleted_secrets(
+            &self,
+            _vault_name: &str,
+        ) -> Result<Vec<DeletedSecretSummary>> {
             Err(CrosstacheError::unknown("not implemented in fake"))
         }
 
@@ -2659,7 +2643,7 @@ mod tests {
     #[test]
     fn test_parse_deleted_secret_summary_full() {
         let item = serde_json::json!({
-            "id": "https://myvault.vault.azure.net/secrets/my-secret",
+            "id": "https://myvault.vault.azure.net/deletedsecrets/my-secret",
             "recoveryId": "https://myvault.vault.azure.net/deletedsecrets/my-secret",
             "deletedDate": 1_700_000_100,
             "scheduledPurgeDate": 1_707_776_100,
@@ -2679,49 +2663,49 @@ mod tests {
         });
 
         let summary = parse_deleted_secret_summary(&item).unwrap();
-        assert_eq!(summary.name, "My Secret");
+        assert_eq!(summary.name, "my-secret");
         assert_eq!(summary.original_name, "My Secret");
-        assert_eq!(summary.note.as_deref(), Some("a note"));
-        assert_eq!(summary.folder.as_deref(), Some("apps/web"));
-        assert_eq!(summary.groups.as_deref(), Some("alpha,beta"));
-        assert!(!summary.enabled);
-        assert_eq!(summary.content_type, "application/json");
         assert_eq!(
-            summary.updated_on,
-            chrono::DateTime::from_timestamp(1_700_000_050, 0)
-                .unwrap()
-                .to_string()
+            summary.deleted_on,
+            Some(
+                chrono::DateTime::from_timestamp(1_700_000_100, 0)
+                    .unwrap()
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            summary.scheduled_purge_on,
+            Some(
+                chrono::DateTime::from_timestamp(1_707_776_100, 0)
+                    .unwrap()
+                    .to_string()
+            )
         );
     }
 
     #[test]
     fn test_parse_deleted_secret_summary_minimal() {
         let item = serde_json::json!({
-            "id": "https://myvault.vault.azure.net/secrets/bare-secret"
+            "id": "https://myvault.vault.azure.net/deletedsecrets/bare-secret"
         });
 
         let summary = parse_deleted_secret_summary(&item).unwrap();
         assert_eq!(summary.name, "bare-secret");
         assert_eq!(summary.original_name, "bare-secret");
-        assert_eq!(summary.note, None);
-        assert_eq!(summary.folder, None);
-        assert_eq!(summary.groups, None);
-        assert!(summary.enabled);
-        assert_eq!(summary.content_type, "text/plain");
-        assert_eq!(summary.updated_on, "Unknown");
+        assert_eq!(summary.deleted_on, None);
+        assert_eq!(summary.scheduled_purge_on, None);
     }
 
     #[test]
     fn test_parse_deleted_secret_summary_legacy_name_tag_and_empty_groups() {
         let item = serde_json::json!({
-            "id": "https://myvault.vault.azure.net/secrets/legacy",
+            "id": "https://myvault.vault.azure.net/deletedsecrets/legacy",
             "tags": { "name": "Legacy Name", "groups": "   " }
         });
 
         let summary = parse_deleted_secret_summary(&item).unwrap();
-        assert_eq!(summary.name, "Legacy Name");
-        // Whitespace-only groups tag is treated as no groups
-        assert_eq!(summary.groups, None);
+        assert_eq!(summary.name, "legacy");
+        assert_eq!(summary.original_name, "Legacy Name");
     }
 
     #[test]
@@ -2729,6 +2713,37 @@ mod tests {
         assert!(parse_deleted_secret_summary(&serde_json::json!({})).is_none());
         assert!(parse_deleted_secret_summary(&serde_json::json!({ "id": 42 })).is_none());
         assert!(parse_deleted_secret_summary(&serde_json::json!({ "id": "" })).is_none());
+    }
+
+    #[test]
+    fn parse_deleted_secret_summary_reads_deletion_dates() {
+        let item = serde_json::json!({
+            "id": "https://kv.vault.azure.net/deletedsecrets/my-secret",
+            "deletedDate": 1_750_000_000,
+            "scheduledPurgeDate": 1_757_776_000,
+            "tags": { "original_name": "My Secret" }
+        });
+        let summary = parse_deleted_secret_summary(&item).unwrap();
+        assert_eq!(summary.name, "my-secret");
+        assert_eq!(summary.original_name, "My Secret");
+        assert!(summary
+            .deleted_on
+            .as_deref()
+            .unwrap()
+            .starts_with("2025-06-15"));
+        assert!(summary.scheduled_purge_on.is_some());
+    }
+
+    #[test]
+    fn parse_deleted_secret_summary_tolerates_missing_dates() {
+        let item = serde_json::json!({
+            "id": "https://kv.vault.azure.net/deletedsecrets/bare"
+        });
+        let summary = parse_deleted_secret_summary(&item).unwrap();
+        assert_eq!(summary.name, "bare");
+        assert_eq!(summary.original_name, "bare");
+        assert!(summary.deleted_on.is_none());
+        assert!(summary.scheduled_purge_on.is_none());
     }
 
     #[test]

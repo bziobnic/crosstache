@@ -3,7 +3,8 @@
 use crate::backend::error::BackendError;
 use crate::backend::SecretBackend;
 use crate::secret::manager::{
-    FieldUpdate, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+    DeletedSecretSummary, FieldUpdate, SecretProperties, SecretRequest, SecretSummary,
+    SecretUpdateRequest,
 };
 use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
 use aws_sdk_secretsmanager::Client as SecretsManagerClient;
@@ -846,13 +847,16 @@ impl SecretBackend for AwsSecretBackend {
         self.get_secret(vault, name, false).await
     }
 
-    async fn list_deleted_secrets(&self, vault: &str) -> Result<Vec<SecretSummary>, BackendError> {
+    async fn list_deleted_secrets(
+        &self,
+        vault: &str,
+    ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
         use crate::backend::aws::encoding::{is_marker, strip_prefix};
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 
         let prefix = format!("{vault}/");
         let mut next_token: Option<String> = None;
-        let mut summaries: Vec<SecretSummary> = Vec::new();
+        let mut summaries: Vec<DeletedSecretSummary> = Vec::new();
 
         loop {
             let mut req = self
@@ -884,15 +888,16 @@ impl SecretBackend for AwsSecretBackend {
                 if is_marker(aws_full_name) {
                     continue;
                 }
-                summaries.push(SecretSummary {
+                summaries.push(DeletedSecretSummary {
                     name: secret_name.clone(),
                     original_name: secret_name,
-                    note: None,
-                    folder: None,
-                    groups: None,
-                    updated_on: String::new(),
-                    enabled: true,
-                    content_type: String::new(),
+                    deleted_on: entry
+                        .deleted_date()
+                        .and_then(|d| chrono::DateTime::from_timestamp(d.secs(), 0))
+                        .map(|dt| dt.to_string()),
+                    // ListSecrets doesn't expose the recovery window, so the
+                    // purge time (DeletedDate + window) is unknowable here.
+                    scheduled_purge_on: None,
                 });
             }
 

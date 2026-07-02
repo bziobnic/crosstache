@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
 use crate::secret::manager::{
-    SecretOperations, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+    DeletedSecretSummary, SecretOperations, SecretProperties, SecretRequest, SecretSummary,
+    SecretUpdateRequest,
 };
 
 use super::map_error;
@@ -241,7 +242,10 @@ impl SecretBackend for AzureSecretBackend {
             .map_err(map_error)
     }
 
-    async fn list_deleted_secrets(&self, vault: &str) -> Result<Vec<SecretSummary>, BackendError> {
+    async fn list_deleted_secrets(
+        &self,
+        vault: &str,
+    ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
         self.inner
             .list_deleted_secrets(vault)
             .await
