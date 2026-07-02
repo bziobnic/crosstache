@@ -2561,12 +2561,7 @@ async fn execute_secret_find(
         return Ok(());
     }
 
-    let empty_msg = find_empty_message(
-        pattern,
-        all_vaults,
-        single_vault.as_deref(),
-        folder.as_deref(),
-    );
+    let empty_msg = find_empty_message(pattern, all_vaults, single_vault.as_deref(), folder);
     render_find_matches(&matches, format, &empty_msg, config)
 }
 
