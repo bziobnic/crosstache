@@ -38,6 +38,41 @@ pub(crate) fn display_name(s: &SecretSummary) -> &str {
     }
 }
 
+/// Remainder of `folder` relative to scope `path` ("" = vault root):
+/// `Some("")` for an exact match, `Some(rest)` when `folder` is under
+/// `path` (segment boundary enforced), `None` when out of scope.
+pub(crate) fn relative_to_scope<'a>(folder: &'a str, path: &str) -> Option<&'a str> {
+    if path.is_empty() {
+        Some(folder)
+    } else if folder == path {
+        Some("")
+    } else {
+        folder
+            .strip_prefix(path)
+            .and_then(|rest| rest.strip_prefix('/'))
+    }
+}
+
+/// True when `folder` is at or under scope `path` (exact-or-prefix with
+/// segment boundary — the `xv ls` scoping rule, shared with `find --folder`).
+/// Not yet called outside tests: reused by the upcoming `find --folder`
+/// implementation (Task 11).
+#[allow(dead_code)]
+pub(crate) fn folder_in_scope(folder: &str, path: &str) -> bool {
+    relative_to_scope(folder, path).is_some()
+}
+
+/// Display name qualified by the folder path relative to the listing root
+/// (`prod/db` listed from root → `prod/db/name`; from `prod` → `db/name`;
+/// secrets directly at the root stay unqualified).
+pub(crate) fn qualified_display_name(s: &SecretSummary, root: &str) -> String {
+    let folder = s.folder.as_deref().unwrap_or("");
+    match relative_to_scope(folder, root) {
+        Some("") | None => display_name(s).to_string(),
+        Some(rel) => format!("{rel}/{}", display_name(s)),
+    }
+}
+
 /// Partition `secrets` relative to folder `path` ("" = vault root).
 /// A secret with folder tag F is in scope when F == path or F starts with
 /// "path/" (segment boundary enforced); its next path segment becomes a
@@ -49,16 +84,9 @@ pub(crate) fn scope_secrets(secrets: Vec<SecretSummary>, path: &str) -> ScopedLi
 
     for s in secrets {
         let folder = s.folder.as_deref().unwrap_or("");
-        let rel: Option<&str> = if path.is_empty() {
-            Some(folder)
-        } else if folder == path {
-            Some("")
-        } else {
-            folder
-                .strip_prefix(path)
-                .and_then(|rest| rest.strip_prefix('/'))
+        let Some(rel) = relative_to_scope(folder, path) else {
+            continue;
         };
-        let Some(rel) = rel else { continue };
         if rel.is_empty() {
             direct.push(s.clone());
         } else if let Some(segment) = rel.split('/').next() {
@@ -340,6 +368,30 @@ mod tests {
             enabled: true,
             content_type: "text/plain".to_string(),
         }
+    }
+
+    #[test]
+    fn folder_scope_helper_enforces_segment_boundary() {
+        assert!(folder_in_scope("prod", "prod"));
+        assert!(folder_in_scope("prod/db", "prod"));
+        assert!(folder_in_scope("prod/db/replica", "prod/db"));
+        assert!(!folder_in_scope("production", "prod"));
+        assert!(!folder_in_scope("dev", "prod"));
+        assert!(folder_in_scope("", "")); // root scopes everything
+        assert!(folder_in_scope("prod", ""));
+        assert!(!folder_in_scope("", "prod"));
+        assert_eq!(relative_to_scope("prod/db", "prod"), Some("db"));
+        assert_eq!(relative_to_scope("prod", "prod"), Some(""));
+    }
+
+    #[test]
+    fn qualified_names_are_relative_to_the_listing_root() {
+        let root_secret = summary("root-a", None);
+        let nested = summary("db-pass", Some("prod/db"));
+        assert_eq!(qualified_display_name(&root_secret, ""), "root-a");
+        assert_eq!(qualified_display_name(&nested, ""), "prod/db/db-pass");
+        assert_eq!(qualified_display_name(&nested, "prod"), "db/db-pass");
+        assert_eq!(qualified_display_name(&nested, "prod/db"), "db-pass");
     }
 
     #[test]

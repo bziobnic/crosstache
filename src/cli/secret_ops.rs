@@ -387,9 +387,14 @@ pub(crate) fn display_cached_secret_list(
     }
 
     // Pipe-friendly modes: flat recursive subtree, unchanged schema.
+    // Qualification is opt-in via -r (the bare --names-only shape is shipped).
     if names_only {
         for s in &scoped.subtree {
-            println!("{}", ls_view::display_name(s));
+            if recursive {
+                println!("{}", ls_view::qualified_display_name(s, path));
+            } else {
+                println!("{}", ls_view::display_name(s));
+            }
         }
         return Ok(());
     }
@@ -519,8 +524,13 @@ pub(crate) fn display_cached_secret_list(
         scoped
             .subtree
             .iter()
-            .cloned()
-            .map(LsEntry::Secret)
+            .map(|s| {
+                // Grid/long render `display_name` (== original_name when set);
+                // overriding it here is how the qualified label reaches them.
+                let mut q = s.clone();
+                q.original_name = ls_view::qualified_display_name(s, path);
+                LsEntry::Secret(q)
+            })
             .collect()
     } else {
         ls_view::entries_for_display(&scoped)

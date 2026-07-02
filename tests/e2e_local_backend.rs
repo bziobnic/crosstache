@@ -542,6 +542,25 @@ fn set_with_metadata() {
     assert_eq!(value, "meta-value");
 }
 
+#[test]
+fn recursive_ls_qualifies_names_by_folder() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("db-pass", "v", &["--folder", "prod/db"]);
+    env.set_secret("root-a", "v");
+
+    let names = env.xv_ok(&["ls", "-r", "--names-only"]);
+    assert!(names.lines().any(|l| l == "prod/db/db-pass"), "{names}");
+    assert!(names.lines().any(|l| l == "root-a"), "{names}");
+
+    // Scoped recursion is relative to the listing root.
+    let scoped = env.xv_ok(&["ls", "prod", "-r", "--names-only"]);
+    assert!(scoped.lines().any(|l| l == "db/db-pass"), "{scoped}");
+
+    // Non-recursive --names-only keeps the shipped unqualified shape.
+    let flat = env.xv_ok(&["ls", "--names-only"]);
+    assert!(flat.lines().any(|l| l == "db-pass"), "{flat}");
+}
+
 // ===========================================================================
 // Delete without --force in a non-interactive session should REFUSE (exit
 // non-zero) and not delete — never silently no-op.
