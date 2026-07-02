@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.17.0 — Folder-aware listing, unified renderers, and legacy cleanup (2026-07-02)
 
 ### Added
 
