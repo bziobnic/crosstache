@@ -2134,69 +2134,6 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
-async fn execute_secret_history(
-    secret_manager: &crate::secret::manager::SecretManager,
-    name: &str,
-    vault: Option<String>,
-    config: &Config,
-) -> Result<()> {
-    use crate::config::ContextManager;
-    use crate::utils::format::format_table;
-    use tabled::{Table, Tabled};
-
-    // Determine vault name using context resolution
-    let vault_name = config.resolve_vault_name(vault).await?;
-
-    // Update context usage tracking
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
-    let _ = context_manager.update_usage(&vault_name).await;
-
-    // Get secret versions using the secret operations
-    let versions = secret_manager
-        .secret_ops()
-        .get_secret_versions(&vault_name, name)
-        .await?;
-
-    if versions.is_empty() {
-        output::info(&format!("No versions found for secret '{name}'"));
-        return Ok(());
-    }
-
-    // Display versions in a table
-    #[derive(Tabled)]
-    struct VersionInfo {
-        #[tabled(rename = "Version")]
-        version: String,
-        #[tabled(rename = "Created")]
-        created: String,
-        #[tabled(rename = "Updated")]
-        updated: String,
-        #[tabled(rename = "Enabled")]
-        enabled: String,
-    }
-
-    let version_infos: Vec<VersionInfo> = versions
-        .into_iter()
-        .map(|v| VersionInfo {
-            version: v
-                .version_number
-                .map(|n| format!("v{n}"))
-                .unwrap_or_else(|| v.version.chars().take(8).collect::<String>() + "..."),
-            created: v.created_on,
-            updated: v.updated_on,
-            enabled: if v.enabled { "Yes" } else { "No" }.to_string(),
-        })
-        .collect();
-
-    let table = Table::new(&version_infos);
-    println!("Version history for secret '{name}' in vault '{vault_name}':");
-    println!();
-    println!("{}", format_table(table, config.no_color));
-
-    Ok(())
-}
-
 /// Resolve a user-friendly version identifier (e.g. "v6", "6") to the Azure Key Vault hex GUID.
 /// If the version string is already a hex GUID, it is returned as-is.
 async fn resolve_version_to_guid(
@@ -3864,11 +3801,13 @@ async fn execute_secret_parse(
             if components.is_empty() {
                 println!("No components found in connection string");
             } else {
-                use crate::utils::format::format_table;
-                use tabled::Table;
-
-                let table = Table::new(&components);
-                println!("{}", format_table(table, config.no_color));
+                let formatter = crate::utils::format::TableFormatter::new(
+                    crate::utils::format::OutputFormat::Table,
+                    config.no_color,
+                    None,
+                    None,
+                );
+                println!("{}", formatter.format_table(&components)?);
             }
         }
         _ => {

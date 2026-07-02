@@ -477,20 +477,6 @@ impl DisplayUtils {
     }
 }
 
-/// Convenience function for formatting a table with default settings
-pub fn format_table(mut table: Table, no_color: bool) -> String {
-    table
-        .with(Style::rounded())
-        .with(Modify::new(Rows::first()).with(Alignment::center()))
-        .with(Padding::new(1, 1, 0, 0));
-
-    if !no_color {
-        table.with(Modify::new(Rows::first()).with(Color::FG_CYAN));
-    }
-
-    table.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
