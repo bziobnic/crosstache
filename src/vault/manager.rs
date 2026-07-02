@@ -131,7 +131,7 @@ impl VaultManager {
         }
 
         // Format and display results
-        let formatter = TableFormatter::new(output_format, self.no_color, template);
+        let formatter = TableFormatter::new(output_format, self.no_color, template, None);
         let table_output = formatter.format_table(&vaults)?;
         println!("{table_output}");
 
@@ -289,7 +289,7 @@ impl VaultManager {
         du.print_header(&format!("Access Policies for Vault '{vault_name}'"))?;
 
         // Format and display results
-        let formatter = TableFormatter::new(output_format, self.no_color, None);
+        let formatter = TableFormatter::new(output_format, self.no_color, None, None);
         let table_output = formatter.format_table(&roles)?;
         println!("{table_output}");
 
@@ -457,7 +457,7 @@ impl VaultManager {
             du.print_separator()?;
             du.print_header("Access Policies")?;
 
-            let formatter = TableFormatter::new(OutputFormat::Table, self.no_color, None);
+            let formatter = TableFormatter::new(OutputFormat::Table, self.no_color, None, None);
             let table_output = formatter.format_table(&vault.access_policies)?;
             println!("{table_output}");
         }

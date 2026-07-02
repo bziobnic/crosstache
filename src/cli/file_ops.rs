@@ -636,7 +636,12 @@ pub(crate) fn display_file_list_items(
                     },
                 })
                 .collect();
-            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
             output.push_str(&formatter.format_table(&csv_rows)?);
         }
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => {
@@ -660,7 +665,12 @@ pub(crate) fn display_file_list_items(
                 })
                 .collect();
 
-            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
             output.push_str(&formatter.format_table(&display_items)?);
 
             let file_count = items
@@ -705,7 +715,12 @@ pub(crate) fn display_file_list_items(
                     },
                 })
                 .collect();
-            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
             output.push_str(&formatter.format_table(&display_items)?);
         }
         OutputFormat::Auto => unreachable!("resolve_for_stdout must not return Auto"),

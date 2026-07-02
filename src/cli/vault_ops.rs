@@ -113,6 +113,7 @@ pub(crate) async fn execute_vault_command(
                         config.runtime_output_format,
                         config.no_color,
                         config.template.clone(),
+                        config.runtime_columns.clone(),
                     );
                     let table = formatter.format_table(&[vault])?;
                     println!("{table}");
@@ -380,7 +381,12 @@ fn render_vault_list(
         output_format,
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
     );
-    let formatter = TableFormatter::new(output_format, config.no_color, config.template.clone());
+    let formatter = TableFormatter::new(
+        output_format,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
 
     if vaults.is_empty() {
         if human_table_like {
@@ -1252,6 +1258,7 @@ async fn execute_vault_share(
                 fmt,
                 config.no_color,
                 config.template.clone(),
+                config.runtime_columns.clone(),
             );
 
             if roles.is_empty() {

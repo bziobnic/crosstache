@@ -412,7 +412,12 @@ pub(crate) fn display_cached_secret_list(
             crate::utils::output::warn("--long is ignored for machine-readable formats");
         }
         let page = paginate_slice(&scoped.subtree, pagination);
-        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
         let output = formatter.format_table(&page.items)?;
         crate::utils::pager::print_output(&output, pager)?;
         return Ok(());
@@ -454,7 +459,12 @@ pub(crate) fn display_cached_secret_list(
     if config.format_explicit && !long {
         let table_secrets = &scoped.subtree;
         let page = paginate_slice(table_secrets, pagination);
-        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
         let display_rows = format_secret_list_rows_for_human(&page.items);
         output.push_str(&formatter.format_table(&display_rows)?);
         output.push('\n');
@@ -765,6 +775,7 @@ pub(crate) async fn execute_secret_history_direct(
                 config.runtime_output_format,
                 config.no_color,
                 config.template.clone(),
+                config.runtime_columns.clone(),
             );
             let table = formatter.format_table(&versions)?;
             println!("{table}");
@@ -3284,7 +3295,12 @@ async fn execute_secret_list(
             ));
             crate::utils::pager::print_output(&output, pager)?;
         } else {
-            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
             output.push_str(&formatter.format_table(&display_secrets)?);
 
             let qualifier = if expired {
@@ -3329,7 +3345,12 @@ async fn execute_secret_list(
             crate::utils::pager::print_output(&output, pager)?;
         }
     } else {
-        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
         let output = formatter.format_table(&display_secrets)?;
         crate::utils::pager::print_output(&output, pager)?;
     }
@@ -3962,6 +3983,7 @@ async fn execute_secret_share(
                 fmt,
                 config.no_color,
                 config.template.clone(),
+                config.runtime_columns.clone(),
             );
 
             if roles.is_empty() {
