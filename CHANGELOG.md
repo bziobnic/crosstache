@@ -17,6 +17,7 @@
 - **`xv find --format csv`** now works (previously find had no CSV output).
 - **`xv context list` and `xv env list` honor the global `--format`** (json/yaml/csv/…): `context list` rows are `{status, vault, resource_group, last_used, usage_count}`; `env list` renders `Name/Active/Backend/Vault/Resource Group` rows instead of a hand-rolled line format.
 - **`xv config show --format yaml`** serializes the whole `Config` object (like `--format json` always did — `config show` is a resource view, not a list; this documented exception is the one command whose machine output is not the table's row set).
+- **`xv update --enabled <true|false>`** enables or disables a secret directly (disabled secrets are excluded from `xv ls` and `xv group list` by default).
 
 ### Changed
 

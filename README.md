@@ -412,6 +412,7 @@ xv update API_KEY --note "rotated 2026-04-30 by ops"
 xv update API_KEY --group production --group api-tier   # repeatable
 xv update API_KEY --folder myapp/edge                    # move to another folder
 xv update API_KEY --tag rotated-by=alice                 # custom tag
+xv update API_KEY --enabled false                        # disable secret (hidden from ls/group list by default)
 ```
 
 ### Delete and recover
