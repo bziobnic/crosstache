@@ -20,6 +20,7 @@ pub mod format;
 pub mod fuzzy;
 pub mod helpers;
 pub mod interactive;
+pub mod list_output;
 pub mod network;
 pub mod output;
 pub mod pager;
