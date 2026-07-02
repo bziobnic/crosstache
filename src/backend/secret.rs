@@ -70,6 +70,10 @@ pub trait SecretBackend: Send + Sync {
     /// If the new secret is created but deleting the original fails, this
     /// returns [`BackendError::RenameIncomplete`] and deliberately does NOT
     /// roll back the new secret — no secret material may be lost.
+    ///
+    /// The destination-exists guard is a best-effort pre-check, not a lock:
+    /// backends' `set_secret` is create-or-replace, so a concurrent write to
+    /// `new_name` between the check and the create would be overwritten.
     async fn rename_secret(
         &self,
         vault: &str,
