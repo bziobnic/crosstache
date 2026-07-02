@@ -2596,6 +2596,49 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
     Ok(())
 }
 
+/// Distinct folder paths (including ancestor prefixes, so `prod/db` also
+/// offers `prod`), sorted — the completion feed for FOLDER-taking args.
+fn folder_completion_paths(secrets: &[crate::secret::manager::SecretSummary]) -> Vec<String> {
+    let mut folders = std::collections::BTreeSet::new();
+    for s in secrets {
+        let Some(folder) = s.folder.as_deref().filter(|f| !f.is_empty()) else {
+            continue;
+        };
+        let mut prefix = String::new();
+        for seg in folder.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(seg);
+            folders.insert(prefix.clone());
+        }
+    }
+    folders.into_iter().collect()
+}
+
+#[allow(dead_code)] // called from src/main.rs::run_complete_folders (binary-only path)
+pub(crate) async fn execute_complete_folders(config: Config) -> Result<()> {
+    use crate::cache::{CacheKey, CacheManager};
+
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Cache-only path, mirroring execute_complete_secrets: a cold cache
+    // means no completions — never a backend round-trip on a Tab press.
+    let cache_manager = CacheManager::from_config(&config);
+    if !cache_manager.is_enabled() {
+        return Ok(());
+    }
+    let cache_key = CacheKey::SecretsList { vault_name };
+    if let Some(cached) =
+        cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+    {
+        for f in folder_completion_paths(&cached) {
+            println!("{f}");
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a user-friendly version identifier (e.g. "v6", "6") to the Azure Key Vault hex GUID.
 /// If the version string is already a hex GUID, it is returned as-is.
 async fn resolve_version_to_guid(
@@ -5297,5 +5340,37 @@ mod tests {
         for line in wrapped.lines() {
             assert!(crate::cli::ls_view::display_width(line) <= 4, "{wrapped:?}");
         }
+    }
+
+    #[test]
+    fn folder_completion_includes_ancestor_prefixes_sorted() {
+        fn s(folder: Option<&str>) -> crate::secret::manager::SecretSummary {
+            crate::secret::manager::SecretSummary {
+                name: "x".to_string(),
+                original_name: "x".to_string(),
+                note: None,
+                folder: folder.map(str::to_string),
+                groups: None,
+                updated_on: String::new(),
+                enabled: true,
+                content_type: String::new(),
+            }
+        }
+        let paths = folder_completion_paths(&[
+            s(Some("prod/db/replica")),
+            s(Some("prod")),
+            s(Some("dev")),
+            s(None),
+            s(Some("")),
+        ]);
+        assert_eq!(
+            paths,
+            vec![
+                "dev".to_string(),
+                "prod".to_string(),
+                "prod/db".to_string(),
+                "prod/db/replica".to_string(),
+            ]
+        );
     }
 }

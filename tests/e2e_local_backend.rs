@@ -1155,3 +1155,11 @@ fn context_envs_is_hidden_and_warns() {
         "missing deprecation warning:\n{stderr}"
     );
 }
+
+#[test]
+fn complete_folders_is_silent_without_cache() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("db-pass", "v", &["--folder", "prod/db"]);
+    let out = env.xv_ok(&["__complete-folders"]);
+    assert_eq!(out.trim(), "", "cache disabled → no completions, no errors");
+}
