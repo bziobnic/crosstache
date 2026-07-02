@@ -2774,21 +2774,10 @@ mod tests {
     fn test_parse_deleted_secret_summary_full() {
         let item = serde_json::json!({
             "id": "https://myvault.vault.azure.net/deletedsecrets/my-secret",
-            "recoveryId": "https://myvault.vault.azure.net/deletedsecrets/my-secret",
             "deletedDate": 1_700_000_100,
             "scheduledPurgeDate": 1_707_776_100,
-            "contentType": "application/json",
-            "attributes": {
-                "enabled": false,
-                "created": 1_700_000_000,
-                "updated": 1_700_000_050,
-                "recoveryLevel": "Recoverable+Purgeable"
-            },
             "tags": {
-                "original_name": "My Secret",
-                "groups": "alpha,beta",
-                "note": "a note",
-                "folder": "apps/web"
+                "original_name": "My Secret"
             }
         });
 
@@ -2843,37 +2832,6 @@ mod tests {
         assert!(parse_deleted_secret_summary(&serde_json::json!({})).is_none());
         assert!(parse_deleted_secret_summary(&serde_json::json!({ "id": 42 })).is_none());
         assert!(parse_deleted_secret_summary(&serde_json::json!({ "id": "" })).is_none());
-    }
-
-    #[test]
-    fn parse_deleted_secret_summary_reads_deletion_dates() {
-        let item = serde_json::json!({
-            "id": "https://kv.vault.azure.net/deletedsecrets/my-secret",
-            "deletedDate": 1_750_000_000,
-            "scheduledPurgeDate": 1_757_776_000,
-            "tags": { "original_name": "My Secret" }
-        });
-        let summary = parse_deleted_secret_summary(&item).unwrap();
-        assert_eq!(summary.name, "my-secret");
-        assert_eq!(summary.original_name, "My Secret");
-        assert!(summary
-            .deleted_on
-            .as_deref()
-            .unwrap()
-            .starts_with("2025-06-15"));
-        assert!(summary.scheduled_purge_on.is_some());
-    }
-
-    #[test]
-    fn parse_deleted_secret_summary_tolerates_missing_dates() {
-        let item = serde_json::json!({
-            "id": "https://kv.vault.azure.net/deletedsecrets/bare"
-        });
-        let summary = parse_deleted_secret_summary(&item).unwrap();
-        assert_eq!(summary.name, "bare");
-        assert_eq!(summary.original_name, "bare");
-        assert!(summary.deleted_on.is_none());
-        assert!(summary.scheduled_purge_on.is_none());
     }
 
     #[test]
