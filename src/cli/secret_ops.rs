@@ -256,6 +256,119 @@ fn filter_secret_summaries_for_display(
     secrets
 }
 
+/// Fold summaries into (group → member count), tokenizing the comma-separated
+/// `groups` tag exactly like `secret_summary_matches_group`. A group repeated
+/// within one secret counts that secret once.
+fn derive_group_rows(secrets: &[crate::secret::manager::SecretSummary]) -> Vec<GroupListRow> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for s in secrets {
+        let Some(groups) = s.groups.as_deref() else {
+            continue;
+        };
+        let mut seen = std::collections::HashSet::new();
+        for g in groups.split(',') {
+            let g = g.trim();
+            if !g.is_empty() && seen.insert(g) {
+                *counts.entry(g.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(group, secrets)| GroupListRow { group, secrets })
+        .collect()
+}
+
+pub(crate) async fn execute_group_command(
+    command: crate::cli::commands::GroupCommands,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    match command {
+        crate::cli::commands::GroupCommands::List { no_cache } => {
+            execute_group_list(no_cache, config, registry).await
+        }
+    }
+}
+
+async fn execute_group_list(
+    no_cache: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::cache::CacheManager;
+    use crate::utils::format::TableFormatter;
+
+    if !use_trait_path(registry) {
+        return Err(CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        ));
+    }
+    let reg = registry.expect("use_trait_path guarantees Some");
+    let vault_name = resolve_vault_for_trait(&config, registry).await?;
+
+    // Same fetch-or-cache flow as `xv ls` (shared CacheKey::SecretsList dataset).
+    let cache_manager = CacheManager::from_config(&config);
+    let cache_key = trait_secret_cache_key(&vault_name);
+    let use_cache = cache_manager.is_enabled() && !no_cache;
+    let cached = if use_cache {
+        cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+    } else {
+        None
+    };
+    let secrets = match cached {
+        Some(secrets) => secrets,
+        None => {
+            let fetched = reg
+                .active()
+                .secrets()
+                .list_secrets(&vault_name, None)
+                .await?;
+            if use_cache {
+                cache_manager.set(&cache_key, &fetched);
+            }
+            fetched
+        }
+    };
+
+    let rows = derive_group_rows(&secrets);
+    let fmt = config.runtime_output_format;
+    let human = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+
+    if rows.is_empty() && human {
+        crate::utils::output::info(&crate::utils::list_output::empty_state_message(
+            "groups",
+            Some(&format!("vault '{vault_name}'")),
+        ));
+        return Ok(());
+    }
+
+    let formatter = TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+    println!("{}", formatter.format_table(&rows)?);
+    if human {
+        println!(
+            "{}",
+            crate::utils::list_output::count_label(
+                rows.len(),
+                rows.len(),
+                "group",
+                "groups",
+                Some(&format!("vault '{vault_name}'")),
+                false,
+            )
+        );
+    }
+    Ok(())
+}
+
 const SECRET_LIST_NOTE_WRAP_WIDTH: usize = 40;
 
 #[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
@@ -270,6 +383,15 @@ struct SecretListDisplayRow {
     groups: String,
     #[tabled(rename = "Updated")]
     updated_on: String,
+}
+
+/// Row shape for `xv group list`.
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct GroupListRow {
+    #[tabled(rename = "Group")]
+    group: String,
+    #[tabled(rename = "Secrets")]
+    secrets: usize,
 }
 
 fn format_secret_list_rows_for_human(
@@ -4860,6 +4982,31 @@ mod tests {
             &summary_with_groups(None),
             "prod"
         ));
+    }
+
+    #[test]
+    fn group_rows_derive_from_comma_separated_tags() {
+        fn s(name: &str, groups: Option<&str>) -> crate::secret::manager::SecretSummary {
+            crate::secret::manager::SecretSummary {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                note: None,
+                folder: None,
+                groups: groups.map(str::to_string),
+                updated_on: String::new(),
+                enabled: true,
+                content_type: String::new(),
+            }
+        }
+        let rows = derive_group_rows(&[
+            s("a", Some("team-a, team-b")),
+            s("b", Some("team-a")),
+            s("c", Some(" team-b ,, team-b ")), // dup within one secret counts once
+            s("d", None),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].group.as_str(), rows[0].secrets), ("team-a", 2));
+        assert_eq!((rows[1].group.as_str(), rows[1].secrets), ("team-b", 2));
     }
 
     #[test]

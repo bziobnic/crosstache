@@ -800,6 +800,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: EnvCommands,
     },
+    /// Inspect secret groups in the current vault context
+    Group {
+        #[command(subcommand)]
+        command: GroupCommands,
+    },
     /// Show audit history for secrets or vaults
     Audit {
         /// Secret name to show audit history for (exclusive with --vault)
@@ -1394,6 +1399,16 @@ pub enum EnvCommands {
 }
 
 #[derive(Subcommand)]
+pub enum GroupCommands {
+    /// List groups and member counts derived from secret metadata
+    List {
+        /// Bypass the local cache and fetch fresh data
+        #[arg(long)]
+        no_cache: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ScanCommands {
     /// Install a pre-commit hook that runs `xv scan --staged --hook`.
     Install {
@@ -1752,6 +1767,9 @@ impl Cli {
             }
             Commands::Env { command } => {
                 crate::cli::config_ops::execute_env_command(command, config, registry).await
+            }
+            Commands::Group { command } => {
+                crate::cli::secret_ops::execute_group_command(command, config, registry).await
             }
             Commands::Audit {
                 name,

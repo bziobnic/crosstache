@@ -1040,3 +1040,40 @@ fn ls_deleted_columns_selection_and_validation() {
         "expected an error for unknown column: {err}"
     );
 }
+
+#[test]
+fn group_list_counts_members_across_formats() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("a", "v", &["--group", "team-a"]);
+    env.set_secret_with_args("b", "v", &["--group", "team-a"]);
+    env.set_secret_with_args("c", "v", &["--group", "team-b"]);
+    env.set_secret("ungrouped", "v");
+
+    // Piped stdout resolves Auto → JSON; force the human table for the
+    // count-line assertion.
+    let table = env.xv_ok(&["group", "list", "--format", "table"]);
+    assert!(
+        table.contains("team-a") && table.contains("team-b"),
+        "{table}"
+    );
+    assert!(table.contains("2 groups"), "count line: {table}");
+
+    let csv = env.xv_ok(&["group", "list", "--format", "csv"]);
+    let mut lines = csv.lines();
+    assert_eq!(lines.next(), Some("Group,Secrets"), "{csv}");
+    assert!(
+        csv.contains("team-a,2") && csv.contains("team-b,1"),
+        "{csv}"
+    );
+
+    let json = env.xv_ok(&["group", "list", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed.as_array().map(Vec::len), Some(2));
+
+    // Empty vault → valid-empty machine output.
+    let fresh = TestEnv::new();
+    assert_eq!(
+        fresh.xv_ok(&["group", "list", "--format", "json"]).trim(),
+        "[]"
+    );
+}
