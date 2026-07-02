@@ -112,32 +112,6 @@ impl VaultManager {
             .await
     }
 
-    /// List vaults with formatted output
-    pub async fn list_vaults_formatted(
-        &self,
-        subscription_id: Option<&str>,
-        resource_group: Option<&str>,
-        output_format: OutputFormat,
-        template: Option<String>,
-    ) -> Result<Vec<VaultSummary>> {
-        let vaults = self
-            .vault_ops
-            .list_vaults(subscription_id, resource_group)
-            .await?;
-
-        if vaults.is_empty() {
-            output::info("No vaults found.");
-            return Ok(vaults);
-        }
-
-        // Format and display results
-        let formatter = TableFormatter::new(output_format, self.no_color, template, None);
-        let table_output = formatter.format_table(&vaults)?;
-        println!("{table_output}");
-
-        Ok(vaults)
-    }
-
     /// Delete vault with confirmation
     pub async fn delete_vault_safe(
         &self,
