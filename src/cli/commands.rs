@@ -796,8 +796,8 @@ pub enum Commands {
         /// Azure resource group (defaults to config value)
         #[arg(long)]
         resource_group: Option<String>,
-        /// Show raw Azure Activity Log output
-        #[arg(long)]
+        /// Deprecated: use the global --format json
+        #[arg(long, hide = true)]
         raw: bool,
     },
     /// Initialize default configuration
