@@ -77,13 +77,46 @@ pub(crate) fn scope_secrets(secrets: Vec<SecretSummary>, path: &str) -> ScopedLi
     }
 }
 
+/// Check if a value starts with a YYYY-MM-DD token (date-shaped).
+/// Used to classify timestamps for sorting and display.
+fn is_date_shaped(value: &str) -> bool {
+    let first = value.split_whitespace().next().unwrap_or("");
+    first.len() == 10
+        && first.chars().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                c == '-'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+}
+
 /// `--sort updated`: newest first (backend timestamps are ISO-shaped, so
 /// lexicographic order is chronological), display-name ascending on ties.
+/// Non-date-shaped values (e.g., "Unknown" sentinel) sort LAST to avoid
+/// incorrectly ranking them as most recent. When both values are non-date-shaped,
+/// they are sorted by display_name only (their timestamp strings are meaningless).
 pub(crate) fn sort_secrets_by_updated_desc(secrets: &mut [SecretSummary]) {
     secrets.sort_by(|a, b| {
-        b.updated_on
-            .cmp(&a.updated_on)
-            .then_with(|| display_name(a).cmp(display_name(b)))
+        let a_shaped = is_date_shaped(&a.updated_on);
+        let b_shaped = is_date_shaped(&b.updated_on);
+
+        match (b_shaped, a_shaped) {
+            (true, true) => {
+                // Both are dates: sort by timestamp descending, then name ascending
+                b.updated_on
+                    .cmp(&a.updated_on)
+                    .then_with(|| display_name(a).cmp(display_name(b)))
+            }
+            (false, false) => {
+                // Both are non-dates: sort by name only (timestamp values are meaningless)
+                display_name(a).cmp(display_name(b))
+            }
+            _ => {
+                // Mixed: dates (true) sort before non-dates (false) in descending order
+                b_shaped.cmp(&a_shaped)
+            }
+        }
     });
 }
 
@@ -91,17 +124,12 @@ pub(crate) fn sort_secrets_by_updated_desc(secrets: &mut [SecretSummary]) {
 /// portion for human tables. Values that don't lead with a YYYY-MM-DD token
 /// pass through unmodified; machine formats always get the full timestamp.
 pub(crate) fn date_portion_for_display(timestamp: &str) -> String {
-    let first = timestamp.split_whitespace().next().unwrap_or("");
-    let is_date_shaped = first.len() == 10
-        && first.chars().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                c == '-'
-            } else {
-                c.is_ascii_digit()
-            }
-        });
-    if is_date_shaped {
-        first.to_string()
+    if is_date_shaped(timestamp) {
+        timestamp
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
     } else {
         timestamp.to_string()
     }
@@ -587,5 +615,39 @@ mod tests {
         assert_eq!(secrets[0].name, "beta"); // newest first
         assert_eq!(secrets[1].name, "alpha"); // tie → name ascending
         assert_eq!(secrets[2].name, "charlie");
+    }
+
+    #[test]
+    fn updated_sort_ranks_non_date_values_last() {
+        let mut oldest_date = summary("oldest-date", None);
+        oldest_date.updated_on = "2026-06-01 10:00:00 UTC".to_string();
+
+        let mut unknown = summary("zulu-unknown", None);
+        unknown.updated_on = "Unknown".to_string();
+
+        let mut empty = summary("alpha-empty", None);
+        empty.updated_on = "".to_string();
+
+        let mut newest_date = summary("newest-date", None);
+        newest_date.updated_on = "2026-07-01 09:00:00 UTC".to_string();
+
+        let mut secrets = vec![empty, unknown, oldest_date, newest_date];
+        sort_secrets_by_updated_desc(&mut secrets);
+
+        // Dates should come first (descending by date), non-dates should come last
+        assert_eq!(
+            secrets[0].name, "newest-date",
+            "newest date should be first"
+        );
+        assert_eq!(
+            secrets[1].name, "oldest-date",
+            "older date should be second"
+        );
+        // Non-dates should be last, tie-broken by name
+        assert_eq!(
+            secrets[2].name, "alpha-empty",
+            "non-date values should be last, sorted by name"
+        );
+        assert_eq!(secrets[3].name, "zulu-unknown");
     }
 }
