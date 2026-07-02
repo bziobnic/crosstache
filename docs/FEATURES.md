@@ -294,11 +294,17 @@ xv list --format json | jq '.[].name'
 ```
 
 `--format json|yaml|csv` works across all list-style commands, including
-`xv audit`, `xv find`, `xv context list`, and `xv env list`. Empty results are
+`xv audit`, `xv find`, `xv share list`, `xv vault share list`,
+`xv context list`, and `xv env list`. Empty results are
 valid-empty on machine formats (`[]` for JSON, headers-only for CSV) instead of
 nothing, so `| jq` works on empty results; the corresponding empty-state
 message for human formats goes to stderr. Counts are plural-aware (`1 vault`,
 `3 vaults`, `5 audit log entries`).
+
+One documented exception: `xv config show --format json|yaml` serializes the
+full configuration object (it is a resource view, not a list). Its human table
+and the `--resolved` rows render through the shared formatter, so `--columns`
+and `--no-color` apply there like everywhere else.
 
 Long list-style output can be paged when both stdin and stdout are terminals:
 
