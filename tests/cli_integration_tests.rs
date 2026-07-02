@@ -350,7 +350,6 @@ fn every_top_level_command_supports_help() {
         &["context", "show"],
         &["context", "use"],
         &["context", "list"],
-        &["context", "envs"],
         &["context", "init"],
         &["vault"],
         &["vault", "create"],

@@ -1213,27 +1213,30 @@ fn find_folder_scopes_by_segment_boundary() {
 }
 
 #[test]
-fn context_envs_is_hidden_and_warns() {
+fn context_envs_is_removed() {
     let env = TestEnv::new();
 
-    // Hidden from help.
+    // No longer listed in help.
     let help = env.xv_ok(&["context", "--help"]);
     assert!(
         !help.contains("envs"),
         "context envs still visible in help:\n{help}"
     );
 
-    // Still works, but warns on stderr.
+    // The alias is gone entirely: clap now rejects it as an unrecognized subcommand.
     let output = env
         .xv()
         .args(["context", "envs"])
         .output()
         .expect("run context envs");
-    assert!(output.status.success());
+    assert!(
+        !output.status.success(),
+        "context envs unexpectedly succeeded"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("context envs is deprecated; use env list"),
-        "missing deprecation warning:\n{stderr}"
+        stderr.contains("unrecognized subcommand") || stderr.contains("error"),
+        "expected a clap error for the removed subcommand:\n{stderr}"
     );
 }
 

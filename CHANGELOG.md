@@ -47,6 +47,8 @@
 ### Removed
 
 - Dead legacy `execute_secret_list` renderer and its `secret_count_label` helper; the `format_table()` free function (all tables now go through `TableFormatter`); the `xv find` score bar.
+- **Four deprecated aliases removed outright** (Scott is the sole user; backwards compatibility is a non-feature): `vault share list --fmt` (use the global `--format`), `audit --raw` (use `--format json`), `context envs` (use `env list`), and `migrate --overwrite` (use `--on-conflict replace`). All four now produce a clap error instead of a deprecation warning.
+- **Dead legacy (pre-backend-trait) non-trait code paths deleted**: `execute_secret_set`, `execute_secret_get`, `execute_secret_delete`, `execute_secret_set_bulk`, `execute_secret_delete_group`, and `execute_secret_update` in `src/cli/secret_ops.rs` (all zero-caller, superseded by the backend-trait path), plus `SecretManager::update_secret_enhanced` and dead config helpers `ContextManager::migrate_from_config` and `init_default_config`. Fixes the tag-drop bug that lived in the deleted legacy update pipeline: metadata-only updates routed through it could drop custom tags; the live backend-trait path was already correct and is unaffected.
 
 ---
 

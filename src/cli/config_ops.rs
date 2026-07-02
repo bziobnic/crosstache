@@ -950,9 +950,6 @@ pub(crate) async fn execute_context_command(
         ContextCommands::Clear { global } => {
             execute_context_clear(global, &config).await?;
         }
-        ContextCommands::Envs => {
-            execute_context_envs(&config).await?;
-        }
         ContextCommands::Init {
             env,
             vault,
@@ -1224,11 +1221,6 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
     ));
 
     Ok(())
-}
-
-async fn execute_context_envs(config: &Config) -> Result<()> {
-    crate::utils::output::warn("context envs is deprecated; use env list");
-    execute_env_list(config).await
 }
 
 async fn execute_context_init(
@@ -1534,7 +1526,7 @@ async fn execute_env_list(config: &Config) -> Result<()> {
         }
     }
     output::hint(
-        "`context envs` lists .xv.toml env profiles, not the vault context; run `xv config show --resolved` to see the effective backend/vault after env → context → global fallbacks.",
+        "`env list` lists .xv.toml env profiles, not the vault context; run `xv config show --resolved` to see the effective backend/vault after env → context → global fallbacks.",
     );
     Ok(())
 }

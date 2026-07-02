@@ -152,7 +152,7 @@ The legacy fallback is removed in v0.8.
 | Command | What it does |
 |---------|--------------|
 | `xv context init` | Creates `.xv.toml` in cwd. Interactive by default; pass `--non-interactive --vault X --resource-group Y` for scripts. `--force` to overwrite. |
-| `xv env list` | Lists envs in the resolved `.xv.toml` with the active one starred. `xv context envs` is an alias. |
+| `xv env list` | Lists envs in the resolved `.xv.toml` with the active one starred. |
 | `xv env use <name>` | Writes `default_env = "<name>"` into the nearest `.xv.toml`. |
 | `xv env create <name> --vault V --resource-group RG [--backend B] [--group G] [--folder F] [--default]` | Adds `[env.<name>]` to the nearest `.xv.toml` (creates the file if absent). `--default` also sets `default_env`. |
 | `xv env delete <name> [-f]` | Removes `[env.<name>]` from the resolved `.xv.toml`. Clears `default_env` if it pointed at that env. |

@@ -829,9 +829,6 @@ pub enum Commands {
         /// Azure resource group (defaults to config value)
         #[arg(long)]
         resource_group: Option<String>,
-        /// Deprecated: use the global --format json
-        #[arg(long, hide = true)]
-        raw: bool,
     },
     /// Initialize default configuration
     Init,
@@ -953,9 +950,6 @@ pub enum Commands {
         /// Concurrent transfers (default 8)
         #[arg(long, default_value = "8")]
         concurrency: usize,
-        /// DEPRECATED: use --on-conflict replace instead
-        #[arg(long, hide = true)]
-        overwrite: bool,
     },
     /// Open the read-only terminal browser. Requires --features tui at build time.
     #[cfg(feature = "tui")]
@@ -1151,9 +1145,6 @@ pub enum VaultShareCommands {
         /// Resource group
         #[arg(short, long)]
         resource_group: Option<String>,
-        /// Deprecated: use the global --format
-        #[arg(long = "fmt", hide = true, id = "share_list_format")]
-        format: Option<crate::utils::format::OutputFormat>,
         /// Include service accounts in output
         #[arg(long)]
         all: bool,
@@ -1313,9 +1304,6 @@ pub enum ContextCommands {
         #[arg(long)]
         global: bool,
     },
-    /// (deprecated) List environment profiles in the resolved .xv.toml — use `env list`
-    #[command(hide = true)]
-    Envs,
     /// Create a new .xv.toml in the current directory
     Init {
         /// Env name to create (default: "dev")
@@ -1790,7 +1778,6 @@ impl Cli {
                 days,
                 operation,
                 resource_group,
-                raw,
             } => {
                 crate::cli::system_ops::execute_audit_command(
                     name,
@@ -1798,7 +1785,6 @@ impl Cli {
                     days,
                     operation,
                     resource_group,
-                    raw,
                     config,
                     registry,
                 )
@@ -1885,7 +1871,6 @@ impl Cli {
                 on_conflict,
                 force_replace,
                 concurrency,
-                overwrite,
             } => {
                 crate::cli::migrate_ops::execute_migrate(
                     from,
@@ -1896,7 +1881,6 @@ impl Cli {
                     on_conflict,
                     force_replace,
                     concurrency,
-                    overwrite,
                     config,
                 )
                 .await
@@ -2172,6 +2156,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_vault_share_list_rejects_legacy_fmt_flag() {
+        let result = Cli::try_parse_from([
+            "xv",
+            "vault",
+            "share",
+            "list",
+            "prod-vault",
+            "--fmt",
+            "json",
+        ]);
+        assert!(
+            result.is_err(),
+            "--fmt should be rejected now that the alias is removed"
+        );
+    }
+
+    #[test]
+    fn test_audit_rejects_legacy_raw_flag() {
+        let result = Cli::try_parse_from(["xv", "audit", "--raw"]);
+        assert!(
+            result.is_err(),
+            "--raw should be rejected now that the alias is removed"
+        );
+    }
+
     // ── gen command unit tests ───────────────────────────────────────────────
 
     #[test]
@@ -2188,7 +2198,8 @@ mod tests {
             "--filter",
             "db-*",
             "--dry-run",
-            "--overwrite",
+            "--on-conflict",
+            "replace",
         ])
         .unwrap();
 
@@ -2202,15 +2213,13 @@ mod tests {
                 on_conflict,
                 force_replace,
                 concurrency,
-                overwrite,
             } => {
                 assert_eq!(from, "azure");
                 assert_eq!(to, "local");
                 assert_eq!(vault, Some("my-vault".to_string()));
                 assert_eq!(filter, Some("db-*".to_string()));
                 assert!(dry_run);
-                assert!(overwrite);
-                assert_eq!(on_conflict, OnConflict::Skip);
+                assert_eq!(on_conflict, OnConflict::Replace);
                 assert!(!force_replace);
                 assert_eq!(concurrency, 8);
             }
@@ -2233,20 +2242,35 @@ mod tests {
                 on_conflict,
                 force_replace,
                 concurrency,
-                overwrite,
             } => {
                 assert_eq!(from, "local");
                 assert_eq!(to, "azure");
                 assert_eq!(vault, None);
                 assert_eq!(filter, None);
                 assert!(!dry_run);
-                assert!(!overwrite);
                 assert_eq!(on_conflict, OnConflict::Skip);
                 assert!(!force_replace);
                 assert_eq!(concurrency, 8);
             }
             _ => panic!("Expected Migrate command"),
         }
+    }
+
+    #[test]
+    fn test_migrate_command_rejects_legacy_overwrite_flag() {
+        let result = Cli::try_parse_from([
+            "xv",
+            "migrate",
+            "--from",
+            "local",
+            "--to",
+            "azure",
+            "--overwrite",
+        ]);
+        assert!(
+            result.is_err(),
+            "--overwrite should be rejected now that the alias is removed"
+        );
     }
 
     #[test]
