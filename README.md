@@ -516,7 +516,7 @@ xv ls --format table                     # the classic table
 xv ls --sort updated                     # most recently updated secrets first
 xv ls --deleted                          # soft-deleted secrets (capability-gated)
 xv list --group production               # filter by group
-xv list --all                            # include disabled / soft-deleted
+xv list --all                            # include disabled (soft-deleted: xv ls --deleted)
 xv list --expiring 30d                   # secrets with expiry in next 30 days
 xv list --expired                        # already expired
 xv list --no-cache                       # bypass local cache
@@ -1221,7 +1221,7 @@ The structured-error layer makes most failures self-explanatory. A few common on
 
 ```bash
 xv list                                  # see what's actually in the vault
-xv list --all                            # include disabled / soft-deleted
+xv list --all                            # include disabled (soft-deleted: xv ls --deleted)
 xv find X --names-only                   # fuzzy search
 ```
 
