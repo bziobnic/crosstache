@@ -406,6 +406,18 @@ pub(crate) fn display_cached_secret_list(
     }
 
     if scoped.subtree.is_empty() {
+        // Grid/long views ignore --columns (warned above); only the explicit
+        // table/plain/raw view renders via TableFormatter, so only that path
+        // needs to validate an unknown --columns selection here.
+        if config.format_explicit && !long {
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
+            formatter.validate_columns::<SecretListDisplayRow>()?;
+        }
         let scope_desc = if !path.is_empty() {
             format!("folder '{path}'")
         } else {
@@ -1830,17 +1842,19 @@ fn render_find_matches(
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
     );
 
-    if rows.is_empty() && human_table_like {
-        output::info(empty_msg);
-        return Ok(());
-    }
-
     let formatter = crate::utils::format::TableFormatter::new(
         fmt,
         config.no_color,
         config.template.clone(),
         config.runtime_columns.clone(),
     );
+
+    if rows.is_empty() && human_table_like {
+        formatter.validate_columns::<FindRow>()?;
+        output::info(empty_msg);
+        return Ok(());
+    }
+
     // Non-empty rows render for every format; empty rows reach here only on
     // machine formats, where format_table emits valid-empty output.
     println!("{}", formatter.format_table(&rows)?);
@@ -3730,6 +3744,7 @@ async fn execute_secret_share(
 
             if roles.is_empty() {
                 if human_table_like {
+                    formatter.validate_columns::<crate::vault::models::VaultRole>()?;
                     // Chrome goes to stderr; stdout stays clean for pipes.
                     crate::utils::output::info(&format!(
                         "No access assignments found for secret '{secret_name}' in vault '{vault_name}'"

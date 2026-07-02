@@ -293,6 +293,7 @@ fn render_audit_rows(rows: &[AuditRow], raw: bool, config: &Config) -> Result<()
 
     if rows.is_empty() {
         if human_table_like {
+            formatter.validate_columns::<AuditRow>()?;
             output::info(&crate::utils::list_output::empty_state_message(
                 "audit log entries",
                 None,

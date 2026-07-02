@@ -390,6 +390,7 @@ fn render_vault_list(
 
     if vaults.is_empty() {
         if human_table_like {
+            formatter.validate_columns::<crate::vault::models::VaultSummary>()?;
             crate::utils::output::info(&empty_state_message("vaults", None));
         } else {
             println!("{}", formatter.format_table(vaults)?);
@@ -1263,6 +1264,7 @@ async fn execute_vault_share(
 
             if roles.is_empty() {
                 if human_table_like {
+                    formatter.validate_columns::<crate::vault::models::VaultRole>()?;
                     output::info(&format!(
                         "No access assignments found for vault '{vault_name}'"
                     ));

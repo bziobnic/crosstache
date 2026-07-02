@@ -620,6 +620,18 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
             })?;
             println!("{yaml}");
         }
+        OutputFormat::Csv => {
+            // CSV is a machine format: emit only the formatter rows on
+            // stdout, with no prose mixed in (consistent with every other
+            // list command, where Csv stays pipe-clean).
+            let formatter = crate::utils::format::TableFormatter::new(
+                OutputFormat::Csv,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
+            println!("{}", formatter.format_table(&rows)?);
+        }
         fmt => {
             if let Some(p) = &project_path {
                 println!("Project config: {}", p.display());
@@ -1468,6 +1480,7 @@ async fn execute_env_list(config: &Config) -> Result<()> {
 
     if rows.is_empty() {
         if human_table_like {
+            formatter.validate_columns::<EnvRow>()?;
             output::info(&crate::utils::list_output::empty_state_message(
                 "environments",
                 None,

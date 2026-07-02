@@ -548,13 +548,6 @@ pub(crate) fn display_file_list_items(
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
     );
 
-    if items.is_empty() && human_table_like {
-        output::info(&crate::utils::list_output::empty_state_message(
-            "files", None,
-        ));
-        return Ok(String::new());
-    }
-
     let mut output = String::new();
 
     // One display row set for every non-JSON/YAML format (spec: file list CSV
@@ -574,6 +567,20 @@ pub(crate) fn display_file_list_items(
         modified: String,
         #[tabled(rename = "Groups")]
         groups: String,
+    }
+
+    if items.is_empty() && human_table_like {
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        formatter.validate_columns::<FileRow>()?;
+        output::info(&crate::utils::list_output::empty_state_message(
+            "files", None,
+        ));
+        return Ok(String::new());
     }
 
     // Build the rows once, before the `match fmt`.

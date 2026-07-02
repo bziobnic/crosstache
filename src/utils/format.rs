@@ -180,6 +180,15 @@ impl TableFormatter {
         Ok(Some(indices))
     }
 
+    /// Validate any configured `--columns` selection against `T`'s headers
+    /// without rendering. Call this on empty-result paths that skip
+    /// `format_table` (e.g. a human-readable "no results" message) so that
+    /// an unknown `--columns` value still errors even when there is no data.
+    pub fn validate_columns<T: Tabled>(&self) -> Result<()> {
+        let headers: Vec<String> = T::headers().iter().map(|h| h.to_string()).collect();
+        self.selected_indices(&headers).map(|_| ())
+    }
+
     /// Build a `Table` from `data`. With an explicit `--columns` selection the
     /// requested columns are projected in order (explicit selection wins over
     /// empty-column hiding); otherwise all-empty columns are omitted.
@@ -529,6 +538,32 @@ mod tests {
         value: String,
         #[tabled(rename = "Status")]
         status: String,
+    }
+
+    #[test]
+    fn validate_columns_errs_on_unknown_and_passes_on_known() {
+        // Unknown column must error even though no rows are ever built or
+        // rendered — this is what empty-state early-returns must call.
+        let bad = TableFormatter::new(
+            OutputFormat::Table,
+            true,
+            None,
+            Some(vec!["Bogus".to_string()]),
+        );
+        assert!(bad.validate_columns::<TestData>().is_err());
+
+        // A valid column selection (case-insensitive) passes.
+        let good = TableFormatter::new(
+            OutputFormat::Table,
+            true,
+            None,
+            Some(vec!["name".to_string(), "Status".to_string()]),
+        );
+        assert!(good.validate_columns::<TestData>().is_ok());
+
+        // No --columns selection at all also passes (nothing to validate).
+        let none = TableFormatter::new(OutputFormat::Table, true, None, None);
+        assert!(none.validate_columns::<TestData>().is_ok());
     }
 
     #[test]
