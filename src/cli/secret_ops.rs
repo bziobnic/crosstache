@@ -465,6 +465,7 @@ pub(crate) fn display_cached_secret_list(
                 page.items.len(),
                 page.total_items,
                 "secret",
+                "secrets",
                 None,
                 page.page_size.is_some(),
             ),
@@ -510,11 +511,16 @@ pub(crate) fn display_cached_secret_list(
             .count(),
         secret_count,
         "secret",
+        "secrets",
         None,
         page.page_size.is_some(),
     );
     if folder_count > 0 {
-        let _ = write!(count_line, ", {} folder(s)", folder_count);
+        let _ = write!(
+            count_line,
+            ", {}",
+            crate::utils::list_output::pluralize(folder_count, "folder", "folders")
+        );
     }
     let _ = writeln!(output, "{} in vault '{}'", count_line, vault_name);
     if let Some(footer) = pagination_footer_text(&page, "entry", fmt) {
@@ -773,6 +779,7 @@ pub(crate) async fn execute_secret_history_direct(
                         versions.len(),
                         versions.len(),
                         "version",
+                        "versions",
                         None,
                         false
                     )
@@ -3983,6 +3990,7 @@ async fn execute_secret_share(
                         paged.items.len(),
                         paged.total_items,
                         "assignment",
+                        "assignments",
                         None,
                         paged.page_size.is_some(),
                     ));

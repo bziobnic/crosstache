@@ -399,6 +399,7 @@ fn render_vault_list(
             page.items.len(),
             page.total_items,
             "vault",
+            "vaults",
             None,
             page.page_size.is_some(),
         ));
@@ -1274,6 +1275,7 @@ async fn execute_vault_share(
                         paged.items.len(),
                         paged.total_items,
                         "assignment",
+                        "assignments",
                         None,
                         paged.page_size.is_some(),
                     ));

@@ -373,6 +373,7 @@ pub(crate) async fn execute_audit_command(
             logs.len(),
             logs.len(),
             "audit log entry",
+            "audit log entries",
             None,
             false
         )
@@ -493,6 +494,7 @@ async fn execute_backend_audit(
             events.len(),
             events.len(),
             "audit log entry",
+            "audit log entries",
             None,
             false
         )

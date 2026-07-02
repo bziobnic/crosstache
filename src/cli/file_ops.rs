@@ -673,10 +673,15 @@ pub(crate) fn display_file_list_items(
                 .count();
 
             output.push('\n');
-            let mut count_line =
-                crate::utils::list_output::count_label(file_count, file_count, "file", None, false);
+            let mut count_line = crate::utils::list_output::count_label(
+                file_count, file_count, "file", "files", None, false,
+            );
             if !recursive && dir_count > 0 {
-                let _ = write!(count_line, ", {} directory(ies)", dir_count);
+                let _ = write!(
+                    count_line,
+                    ", {}",
+                    crate::utils::list_output::pluralize(dir_count, "directory", "directories")
+                );
             }
             let _ = writeln!(output, "{}", count_line);
         }
