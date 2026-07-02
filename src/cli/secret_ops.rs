@@ -576,6 +576,227 @@ pub(crate) fn display_cached_secret_list(
     Ok(())
 }
 
+/// Row shape for `xv ls --deleted` — machine formats get this array; empty
+/// strings mark dates the backend cannot supply (AWS/local purge schedule).
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct DeletedSecretListRow {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Deleted")]
+    deleted: String,
+    #[tabled(rename = "Purge Scheduled")]
+    purge_scheduled: String,
+}
+
+fn deleted_display_name(s: &crate::secret::manager::DeletedSecretSummary) -> &str {
+    if s.original_name.is_empty() {
+        &s.name
+    } else {
+        &s.original_name
+    }
+}
+
+fn deleted_list_rows(
+    items: &[crate::secret::manager::DeletedSecretSummary],
+    human: bool,
+) -> Vec<DeletedSecretListRow> {
+    items
+        .iter()
+        .map(|s| {
+            let fmt_date = |d: &Option<String>| {
+                let v = d.clone().unwrap_or_default();
+                if human {
+                    crate::cli::ls_view::date_portion_for_display(&v)
+                } else {
+                    v
+                }
+            };
+            DeletedSecretListRow {
+                name: deleted_display_name(s).to_string(),
+                deleted: fmt_date(&s.deleted_on),
+                purge_scheduled: fmt_date(&s.scheduled_purge_on),
+            }
+        })
+        .collect()
+}
+
+/// `xv ls --deleted`: list soft-deleted secrets awaiting restore/purge.
+/// Always bypasses the secrets-list cache (which only holds live secrets)
+/// and requires the backend to advertise `has_soft_delete`.
+pub(crate) async fn execute_deleted_secret_list(
+    pagination: Pagination,
+    pager: bool,
+    names_only: bool,
+    long: bool,
+    sort: crate::cli::commands::LsSort,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::cli::commands::LsSort;
+    use crate::cli::ls_view;
+    use crate::utils::format::TableFormatter;
+    use crate::utils::pagination::{paginate_slice, pagination_footer_text};
+    use std::fmt::Write as _;
+
+    if !use_trait_path(registry) {
+        return Err(CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        ));
+    }
+    let reg = registry.expect("use_trait_path guarantees Some");
+
+    // Capability gate — same shape as `xv restore`'s.
+    let unsupported = || {
+        CrosstacheError::InvalidArgument(format!(
+            "The {} backend does not support listing deleted secrets (soft-delete not available).",
+            reg.active().name()
+        ))
+    };
+    if !reg.active().capabilities().has_soft_delete {
+        return Err(unsupported());
+    }
+
+    let vault_name = resolve_vault_for_trait(&config, registry).await?;
+    // Always live — the SecretsList cache holds live secrets only, and trash
+    // freshness matters right after a delete.
+    let mut items = match reg
+        .active()
+        .secrets()
+        .list_deleted_secrets(&vault_name)
+        .await
+    {
+        Ok(items) => items,
+        Err(crate::backend::BackendError::Unsupported(_)) => return Err(unsupported()),
+        Err(e) => return Err(e.into()),
+    };
+
+    match sort {
+        LsSort::Name => items.sort_by(|a, b| deleted_display_name(a).cmp(deleted_display_name(b))),
+        // In deleted mode "updated" means the deleted date (newest first).
+        LsSort::Updated => items.sort_by(|a, b| {
+            b.deleted_on
+                .cmp(&a.deleted_on)
+                .then_with(|| deleted_display_name(a).cmp(deleted_display_name(b)))
+        }),
+    }
+
+    if names_only {
+        for s in &items {
+            println!("{}", deleted_display_name(s));
+        }
+        return Ok(());
+    }
+
+    let fmt = config.runtime_output_format;
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+    let page = paginate_slice(&items, pagination);
+
+    if !human_table_like {
+        if long {
+            crate::utils::output::warn("--long is ignored for machine-readable formats");
+        }
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        let rows = deleted_list_rows(&page.items, false);
+        let output = formatter.format_table(&rows)?;
+        crate::utils::pager::print_output(&output, pager)?;
+        return Ok(());
+    }
+
+    // Validate --columns up front so an unknown selection errors even when
+    // the result set is empty (branch-wide rule shared with `display_cached_secret_list`).
+    if config.runtime_columns.is_some() {
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        formatter.validate_columns::<DeletedSecretListRow>()?;
+    }
+
+    if items.is_empty() {
+        crate::utils::output::info(&crate::utils::list_output::empty_state_message(
+            "deleted secrets",
+            Some(&format!("vault '{vault_name}'")),
+        ));
+        return Ok(());
+    }
+
+    let mut output = String::new();
+    output.push('\n');
+    let color = !config.no_color && fmt == OutputFormat::Table;
+    if color {
+        let _ = writeln!(
+            output,
+            "\x1b[36mVault: {} (deleted secrets)\x1b[0m",
+            vault_name
+        );
+    } else {
+        let _ = writeln!(output, "Vault: {} (deleted secrets)", vault_name);
+    }
+    output.push('\n');
+
+    if config.format_explicit && !long {
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        let rows = deleted_list_rows(&page.items, true);
+        output.push_str(&formatter.format_table(&rows)?);
+        output.push('\n');
+    } else {
+        if config.runtime_columns.is_some() {
+            crate::utils::output::warn(
+                "--columns is ignored for the grid/long view; use --format table",
+            );
+        }
+        if long {
+            output.push_str(&ls_view::render_deleted_long(&page.items));
+        } else {
+            let width = crossterm::terminal::size()
+                .map(|(w, _)| w as usize)
+                .unwrap_or(80);
+            let labels: Vec<String> = page
+                .items
+                .iter()
+                .map(|s| deleted_display_name(s).to_string())
+                .collect();
+            output.push_str(&ls_view::render_name_grid(&labels, width));
+        }
+        output.push('\n');
+    }
+
+    let _ = writeln!(
+        output,
+        "{} in vault '{}'",
+        crate::utils::list_output::count_label(
+            page.items.len(),
+            page.total_items,
+            "deleted secret",
+            "deleted secrets",
+            None,
+            page.page_size.is_some(),
+        ),
+        vault_name
+    );
+    if let Some(footer) = pagination_footer_text(&page, "deleted secret", "deleted secrets", fmt) {
+        output.push('\n');
+        output.push_str(&footer);
+    }
+    crate::utils::pager::print_output(&output, pager)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_list_direct(
     path: String,

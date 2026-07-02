@@ -522,6 +522,13 @@ pub enum Commands {
         /// Sort order: name (A→Z, default) or updated (newest first)
         #[arg(long, value_enum, default_value_t = LsSort::Name)]
         sort: LsSort,
+        /// List soft-deleted secrets awaiting restore/purge instead of live
+        /// secrets (backend must support soft delete)
+        #[arg(
+            long,
+            conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired"]
+        )]
+        deleted: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -1524,24 +1531,32 @@ impl Cli {
                 pager,
                 names_only,
                 sort,
+                deleted,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
-                let path = match path {
-                    Some(raw) => {
-                        let trimmed = raw.trim_end_matches('/').to_string();
-                        if !trimmed.is_empty() {
-                            crate::utils::helpers::validate_folder_path(&trimmed)?;
+                if deleted {
+                    crate::cli::secret_ops::execute_deleted_secret_list(
+                        pagination, pager, names_only, long, sort, config, registry,
+                    )
+                    .await
+                } else {
+                    let path = match path {
+                        Some(raw) => {
+                            let trimmed = raw.trim_end_matches('/').to_string();
+                            if !trimmed.is_empty() {
+                                crate::utils::helpers::validate_folder_path(&trimmed)?;
+                            }
+                            trimmed
                         }
-                        trimmed
-                    }
-                    None => String::new(),
-                };
-                crate::cli::secret_ops::execute_secret_list_direct(
-                    path, group, all, expiring, expired, no_cache, pagination, pager, names_only,
-                    long, recursive, sort, config, registry,
-                )
-                .await
+                        None => String::new(),
+                    };
+                    crate::cli::secret_ops::execute_secret_list_direct(
+                        path, group, all, expiring, expired, no_cache, pagination, pager,
+                        names_only, long, recursive, sort, config, registry,
+                    )
+                    .await
+                }
             }
             Commands::Delete { name, group, force } => {
                 crate::cli::secret_ops::execute_secret_delete_direct(

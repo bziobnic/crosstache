@@ -3,7 +3,7 @@
 //! Folders are a client-side view derived from each secret's hierarchical
 //! `folder` tag (e.g. `prod/db`). Nothing here talks to a backend.
 
-use crate::secret::manager::SecretSummary;
+use crate::secret::manager::{DeletedSecretSummary, SecretSummary};
 use crate::utils::format::sanitize_control_chars;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -353,6 +353,83 @@ pub(crate) fn render_long(entries: &[LsEntry], color: bool) -> String {
     out
 }
 
+/// Grid of bare labels (no folder entries) — `xv ls --deleted`'s default view.
+pub(crate) fn render_name_grid(names: &[String], width: usize) -> String {
+    let entries: Vec<LsEntry> = names
+        .iter()
+        .map(|n| {
+            LsEntry::Secret(SecretSummary {
+                name: n.clone(),
+                original_name: n.clone(),
+                note: None,
+                folder: None,
+                groups: None,
+                updated_on: String::new(),
+                enabled: true,
+                content_type: String::new(),
+            })
+        })
+        .collect();
+    render_grid(&entries, width, false)
+}
+
+/// Borderless long listing for deleted secrets: NAME  DELETED  PURGE SCHEDULED.
+/// Missing dates render as `-`, mirroring `render_long`'s folder placeholders.
+pub(crate) fn render_deleted_long(items: &[DeletedSecretSummary]) -> String {
+    let cell = |v: &Option<String>| match v {
+        Some(ts) => sanitize_control_chars(&date_portion_for_display(ts)),
+        None => "-".to_string(),
+    };
+    let rows: Vec<(String, String, String)> = items
+        .iter()
+        .map(|s| {
+            let name = if s.original_name.is_empty() {
+                &s.name
+            } else {
+                &s.original_name
+            };
+            (
+                sanitize_control_chars(name),
+                cell(&s.deleted_on),
+                cell(&s.scheduled_purge_on),
+            )
+        })
+        .collect();
+
+    let name_w = rows
+        .iter()
+        .map(|r| display_width(&r.0))
+        .chain(["NAME".len()])
+        .max()
+        .unwrap_or(4);
+    let deleted_w = rows
+        .iter()
+        .map(|r| display_width(&r.1))
+        .chain(["DELETED".len()])
+        .max()
+        .unwrap_or(7);
+
+    let mut out = String::new();
+    let header = format!(
+        "{}  {}  PURGE SCHEDULED",
+        pad_to("NAME", name_w),
+        pad_to("DELETED", deleted_w)
+    );
+    out.push_str(header.trim_end());
+    out.push('\n');
+    for (name, deleted, purge) in rows {
+        let line = format!(
+            "{}  {}  {}",
+            pad_to(&name, name_w),
+            pad_to(&deleted, deleted_w),
+            purge
+        );
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,6 +744,53 @@ mod tests {
         assert_eq!(secrets[0].name, "beta"); // newest first
         assert_eq!(secrets[1].name, "alpha"); // tie → name ascending
         assert_eq!(secrets[2].name, "charlie");
+    }
+
+    fn deleted(name: &str, deleted_on: Option<&str>, purge: Option<&str>) -> DeletedSecretSummary {
+        DeletedSecretSummary {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            deleted_on: deleted_on.map(str::to_string),
+            scheduled_purge_on: purge.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn deleted_long_lists_dates_with_placeholders() {
+        let items = vec![
+            deleted(
+                "gone",
+                Some("2026-06-30 10:00:00 UTC"),
+                Some("2026-09-28 10:00:00 UTC"),
+            ),
+            deleted("trashed", Some("2026-06-01 09:00:00 UTC"), None),
+        ];
+        let out = render_deleted_long(&items);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("NAME"), "{out}");
+        assert!(lines[0].contains("DELETED") && lines[0].contains("PURGE SCHEDULED"));
+        assert!(
+            lines[1].starts_with("gone")
+                && lines[1].contains("2026-06-30")
+                && lines[1].contains("2026-09-28")
+        );
+        assert!(
+            lines[2].starts_with("trashed") && lines[2].ends_with('-'),
+            "missing purge date renders '-': {out}"
+        );
+        for line in &lines {
+            assert_eq!(line.trim_end(), *line);
+        }
+    }
+
+    #[test]
+    fn name_grid_renders_bare_labels() {
+        let out = render_name_grid(&["alpha".to_string(), "beta".to_string()], 40);
+        assert!(out.contains("alpha") && out.contains("beta"));
+        assert!(
+            !out.contains('/'),
+            "no folder markers in a deleted grid: {out}"
+        );
     }
 
     #[test]

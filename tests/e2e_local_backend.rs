@@ -971,3 +971,72 @@ fn ls_sort_flag_is_accepted_and_lists_everything() {
     let (_, stderr) = env.xv_fail(&["ls", "--sort", "bogus"]);
     assert!(stderr.contains("possible values"), "{stderr}");
 }
+
+#[test]
+fn ls_deleted_lists_soft_deleted_secrets() {
+    let env = TestEnv::new();
+    env.set_secret("doomed", "v");
+    env.set_secret("kept", "v");
+    env.xv_ok(&["delete", "doomed", "--force"]);
+
+    // Piped stdout resolves Auto → JSON, so the human views need the
+    // explicit format (same convention as the live `xv ls` e2e tests).
+    let out = env.xv_ok(&["ls", "--deleted", "--format", "table"]);
+    assert!(out.contains("doomed") && !out.contains("kept"), "{out}");
+    assert!(out.contains("1 deleted secret"), "count line: {out}");
+
+    // Long view has the date columns (explicit table format + -l takes the
+    // borderless long path, mirroring live `xv ls`).
+    let long = env.xv_ok(&["ls", "--deleted", "-l", "--format", "table"]);
+    assert!(
+        long.contains("DELETED") && long.contains("PURGE SCHEDULED"),
+        "{long}"
+    );
+
+    // Machine format: row array with a populated deleted date (local backend);
+    // purge schedule is empty (local trash never auto-purges).
+    let json = env.xv_ok(&["ls", "--deleted", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let rows = parsed.as_array().expect("array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "doomed");
+    assert!(!rows[0]["deleted"].as_str().unwrap().is_empty());
+    assert_eq!(rows[0]["purge_scheduled"], "");
+}
+
+#[test]
+fn ls_deleted_conflicts_and_empty_states() {
+    let env = TestEnv::new();
+
+    // clap conflicts: FOLDER positional and -r.
+    let (_, err1) = env.xv_fail(&["ls", "prod", "--deleted"]);
+    assert!(err1.contains("cannot be used with"), "{err1}");
+    let (_, err2) = env.xv_fail(&["ls", "--deleted", "-r"]);
+    assert!(err2.contains("cannot be used with"), "{err2}");
+
+    // Empty: human info on stderr, valid-empty JSON on stdout.
+    let json = env.xv_ok(&["ls", "--deleted", "--format", "json"]);
+    assert_eq!(json.trim(), "[]");
+}
+
+#[test]
+fn ls_deleted_columns_selection_and_validation() {
+    let env = TestEnv::new();
+    env.set_secret("doomed", "v");
+    env.xv_ok(&["delete", "doomed", "--force"]);
+
+    // --columns projects the requested subset on the deleted table.
+    let out = env.xv_ok(&["ls", "--deleted", "--format", "table", "--columns", "Name"]);
+    assert!(out.contains("doomed"), "{out}");
+    assert!(!out.contains("Purge Scheduled"), "{out}");
+
+    // Unknown column errors, even on the empty grid/long path (human table
+    // formats validate --columns regardless of Auto/JSON's empty-array
+    // fast path, matching the branch-wide rule in `display_cached_secret_list`).
+    let env2 = TestEnv::new();
+    let (_, err) = env2.xv_fail(&["ls", "--deleted", "--format", "table", "--columns", "Nope"]);
+    assert!(
+        !err.is_empty(),
+        "expected an error for unknown column: {err}"
+    );
+}
