@@ -23,6 +23,7 @@ releases — they are part of the scripting contract.
 | `34`  | SSL/TLS error         | certificate or handshake failure                |
 | `35`  | Invalid URL           | malformed URL passed to a network call          |
 | `40`  | Azure API error       | Azure returned an error response                |
+| `43`  | Rename incomplete     | rename created the new secret but failed to delete the original; both copies still exist (`xv-rename-incomplete`) |
 | `50`  | Scan: leak detected   | `xv scan` found a finding (file with a secret value or pattern match) |
 
 ## Error codes

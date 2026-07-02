@@ -99,6 +99,15 @@ pub enum CrosstacheError {
     #[error("Scan detected {count} potential leak(s)")]
     ScanLeakDetected { count: usize },
 
+    #[error("Rename of secret '{source}' to '{destination}' in vault '{vault}' is incomplete: the new secret was created, but deleting the original failed: {cause}. Both secrets still exist and no secret material was lost. Next steps: with vault '{vault}' active, verify the new secret (`xv get {destination}`), then delete the original (`xv delete {source}`) or retry the deletion later.")]
+    RenameIncomplete {
+        source: String,
+        destination: String,
+        vault: String,
+        #[source]
+        cause: Box<CrosstacheError>,
+    },
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -136,6 +145,7 @@ impl CrosstacheError {
             Self::InvalidArgument(_) => "xv-invalid-argument",
             Self::Upgrade(_) => "xv-upgrade",
             Self::ScanLeakDetected { .. } => "xv-scan-leak-detected",
+            Self::RenameIncomplete { .. } => "xv-rename-incomplete",
             Self::Unknown(_) => "xv-unknown",
         }
     }
@@ -165,6 +175,7 @@ impl CrosstacheError {
             Self::AzureApiError(_) => 40,
             Self::Conflict(_) => 41,
             Self::RateLimited(_) => 42,
+            Self::RenameIncomplete { .. } => 43,
 
             // 50–59 — policy/scan findings
             Self::ScanLeakDetected { .. } => 50,
@@ -546,6 +557,15 @@ mod tests {
                 "xv-invalid-argument",
             ),
             (CrosstacheError::upgrade("x"), "xv-upgrade"),
+            (
+                CrosstacheError::RenameIncomplete {
+                    source: "old".into(),
+                    destination: "new".into(),
+                    vault: "v".into(),
+                    cause: Box::new(CrosstacheError::unknown("x")),
+                },
+                "xv-rename-incomplete",
+            ),
             (CrosstacheError::unknown("x"), "xv-unknown"),
             (
                 CrosstacheError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, "x")),
@@ -598,6 +618,16 @@ mod tests {
         assert_eq!(CrosstacheError::azure_api("x").exit_code(), 40);
         assert_eq!(CrosstacheError::conflict("x").exit_code(), 41);
         assert_eq!(CrosstacheError::rate_limited("x").exit_code(), 42);
+        assert_eq!(
+            CrosstacheError::RenameIncomplete {
+                source: "old".into(),
+                destination: "new".into(),
+                vault: "v".into(),
+                cause: Box::new(CrosstacheError::network("x")),
+            }
+            .exit_code(),
+            43
+        );
 
         // 1 — unknown / catch-all
         assert_eq!(CrosstacheError::unknown("x").exit_code(), 1);
@@ -614,6 +644,31 @@ mod tests {
             serde_json::from_str::<serde_json::Value>("not json").unwrap_err(),
         );
         assert_eq!(json_err.exit_code(), 1);
+    }
+
+    #[test]
+    fn rename_incomplete_names_both_copies_and_the_recovery_steps() {
+        let err = CrosstacheError::RenameIncomplete {
+            source: "old-name".into(),
+            destination: "new-name".into(),
+            vault: "my-vault".into(),
+            cause: Box::new(CrosstacheError::network("dial tcp: timeout")),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'old-name'") && msg.contains("'new-name'"),
+            "{msg}"
+        );
+        assert!(msg.contains("vault 'my-vault'"), "{msg}");
+        assert!(msg.contains("Both secrets still exist"), "{msg}");
+        assert!(
+            msg.contains("`xv get new-name`") && msg.contains("`xv delete old-name`"),
+            "recovery steps missing: {msg}"
+        );
+        assert!(
+            msg.contains("dial tcp: timeout"),
+            "cause not surfaced: {msg}"
+        );
     }
 
     // --- Suggestions ---
@@ -859,6 +914,12 @@ mod tests {
                 category: "error variant",
                 name: "ScanLeakDetected",
                 fields: &["count"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "RenameIncomplete",
+                fields: &["source", "destination", "vault", "cause"],
                 allowed_value_like_fields: &[],
             },
             SecuritySurface {
