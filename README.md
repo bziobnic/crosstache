@@ -430,6 +430,10 @@ AWS it enters the standard 30-day recovery window; on local it lands in
 trash. Renaming back to a soft-deleted/recoverable old name will conflict
 until the retention window clears it.
 
+Combining `--enabled false` with `--rename` in one call fails on Azure: the
+disable applies first, then the rename's read of the (now-disabled) secret
+gets a 403; re-enable first, or rename before disabling, to avoid the trap.
+
 ### Delete and recover
 
 ```bash

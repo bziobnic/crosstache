@@ -1565,22 +1565,40 @@ pub(crate) async fn execute_secret_update_direct(
                 "Successfully updated secret '{}'",
                 props.original_name
             ));
+            // The in-place update just mutated state (value/tags/groups/etc.);
+            // invalidate immediately so a rename-phase failure below can't
+            // leave a stale cached list behind.
+            invalidate_trait_secret_cache(&config, &vault_name);
         }
 
         if let Some(ref new_name) = rename {
-            let props = reg
+            let rename_result = reg
                 .active()
                 .secrets()
                 .rename_secret(&vault_name, name, new_name)
-                .await?;
-            output::success(&format!(
-                "Successfully renamed secret '{name}' to '{}'",
-                props.original_name
-            ));
+                .await;
+            // Rename may mutate state even when it errors (e.g. RenameIncomplete:
+            // the new name was created but deleting the old one failed), so
+            // invalidate unconditionally before inspecting the result.
+            invalidate_trait_secret_cache(&config, &vault_name);
+            match rename_result {
+                Ok(props) => {
+                    output::success(&format!(
+                        "Successfully renamed secret '{name}' to '{}'",
+                        props.original_name
+                    ));
+                }
+                Err(e) => {
+                    if has_other_updates {
+                        output::warn(
+                            "the metadata update was applied; the rename did not complete — the secret keeps its original name",
+                        );
+                    }
+                    return Err(e.into());
+                }
+            }
         }
 
-        // Invalidate the secrets list cache for metadata, value, rename, or enablement changes.
-        invalidate_trait_secret_cache(&config, &vault_name);
         return Ok(());
     }
 
@@ -4624,6 +4642,244 @@ mod tests {
                 "prod/db".to_string(),
                 "prod/db/replica".to_string(),
             ]
+        );
+    }
+
+    fn fake_secret_properties(name: &str) -> crate::secret::manager::SecretProperties {
+        crate::secret::manager::SecretProperties {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            value: None,
+            version: "v1".to_string(),
+            version_number: Some(1),
+            created_timestamp: 0,
+            created_on: "2026-04-28".to_string(),
+            updated_on: "2026-04-28".to_string(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags: std::collections::HashMap::new(),
+            content_type: String::new(),
+            recovery_level: None,
+        }
+    }
+
+    /// Backend whose in-place update always succeeds but whose rename phase
+    /// always fails with a `Conflict` — the shape produced by `xv update src
+    /// --note x --rename existing-dst` when `dst` already exists.
+    struct RenameFailBackend;
+
+    #[async_trait::async_trait]
+    impl SecretBackend for RenameFailBackend {
+        async fn set_secret(
+            &self,
+            _vault: &str,
+            _request: crate::secret::manager::SecretRequest,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _include_value: bool,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret_version(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+            _include_value: bool,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn list_secrets(
+            &self,
+            _vault: &str,
+            _group_filter: Option<&str>,
+        ) -> std::result::Result<Vec<crate::secret::manager::SecretSummary>, BackendError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<(), BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            name: &str,
+            _request: crate::secret::manager::SecretUpdateRequest,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Ok(fake_secret_properties(name))
+        }
+
+        async fn rename_secret(
+            &self,
+            _vault: &str,
+            name: &str,
+            new_name: &str,
+        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
+            Err(BackendError::Conflict(format!(
+                "destination '{new_name}' already exists (renaming '{name}')"
+            )))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for RenameFailBackend {
+        fn name(&self) -> &'static str {
+            "local"
+        }
+
+        fn kind(&self) -> BackendKind {
+            BackendKind::Local
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                has_vaults: true,
+                has_file_storage: false,
+                has_rbac: false,
+                has_audit: false,
+                has_versioning: true,
+                has_soft_delete: true,
+                has_secret_rotation: false,
+                has_groups: true,
+                has_folders: true,
+                has_notes: true,
+                has_expiry: true,
+                max_secret_size: None,
+                max_name_length: None,
+                name_charset: NameCharset::Unrestricted,
+            }
+        }
+
+        fn secrets(&self) -> &dyn SecretBackend {
+            self
+        }
+
+        async fn health_check(&self) -> std::result::Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    /// Regression test for fix-6 finding #1: when the in-place update phase
+    /// of a combined `--rename` update succeeds but the rename phase fails,
+    /// the secrets-list cache must still be invalidated. Before the fix, both
+    /// `update_secret(...).await?` and `rename_secret(...).await?` returned
+    /// early past the single trailing `invalidate_trait_secret_cache` call,
+    /// leaving a stale cached `xv ls` for up to the cache TTL.
+    ///
+    /// This is a unit-level test (not e2e) because every e2e harness in this
+    /// repo (see `tests/e2e_local_backend.rs`'s `TestEnv::new()`) sets
+    /// `cache_enabled = false` — there is no existing precedent for an e2e
+    /// test that exercises the on-disk cache, and adding one is out of scope
+    /// for this fix. Exercising `execute_secret_update_direct` directly with
+    /// a controllable backend lets us assert on the cache file without a
+    /// full CLI invocation.
+    #[tokio::test]
+    async fn rename_failure_after_successful_update_invalidates_cache() {
+        let registry = BackendRegistry::new(Arc::new(RenameFailBackend));
+
+        // Unique per-process vault name: the cache dir is the real OS cache
+        // dir (`CacheManager::from_config` always resolves `dirs::cache_dir()`),
+        // so this keeps the test from colliding with any other cache entry
+        // and lets us safely clean up exactly the key we touched.
+        let vault_name = format!(
+            "xv-test-rename-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let config = Config {
+            backend: Some("local".to_string()),
+            cache_enabled: true,
+            cache_ttl_secs: 300,
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: None,
+                key_file: None,
+                default_vault: Some(vault_name.clone()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+            ..Default::default()
+        };
+
+        let cache_manager = crate::cache::CacheManager::from_config(&config);
+        let cache_key = trait_secret_cache_key(&vault_name);
+
+        // Seed a stale cache entry, as a prior `xv ls` would have left behind.
+        let stale: Vec<crate::secret::manager::SecretSummary> =
+            vec![summary_named("src", None, true)];
+        cache_manager.set(&cache_key, &stale);
+        assert!(
+            cache_manager
+                .get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+                .is_some(),
+            "precondition: stale cache entry must be readable before the update runs"
+        );
+
+        let result = execute_secret_update_direct(
+            "src",
+            None,
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+            Some("existing-dst".to_string()),
+            Some("rotated".to_string()),
+            None,
+            false,
+            false,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
+            config.clone(),
+            Some(&registry),
+        )
+        .await;
+
+        // Clean up regardless of assertion outcome so a failing run never
+        // leaves stray state in the real OS cache dir.
+        let cleanup = || cache_manager.invalidate(&cache_key);
+
+        let err = match result {
+            Ok(()) => {
+                cleanup();
+                panic!("rename phase must fail for this backend");
+            }
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("Conflict") || err.to_string().contains("already exists"),
+            "unexpected error: {err}"
+        );
+
+        let cache_still_present = cache_manager
+            .get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+            .is_some();
+        cleanup();
+
+        assert!(
+            !cache_still_present,
+            "cache must be invalidated once the in-place update applied, \
+             even though the following rename failed"
         );
     }
 }
