@@ -510,8 +510,10 @@ The "did you mean" suggestion uses fuzzy matching (Levenshtein, distance ≤ 2).
 xv ls                                    # grid of folders (prod/) and root secrets
 xv ls prod                               # inside a folder
 xv ls prod -l                            # long listing: name, updated, groups, note
-xv ls -r                                 # every secret, flattened
+xv ls -r                                 # every secret, flattened (with folder-qualified names)
 xv ls --format table                     # the classic table
+xv ls --sort updated                     # most recently updated secrets first
+xv ls --deleted                          # soft-deleted secrets (capability-gated)
 xv list --group production               # filter by group
 xv list --all                            # include disabled / soft-deleted
 xv list --expiring 30d                   # secrets with expiry in next 30 days
@@ -556,6 +558,7 @@ xv find db                               # rank by name
 xv find db --in folder                   # also search folder field
 xv find db --in folder --in groups       # multiple fields
 xv find db --in tags                     # search custom tags
+xv find db --folder prod                 # scope to prod/* subtree
 xv find db --limit 10                    # cap rows (default 50)
 xv find db --min-score 0.5               # tighter threshold (0.0..=1.0; default 0.3)
 xv find db --all-vaults                  # search every vault you can list
@@ -579,6 +582,14 @@ xv run --include "$selected" -- ./debug.sh
 ```
 
 The previous interactive `xv find` was replaced in v0.6.1; see [`docs/find.md`](docs/find.md) for the migration table.
+
+### Groups — list and filter
+
+```bash
+xv group list                            # all groups with member counts
+xv group list --format json              # machine-friendly output
+xv list --group production               # filter by group (shown earlier)
+```
 
 ---
 
@@ -1245,7 +1256,7 @@ xv vault list                            # if this works, DNS is fine — typo i
 ### `error[xv-env-not-defined]: Environment 'X' not defined in .xv.toml`
 
 ```bash
-xv context envs                          # see what's defined
+xv env list                              # see what's defined
 xv context show                          # see which .xv.toml is being used
 ```
 
