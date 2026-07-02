@@ -2252,12 +2252,27 @@ pub(crate) async fn execute_secret_find_direct(
     in_fields: Vec<String>,
     limit: usize,
     min_score: f32,
+    folder: Option<String>,
     all_vaults: bool,
     names_only: bool,
     format: crate::utils::format::OutputFormat,
     config: Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
+    // Normalize --folder: trim trailing '/', validate, treat empty as absent.
+    let folder_scope: Option<String> = match folder {
+        Some(raw) => {
+            let trimmed = raw.trim_end_matches('/').to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                crate::utils::helpers::validate_folder_path(&trimmed)?;
+                Some(trimmed)
+            }
+        }
+        None => None,
+    };
+
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
@@ -2319,6 +2334,16 @@ pub(crate) async fn execute_secret_find_direct(
                 .collect()
         };
 
+        let items: Vec<CandidateItem> = match folder_scope.as_deref() {
+            Some(path) => items
+                .into_iter()
+                .filter(|i| {
+                    crate::cli::ls_view::folder_in_scope(i.folder.as_deref().unwrap_or(""), path)
+                })
+                .collect(),
+            None => items,
+        };
+
         let pattern_str = pattern.as_deref().unwrap_or("");
         let mut matches = score_matches(pattern_str, &items, &fields);
 
@@ -2352,6 +2377,7 @@ pub(crate) async fn execute_secret_find_direct(
         in_fields,
         limit,
         min_score,
+        folder_scope.as_deref(),
         all_vaults,
         names_only,
         format,
@@ -2367,6 +2393,7 @@ async fn execute_secret_find(
     in_fields: Vec<String>,
     limit: usize,
     min_score: f32,
+    folder: Option<&str>,
     all_vaults: bool,
     names_only: bool,
     format: crate::utils::format::OutputFormat,
@@ -2477,6 +2504,17 @@ async fn execute_secret_find(
             .map(CandidateItem::from_secret_summary)
             .collect()
     };
+
+    let items: Vec<CandidateItem> = match folder {
+        Some(path) => items
+            .into_iter()
+            .filter(|i| {
+                crate::cli::ls_view::folder_in_scope(i.folder.as_deref().unwrap_or(""), path)
+            })
+            .collect(),
+        None => items,
+    };
+
     let pattern_str = pattern.unwrap_or("");
     let mut matches = score_matches(pattern_str, &items, &fields);
 

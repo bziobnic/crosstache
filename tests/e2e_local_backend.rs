@@ -1109,6 +1109,29 @@ fn group_list_excludes_disabled_secrets() {
 }
 
 #[test]
+fn find_folder_scopes_by_segment_boundary() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("db-pass", "v", &["--folder", "prod/db"]);
+    env.set_secret_with_args("api-key", "v", &["--folder", "prod"]);
+    env.set_secret_with_args("trap", "v", &["--folder", "production"]);
+    env.set_secret("root-a", "v");
+
+    // No pattern: everything in scope, unranked.
+    let out = env.xv_ok(&["find", "--folder", "prod", "--names-only"]);
+    let names: Vec<&str> = out.lines().collect();
+    assert!(
+        names.contains(&"db-pass") && names.contains(&"api-key"),
+        "{out}"
+    );
+    assert!(!names.contains(&"trap"), "segment boundary violated: {out}");
+    assert!(!names.contains(&"root-a"), "{out}");
+
+    // Trailing slash tolerated; invalid path errors.
+    let out2 = env.xv_ok(&["find", "--folder", "prod/", "--names-only"]);
+    assert!(out2.contains("db-pass"), "{out2}");
+}
+
+#[test]
 fn context_envs_is_hidden_and_warns() {
     let env = TestEnv::new();
 

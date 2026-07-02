@@ -465,6 +465,11 @@ pub enum Commands {
         )]
         min_score: f32,
 
+        /// Only search secrets in this folder (or its subfolders, segment
+        /// boundary enforced: `prod` matches `prod/db` but not `production`).
+        #[arg(long, value_name = "PATH")]
+        folder: Option<String>,
+
         /// Search every vault the caller has list rights on. Slow on
         /// cold cache. Mutually exclusive with vault-resolved context.
         #[arg(long)]
@@ -1520,6 +1525,7 @@ impl Cli {
                 in_fields,
                 limit,
                 min_score,
+                folder,
                 all_vaults,
                 names_only,
             } => {
@@ -1528,6 +1534,7 @@ impl Cli {
                     in_fields,
                     limit,
                     min_score,
+                    folder,
                     all_vaults,
                     names_only,
                     self.format,
