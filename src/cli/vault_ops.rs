@@ -113,6 +113,7 @@ pub(crate) async fn execute_vault_command(
                         config.runtime_output_format,
                         config.no_color,
                         config.template.clone(),
+                        config.runtime_columns.clone(),
                     );
                     let table = formatter.format_table(&[vault])?;
                     println!("{table}");
@@ -380,10 +381,16 @@ fn render_vault_list(
         output_format,
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
     );
-    let formatter = TableFormatter::new(output_format, config.no_color, config.template.clone());
+    let formatter = TableFormatter::new(
+        output_format,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
 
     if vaults.is_empty() {
         if human_table_like {
+            formatter.validate_columns::<crate::vault::models::VaultSummary>()?;
             crate::utils::output::info(&empty_state_message("vaults", None));
         } else {
             println!("{}", formatter.format_table(vaults)?);
@@ -399,6 +406,7 @@ fn render_vault_list(
             page.items.len(),
             page.total_items,
             "vault",
+            "vaults",
             None,
             page.page_size.is_some(),
         ));
@@ -1251,10 +1259,12 @@ async fn execute_vault_share(
                 fmt,
                 config.no_color,
                 config.template.clone(),
+                config.runtime_columns.clone(),
             );
 
             if roles.is_empty() {
                 if human_table_like {
+                    formatter.validate_columns::<crate::vault::models::VaultRole>()?;
                     output::info(&format!(
                         "No access assignments found for vault '{vault_name}'"
                     ));
@@ -1274,6 +1284,7 @@ async fn execute_vault_share(
                         paged.items.len(),
                         paged.total_items,
                         "assignment",
+                        "assignments",
                         None,
                         paged.page_size.is_some(),
                     ));

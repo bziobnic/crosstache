@@ -256,24 +256,6 @@ fn filter_secret_summaries_for_display(
     secrets
 }
 
-fn secret_count_label(
-    displayed: usize,
-    total: usize,
-    qualifier: Option<&str>,
-    paginated: bool,
-) -> String {
-    let noun = match qualifier {
-        Some(q) => format!("{q} secret(s)"),
-        None => "secret(s)".to_string(),
-    };
-
-    if paginated {
-        format!("Showing {displayed} of {total} {noun}")
-    } else {
-        format!("{displayed} {noun}")
-    }
-}
-
 const SECRET_LIST_NOTE_WRAP_WIDTH: usize = 40;
 
 #[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
@@ -412,13 +394,45 @@ pub(crate) fn display_cached_secret_list(
             crate::utils::output::warn("--long is ignored for machine-readable formats");
         }
         let page = paginate_slice(&scoped.subtree, pagination);
-        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
         let output = formatter.format_table(&page.items)?;
         crate::utils::pager::print_output(&output, pager)?;
         return Ok(());
     }
 
+    // Grid/long views ignore --columns for rendering, but an unknown column
+    // name must still error like every other view. Validate up front — before
+    // the empty-scope early return below — so empty scopes reject typos too;
+    // the "ignored for the grid/long view" warning (below) only fires once we
+    // know the selection is valid.
+    let is_grid_or_long_view = !config.format_explicit || long;
+    if config.runtime_columns.is_some() && is_grid_or_long_view {
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        formatter.validate_columns::<SecretListDisplayRow>()?;
+    }
+
     if scoped.subtree.is_empty() {
+        // Explicit table/plain/raw view: validate an unknown --columns
+        // selection here too (grid/long already validated above).
+        if config.format_explicit && !long {
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
+            formatter.validate_columns::<SecretListDisplayRow>()?;
+        }
         let scope_desc = if !path.is_empty() {
             format!("folder '{path}'")
         } else {
@@ -454,7 +468,12 @@ pub(crate) fn display_cached_secret_list(
     if config.format_explicit && !long {
         let table_secrets = &scoped.subtree;
         let page = paginate_slice(table_secrets, pagination);
-        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
         let display_rows = format_secret_list_rows_for_human(&page.items);
         output.push_str(&formatter.format_table(&display_rows)?);
         output.push('\n');
@@ -465,6 +484,7 @@ pub(crate) fn display_cached_secret_list(
                 page.items.len(),
                 page.total_items,
                 "secret",
+                "secrets",
                 None,
                 page.page_size.is_some(),
             ),
@@ -479,6 +499,11 @@ pub(crate) fn display_cached_secret_list(
     }
 
     // ls-style grid / long listing.
+    if config.runtime_columns.is_some() {
+        crate::utils::output::warn(
+            "--columns is ignored for the grid/long view; use --format table",
+        );
+    }
     let entries: Vec<LsEntry> = if recursive {
         scoped
             .subtree
@@ -510,11 +535,16 @@ pub(crate) fn display_cached_secret_list(
             .count(),
         secret_count,
         "secret",
+        "secrets",
         None,
         page.page_size.is_some(),
     );
     if folder_count > 0 {
-        let _ = write!(count_line, ", {} folder(s)", folder_count);
+        let _ = write!(
+            count_line,
+            ", {}",
+            crate::utils::list_output::pluralize(folder_count, "folder", "folders")
+        );
     }
     let _ = writeln!(output, "{} in vault '{}'", count_line, vault_name);
     if let Some(footer) = pagination_footer_text(&page, "entry", fmt) {
@@ -752,13 +782,31 @@ pub(crate) async fn execute_secret_history_direct(
             .list_versions(&vault_name, name)
             .await?;
         if versions.is_empty() {
-            output::info(&format!("No version history for '{name}'"));
+            let fmt = config.runtime_output_format;
+            use crate::utils::format::TableFormatter;
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
+            if matches!(
+                fmt,
+                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+            ) {
+                formatter.validate_columns::<crate::secret::manager::SecretProperties>()?;
+                output::info(&format!("No version history for '{name}'"));
+            } else {
+                // Valid-empty machine output on stdout (e.g. `[]` for JSON).
+                println!("{}", formatter.format_table(&versions)?);
+            }
         } else {
             use crate::utils::format::TableFormatter;
             let formatter = TableFormatter::new(
                 config.runtime_output_format,
                 config.no_color,
                 config.template.clone(),
+                config.runtime_columns.clone(),
             );
             let table = formatter.format_table(&versions)?;
             println!("{table}");
@@ -773,6 +821,7 @@ pub(crate) async fn execute_secret_history_direct(
                         versions.len(),
                         versions.len(),
                         "version",
+                        "versions",
                         None,
                         false
                     )
@@ -1753,6 +1802,81 @@ async fn execute_secret_get(
     Ok(())
 }
 
+/// One `xv find` result as rendered by every output format. Serde keys match
+/// the pre-unification JSON envelope (`name`/`score`/`folder`/`groups`);
+/// `score` is a 2-decimal string for stable CSV/table output and `folder`/
+/// `groups` are empty strings instead of null (changelog-documented).
+#[derive(tabled::Tabled, serde::Serialize)]
+struct FindRow {
+    #[tabled(rename = "Name")]
+    #[serde(rename = "name")]
+    name: String,
+    #[tabled(rename = "Score")]
+    #[serde(rename = "score")]
+    score: String,
+    #[tabled(rename = "Folder")]
+    #[serde(rename = "folder")]
+    folder: String,
+    #[tabled(rename = "Groups")]
+    #[serde(rename = "groups")]
+    groups: String,
+}
+
+/// Empty-state wording for `xv find`, shared by the trait and legacy paths.
+fn find_empty_message(pattern: Option<&str>, all_vaults: bool, vault_name: Option<&str>) -> String {
+    match (all_vaults, pattern, vault_name) {
+        (true, Some(p), _) => format!("No secrets match '{p}' across all vaults."),
+        (true, None, _) => "No secrets found across all vaults.".to_string(),
+        (false, Some(p), Some(v)) => format!("No secrets match '{p}' in vault '{v}'."),
+        (false, None, Some(v)) => format!("No secrets in vault '{v}'."),
+        (false, _, None) => "No matching secrets found.".to_string(),
+    }
+}
+
+/// Render find matches through the shared TableFormatter: all formats work
+/// (CSV included), `--columns`/`--no-color` inherited, machine formats emit
+/// valid-empty output on stdout when nothing matched.
+fn render_find_matches(
+    matches: &[crate::utils::fuzzy::Match<'_>],
+    format: crate::utils::format::OutputFormat,
+    empty_msg: &str,
+    config: &Config,
+) -> Result<()> {
+    let rows: Vec<FindRow> = matches
+        .iter()
+        .map(|m| FindRow {
+            name: m.item.name.clone(),
+            score: format!("{:.2}", m.score as f64),
+            folder: m.item.folder.clone().unwrap_or_default(),
+            groups: m.item.groups.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    let fmt = format.resolve_for_stdout();
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+
+    let formatter = crate::utils::format::TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+
+    if rows.is_empty() && human_table_like {
+        formatter.validate_columns::<FindRow>()?;
+        output::info(empty_msg);
+        return Ok(());
+    }
+
+    // Non-empty rows render for every format; empty rows reach here only on
+    // machine formats, where format_table emits valid-empty output.
+    println!("{}", formatter.format_table(&rows)?);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_find_direct(
     pattern: Option<String>,
@@ -1790,6 +1914,7 @@ pub(crate) async fn execute_secret_find_direct(
             }
         }
 
+        let mut scope_vault: Option<String> = None;
         let items: Vec<CandidateItem> = if all_vaults {
             // List all vaults and collect secrets
             let mut combined = Vec::new();
@@ -1813,6 +1938,7 @@ pub(crate) async fn execute_secret_find_direct(
             combined
         } else {
             let vault_name = resolve_vault_for_trait(&config, registry).await?;
+            scope_vault = Some(vault_name.clone());
             let all_secrets = reg
                 .active()
                 .secrets()
@@ -1843,32 +1969,8 @@ pub(crate) async fn execute_secret_find_direct(
             return Ok(());
         }
 
-        let resolved = format.resolve_for_stdout();
-        if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
-            let envelope: Vec<serde_json::Value> = matches
-                .iter()
-                .map(|m| {
-                    serde_json::json!({
-                        "name": m.item.name,
-                        "score": m.score,
-                        "folder": m.item.folder,
-                        "groups": m.item.groups,
-                    })
-                })
-                .collect();
-            let rendered = match resolved {
-                OutputFormat::Json => serde_json::to_string_pretty(&envelope).unwrap_or_default(),
-                OutputFormat::Yaml => serde_yaml::to_string(&envelope).unwrap_or_default(),
-                _ => unreachable!(),
-            };
-            println!("{rendered}");
-        } else if matches.is_empty() {
-            output::info("No matching secrets found");
-        } else {
-            for m in &matches {
-                println!("{}", m.item.name);
-            }
-        }
+        let empty_msg = find_empty_message(pattern.as_deref(), all_vaults, scope_vault.as_deref());
+        render_find_matches(&matches, format, &empty_msg, &config)?;
         return Ok(());
     }
 
@@ -2030,62 +2132,8 @@ async fn execute_secret_find(
         return Ok(());
     }
 
-    // Format-aware rendering.
-    let resolved = format.resolve_for_stdout();
-    use crate::utils::format::OutputFormat;
-    if matches!(resolved, OutputFormat::Json | OutputFormat::Yaml) {
-        let envelope: Vec<serde_json::Value> = matches
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "name": m.item.name,
-                    "score": m.score,
-                    "folder": m.item.folder,
-                    "groups": m.item.groups,
-                })
-            })
-            .collect();
-        let rendered = match resolved {
-            OutputFormat::Json => serde_json::to_string_pretty(&envelope).unwrap_or_default(),
-            OutputFormat::Yaml => serde_yaml::to_string(&envelope).unwrap_or_default(),
-            _ => unreachable!(),
-        };
-        println!("{rendered}");
-        return Ok(());
-    }
-
-    // Plain/table fallback (Task 7 polishes the score-bar column).
-    if matches.is_empty() {
-        if all_vaults {
-            if let Some(p) = pattern {
-                output::info(&format!("No secrets match '{p}' across all vaults."));
-            } else {
-                output::info("No secrets found across all vaults.");
-            }
-        } else {
-            let vault_name = single_vault.as_ref().ok_or_else(|| {
-                CrosstacheError::config(
-                    "vault name not resolved for single-vault search".to_string(),
-                )
-            })?;
-            if let Some(p) = pattern {
-                output::info(&format!("No secrets match '{p}' in vault '{vault_name}'."));
-            } else {
-                output::info(&format!("No secrets in vault '{vault_name}'."));
-            }
-        }
-        return Ok(());
-    }
-    use crate::utils::fuzzy::score_bar;
-    let top = matches.iter().map(|m| m.score).max().unwrap_or(1).max(1) as f32;
-    println!("{:<40}  {:<10}  {:<24}  GROUPS", "NAME", "SCORE", "FOLDER");
-    for m in &matches {
-        let folder = m.item.folder.as_deref().unwrap_or("");
-        let groups = m.item.groups.as_deref().unwrap_or("");
-        let bar = score_bar(m.score as f32 / top);
-        println!("{:<40}  {bar}  {:<24}  {}", m.item.name, folder, groups);
-    }
-    Ok(())
+    let empty_msg = find_empty_message(pattern, all_vaults, single_vault.as_deref());
+    render_find_matches(&matches, format, &empty_msg, config)
 }
 
 #[allow(dead_code)] // called from src/main.rs::run_complete_secrets (binary-only path)
@@ -2116,69 +2164,6 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
             println!("{display}");
         }
     }
-    Ok(())
-}
-
-#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
-async fn execute_secret_history(
-    secret_manager: &crate::secret::manager::SecretManager,
-    name: &str,
-    vault: Option<String>,
-    config: &Config,
-) -> Result<()> {
-    use crate::config::ContextManager;
-    use crate::utils::format::format_table;
-    use tabled::{Table, Tabled};
-
-    // Determine vault name using context resolution
-    let vault_name = config.resolve_vault_name(vault).await?;
-
-    // Update context usage tracking
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
-    let _ = context_manager.update_usage(&vault_name).await;
-
-    // Get secret versions using the secret operations
-    let versions = secret_manager
-        .secret_ops()
-        .get_secret_versions(&vault_name, name)
-        .await?;
-
-    if versions.is_empty() {
-        output::info(&format!("No versions found for secret '{name}'"));
-        return Ok(());
-    }
-
-    // Display versions in a table
-    #[derive(Tabled)]
-    struct VersionInfo {
-        #[tabled(rename = "Version")]
-        version: String,
-        #[tabled(rename = "Created")]
-        created: String,
-        #[tabled(rename = "Updated")]
-        updated: String,
-        #[tabled(rename = "Enabled")]
-        enabled: String,
-    }
-
-    let version_infos: Vec<VersionInfo> = versions
-        .into_iter()
-        .map(|v| VersionInfo {
-            version: v
-                .version_number
-                .map(|n| format!("v{n}"))
-                .unwrap_or_else(|| v.version.chars().take(8).collect::<String>() + "..."),
-            created: v.created_on,
-            updated: v.updated_on,
-            enabled: if v.enabled { "Yes" } else { "No" }.to_string(),
-        })
-        .collect();
-
-    let table = Table::new(&version_infos);
-    println!("Version history for secret '{name}' in vault '{vault_name}':");
-    println!();
-    println!("{}", format_table(table, config.no_color));
-
     Ok(())
 }
 
@@ -3143,193 +3128,6 @@ async fn execute_secret_inject(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
-async fn execute_secret_list(
-    secret_manager: &crate::secret::manager::SecretManager,
-    group: Option<String>,
-    show_all: bool,
-    expiring: Option<String>,
-    expired: bool,
-    pagination: Pagination,
-    pager: bool,
-    names_only: bool,
-    config: &Config,
-) -> Result<Vec<crate::secret::manager::SecretSummary>> {
-    use crate::config::ContextManager;
-    use crate::utils::format::TableFormatter;
-    use crate::utils::pagination::{paginate_slice, pagination_footer_text};
-    use std::fmt::Write as _;
-
-    let vault_name = config.resolve_vault_name(None).await?;
-
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
-    let _ = context_manager.update_usage(&vault_name).await;
-
-    let fmt = config.runtime_output_format;
-    let human_table_like = matches!(
-        fmt,
-        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
-    );
-
-    // Always fetch the complete unfiltered list so the caller can cache
-    // the full dataset. Filters are applied in-memory below.
-    let all_secrets = secret_manager
-        .secret_ops()
-        .list_secrets(&vault_name, None)
-        .await?;
-
-    // Apply group and enabled filters for display
-    let mut secrets: Vec<_> = all_secrets.clone();
-    if !show_all {
-        secrets.retain(|s| s.enabled);
-    }
-    if let Some(ref g) = group {
-        secrets.retain(|s| secret_summary_matches_group(s, g));
-    }
-
-    // Apply expiry filtering if requested (requires per-secret API calls)
-    if expired || expiring.is_some() {
-        use crate::utils::datetime::{is_expired, is_expiring_within};
-
-        let mut filtered_secrets = Vec::new();
-
-        for secret_summary in secrets {
-            match secret_manager
-                .get_secret_safe(&vault_name, &secret_summary.name, false, true)
-                .await
-            {
-                Ok(secret_props) => {
-                    let should_include = if expired {
-                        is_expired(secret_props.expires_on)
-                    } else if let Some(ref duration) = expiring {
-                        match is_expiring_within(secret_props.expires_on, duration) {
-                            Ok(is_exp) => is_exp,
-                            Err(e) => {
-                                eprintln!("Warning: Invalid duration '{}': {}", duration, e);
-                                false
-                            }
-                        }
-                    } else {
-                        true
-                    };
-
-                    if should_include {
-                        filtered_secrets.push(secret_summary);
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to get details for secret '{}': {}",
-                        secret_summary.name, e
-                    );
-                }
-            }
-        }
-
-        secrets = filtered_secrets;
-    }
-
-    // Early exit for names-only mode (no pagination for pipe-friendly output)
-    if names_only {
-        for s in &secrets {
-            let display = if s.original_name.is_empty() {
-                &s.name
-            } else {
-                &s.original_name
-            };
-            println!("{display}");
-        }
-        return Ok(all_secrets);
-    }
-
-    let paged = paginate_slice(&secrets, pagination);
-    let display_secrets = paged.items.clone();
-
-    // Display results
-    if human_table_like {
-        let mut output = String::new();
-        output.push('\n');
-        // Color only for styled table; plain/raw must not emit ANSI escapes
-        if !config.no_color && fmt == OutputFormat::Table {
-            let _ = writeln!(output, "\x1b[36mVault: {}\x1b[0m", vault_name);
-        } else {
-            let _ = writeln!(output, "Vault: {}", vault_name);
-        }
-        output.push('\n');
-
-        if secrets.is_empty() {
-            let msg = if expired || expiring.is_some() {
-                let filter_desc = if expired { "expired" } else { "expiring" };
-                format!(
-                    "No {} secrets found in vault '{}'.",
-                    filter_desc, vault_name
-                )
-            } else if show_all {
-                "No secrets found in vault.".to_string()
-            } else {
-                "No enabled secrets found in vault. Use --all to show disabled secrets.".to_string()
-            };
-            output.push_str(&output::format_line(
-                output::Level::Info,
-                &msg,
-                output::should_use_rich_stdout(),
-            ));
-            crate::utils::pager::print_output(&output, pager)?;
-        } else {
-            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-            output.push_str(&formatter.format_table(&display_secrets)?);
-
-            let qualifier = if expired {
-                Some("expired".to_string())
-            } else {
-                expiring
-                    .as_ref()
-                    .map(|duration| format!("secret(s) expiring within {duration}"))
-            };
-            let count_label = if let Some(ref q) = qualifier {
-                if expired {
-                    secret_count_label(
-                        display_secrets.len(),
-                        paged.total_items,
-                        Some(q),
-                        paged.page_size.is_some(),
-                    )
-                } else if paged.page_size.is_some() {
-                    format!(
-                        "Showing {} of {} {}",
-                        display_secrets.len(),
-                        paged.total_items,
-                        q
-                    )
-                } else {
-                    format!("{} {}", display_secrets.len(), q)
-                }
-            } else {
-                secret_count_label(
-                    display_secrets.len(),
-                    paged.total_items,
-                    None,
-                    paged.page_size.is_some(),
-                )
-            };
-            output.push('\n');
-            let _ = writeln!(output, "{} in vault '{}'", count_label, vault_name);
-            if let Some(footer) = pagination_footer_text(&paged, "secret", fmt) {
-                output.push('\n');
-                output.push_str(&footer);
-            }
-            crate::utils::pager::print_output(&output, pager)?;
-        }
-    } else {
-        let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-        let output = formatter.format_table(&display_secrets)?;
-        crate::utils::pager::print_output(&output, pager)?;
-    }
-
-    Ok(all_secrets)
-}
-
 #[allow(dead_code)] // legacy non-trait impl, superseded by backend-trait path
 async fn execute_secret_delete(
     secret_manager: &crate::secret::manager::SecretManager,
@@ -3839,11 +3637,13 @@ async fn execute_secret_parse(
             if components.is_empty() {
                 println!("No components found in connection string");
             } else {
-                use crate::utils::format::format_table;
-                use tabled::Table;
-
-                let table = Table::new(&components);
-                println!("{}", format_table(table, config.no_color));
+                let formatter = crate::utils::format::TableFormatter::new(
+                    crate::utils::format::OutputFormat::Table,
+                    config.no_color,
+                    None,
+                    None,
+                );
+                println!("{}", formatter.format_table(&components)?);
             }
         }
         _ => {
@@ -3955,10 +3755,12 @@ async fn execute_secret_share(
                 fmt,
                 config.no_color,
                 config.template.clone(),
+                config.runtime_columns.clone(),
             );
 
             if roles.is_empty() {
                 if human_table_like {
+                    formatter.validate_columns::<crate::vault::models::VaultRole>()?;
                     // Chrome goes to stderr; stdout stays clean for pipes.
                     crate::utils::output::info(&format!(
                         "No access assignments found for secret '{secret_name}' in vault '{vault_name}'"
@@ -3983,6 +3785,7 @@ async fn execute_secret_share(
                         paged.items.len(),
                         paged.total_items,
                         "assignment",
+                        "assignments",
                         None,
                         paged.page_size.is_some(),
                     ));
@@ -4810,15 +4613,6 @@ mod tests {
             &summary_with_groups(None),
             "prod"
         ));
-    }
-
-    #[test]
-    fn test_secret_count_label_distinguishes_paginated_total() {
-        assert_eq!(
-            secret_count_label(10, 137, None, true),
-            "Showing 10 of 137 secret(s)"
-        );
-        assert_eq!(secret_count_label(137, 137, None, false), "137 secret(s)");
     }
 
     #[test]

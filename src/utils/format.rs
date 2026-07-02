@@ -132,41 +132,82 @@ fn visible_column_indices(column_count: usize, rows: &[Vec<String>]) -> Vec<usiz
     }
 }
 
-/// Build a `Table` from `data`, omitting columns whose cells are all empty.
-/// Human table/plain views only — machine formats keep the full field set.
-fn table_hiding_empty_columns<T: Tabled>(data: &[T]) -> Table {
-    let headers: Vec<String> = T::headers().iter().map(|h| h.to_string()).collect();
-    let rows: Vec<Vec<String>> = data
-        .iter()
-        .map(|item| item.fields().iter().map(|f| f.to_string()).collect())
-        .collect();
-    let keep = visible_column_indices(headers.len(), &rows);
-
-    let mut builder = tabled::builder::Builder::default();
-    builder.push_record(keep.iter().map(|&i| headers[i].clone()));
-    for row in &rows {
-        builder.push_record(keep.iter().map(|&i| row[i].clone()));
-    }
-    builder.build()
-}
-
 /// Table formatter with color support
 pub struct TableFormatter {
     _theme: ColorTheme,
     format: OutputFormat,
     no_color: bool,
     template: Option<String>,
+    /// Parsed global `--columns` selection; applies to Table/Plain/CSV only.
+    columns: Option<Vec<String>>,
 }
 
 impl TableFormatter {
     /// Create a new table formatter
-    pub fn new(format: OutputFormat, no_color: bool, template: Option<String>) -> Self {
+    pub fn new(
+        format: OutputFormat,
+        no_color: bool,
+        template: Option<String>,
+        columns: Option<Vec<String>>,
+    ) -> Self {
         Self {
             _theme: ColorTheme::default(),
             format: format.resolve_for_stdout(),
             no_color,
             template,
+            columns,
         }
+    }
+
+    /// Resolve the `--columns` selection against `headers`, case-insensitively.
+    /// `Ok(None)` = no selection requested (hide-empty behavior applies).
+    fn selected_indices(&self, headers: &[String]) -> Result<Option<Vec<usize>>> {
+        let Some(requested) = &self.columns else {
+            return Ok(None);
+        };
+        let mut indices = Vec::with_capacity(requested.len());
+        for want in requested {
+            match headers.iter().position(|h| h.eq_ignore_ascii_case(want)) {
+                Some(i) => indices.push(i),
+                None => {
+                    return Err(crate::error::CrosstacheError::invalid_argument(format!(
+                        "unknown column '{want}'; available: {}",
+                        headers.join(", ")
+                    )))
+                }
+            }
+        }
+        Ok(Some(indices))
+    }
+
+    /// Validate any configured `--columns` selection against `T`'s headers
+    /// without rendering. Call this on empty-result paths that skip
+    /// `format_table` (e.g. a human-readable "no results" message) so that
+    /// an unknown `--columns` value still errors even when there is no data.
+    pub fn validate_columns<T: Tabled>(&self) -> Result<()> {
+        let headers: Vec<String> = T::headers().iter().map(|h| h.to_string()).collect();
+        self.selected_indices(&headers).map(|_| ())
+    }
+
+    /// Build a `Table` from `data`. With an explicit `--columns` selection the
+    /// requested columns are projected in order (explicit selection wins over
+    /// empty-column hiding); otherwise all-empty columns are omitted.
+    fn build_table<T: Tabled>(&self, data: &[T]) -> Result<Table> {
+        let headers: Vec<String> = T::headers().iter().map(|h| h.to_string()).collect();
+        let rows: Vec<Vec<String>> = data
+            .iter()
+            .map(|item| item.fields().iter().map(|f| f.to_string()).collect())
+            .collect();
+        let keep = match self.selected_indices(&headers)? {
+            Some(selection) => selection,
+            None => visible_column_indices(headers.len(), &rows),
+        };
+        let mut builder = tabled::builder::Builder::default();
+        builder.push_record(keep.iter().map(|&i| headers[i].clone()));
+        for row in &rows {
+            builder.push_record(keep.iter().map(|&i| row[i].clone()));
+        }
+        Ok(builder.build())
     }
 
     /// Create a formatted table from data
@@ -178,10 +219,15 @@ impl TableFormatter {
                 OutputFormat::Json => self.format_as_json(data),
                 OutputFormat::Yaml => self.format_as_yaml(data),
                 OutputFormat::Csv => self.format_as_csv(data),
-                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => Ok(
-                    "No results found. If this is unexpected, check your vault permissions or filter criteria."
-                        .to_string(),
-                ),
+                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => {
+                    // Validate --columns selection even with no rows.
+                    let headers: Vec<String> = T::headers().iter().map(|h| h.to_string()).collect();
+                    let _ = self.selected_indices(&headers)?;
+                    Ok(
+                        "No results found. If this is unexpected, check your vault permissions or filter criteria."
+                            .to_string(),
+                    )
+                }
                 OutputFormat::Template => self.format_as_template(data),
             };
         }
@@ -200,7 +246,7 @@ impl TableFormatter {
 
     /// Format data as a styled table
     fn format_as_table<T: Tabled>(&self, data: &[T]) -> Result<String> {
-        let mut table = table_hiding_empty_columns(data);
+        let mut table = self.build_table(data)?;
 
         // Neutralize terminal escape sequences in untrusted cell content
         table.with(Modify::new(Segment::all()).with(Format::content(sanitize_control_chars)));
@@ -237,24 +283,30 @@ impl TableFormatter {
 
     /// Format data as CSV
     fn format_as_csv<T: Tabled>(&self, data: &[T]) -> Result<String> {
+        let headers: Vec<String> = T::headers().iter().map(|h| h.to_string()).collect();
+        let selection = self.selected_indices(&headers)?;
+
         let mut writer = csv::WriterBuilder::new()
             .terminator(csv::Terminator::Any(b'\n'))
             .from_writer(Vec::new());
 
-        let headers = T::headers();
-        writer
-            .write_record(headers.iter().map(|header| header.as_ref()))
-            .map_err(|err| {
-                crate::error::CrosstacheError::SerializationError(format!("CSV error: {err}"))
-            })?;
+        let header_record: Vec<&str> = match &selection {
+            Some(keep) => keep.iter().map(|&i| headers[i].as_str()).collect(),
+            None => headers.iter().map(|h| h.as_str()).collect(),
+        };
+        writer.write_record(&header_record).map_err(|err| {
+            crate::error::CrosstacheError::SerializationError(format!("CSV error: {err}"))
+        })?;
 
         for item in data {
-            let fields = item.fields();
-            writer
-                .write_record(fields.iter().map(|field| field.as_ref()))
-                .map_err(|err| {
-                    crate::error::CrosstacheError::SerializationError(format!("CSV error: {err}"))
-                })?;
+            let fields: Vec<String> = item.fields().iter().map(|f| f.to_string()).collect();
+            let record: Vec<&str> = match &selection {
+                Some(keep) => keep.iter().map(|&i| fields[i].as_str()).collect(),
+                None => fields.iter().map(|f| f.as_str()).collect(),
+            };
+            writer.write_record(&record).map_err(|err| {
+                crate::error::CrosstacheError::SerializationError(format!("CSV error: {err}"))
+            })?;
         }
 
         let bytes = writer.into_inner().map_err(|err| {
@@ -270,7 +322,7 @@ impl TableFormatter {
 
     /// Format data as plain text
     fn format_as_plain<T: Tabled>(&self, data: &[T]) -> Result<String> {
-        let mut table = table_hiding_empty_columns(data);
+        let mut table = self.build_table(data)?;
         // Neutralize terminal escape sequences in untrusted cell content
         table.with(Modify::new(Segment::all()).with(Format::content(sanitize_control_chars)));
         table.with(Style::ascii()).with(Padding::new(1, 1, 0, 0));
@@ -434,20 +486,6 @@ impl DisplayUtils {
     }
 }
 
-/// Convenience function for formatting a table with default settings
-pub fn format_table(mut table: Table, no_color: bool) -> String {
-    table
-        .with(Style::rounded())
-        .with(Modify::new(Rows::first()).with(Alignment::center()))
-        .with(Padding::new(1, 1, 0, 0));
-
-    if !no_color {
-        table.with(Modify::new(Rows::first()).with(Color::FG_CYAN));
-    }
-
-    table.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,7 +517,7 @@ mod tests {
             value: "v".to_string(),
             status: "ok".to_string(),
         }];
-        let formatter = TableFormatter::new(OutputFormat::Table, true, None);
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None, None);
         let out = formatter.format_table(&data).unwrap();
         assert!(
             !out.contains('\x1b'),
@@ -503,6 +541,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_columns_errs_on_unknown_and_passes_on_known() {
+        // Unknown column must error even though no rows are ever built or
+        // rendered — this is what empty-state early-returns must call.
+        let bad = TableFormatter::new(
+            OutputFormat::Table,
+            true,
+            None,
+            Some(vec!["Bogus".to_string()]),
+        );
+        assert!(bad.validate_columns::<TestData>().is_err());
+
+        // A valid column selection (case-insensitive) passes.
+        let good = TableFormatter::new(
+            OutputFormat::Table,
+            true,
+            None,
+            Some(vec!["name".to_string(), "Status".to_string()]),
+        );
+        assert!(good.validate_columns::<TestData>().is_ok());
+
+        // No --columns selection at all also passes (nothing to validate).
+        let none = TableFormatter::new(OutputFormat::Table, true, None, None);
+        assert!(none.validate_columns::<TestData>().is_ok());
+    }
+
+    #[test]
     fn test_table_formatting() {
         let data = vec![
             TestData {
@@ -517,7 +581,7 @@ mod tests {
             },
         ];
 
-        let formatter = TableFormatter::new(OutputFormat::Table, true, None);
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None, None);
         let result = formatter.format_table(&data);
         assert!(result.is_ok());
     }
@@ -525,7 +589,7 @@ mod tests {
     #[test]
     fn empty_json_is_valid_array() {
         let data: Vec<TestData> = vec![];
-        let formatter = TableFormatter::new(OutputFormat::Json, true, None);
+        let formatter = TableFormatter::new(OutputFormat::Json, true, None, None);
         let out = formatter.format_table(&data).expect("format");
         assert_eq!(out.trim(), "[]");
     }
@@ -544,7 +608,7 @@ mod tests {
                 status: "line\nbreak".to_string(),
             },
         ];
-        let formatter = TableFormatter::new(OutputFormat::Csv, true, None);
+        let formatter = TableFormatter::new(OutputFormat::Csv, true, None, None);
         let out = formatter.format_table(&data).expect("format");
 
         assert_eq!(
@@ -585,6 +649,7 @@ mod tests {
             OutputFormat::Template,
             true,
             Some("export {{Name}}={{Value}}".to_string()),
+            None,
         );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "export secret1=abc123\nexport secret2=xyz789");
@@ -601,6 +666,7 @@ mod tests {
             OutputFormat::Template,
             true,
             Some("{{name}} {{NAME}} {{Name}}".to_string()),
+            None,
         );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "mykey mykey mykey");
@@ -617,6 +683,7 @@ mod tests {
             OutputFormat::Template,
             true,
             Some("{{Name}}: {{nonexistent}}".to_string()),
+            None,
         );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "key: {{nonexistent}}");
@@ -629,7 +696,7 @@ mod tests {
             value: "val".to_string(),
             status: "ok".to_string(),
         }];
-        let formatter = TableFormatter::new(OutputFormat::Template, true, None);
+        let formatter = TableFormatter::new(OutputFormat::Template, true, None, None);
         let result = formatter.format_table(&data);
         assert!(result.is_err());
         assert!(
@@ -641,8 +708,12 @@ mod tests {
     #[test]
     fn test_template_empty_data_returns_empty() {
         let data: Vec<TestData> = vec![];
-        let formatter =
-            TableFormatter::new(OutputFormat::Template, true, Some("{{Name}}".to_string()));
+        let formatter = TableFormatter::new(
+            OutputFormat::Template,
+            true,
+            Some("{{Name}}".to_string()),
+            None,
+        );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "");
     }
@@ -658,6 +729,7 @@ mod tests {
             OutputFormat::Template,
             true,
             Some("{{ Name }} = {{  Value  }}".to_string()),
+            None,
         );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "key = val");
@@ -674,6 +746,7 @@ mod tests {
             OutputFormat::Template,
             true,
             Some("{{Name}}={{Value}} ({{Status}})".to_string()),
+            None,
         );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "db_pass=secret (active)");
@@ -697,6 +770,7 @@ mod tests {
             OutputFormat::Template,
             true,
             Some("{{Secret Name}} by {{Created By}}".to_string()),
+            None,
         );
         let result = formatter.format_table(&data).unwrap();
         assert_eq!(result, "api-key by admin");
@@ -716,7 +790,7 @@ mod tests {
                 status: "ok".to_string(),
             },
         ];
-        let formatter = TableFormatter::new(OutputFormat::Table, true, None);
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None, None);
         let out = formatter.format_table(&data).unwrap();
         assert!(
             !out.contains("Value"),
@@ -733,7 +807,7 @@ mod tests {
             value: String::new(),
             status: "ok".to_string(),
         }];
-        let formatter = TableFormatter::new(OutputFormat::Plain, true, None);
+        let formatter = TableFormatter::new(OutputFormat::Plain, true, None, None);
         let out = formatter.format_table(&data).unwrap();
         assert!(
             !out.contains("Value"),
@@ -756,7 +830,7 @@ mod tests {
                 status: "ok".to_string(),
             },
         ];
-        let formatter = TableFormatter::new(OutputFormat::Table, true, None);
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None, None);
         let out = formatter.format_table(&data).unwrap();
         assert!(
             out.contains("Value"),
@@ -771,11 +845,11 @@ mod tests {
             value: String::new(),
             status: "ok".to_string(),
         }];
-        let csv = TableFormatter::new(OutputFormat::Csv, true, None)
+        let csv = TableFormatter::new(OutputFormat::Csv, true, None, None)
             .format_table(&data)
             .unwrap();
         assert!(csv.contains("Value"), "CSV keeps the full schema:\n{csv}");
-        let json = TableFormatter::new(OutputFormat::Json, true, None)
+        let json = TableFormatter::new(OutputFormat::Json, true, None, None)
             .format_table(&data)
             .unwrap();
         assert!(
@@ -794,5 +868,115 @@ mod tests {
     fn whitespace_only_cells_count_as_empty() {
         let rows = vec![vec!["  ".to_string(), "x".to_string()]];
         assert_eq!(visible_column_indices(2, &rows), vec![1]);
+    }
+
+    #[derive(Tabled, Serialize)]
+    struct ColRow {
+        #[tabled(rename = "Name")]
+        name: String,
+        #[tabled(rename = "Note")]
+        note: String,
+        #[tabled(rename = "Updated")]
+        updated: String,
+    }
+
+    fn col_rows() -> Vec<ColRow> {
+        vec![ColRow {
+            name: "alpha".to_string(),
+            note: String::new(),
+            updated: "2026-07-01".to_string(),
+        }]
+    }
+
+    #[test]
+    fn columns_projects_in_requested_order_case_insensitive() {
+        let formatter = TableFormatter::new(
+            OutputFormat::Csv,
+            true,
+            None,
+            Some(vec!["updated".to_string(), "NAME".to_string()]),
+        );
+        let out = formatter.format_table(&col_rows()).unwrap();
+        let mut lines = out.lines();
+        assert_eq!(lines.next().unwrap(), "Updated,Name");
+        assert_eq!(lines.next().unwrap(), "2026-07-01,alpha");
+    }
+
+    #[test]
+    fn columns_unknown_name_errors_listing_available() {
+        let formatter = TableFormatter::new(
+            OutputFormat::Table,
+            true,
+            None,
+            Some(vec!["Bogus".to_string()]),
+        );
+        let err = formatter.format_table(&col_rows()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown column 'Bogus'"), "got: {msg}");
+        assert!(msg.contains("Name, Note, Updated"), "got: {msg}");
+    }
+
+    #[test]
+    fn columns_selection_overrides_hide_empty() {
+        // Note is all-empty: hidden without a selection, shown when selected.
+        let hidden = TableFormatter::new(OutputFormat::Table, true, None, None)
+            .format_table(&col_rows())
+            .unwrap();
+        assert!(!hidden.contains("Note"));
+
+        let shown = TableFormatter::new(
+            OutputFormat::Table,
+            true,
+            None,
+            Some(vec!["Name".to_string(), "Note".to_string()]),
+        )
+        .format_table(&col_rows())
+        .unwrap();
+        assert!(shown.contains("Note"));
+        assert!(!shown.contains("Updated"));
+    }
+
+    #[test]
+    fn columns_ignored_for_json() {
+        let formatter = TableFormatter::new(
+            OutputFormat::Json,
+            true,
+            None,
+            Some(vec!["Name".to_string()]),
+        );
+        let out = formatter.format_table(&col_rows()).unwrap();
+        // Full schema regardless of selection.
+        assert!(out.contains("\"updated\""));
+    }
+
+    #[test]
+    fn columns_apply_to_empty_csv_headers() {
+        let formatter = TableFormatter::new(
+            OutputFormat::Csv,
+            true,
+            None,
+            Some(vec!["Name".to_string()]),
+        );
+        let empty: Vec<ColRow> = vec![];
+        let out = formatter.format_table(&empty).unwrap();
+        assert_eq!(out.trim_end(), "Name");
+    }
+
+    #[test]
+    fn columns_validated_even_when_table_data_is_empty() {
+        let formatter = TableFormatter::new(
+            OutputFormat::Table,
+            true,
+            None,
+            Some(vec!["Bogus".to_string()]),
+        );
+        let empty: Vec<ColRow> = vec![];
+        let result = formatter.format_table(&empty);
+        assert!(
+            result.is_err(),
+            "unknown column must error even with no rows"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Bogus"), "{msg}");
     }
 }

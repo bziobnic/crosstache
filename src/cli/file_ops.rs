@@ -548,38 +548,15 @@ pub(crate) fn display_file_list_items(
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
     );
 
-    if items.is_empty() && human_table_like {
-        output::info(&crate::utils::list_output::empty_state_message(
-            "files", None,
-        ));
-        return Ok(String::new());
-    }
-
     let mut output = String::new();
 
-    // Rows for `--format csv`: machine-oriented fields (not `format_size()` / joined strings).
+    // One display row set for every non-JSON/YAML format (spec: file list CSV
+    // becomes the table's column set + a leading Kind column). JSON/YAML keep
+    // the rich BlobListItem serialization as the full-fidelity formats.
     #[derive(Tabled, Serialize)]
-    struct FileListCsvRow {
-        #[tabled(rename = "type")]
+    struct FileRow {
+        #[tabled(rename = "Kind")]
         kind: String,
-        name: String,
-        size: u64,
-        #[tabled(rename = "content_type")]
-        content_type: String,
-        #[tabled(rename = "last_modified")]
-        last_modified: String,
-        etag: String,
-        groups: String,
-        #[tabled(rename = "full_path")]
-        full_path: String,
-        #[tabled(rename = "metadata")]
-        metadata: String,
-        #[tabled(rename = "tags")]
-        tags: String,
-    }
-
-    #[derive(Tabled, Serialize)]
-    struct ListItem {
         #[tabled(rename = "Name")]
         name: String,
         #[tabled(rename = "Size")]
@@ -591,6 +568,43 @@ pub(crate) fn display_file_list_items(
         #[tabled(rename = "Groups")]
         groups: String,
     }
+
+    if items.is_empty() && human_table_like {
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        formatter.validate_columns::<FileRow>()?;
+        output::info(&crate::utils::list_output::empty_state_message(
+            "files", None,
+        ));
+        return Ok(String::new());
+    }
+
+    // Build the rows once, before the `match fmt`.
+    let rows: Vec<FileRow> = items
+        .iter()
+        .map(|item| match item {
+            BlobListItem::Directory { name, .. } => FileRow {
+                kind: "directory".to_string(),
+                name: name.clone(),
+                size: "<DIR>".to_string(),
+                content_type: "-".to_string(),
+                modified: "-".to_string(),
+                groups: "-".to_string(),
+            },
+            BlobListItem::File(file) => FileRow {
+                kind: "file".to_string(),
+                name: file.name.clone(),
+                size: format_size(file.size),
+                content_type: file.content_type.clone(),
+                modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                groups: file.groups.join(", "),
+            },
+        })
+        .collect();
 
     match fmt {
         OutputFormat::Json => {
@@ -605,105 +619,41 @@ pub(crate) fn display_file_list_items(
             })?;
             output.push_str(&yaml_output);
         }
-        OutputFormat::Csv => {
-            let csv_rows: Vec<FileListCsvRow> = items
-                .iter()
-                .map(|item| match item {
-                    BlobListItem::Directory { name, full_path } => FileListCsvRow {
-                        kind: "directory".to_string(),
-                        name: name.clone(),
-                        size: 0,
-                        content_type: String::new(),
-                        last_modified: String::new(),
-                        etag: String::new(),
-                        groups: "[]".to_string(),
-                        full_path: full_path.clone(),
-                        metadata: "{}".to_string(),
-                        tags: "{}".to_string(),
-                    },
-                    BlobListItem::File(file) => FileListCsvRow {
-                        kind: "file".to_string(),
-                        name: file.name.clone(),
-                        size: file.size,
-                        content_type: file.content_type.clone(),
-                        last_modified: file.last_modified.to_rfc3339(),
-                        etag: file.etag.clone(),
-                        groups: serde_json::to_string(&file.groups).unwrap_or_else(|_| "[]".into()),
-                        full_path: String::new(),
-                        metadata: serde_json::to_string(&file.metadata)
-                            .unwrap_or_else(|_| "{}".into()),
-                        tags: serde_json::to_string(&file.tags).unwrap_or_else(|_| "{}".into()),
-                    },
-                })
-                .collect();
-            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-            output.push_str(&formatter.format_table(&csv_rows)?);
-        }
-        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw => {
-            let display_items: Vec<ListItem> = items
-                .iter()
-                .map(|item| match item {
-                    BlobListItem::Directory { name, .. } => ListItem {
-                        name: name.clone(),
-                        size: "<DIR>".to_string(),
-                        content_type: "-".to_string(),
-                        modified: "-".to_string(),
-                        groups: "-".to_string(),
-                    },
-                    BlobListItem::File(file) => ListItem {
-                        name: file.name.clone(),
-                        size: format_size(file.size),
-                        content_type: file.content_type.clone(),
-                        modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
-                        groups: file.groups.join(", "),
-                    },
-                })
-                .collect();
-
-            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-            output.push_str(&formatter.format_table(&display_items)?);
-
-            let file_count = items
-                .iter()
-                .filter(|i| matches!(i, BlobListItem::File(_)))
-                .count();
-            let dir_count = items
-                .iter()
-                .filter(|i| matches!(i, BlobListItem::Directory { .. }))
-                .count();
-
-            output.push('\n');
-            let mut count_line =
-                crate::utils::list_output::count_label(file_count, file_count, "file", None, false);
-            if !recursive && dir_count > 0 {
-                let _ = write!(count_line, ", {} directory(ies)", dir_count);
-            }
-            let _ = writeln!(output, "{}", count_line);
-        }
-        OutputFormat::Template => {
-            let display_items: Vec<ListItem> = items
-                .iter()
-                .map(|item| match item {
-                    BlobListItem::Directory { name, .. } => ListItem {
-                        name: name.clone(),
-                        size: "<DIR>".to_string(),
-                        content_type: "-".to_string(),
-                        modified: "-".to_string(),
-                        groups: "-".to_string(),
-                    },
-                    BlobListItem::File(file) => ListItem {
-                        name: file.name.clone(),
-                        size: format_size(file.size),
-                        content_type: file.content_type.clone(),
-                        modified: file.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
-                        groups: file.groups.join(", "),
-                    },
-                })
-                .collect();
-            let formatter = TableFormatter::new(fmt, config.no_color, config.template.clone());
-            output.push_str(&formatter.format_table(&display_items)?);
-        }
         OutputFormat::Auto => unreachable!("resolve_for_stdout must not return Auto"),
+        _ => {
+            // Table / Plain / Raw / Csv / Template share the FileRow set.
+            let formatter = TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
+            output.push_str(&formatter.format_table(&rows)?);
+
+            if human_table_like {
+                let file_count = items
+                    .iter()
+                    .filter(|i| matches!(i, BlobListItem::File(_)))
+                    .count();
+                let dir_count = items
+                    .iter()
+                    .filter(|i| matches!(i, BlobListItem::Directory { .. }))
+                    .count();
+
+                output.push('\n');
+                let mut count_line = crate::utils::list_output::count_label(
+                    file_count, file_count, "file", "files", None, false,
+                );
+                if !recursive && dir_count > 0 {
+                    let _ = write!(
+                        count_line,
+                        ", {}",
+                        crate::utils::list_output::pluralize(dir_count, "directory", "directories")
+                    );
+                }
+                let _ = writeln!(output, "{}", count_line);
+            }
+        }
     }
 
     Ok(output.trim_end_matches('\n').to_string())

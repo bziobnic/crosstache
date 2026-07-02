@@ -35,10 +35,9 @@ pub(crate) async fn execute_config_command(command: ConfigCommands, config: Conf
 }
 
 async fn execute_config_show(config: &Config) -> Result<()> {
-    use crate::utils::format::format_table;
-    use tabled::{Table, Tabled};
+    use tabled::Tabled;
 
-    #[derive(Tabled)]
+    #[derive(Tabled, serde::Serialize)]
     struct ConfigItem {
         #[tabled(rename = "Setting")]
         key: String,
@@ -162,14 +161,32 @@ async fn execute_config_show(config: &Config) -> Result<()> {
 
     let items = items;
 
-    if config.output_json {
-        let json_output = serde_json::to_string_pretty(config).map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to serialize config: {e}"))
-        })?;
-        println!("{json_output}");
-    } else {
-        let table = Table::new(&items);
-        println!("{}", format_table(table, config.no_color));
+    // Documented exception: json/yaml serialize the whole Config object
+    // (resource view, not a list); only the human table goes through
+    // TableFormatter so --columns/--no-color behave uniformly.
+    use crate::utils::format::OutputFormat;
+    match config.runtime_output_format {
+        OutputFormat::Json | OutputFormat::Auto => {
+            let json_output = serde_json::to_string_pretty(config).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize config: {e}"))
+            })?;
+            println!("{json_output}");
+        }
+        OutputFormat::Yaml => {
+            let yaml_output = serde_yaml::to_string(config).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize config: {e}"))
+            })?;
+            println!("{yaml_output}");
+        }
+        fmt => {
+            let formatter = crate::utils::format::TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
+            println!("{}", formatter.format_table(&items)?);
+        }
     }
 
     Ok(())
@@ -289,8 +306,7 @@ fn resolve_editor_from(visual: Option<String>, editor: Option<String>) -> String
 ///   - global config file
 async fn execute_config_show_resolved(config: &Config) -> Result<()> {
     use crate::config::project;
-    use crate::utils::format::format_table;
-    use tabled::{Table, Tabled};
+    use tabled::Tabled;
 
     #[derive(Tabled, serde::Serialize)]
     struct Row {
@@ -590,39 +606,70 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
         }
     }
 
-    if config.output_json {
-        let json = serde_json::to_string_pretty(&rows).map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to serialize resolved config: {e}"))
-        })?;
-        println!("{json}");
-    } else {
-        if let Some(p) = &project_path {
-            println!("Project config: {}", p.display());
-        } else {
-            println!("Project config: (none — no .xv.toml found)");
+    use crate::utils::format::OutputFormat;
+    match config.runtime_output_format {
+        OutputFormat::Json | OutputFormat::Auto => {
+            let json = serde_json::to_string_pretty(&rows).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize resolved config: {e}"))
+            })?;
+            println!("{json}");
         }
-        let table = Table::new(&rows);
-        println!("{}", format_table(table, config.no_color));
-        println!();
-        println!("Precedence (highest → lowest):");
-        println!("  backend         : --backend flag > .xv.toml profile > XV_BACKEND / global config > built-in (azure)");
-        println!("  env             : XV_ENV > --env flag > .xv.toml default_env");
-        println!("  vault           : --vault arg > .xv.toml profile.vault > context > global default_vault");
-        println!("  resource_group  : --resource-group > .xv.toml profile.resource_group > context > global default_resource_group");
-        println!();
-        println!("Naming convention: the global config uses a `default_` prefix (default_vault,");
-        println!("default_resource_group) because those values are fallbacks; a .xv.toml env");
-        println!("profile uses the bare name (vault, resource_group) because it sets a specific");
-        println!(
-            "value that overrides the global default. Same concept, the prefix signals the layer."
-        );
-        if !resolution_notes.is_empty() {
+        OutputFormat::Yaml => {
+            let yaml = serde_yaml::to_string(&rows).map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to serialize resolved config: {e}"))
+            })?;
+            println!("{yaml}");
+        }
+        OutputFormat::Csv => {
+            // CSV is a machine format: emit only the formatter rows on
+            // stdout, with no prose mixed in (consistent with every other
+            // list command, where Csv stays pipe-clean).
+            let formatter = crate::utils::format::TableFormatter::new(
+                OutputFormat::Csv,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
+            println!("{}", formatter.format_table(&rows)?);
+        }
+        fmt => {
+            if let Some(p) = &project_path {
+                println!("Project config: {}", p.display());
+            } else {
+                println!("Project config: (none — no .xv.toml found)");
+            }
+            let formatter = crate::utils::format::TableFormatter::new(
+                fmt,
+                config.no_color,
+                config.template.clone(),
+                config.runtime_columns.clone(),
+            );
+            println!("{}", formatter.format_table(&rows)?);
             println!();
-            println!("Layer notes:");
-            resolution_notes.sort();
-            resolution_notes.dedup();
-            for note in resolution_notes {
-                println!("  - {note}");
+            println!("Precedence (highest → lowest):");
+            println!("  backend         : --backend flag > .xv.toml profile > XV_BACKEND / global config > built-in (azure)");
+            println!("  env             : XV_ENV > --env flag > .xv.toml default_env");
+            println!("  vault           : --vault arg > .xv.toml profile.vault > context > global default_vault");
+            println!("  resource_group  : --resource-group > .xv.toml profile.resource_group > context > global default_resource_group");
+            println!();
+            println!(
+                "Naming convention: the global config uses a `default_` prefix (default_vault,"
+            );
+            println!("default_resource_group) because those values are fallbacks; a .xv.toml env");
+            println!(
+                "profile uses the bare name (vault, resource_group) because it sets a specific"
+            );
+            println!(
+                "value that overrides the global default. Same concept, the prefix signals the layer."
+            );
+            if !resolution_notes.is_empty() {
+                println!();
+                println!("Layer notes:");
+                resolution_notes.sort();
+                resolution_notes.dedup();
+                for note in resolution_notes {
+                    println!("  - {note}");
+                }
             }
         }
     }
@@ -1062,21 +1109,12 @@ Use `xv --env {vault_name} <command>` to activate it, or set XV_ENV={vault_name}
 
 async fn execute_context_list(config: &Config) -> Result<()> {
     use crate::config::ContextManager;
-    use crate::utils::format::format_table;
-    use tabled::{Table, Tabled};
+    use crate::utils::format::OutputFormat;
+    use tabled::Tabled;
 
     let context_manager = ContextManager::load().await.unwrap_or_default();
 
-    if context_manager.recent.is_empty() && context_manager.current.is_none() {
-        output::info(&crate::utils::list_output::empty_state_message(
-            "vault contexts",
-            None,
-        ));
-        output::hint("Use 'xv context use <vault-name>' to create a context");
-        return Ok(());
-    }
-
-    #[derive(Tabled)]
+    #[derive(Tabled, serde::Serialize)]
     struct ContextItem {
         #[tabled(rename = "Status")]
         status: String,
@@ -1121,10 +1159,34 @@ async fn execute_context_list(config: &Config) -> Result<()> {
         });
     }
 
-    if !items.is_empty() {
-        let table = Table::new(&items);
-        println!("{}", format_table(table, config.no_color));
+    let fmt = config.runtime_output_format;
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+    let formatter = crate::utils::format::TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
 
+    if items.is_empty() {
+        if human_table_like {
+            formatter.validate_columns::<ContextItem>()?;
+            output::info(&crate::utils::list_output::empty_state_message(
+                "vault contexts",
+                None,
+            ));
+            output::hint("Use 'xv context use <vault-name>' to create a context");
+        } else {
+            println!("{}", formatter.format_table(&items)?);
+        }
+        return Ok(());
+    }
+
+    println!("{}", formatter.format_table(&items)?);
+    if human_table_like {
         println!("\nScope: {}", context_manager.scope_description());
         if ContextManager::local_context_exists() {
             println!("Note: Local context file found in current directory (.xv/context)");
@@ -1333,6 +1395,7 @@ pub(crate) async fn execute_env_command(
 
 async fn execute_env_list(config: &Config) -> Result<()> {
     use crate::config::project;
+    use crate::utils::format::OutputFormat;
 
     let cwd = std::env::current_dir()?;
     let Some((path, cfg)) = project::find_project_config(&cwd).await? else {
@@ -1347,12 +1410,6 @@ async fn execute_env_list(config: &Config) -> Result<()> {
         .ok()
         .map(|(name, _)| name.to_string());
 
-    let default_label = cfg
-        .default_env
-        .as_deref()
-        .map(|d| format!(", default: {d}"))
-        .unwrap_or_default();
-    println!("Project envs (from {}{}):", path.display(), default_label);
     use crate::config::project::resolve_effective_backend;
     // Precedence for every row mirrors `resolve_effective_backend`:
     //   cli_backend (--backend / XV_BACKEND via clap) > profile.backend > global.
@@ -1363,62 +1420,118 @@ async fn execute_env_list(config: &Config) -> Result<()> {
     // global layer rather than silently defaulting to "azure".
     let cli_backend = config.cli_backend.as_deref();
     let global_backend = config.disk_backend.as_deref();
-    for (name, profile) in &cfg.envs {
-        let marker = if active.as_deref() == Some(name.as_str()) {
-            "*"
-        } else {
-            " "
-        };
-        // Resolve through the canonical precedence helper so a --backend
-        // override is reflected even on rows that pin their own backend, and
-        // an unset profile backend shows the inherited global value.
-        let resolved =
-            resolve_effective_backend(cli_backend, profile.backend.as_deref(), global_backend);
-        // "(inherited)" marks rows whose env profile set no `backend` of its
-        // own — the displayed value came from outside the profile (CLI flag,
-        // XV_BACKEND, global config, or the built-in default). This must key
-        // strictly on the profile field below: the CLI override is populated
-        // from XV_BACKEND even when --backend is absent, so it is not a
-        // reliable signal for "this row has no profile-level backend".
-        let backend_note = if profile.backend.is_none() {
-            " (inherited)"
-        } else {
-            ""
-        };
-        let vault = profile.vault.as_deref().unwrap_or("(unset)");
-        let mut extras = String::new();
-        if let Some(rg) = &profile.resource_group {
-            extras.push_str(&format!("  resource_group={rg}"));
-        }
-        println!("  {marker} {name}  backend={resolved}{backend_note}  vault={vault}{extras}");
+
+    #[derive(tabled::Tabled, serde::Serialize)]
+    struct EnvRow {
+        #[tabled(rename = "Name")]
+        name: String,
+        #[tabled(rename = "Active")]
+        active: String,
+        #[tabled(rename = "Backend")]
+        backend: String,
+        #[tabled(rename = "Vault")]
+        vault: String,
+        #[tabled(rename = "Resource Group")]
+        resource_group: String,
     }
+
+    let rows: Vec<EnvRow> = cfg
+        .envs
+        .iter()
+        .map(|(name, profile)| {
+            let resolved =
+                resolve_effective_backend(cli_backend, profile.backend.as_deref(), global_backend);
+            // "(inherited)" marks rows whose env profile set no `backend` of
+            // its own — the displayed value came from outside the profile.
+            // Keys strictly on the profile field: the CLI override is populated
+            // from XV_BACKEND even when --backend is absent.
+            let backend_note = if profile.backend.is_none() {
+                " (inherited)"
+            } else {
+                ""
+            };
+            EnvRow {
+                name: name.clone(),
+                active: if active.as_deref() == Some(name.as_str()) {
+                    "*".to_string()
+                } else {
+                    String::new()
+                },
+                backend: format!("{resolved}{backend_note}"),
+                vault: profile
+                    .vault
+                    .clone()
+                    .unwrap_or_else(|| "(unset)".to_string()),
+                resource_group: profile.resource_group.clone().unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    let fmt = config.runtime_output_format;
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+    let formatter = crate::utils::format::TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+
+    if rows.is_empty() {
+        if human_table_like {
+            formatter.validate_columns::<EnvRow>()?;
+            output::info(&crate::utils::list_output::empty_state_message(
+                "environments",
+                None,
+            ));
+        } else {
+            println!("{}", formatter.format_table(&rows)?);
+        }
+        return Ok(());
+    }
+
+    if human_table_like {
+        let default_label = cfg
+            .default_env
+            .as_deref()
+            .map(|d| format!(", default: {d}"))
+            .unwrap_or_default();
+        println!("Project envs (from {}{}):", path.display(), default_label);
+    }
+    println!("{}", formatter.format_table(&rows)?);
 
     // Summary: what the active env actually resolves to right now, after full
     // precedence (this is the "effective profile" §P2-4 asks for). Only shown
     // when an env is active so single-env or no-active-env cases stay terse.
-    if let Some(active_name) = &active {
-        if let Some(profile) = cfg.envs.get(active_name) {
-            let eff_backend =
-                resolve_effective_backend(cli_backend, profile.backend.as_deref(), global_backend);
-            // Vault resolution must mirror Config::resolve_vault_name and
-            // `config show --resolved`: profile.vault > context vault > global
-            // default_vault. Skipping the context layer made the summary
-            // disagree with what commands actually use.
-            let context_manager = crate::config::ContextManager::load()
-                .await
-                .unwrap_or_default();
-            let eff_vault = profile
-                .vault
-                .as_deref()
-                .or_else(|| context_manager.current_vault())
-                .or(if config.default_vault.is_empty() {
-                    None
-                } else {
-                    Some(config.default_vault.as_str())
-                })
-                .unwrap_or("(unset)");
-            println!();
-            println!("Effective ({active_name}): backend={eff_backend}  vault={eff_vault}");
+    if human_table_like {
+        if let Some(active_name) = &active {
+            if let Some(profile) = cfg.envs.get(active_name) {
+                let eff_backend = resolve_effective_backend(
+                    cli_backend,
+                    profile.backend.as_deref(),
+                    global_backend,
+                );
+                // Vault resolution must mirror Config::resolve_vault_name and
+                // `config show --resolved`: profile.vault > context vault >
+                // global default_vault.
+                let context_manager = crate::config::ContextManager::load()
+                    .await
+                    .unwrap_or_default();
+                let eff_vault = profile
+                    .vault
+                    .as_deref()
+                    .or_else(|| context_manager.current_vault())
+                    .or(if config.default_vault.is_empty() {
+                        None
+                    } else {
+                        Some(config.default_vault.as_str())
+                    })
+                    .unwrap_or("(unset)");
+                println!();
+                println!("Effective ({active_name}): backend={eff_backend}  vault={eff_vault}");
+            }
         }
     }
     output::hint(

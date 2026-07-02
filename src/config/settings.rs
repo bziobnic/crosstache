@@ -208,6 +208,11 @@ pub struct Config {
     #[serde(skip)]
     #[tabled(skip)]
     pub format_explicit: bool,
+    /// Parsed global `--columns` selection (set in `Cli::execute`, not persisted).
+    /// Applies to table/plain/csv renders of every `TableFormatter` consumer.
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub runtime_columns: Option<Vec<String>>,
     #[tabled(rename = "No Color")]
     pub no_color: bool,
     #[tabled(skip)]
@@ -308,6 +313,7 @@ impl Default for Config {
             runtime_output_format: OutputFormat::Auto,
             template: None,
             format_explicit: false,
+            runtime_columns: None,
             no_color: false,
             blob_config: None,
             azure_credential_priority: AzureCredentialType::Default,

@@ -161,6 +161,12 @@ pub struct Cli {
     #[arg(long, global = true, hide = should_hide_options())]
     pub template: Option<String>,
 
+    /// Comma-separated column names for table/plain/csv output, applied in the
+    /// given order (case-insensitive, e.g. --columns Name,Updated).
+    /// JSON/YAML/template ignore it. Unknown names error.
+    #[arg(long, global = true, value_name = "COLS", hide = should_hide_options())]
+    pub columns: Option<String>,
+
     /// Disable colored output (same effect as the NO_COLOR env var)
     #[arg(long, global = true, hide = should_hide_options())]
     pub no_color: bool,
@@ -790,8 +796,8 @@ pub enum Commands {
         /// Azure resource group (defaults to config value)
         #[arg(long)]
         resource_group: Option<String>,
-        /// Show raw Azure Activity Log output
-        #[arg(long)]
+        /// Deprecated: use the global --format json
+        #[arg(long, hide = true)]
         raw: bool,
     },
     /// Initialize default configuration
@@ -1391,6 +1397,21 @@ impl Cli {
 
         // Wire template string
         config.template = self.template.clone();
+
+        // Parse the global --columns selection (empty segments dropped;
+        // an all-empty value behaves like no flag).
+        config.runtime_columns = self.columns.as_deref().and_then(|raw| {
+            let cols: Vec<String> = raw
+                .split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            if cols.is_empty() {
+                None
+            } else {
+                Some(cols)
+            }
+        });
 
         // Disable colors if --no-color flag is set
         if self.no_color {

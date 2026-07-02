@@ -251,6 +251,80 @@ impl AzureActivityLogClient {
     }
 }
 
+/// One audit event as rendered by every output format. Machine formats emit
+/// exactly these five fields (the pre-unification `--raw` per-entry documents
+/// with `---` separators are gone — changelog-documented breaking change).
+#[derive(tabled::Tabled, serde::Serialize)]
+struct AuditRow {
+    #[tabled(rename = "Timestamp")]
+    timestamp: String,
+    #[tabled(rename = "Operation")]
+    operation: String,
+    #[tabled(rename = "Resource")]
+    resource: String,
+    #[tabled(rename = "Caller")]
+    caller: String,
+    #[tabled(rename = "Status")]
+    status: String,
+}
+
+/// Render audit rows through the shared TableFormatter: global `--format`
+/// honored (JSON = array of rows), `--columns`/`--no-color` inherited, valid
+/// empty machine output, human count/empty on stderr.
+fn render_audit_rows(rows: &[AuditRow], raw: bool, config: &Config) -> Result<()> {
+    use crate::utils::format::{OutputFormat, TableFormatter};
+
+    let fmt = if raw {
+        output::warn("--raw is deprecated; use the global --format json");
+        OutputFormat::Json
+    } else {
+        config.runtime_output_format
+    };
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+    let formatter = TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+
+    if rows.is_empty() {
+        if human_table_like {
+            formatter.validate_columns::<AuditRow>()?;
+            output::info(&crate::utils::list_output::empty_state_message(
+                "audit log entries",
+                None,
+            ));
+        } else {
+            // Valid-empty machine output on stdout (e.g. `[]` for JSON).
+            println!("{}", formatter.format_table(rows)?);
+        }
+        return Ok(());
+    }
+
+    if human_table_like {
+        output::info(&format!(
+            "{}:",
+            crate::utils::list_output::count_label(
+                rows.len(),
+                rows.len(),
+                "audit log entry",
+                "audit log entries",
+                None,
+                false
+            )
+        ));
+    }
+    println!("{}", formatter.format_table(rows)?);
+    if human_table_like {
+        output::hint("Use --operation <type> to filter by operation type");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_audit_command(
     name: Option<String>,
@@ -331,8 +405,8 @@ pub(crate) async fn execute_audit_command(
 
     // Fetch audit logs
     let mut logs = if let Some(secret_name) = name {
-        println!("  Secret: {}", secret_name);
-        println!("  Vault: {}", vault_name);
+        output::info(&format!("  Secret: {}", secret_name));
+        output::info(&format!("  Vault: {}", vault_name));
         audit_client
             .get_secret_audit_logs(
                 &subscription_id,
@@ -343,7 +417,7 @@ pub(crate) async fn execute_audit_command(
             )
             .await?
     } else {
-        println!("  Vault: {}", vault_name);
+        output::info(&format!("  Vault: {}", vault_name));
         audit_client
             .get_vault_audit_logs(&subscription_id, &resource_group, &vault_name, days)
             .await?
@@ -358,92 +432,30 @@ pub(crate) async fn execute_audit_command(
         });
     }
 
-    if logs.is_empty() {
-        output::info(&crate::utils::list_output::empty_state_message(
-            "audit log entries",
-            None,
-        ));
-        return Ok(());
-    }
-
-    println!();
-    output::info(&format!(
-        "{}:\n",
-        crate::utils::list_output::count_label(
-            logs.len(),
-            logs.len(),
-            "audit log entry",
-            None,
-            false
-        )
-    ));
-
-    if raw {
-        // Show raw JSON output
-        for log in logs {
-            let json_output = serde_json::to_string_pretty(&log).map_err(|e| {
-                CrosstacheError::serialization(format!("Failed to serialize log entry: {}", e))
-            })?;
-            println!("{}", json_output);
-            println!("---");
-        }
-    } else {
-        // Show formatted output
-        println!(
-            "{:<20} | {:<25} | {:<20} | {:<30} | {:<10}",
-            "Timestamp", "Operation", "Resource", "Caller", "Status"
-        );
-        println!("{}", "-".repeat(120));
-
-        for log in logs {
-            // Extract resource name (last part after /)
+    let rows: Vec<AuditRow> = logs
+        .iter()
+        .map(|log| {
+            // Resource name: keep the last path segment, as before.
             let resource_display = log
                 .resource_name
                 .split('/')
                 .next_back()
                 .unwrap_or(&log.resource_name);
+            AuditRow {
+                timestamp: log.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+                operation: log.operation.clone(),
+                resource: resource_display.to_string(),
+                caller: log.caller.clone(),
+                status: log.status.clone(),
+            }
+        })
+        .collect();
 
-            // Truncate long strings for better display
-            let operation = if log.operation.len() > 25 {
-                format!("{}...", &log.operation[..22])
-            } else {
-                log.operation.clone()
-            };
-
-            let caller = if log.caller.len() > 30 {
-                format!("{}...", &log.caller[..27])
-            } else {
-                log.caller.clone()
-            };
-
-            let resource = if resource_display.len() > 20 {
-                format!("{}...", &resource_display[..17])
-            } else {
-                resource_display.to_string()
-            };
-
-            println!(
-                "{:<20} | {:<25} | {:<20} | {:<30} | {:<10}",
-                log.timestamp.format("%m-%d %H:%M:%S"),
-                operation,
-                resource,
-                caller,
-                log.status
-            );
-        }
-
-        println!();
-        output::hint(
-            "Use --raw to see full details, or --operation <type> to filter by operation type",
-        );
-    }
-
-    Ok(())
+    render_audit_rows(&rows, raw, &config)
 }
 
 /// Render audit logs fetched through the backend-agnostic [`AuditBackend`]
-/// trait, mirroring the Azure Activity Log output shapes (table and `--raw`
-/// JSON).
+/// trait via the shared `AuditRow` renderer (global `--format` honored).
 async fn execute_backend_audit(
     auditor: &dyn crate::backend::AuditBackend,
     name: Option<String>,
@@ -458,13 +470,13 @@ async fn execute_backend_audit(
     output::step(&format!("Fetching audit logs for {} days...", days));
 
     let mut events: Vec<crate::backend::AuditEvent> = if let Some(secret_name) = name {
-        println!("  Secret: {}", secret_name);
-        println!("  Vault: {}", vault_name);
+        output::info(&format!("  Secret: {}", secret_name));
+        output::info(&format!("  Vault: {}", vault_name));
         auditor
             .get_secret_events(&vault_name, &secret_name, days)
             .await?
     } else {
-        println!("  Vault: {}", vault_name);
+        output::info(&format!("  Vault: {}", vault_name));
         auditor.get_vault_events(&vault_name, days).await?
     };
 
@@ -478,75 +490,18 @@ async fn execute_backend_audit(
         });
     }
 
-    if events.is_empty() {
-        output::info(&crate::utils::list_output::empty_state_message(
-            "audit log entries",
-            None,
-        ));
-        return Ok(());
-    }
+    let rows: Vec<AuditRow> = events
+        .iter()
+        .map(|event| AuditRow {
+            timestamp: event.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+            operation: event.operation.clone(),
+            resource: event.resource_name.clone(),
+            caller: event.caller.clone(),
+            status: event.status.clone(),
+        })
+        .collect();
 
-    println!();
-    output::info(&format!(
-        "{}:\n",
-        crate::utils::list_output::count_label(
-            events.len(),
-            events.len(),
-            "audit log entry",
-            None,
-            false
-        )
-    ));
-
-    if raw {
-        // Show raw JSON output
-        for event in events {
-            let json_output = serde_json::to_string_pretty(&event).map_err(|e| {
-                CrosstacheError::serialization(format!("Failed to serialize log entry: {}", e))
-            })?;
-            println!("{}", json_output);
-            println!("---");
-        }
-    } else {
-        // Show formatted output (same shape as the Azure table)
-        println!(
-            "{:<20} | {:<25} | {:<20} | {:<30} | {:<10}",
-            "Timestamp", "Operation", "Resource", "Caller", "Status"
-        );
-        println!("{}", "-".repeat(120));
-
-        for event in events {
-            let operation = truncate_column(&event.operation, 25);
-            let resource = truncate_column(&event.resource_name, 20);
-            let caller = truncate_column(&event.caller, 30);
-
-            println!(
-                "{:<20} | {:<25} | {:<20} | {:<30} | {:<10}",
-                event.timestamp.format("%m-%d %H:%M:%S"),
-                operation,
-                resource,
-                caller,
-                event.status
-            );
-        }
-
-        println!();
-        output::hint(
-            "Use --raw to see full details, or --operation <type> to filter by operation type",
-        );
-    }
-
-    Ok(())
-}
-
-/// Truncate a table cell to `max` characters, appending `...` when cut.
-fn truncate_column(value: &str, max: usize) -> String {
-    if value.chars().count() > max {
-        let cut: String = value.chars().take(max.saturating_sub(3)).collect();
-        format!("{cut}...")
-    } else {
-        value.to_string()
-    }
+    render_audit_rows(&rows, raw, &config)
 }
 
 pub(crate) async fn execute_init_command(_config: Config) -> Result<()> {
@@ -1264,5 +1219,86 @@ mod tests {
 
         assert_eq!(calls.vault_events.load(Ordering::SeqCst), 1);
         assert_eq!(calls.secret_events.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn render_audit_rows_table_format_includes_headers_and_cells() {
+        use crate::utils::format::{OutputFormat, TableFormatter};
+
+        let rows = vec![
+            AuditRow {
+                timestamp: "2024-01-15 10:30:45".to_string(),
+                operation: "SecretRead".to_string(),
+                resource: "mysecret".to_string(),
+                caller: "user@example.com".to_string(),
+                status: "Success".to_string(),
+            },
+            AuditRow {
+                timestamp: "2024-01-15 10:31:12".to_string(),
+                operation: "SecretWrite".to_string(),
+                resource: "anothersecret".to_string(),
+                caller: "admin@example.com".to_string(),
+                status: "Success".to_string(),
+            },
+        ];
+
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None, None);
+        let output = formatter
+            .format_table(&rows)
+            .expect("Table formatting should succeed");
+
+        // Verify header is present
+        assert!(
+            output.contains("Timestamp"),
+            "Table output should contain 'Timestamp' header"
+        );
+
+        // Verify at least one cell value is present
+        assert!(
+            output.contains("SecretRead") || output.contains("mysecret"),
+            "Table output should contain audit row data"
+        );
+    }
+
+    #[test]
+    fn render_audit_rows_json_format_produces_valid_json_array() {
+        use crate::utils::format::{OutputFormat, TableFormatter};
+
+        let rows = vec![AuditRow {
+            timestamp: "2024-01-15 10:30:45".to_string(),
+            operation: "SecretDelete".to_string(),
+            resource: "oldsecret".to_string(),
+            caller: "operator@example.com".to_string(),
+            status: "Success".to_string(),
+        }];
+
+        let formatter = TableFormatter::new(OutputFormat::Json, true, None, None);
+        let output = formatter
+            .format_table(&rows)
+            .expect("JSON formatting should succeed");
+
+        // Parse as JSON and verify structure
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("Output should be valid JSON");
+
+        let array = parsed.as_array().expect("JSON output should be an array");
+        assert_eq!(
+            array.len(),
+            1,
+            "JSON array should have exactly 1 element matching input rows"
+        );
+
+        // Verify the object contains expected fields
+        let first_obj = &array[0];
+        assert_eq!(
+            first_obj.get("timestamp").and_then(|v| v.as_str()),
+            Some("2024-01-15 10:30:45"),
+            "JSON object should contain timestamp field with correct value"
+        );
+        assert_eq!(
+            first_obj.get("operation").and_then(|v| v.as_str()),
+            Some("SecretDelete"),
+            "JSON object should contain operation field with correct value"
+        );
     }
 }
