@@ -219,26 +219,57 @@ fn context_envs_lists_envs() {
     let out = cmd
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
-        .args(["context", "envs"])
+        .args(["context", "envs", "--format", "json"])
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0));
     let stdout = stdout_str(&out);
-    assert!(stdout.contains("dev"));
-    assert!(stdout.contains("prod"));
-    assert!(stdout.contains("vdev"));
-    assert!(stdout.contains("vprod"));
-    // Default env starred:
-    assert!(
-        stdout.contains("* dev"),
-        "active env should be starred: {stdout}"
+    let rows: serde_json::Value = serde_json::from_str(&stdout).expect("stdout must be JSON");
+    let rows = rows.as_array().expect("rows must be a JSON array");
+    let find = |name: &str| {
+        rows.iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("expected env '{name}' in rows: {rows:?}"))
+    };
+    let dev = find("dev");
+    assert_eq!(dev["vault"], "vdev");
+    assert_eq!(dev["active"], "*", "dev should be the active env: {dev:?}");
+    let prod = find("prod");
+    assert_eq!(prod["vault"], "vprod");
+    assert_eq!(
+        prod["active"], "",
+        "prod should not be marked active: {prod:?}"
     );
+
     // The explanatory hint is informational chrome and goes to stderr (so the
     // env list on stdout stays pipe-clean).
     let stderr = stderr_str(&out);
     assert!(
         stderr.contains("not the vault context") && stderr.contains("config show --resolved"),
         "context envs should explain env-vs-context and point to resolved config: {stderr}"
+    );
+}
+
+#[test]
+fn context_envs_lists_envs_table_format() {
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(temp.path(), "dev", &[("dev", "vdev"), ("prod", "vprod")]);
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["context", "envs", "--format", "table"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let stdout = stdout_str(&out);
+    assert!(stdout.contains("Name"), "expected table header: {stdout}");
+    let dev_row = stdout
+        .lines()
+        .find(|line| line.contains("│ dev") && !line.contains("prod"))
+        .unwrap_or_else(|| panic!("expected a 'dev' row in table output: {stdout}"));
+    assert!(
+        dev_row.contains('*'),
+        "active env row should contain the '*' marker: {dev_row}"
     );
 }
 
@@ -440,20 +471,54 @@ fn env_list_shows_xv_toml_project_envs() {
     let out = cmd
         .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
         .env("AZURE_TENANT_ID", FAKE_TENANT)
-        .args(["env", "list"])
+        .args(["env", "list", "--format", "json"])
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
     let stdout = stdout_str(&out);
-    assert!(stdout.contains("dev"), "expected 'dev' in output: {stdout}");
-    assert!(
-        stdout.contains("prod"),
-        "expected 'prod' in output: {stdout}"
-    );
+    let rows: serde_json::Value = serde_json::from_str(&stdout).expect("stdout must be JSON");
+    let rows = rows.as_array().expect("rows must be a JSON array");
+    let find = |name: &str| {
+        rows.iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("expected env '{name}' in rows: {rows:?}"))
+    };
+    let dev = find("dev");
+    assert_eq!(dev["vault"], "vault-dev");
     // Active env (default_env=dev) must be starred.
+    assert_eq!(dev["active"], "*", "dev should be the active env: {dev:?}");
+    let prod = find("prod");
+    assert_eq!(prod["vault"], "vault-prod");
+    assert_eq!(
+        prod["active"], "",
+        "prod should not be marked active: {prod:?}"
+    );
+}
+
+#[test]
+fn env_list_shows_xv_toml_project_envs_table_format() {
+    let (mut cmd, temp) = xv_isolated();
+    write_xv_toml(
+        temp.path(),
+        "dev",
+        &[("dev", "vault-dev"), ("prod", "vault-prod")],
+    );
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args(["env", "list", "--format", "table"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr_str(&out));
+    let stdout = stdout_str(&out);
+    assert!(stdout.contains("Name"), "expected table header: {stdout}");
+    let dev_row = stdout
+        .lines()
+        .find(|line| line.contains("│ dev") && !line.contains("prod"))
+        .unwrap_or_else(|| panic!("expected a 'dev' row in table output: {stdout}"));
     assert!(
-        stdout.contains("* dev"),
-        "expected '* dev' starred: {stdout}"
+        dev_row.contains('*'),
+        "active env row should contain the '*' marker: {dev_row}"
     );
 }
 
