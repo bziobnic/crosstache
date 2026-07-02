@@ -4,10 +4,19 @@
 
 ### Added
 
+- **Global `--no-color` flag** (complements the `NO_COLOR` env var and config key).
+- **`--names-only` on `vault list` and `file list`** (one name per line, pipe-friendly; `file list --names-only` lists recursively).
+- **`file list --pager [auto|always|never]`** matching every other list command (bare `--pager` unchanged).
 - **`xv ls` is folder-aware and ls-styled.** The default TTY output is now a multi-column name grid with folders listed first (`prod/`), derived from each secret's `folder` tag. `xv ls prod` lists inside a folder, `xv ls -l` is a borderless long listing (name, updated date, groups, note), `xv ls -r` flattens recursively, and the previous rounded table remains available via explicit `--format table`. Piped/machine output (`--format json|yaml|csv`, `--names-only`) keeps the flat schema unchanged, scoped to the requested subtree. Machine output rows are now sorted by display name (previously backend order).
+
+### Changed
+
+- **List empty-states now go to stderr** for human formats across all list commands (including `xv ls`, whose empty message previously landed on stdout — `xv ls > file` on an empty scope now writes an empty file), and empty-state/count wording is standardized via shared helpers. `xv history`'s count line moved from stderr to stdout (human formats only).
+- **`vault share list -f/--fmt` is deprecated**: use the global `--format`. `--fmt` still works with a warning for one release; `-f` is removed. `vault list`'s redundant local `--format` was removed (the identical global flag takes over transparently).
 
 ### Fixed
 
+- **Empty machine-format output is now valid-empty** (`[]` for JSON) on stdout for `vault list`, `vault share list`, and `file list`, instead of a stderr-only message that broke `| jq` on empty results.
 - **`xv ls` table rendering.** Columns whose cells are all empty are no longer rendered as blank zero-width headers, narrow terminals now shrink the widest column first instead of chopping every column (no more `UT`/`C` timestamp wrapping), and the `Updated` column shows the date only (`2026-05-17`). Machine formats (JSON/YAML/CSV) are unchanged.
 - **`xv share list` honors the global `--format`** (json/yaml/csv/…) like `xv vault share list` already did; its empty-state message now goes to stderr, and machine formats emit valid empty output (`[]`) for pipes.
 - **`NO_COLOR` now disables color for all table output.** The environment variable was previously honored only by status messages; it now also sets the config's `no_color`, and `xv context list` no longer hard-codes colored output.
