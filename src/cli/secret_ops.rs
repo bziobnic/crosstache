@@ -319,18 +319,24 @@ fn wrap_paragraph_to_width(paragraph: &str, width: usize) -> String {
 }
 
 fn push_wrapped_word(word: &str, width: usize, current: &mut String, lines: &mut Vec<String>) {
-    let word_len = word.chars().count();
+    use unicode_width::UnicodeWidthChar;
+    let display_width = crate::cli::ls_view::display_width;
+    let word_len = display_width(word);
 
     if word_len > width {
         if !current.is_empty() {
             lines.push(std::mem::take(current));
         }
         let mut chunk = String::new();
+        let mut chunk_w = 0usize;
         for ch in word.chars() {
-            chunk.push(ch);
-            if chunk.chars().count() == width {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if chunk_w + w > width && !chunk.is_empty() {
                 lines.push(std::mem::take(&mut chunk));
+                chunk_w = 0;
             }
+            chunk.push(ch);
+            chunk_w += w;
         }
         if !chunk.is_empty() {
             *current = chunk;
@@ -343,7 +349,7 @@ fn push_wrapped_word(word: &str, width: usize, current: &mut String, lines: &mut
         return;
     }
 
-    let projected_len = current.chars().count() + 1 + word_len;
+    let projected_len = display_width(current) + 1 + word_len;
     if projected_len <= width {
         current.push(' ');
         current.push_str(word);
@@ -4631,7 +4637,7 @@ mod tests {
             rows[0]
                 .note
                 .lines()
-                .all(|line| line.chars().count() <= SECRET_LIST_NOTE_WRAP_WIDTH),
+                .all(|line| crate::cli::ls_view::display_width(line) <= SECRET_LIST_NOTE_WRAP_WIDTH),
             "wrapped note lines should fit the notes column width: {:?}",
             rows[0].note
         );
@@ -4831,5 +4837,15 @@ mod tests {
         assert_eq!(read_secret_value(&mut reader, false).unwrap(), "");
         let mut reader = std::io::Cursor::new("  \n  ");
         assert_eq!(read_secret_value(&mut reader, true).unwrap(), "");
+    }
+
+    #[test]
+    fn wrap_is_display_width_aware_for_cjk() {
+        // 6 full-width chars = 12 columns; budget of 4 columns = 2 chars/line.
+        let wrapped = wrap_text_to_width("秘密秘密秘密", 4);
+        assert_eq!(wrapped.lines().count(), 3, "{wrapped:?}");
+        for line in wrapped.lines() {
+            assert!(crate::cli::ls_view::display_width(line) <= 4, "{wrapped:?}");
+        }
     }
 }

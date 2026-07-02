@@ -5,6 +5,19 @@
 
 use crate::secret::manager::SecretSummary;
 use crate::utils::format::sanitize_control_chars;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Terminal display width of `s` (Unicode-aware: CJK/full-width chars = 2 columns).
+pub(crate) fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Left-align `s` in `w` display columns. `format!("{:<w$}")` pads by char
+/// count, which breaks on full-width characters — always pad manually.
+pub(crate) fn pad_to(s: &str, w: usize) -> String {
+    let pad = w.saturating_sub(display_width(s));
+    format!("{s}{}", " ".repeat(pad))
+}
 
 /// The result of scoping a secret list to a folder path.
 pub(crate) struct ScopedList {
@@ -120,7 +133,7 @@ pub(crate) fn render_grid(entries: &[LsEntry], width: usize, color: bool) -> Str
         return String::new();
     }
     let labels: Vec<String> = entries.iter().map(entry_label).collect();
-    let lens: Vec<usize> = labels.iter().map(|l| l.chars().count()).collect();
+    let lens: Vec<usize> = labels.iter().map(|l| display_width(l)).collect();
     let n = labels.len();
 
     // Find the largest column count whose per-column max widths fit.
@@ -177,12 +190,21 @@ const LONG_NOTE_MAX: usize = 60;
 
 fn truncate_note(note: &str, max: usize) -> String {
     let first = note.lines().next().unwrap_or("");
-    if first.chars().count() <= max {
-        first.to_string()
-    } else {
-        let cut: String = first.chars().take(max.saturating_sub(1)).collect();
-        format!("{cut}…")
+    if display_width(first) <= max {
+        return first.to_string();
     }
+    let budget = max.saturating_sub(1); // reserve one column for the ellipsis
+    let mut cut = String::new();
+    let mut used = 0usize;
+    for ch in first.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        cut.push(ch);
+    }
+    format!("{cut}…")
 }
 
 /// Borderless long listing: NAME  UPDATED  GROUPS  NOTE. Folders render as
@@ -220,40 +242,44 @@ pub(crate) fn render_long(entries: &[LsEntry], color: bool) -> String {
 
     let name_w = rows
         .iter()
-        .map(|r| r.name.chars().count())
+        .map(|r| display_width(&r.name))
         .chain(["NAME".len()])
         .max()
         .unwrap_or(4);
     let updated_w = rows
         .iter()
-        .map(|r| r.updated.chars().count())
+        .map(|r| display_width(&r.updated))
         .chain(["UPDATED".len()])
         .max()
         .unwrap_or(7);
     let groups_w = rows
         .iter()
-        .map(|r| r.groups.chars().count())
+        .map(|r| display_width(&r.groups))
         .chain(["GROUPS".len()])
         .max()
         .unwrap_or(6);
 
     let mut out = String::new();
     let header = format!(
-        "{:<name_w$}  {:<updated_w$}  {:<groups_w$}  NOTE",
-        "NAME", "UPDATED", "GROUPS"
+        "{}  {}  {}  NOTE",
+        pad_to("NAME", name_w),
+        pad_to("UPDATED", updated_w),
+        pad_to("GROUPS", groups_w)
     );
     out.push_str(header.trim_end());
     out.push('\n');
     for row in rows {
-        let padded_name = format!("{:<name_w$}", row.name);
+        let padded_name = pad_to(&row.name, name_w);
         let name_cell = if color && row.is_folder {
             format!("{CYAN}{padded_name}{RESET}")
         } else {
             padded_name
         };
         let line = format!(
-            "{name_cell}  {:<updated_w$}  {:<groups_w$}  {}",
-            row.updated, row.groups, row.note
+            "{name_cell}  {}  {}  {}",
+            pad_to(&row.updated, updated_w),
+            pad_to(&row.groups, groups_w),
+            row.note
         );
         out.push_str(line.trim_end());
         out.push('\n');
@@ -396,7 +422,7 @@ mod tests {
         assert!(out.contains("gamma-long-name"));
         for line in &lines {
             assert_eq!(line.trim_end(), *line, "no trailing whitespace");
-            assert!(line.chars().count() <= 40, "line exceeds width:\n{out}");
+            assert!(display_width(line) <= 40, "line exceeds width:\n{out}");
         }
     }
 
@@ -486,5 +512,54 @@ mod tests {
         s.note = Some("bad\x1b]0;title\x07note".to_string());
         let out = render_long(&[LsEntry::Secret(s)], false);
         assert!(!out.contains('\x1b') && !out.contains('\x07'), "{out:?}");
+    }
+
+    #[test]
+    fn display_width_counts_columns_not_chars() {
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("秘密"), 4); // 2 full-width chars = 4 columns
+        assert_eq!(pad_to("秘密", 6), "秘密  ");
+        assert_eq!(pad_to("abc", 5), "abc  ");
+    }
+
+    #[test]
+    fn grid_accounts_for_full_width_characters() {
+        let entries = vec![
+            secret_entry("数据库密码"),
+            secret_entry("api-key"),
+            secret_entry("另一个秘密名字"),
+        ];
+        let out = render_grid(&entries, 20, false);
+        for line in out.lines() {
+            assert!(display_width(line) <= 20, "line exceeds width:\n{out}");
+        }
+    }
+
+    #[test]
+    fn long_listing_aligns_full_width_names() {
+        let entries = vec![secret_entry("秘密"), secret_entry("abcd")];
+        let out = render_long(&entries, false);
+        let lines: Vec<&str> = out.lines().collect();
+        let idx_a = lines[1].find("2026-05-17").unwrap();
+        let idx_b = lines[2].find("2026-05-17").unwrap();
+        assert_eq!(
+            display_width(&lines[1][..idx_a]),
+            display_width(&lines[2][..idx_b]),
+            "UPDATED column misaligned:\n{out}"
+        );
+    }
+
+    #[test]
+    fn note_truncation_is_width_aware() {
+        let mut s = summary("a", None);
+        s.note = Some("秘".repeat(60)); // 120 columns wide
+        let out = render_long(&[LsEntry::Secret(s)], false);
+        let data_line = out.lines().nth(1).unwrap();
+        let note_cell = data_line.rsplit("  ").next().unwrap();
+        assert!(
+            display_width(note_cell) <= LONG_NOTE_MAX,
+            "note not width-capped:\n{out}"
+        );
+        assert!(out.contains('…'));
     }
 }
