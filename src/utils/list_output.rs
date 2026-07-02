@@ -3,7 +3,7 @@
 //! Every list-style command routes its human empty-state and count text
 //! through these helpers so the wording cannot drift per-command again.
 //! Streams are the caller's job: empty-states go to stderr via
-//! `output::info`, counts go to stdout on human formats only.
+//! `output::info`, counts go to stdout or stderr per each command's established stream (list footers on stdout; audit's header-position count on stderr).
 
 /// "No <nouns> found[ in <scope>]." — scope is pre-formatted, e.g. "vault 'kv'".
 pub fn empty_state_message(noun_plural: &str, scope: Option<&str>) -> String {

@@ -1219,4 +1219,85 @@ mod tests {
         assert_eq!(calls.vault_events.load(Ordering::SeqCst), 1);
         assert_eq!(calls.secret_events.load(Ordering::SeqCst), 0);
     }
+
+    #[test]
+    fn render_audit_rows_table_format_includes_headers_and_cells() {
+        use crate::utils::format::{OutputFormat, TableFormatter};
+
+        let rows = vec![
+            AuditRow {
+                timestamp: "2024-01-15 10:30:45".to_string(),
+                operation: "SecretRead".to_string(),
+                resource: "mysecret".to_string(),
+                caller: "user@example.com".to_string(),
+                status: "Success".to_string(),
+            },
+            AuditRow {
+                timestamp: "2024-01-15 10:31:12".to_string(),
+                operation: "SecretWrite".to_string(),
+                resource: "anothersecret".to_string(),
+                caller: "admin@example.com".to_string(),
+                status: "Success".to_string(),
+            },
+        ];
+
+        let formatter = TableFormatter::new(OutputFormat::Table, true, None, None);
+        let output = formatter
+            .format_table(&rows)
+            .expect("Table formatting should succeed");
+
+        // Verify header is present
+        assert!(
+            output.contains("Timestamp"),
+            "Table output should contain 'Timestamp' header"
+        );
+
+        // Verify at least one cell value is present
+        assert!(
+            output.contains("SecretRead") || output.contains("mySecret"),
+            "Table output should contain audit row data"
+        );
+    }
+
+    #[test]
+    fn render_audit_rows_json_format_produces_valid_json_array() {
+        use crate::utils::format::{OutputFormat, TableFormatter};
+
+        let rows = vec![AuditRow {
+            timestamp: "2024-01-15 10:30:45".to_string(),
+            operation: "SecretDelete".to_string(),
+            resource: "oldsecret".to_string(),
+            caller: "operator@example.com".to_string(),
+            status: "Success".to_string(),
+        }];
+
+        let formatter = TableFormatter::new(OutputFormat::Json, true, None, None);
+        let output = formatter
+            .format_table(&rows)
+            .expect("JSON formatting should succeed");
+
+        // Parse as JSON and verify structure
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("Output should be valid JSON");
+
+        let array = parsed.as_array().expect("JSON output should be an array");
+        assert_eq!(
+            array.len(),
+            1,
+            "JSON array should have exactly 1 element matching input rows"
+        );
+
+        // Verify the object contains expected fields
+        let first_obj = &array[0];
+        assert_eq!(
+            first_obj.get("timestamp").and_then(|v| v.as_str()),
+            Some("2024-01-15 10:30:45"),
+            "JSON object should contain timestamp field with correct value"
+        );
+        assert_eq!(
+            first_obj.get("operation").and_then(|v| v.as_str()),
+            Some("SecretDelete"),
+            "JSON object should contain operation field with correct value"
+        );
+    }
 }
