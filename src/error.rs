@@ -99,15 +99,6 @@ pub enum CrosstacheError {
     #[error("Scan detected {count} potential leak(s)")]
     ScanLeakDetected { count: usize },
 
-    #[error("Rename of secret '{source}' to '{destination}' in vault '{vault}' is incomplete: the new secret was created, but deleting the original failed: {cause}. Both secrets still exist and no secret material was lost. Next steps: with vault '{vault}' active, verify the new secret (`xv get {destination}`), then delete the original (`xv delete {source}`) or retry the deletion later.")]
-    RenameIncomplete {
-        source: String,
-        destination: String,
-        vault: String,
-        #[source]
-        cause: Box<CrosstacheError>,
-    },
-
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -145,7 +136,6 @@ impl CrosstacheError {
             Self::InvalidArgument(_) => "xv-invalid-argument",
             Self::Upgrade(_) => "xv-upgrade",
             Self::ScanLeakDetected { .. } => "xv-scan-leak-detected",
-            Self::RenameIncomplete { .. } => "xv-rename-incomplete",
             Self::Unknown(_) => "xv-unknown",
         }
     }
@@ -175,7 +165,6 @@ impl CrosstacheError {
             Self::AzureApiError(_) => 40,
             Self::Conflict(_) => 41,
             Self::RateLimited(_) => 42,
-            Self::RenameIncomplete { .. } => 43,
 
             // 50–59 — policy/scan findings
             Self::ScanLeakDetected { .. } => 50,
@@ -870,12 +859,6 @@ mod tests {
                 category: "error variant",
                 name: "ScanLeakDetected",
                 fields: &["count"],
-                allowed_value_like_fields: &[],
-            },
-            SecuritySurface {
-                category: "error variant",
-                name: "RenameIncomplete",
-                fields: &["source", "destination", "vault", "cause"],
                 allowed_value_like_fields: &[],
             },
             SecuritySurface {
