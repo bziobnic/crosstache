@@ -696,6 +696,9 @@ pub enum Commands {
         /// Clear the folder
         #[arg(long, conflicts_with = "folder")]
         clear_folder: bool,
+        /// Enable or disable the secret (true/false)
+        #[arg(long)]
+        enabled: Option<bool>,
     },
     /// Compare secrets between two vaults
     Diff {
@@ -1667,6 +1670,7 @@ impl Cli {
                 clear_not_before,
                 clear_note,
                 clear_folder,
+                enabled,
             } => {
                 crate::cli::secret_ops::execute_secret_update_direct(
                     &name,
@@ -1686,6 +1690,7 @@ impl Cli {
                     clear_not_before,
                     clear_note,
                     clear_folder,
+                    enabled,
                     config,
                     registry,
                 )

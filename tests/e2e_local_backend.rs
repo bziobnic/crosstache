@@ -1077,3 +1077,33 @@ fn group_list_counts_members_across_formats() {
         "[]"
     );
 }
+
+#[test]
+fn group_list_excludes_disabled_secrets() {
+    let env = TestEnv::new();
+    // Create secrets with groups
+    env.set_secret_with_args("active-a", "v", &["--group", "team-x"]);
+    env.set_secret_with_args("active-b", "v", &["--group", "team-x"]);
+    env.set_secret_with_args("disabled-member", "v", &["--group", "team-x"]);
+
+    // Disable the third secret
+    env.xv_ok(&["update", "disabled-member", "--enabled", "false"]);
+
+    // Verify the group count excludes the disabled secret
+    let csv = env.xv_ok(&["group", "list", "--format", "csv"]);
+    assert!(
+        csv.contains("team-x,2"),
+        "disabled secret should not be counted: {csv}"
+    );
+
+    let json = env.xv_ok(&["group", "list", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.get("secrets")),
+        Some(&serde_json::json!(2)),
+        "disabled secret should not contribute to count: {json}"
+    );
+}

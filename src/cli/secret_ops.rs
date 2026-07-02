@@ -331,7 +331,8 @@ async fn execute_group_list(
         }
     };
 
-    let rows = derive_group_rows(&secrets);
+    let filtered = filter_secret_summaries_for_display(secrets, None, false);
+    let rows = derive_group_rows(&filtered);
     let fmt = config.runtime_output_format;
     let human = matches!(
         fmt,
@@ -1473,6 +1474,7 @@ pub(crate) async fn execute_secret_update_direct(
     clear_not_before: bool,
     clear_note: bool,
     clear_folder: bool,
+    enabled: Option<bool>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -1534,7 +1536,7 @@ pub(crate) async fn execute_secret_update_direct(
             new_name: rename,
             value: resolved_value,
             content_type: None,
-            enabled: None,
+            enabled,
             expires_on: expires_update,
             not_before: not_before_update,
             tags: merged_tags,
