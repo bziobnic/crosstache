@@ -161,6 +161,10 @@ pub struct Cli {
     #[arg(long, global = true, hide = should_hide_options())]
     pub template: Option<String>,
 
+    /// Disable colored output (same effect as the NO_COLOR env var)
+    #[arg(long, global = true, hide = should_hide_options())]
+    pub no_color: bool,
+
     /// Azure credential type to use first (cli, managed_identity, environment, default)
     #[arg(
         long,
@@ -1391,6 +1395,11 @@ impl Cli {
 
         // Wire template string
         config.template = self.template.clone();
+
+        // Disable colors if --no-color flag is set
+        if self.no_color {
+            config.no_color = true;
+        }
 
         // Warn if --template given without --format template
         if config.template.is_some() && resolved != OutputFormat::Template {
