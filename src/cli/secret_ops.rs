@@ -256,6 +256,120 @@ fn filter_secret_summaries_for_display(
     secrets
 }
 
+/// Fold summaries into (group → member count), tokenizing the comma-separated
+/// `groups` tag exactly like `secret_summary_matches_group`. A group repeated
+/// within one secret counts that secret once.
+fn derive_group_rows(secrets: &[crate::secret::manager::SecretSummary]) -> Vec<GroupListRow> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for s in secrets {
+        let Some(groups) = s.groups.as_deref() else {
+            continue;
+        };
+        let mut seen = std::collections::HashSet::new();
+        for g in groups.split(',') {
+            let g = g.trim();
+            if !g.is_empty() && seen.insert(g) {
+                *counts.entry(g.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(group, secrets)| GroupListRow { group, secrets })
+        .collect()
+}
+
+pub(crate) async fn execute_group_command(
+    command: crate::cli::commands::GroupCommands,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    match command {
+        crate::cli::commands::GroupCommands::List { no_cache } => {
+            execute_group_list(no_cache, config, registry).await
+        }
+    }
+}
+
+async fn execute_group_list(
+    no_cache: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::cache::CacheManager;
+    use crate::utils::format::TableFormatter;
+
+    if !use_trait_path(registry) {
+        return Err(CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        ));
+    }
+    let reg = registry.expect("use_trait_path guarantees Some");
+    let vault_name = resolve_vault_for_trait(&config, registry).await?;
+
+    // Same fetch-or-cache flow as `xv ls` (shared CacheKey::SecretsList dataset).
+    let cache_manager = CacheManager::from_config(&config);
+    let cache_key = trait_secret_cache_key(&vault_name);
+    let use_cache = cache_manager.is_enabled() && !no_cache;
+    let cached = if use_cache {
+        cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+    } else {
+        None
+    };
+    let secrets = match cached {
+        Some(secrets) => secrets,
+        None => {
+            let fetched = reg
+                .active()
+                .secrets()
+                .list_secrets(&vault_name, None)
+                .await?;
+            if use_cache {
+                cache_manager.set(&cache_key, &fetched);
+            }
+            fetched
+        }
+    };
+
+    let filtered = filter_secret_summaries_for_display(secrets, None, false);
+    let rows = derive_group_rows(&filtered);
+    let fmt = config.runtime_output_format;
+    let human = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+
+    if rows.is_empty() && human {
+        crate::utils::output::info(&crate::utils::list_output::empty_state_message(
+            "groups",
+            Some(&format!("vault '{vault_name}'")),
+        ));
+        return Ok(());
+    }
+
+    let formatter = TableFormatter::new(
+        fmt,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+    println!("{}", formatter.format_table(&rows)?);
+    if human {
+        println!(
+            "{}",
+            crate::utils::list_output::count_label(
+                rows.len(),
+                rows.len(),
+                "group",
+                "groups",
+                Some(&format!("vault '{vault_name}'")),
+                false,
+            )
+        );
+    }
+    Ok(())
+}
+
 const SECRET_LIST_NOTE_WRAP_WIDTH: usize = 40;
 
 #[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
@@ -270,6 +384,15 @@ struct SecretListDisplayRow {
     groups: String,
     #[tabled(rename = "Updated")]
     updated_on: String,
+}
+
+/// Row shape for `xv group list`.
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct GroupListRow {
+    #[tabled(rename = "Group")]
+    group: String,
+    #[tabled(rename = "Secrets")]
+    secrets: usize,
 }
 
 fn format_secret_list_rows_for_human(
@@ -319,18 +442,24 @@ fn wrap_paragraph_to_width(paragraph: &str, width: usize) -> String {
 }
 
 fn push_wrapped_word(word: &str, width: usize, current: &mut String, lines: &mut Vec<String>) {
-    let word_len = word.chars().count();
+    use unicode_width::UnicodeWidthChar;
+    let display_width = crate::cli::ls_view::display_width;
+    let word_len = display_width(word);
 
     if word_len > width {
         if !current.is_empty() {
             lines.push(std::mem::take(current));
         }
         let mut chunk = String::new();
+        let mut chunk_w = 0usize;
         for ch in word.chars() {
-            chunk.push(ch);
-            if chunk.chars().count() == width {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if chunk_w + w > width && !chunk.is_empty() {
                 lines.push(std::mem::take(&mut chunk));
+                chunk_w = 0;
             }
+            chunk.push(ch);
+            chunk_w += w;
         }
         if !chunk.is_empty() {
             *current = chunk;
@@ -343,7 +472,7 @@ fn push_wrapped_word(word: &str, width: usize, current: &mut String, lines: &mut
         return;
     }
 
-    let projected_len = current.chars().count() + 1 + word_len;
+    let projected_len = display_width(current) + 1 + word_len;
     if projected_len <= width {
         current.push(' ');
         current.push_str(word);
@@ -361,6 +490,7 @@ pub(crate) fn display_cached_secret_list(
     path: &str,
     long: bool,
     recursive: bool,
+    sort: crate::cli::commands::LsSort,
     pagination: Pagination,
     pager: bool,
     vault_name: &str,
@@ -373,12 +503,21 @@ pub(crate) fn display_cached_secret_list(
     use std::fmt::Write as _;
 
     let filtered = filter_secret_summaries_for_display(secrets, group.as_deref(), all);
-    let scoped = ls_view::scope_secrets(filtered, path);
+    let mut scoped = ls_view::scope_secrets(filtered, path);
+    if sort == crate::cli::commands::LsSort::Updated {
+        ls_view::sort_secrets_by_updated_desc(&mut scoped.secrets);
+        ls_view::sort_secrets_by_updated_desc(&mut scoped.subtree);
+    }
 
     // Pipe-friendly modes: flat recursive subtree, unchanged schema.
+    // Qualification is opt-in via -r (the bare --names-only shape is shipped).
     if names_only {
         for s in &scoped.subtree {
-            println!("{}", ls_view::display_name(s));
+            if recursive {
+                println!("{}", ls_view::qualified_display_name(s, path));
+            } else {
+                println!("{}", ls_view::display_name(s));
+            }
         }
         return Ok(());
     }
@@ -490,7 +629,7 @@ pub(crate) fn display_cached_secret_list(
             ),
             vault_name
         );
-        if let Some(footer) = pagination_footer_text(&page, "secret", fmt) {
+        if let Some(footer) = pagination_footer_text(&page, "secret", "secrets", fmt) {
             output.push('\n');
             output.push_str(&footer);
         }
@@ -505,12 +644,14 @@ pub(crate) fn display_cached_secret_list(
         );
     }
     let entries: Vec<LsEntry> = if recursive {
-        scoped
-            .subtree
-            .iter()
-            .cloned()
-            .map(LsEntry::Secret)
-            .collect()
+        ls_view::qualified_subtree(
+            &scoped.subtree,
+            path,
+            sort == crate::cli::commands::LsSort::Name,
+        )
+        .into_iter()
+        .map(LsEntry::Secret)
+        .collect()
     } else {
         ls_view::entries_for_display(&scoped)
     };
@@ -547,7 +688,228 @@ pub(crate) fn display_cached_secret_list(
         );
     }
     let _ = writeln!(output, "{} in vault '{}'", count_line, vault_name);
-    if let Some(footer) = pagination_footer_text(&page, "entry", fmt) {
+    if let Some(footer) = pagination_footer_text(&page, "entry", "entries", fmt) {
+        output.push('\n');
+        output.push_str(&footer);
+    }
+    crate::utils::pager::print_output(&output, pager)?;
+    Ok(())
+}
+
+/// Row shape for `xv ls --deleted` — machine formats get this array; empty
+/// strings mark dates the backend cannot supply (AWS/local purge schedule).
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct DeletedSecretListRow {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Deleted")]
+    deleted: String,
+    #[tabled(rename = "Purge Scheduled")]
+    purge_scheduled: String,
+}
+
+fn deleted_display_name(s: &crate::secret::manager::DeletedSecretSummary) -> &str {
+    if s.original_name.is_empty() {
+        &s.name
+    } else {
+        &s.original_name
+    }
+}
+
+fn deleted_list_rows(
+    items: &[crate::secret::manager::DeletedSecretSummary],
+    human: bool,
+) -> Vec<DeletedSecretListRow> {
+    items
+        .iter()
+        .map(|s| {
+            let fmt_date = |d: &Option<String>| {
+                let v = d.clone().unwrap_or_default();
+                if human {
+                    crate::cli::ls_view::date_portion_for_display(&v)
+                } else {
+                    v
+                }
+            };
+            DeletedSecretListRow {
+                name: deleted_display_name(s).to_string(),
+                deleted: fmt_date(&s.deleted_on),
+                purge_scheduled: fmt_date(&s.scheduled_purge_on),
+            }
+        })
+        .collect()
+}
+
+/// `xv ls --deleted`: list soft-deleted secrets awaiting restore/purge.
+/// Always bypasses the secrets-list cache (which only holds live secrets)
+/// and requires the backend to advertise `has_soft_delete`.
+pub(crate) async fn execute_deleted_secret_list(
+    pagination: Pagination,
+    pager: bool,
+    names_only: bool,
+    long: bool,
+    sort: crate::cli::commands::LsSort,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    use crate::cli::commands::LsSort;
+    use crate::cli::ls_view;
+    use crate::utils::format::TableFormatter;
+    use crate::utils::pagination::{paginate_slice, pagination_footer_text};
+    use std::fmt::Write as _;
+
+    if !use_trait_path(registry) {
+        return Err(CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        ));
+    }
+    let reg = registry.expect("use_trait_path guarantees Some");
+
+    // Capability gate — same shape as `xv restore`'s.
+    let unsupported = || {
+        CrosstacheError::InvalidArgument(format!(
+            "The {} backend does not support listing deleted secrets (soft-delete not available).",
+            reg.active().name()
+        ))
+    };
+    if !reg.active().capabilities().has_soft_delete {
+        return Err(unsupported());
+    }
+
+    let vault_name = resolve_vault_for_trait(&config, registry).await?;
+    // Always live — the SecretsList cache holds live secrets only, and trash
+    // freshness matters right after a delete.
+    let mut items = match reg
+        .active()
+        .secrets()
+        .list_deleted_secrets(&vault_name)
+        .await
+    {
+        Ok(items) => items,
+        Err(crate::backend::BackendError::Unsupported(_)) => return Err(unsupported()),
+        Err(e) => return Err(e.into()),
+    };
+
+    match sort {
+        LsSort::Name => items.sort_by(|a, b| deleted_display_name(a).cmp(deleted_display_name(b))),
+        // In deleted mode "updated" means the deleted date (newest first).
+        LsSort::Updated => items.sort_by(|a, b| {
+            b.deleted_on
+                .cmp(&a.deleted_on)
+                .then_with(|| deleted_display_name(a).cmp(deleted_display_name(b)))
+        }),
+    }
+
+    if names_only {
+        for s in &items {
+            println!("{}", deleted_display_name(s));
+        }
+        return Ok(());
+    }
+
+    let fmt = config.runtime_output_format;
+    let human_table_like = matches!(
+        fmt,
+        OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+    );
+    let page = paginate_slice(&items, pagination);
+
+    if !human_table_like {
+        if long {
+            crate::utils::output::warn("--long is ignored for machine-readable formats");
+        }
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        let rows = deleted_list_rows(&page.items, false);
+        let output = formatter.format_table(&rows)?;
+        crate::utils::pager::print_output(&output, pager)?;
+        return Ok(());
+    }
+
+    // Validate --columns up front so an unknown selection errors even when
+    // the result set is empty (branch-wide rule shared with `display_cached_secret_list`).
+    if config.runtime_columns.is_some() {
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        formatter.validate_columns::<DeletedSecretListRow>()?;
+    }
+
+    if items.is_empty() {
+        crate::utils::output::info(&crate::utils::list_output::empty_state_message(
+            "deleted secrets",
+            Some(&format!("vault '{vault_name}'")),
+        ));
+        return Ok(());
+    }
+
+    let mut output = String::new();
+    output.push('\n');
+    let color = !config.no_color && fmt == OutputFormat::Table;
+    if color {
+        let _ = writeln!(
+            output,
+            "\x1b[36mVault: {} (deleted secrets)\x1b[0m",
+            vault_name
+        );
+    } else {
+        let _ = writeln!(output, "Vault: {} (deleted secrets)", vault_name);
+    }
+    output.push('\n');
+
+    if config.format_explicit && !long {
+        let formatter = TableFormatter::new(
+            fmt,
+            config.no_color,
+            config.template.clone(),
+            config.runtime_columns.clone(),
+        );
+        let rows = deleted_list_rows(&page.items, true);
+        output.push_str(&formatter.format_table(&rows)?);
+        output.push('\n');
+    } else {
+        if config.runtime_columns.is_some() {
+            crate::utils::output::warn(
+                "--columns is ignored for the grid/long view; use --format table",
+            );
+        }
+        if long {
+            output.push_str(&ls_view::render_deleted_long(&page.items));
+        } else {
+            let width = crossterm::terminal::size()
+                .map(|(w, _)| w as usize)
+                .unwrap_or(80);
+            let labels: Vec<String> = page
+                .items
+                .iter()
+                .map(|s| deleted_display_name(s).to_string())
+                .collect();
+            output.push_str(&ls_view::render_name_grid(&labels, width));
+        }
+        output.push('\n');
+    }
+
+    let _ = writeln!(
+        output,
+        "{} in vault '{}'",
+        crate::utils::list_output::count_label(
+            page.items.len(),
+            page.total_items,
+            "deleted secret",
+            "deleted secrets",
+            None,
+            page.page_size.is_some(),
+        ),
+        vault_name
+    );
+    if let Some(footer) = pagination_footer_text(&page, "deleted secret", "deleted secrets", fmt) {
         output.push('\n');
         output.push_str(&footer);
     }
@@ -568,6 +930,7 @@ pub(crate) async fn execute_secret_list_direct(
     names_only: bool,
     long: bool,
     recursive: bool,
+    sort: crate::cli::commands::LsSort,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -593,6 +956,7 @@ pub(crate) async fn execute_secret_list_direct(
                     &path,
                     long,
                     recursive,
+                    sort,
                     pagination,
                     pager,
                     &vault_name,
@@ -677,6 +1041,7 @@ pub(crate) async fn execute_secret_list_direct(
             &path,
             long,
             recursive,
+            sort,
             pagination,
             pager,
             &vault_name,
@@ -1106,6 +1471,7 @@ pub(crate) async fn execute_secret_update_direct(
     clear_not_before: bool,
     clear_note: bool,
     clear_folder: bool,
+    enabled: Option<bool>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -1167,7 +1533,7 @@ pub(crate) async fn execute_secret_update_direct(
             new_name: rename,
             value: resolved_value,
             content_type: None,
-            enabled: None,
+            enabled,
             expires_on: expires_update,
             not_before: not_before_update,
             tags: merged_tags,
@@ -1192,6 +1558,13 @@ pub(crate) async fn execute_secret_update_direct(
     }
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
+    // The legacy signature has no enabled parameter; erroring here beats
+    // silently dropping the flag when the registry failed to initialize.
+    if enabled.is_some() {
+        return Err(CrosstacheError::config(
+            "--enabled requires the backend registry",
+        ));
+    }
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -1823,13 +2196,30 @@ struct FindRow {
 }
 
 /// Empty-state wording for `xv find`, shared by the trait and legacy paths.
-fn find_empty_message(pattern: Option<&str>, all_vaults: bool, vault_name: Option<&str>) -> String {
-    match (all_vaults, pattern, vault_name) {
-        (true, Some(p), _) => format!("No secrets match '{p}' across all vaults."),
-        (true, None, _) => "No secrets found across all vaults.".to_string(),
-        (false, Some(p), Some(v)) => format!("No secrets match '{p}' in vault '{v}'."),
-        (false, None, Some(v)) => format!("No secrets in vault '{v}'."),
-        (false, _, None) => "No matching secrets found.".to_string(),
+fn find_empty_message(
+    pattern: Option<&str>,
+    all_vaults: bool,
+    vault_name: Option<&str>,
+    folder_scope: Option<&str>,
+) -> String {
+    match (all_vaults, pattern, vault_name, folder_scope) {
+        // All vaults cases
+        (true, Some(p), _, Some(f)) => {
+            format!("No secrets match '{p}' in folder '{f}' across all vaults.")
+        }
+        (true, Some(p), _, None) => format!("No secrets match '{p}' across all vaults."),
+        (true, None, _, Some(f)) => format!("No secrets found in folder '{f}' across all vaults."),
+        (true, None, _, None) => "No secrets found across all vaults.".to_string(),
+        // Single vault cases
+        (false, Some(p), Some(v), Some(f)) => {
+            format!("No secrets match '{p}' in folder '{f}' of vault '{v}'.")
+        }
+        (false, Some(p), Some(v), None) => format!("No secrets match '{p}' in vault '{v}'."),
+        (false, None, Some(v), Some(f)) => {
+            format!("No secrets found in folder '{f}' of vault '{v}'.")
+        }
+        (false, None, Some(v), None) => format!("No secrets in vault '{v}'."),
+        (false, _, None, _) => "No matching secrets found.".to_string(),
     }
 }
 
@@ -1883,12 +2273,27 @@ pub(crate) async fn execute_secret_find_direct(
     in_fields: Vec<String>,
     limit: usize,
     min_score: f32,
+    folder: Option<String>,
     all_vaults: bool,
     names_only: bool,
     format: crate::utils::format::OutputFormat,
     config: Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
+    // Normalize --folder: trim trailing '/', validate, treat empty as absent.
+    let folder_scope: Option<String> = match folder {
+        Some(raw) => {
+            let trimmed = raw.trim_end_matches('/').to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                crate::utils::helpers::validate_folder_path(&trimmed)?;
+                Some(trimmed)
+            }
+        }
+        None => None,
+    };
+
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
@@ -1950,6 +2355,16 @@ pub(crate) async fn execute_secret_find_direct(
                 .collect()
         };
 
+        let items: Vec<CandidateItem> = match folder_scope.as_deref() {
+            Some(path) => items
+                .into_iter()
+                .filter(|i| {
+                    crate::cli::ls_view::folder_in_scope(i.folder.as_deref().unwrap_or(""), path)
+                })
+                .collect(),
+            None => items,
+        };
+
         let pattern_str = pattern.as_deref().unwrap_or("");
         let mut matches = score_matches(pattern_str, &items, &fields);
 
@@ -1969,7 +2384,12 @@ pub(crate) async fn execute_secret_find_direct(
             return Ok(());
         }
 
-        let empty_msg = find_empty_message(pattern.as_deref(), all_vaults, scope_vault.as_deref());
+        let empty_msg = find_empty_message(
+            pattern.as_deref(),
+            all_vaults,
+            scope_vault.as_deref(),
+            folder_scope.as_deref(),
+        );
         render_find_matches(&matches, format, &empty_msg, &config)?;
         return Ok(());
     }
@@ -1983,6 +2403,7 @@ pub(crate) async fn execute_secret_find_direct(
         in_fields,
         limit,
         min_score,
+        folder_scope.as_deref(),
         all_vaults,
         names_only,
         format,
@@ -1998,6 +2419,7 @@ async fn execute_secret_find(
     in_fields: Vec<String>,
     limit: usize,
     min_score: f32,
+    folder: Option<&str>,
     all_vaults: bool,
     names_only: bool,
     format: crate::utils::format::OutputFormat,
@@ -2108,6 +2530,17 @@ async fn execute_secret_find(
             .map(CandidateItem::from_secret_summary)
             .collect()
     };
+
+    let items: Vec<CandidateItem> = match folder {
+        Some(path) => items
+            .into_iter()
+            .filter(|i| {
+                crate::cli::ls_view::folder_in_scope(i.folder.as_deref().unwrap_or(""), path)
+            })
+            .collect(),
+        None => items,
+    };
+
     let pattern_str = pattern.unwrap_or("");
     let mut matches = score_matches(pattern_str, &items, &fields);
 
@@ -2132,7 +2565,7 @@ async fn execute_secret_find(
         return Ok(());
     }
 
-    let empty_msg = find_empty_message(pattern, all_vaults, single_vault.as_deref());
+    let empty_msg = find_empty_message(pattern, all_vaults, single_vault.as_deref(), folder);
     render_find_matches(&matches, format, &empty_msg, config)
 }
 
@@ -2161,7 +2594,50 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
             } else {
                 &s.original_name
             };
-            println!("{display}");
+            println!("{}", crate::utils::format::sanitize_control_chars(display));
+        }
+    }
+    Ok(())
+}
+
+/// Distinct folder paths (including ancestor prefixes, so `prod/db` also
+/// offers `prod`), sorted — the completion feed for FOLDER-taking args.
+fn folder_completion_paths(secrets: &[crate::secret::manager::SecretSummary]) -> Vec<String> {
+    let mut folders = std::collections::BTreeSet::new();
+    for s in secrets {
+        let Some(folder) = s.folder.as_deref().filter(|f| !f.is_empty()) else {
+            continue;
+        };
+        let mut prefix = String::new();
+        for seg in folder.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(seg);
+            folders.insert(prefix.clone());
+        }
+    }
+    folders.into_iter().collect()
+}
+
+#[allow(dead_code)] // called from src/main.rs::run_complete_folders (binary-only path)
+pub(crate) async fn execute_complete_folders(config: Config) -> Result<()> {
+    use crate::cache::{CacheKey, CacheManager};
+
+    let vault_name = config.resolve_vault_name(None).await?;
+
+    // Cache-only path, mirroring execute_complete_secrets: a cold cache
+    // means no completions — never a backend round-trip on a Tab press.
+    let cache_manager = CacheManager::from_config(&config);
+    if !cache_manager.is_enabled() {
+        return Ok(());
+    }
+    let cache_key = CacheKey::SecretsList { vault_name };
+    if let Some(cached) =
+        cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+    {
+        for f in folder_completion_paths(&cached) {
+            println!("{}", crate::utils::format::sanitize_control_chars(&f));
         }
     }
     Ok(())
@@ -3790,7 +4266,9 @@ async fn execute_secret_share(
                         paged.page_size.is_some(),
                     ));
                 }
-                if let Some(footer) = pagination_footer_text(&paged, "assignment", fmt) {
+                if let Some(footer) =
+                    pagination_footer_text(&paged, "assignment", "assignments", fmt)
+                {
                     output.push('\n');
                     output.push_str(&footer);
                 }
@@ -4616,6 +5094,31 @@ mod tests {
     }
 
     #[test]
+    fn group_rows_derive_from_comma_separated_tags() {
+        fn s(name: &str, groups: Option<&str>) -> crate::secret::manager::SecretSummary {
+            crate::secret::manager::SecretSummary {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                note: None,
+                folder: None,
+                groups: groups.map(str::to_string),
+                updated_on: String::new(),
+                enabled: true,
+                content_type: String::new(),
+            }
+        }
+        let rows = derive_group_rows(&[
+            s("a", Some("team-a, team-b")),
+            s("b", Some("team-a")),
+            s("c", Some(" team-b ,, team-b ")), // dup within one secret counts once
+            s("d", None),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].group.as_str(), rows[0].secrets), ("team-a", 2));
+        assert_eq!((rows[1].group.as_str(), rows[1].secrets), ("team-b", 2));
+    }
+
+    #[test]
     fn human_secret_list_rows_wrap_long_notes() {
         let mut secret = summary_named("api-key", Some("prod"), true);
         secret.note = Some(
@@ -4631,7 +5134,7 @@ mod tests {
             rows[0]
                 .note
                 .lines()
-                .all(|line| line.chars().count() <= SECRET_LIST_NOTE_WRAP_WIDTH),
+                .all(|line| crate::cli::ls_view::display_width(line) <= SECRET_LIST_NOTE_WRAP_WIDTH),
             "wrapped note lines should fit the notes column width: {:?}",
             rows[0].note
         );
@@ -4831,5 +5334,47 @@ mod tests {
         assert_eq!(read_secret_value(&mut reader, false).unwrap(), "");
         let mut reader = std::io::Cursor::new("  \n  ");
         assert_eq!(read_secret_value(&mut reader, true).unwrap(), "");
+    }
+
+    #[test]
+    fn wrap_is_display_width_aware_for_cjk() {
+        // 6 full-width chars = 12 columns; budget of 4 columns = 2 chars/line.
+        let wrapped = wrap_text_to_width("秘密秘密秘密", 4);
+        assert_eq!(wrapped.lines().count(), 3, "{wrapped:?}");
+        for line in wrapped.lines() {
+            assert!(crate::cli::ls_view::display_width(line) <= 4, "{wrapped:?}");
+        }
+    }
+
+    #[test]
+    fn folder_completion_includes_ancestor_prefixes_sorted() {
+        fn s(folder: Option<&str>) -> crate::secret::manager::SecretSummary {
+            crate::secret::manager::SecretSummary {
+                name: "x".to_string(),
+                original_name: "x".to_string(),
+                note: None,
+                folder: folder.map(str::to_string),
+                groups: None,
+                updated_on: String::new(),
+                enabled: true,
+                content_type: String::new(),
+            }
+        }
+        let paths = folder_completion_paths(&[
+            s(Some("prod/db/replica")),
+            s(Some("prod")),
+            s(Some("dev")),
+            s(None),
+            s(Some("")),
+        ]);
+        assert_eq!(
+            paths,
+            vec![
+                "dev".to_string(),
+                "prod".to_string(),
+                "prod/db".to_string(),
+                "prod/db/replica".to_string(),
+            ]
+        );
     }
 }

@@ -24,7 +24,9 @@ use zeroize::Zeroizing;
 
 use crate::backend::error::BackendError;
 use crate::backend::secret::SecretBackend;
-use crate::secret::manager::{SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest};
+use crate::secret::manager::{
+    DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+};
 
 use super::{crypto, opaque, paths};
 
@@ -1790,7 +1792,10 @@ impl SecretBackend for LocalSecretBackend {
         Ok(())
     }
 
-    async fn list_deleted_secrets(&self, vault: &str) -> Result<Vec<SecretSummary>, BackendError> {
+    async fn list_deleted_secrets(
+        &self,
+        vault: &str,
+    ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
         let tbase = trash_base_dir(&self.store_path, vault)?;
         if !tbase.exists() {
             return Ok(Vec::new());
@@ -1805,6 +1810,16 @@ impl SecretBackend for LocalSecretBackend {
                 continue;
             }
 
+            // Trash entry dirs are named `{stem}@{deleted_at_millis}` (see
+            // `trash_entry_dir`); legacy unsuffixed dirs simply yield None.
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let deleted_on = dir_name
+                .rsplit('@')
+                .next()
+                .and_then(|ms| ms.parse::<i64>().ok())
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|dt| dt.to_string());
+
             // Look for .meta.json files in this trash entry
             let dir_path = entry.path();
             if let Ok(inner_entries) = fs::read_dir(&dir_path) {
@@ -1812,7 +1827,14 @@ impl SecretBackend for LocalSecretBackend {
                     let fname = inner.file_name().to_string_lossy().to_string();
                     if fname.ends_with(".meta.json") {
                         if let Ok(meta) = read_meta(&inner.path(), &self.identity) {
-                            results.push(meta_to_summary(&meta));
+                            results.push(DeletedSecretSummary {
+                                name: meta.name.clone(),
+                                original_name: meta.original_name.clone(),
+                                deleted_on: deleted_on.clone(),
+                                // Local trash persists until an explicit
+                                // `xv purge` — no schedule to report.
+                                scheduled_purge_on: None,
+                            });
                         }
                     }
                 }
@@ -2309,6 +2331,28 @@ mod tests {
         // Deleted list should be empty
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
         assert!(deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleted_listing_carries_deletion_date_but_no_purge_schedule() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("dated", "v1"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "dated").await.unwrap();
+
+        let deleted = backend.list_deleted_secrets("default").await.unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].name, "dated");
+        assert!(
+            deleted[0].deleted_on.is_some(),
+            "deleted_on must come from the trash dir's @millis suffix"
+        );
+        assert!(
+            deleted[0].scheduled_purge_on.is_none(),
+            "local trash never auto-purges"
+        );
     }
 
     #[tokio::test]

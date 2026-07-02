@@ -43,6 +43,16 @@ impl PagerWhen {
     }
 }
 
+/// Sort order for `xv ls`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
+pub enum LsSort {
+    /// Alphabetical by display name (default).
+    #[default]
+    Name,
+    /// Most recently updated first (deleted date in `--deleted` mode).
+    Updated,
+}
+
 #[derive(Debug, Clone, clap::ValueEnum, PartialEq, Eq, Default)]
 pub enum OnConflict {
     /// Skip secrets that already exist in the target (default)
@@ -455,6 +465,11 @@ pub enum Commands {
         )]
         min_score: f32,
 
+        /// Only search secrets in this folder (or its subfolders, segment
+        /// boundary enforced: `prod` matches `prod/db` but not `production`).
+        #[arg(long, value_name = "PATH")]
+        folder: Option<String>,
+
         /// Search every vault the caller has list rights on. Slow on
         /// cold cache. Mutually exclusive with vault-resolved context.
         #[arg(long)]
@@ -509,6 +524,16 @@ pub enum Commands {
         /// Overrides --format and disables auto-format-resolution.
         #[arg(long)]
         names_only: bool,
+        /// Sort order: name (A→Z, default) or updated (newest first)
+        #[arg(long, value_enum, default_value_t = LsSort::Name)]
+        sort: LsSort,
+        /// List soft-deleted secrets awaiting restore/purge instead of live
+        /// secrets (backend must support soft delete)
+        #[arg(
+            long,
+            conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired"]
+        )]
+        deleted: bool,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -676,6 +701,9 @@ pub enum Commands {
         /// Clear the folder
         #[arg(long, conflicts_with = "folder")]
         clear_folder: bool,
+        /// Enable or disable the secret (true/false)
+        #[arg(long)]
+        enabled: Option<bool>,
     },
     /// Compare secrets between two vaults
     Diff {
@@ -779,6 +807,11 @@ pub enum Commands {
     Env {
         #[command(subcommand)]
         command: EnvCommands,
+    },
+    /// Inspect secret groups in the current vault context
+    Group {
+        #[command(subcommand)]
+        command: GroupCommands,
     },
     /// Show audit history for secrets or vaults
     Audit {
@@ -1280,7 +1313,8 @@ pub enum ContextCommands {
         #[arg(long)]
         global: bool,
     },
-    /// List environment profiles in the resolved .xv.toml
+    /// (deprecated) List environment profiles in the resolved .xv.toml — use `env list`
+    #[command(hide = true)]
     Envs,
     /// Create a new .xv.toml in the current directory
     Init {
@@ -1370,6 +1404,16 @@ pub enum EnvCommands {
         /// Overwrite existing secrets
         #[arg(long)]
         overwrite: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GroupCommands {
+    /// List groups and member counts derived from secret metadata
+    List {
+        /// Bypass the local cache and fetch fresh data
+        #[arg(long)]
+        no_cache: bool,
     },
 }
 
@@ -1481,6 +1525,7 @@ impl Cli {
                 in_fields,
                 limit,
                 min_score,
+                folder,
                 all_vaults,
                 names_only,
             } => {
@@ -1489,6 +1534,7 @@ impl Cli {
                     in_fields,
                     limit,
                     min_score,
+                    folder,
                     all_vaults,
                     names_only,
                     self.format,
@@ -1510,24 +1556,33 @@ impl Cli {
                 page_size,
                 pager,
                 names_only,
+                sort,
+                deleted,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
-                let path = match path {
-                    Some(raw) => {
-                        let trimmed = raw.trim_end_matches('/').to_string();
-                        if !trimmed.is_empty() {
-                            crate::utils::helpers::validate_folder_path(&trimmed)?;
+                if deleted {
+                    crate::cli::secret_ops::execute_deleted_secret_list(
+                        pagination, pager, names_only, long, sort, config, registry,
+                    )
+                    .await
+                } else {
+                    let path = match path {
+                        Some(raw) => {
+                            let trimmed = raw.trim_end_matches('/').to_string();
+                            if !trimmed.is_empty() {
+                                crate::utils::helpers::validate_folder_path(&trimmed)?;
+                            }
+                            trimmed
                         }
-                        trimmed
-                    }
-                    None => String::new(),
-                };
-                crate::cli::secret_ops::execute_secret_list_direct(
-                    path, group, all, expiring, expired, no_cache, pagination, pager, names_only,
-                    long, recursive, config, registry,
-                )
-                .await
+                        None => String::new(),
+                    };
+                    crate::cli::secret_ops::execute_secret_list_direct(
+                        path, group, all, expiring, expired, no_cache, pagination, pager,
+                        names_only, long, recursive, sort, config, registry,
+                    )
+                    .await
+                }
             }
             Commands::Delete { name, group, force } => {
                 crate::cli::secret_ops::execute_secret_delete_direct(
@@ -1623,6 +1678,7 @@ impl Cli {
                 clear_not_before,
                 clear_note,
                 clear_folder,
+                enabled,
             } => {
                 crate::cli::secret_ops::execute_secret_update_direct(
                     &name,
@@ -1642,6 +1698,7 @@ impl Cli {
                     clear_not_before,
                     clear_note,
                     clear_folder,
+                    enabled,
                     config,
                     registry,
                 )
@@ -1723,6 +1780,9 @@ impl Cli {
             }
             Commands::Env { command } => {
                 crate::cli::config_ops::execute_env_command(command, config, registry).await
+            }
+            Commands::Group { command } => {
+                crate::cli::secret_ops::execute_group_command(command, config, registry).await
             }
             Commands::Audit {
                 name,

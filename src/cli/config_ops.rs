@@ -913,13 +913,11 @@ async fn refresh_vault_list(config: Config) -> Result<()> {
         config.no_color,
     )?;
 
+    // Fetch WITHOUT rendering: this runs as a cache refresh (often spawned by
+    // `xv cache refresh --key vaults`), so nothing may reach stdout.
     let vaults = vault_manager
-        .list_vaults_formatted(
-            Some(&config.subscription_id),
-            None,
-            crate::utils::format::OutputFormat::Json,
-            None,
-        )
+        .vault_ops()
+        .list_vaults(Some(&config.subscription_id), None)
         .await?;
 
     let cache_manager = CacheManager::from_config(&config);
@@ -1229,6 +1227,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
 }
 
 async fn execute_context_envs(config: &Config) -> Result<()> {
+    crate::utils::output::warn("context envs is deprecated; use env list");
     execute_env_list(config).await
 }
 

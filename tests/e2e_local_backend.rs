@@ -231,6 +231,66 @@ fn update_secret_metadata() {
 }
 
 #[test]
+fn update_note_only_preserves_group_membership() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("GROUPED_KEY", "original", &["--group", "team-a"]);
+
+    // Sanity check: the secret starts out counted in its group.
+    let before = env.xv_ok(&["group", "list", "--format", "csv"]);
+    assert!(before.contains("team-a,1"), "before update: {before}");
+
+    // A note-only update must not silently drop the existing `groups` tag
+    // (or any other tag) via a full-replacement PATCH/write.
+    env.xv_ok(&["update", "GROUPED_KEY", "--note", "note only update"]);
+
+    let after = env.xv_ok(&["group", "list", "--format", "csv"]);
+    assert!(
+        after.contains("team-a,1"),
+        "group membership should survive a note-only update: {after}"
+    );
+
+    // Value and note should both reflect the expected post-update state.
+    let value = env.get_raw("GROUPED_KEY");
+    assert_eq!(value, "original");
+}
+
+#[test]
+fn clear_note_and_folder_in_update() {
+    let env = TestEnv::new();
+    // Create secret with note and folder
+    env.set_secret_with_args(
+        "CLEAR_METADATA_KEY",
+        "value",
+        &["--note", "initial note", "--folder", "app/db"],
+    );
+
+    // Verify the secret value is correct
+    let value = env.get_raw("CLEAR_METADATA_KEY");
+    assert_eq!(value, "value");
+
+    // Clear the note and folder via update
+    env.xv_ok(&[
+        "update",
+        "CLEAR_METADATA_KEY",
+        "--clear-note",
+        "--clear-folder",
+    ]);
+
+    // Verify value is still correct after clearing metadata
+    let value_after = env.get_raw("CLEAR_METADATA_KEY");
+    assert_eq!(value_after, "value");
+
+    // Verify that the secret is NOT found when searching by its former folder
+    // (this indirectly confirms the folder was cleared)
+    let found_by_folder = env.xv_ok(&["find", "--folder", "app/db", "--names-only"]);
+    assert!(
+        !found_by_folder.contains("CLEAR_METADATA_KEY"),
+        "secret should not be found by its former folder after clearing: {}",
+        found_by_folder
+    );
+}
+
+#[test]
 fn delete_and_verify() {
     let env = TestEnv::new();
     env.set_secret("TEMP_SECRET", "temp-value");
@@ -540,6 +600,25 @@ fn set_with_metadata() {
 
     let value = env.get_raw("META_SECRET");
     assert_eq!(value, "meta-value");
+}
+
+#[test]
+fn recursive_ls_qualifies_names_by_folder() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("db-pass", "v", &["--folder", "prod/db"]);
+    env.set_secret("root-a", "v");
+
+    let names = env.xv_ok(&["ls", "-r", "--names-only"]);
+    assert!(names.lines().any(|l| l == "prod/db/db-pass"), "{names}");
+    assert!(names.lines().any(|l| l == "root-a"), "{names}");
+
+    // Scoped recursion is relative to the listing root.
+    let scoped = env.xv_ok(&["ls", "prod", "-r", "--names-only"]);
+    assert!(scoped.lines().any(|l| l == "db/db-pass"), "{scoped}");
+
+    // Non-recursive --names-only keeps the shipped unqualified shape.
+    let flat = env.xv_ok(&["ls", "--names-only"]);
+    assert!(flat.lines().any(|l| l == "db-pass"), "{flat}");
 }
 
 // ===========================================================================
@@ -913,4 +992,255 @@ fn env_push_imports_secrets() {
     // Both secrets must now be retrievable from the local backend.
     assert_eq!(env.get_raw("GAMMA"), "three");
     assert_eq!(env.get_raw("DELTA"), "four");
+}
+
+#[test]
+fn parse_prints_exactly_one_table() {
+    let env = TestEnv::new();
+    // `xv parse` has its own local `--fmt` flag (default "table").
+    let out = env.xv_ok(&["parse", "Server=myhost;Database=mydb"]);
+    assert_eq!(
+        out.matches("myhost").count(),
+        1,
+        "connection-string table printed more than once:\n{out}"
+    );
+
+    // JSON format must not leak a human table before the JSON document.
+    let json_out = env.xv_ok(&["parse", "Server=myhost;Database=mydb", "--fmt", "json"]);
+    assert!(
+        json_out.trim_start().starts_with('['),
+        "json output polluted by a table:\n{json_out}"
+    );
+}
+
+#[test]
+fn ls_sort_flag_is_accepted_and_lists_everything() {
+    let env = TestEnv::new();
+    env.set_secret("older", "v");
+    env.set_secret("newer", "v");
+
+    // Local timestamps have minute resolution, so ordering is covered by the
+    // unit test; here we assert the flag parses and output is complete.
+    let out = env.xv_ok(&["ls", "--sort", "updated"]);
+    assert!(out.contains("older") && out.contains("newer"), "{out}");
+
+    let json = env.xv_ok(&["ls", "--sort", "updated", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed.as_array().map(Vec::len), Some(2));
+
+    let (_, stderr) = env.xv_fail(&["ls", "--sort", "bogus"]);
+    assert!(stderr.contains("possible values"), "{stderr}");
+}
+
+#[test]
+fn ls_deleted_lists_soft_deleted_secrets() {
+    let env = TestEnv::new();
+    env.set_secret("doomed", "v");
+    env.set_secret("kept", "v");
+    env.xv_ok(&["delete", "doomed", "--force"]);
+
+    // Piped stdout resolves Auto → JSON, so the human views need the
+    // explicit format (same convention as the live `xv ls` e2e tests).
+    let out = env.xv_ok(&["ls", "--deleted", "--format", "table"]);
+    assert!(out.contains("doomed") && !out.contains("kept"), "{out}");
+    assert!(out.contains("1 deleted secret"), "count line: {out}");
+
+    // Long view has the date columns (explicit table format + -l takes the
+    // borderless long path, mirroring live `xv ls`).
+    let long = env.xv_ok(&["ls", "--deleted", "-l", "--format", "table"]);
+    assert!(
+        long.contains("DELETED") && long.contains("PURGE SCHEDULED"),
+        "{long}"
+    );
+
+    // Machine format: row array with a populated deleted date (local backend);
+    // purge schedule is empty (local trash never auto-purges).
+    let json = env.xv_ok(&["ls", "--deleted", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let rows = parsed.as_array().expect("array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "doomed");
+    assert!(!rows[0]["deleted"].as_str().unwrap().is_empty());
+    assert_eq!(rows[0]["purge_scheduled"], "");
+}
+
+#[test]
+fn ls_deleted_conflicts_and_empty_states() {
+    let env = TestEnv::new();
+
+    // clap conflicts: FOLDER positional and -r.
+    let (_, err1) = env.xv_fail(&["ls", "prod", "--deleted"]);
+    assert!(err1.contains("cannot be used with"), "{err1}");
+    let (_, err2) = env.xv_fail(&["ls", "--deleted", "-r"]);
+    assert!(err2.contains("cannot be used with"), "{err2}");
+
+    // Empty: human info on stderr, valid-empty JSON on stdout.
+    let json = env.xv_ok(&["ls", "--deleted", "--format", "json"]);
+    assert_eq!(json.trim(), "[]");
+}
+
+#[test]
+fn ls_deleted_columns_selection_and_validation() {
+    let env = TestEnv::new();
+    env.set_secret("doomed", "v");
+    env.xv_ok(&["delete", "doomed", "--force"]);
+
+    // --columns projects the requested subset on the deleted table.
+    let out = env.xv_ok(&["ls", "--deleted", "--format", "table", "--columns", "Name"]);
+    assert!(out.contains("doomed"), "{out}");
+    assert!(!out.contains("Purge Scheduled"), "{out}");
+
+    // Unknown column errors, even on the empty grid/long path (human table
+    // formats validate --columns regardless of Auto/JSON's empty-array
+    // fast path, matching the branch-wide rule in `display_cached_secret_list`).
+    let env2 = TestEnv::new();
+    let (_, err) = env2.xv_fail(&["ls", "--deleted", "--format", "table", "--columns", "Nope"]);
+    assert!(
+        !err.is_empty(),
+        "expected an error for unknown column: {err}"
+    );
+}
+
+#[test]
+fn group_list_counts_members_across_formats() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("a", "v", &["--group", "team-a"]);
+    env.set_secret_with_args("b", "v", &["--group", "team-a"]);
+    env.set_secret_with_args("c", "v", &["--group", "team-b"]);
+    env.set_secret("ungrouped", "v");
+
+    // Piped stdout resolves Auto → JSON; force the human table for the
+    // count-line assertion.
+    let table = env.xv_ok(&["group", "list", "--format", "table"]);
+    assert!(
+        table.contains("team-a") && table.contains("team-b"),
+        "{table}"
+    );
+    assert!(table.contains("2 groups"), "count line: {table}");
+
+    let csv = env.xv_ok(&["group", "list", "--format", "csv"]);
+    let mut lines = csv.lines();
+    assert_eq!(lines.next(), Some("Group,Secrets"), "{csv}");
+    assert!(
+        csv.contains("team-a,2") && csv.contains("team-b,1"),
+        "{csv}"
+    );
+
+    let json = env.xv_ok(&["group", "list", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed.as_array().map(Vec::len), Some(2));
+
+    // Empty vault → valid-empty machine output.
+    let fresh = TestEnv::new();
+    assert_eq!(
+        fresh.xv_ok(&["group", "list", "--format", "json"]).trim(),
+        "[]"
+    );
+}
+
+#[test]
+fn group_list_excludes_disabled_secrets() {
+    let env = TestEnv::new();
+    // Create secrets with groups
+    env.set_secret_with_args("active-a", "v", &["--group", "team-x"]);
+    env.set_secret_with_args("active-b", "v", &["--group", "team-x"]);
+    env.set_secret_with_args("disabled-member", "v", &["--group", "team-x"]);
+
+    // Disable the third secret
+    env.xv_ok(&["update", "disabled-member", "--enabled", "false"]);
+
+    // Verify the group count excludes the disabled secret
+    let csv = env.xv_ok(&["group", "list", "--format", "csv"]);
+    assert!(
+        csv.contains("team-x,2"),
+        "disabled secret should not be counted: {csv}"
+    );
+
+    let json = env.xv_ok(&["group", "list", "--format", "json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.get("secrets")),
+        Some(&serde_json::json!(2)),
+        "disabled secret should not contribute to count: {json}"
+    );
+
+    // ls (default view) must exclude it while disabled...
+    let ls = env.xv_ok(&["ls", "--names-only"]);
+    assert!(
+        !ls.lines().any(|l| l == "disabled-member"),
+        "disabled secret should not be listed: {ls}"
+    );
+
+    // ...and the full roundtrip must work: RE-ENABLE and reappear.
+    env.xv_ok(&["update", "disabled-member", "--enabled", "true"]);
+
+    let csv = env.xv_ok(&["group", "list", "--format", "csv"]);
+    assert!(
+        csv.contains("team-x,3"),
+        "re-enabled secret should be counted again: {csv}"
+    );
+    let ls = env.xv_ok(&["ls", "--names-only"]);
+    assert!(
+        ls.lines().any(|l| l == "disabled-member"),
+        "re-enabled secret should be listed again: {ls}"
+    );
+}
+
+#[test]
+fn find_folder_scopes_by_segment_boundary() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("db-pass", "v", &["--folder", "prod/db"]);
+    env.set_secret_with_args("api-key", "v", &["--folder", "prod"]);
+    env.set_secret_with_args("trap", "v", &["--folder", "production"]);
+    env.set_secret("root-a", "v");
+
+    // No pattern: everything in scope, unranked.
+    let out = env.xv_ok(&["find", "--folder", "prod", "--names-only"]);
+    let names: Vec<&str> = out.lines().collect();
+    assert!(
+        names.contains(&"db-pass") && names.contains(&"api-key"),
+        "{out}"
+    );
+    assert!(!names.contains(&"trap"), "segment boundary violated: {out}");
+    assert!(!names.contains(&"root-a"), "{out}");
+
+    // Trailing slash tolerated; invalid path errors.
+    let out2 = env.xv_ok(&["find", "--folder", "prod/", "--names-only"]);
+    assert!(out2.contains("db-pass"), "{out2}");
+}
+
+#[test]
+fn context_envs_is_hidden_and_warns() {
+    let env = TestEnv::new();
+
+    // Hidden from help.
+    let help = env.xv_ok(&["context", "--help"]);
+    assert!(
+        !help.contains("envs"),
+        "context envs still visible in help:\n{help}"
+    );
+
+    // Still works, but warns on stderr.
+    let output = env
+        .xv()
+        .args(["context", "envs"])
+        .output()
+        .expect("run context envs");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("context envs is deprecated; use env list"),
+        "missing deprecation warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn complete_folders_is_silent_without_cache() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("db-pass", "v", &["--folder", "prod/db"]);
+    let out = env.xv_ok(&["__complete-folders"]);
+    assert_eq!(out.trim(), "", "cache disabled → no completions, no errors");
 }

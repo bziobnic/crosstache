@@ -112,6 +112,21 @@ impl<T> FieldUpdate<T> {
     }
 }
 
+/// Attribute/tag-only update for [`SecretOperations::update_secret_attributes`].
+///
+/// `None` fields are left unchanged by the backend. `tags`, when `Some`,
+/// replaces the entire tag map (Azure `PATCH /secrets/{name}` semantics), so
+/// callers must supply the full desired map including crosstache's metadata
+/// tags.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretAttributesUpdate {
+    pub enabled: Option<bool>,
+    pub content_type: Option<String>,
+    pub expires_on: Option<DateTime<Utc>>,
+    pub not_before: Option<DateTime<Utc>>,
+    pub tags: Option<HashMap<String, String>>,
+}
+
 /// Secret update request for advanced operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretUpdateRequest {
@@ -166,6 +181,17 @@ pub struct SecretSummary {
     pub enabled: bool,
     #[tabled(skip)]
     pub content_type: String,
+}
+
+/// Summary of a soft-deleted secret awaiting purge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedSecretSummary {
+    pub name: String,
+    pub original_name: String,
+    /// When the secret was deleted (backend-formatted timestamp), when known.
+    pub deleted_on: Option<String>,
+    /// When the backend will permanently purge it (None = no schedule).
+    pub scheduled_purge_on: Option<String>,
 }
 
 /// Connection string component
@@ -224,6 +250,26 @@ pub trait SecretOperations: Send + Sync {
         request: &SecretRequest,
     ) -> Result<SecretProperties>;
 
+    /// Update only the attributes/tags of an existing secret — no new
+    /// version, no value read or write.
+    ///
+    /// Azure implements this with `PATCH {vault}/secrets/{name}` (the
+    /// UpdateSecret operation), which works on *disabled* secrets — the
+    /// full-write path cannot, because reading or confirming the value of a
+    /// disabled secret returns HTTP 403 `SecretDisabled`. Implementors
+    /// without a dedicated attributes call keep this default error so
+    /// callers can fall back to a full write.
+    async fn update_secret_attributes(
+        &self,
+        _vault_name: &str,
+        _secret_name: &str,
+        _update: &SecretAttributesUpdate,
+    ) -> Result<SecretProperties> {
+        Err(CrosstacheError::azure_api(
+            "attribute-only secret updates are not supported by this backend",
+        ))
+    }
+
     /// Restore a deleted secret
     async fn restore_secret(&self, vault_name: &str, secret_name: &str)
         -> Result<SecretProperties>;
@@ -231,9 +277,8 @@ pub trait SecretOperations: Send + Sync {
     /// Permanently purge a deleted secret
     async fn purge_secret(&self, vault_name: &str, secret_name: &str) -> Result<()>;
 
-    /// List deleted secrets
-    #[allow(dead_code)]
-    async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<SecretSummary>>;
+    /// List soft-deleted secrets awaiting purge.
+    async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<DeletedSecretSummary>>;
 
     /// Check if secret exists
     async fn secret_exists(&self, vault_name: &str, secret_name: &str) -> Result<bool>;
@@ -438,68 +483,39 @@ async fn read_error_body(response: reqwest::Response) -> String {
         .unwrap_or_else(|e| format!("(failed to read error body: {e})"))
 }
 
-/// Parse one entry of a `GET /deletedsecrets` response page into a
-/// [`SecretSummary`].
-///
-/// Deleted secret items carry the original secret `id`
-/// (`https://<vault>.vault.azure.net/secrets/<name>`) alongside their
-/// attributes and tags, so the summary can be built without a follow-up
-/// `get_secret` call (which would 404 for a deleted secret anyway).
-/// Returns `None` when the entry has no usable `id`.
-fn parse_deleted_secret_summary(item: &serde_json::Value) -> Option<SecretSummary> {
+/// Parse one item from Azure's `GET {vault}/deletedsecrets` (api 7.4).
+/// `deletedDate`/`scheduledPurgeDate` are top-level epoch-second fields on
+/// the deleted-secret item (not under `attributes`).
+fn parse_deleted_secret_summary(item: &serde_json::Value) -> Option<DeletedSecretSummary> {
     let id = item.get("id").and_then(|v| v.as_str())?;
     let name = id.rsplit('/').next().unwrap_or(id).to_string();
     if name.is_empty() {
         return None;
     }
 
-    let attributes = item.get("attributes").unwrap_or(&serde_json::Value::Null);
-    let enabled = attributes
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let updated_on = attributes
-        .get("updated")
-        .and_then(|v| v.as_i64())
-        .map(|ts| {
-            chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.to_string())
-                .unwrap_or_else(|| "Unknown".to_string())
+    let epoch_string = |key: &str| {
+        item.get(key)
+            .and_then(|v| v.as_i64())
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|dt| dt.to_string())
+    };
+
+    let original_name = item
+        .get("tags")
+        .and_then(|v| v.as_object())
+        .and_then(|tags| {
+            tags.get("original_name")
+                .or_else(|| tags.get("name"))
+                .and_then(|v| v.as_str())
         })
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    let mut tags = HashMap::new();
-    if let Some(tags_obj) = item.get("tags").and_then(|v| v.as_object()) {
-        for (key, value) in tags_obj {
-            if let Some(tag_value) = value.as_str() {
-                tags.insert(key.clone(), tag_value.to_string());
-            }
-        }
-    }
-
-    let original_name = tags
-        .get("original_name")
-        .or_else(|| tags.get("name"))
-        .cloned()
+        .map(str::to_string)
         .unwrap_or_else(|| name.clone());
-    let groups = tags
-        .get("groups")
-        .map(|g| g.trim().to_string())
-        .filter(|g| !g.is_empty());
 
-    Some(SecretSummary {
-        name: original_name.clone(),
+    Some(DeletedSecretSummary {
+        name,
         original_name,
-        note: tags.get("note").cloned(),
-        folder: tags.get("folder").cloned(),
-        groups,
-        updated_on,
-        enabled,
-        content_type: item
-            .get("contentType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("text/plain")
-            .to_string(),
+        deleted_on: epoch_string("deletedDate"),
+        scheduled_purge_on: epoch_string("scheduledPurgeDate"),
     })
 }
 
@@ -804,13 +820,15 @@ impl SecretOperations for AzureSecretOperations {
             )));
         }
 
-        // Parse the response and convert to SecretProperties
-        let _json: serde_json::Value =
+        // Parse the response and convert to SecretProperties. The PUT
+        // response is a full secret bundle (id, value, attributes, tags), so
+        // build the result from it directly instead of a confirmation GET —
+        // a follow-up GET would return HTTP 403 `SecretDisabled` when this
+        // write just disabled the secret (enabled=false), failing the
+        // operation *after* the write succeeded.
+        let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-
-        // Return the created secret properties
-        self.get_secret(vault_name.as_str(), &sanitized_name, true)
-            .await
+        parse_secret_properties_bundle(&json, &sanitized_name, true, "")
     }
 
     async fn get_secret(
@@ -1137,6 +1155,96 @@ impl SecretOperations for AzureSecretOperations {
         self.set_secret(vault_name, request).await
     }
 
+    async fn update_secret_attributes(
+        &self,
+        vault_name: &str,
+        secret_name: &str,
+        update: &SecretAttributesUpdate,
+    ) -> Result<SecretProperties> {
+        let vault_name = self.validated_vault_name(vault_name)?;
+        let sanitized_name = sanitize_secret_name(secret_name)?;
+
+        // `PATCH {vault}/secrets/{name}?api-version=7.4` (UpdateSecret):
+        // updates attributes/tags of the latest version without reading or
+        // writing the value, so it works on disabled secrets and never
+        // creates a new version. Omitted body fields are left unchanged.
+        let secret_url = self.key_vault_api_url(&vault_name, &["secrets", &sanitized_name])?;
+
+        // Get an access token for Key Vault
+        let token = self
+            .auth_provider
+            .get_token(&["https://vault.azure.net/.default"])
+            .await?;
+
+        // Build the request body from only the fields being changed.
+        let mut body = serde_json::json!({});
+        let mut attributes = serde_json::json!({});
+        if let Some(enabled) = update.enabled {
+            attributes["enabled"] = serde_json::json!(enabled);
+        }
+        if let Some(expires_on) = update.expires_on {
+            attributes["exp"] = serde_json::json!(expires_on.timestamp());
+        }
+        if let Some(not_before) = update.not_before {
+            attributes["nbf"] = serde_json::json!(not_before.timestamp());
+        }
+        if attributes.as_object().is_some_and(|obj| !obj.is_empty()) {
+            body["attributes"] = attributes;
+        }
+        if let Some(ref content_type) = update.content_type {
+            body["contentType"] = serde_json::json!(content_type);
+        }
+        if let Some(ref tags) = update.tags {
+            if let Some(folder) = tags.get("folder") {
+                validate_folder_path(folder)?;
+            }
+            body["tags"] = serde_json::json!(tags);
+        }
+
+        // Create HTTP client with proper timeout configuration
+        let network_config = NetworkConfig::default();
+        let client = create_http_client(&network_config)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", token.token.secret())
+                .parse()
+                .map_err(|e| CrosstacheError::azure_api(format!("Invalid token format: {e}")))?,
+        );
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+
+        // Make the REST API call
+        let response = client
+            .patch(&secret_url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| classify_network_error(&e, &secret_url))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            if status == 404 {
+                return Err(CrosstacheError::SecretNotFound {
+                    name: secret_name.to_string(),
+                    suggestion: None,
+                });
+            }
+            let error_text = read_error_body(response).await;
+            return Err(CrosstacheError::azure_api(format!(
+                "Failed to update secret attributes: HTTP {status} - {error_text}"
+            )));
+        }
+
+        // The PATCH response is a secret bundle without the value.
+        let json: serde_json::Value =
+            read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
+        parse_secret_properties_bundle(&json, &sanitized_name, false, "")
+    }
+
     async fn restore_secret(
         &self,
         vault_name: &str,
@@ -1203,9 +1311,12 @@ impl SecretOperations for AzureSecretOperations {
         let vault_name = self.validated_vault_name(vault_name)?;
         let sanitized_name = sanitize_secret_name(secret_name)?;
 
-        // Use REST API to permanently purge a deleted secret
+        // Use REST API to permanently purge a deleted secret.
+        // The purge operation is `DELETE {vault}/deletedsecrets/{name}` —
+        // no trailing `/purge` segment; that returns HTTP 400 BadParameter
+        // ("Method DELETE does not allow operation 'purge'").
         let purge_url =
-            self.key_vault_api_url(&vault_name, &["deletedsecrets", &sanitized_name, "purge"])?;
+            self.key_vault_api_url(&vault_name, &["deletedsecrets", &sanitized_name])?;
 
         // Get an access token for Key Vault
         let token = self
@@ -1248,7 +1359,7 @@ impl SecretOperations for AzureSecretOperations {
         Ok(())
     }
 
-    async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<SecretSummary>> {
+    async fn list_deleted_secrets(&self, vault_name: &str) -> Result<Vec<DeletedSecretSummary>> {
         let vault_name = self.validated_vault_name(vault_name)?;
 
         // Use REST API to list soft-deleted secrets
@@ -1969,11 +2080,6 @@ impl SecretManager {
             });
         }
 
-        // Display formatted table
-        let formatter = TableFormatter::new(OutputFormat::Table, self.no_color, None, None);
-        let table_output = formatter.format_table(&result)?;
-        println!("{table_output}");
-
         Ok(result)
     }
 
@@ -2486,7 +2592,10 @@ mod tests {
             Ok(())
         }
 
-        async fn list_deleted_secrets(&self, _vault_name: &str) -> Result<Vec<SecretSummary>> {
+        async fn list_deleted_secrets(
+            &self,
+            _vault_name: &str,
+        ) -> Result<Vec<DeletedSecretSummary>> {
             Err(CrosstacheError::unknown("not implemented in fake"))
         }
 
@@ -2664,69 +2773,58 @@ mod tests {
     #[test]
     fn test_parse_deleted_secret_summary_full() {
         let item = serde_json::json!({
-            "id": "https://myvault.vault.azure.net/secrets/my-secret",
-            "recoveryId": "https://myvault.vault.azure.net/deletedsecrets/my-secret",
+            "id": "https://myvault.vault.azure.net/deletedsecrets/my-secret",
             "deletedDate": 1_700_000_100,
             "scheduledPurgeDate": 1_707_776_100,
-            "contentType": "application/json",
-            "attributes": {
-                "enabled": false,
-                "created": 1_700_000_000,
-                "updated": 1_700_000_050,
-                "recoveryLevel": "Recoverable+Purgeable"
-            },
             "tags": {
-                "original_name": "My Secret",
-                "groups": "alpha,beta",
-                "note": "a note",
-                "folder": "apps/web"
+                "original_name": "My Secret"
             }
         });
 
         let summary = parse_deleted_secret_summary(&item).unwrap();
-        assert_eq!(summary.name, "My Secret");
+        assert_eq!(summary.name, "my-secret");
         assert_eq!(summary.original_name, "My Secret");
-        assert_eq!(summary.note.as_deref(), Some("a note"));
-        assert_eq!(summary.folder.as_deref(), Some("apps/web"));
-        assert_eq!(summary.groups.as_deref(), Some("alpha,beta"));
-        assert!(!summary.enabled);
-        assert_eq!(summary.content_type, "application/json");
         assert_eq!(
-            summary.updated_on,
-            chrono::DateTime::from_timestamp(1_700_000_050, 0)
-                .unwrap()
-                .to_string()
+            summary.deleted_on,
+            Some(
+                chrono::DateTime::from_timestamp(1_700_000_100, 0)
+                    .unwrap()
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            summary.scheduled_purge_on,
+            Some(
+                chrono::DateTime::from_timestamp(1_707_776_100, 0)
+                    .unwrap()
+                    .to_string()
+            )
         );
     }
 
     #[test]
     fn test_parse_deleted_secret_summary_minimal() {
         let item = serde_json::json!({
-            "id": "https://myvault.vault.azure.net/secrets/bare-secret"
+            "id": "https://myvault.vault.azure.net/deletedsecrets/bare-secret"
         });
 
         let summary = parse_deleted_secret_summary(&item).unwrap();
         assert_eq!(summary.name, "bare-secret");
         assert_eq!(summary.original_name, "bare-secret");
-        assert_eq!(summary.note, None);
-        assert_eq!(summary.folder, None);
-        assert_eq!(summary.groups, None);
-        assert!(summary.enabled);
-        assert_eq!(summary.content_type, "text/plain");
-        assert_eq!(summary.updated_on, "Unknown");
+        assert_eq!(summary.deleted_on, None);
+        assert_eq!(summary.scheduled_purge_on, None);
     }
 
     #[test]
     fn test_parse_deleted_secret_summary_legacy_name_tag_and_empty_groups() {
         let item = serde_json::json!({
-            "id": "https://myvault.vault.azure.net/secrets/legacy",
+            "id": "https://myvault.vault.azure.net/deletedsecrets/legacy",
             "tags": { "name": "Legacy Name", "groups": "   " }
         });
 
         let summary = parse_deleted_secret_summary(&item).unwrap();
-        assert_eq!(summary.name, "Legacy Name");
-        // Whitespace-only groups tag is treated as no groups
-        assert_eq!(summary.groups, None);
+        assert_eq!(summary.name, "legacy");
+        assert_eq!(summary.original_name, "Legacy Name");
     }
 
     #[test]

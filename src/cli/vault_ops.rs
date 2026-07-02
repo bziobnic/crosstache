@@ -411,7 +411,7 @@ fn render_vault_list(
             page.page_size.is_some(),
         ));
     }
-    if let Some(footer) = pagination_footer_text(&page, "vault", output_format) {
+    if let Some(footer) = pagination_footer_text(&page, "vault", "vaults", output_format) {
         output.push('\n');
         output.push_str(&footer);
     }
@@ -1289,7 +1289,9 @@ async fn execute_vault_share(
                         paged.page_size.is_some(),
                     ));
                 }
-                if let Some(footer) = pagination_footer_text(&paged, "assignment", fmt) {
+                if let Some(footer) =
+                    pagination_footer_text(&paged, "assignment", "assignments", fmt)
+                {
                     output.push('\n');
                     output.push_str(&footer);
                 }

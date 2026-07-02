@@ -47,6 +47,16 @@ async fn main() {
         return;
     }
 
+    if args.len() > 1 && args[1] == "__complete-folders" {
+        let format = OutputFormat::Plain; // Default format for completion
+        if let Err(e) = run_complete_folders().await {
+            error!("Error: {}", e);
+            print_user_friendly_error(&e, format);
+            std::process::exit(e.exit_code());
+        }
+        return;
+    }
+
     // Parse command-line arguments
     let cli = Cli::parse();
     let format = cli.format; // OutputFormat is Copy
@@ -63,6 +73,12 @@ async fn run_complete_secrets() -> Result<()> {
     // Load config without validation for internal complete-secrets command
     let config = load_config_without_validation().await?;
     crate::cli::secret_ops::execute_complete_secrets(config).await
+}
+
+async fn run_complete_folders() -> Result<()> {
+    // Load config without validation for the internal completion command
+    let config = load_config_without_validation().await?;
+    crate::cli::secret_ops::execute_complete_folders(config).await
 }
 
 async fn run(cli: Cli) -> Result<()> {

@@ -465,6 +465,44 @@ async fn set_secret_update_path_when_already_exists() {
 }
 
 #[tokio::test]
+async fn update_secret_enabled_flag_is_unsupported() {
+    use aws_sdk_secretsmanager::operation::list_secrets::ListSecretsOutput;
+    use crosstache::backend::{BackendError, SecretBackend};
+    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+
+    // AWS has no enable/disable concept; the flag must fail loudly before
+    // any API call is made (no mock rules are consumed).
+    let rule = mock!(Client::list_secrets).then_output(|| ListSecretsOutput::builder().build());
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let backend = aws_secret_backend(client);
+
+    let request = SecretUpdateRequest {
+        name: "db-password".to_string(),
+        new_name: None,
+        value: None,
+        content_type: None,
+        enabled: Some(false),
+        expires_on: FieldUpdate::Unchanged,
+        not_before: FieldUpdate::Unchanged,
+        tags: None,
+        groups: None,
+        note: FieldUpdate::Unchanged,
+        folder: FieldUpdate::Unchanged,
+        replace_tags: false,
+        replace_groups: false,
+    };
+
+    let err = backend
+        .update_secret("myproj-kv", "db-password", request)
+        .await
+        .expect_err("--enabled must not be a silent no-op on AWS");
+    assert!(
+        matches!(&err, BackendError::Unsupported(feature) if feature == "enable/disable secrets"),
+        "expected Unsupported, got: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn list_versions_returns_history() {
     use aws_sdk_secretsmanager::operation::list_secret_version_ids::ListSecretVersionIdsOutput;
     use aws_sdk_secretsmanager::types::SecretVersionsListEntry;
