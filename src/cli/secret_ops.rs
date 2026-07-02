@@ -768,7 +768,23 @@ pub(crate) async fn execute_secret_history_direct(
             .list_versions(&vault_name, name)
             .await?;
         if versions.is_empty() {
-            output::info(&format!("No version history for '{name}'"));
+            let fmt = config.runtime_output_format;
+            if matches!(
+                fmt,
+                OutputFormat::Table | OutputFormat::Plain | OutputFormat::Raw
+            ) {
+                output::info(&format!("No version history for '{name}'"));
+            } else {
+                // Valid-empty machine output on stdout (e.g. `[]` for JSON).
+                use crate::utils::format::TableFormatter;
+                let formatter = TableFormatter::new(
+                    fmt,
+                    config.no_color,
+                    config.template.clone(),
+                    config.runtime_columns.clone(),
+                );
+                println!("{}", formatter.format_table(&versions)?);
+            }
         } else {
             use crate::utils::format::TableFormatter;
             let formatter = TableFormatter::new(
