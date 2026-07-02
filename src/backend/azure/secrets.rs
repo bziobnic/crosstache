@@ -87,8 +87,10 @@ fn build_patched_tags(
     };
 
     // Resolve groups: honor replace_groups semantics.
+    // When request.groups is None, preserve existing groups (no change requested).
     let groups = match &request.groups {
         Some(new_groups) if !request.replace_groups => {
+            // Merge: append new_groups to existing
             let mut existing: Vec<String> = current_tags
                 .get("groups")
                 .map(|g| g.split(',').map(|s| s.trim().to_string()).collect())
@@ -100,16 +102,33 @@ fn build_patched_tags(
             }
             Some(existing)
         }
-        other => other.clone(),
+        Some(new_groups) => {
+            // Replace: use new_groups as-is (may be empty)
+            Some(new_groups.clone())
+        }
+        None => {
+            // No change requested: preserve existing groups
+            current_tags.get("groups").map(|g| {
+                g.split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+        }
     };
 
     tags.insert("original_name".to_string(), request.name.clone());
     tags.insert("created_by".to_string(), "crosstache".to_string());
+
+    // Handle groups: remove first, then conditionally insert.
+    tags.remove("groups");
     if let Some(groups) = groups {
         if !groups.is_empty() {
             tags.insert("groups".to_string(), groups.join(","));
         }
     }
+
+    // Handle note: remove first, then conditionally insert.
+    tags.remove("note");
     if let Some(note) = request
         .note
         .clone()
@@ -117,6 +136,9 @@ fn build_patched_tags(
     {
         tags.insert("note".to_string(), note);
     }
+
+    // Handle folder: remove first, then conditionally insert.
+    tags.remove("folder");
     if let Some(folder) = request
         .folder
         .clone()
@@ -124,6 +146,7 @@ fn build_patched_tags(
     {
         tags.insert("folder".to_string(), folder);
     }
+
     tags
 }
 
@@ -517,5 +540,84 @@ mod build_patched_tags_tests {
         let result = build_patched_tags(&request, &current);
 
         assert_eq!(result.get("groups").map(String::as_str), Some("team-a,b"));
+    }
+
+    #[test]
+    fn clear_note_removes_existing_note() {
+        let current = current_tags();
+        let mut request = base_request("my-secret");
+        request.note = FieldUpdate::Clear;
+
+        let result = build_patched_tags(&request, &current);
+
+        // Note key should be completely removed
+        assert!(!result.contains_key("note"));
+        // Other tags should be preserved
+        assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
+        assert_eq!(result.get("groups").map(String::as_str), Some("team-a"));
+    }
+
+    #[test]
+    fn clear_folder_removes_existing_folder() {
+        let mut current = current_tags();
+        current.insert("folder".to_string(), "app/db".to_string());
+        let mut request = base_request("my-secret");
+        request.folder = FieldUpdate::Clear;
+
+        let result = build_patched_tags(&request, &current);
+
+        // Folder key should be completely removed
+        assert!(!result.contains_key("folder"));
+        // Other tags should be preserved
+        assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
+        assert_eq!(result.get("groups").map(String::as_str), Some("team-a"));
+        assert_eq!(result.get("note").map(String::as_str), Some("old"));
+    }
+
+    #[test]
+    fn clear_groups_via_replace_empty_list() {
+        let current = current_tags();
+        let mut request = base_request("my-secret");
+        request.groups = Some(vec![]); // Empty list with replace_groups=true
+        request.replace_groups = true;
+
+        let result = build_patched_tags(&request, &current);
+
+        // Groups key should be completely removed
+        assert!(!result.contains_key("groups"));
+        // Other tags should be preserved
+        assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
+        assert_eq!(result.get("note").map(String::as_str), Some("old"));
+    }
+
+    #[test]
+    fn unchanged_note_preserves_existing_value() {
+        let current = current_tags();
+        let mut request = base_request("my-secret");
+        request.note = FieldUpdate::Unchanged; // Explicitly unchanged
+
+        let result = build_patched_tags(&request, &current);
+
+        // Note should be preserved from current_tags
+        assert_eq!(result.get("note").map(String::as_str), Some("old"));
+        // Other tags should be preserved
+        assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
+        assert_eq!(result.get("groups").map(String::as_str), Some("team-a"));
+    }
+
+    #[test]
+    fn unchanged_folder_preserves_existing_value() {
+        let mut current = current_tags();
+        current.insert("folder".to_string(), "app/db".to_string());
+        let mut request = base_request("my-secret");
+        request.folder = FieldUpdate::Unchanged; // Explicitly unchanged
+
+        let result = build_patched_tags(&request, &current);
+
+        // Folder should be preserved from current_tags
+        assert_eq!(result.get("folder").map(String::as_str), Some("app/db"));
+        // Other tags should be preserved
+        assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
+        assert_eq!(result.get("groups").map(String::as_str), Some("team-a"));
     }
 }

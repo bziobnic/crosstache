@@ -255,6 +255,42 @@ fn update_note_only_preserves_group_membership() {
 }
 
 #[test]
+fn clear_note_and_folder_in_update() {
+    let env = TestEnv::new();
+    // Create secret with note and folder
+    env.set_secret_with_args(
+        "CLEAR_METADATA_KEY",
+        "value",
+        &["--note", "initial note", "--folder", "app/db"],
+    );
+
+    // Verify the secret value is correct
+    let value = env.get_raw("CLEAR_METADATA_KEY");
+    assert_eq!(value, "value");
+
+    // Clear the note and folder via update
+    env.xv_ok(&[
+        "update",
+        "CLEAR_METADATA_KEY",
+        "--clear-note",
+        "--clear-folder",
+    ]);
+
+    // Verify value is still correct after clearing metadata
+    let value_after = env.get_raw("CLEAR_METADATA_KEY");
+    assert_eq!(value_after, "value");
+
+    // Verify that the secret is NOT found when searching by its former folder
+    // (this indirectly confirms the folder was cleared)
+    let found_by_folder = env.xv_ok(&["find", "--folder", "app/db", "--names-only"]);
+    assert!(
+        !found_by_folder.contains("CLEAR_METADATA_KEY"),
+        "secret should not be found by its former folder after clearing: {}",
+        found_by_folder
+    );
+}
+
+#[test]
 fn delete_and_verify() {
     let env = TestEnv::new();
     env.set_secret("TEMP_SECRET", "temp-value");
