@@ -295,6 +295,57 @@ async fn e2e_azure_secret_full_lifecycle() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_azure_rename_roundtrip() {
+    let backend = azure_backend().await;
+    let vault = test_vault();
+    let source = unique_name("rn-src");
+    let dest = unique_name("rn-dst");
+
+    let mut req = make_request(&source, "rename-me");
+    req.groups = Some(vec!["e2e".to_string()]);
+    req.note = Some("rename e2e".to_string());
+    backend
+        .secrets()
+        .set_secret(&vault, req)
+        .await
+        .expect("create rename source");
+
+    let created = backend
+        .secrets()
+        .rename_secret(&vault, &source, &dest)
+        .await
+        .expect("rename_secret should succeed");
+    assert_eq!(created.name, dest);
+
+    let got = backend
+        .secrets()
+        .get_secret(&vault, &dest, true)
+        .await
+        .expect("get renamed secret");
+    assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("rename-me"));
+    assert_eq!(got.tags.get("note").map(String::as_str), Some("rename e2e"));
+    assert_eq!(got.tags.get("groups").map(String::as_str), Some("e2e"));
+
+    // The old name must be soft-deleted (GET returns 404 once the delete
+    // lands; Key Vault applies it promptly after DELETE returns).
+    let exists = backend
+        .secrets()
+        .secret_exists(&vault, &source)
+        .await
+        .expect("exists check on the old name");
+    assert!(
+        !exists,
+        "source '{source}' should be soft-deleted after rename"
+    );
+
+    // Cleanup: soft-delete the destination. The vault has purge protection,
+    // so purging is blocked by policy — soft delete + unique names is the
+    // documented harness contract. `source` is already soft-deleted.
+    cleanup(&backend, &vault, &[&dest]).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_azure_bulk_set_and_get() {
     let backend = azure_backend().await;
     let vault = test_vault();

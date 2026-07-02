@@ -413,7 +413,22 @@ xv update API_KEY --group production --group api-tier   # repeatable
 xv update API_KEY --folder myapp/edge                    # move to another folder
 xv update API_KEY --tag rotated-by=alice                 # custom tag
 xv update API_KEY --enabled false                        # disable secret (hidden from ls/group list by default)
+xv update API_KEY --rename API_KEY_V2                     # rename in place, metadata carried over
 ```
+
+`--rename` reads the current value and metadata, creates the new name (tags,
+groups, note, folder, content type, and expiry ride along), then deletes the
+old name with the backend's normal delete. Version history is not carried
+over — the new name starts fresh. Renaming onto a name that already exists is
+refused. Combine `--rename` with other update flags (`--note`, `--group`,
+`--tag`, …) to change metadata and rename in one call — the in-place updates
+apply first, then the rename. If the new secret is created but deleting the
+old one fails, `xv update` exits with code `43` (`xv-rename-incomplete`) and
+prints both names plus recovery steps; the new secret is never rolled back.
+On Azure the old name is left soft-deleted (`xv ls --deleted` shows it); on
+AWS it enters the standard 30-day recovery window; on local it lands in
+trash. Renaming back to a soft-deleted/recoverable old name will conflict
+until the retention window clears it.
 
 ### Delete and recover
 
