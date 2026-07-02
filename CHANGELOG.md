@@ -8,14 +8,25 @@
 - **`--names-only` on `vault list` and `file list`** (one name per line, pipe-friendly; `file list --names-only` lists recursively).
 - **`file list --pager [auto|always|never]`** matching every other list command (bare `--pager` unchanged).
 - **`xv ls` is folder-aware and ls-styled.** The default TTY output is now a multi-column name grid with folders listed first (`prod/`), derived from each secret's `folder` tag. `xv ls prod` lists inside a folder, `xv ls -l` is a borderless long listing (name, updated date, groups, note), `xv ls -r` flattens recursively, and the previous rounded table remains available via explicit `--format table`. Piped/machine output (`--format json|yaml|csv`, `--names-only`) keeps the flat schema unchanged, scoped to the requested subtree. Machine output rows are now sorted by display name (previously backend order).
+- **Global `--columns <COLS>` flag returns** (removed as a silent no-op in the P0 pass): comma-separated, case-insensitive column names applied in the given order to `table`/`plain`/`csv` output of every list command. Unknown names error and list the available columns. Explicit `--columns` overrides the hide-empty-columns behavior; JSON/YAML/template keep the full schema.
+- **`xv find --format csv`** now works (previously find had no CSV output).
+- **`xv context list` and `xv env list` honor the global `--format`** (json/yaml/csv/…): `context list` rows are `{status, vault, resource_group, last_used, usage_count}`; `env list` renders `Name/Active/Backend/Vault/Resource Group` rows instead of a hand-rolled line format.
+- **`xv config show --format yaml`** serializes the whole `Config` object (like `--format json` always did — `config show` is a resource view, not a list; this documented exception is the one command whose machine output is not the table's row set).
 
 ### Changed
 
 - **List empty-states now go to stderr** for human formats across all list commands (including `xv ls`, whose empty message previously landed on stdout — `xv ls > file` on an empty scope now writes an empty file), and empty-state/count wording is standardized via shared helpers. `xv history`'s count line moved from stderr to stdout (human formats only).
 - **`vault share list -f/--fmt` is deprecated**: use the global `--format`. `--fmt` still works with a warning for one release; `-f` is removed. `vault list`'s redundant local `--format` was removed (the identical global flag takes over transparently).
+- **BREAKING (machine shapes normalized).** Pre-1.0 breaking changes, deliberate and grouped here:
+  - **`xv find`**: JSON/YAML output is now the standard row shape — `score` is a two-decimal string (was a raw integer) and `folder`/`groups` are empty strings (were `null`). The TTY output is the shared rounded table; the score bar and UPPERCASE header are gone. `--names-only` unchanged.
+  - **`xv audit`**: honors the global `--format` (JSON = one array of `{timestamp, operation, resource, caller, status}` rows). `--raw` is deprecated to a hidden alias that warns and implies `--format json`; its old per-entry documents with `---` separators (and rich fields like `correlation_id`/`properties`) are no longer emitted. The contextual `Vault:`/`Secret:` lines moved to stderr so `xv audit --format json | jq` sees pure JSON, and the human timestamp is now full-date (`%Y-%m-%d %H:%M:%S`).
+  - **`xv file list --format csv`**: columns now match the table — `Kind,Name,Size,Content-Type,Modified,Groups` (was a snake_case kitchen-sink set with raw byte sizes, etags, and JSON-blob metadata columns). JSON/YAML keep the rich full-fidelity serialization. The human table gains the leading `Kind` column.
+- **Counts are plural-aware**: `1 vault`, `3 vaults`, `5 audit log entries` — the `"N noun(s)"` style from the previous pass is gone.
+- **`xv config show` human table** renders through the shared formatter (uniform `--columns`/`--no-color` behavior); same for `config show --resolved`.
 
 ### Fixed
 
+- **Empty `history`, `find`, and `audit` machine-format output is now valid-empty** (`[]` for JSON, headers-only for CSV) on stdout instead of nothing, so `| jq` works on empty results. Same for empty `context list`/`env list` machine output.
 - **Empty machine-format output is now valid-empty** (`[]` for JSON) on stdout for `vault list`, `vault share list`, and `file list`, instead of a stderr-only message that broke `| jq` on empty results.
 - **`xv ls` table rendering.** Columns whose cells are all empty are no longer rendered as blank zero-width headers, narrow terminals now shrink the widest column first instead of chopping every column (no more `UT`/`C` timestamp wrapping), and the `Updated` column shows the date only (`2026-05-17`). Machine formats (JSON/YAML/CSV) are unchanged.
 - **`xv share list` honors the global `--format`** (json/yaml/csv/…) like `xv vault share list` already did; its empty-state message now goes to stderr, and machine formats emit valid empty output (`[]`) for pipes.
@@ -23,7 +34,7 @@
 
 ### Removed
 
-- The global `--columns` flag, which was documented but never implemented (a silent no-op since introduction). Column selection will return with the planned list-renderer unification.
+- Dead legacy `execute_secret_list` renderer and its `secret_count_label` helper; the `format_table()` free function (all tables now go through `TableFormatter`); the `xv find` score bar.
 
 ---
 

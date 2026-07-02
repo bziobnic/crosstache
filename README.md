@@ -560,7 +560,8 @@ xv find db --limit 10                    # cap rows (default 50)
 xv find db --min-score 0.5               # tighter threshold (0.0..=1.0; default 0.3)
 xv find db --all-vaults                  # search every vault you can list
 xv find db --names-only                  # pipe-friendly
-xv find db --format json                 # [{name, score, folder, groups}]
+xv find db --format json                 # [{name, score, folder, groups}] — score is a "NN.00" string
+xv find db --format csv                  # Name,Score,Folder,Groups
 ```
 
 ### Pipe into fzf — interactive picker
@@ -1154,6 +1155,7 @@ These work with any command:
 | Flag | Purpose |
 |------|---------|
 | `--format <FORMAT>` | `table` / `json` / `yaml` / `csv` / `plain` / `raw` / `template` (default: `auto` — table on TTY, json for pipes) |
+| `--columns <COLS>` | Comma-separated column names for `table`/`plain`/`csv` output, in order (case-insensitive, e.g. `--columns Name,Updated`); unknown names error |
 | `--credential-type <TYPE>` | Azure credential type (`cli`, `managed_identity`, `environment`, `default`) |
 | `--template <TEMPLATE>` | Custom template string for template format |
 | `--no-color` | Disable colored output (same effect as the `NO_COLOR` env var) |
