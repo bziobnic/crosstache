@@ -2871,6 +2871,10 @@ async fn execute_secret_run(
                     if !no_masking && !value.is_empty() {
                         secret_values.push(value.clone());
                     }
+                } else {
+                    let msg = format!("Secret '{}' resolved but has no value", secret.name);
+                    output::warn(&msg);
+                    fetch_failures.push(msg);
                 }
             }
             Err(e) => {
@@ -2923,7 +2927,9 @@ async fn execute_secret_run(
                             secret_values.push(value);
                         }
                     } else {
-                        output::warn(&format!("URI '{uri}' resolved but has no value"));
+                        let msg = format!("URI '{uri}' resolved but has no value");
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
                     }
                 }
                 Err(e) => {

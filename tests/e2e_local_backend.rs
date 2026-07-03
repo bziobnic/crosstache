@@ -1629,9 +1629,13 @@ fn run_aborts_on_failing_uri_reference() {
     ]);
     let output = cmd.output().expect("execute xv run");
 
-    assert!(
-        !output.status.success(),
-        "xv run should fail (non-zero exit) when a referenced secret cannot be fetched:\nstdout: {}\nstderr: {}",
+    // Pin the exact exit code (3 == CrosstacheError::Config, see src/error.rs)
+    // so an accidental change of error variant is caught, not just "any
+    // non-zero exit".
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv run should fail with the config-error exit code (3) when a referenced secret cannot be fetched:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -1645,6 +1649,25 @@ fn run_aborts_on_failing_uri_reference() {
         "child process must NOT run when a secret fetch fails (fail-fast default)"
     );
 }
+
+// Note: there is no equivalent test here for the selected-secrets fetch loop
+// (the non-URI path in `execute_secret_run`). On the local backend,
+// `get_secret` reads directly from a file this test harness fully controls —
+// there is no network/permission layer to fail transiently, and corrupting
+// an on-disk entry to force a decode error would couple this test tightly to
+// internal storage format details rather than the abort/collect logic under
+// test (which is shared with the URI path above and already covered by it).
+//
+// The "resolved but has no value" branch (added for both loops: a backend
+// returning `Ok` with `value: None`) is likewise not independently testable
+// here: local's `get_secret` always returns `Some(value)` when
+// `include_value: true` (verified in `src/backend/local/secrets.rs`), and
+// `xv set --stdin` with empty input is rejected at write time
+// ("Secret value cannot be empty", exit 3) — so an empty-but-present value,
+// which would still be `Some("")` rather than `None`, isn't reachable via the
+// local backend either. That branch is exercised for the URI path only
+// indirectly through code review / manual reasoning about the shared
+// `fetch_failures` collection logic.
 
 #[test]
 fn run_best_effort_launches_child_despite_failing_uri_reference() {
