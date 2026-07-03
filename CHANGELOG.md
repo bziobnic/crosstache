@@ -5,6 +5,7 @@
 ### Changed
 
 - **Breaking: `xv run` now aborts before launching the child when any selected secret or `xv://` reference fails to fetch; use `--best-effort` for the old behavior** (#306). Previously a per-secret fetch failure only printed a warning and the command ran anyway, which could silently launch a process missing an env var (e.g. after a transient backend error or a permission problem). All failures across both the selected-secret list and `xv://` reference resolution are now collected and reported together before the exit.
+- **Breaking: `xv inject` now aborts before writing/printing the rendered output when any `{{ secret:name }}` or `xv://` reference fails to resolve; use `--best-effort` for the old behavior** (#313). Previously a per-reference resolution failure only printed a warning and rendering continued, which could silently write a config file (e.g. `.env`) with unresolved `{{ secret:name }}` / `xv://` placeholders left in place while `xv inject` exited 0. An unparseable `xv://` reference in a template (e.g. a malformed backend prefix) is now also treated as a failure rather than silently skipped, since — unlike `xv run`'s scan of arbitrary parent-environment values, which can incidentally contain `xv://`-shaped substrings — every reference in a template the user wrote for `xv inject` is unambiguously intentional.
 
 ### Fixed
 

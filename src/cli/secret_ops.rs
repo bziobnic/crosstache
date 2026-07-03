@@ -1440,6 +1440,7 @@ pub(crate) async fn execute_secret_inject_direct(
     template: Option<String>,
     out: Option<String>,
     group: Vec<String>,
+    best_effort: bool,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -1451,7 +1452,7 @@ pub(crate) async fn execute_secret_inject_direct(
         )
     })?;
 
-    execute_secret_inject(reg, None, template, out, group, &config).await
+    execute_secret_inject(reg, None, template, out, group, best_effort, &config).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3192,12 +3193,14 @@ fn clean_split(window: &[u8], secrets: &[Zeroizing<String>], mut split: usize) -
     split
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_inject(
     reg: &BackendRegistry,
     vault: Option<String>,
     template_file: Option<String>,
     output_file: Option<String>,
     groups: Vec<String>,
+    best_effort: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -3236,6 +3239,20 @@ async fn execute_secret_inject(
     let mut required_secrets: Vec<String> = Vec::new();
     let mut cross_vault_refs: Vec<(String, BackendRef)> = Vec::new(); // (original_uri, parsed_ref)
 
+    // Failures collected across template parsing and secret fetching. By
+    // default any failure aborts rendering (and the output write) before it
+    // happens; `--best-effort` restores the old warn-and-continue behavior
+    // (matching `xv run`'s fetch_failures pattern, #314).
+    //
+    // Unlike `xv run`'s scan of arbitrary parent-environment values (which
+    // can incidentally contain `xv://`-shaped substrings unrelated to secret
+    // references — a genuine "lookalike"), every reference here comes from a
+    // template the user authored specifically for `xv inject`. Both
+    // `{{ secret:name }}` and `xv://vault/secret` are unambiguously
+    // intentional in that context, so an unparseable `xv://` reference is
+    // treated as a failure too, not silently skipped.
+    let mut fetch_failures: Vec<String> = Vec::new();
+
     // Find {{ secret:name }} references (current vault)
     for captures in secret_regex.captures_iter(&template_content) {
         if let Some(secret_name) = captures.get(1) {
@@ -3256,7 +3273,11 @@ async fn execute_secret_inject(
         }
         match BackendRef::parse(&format!("{vault_part}/{secret_part}")) {
             Ok(r) => cross_vault_refs.push((uri_key, r)),
-            Err(e) => output::warn(&format!("Skipping invalid URI '{uri_key}': {e}")),
+            Err(e) => {
+                let msg = format!("Invalid URI '{uri_key}': {e}");
+                output::warn(&msg);
+                fetch_failures.push(msg);
+            }
         }
     }
 
@@ -3336,7 +3357,6 @@ async fn execute_secret_inject(
     // Build a map of secret names/URIs to values
     let mut secret_values: HashMap<String, Zeroizing<String>> = HashMap::new();
     let mut cross_vault_values: HashMap<String, Zeroizing<String>> = HashMap::new(); // URI -> value
-    let mut missing_secrets: Vec<String> = Vec::new();
 
     // Fetch secrets from current vault
     for secret_name in &required_secrets {
@@ -3353,19 +3373,24 @@ async fn execute_secret_inject(
                     if let Some(value) = secret_props.value {
                         secret_values.insert(secret_name.clone(), value);
                     } else {
-                        missing_secrets.push(secret_name.clone());
+                        let msg = format!("Secret '{secret_name}' resolved but has no value");
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
                     }
                 }
                 Err(e) => {
-                    output::warn(&format!(
+                    let msg = format!(
                         "Failed to get value for secret '{}' from vault '{}': {}",
                         secret_name, vault_name, e
-                    ));
-                    missing_secrets.push(secret_name.clone());
+                    );
+                    output::warn(&msg);
+                    fetch_failures.push(msg);
                 }
             }
         } else {
-            missing_secrets.push(secret_name.clone());
+            let msg = format!("Secret '{secret_name}' not found in vault '{vault_name}'");
+            output::warn(&msg);
+            fetch_failures.push(msg);
         }
     }
 
@@ -3383,8 +3408,9 @@ async fn execute_secret_inject(
             let secret_name = match &backend_ref.secret {
                 Some(s) => s.clone(),
                 None => {
-                    output::warn(&format!("URI '{uri}' has no secret segment — skipping"));
-                    missing_secrets.push(uri.clone());
+                    let msg = format!("URI '{uri}' has no secret segment — skipping");
+                    output::warn(&msg);
+                    fetch_failures.push(msg);
                     continue;
                 }
             };
@@ -3404,22 +3430,35 @@ async fn execute_secret_inject(
                     if let Some(value) = secret_props.value {
                         cross_vault_values.insert(uri.clone(), value);
                     } else {
-                        output::warn(&format!("URI '{uri}' resolved but has no value"));
-                        missing_secrets.push(uri.clone());
+                        let msg = format!("URI '{uri}' resolved but has no value");
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
                     }
                 }
                 Err(e) => {
-                    output::warn(&format!("Failed to resolve URI '{uri}': {e}"));
-                    missing_secrets.push(uri.clone());
+                    let msg = format!("Failed to resolve URI '{uri}': {e}");
+                    output::warn(&msg);
+                    fetch_failures.push(msg);
                 }
             }
         }
     }
 
-    if !missing_secrets.is_empty() {
+    // Abort before rendering/writing if any reference failed to resolve,
+    // unless --best-effort was requested (the previous default:
+    // warn-and-continue, leaving unresolved placeholders in the output).
+    if !fetch_failures.is_empty() && !best_effort {
+        output::error(&format!(
+            "Aborting: {} secret(s)/reference(s) failed to resolve. Use --best-effort to render anyway.",
+            fetch_failures.len()
+        ));
+        for failure in &fetch_failures {
+            output::error(&format!("  - {failure}"));
+        }
         return Err(CrosstacheError::config(format!(
-            "Missing secrets: {}",
-            missing_secrets.join(", ")
+            "xv inject aborted: {} secret(s)/reference(s) failed to resolve: {}",
+            fetch_failures.len(),
+            fetch_failures.join("; ")
         )));
     }
 

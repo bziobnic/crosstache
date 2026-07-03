@@ -651,6 +651,9 @@ pub enum Commands {
         /// Filter secrets by group (can be specified multiple times)
         #[arg(short, long)]
         group: Vec<String>,
+        /// Continue and render/write the template even if some references fail to resolve (previous default)
+        #[arg(long)]
+        best_effort: bool,
     },
     /// Update secret properties in the current vault context
     Update {
@@ -1666,9 +1669,15 @@ impl Cli {
                 template,
                 out,
                 group,
+                best_effort,
             } => {
                 crate::cli::secret_ops::execute_secret_inject_direct(
-                    template, out, group, config, registry,
+                    template,
+                    out,
+                    group,
+                    best_effort,
+                    config,
+                    registry,
                 )
                 .await
             }
