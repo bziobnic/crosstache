@@ -302,6 +302,49 @@ async fn localstack_list_secrets_exposes_folder_tag() {
         .unwrap();
 }
 
+/// list_deleted_secrets must expose the xv:original_name tag in its
+/// summaries the same way list_secrets does — otherwise `xv ls --deleted`
+/// loses the user-facing name on AWS (issue #301 item A).
+#[tokio::test]
+async fn localstack_deleted_listing_exposes_original_name() {
+    if skip_unless_enabled() {
+        return;
+    }
+    let backend = build_backend().await;
+    let vault = format!("xv-test-{}", uuid::Uuid::new_v4());
+
+    let request = SecretRequest {
+        name: "Round.Trip".into(),
+        value: Zeroizing::new("deleted-value".into()),
+        groups: None,
+        note: None,
+        content_type: None,
+        enabled: None,
+        expires_on: None,
+        not_before: None,
+        tags: None,
+        folder: None,
+    };
+    backend.secrets().set_secret(&vault, request).await.unwrap();
+
+    // Soft-delete (default 30-day recovery window).
+    backend
+        .secrets()
+        .delete_secret(&vault, "Round.Trip")
+        .await
+        .unwrap();
+
+    let deleted = backend.secrets().list_deleted_secrets(&vault).await.unwrap();
+    let found = deleted
+        .iter()
+        .find(|s| s.name == "Round.Trip")
+        .unwrap_or_else(|| panic!("Round.Trip not found in deleted listing: {deleted:?}"));
+    assert_eq!(found.original_name, "Round.Trip");
+
+    // Cleanup: force-purge so reruns never hit the recovery window.
+    let _ = backend.secrets().purge_secret(&vault, "Round.Trip").await;
+}
+
 #[tokio::test]
 async fn localstack_vault_marker_create_list_delete() {
     if skip_unless_enabled() {

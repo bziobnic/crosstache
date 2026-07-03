@@ -883,6 +883,7 @@ impl SecretBackend for AwsSecretBackend {
         vault: &str,
     ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
         use crate::backend::aws::encoding::{is_marker, strip_prefix};
+        use crate::backend::aws::metadata::TAG_ORIGINAL_NAME;
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 
         let prefix = format!("{vault}/");
@@ -919,9 +920,17 @@ impl SecretBackend for AwsSecretBackend {
                 if is_marker(aws_full_name) {
                     continue;
                 }
+                let original_name_val = entry
+                    .tags()
+                    .iter()
+                    .find(|t| t.key() == Some(TAG_ORIGINAL_NAME))
+                    .and_then(|t| t.value())
+                    .map(String::from)
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| secret_name.clone());
                 summaries.push(DeletedSecretSummary {
-                    name: secret_name.clone(),
-                    original_name: secret_name,
+                    name: secret_name,
+                    original_name: original_name_val,
                     deleted_on: entry
                         .deleted_date()
                         .and_then(|d| chrono::DateTime::from_timestamp(d.secs(), 0))
