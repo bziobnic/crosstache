@@ -118,4 +118,4 @@ gitleaks protect --staged && xv scan --staged --hook
 Scanner is in-memory and re-fetches values per process. Expect 1–3 s on a 50-secret vault for `--staged`. To speed up:
 
 - `[scan].min_value_length = 12` — skip short values.
-- `XV_SCAN_DISABLE=1` (or `=true`, case-insensitive) — bypass entirely (escape hatch for emergencies).
+- `XV_SCAN_DISABLE=1` (or `=true`, case-insensitive) — bypass entirely (escape hatch for emergencies). The check runs *after* global config is loaded and validated, so a broken or missing config (e.g. no Azure subscription/tenant ID configured) still fails before this escape hatch applies — it is not a general "xv is broken" bypass.
