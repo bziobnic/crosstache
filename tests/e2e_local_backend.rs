@@ -1671,3 +1671,65 @@ fn copy_refuses_to_overwrite_existing_target_even_semantics_unchanged() {
     assert_eq!(env.get_raw("copy-dst"), "copy-dst-original");
     env.xv_ok(&["context", "use", "default", "--global"]);
 }
+
+#[test]
+fn move_preserves_group_folder_and_note_metadata() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest3"]);
+
+    env.set_secret_with_args(
+        "meta-src",
+        "meta-value",
+        &[
+            "--group",
+            "backend",
+            "--folder",
+            "prod",
+            "--note",
+            "something",
+        ],
+    );
+
+    env.xv_ok(&[
+        "move",
+        "meta-src",
+        "--from",
+        "default",
+        "--to",
+        "dest3",
+        "--new-name",
+        "meta-dst",
+        "--force",
+    ]);
+
+    // Value moved.
+    env.xv_ok(&["context", "use", "dest3", "--global"]);
+    assert_eq!(env.get_raw("meta-dst"), "meta-value");
+
+    // Group/folder/note metadata rode along to the destination vault; the
+    // local backend's `set_secret` only reads these from the dedicated
+    // `SecretRequest` fields (not raw tags), so hand-building the request
+    // without lifting them out of `tags` silently drops them.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        json.contains("meta-dst")
+            && json.contains("backend")
+            && json.contains("prod")
+            && json.contains("something"),
+        "group/folder/note metadata missing after move:\n{json}"
+    );
+
+    let group_list = env.xv_ok(&["group", "list", "--format", "json"]);
+    assert!(
+        group_list.contains("backend"),
+        "moved secret's group not visible to 'group list':\n{group_list}"
+    );
+
+    let folder_ls = env.xv_ok(&["ls", "prod", "--format", "json"]);
+    assert!(
+        folder_ls.contains("meta-dst"),
+        "moved secret not visible under its folder via 'ls prod':\n{folder_ls}"
+    );
+
+    env.xv_ok(&["context", "use", "default", "--global"]);
+}

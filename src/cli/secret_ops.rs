@@ -3524,6 +3524,7 @@ async fn execute_secret_copy(
     config: &Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    use crate::backend::secret::rename_request_from_properties;
     use crate::config::ContextManager;
     use crate::secret::manager::SecretRequest;
 
@@ -3559,18 +3560,13 @@ async fn execute_secret_copy(
             ));
         }
 
-        let secret_request = SecretRequest {
-            name: target_name.to_string(),
-            value: source_secret.value.unwrap_or_default(),
-            content_type: Some(source_secret.content_type),
-            enabled: Some(source_secret.enabled),
-            expires_on: source_secret.expires_on,
-            not_before: source_secret.not_before,
-            tags: Some(source_secret.tags),
-            groups: None,
-            note: None,
-            folder: None,
-        };
+        // Lift groups/note/folder out of the canonical tag encoding into the
+        // dedicated `SecretRequest` fields so every backend (local, AWS, ...)
+        // re-encodes them the way its own reader expects — the local and AWS
+        // backends only read those attributes from the dedicated fields, not
+        // from raw tags, so building the request by hand here previously
+        // silently dropped group membership, folder, and note on copy/move.
+        let secret_request = rename_request_from_properties(target_name, &source_secret)?;
 
         let copied_secret = backend.set_secret(to_vault, secret_request).await?;
         invalidate_trait_secret_cache(config, to_vault);
