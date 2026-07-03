@@ -552,10 +552,12 @@ pub enum Commands {
         /// secrets (backend must support soft delete)
         #[arg(
             long,
-            conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired"]
+            conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired", "type_filter"]
         )]
         deleted: bool,
-        /// Filter by record type (built-in or custom `[types.*]`, e.g. `login`)
+        /// Filter by record type (built-in or custom `[types.*]`, e.g. `login`).
+        /// Not supported with --deleted: deleted-secret summaries don't carry
+        /// tags on any backend, so there's no `xv-type` to filter on.
         #[arg(long = "type")]
         type_filter: Option<String>,
     },

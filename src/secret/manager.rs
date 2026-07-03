@@ -2272,6 +2272,69 @@ mod tests {
         ))
     }
 
+    /// Bugbot HIGH review, round 3: `prepare_secret_request` is the exact
+    /// function the record write-back paths (execute_record_field_update's
+    /// secret-field-edit branch, execute_record_type_conversion,
+    /// execute_record_untype — all value-changing, so Azure's full-PUT
+    /// path) run through. It only re-adds groups/note/folder tags when the
+    /// corresponding `SecretRequest` field is `Some` — there is no "carry
+    /// forward the existing tag" fallback here, unlike the tri-state
+    /// `FieldUpdate` used elsewhere. This pins the positive case: all three
+    /// present and correctly encoded.
+    #[test]
+    fn prepare_secret_request_emits_groups_note_folder_when_present() {
+        let ops = test_ops();
+        let request = SecretRequest {
+            name: "cred".to_string(),
+            value: Zeroizing::new("v".to_string()),
+            content_type: None,
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: None,
+            groups: Some(vec!["prod".to_string(), "team-a".to_string()]),
+            note: Some("rotate monthly".to_string()),
+            folder: Some("app/db".to_string()),
+        };
+        let (_, tags) = ops.prepare_secret_request(&request).unwrap();
+        assert_eq!(tags.get("groups").map(String::as_str), Some("prod,team-a"));
+        assert_eq!(tags.get("note").map(String::as_str), Some("rotate monthly"));
+        assert_eq!(tags.get("folder").map(String::as_str), Some("app/db"));
+    }
+
+    /// Companion negative test, documenting the exact PUT semantics that
+    /// bit the record write-back paths (Bugbot review, round 3): a
+    /// value-changing `SecretRequest` (this is the full-PUT path, not the
+    /// attributes-only PATCH) with `groups: None` must NOT emit a `groups`
+    /// tag — `prepare_secret_request` has no "None means leave the
+    /// existing tag alone" fallback the way `FieldUpdate::Unchanged` does
+    /// for note/folder elsewhere in the update flow. A caller that
+    /// forgets this (as the record write-back paths did before the fix)
+    /// silently erases group membership on Azure, even though the same
+    /// `groups: None` is a safe no-op on the delta-based local/AWS
+    /// backends.
+    #[test]
+    fn prepare_secret_request_omits_groups_tag_when_groups_is_none_even_with_a_value() {
+        let ops = test_ops();
+        let request = SecretRequest {
+            name: "cred".to_string(),
+            value: Zeroizing::new("v".to_string()),
+            content_type: None,
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: None,
+            groups: None,
+            note: None,
+            folder: None,
+        };
+        let (_, tags) = ops.prepare_secret_request(&request).unwrap();
+        assert!(
+            !tags.contains_key("groups"),
+            "groups tag must not appear when SecretRequest.groups is None: {tags:?}"
+        );
+    }
+
     #[test]
     fn test_deleted_backup_restore_url_construction() {
         let ops = test_ops();

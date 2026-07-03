@@ -2332,7 +2332,8 @@ async fn execute_record_field_update(
         new_value = Some(Zeroizing::new(encode_envelope(&envelope)?));
     }
 
-    // Tags + content type + replace_tags. Two distinct write shapes:
+    // Tags + content type + replace_tags/replace_groups + groups/note/
+    // folder. Two distinct write shapes:
     //
     // - Secret-field edit (`new_value.is_some()`): this forces the full-PUT
     //   path on Azure's `update_secret` (it only takes the lighter
@@ -2344,42 +2345,84 @@ async fn execute_record_field_update(
     //   "no content type" / "rebuild tags from empty" respectively. Relying
     //   on backend merge-on-`None` semantics here silently destroyed the
     //   record's content-type marker and dropped xv-type/f.*/groups/etc.
-    //   (Bugbot review on the first cut of this function). So whenever a
-    //   secret-field edit is in play we build the COMPLETE desired tag map
-    //   ourselves (existing tags + the metadata overlay) and set
-    //   `replace_tags: true`, exactly like `execute_record_type_conversion`/
-    //   `execute_record_untype` already do — never a partial delta.
+    //   (Bugbot review, round 1). So whenever a secret-field edit is in
+    //   play we build the COMPLETE desired tag map ourselves (existing tags
+    //   + the metadata overlay) and set `replace_tags: true`, exactly like
+    //   `execute_record_type_conversion`/`execute_record_untype` already do
+    //   — never a partial delta.
+    //
+    //   That full-PUT path ALSO does not treat `groups: None` as
+    //   "unchanged": Azure's `prepare_secret_request` (src/secret/manager.rs)
+    //   only re-adds the `groups` tag when `SecretRequest.groups` is `Some`,
+    //   so sending `None` after stripping the denormalized `groups` key out
+    //   of the tags map above silently ERASED group membership on Azure —
+    //   `note`/`folder` happened to survive only because they ride
+    //   `FieldUpdate::Unchanged`, which Azure's translation layer explicitly
+    //   re-fetches and carries forward before reaching `prepare_secret_
+    //   request`; `groups` has no such tri-state fallback (Bugbot review,
+    //   round 3). Fix: use the tuple `split_denormalized_tags` returns —
+    //   `groups` goes into the request's dedicated field as `Some(vec)`
+    //   with `replace_groups: true` (exact carry-forward, mirrors
+    //   `rename_request_from_properties`'s use of the same tuple); `note`/
+    //   `folder` switch from `Unchanged` to `Set`-when-known so they no
+    //   longer rely on any backend's "Unchanged re-fetches current"
+    //   behavior specifically — they're asserted directly from the same
+    //   `secret` this function already fetched.
     // - Metadata-only edit (`new_value.is_none()`): stays on Azure's
     //   attributes-only PATCH, which already merges a partial tag delta
-    //   against the current tags itself (`build_patched_tags`), so a
-    //   partial map + `replace_tags: false` is correct and cheaper (no new
-    //   version).
-    let (new_tags, content_type, replace_tags) = if !secret_updates.is_empty() {
-        let mut full = secret.tags.clone();
-        for (k, v) in &metadata_updates {
-            full.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
-        }
-        // `secret.tags` is DENORMALIZED for display (groups/note/folder
-        // folded into plain keys by every backend's get_secret) — strip
-        // them before this map becomes a literal `replace_tags: true`
-        // write, or they'd land as extra plain user tags on AWS / the
-        // wrong SecretMeta field on local (Bugbot review; same helper
-        // `rename_request_from_properties` already relies on). The
-        // request's own `groups: None`/`note`/`folder: Unchanged` below
-        // already preserves their real values via each backend's normal
-        // "leave unchanged" handling — this call only needs to run for
-        // its stripping side effect.
-        let _ = crate::backend::secret::split_denormalized_tags(&mut full);
-        (Some(full), Some(RECORD_CONTENT_TYPE.to_string()), true)
-    } else if !metadata_updates.is_empty() {
-        let mut t = std::collections::HashMap::new();
-        for (k, v) in &metadata_updates {
-            t.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
-        }
-        (Some(t), None, false)
-    } else {
-        (None, None, false)
-    };
+    //   against the current tags itself (`build_patched_tags`) and already
+    //   correctly leaves groups/note/folder alone when their request fields
+    //   are None/Unchanged — untouched, still correct.
+    let (new_tags, content_type, replace_tags, groups, note, folder, replace_groups) =
+        if !secret_updates.is_empty() {
+            let mut full = secret.tags.clone();
+            for (k, v) in &metadata_updates {
+                full.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
+            }
+            // `secret.tags` is DENORMALIZED for display (groups/note/folder
+            // folded into plain keys by every backend's get_secret) — strip
+            // them before this map becomes a literal `replace_tags: true`
+            // write, or they'd land as extra plain user tags on AWS / the
+            // wrong SecretMeta field on local (Bugbot review, round 2; same
+            // helper `rename_request_from_properties` already relies on).
+            let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut full);
+            (
+                Some(full),
+                Some(RECORD_CONTENT_TYPE.to_string()),
+                true,
+                groups,
+                note.map(crate::secret::manager::FieldUpdate::Set)
+                    .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+                folder
+                    .map(crate::secret::manager::FieldUpdate::Set)
+                    .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+                true,
+            )
+        } else if !metadata_updates.is_empty() {
+            let mut t = std::collections::HashMap::new();
+            for (k, v) in &metadata_updates {
+                t.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
+            }
+            (
+                Some(t),
+                None,
+                false,
+                None,
+                crate::secret::manager::FieldUpdate::Unchanged,
+                crate::secret::manager::FieldUpdate::Unchanged,
+                false,
+            )
+        } else {
+            (
+                None,
+                None,
+                false,
+                None,
+                crate::secret::manager::FieldUpdate::Unchanged,
+                crate::secret::manager::FieldUpdate::Unchanged,
+                false,
+            )
+        };
 
     // Re-run the tag budget: projected f.* tags (existing, minus any this
     // write overwrites, plus the new values) + existing user tags. This
@@ -2420,11 +2463,11 @@ async fn execute_record_field_update(
         expires_on: crate::secret::manager::FieldUpdate::Unchanged,
         not_before: crate::secret::manager::FieldUpdate::Unchanged,
         tags: new_tags,
-        groups: None,
-        note: crate::secret::manager::FieldUpdate::Unchanged,
-        folder: crate::secret::manager::FieldUpdate::Unchanged,
+        groups,
+        note,
+        folder,
         replace_tags,
-        replace_groups: false,
+        replace_groups,
     };
     let props = reg
         .active()
@@ -2509,9 +2552,16 @@ async fn execute_record_type_conversion(
     let mut new_tags = secret.tags.clone();
     // Strip denormalized groups/note/folder (see
     // `split_denormalized_tags`'s doc comment) before this becomes a
-    // `replace_tags: true` write — their real values are preserved via
-    // `groups: None`/`note`/`folder: Unchanged` below, not this map.
-    let _ = crate::backend::secret::split_denormalized_tags(&mut new_tags);
+    // `replace_tags: true` write, and USE the extracted values via the
+    // request's dedicated fields (`groups: Some(vec)` +
+    // `replace_groups: true`, `note`/`folder` as `Set`-when-known) rather
+    // than `None`/`Unchanged` — a value-changing update takes Azure's
+    // full-PUT path, which does not treat `groups: None` as "leave
+    // unchanged" the way local/AWS's delta model does: `prepare_secret_
+    // request` only re-adds the `groups` tag when the request field is
+    // `Some`, so `None` here previously erased group membership on Azure
+    // (Bugbot review, round 3).
+    let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut new_tags);
     new_tags.insert(TYPE_TAG.to_string(), record_type.name.clone());
 
     let request = crate::secret::manager::SecretUpdateRequest {
@@ -2522,11 +2572,15 @@ async fn execute_record_type_conversion(
         expires_on: crate::secret::manager::FieldUpdate::Unchanged,
         not_before: crate::secret::manager::FieldUpdate::Unchanged,
         tags: Some(new_tags),
-        groups: None,
-        note: crate::secret::manager::FieldUpdate::Unchanged,
-        folder: crate::secret::manager::FieldUpdate::Unchanged,
+        groups,
+        note: note
+            .map(crate::secret::manager::FieldUpdate::Set)
+            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+        folder: folder
+            .map(crate::secret::manager::FieldUpdate::Set)
+            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
         replace_tags: true,
-        replace_groups: false,
+        replace_groups: true,
     };
     let props = reg
         .active()
@@ -2609,10 +2663,14 @@ async fn execute_record_untype(
     new_tags.remove(TYPE_TAG);
     new_tags.retain(|k, _| !k.starts_with(FIELD_TAG_PREFIX));
     // Strip denormalized groups/note/folder — see
-    // `split_denormalized_tags`'s doc comment. Untyping doesn't touch
-    // groups/note/folder either; `groups: None`/`note`/`folder: Unchanged`
-    // below preserve their real values.
-    let _ = crate::backend::secret::split_denormalized_tags(&mut new_tags);
+    // `split_denormalized_tags`'s doc comment — and USE the extracted
+    // values via the request's dedicated fields. Untyping is a
+    // value-changing update (Azure's full-PUT path), which does not treat
+    // `groups: None` as "leave unchanged": `prepare_secret_request` only
+    // re-adds the `groups` tag when the request field is `Some`, so
+    // `None` here previously erased group membership on Azure (Bugbot
+    // review, round 3).
+    let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut new_tags);
 
     let request = crate::secret::manager::SecretUpdateRequest {
         name: name.to_string(),
@@ -2622,11 +2680,15 @@ async fn execute_record_untype(
         expires_on: crate::secret::manager::FieldUpdate::Unchanged,
         not_before: crate::secret::manager::FieldUpdate::Unchanged,
         tags: Some(new_tags),
-        groups: None,
-        note: crate::secret::manager::FieldUpdate::Unchanged,
-        folder: crate::secret::manager::FieldUpdate::Unchanged,
+        groups,
+        note: note
+            .map(crate::secret::manager::FieldUpdate::Set)
+            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+        folder: folder
+            .map(crate::secret::manager::FieldUpdate::Set)
+            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
         replace_tags: true,
-        replace_groups: false,
+        replace_groups: true,
     };
     let props = reg
         .active()

@@ -1083,6 +1083,8 @@ fn update_secret_field_preserves_group_note_folder_without_denormalizing_into_ta
             "hunter2",
             "--group",
             "prod",
+            "--group",
+            "team-a",
             "--note",
             "rotate monthly",
             "--folder",
@@ -1093,7 +1095,7 @@ fn update_secret_field_preserves_group_note_folder_without_denormalizing_into_ta
     assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
 
     let before = read_local_meta(temp.path(), "default", "cred");
-    assert_eq!(before["groups"], serde_json::json!(["prod"]));
+    assert_eq!(before["groups"], serde_json::json!(["prod", "team-a"]));
     assert_eq!(before["note"], "rotate monthly");
     assert_eq!(before["folder"], "app/db");
     // Never denormalized into tags in the first place (set path).
@@ -1113,7 +1115,7 @@ fn update_secret_field_preserves_group_note_folder_without_denormalizing_into_ta
 
     let after = read_local_meta(temp.path(), "default", "cred");
     // Dedicated metadata fields intact.
-    assert_eq!(after["groups"], serde_json::json!(["prod"]));
+    assert_eq!(after["groups"], serde_json::json!(["prod", "team-a"]));
     assert_eq!(after["note"], "rotate monthly");
     assert_eq!(after["folder"], "app/db");
     // Never leaked into the raw tag map by the write-back.
@@ -1150,6 +1152,8 @@ fn type_conversion_preserves_group_note_folder_without_denormalizing_into_tags()
             "hunter2",
             "--group",
             "prod",
+            "--group",
+            "team-a",
             "--note",
             "rotate monthly",
             "--folder",
@@ -1170,7 +1174,7 @@ fn type_conversion_preserves_group_note_folder_without_denormalizing_into_tags()
     );
 
     let after = read_local_meta(temp.path(), "default", "bare");
-    assert_eq!(after["groups"], serde_json::json!(["prod"]));
+    assert_eq!(after["groups"], serde_json::json!(["prod", "team-a"]));
     assert_eq!(after["note"], "rotate monthly");
     assert_eq!(after["folder"], "app/db");
     assert!(
@@ -1206,6 +1210,8 @@ fn untype_preserves_group_note_folder_without_denormalizing_into_tags() {
             "hunter2",
             "--group",
             "prod",
+            "--group",
+            "team-a",
             "--note",
             "rotate monthly",
             "--folder",
@@ -1226,7 +1232,7 @@ fn untype_preserves_group_note_folder_without_denormalizing_into_tags() {
     );
 
     let after = read_local_meta(temp.path(), "default", "cred");
-    assert_eq!(after["groups"], serde_json::json!(["prod"]));
+    assert_eq!(after["groups"], serde_json::json!(["prod", "team-a"]));
     assert_eq!(after["note"], "rotate monthly");
     assert_eq!(after["folder"], "app/db");
     assert!(
@@ -1683,6 +1689,42 @@ fn ls_type_filter() {
     let entries = parsed.as_array().expect("array");
     assert_eq!(entries.len(), 1, "stdout: {stdout}");
     assert_eq!(entries[0]["name"], "cred");
+}
+
+/// Bugbot LOW review, round 3: `DeletedSecretSummary` (the shape returned
+/// by `ls --deleted` on every backend) has no `tags` field at all — deleted
+/// listings never carry `xv-type`, so `--type` can't be threaded through
+/// and filtered without a bigger cross-backend change to start fetching
+/// tags for every deleted secret. Rather than a silent no-op (the filter
+/// looking like it did nothing), `--deleted --type` is a hard clap usage
+/// error in both flag orders.
+#[test]
+fn ls_deleted_with_type_filter_is_a_usage_error() {
+    let (mut cmd, _temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["ls", "--deleted", "--type", "login"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+
+    let (mut cmd2, _temp2) = common::xv_isolated_local();
+    let out2 = cmd2
+        .args(["ls", "--type", "login", "--deleted"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(2),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
 }
 
 #[test]
