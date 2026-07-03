@@ -14,14 +14,25 @@
 //!   - An explicit `--group`/`--folder` (or, for `folder`, `xv update
 //!     --clear-folder`, which doesn't consult the profile at all) always
 //!     wins over the profile default.
+//!   - `xv set` and `xv gen --save` share the exact same defaulting logic
+//!     (`apply_profile_write_defaults` in `src/cli/secret_ops.rs`), so both
+//!     construct identical requests from the same effective metadata.
+//!   - A blank `group = ""` / `folder = ""` in the profile is treated as "no
+//!     default", not a real (empty, unfilterable) value.
 //!
-//! Hermetic: every test uses its own isolated config dir, local
-//! (age-encrypted) backend store, and project directory containing a
-//! `.xv.toml`. No Azure credentials or network access required.
+//! Hermetic: every test runs through `common::xv_isolated_local_with_profile`
+//! (`env_clear()` + explicit allowlist + `XV_NO_PARENT_CONFIG=1`, per the
+//! #317 lesson) — no host env vars (`DEBUG`, `CACHE_TTL`,
+//! `AZURE_CREDENTIAL_PRIORITY`, `BLOB_*`, ...) leak into the child, and
+//! `.xv.toml` walk-up can't escape the isolated project dir. No Azure
+//! credentials or network access required.
 //!
 //! Run with:
 //!   cargo test --test e2e_env_profile_defaults
 
+mod common;
+
+use common::xv_isolated_local_with_profile;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -46,44 +57,15 @@ struct ProfileEnv {
 impl ProfileEnv {
     /// Isolated env: local backend, global `xv.conf`, and a `.xv.toml`
     /// (`xv_toml`) written into the project dir that becomes the command's
-    /// cwd.
+    /// cwd. Config/store setup is delegated to
+    /// `common::xv_isolated_local_with_profile` so it stays in lockstep with
+    /// the rest of the hermetic test suite; `xv()` below rebuilds a fresh
+    /// `Command` per call (a spawned `Command` can't be reused) using the
+    /// exact same env-isolation recipe.
     fn new(xv_toml: &str) -> Self {
-        let tmp = TempDir::new().expect("create temp dir");
-        let config_dir = tmp.path().join("config");
-        let store_dir = tmp.path().join("store");
-        let key_file = tmp.path().join("key.txt");
-        let xv_dir = config_dir.join("xv");
+        let (_first_cmd, tmp) = xv_isolated_local_with_profile(xv_toml);
+        let config_dir = tmp.path().join(".config");
         let project_dir = tmp.path().join("project");
-
-        std::fs::create_dir_all(&xv_dir).expect("create config dir");
-        std::fs::create_dir_all(&store_dir).expect("create store dir");
-        std::fs::create_dir_all(&project_dir).expect("create project dir");
-
-        let config_content = format!(
-            r#"backend = "local"
-debug = false
-subscription_id = ""
-default_vault = "default"
-default_resource_group = ""
-default_location = ""
-tenant_id = ""
-output_json = false
-no_color = true
-cache_enabled = false
-cache_ttl_secs = 0
-clipboard_timeout = 0
-
-[local]
-store_path = "{store}"
-key_file = "{key}"
-default_vault = "default"
-"#,
-            store = store_dir.display(),
-            key = key_file.display(),
-        );
-        std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
-        std::fs::write(project_dir.join(".xv.toml"), xv_toml).expect("write .xv.toml");
-
         Self {
             _tmp: tmp,
             config_dir,
@@ -97,16 +79,18 @@ default_vault = "default"
 
     /// Return a `Command` pre-configured for this test environment, with
     /// cwd set to the project dir so `.xv.toml` walk-up finds it directly.
+    /// Fully hermetic: `env_clear()` plus an explicit allowlist, matching
+    /// `common::xv_isolated_local_with_profile` / `common::isolate`.
     fn xv(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xv"));
-        cmd.env("XDG_CONFIG_HOME", &self.config_dir);
-        cmd.env("XV_BACKEND", "local");
-        cmd.env_remove("AZURE_SUBSCRIPTION_ID");
-        cmd.env_remove("AZURE_TENANT_ID");
-        cmd.env_remove("DEFAULT_VAULT");
-        cmd.env_remove("XV_ENV");
-        cmd.env("NO_COLOR", "1");
-        cmd.current_dir(&self.project_dir);
+        let mut cmd = common::xv();
+        cmd.env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", self._tmp.path())
+            .env("XDG_CONFIG_HOME", &self.config_dir)
+            .env("XV_NO_PARENT_CONFIG", "1")
+            .env("XV_BACKEND", "local")
+            .env("NO_COLOR", "1")
+            .current_dir(&self.project_dir);
         cmd
     }
 
@@ -123,6 +107,20 @@ default_vault = "default"
             stderr,
         );
         stdout
+    }
+
+    fn xv_fail(&self, args: &[&str]) -> (String, String) {
+        let output = self.xv().args(args).output().expect("execute xv binary");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(
+            !output.status.success(),
+            "xv {:?} should have failed but succeeded:\nstdout: {}\nstderr: {}",
+            args,
+            stdout,
+            stderr,
+        );
+        (stdout, stderr)
     }
 
     /// Set a secret via stdin piping, with extra CLI args. Returns stdout on
@@ -156,6 +154,13 @@ default_vault = "default"
 
     fn set_secret(&self, name: &str, value: &str) -> String {
         self.set_secret_with_args(name, value, &[])
+    }
+
+    /// `xv gen --save NAME [extra...]`. Returns stdout on success.
+    fn gen_save_with_args(&self, name: &str, extra: &[&str]) -> String {
+        let mut args = vec!["gen", "--raw", "--save", name];
+        args.extend_from_slice(extra);
+        self.xv_ok(&args)
     }
 }
 
@@ -223,6 +228,80 @@ fn clear_folder_on_update_not_resurrected_by_profile_default() {
     assert!(
         root.contains("CLEAR_ME"),
         "secret with cleared folder should appear at vault root: {root}"
+    );
+}
+
+// ===========================================================================
+// `xv gen --save` — shares `apply_profile_write_defaults` with `xv set`
+// ===========================================================================
+
+#[test]
+fn gen_save_without_flags_uses_profile_group_and_folder_defaults() {
+    let env = ProfileEnv::new(PROFILE_TOML); // group = "web", folder = "app"
+    env.gen_save_with_args("GEN_SECRET", &[]);
+
+    let json = env.xv_ok(&["ls", "app", "--format", "json"]);
+    assert!(
+        json.contains("GEN_SECRET"),
+        "gen --save should land in the profile's default folder: {json}"
+    );
+
+    let out_file = env.tmp_path().join("gen_save_run_env.txt");
+    let status = env
+        .xv()
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("env | sort > '{}'", out_file.display()),
+        ])
+        .status()
+        .expect("execute xv run");
+    assert!(status.success(), "xv run should succeed");
+    let contents = std::fs::read_to_string(&out_file).expect("read child env dump");
+    assert!(
+        contents.contains("GEN_SECRET"),
+        "gen --save should pick up the profile's default group (web), matching `xv run`'s \
+         default filter: {contents}"
+    );
+}
+
+#[test]
+fn gen_save_with_explicit_flags_overrides_profile_defaults() {
+    let env = ProfileEnv::new(PROFILE_TOML); // group = "web", folder = "app"
+    env.gen_save_with_args("GEN_OTHER", &["--group", "backend", "--folder", "other"]);
+
+    let scoped_other = env.xv_ok(&["ls", "other", "--names-only"]);
+    assert!(
+        scoped_other.contains("GEN_OTHER"),
+        "explicit --folder should win for gen --save: {scoped_other}"
+    );
+    let scoped_app = env.xv_ok(&["ls", "app", "--names-only"]);
+    assert!(
+        !scoped_app.contains("GEN_OTHER"),
+        "profile folder default should not apply when --folder was given to gen --save: {scoped_app}"
+    );
+
+    let out_file = env.tmp_path().join("gen_save_explicit_run_env.txt");
+    let status = env
+        .xv()
+        .args([
+            "run",
+            "--group",
+            "backend",
+            "--",
+            "sh",
+            "-c",
+            &format!("env | sort > '{}'", out_file.display()),
+        ])
+        .status()
+        .expect("execute xv run");
+    assert!(status.success(), "xv run should succeed");
+    let contents = std::fs::read_to_string(&out_file).expect("read child env dump");
+    assert!(
+        contents.contains("GEN_OTHER"),
+        "explicit --group backend on gen --save should be injected by run --group backend: {contents}"
     );
 }
 
@@ -295,6 +374,92 @@ fn run_with_explicit_group_flag_overrides_profile_default() {
 }
 
 // ===========================================================================
+// Blank profile values (`group = ""` / `folder = ""`) are treated as absent
+// ===========================================================================
+
+const BLANK_PROFILE_TOML: &str = r#"default_env = "dev"
+
+[env.dev]
+vault = "default"
+group = ""
+folder = ""
+"#;
+
+#[test]
+fn blank_profile_folder_is_not_written_as_an_empty_tag() {
+    let env = ProfileEnv::new(BLANK_PROFILE_TOML);
+    env.set_secret("ROOT_SECRET", "v1");
+
+    // A blank `folder = ""` must resolve to `None`, not `Some("")`. Checked
+    // against the raw JSON field (not just `ls` display grouping, which
+    // treats an empty-string folder and a `null` folder identically at the
+    // root level and would mask this regression either way).
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        json.contains("\"folder\": null"),
+        "blank profile folder default should resolve to no folder at all, not an empty-string tag: {json}"
+    );
+    assert!(
+        !json.contains("\"folder\": \"\""),
+        "blank profile folder default must not be written as an empty-string folder tag: {json}"
+    );
+}
+
+#[test]
+fn blank_profile_group_is_not_written_as_an_empty_tag() {
+    let env = ProfileEnv::new(BLANK_PROFILE_TOML);
+    env.set_secret("ROOT_SECRET", "v1");
+
+    // Same blank-is-absent check on the write side for `group`, checked
+    // against the raw JSON field.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        json.contains("\"groups\": null"),
+        "blank profile group default should resolve to no group at all, not an empty-string tag: {json}"
+    );
+    assert!(
+        !json.contains("\"groups\": \"\""),
+        "blank profile group default must not be written as an empty-string group tag: {json}"
+    );
+}
+
+#[test]
+fn blank_profile_group_is_not_used_as_run_filter() {
+    let env = ProfileEnv::new(BLANK_PROFILE_TOML);
+    // Explicit --group bypasses the write-time default entirely, so this
+    // secret's own tag can't accidentally self-cancel against a buggy
+    // read-side resolution (an unpatched resolver would tag *unflagged*
+    // writes with group="" too, which would coincidentally match an
+    // equally-buggy groups=[""] run filter and mask the regression).
+    env.set_secret_with_args("SOME_SECRET", "v1", &["--group", "unrelated-group"]);
+
+    // A blank `group = ""` must not become an unfilterable `groups=[""]`
+    // selector that trips `xv run`'s fail-loud empty-selection check with a
+    // group the user never typed.
+    let out_file = env.tmp_path().join("blank_group_run_env.txt");
+    let status = env
+        .xv()
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("env | sort > '{}'", out_file.display()),
+        ])
+        .status()
+        .expect("execute xv run");
+    assert!(
+        status.success(),
+        "xv run should succeed with no usable group filter (blank profile group treated as absent)"
+    );
+    let contents = std::fs::read_to_string(&out_file).expect("read child env dump");
+    assert!(
+        contents.contains("SOME_SECRET"),
+        "with no effective group filter, all secrets should be injected regardless of their own group: {contents}"
+    );
+}
+
+// ===========================================================================
 // `xv ls` — NOT scoped by the profile's write-side folder default
 // ===========================================================================
 
@@ -314,5 +479,21 @@ fn ls_default_view_is_not_scoped_by_profile_folder_default() {
     assert!(
         json.contains("\"other\""),
         "profile folder default incorrectly scoped `ls`, hiding 'other': {json}"
+    );
+}
+
+// ===========================================================================
+// `xv run` — fail-loud error attributes the profile default (#308 review)
+// ===========================================================================
+
+#[test]
+fn run_fail_loud_error_attributes_profile_group_default() {
+    let env = ProfileEnv::new(PROFILE_TOML); // group = "web"
+                                             // No secrets set at all — the group=web filter (from the profile) will
+                                             // match nothing, tripping the fail-loud empty-selection error.
+    let (_stdout, stderr) = env.xv_fail(&["run", "--", "true"]);
+    assert!(
+        stderr.contains("from env profile default"),
+        "fail-loud error should attribute the unmatched group to the profile default: {stderr}"
     );
 }

@@ -525,7 +525,11 @@ impl Config {
                     eprintln!("{line}");
                 }
             }
-            if let Some(g) = profile.group.as_deref() {
+            // Treat a blank `group = ""` as "no default set", not a real
+            // (empty, unfilterable) group — an empty filter would silently
+            // match nothing and trip `xv run`'s fail-loud empty-selection
+            // check with a group the user never typed.
+            if let Some(g) = profile.group.as_deref().filter(|s| !s.trim().is_empty()) {
                 return Ok(Some(g.to_string()));
             }
         }
@@ -557,7 +561,8 @@ impl Config {
                     eprintln!("{line}");
                 }
             }
-            if let Some(f) = profile.folder.as_deref() {
+            // Same blank-is-absent treatment as `resolve_group`.
+            if let Some(f) = profile.folder.as_deref().filter(|s| !s.trim().is_empty()) {
                 return Ok(Some(f.to_string()));
             }
         }

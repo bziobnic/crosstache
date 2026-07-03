@@ -1000,6 +1000,12 @@ async fn save_generated_secret(
 ) -> Result<()> {
     use crate::cli::helpers::{resolve_vault_for_trait, use_trait_path};
 
+    // Apply env-profile `group`/`folder` write-time defaults when the
+    // caller didn't pass an explicit `--group`/`--folder`, exactly like
+    // `xv set` — see `apply_profile_write_defaults` for the shared logic.
+    let mut meta = meta.clone();
+    crate::cli::secret_ops::apply_profile_write_defaults(&mut meta, config).await?;
+
     let request = meta.to_secret_request(name, zeroize::Zeroizing::new(value.to_string()))?;
 
     // Trait path: any backend exposed through the registry (local, aws, and
