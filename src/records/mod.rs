@@ -83,59 +83,92 @@ pub fn check_tag_budget(
 }
 
 /// Computes `reserved_count` for [`check_tag_budget`]: the number of
-/// reserved bookkeeping tags a record write actually consumes.
+/// reserved bookkeeping tags a record write actually consumes on the wire
+/// for a given backend.
 ///
-/// This always includes `crate::backend::ALWAYS_WRITTEN_TAGS` (currently
-/// `original_name` + `created_by`) — every backend `set_secret` write
-/// stamps these unconditionally regardless of what the caller requests, so
-/// a pre-check that omits them can pass here and still be rejected by the
-/// backend as over budget (undercounting defeats fail-before-write right
-/// at the boundary). `has_type` adds one more for the reserved `xv-type`
-/// tag (always present on a record write); `has_groups`/`has_note`/
-/// `has_folder` are conditional on whether this specific write sets them.
-pub fn reserved_tag_count(
+/// This single, backend-aware predictor replaces two earlier functions
+/// (a universal `reserved_tag_count` plus an AWS-only
+/// `backend_extra_reserved_tags` add-on) that together mis-modeled two
+/// backends at once: the universal count assumed every backend always
+/// writes `created_by` and a `note` tag, which is true for Azure but not
+/// for AWS (see the per-backend derivation below) — so near AWS's 50-tag
+/// cap the old model could *falsely reject* a write that would actually
+/// succeed. Each arm here is derived directly from what that backend's
+/// `set_secret` implementation actually puts on the wire, so it can't
+/// drift the same way again.
+///
+/// - `has_type`: the reserved `xv-type` tag is always present on a record
+///   write, on every backend (it rides in `SecretRequest.tags`, not a
+///   backend-specific field, so it costs the same slot everywhere).
+/// - `has_groups` / `has_note` / `has_folder` / `has_expiry`: whether this
+///   specific write sets `SecretRequest.groups` / `.note` / `.folder` /
+///   `.expires_on`.
+///
+/// ## Per-backend derivation
+///
+/// **Azure** — `SecretManager::prepare_secret_request` (`src/secret/manager.rs`,
+/// the path `xv set`'s full write always takes; `xv update`'s
+/// attributes-only PATCH via `azure::secrets::build_patched_tags` mirrors
+/// the same stamps and isn't reachable from `xv set --type`):
+/// unconditionally inserts `original_name` and `created_by` as tags, then
+/// `groups`/`note`/`folder` as tags only when present. `content_type` and
+/// expiry are secret *attributes* on the Key Vault object, not tags — 0
+/// slots for those.
+///
+/// **AWS** — `AwsSecretBackend::set_secret` (`src/backend/aws/secrets.rs`):
+/// always pushes `xv:original_name`; pushes `xv:groups`/`xv:folder` only
+/// when present; pushes `xv:content_type` whenever the request has a
+/// content type (every record write does — `RECORD_CONTENT_TYPE`), and
+/// `xv:expires_at` whenever an expiry is set. `note` becomes the secret's
+/// `Description` (`create_builder.description(note)`), never a tag — 0
+/// slots. `created_by`: `metadata::TAG_CREATED_BY` exists as a constant
+/// but `set_secret` never writes it (`#[allow(dead_code)]`, "exercised by
+/// the round-trip tests only") — 0 slots.
+///
+/// **Local** — `LocalBackend::set_secret` (`src/backend/local/secrets.rs`):
+/// `SecretMeta.tags` is exactly `request.tags.clone().unwrap_or_default()`
+/// with nothing added; `original_name`/`created_by`/`groups`/`note`/
+/// `folder`/`content_type`/expiry are all separate `SecretMeta` struct
+/// fields, never tags. Only `has_type` (which rides in `request.tags`
+/// itself, same as every backend) contributes here. This arm is moot in
+/// practice — local's `BackendCapabilities.max_tags` is `None`, so
+/// `check_tag_budget` never applies the count check — but is kept
+/// accurate rather than a shortcut, per the same "can't drift" reasoning
+/// as the other two arms.
+pub fn predicted_reserved_tag_count(
+    backend: crate::backend::BackendKind,
     has_type: bool,
     has_groups: bool,
     has_note: bool,
     has_folder: bool,
-) -> usize {
-    let mut count = crate::backend::ALWAYS_WRITTEN_TAGS.len();
-    if has_type {
-        count += 1;
-    }
-    if has_groups {
-        count += 1;
-    }
-    if has_note {
-        count += 1;
-    }
-    if has_folder {
-        count += 1;
-    }
-    count
-}
-
-/// Extra reserved tag slots consumed by backend-specific bookkeeping that
-/// [`reserved_tag_count`]'s universal (Azure-shaped) count doesn't cover.
-///
-/// AWS's `set_secret` (`src/backend/aws/secrets.rs`) always tags
-/// `xv:content_type` whenever the request carries a content type — which
-/// every record write does (`RECORD_CONTENT_TYPE`) — and additionally
-/// tags `xv:expires_at` whenever an expiry is set. Neither Azure (content
-/// type lives on the secret object, not a tag) nor the local backend
-/// (unbounded tags) spend a slot on these, so this returns `0` for any
-/// `backend_kind` other than `Aws`.
-pub fn backend_extra_reserved_tags(
-    backend_kind: crate::backend::BackendKind,
     has_expiry: bool,
 ) -> usize {
-    match backend_kind {
-        crate::backend::BackendKind::Aws => {
-            // xv:content_type, always present on a record write, + xv:expires_at
-            // when an expiry is set.
-            1 + usize::from(has_expiry)
+    let type_tag = usize::from(has_type);
+    match backend {
+        crate::backend::BackendKind::Azure => {
+            type_tag
+                + crate::backend::ALWAYS_WRITTEN_TAGS.len() // original_name + created_by
+                + usize::from(has_groups)
+                + usize::from(has_note)
+                + usize::from(has_folder)
+            // content_type / expiry: secret attributes, not tags — 0.
         }
-        crate::backend::BackendKind::Azure | crate::backend::BackendKind::Local => 0,
+        crate::backend::BackendKind::Aws => {
+            type_tag
+                + 1 // xv:original_name, always
+                + usize::from(has_groups) // xv:groups
+                + usize::from(has_folder) // xv:folder
+                + 1 // xv:content_type, always present on a record write
+                + usize::from(has_expiry) // xv:expires_at
+                                          // note -> Description, not a tag; created_by is never written — 0 each.
+        }
+        crate::backend::BackendKind::Local => {
+            type_tag
+            // original_name/created_by/groups/note/folder/content_type/expiry
+            // are all separate SecretMeta struct fields, never tags — 0 each.
+            // (Moot: local's max_tags is None, so check_tag_budget never
+            // applies the count check regardless.)
+        }
     }
 }
 
@@ -234,30 +267,70 @@ mod tag_budget_tests {
         assert!(check_tag_budget(&c, 100, &fields, &user_tags(100)).is_ok());
     }
 
+    use crate::backend::BackendKind;
+
     #[test]
-    fn reserved_tag_count_includes_always_written_bookkeeping_tags() {
+    fn predicted_reserved_tag_count_azure_matches_prepare_secret_request() {
         // xv-type + original_name + created_by, no groups/note/folder.
-        assert_eq!(reserved_tag_count(true, false, false, false), 3);
-        // All optional bookkeeping tags present too.
-        assert_eq!(reserved_tag_count(true, true, true, true), 6);
+        assert_eq!(
+            predicted_reserved_tag_count(BackendKind::Azure, true, false, false, false, false),
+            3
+        );
+        // All optional bookkeeping tags present too; expiry is a secret
+        // attribute on Azure, not a tag, so it must NOT add a slot.
+        assert_eq!(
+            predicted_reserved_tag_count(BackendKind::Azure, true, true, true, true, true),
+            6
+        );
         // Even with has_type = false, the two always-written tags still count.
-        assert_eq!(reserved_tag_count(false, false, false, false), 2);
+        assert_eq!(
+            predicted_reserved_tag_count(BackendKind::Azure, false, false, false, false, false),
+            2
+        );
     }
 
-    /// Azure's real boundary (max_tags = 15): reserved_tag_count must
-    /// include original_name + created_by so a record that would total
-    /// exactly 15 tags on the wire passes, and one that would total 16
-    /// fails *before* any backend call — reproducing the under-count bug
-    /// where the old ad-hoc `reserved_count` computation (missing
-    /// original_name/created_by) let a request through that Azure's real
-    /// REST call would then reject.
+    #[test]
+    fn predicted_reserved_tag_count_aws_matches_set_secret() {
+        // xv-type + xv:original_name + xv:content_type only: no groups,
+        // no folder, no expiry — and note/created_by must NOT add a slot
+        // (note -> Description, created_by is never written on AWS).
+        assert_eq!(
+            predicted_reserved_tag_count(BackendKind::Aws, true, false, true, false, false),
+            3
+        );
+        // groups + folder + expiry all present.
+        assert_eq!(
+            predicted_reserved_tag_count(BackendKind::Aws, true, true, false, true, true),
+            6
+        );
+    }
+
+    #[test]
+    fn predicted_reserved_tag_count_local_only_counts_the_type_tag() {
+        // original_name/created_by/groups/note/folder/content_type/expiry
+        // are all separate SecretMeta struct fields on local — never tags.
+        assert_eq!(
+            predicted_reserved_tag_count(BackendKind::Local, true, true, true, true, true),
+            1
+        );
+        assert_eq!(
+            predicted_reserved_tag_count(BackendKind::Local, false, true, true, true, true),
+            0
+        );
+    }
+
+    /// Azure's real boundary (max_tags = 15): the predictor must include
+    /// original_name + created_by so a record that would total exactly 15
+    /// tags on the wire passes, and one that would total 16 fails *before*
+    /// any backend call.
     #[test]
     fn budget_boundary_at_azure_max_tags_matches_real_write() {
         let c = caps(Some(15), Some(256));
 
         // xv-type + original_name + created_by + groups = 4 reserved,
         // plus 11 f.* metadata field tags = 15 total on the wire. Must pass.
-        let reserved = reserved_tag_count(true, true, false, false);
+        let reserved =
+            predicted_reserved_tag_count(BackendKind::Azure, true, true, false, false, false);
         assert_eq!(reserved, 4);
         let mut fields_15 = BTreeMap::new();
         for i in 0..11 {
@@ -273,53 +346,31 @@ mod tag_budget_tests {
         assert!(err.to_string().contains("16"), "{err}");
     }
 
+    /// AWS's real boundary (max_tags = 50), WITH an expiry set (so both
+    /// xv:content_type and xv:expires_at are on the wire) but WITHOUT note
+    /// (which costs 0 slots on AWS — the round-2 fix's bug: the old
+    /// universal predictor assumed every backend spends a slot on `note`,
+    /// which is only true for Azure). Reproduces the fix: a record with
+    /// note set that would have been falsely counted as over budget on
+    /// the old model now correctly passes at the real 50-tag boundary,
+    /// and one more field still fails before write.
     #[test]
-    fn backend_extra_reserved_tags_is_zero_for_azure_and_local() {
-        assert_eq!(
-            backend_extra_reserved_tags(crate::backend::BackendKind::Azure, true),
-            0
-        );
-        assert_eq!(
-            backend_extra_reserved_tags(crate::backend::BackendKind::Local, true),
-            0
-        );
-    }
-
-    #[test]
-    fn backend_extra_reserved_tags_counts_aws_content_type_and_expiry() {
-        // xv:content_type only (no expiry set).
-        assert_eq!(
-            backend_extra_reserved_tags(crate::backend::BackendKind::Aws, false),
-            1
-        );
-        // xv:content_type + xv:expires_at.
-        assert_eq!(
-            backend_extra_reserved_tags(crate::backend::BackendKind::Aws, true),
-            2
-        );
-    }
-
-    /// AWS's real boundary (max_tags = 50): reserved_tag_count() alone
-    /// (Azure-shaped) doesn't know about AWS's always-written
-    /// xv:content_type tag or its conditional xv:expires_at tag, so a
-    /// record write with an expiry set could pass the pre-check and still
-    /// blow AWS's real 50-tag cap at the API without
-    /// backend_extra_reserved_tags folded in. Reproduces that boundary:
-    /// with the extra reserved tags counted, a 50-tag-total record passes
-    /// and a 51-tag-total fails before write.
-    #[test]
-    fn budget_boundary_at_aws_max_tags_counts_content_type_and_expiry() {
+    fn budget_boundary_at_aws_max_tags_counts_content_type_and_expiry_not_note() {
         let c = caps(Some(50), Some(256));
 
-        // Universal reserved: xv-type + original_name + created_by + groups = 4.
-        // AWS extras: xv:content_type (always) + xv:expires_at (expiry set) = 2.
-        let reserved = reserved_tag_count(true, true, false, false)
-            + backend_extra_reserved_tags(crate::backend::BackendKind::Aws, true);
-        assert_eq!(reserved, 6);
+        // xv-type + xv:original_name + xv:groups + xv:content_type +
+        // xv:expires_at = 5 reserved (note is set on this write too, but
+        // costs 0 AWS tag slots — it becomes the Description).
+        let reserved =
+            predicted_reserved_tag_count(BackendKind::Aws, true, true, true, false, true);
+        assert_eq!(reserved, 5);
 
-        // 6 reserved + 44 f.* fields = 50 total on the wire. Must pass.
+        // 5 reserved + 45 f.* fields = 50 total on the wire. Must pass —
+        // the old over-counting model (which added a phantom `note` slot
+        // and a phantom `created_by` slot) would have rejected this at
+        // only 43 f.* fields.
         let mut fields_50 = BTreeMap::new();
-        for i in 0..44 {
+        for i in 0..45 {
             fields_50.insert(format!("field{i}"), "v".to_string());
         }
         assert!(check_tag_budget(&c, reserved, &fields_50, &BTreeMap::new()).is_ok());
@@ -327,7 +378,7 @@ mod tag_budget_tests {
         // One more f.* field pushes the real wire total to 51. Must fail
         // before write.
         let mut fields_51 = fields_50.clone();
-        fields_51.insert("field44".to_string(), "v".to_string());
+        fields_51.insert("field45".to_string(), "v".to_string());
         let err = check_tag_budget(&c, reserved, &fields_51, &BTreeMap::new()).unwrap_err();
         assert!(err.to_string().contains("51"), "{err}");
     }

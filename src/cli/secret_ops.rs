@@ -282,15 +282,32 @@ async fn build_record_set_request(
     // least as strict as the untyped `set` path, which already loses a
     // user-supplied `original_name`/`created_by` tag to the backend's own
     // unconditional overwrite (see `crate::backend::ALWAYS_WRITTEN_TAGS`).
+    //
+    // Also reject `groups`/`note`/`folder` — on the untyped `set` path
+    // these keys don't error either, but they're not silently ignored:
+    // `SecretManager::prepare_secret_request` (Azure's real write path)
+    // copies `request.tags` (which would include a user `--tag note=y`)
+    // into the tag map FIRST, then unconditionally re-inserts
+    // `groups`/`note`/`folder` from the dedicated `--group`/`--note`/
+    // `--folder` flags when those flags were passed — so `--note x --tag
+    // note=y` deterministically keeps `x` (the dedicated flag always wins
+    // over the same-named `--tag`), never `y`, and never errors. That
+    // silent "last write wins" merge is exactly the desync class round 1
+    // already rejected for xv-type/f.*/original_name/created_by, so the
+    // record path is intentionally stricter here than the untyped path:
+    // fail loud instead of silently picking a winner.
     for key in meta.tag.iter().map(|(k, _)| k.as_str()) {
         let collides = key == TYPE_TAG
             || key.starts_with(FIELD_TAG_PREFIX)
             || key == crate::backend::TAG_ORIGINAL_NAME
-            || key == crate::backend::TAG_CREATED_BY;
+            || key == crate::backend::TAG_CREATED_BY
+            || key == "groups"
+            || key == "note"
+            || key == "folder";
         if collides {
             return Err(CrosstacheError::config(format!(
                 "--tag '{key}' collides with a reserved record tag name ({}, {FIELD_TAG_PREFIX}*, \
-                 {}, {}); rename it",
+                 {}, {}, groups, note, folder); rename it or use --group/--note/--folder instead",
                 TYPE_TAG,
                 crate::backend::TAG_ORIGINAL_NAME,
                 crate::backend::TAG_CREATED_BY
@@ -362,25 +379,23 @@ async fn build_record_set_request(
         )));
     }
 
-    // Tag budget: reserved (xv-type + the two backend-always-written
-    // bookkeeping tags + whatever SecretWriteArgs sets — groups/note/folder)
-    // + backend-specific extras (AWS's xv:content_type/xv:expires_at tags)
-    // + f.* metadata fields + user --tag count. `reserved_tag_count`
-    // includes `original_name`/`created_by` because every backend's
-    // `set_secret` stamps those unconditionally regardless of this
-    // pre-check — see its doc comment for why omitting them under-counts
-    // relative to what the real write attaches. `backend_extra_reserved_tags`
-    // covers AWS's additional always/conditionally-written tags that the
-    // universal (Azure-shaped) count above doesn't know about — without
-    // it, a record could pass this pre-check and still blow AWS's 50-tag
-    // cap at the API.
-    let reserved_count =
-        crate::records::reserved_tag_count(
-            true, // xv-type: always present on a record write
-            !meta.group.is_empty(),
-            meta.note.is_some(),
-            meta.folder.is_some(),
-        ) + crate::records::backend_extra_reserved_tags(backend_kind, meta.expires.is_some());
+    // Tag budget: reserved (backend-specific bookkeeping tags this write
+    // will actually cause the active backend's `set_secret` to attach) +
+    // f.* metadata fields + user --tag count. `predicted_reserved_tag_count`
+    // is derived per-backend from what each backend's `set_secret` really
+    // puts on the wire (see its doc comment) — a single universal count
+    // would either under-count (missing a backend-specific tag, letting a
+    // write pass this pre-check and still blow the real cap) or
+    // over-count (assuming a tag every backend doesn't actually write,
+    // falsely rejecting a write that would have succeeded).
+    let reserved_count = crate::records::predicted_reserved_tag_count(
+        backend_kind,
+        true, // xv-type: always present on a record write
+        !meta.group.is_empty(),
+        meta.note.is_some(),
+        meta.folder.is_some(),
+        meta.expires.is_some(),
+    );
     let field_tags: BTreeMap<String, String> = metadata
         .iter()
         .map(|(k, v)| (format!("{FIELD_TAG_PREFIX}{k}"), v.clone()))

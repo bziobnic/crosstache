@@ -367,6 +367,131 @@ fn set_typed_rejects_tag_colliding_with_field_prefix() {
     assert!(!meta_path.exists(), "nothing must be written on rejection");
 }
 
+/// Bugbot PR #322 round 4: `--note x --tag note=y` must be rejected on a
+/// typed record set rather than silently letting the dedicated `--note`
+/// flag win (which is what the untyped `set` path does deterministically
+/// today — no error, `x` always wins over a same-named `--tag`). The
+/// record path is intentionally stricter: fail loud instead of silently
+/// picking a winner between two conflicting sources for the same tag.
+#[test]
+fn set_typed_rejects_tag_colliding_with_note() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--note",
+            "x",
+            "--tag",
+            "note=y",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("note"), "stderr: {stderr}");
+
+    let meta_path = temp
+        .path()
+        .join("store")
+        .join("vaults")
+        .join("default")
+        .join("secrets")
+        .join("cred.meta.json");
+    assert!(!meta_path.exists(), "nothing must be written on rejection");
+}
+
+/// Same collision class as `note`, for `--group`/`--tag groups=...`.
+#[test]
+fn set_typed_rejects_tag_colliding_with_groups() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--group",
+            "prod",
+            "--tag",
+            "groups=other",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("groups"), "stderr: {stderr}");
+
+    let meta_path = temp
+        .path()
+        .join("store")
+        .join("vaults")
+        .join("default")
+        .join("secrets")
+        .join("cred.meta.json");
+    assert!(!meta_path.exists(), "nothing must be written on rejection");
+}
+
+/// Same collision class as `note`, for `--folder`/`--tag folder=...`.
+#[test]
+fn set_typed_rejects_tag_colliding_with_folder() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--folder",
+            "app",
+            "--tag",
+            "folder=other",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("folder"), "stderr: {stderr}");
+
+    let meta_path = temp
+        .path()
+        .join("store")
+        .join("vaults")
+        .join("default")
+        .join("secrets")
+        .join("cred.meta.json");
+    assert!(!meta_path.exists(), "nothing must be written on rejection");
+}
+
 /// Bugbot PR #322 re-review: `xv set --type` with `--field` values but no
 /// `--value`/`--stdin` must not hang waiting on a TTY that will never
 /// arrive — the test harness's stdin is not a TTY (it's whatever
