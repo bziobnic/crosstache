@@ -260,6 +260,46 @@ async fn localstack_list_paginates() {
     }
 }
 
+/// list_secrets must expose the folder/original-name tags in its summaries,
+/// the same way get_secret does via props_from_describe — otherwise
+/// folder-qualified `xv mv`/`xv ls` appear folderless on AWS (Bugbot #300).
+#[tokio::test]
+async fn localstack_list_secrets_exposes_folder_tag() {
+    if skip_unless_enabled() {
+        return;
+    }
+    let backend = build_backend().await;
+    let vault = format!("xv-test-{}", uuid::Uuid::new_v4());
+
+    let request = SecretRequest {
+        name: "db-pass".into(),
+        value: Zeroizing::new("folder-value".into()),
+        groups: None,
+        note: None,
+        content_type: None,
+        enabled: None,
+        expires_on: None,
+        not_before: None,
+        tags: None,
+        folder: Some("db".into()),
+    };
+    backend.secrets().set_secret(&vault, request).await.unwrap();
+
+    let listed = backend.secrets().list_secrets(&vault, None).await.unwrap();
+    let found = listed
+        .iter()
+        .find(|s| s.name == "db-pass")
+        .unwrap_or_else(|| panic!("db-pass not found in listing: {listed:?}"));
+    assert_eq!(found.folder.as_deref(), Some("db"));
+    assert_eq!(found.original_name, "db-pass");
+
+    backend
+        .secrets()
+        .purge_secret(&vault, "db-pass")
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn localstack_vault_marker_create_list_delete() {
     if skip_unless_enabled() {
