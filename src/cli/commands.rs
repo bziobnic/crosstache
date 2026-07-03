@@ -555,6 +555,9 @@ pub enum Commands {
             conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired"]
         )]
         deleted: bool,
+        /// Filter by record type (built-in or custom `[types.*]`, e.g. `login`)
+        #[arg(long = "type")]
+        type_filter: Option<String>,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -1664,6 +1667,7 @@ impl Cli {
                 names_only,
                 sort,
                 deleted,
+                type_filter,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
@@ -1684,8 +1688,21 @@ impl Cli {
                         None => String::new(),
                     };
                     crate::cli::secret_ops::execute_secret_list_direct(
-                        path, group, all, expiring, expired, no_cache, pagination, pager,
-                        names_only, long, recursive, sort, config, registry,
+                        path,
+                        group,
+                        all,
+                        expiring,
+                        expired,
+                        no_cache,
+                        pagination,
+                        pager,
+                        names_only,
+                        long,
+                        recursive,
+                        sort,
+                        type_filter,
+                        config,
+                        registry,
                     )
                     .await
                 }

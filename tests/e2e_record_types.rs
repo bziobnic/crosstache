@@ -1223,6 +1223,168 @@ fn type_on_existing_record_errors() {
     assert!(stderr.contains("already"), "stderr: {stderr}");
 }
 
+// ---------------------------------------------------------------------------
+// Task 10: `ls` — type column, f.* fields in JSON, --type filter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ls_shows_type_column_when_typed_present() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let out_plain = xv_same_env(temp.path())
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(
+        out_plain.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out_plain)
+    );
+
+    let out2 = xv_same_env(temp.path())
+        .args(["ls", "--format", "table"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    assert!(stdout.contains("Type"), "stdout: {stdout}");
+    assert!(stdout.contains("login"), "stdout: {stdout}");
+}
+
+#[test]
+fn ls_untyped_only_output_unchanged() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["ls", "--format", "table"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    // Byte-compare the table header line against the pre-Task-10 shape:
+    // TableFormatter drops all-empty columns, so this fixture's table only
+    // ever showed Name/Updated — the point of this test is that adding
+    // record-types support doesn't introduce a Type column (or any other
+    // column) for an untyped-only listing.
+    let header_line = stdout
+        .lines()
+        .find(|l| l.contains("Name"))
+        .unwrap_or_else(|| panic!("no header line in: {stdout}"));
+    assert_eq!(
+        header_line.trim(),
+        "│ Name  │  Updated   │",
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains("Type"), "stdout: {stdout}");
+}
+
+#[test]
+fn ls_json_lifts_fields_and_type() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["ls", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let entries = parsed.as_array().expect("array");
+    let cred = entries
+        .iter()
+        .find(|e| e["name"] == "cred")
+        .expect("cred entry present");
+    assert_eq!(cred["record_type"], "login");
+    assert_eq!(cred["fields"]["username"], "bob");
+}
+
+#[test]
+fn ls_type_filter() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let out_plain = xv_same_env(temp.path())
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(
+        out_plain.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out_plain)
+    );
+
+    let out2 = xv_same_env(temp.path())
+        .args(["ls", "--type", "login", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let entries = parsed.as_array().expect("array");
+    assert_eq!(entries.len(), 1, "stdout: {stdout}");
+    assert_eq!(entries[0]["name"], "cred");
+}
+
 #[test]
 fn get_field_on_untyped_errors() {
     let (mut cmd, temp) = common::xv_isolated_local();

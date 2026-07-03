@@ -1057,6 +1057,27 @@ struct GroupListRow {
     secrets: usize,
 }
 
+/// Table row shape used only when at least one listed secret is a typed
+/// record (record-types plan Task 10) — adds a `Type` column. Kept as a
+/// separate struct (rather than always adding the column to
+/// `SecretListDisplayRow`) so an untyped-only listing's table output stays
+/// byte-identical to pre-Task-10 behavior.
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct SecretListDisplayRowTyped {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Type")]
+    record_type: String,
+    #[tabled(rename = "Note")]
+    note: String,
+    #[tabled(rename = "Folder")]
+    folder: String,
+    #[tabled(rename = "Groups")]
+    groups: String,
+    #[tabled(rename = "Updated")]
+    updated_on: String,
+}
+
 fn format_secret_list_rows_for_human(
     secrets: &[crate::secret::manager::SecretSummary],
 ) -> Vec<SecretListDisplayRow> {
@@ -1074,6 +1095,72 @@ fn format_secret_list_rows_for_human(
             updated_on: crate::cli::ls_view::date_portion_for_display(&secret.updated_on),
         })
         .collect()
+}
+
+fn format_secret_list_rows_for_human_typed(
+    secrets: &[crate::secret::manager::SecretSummary],
+) -> Vec<SecretListDisplayRowTyped> {
+    secrets
+        .iter()
+        .map(|secret| SecretListDisplayRowTyped {
+            name: secret.name.clone(),
+            record_type: secret.tags.get(TYPE_TAG).cloned().unwrap_or_default(),
+            note: secret
+                .note
+                .as_deref()
+                .map(|note| wrap_text_to_width(note, SECRET_LIST_NOTE_WRAP_WIDTH))
+                .unwrap_or_default(),
+            folder: secret.folder.clone().unwrap_or_default(),
+            groups: secret.groups.clone().unwrap_or_default(),
+            updated_on: crate::cli::ls_view::date_portion_for_display(&secret.updated_on),
+        })
+        .collect()
+}
+
+/// True when any secret in `secrets` carries the reserved `xv-type` tag —
+/// decides whether the table view gains a `Type` column.
+fn any_secret_typed(secrets: &[crate::secret::manager::SecretSummary]) -> bool {
+    secrets.iter().any(|s| s.tags.contains_key(TYPE_TAG))
+}
+
+/// Filters `secrets` down to those whose `xv-type` tag matches `type_name`
+/// (record-types plan Task 10's `ls --type` filter).
+fn filter_secrets_by_type(
+    mut secrets: Vec<crate::secret::manager::SecretSummary>,
+    type_name: Option<&str>,
+) -> Vec<crate::secret::manager::SecretSummary> {
+    if let Some(t) = type_name {
+        secrets.retain(|s| s.tags.get(TYPE_TAG).map(String::as_str) == Some(t));
+    }
+    secrets
+}
+
+/// Lifts a `SecretSummary`'s `f.*` tags into a `fields` map and its
+/// `xv-type` tag into `record_type`, for `ls --format json` (record-types
+/// plan Task 10). Other keys match `SecretSummary`'s existing JSON shape
+/// exactly (same field names, no `tags` key) so untyped-secret JSON output
+/// is unaffected beyond the two new keys.
+fn secret_summary_to_json_with_fields(
+    s: &crate::secret::manager::SecretSummary,
+) -> serde_json::Value {
+    let mut fields = serde_json::Map::new();
+    for (k, v) in &s.tags {
+        if let Some(f) = k.strip_prefix(FIELD_TAG_PREFIX) {
+            fields.insert(f.to_string(), serde_json::Value::String(v.clone()));
+        }
+    }
+    serde_json::json!({
+        "name": s.name,
+        "original_name": s.original_name,
+        "note": s.note,
+        "folder": s.folder,
+        "groups": s.groups,
+        "updated_on": s.updated_on,
+        "enabled": s.enabled,
+        "content_type": s.content_type,
+        "record_type": s.tags.get(TYPE_TAG),
+        "fields": fields,
+    })
 }
 
 fn wrap_text_to_width(input: &str, width: usize) -> String {
@@ -1158,6 +1245,7 @@ pub(crate) fn display_cached_secret_list(
     vault_name: &str,
     config: &Config,
     names_only: bool,
+    type_filter: Option<&str>,
 ) -> Result<()> {
     use crate::cli::ls_view::{self, LsEntry};
     use crate::utils::format::TableFormatter;
@@ -1165,6 +1253,7 @@ pub(crate) fn display_cached_secret_list(
     use std::fmt::Write as _;
 
     let filtered = filter_secret_summaries_for_display(secrets, group.as_deref(), all);
+    let filtered = filter_secrets_by_type(filtered, type_filter);
     let mut scoped = ls_view::scope_secrets(filtered, path);
     if sort == crate::cli::commands::LsSort::Updated {
         ls_view::sort_secrets_by_updated_desc(&mut scoped.secrets);
@@ -1195,6 +1284,20 @@ pub(crate) fn display_cached_secret_list(
             crate::utils::output::warn("--long is ignored for machine-readable formats");
         }
         let page = paginate_slice(&scoped.subtree, pagination);
+        if fmt == OutputFormat::Json {
+            // JSON output lifts `f.*` tags into a `fields` map and
+            // `xv-type` into `record_type` (record-types plan Task 10).
+            let body: Vec<serde_json::Value> = page
+                .items
+                .iter()
+                .map(secret_summary_to_json_with_fields)
+                .collect();
+            let output = serde_json::to_string_pretty(&body).map_err(|e| {
+                CrosstacheError::serialization(format!("JSON serialization failed: {e}"))
+            })?;
+            crate::utils::pager::print_output(&output, pager)?;
+            return Ok(());
+        }
         let formatter = TableFormatter::new(
             fmt,
             config.no_color,
@@ -1275,8 +1378,16 @@ pub(crate) fn display_cached_secret_list(
             config.template.clone(),
             config.runtime_columns.clone(),
         );
-        let display_rows = format_secret_list_rows_for_human(&page.items);
-        output.push_str(&formatter.format_table(&display_rows)?);
+        // TYPE column only when at least one listed secret is typed, so an
+        // untyped-only listing's table output stays byte-identical to
+        // pre-Task-10 behavior (record-types plan Task 10).
+        if any_secret_typed(&page.items) {
+            let display_rows = format_secret_list_rows_for_human_typed(&page.items);
+            output.push_str(&formatter.format_table(&display_rows)?);
+        } else {
+            let display_rows = format_secret_list_rows_for_human(&page.items);
+            output.push_str(&formatter.format_table(&display_rows)?);
+        }
         output.push('\n');
         let _ = writeln!(
             output,
@@ -1593,6 +1704,7 @@ pub(crate) async fn execute_secret_list_direct(
     long: bool,
     recursive: bool,
     sort: crate::cli::commands::LsSort,
+    type_filter: Option<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -1624,6 +1736,7 @@ pub(crate) async fn execute_secret_list_direct(
                     &vault_name,
                     &config,
                     names_only,
+                    type_filter.as_deref(),
                 );
             }
         }
@@ -1709,6 +1822,7 @@ pub(crate) async fn execute_secret_list_direct(
             &vault_name,
             &config,
             names_only,
+            type_filter.as_deref(),
         );
     }
 
