@@ -113,15 +113,22 @@ pub(crate) async fn resolve_vault_for_trait(
 ///
 /// `prompt` is the full confirmation question (e.g. `"Delete secret 'X'?"`).
 pub(crate) fn confirm_destructive(force: bool, prompt: &str) -> Result<bool> {
+    confirm_proceed(force, prompt, "--force")
+}
+
+/// Confirm a non-destructive but wide-reaching operation (e.g. a bulk move).
+/// Same TTY rules as [`confirm_destructive`], but the skip flag is
+/// parameterized (`--yes` for mv) and the refusal message names it.
+pub(crate) fn confirm_proceed(yes: bool, prompt: &str, flag_hint: &str) -> Result<bool> {
     use std::io::IsTerminal;
 
-    if force {
+    if yes {
         return Ok(true);
     }
     if !std::io::stdin().is_terminal() {
         return Err(CrosstacheError::invalid_argument(format!(
             "Refusing to proceed without confirmation in a non-interactive session ({prompt}). \
-             Re-run with --force to confirm."
+             Re-run with {flag_hint} to confirm."
         )));
     }
     crate::utils::interactive::InteractivePrompt::new().confirm(prompt, false)

@@ -166,6 +166,7 @@ pub(crate) async fn execute_mv(
                 src_name,
                 dest_folder,
                 dest_name,
+                dry_run,
             )
             .await
         }
@@ -204,6 +205,7 @@ async fn execute_secret_mv(
     src_name: String,
     dest_folder: Option<String>,
     dest_name: String,
+    dry_run: bool,
 ) -> Result<()> {
     let src_folder_norm = norm_folder(src_folder.as_deref());
 
@@ -239,6 +241,16 @@ async fn execute_secret_mv(
         return Err(CrosstacheError::conflict(format!(
             "secret '{dest_name}' already exists in vault '{vault_name}' — delete it first or pick another name"
         )));
+    }
+
+    if dry_run {
+        let dest_qualified = match &dest_folder {
+            Some(f) if !f.is_empty() => format!("{f}/{dest_name}"),
+            _ => dest_name.clone(),
+        };
+        println!("{source} -> {dest_qualified}");
+        output::info("1 secret would move (dry run)");
+        return Ok(());
     }
 
     let mut folder_updated = false;
@@ -303,18 +315,113 @@ async fn execute_secret_mv(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_folder_mv(
-    _reg: &BackendRegistry,
-    _config: &Config,
-    _vault_name: &str,
-    _secrets: Vec<SecretSummary>,
-    _src_prefix: String,
-    _dest_prefix: Option<String>,
-    _dry_run: bool,
-    _yes: bool,
+    reg: &BackendRegistry,
+    config: &Config,
+    vault_name: &str,
+    secrets: Vec<SecretSummary>,
+    src_prefix: String,
+    dest_prefix: Option<String>,
+    dry_run: bool,
+    yes: bool,
 ) -> Result<()> {
-    Err(CrosstacheError::invalid_argument(
-        "folder mv is not implemented yet",
-    ))
+    use crate::cli::helpers::confirm_proceed;
+    use crate::cli::ls_view::{display_name, relative_to_scope};
+
+    // (old qualified path, new qualified path, name to call the API with, new folder tag or None=clear)
+    let mut moves: Vec<(String, String, String, Option<String>)> = Vec::new();
+    for s in &secrets {
+        let folder = s.folder.as_deref().unwrap_or("");
+        let Some(remainder) = relative_to_scope(folder, &src_prefix) else {
+            continue; // out of scope (segment boundary enforced by relative_to_scope)
+        };
+        let new_folder = match (&dest_prefix, remainder) {
+            (Some(d), "") => Some(d.clone()),
+            (Some(d), rest) => Some(format!("{d}/{rest}")),
+            (None, "") => None,
+            (None, rest) => Some(rest.to_string()),
+        };
+        let name = display_name(s).to_string();
+        let old_path = format!("{folder}/{name}");
+        let new_path = match &new_folder {
+            Some(f) => format!("{f}/{name}"),
+            None => name.clone(),
+        };
+        moves.push((old_path, new_path, name, new_folder));
+    }
+
+    if moves.is_empty() {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "no secrets under '{src_prefix}/'"
+        )));
+    }
+
+    if dry_run {
+        for (old, new, _, _) in &moves {
+            println!("{old} -> {new}");
+        }
+        output::info(&format!("{} secrets would move (dry run)", moves.len()));
+        return Ok(());
+    }
+
+    let dest_label = dest_prefix
+        .as_deref()
+        .map_or("/".to_string(), |d| format!("{d}/"));
+    eprintln!(
+        "Moving {} secrets from '{src_prefix}/' to '{dest_label}':",
+        moves.len()
+    );
+    for (old, new, _, _) in moves.iter().take(10) {
+        eprintln!("  {old} -> {new}");
+    }
+    if moves.len() > 10 {
+        eprintln!("  ... ({} more; --dry-run to list all)", moves.len() - 10);
+    }
+    if !confirm_proceed(yes, &format!("Move {} secrets?", moves.len()), "--yes")? {
+        output::info("Aborted; nothing moved.");
+        return Ok(());
+    }
+
+    let mut failures = 0usize;
+    for (old, new, name, new_folder) in &moves {
+        let request = SecretUpdateRequest {
+            name: name.clone(),
+            value: None,
+            content_type: None,
+            enabled: None,
+            expires_on: FieldUpdate::Unchanged,
+            not_before: FieldUpdate::Unchanged,
+            tags: None,
+            groups: None,
+            note: FieldUpdate::Unchanged,
+            folder: match new_folder {
+                Some(f) => FieldUpdate::Set(f.clone()),
+                None => FieldUpdate::Clear,
+            },
+            replace_tags: false,
+            replace_groups: false,
+        };
+        if let Err(e) = reg
+            .active()
+            .secrets()
+            .update_secret(vault_name, name, request)
+            .await
+        {
+            failures += 1;
+            output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
+        }
+    }
+    invalidate_trait_secret_cache(config, vault_name);
+    let moved = moves.len() - failures;
+    if failures > 0 {
+        return Err(CrosstacheError::unknown(format!(
+            "moved {moved} of {} secrets; {failures} failed (see warnings above)",
+            moves.len()
+        )));
+    }
+    output::success(&format!(
+        "Moved {moved} secrets from '{src_prefix}/' to '{dest_label}'"
+    ));
+    Ok(())
 }
 
 #[cfg(test)]

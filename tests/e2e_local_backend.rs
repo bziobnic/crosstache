@@ -1418,3 +1418,94 @@ fn mv_noop_and_errors() {
         "expected suggestion in: {stderr}"
     );
 }
+
+#[test]
+fn mv_secret_dry_run_does_not_mutate() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("pass", "v1", &["--folder", "db"]);
+
+    let out = env.xv_ok(&["mv", "db/pass", "app/", "--dry-run"]);
+    assert!(out.contains("db/pass") && out.contains("app/pass"), "{out}");
+
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"db\""), "dry-run must not mutate: {json}");
+}
+
+// ===========================================================================
+// xv mv — bulk folder move
+// ===========================================================================
+
+#[test]
+fn mv_folder_bulk_dry_run_and_apply() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("a", "1", &["--folder", "app"]);
+    env.set_secret_with_args("b", "2", &["--folder", "app/db"]);
+    env.set_secret_with_args("c", "3", &["--folder", "approved"]); // boundary trap
+    env.set_secret_with_args("d", "4", &[]);
+
+    // Dry run: full plan on stdout, nothing changed.
+    let plan = env.xv_ok(&["mv", "app/", "svc/", "--dry-run"]);
+    assert!(plan.contains("app/a") && plan.contains("svc/a"), "{plan}");
+    assert!(
+        plan.contains("app/db/b") && plan.contains("svc/db/b"),
+        "remainder must be preserved: {plan}"
+    );
+    assert!(
+        !plan.contains("approved"),
+        "segment boundary violated: {plan}"
+    );
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"app\""), "dry-run must not mutate: {json}");
+
+    // Apply with --yes.
+    env.xv_ok(&["mv", "app/", "svc/", "--yes"]);
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        json.contains("\"svc\"") && json.contains("svc/db"),
+        "{json}"
+    );
+    assert!(
+        !json.contains("\"app\"") && !json.contains("app/db"),
+        "{json}"
+    );
+    assert!(
+        json.contains("approved"),
+        "unrelated folder touched: {json}"
+    );
+}
+
+#[test]
+fn mv_folder_bulk_requires_yes_when_not_a_tty() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("a", "1", &["--folder", "app"]);
+
+    // Tests run with piped stdin (not a TTY): without --yes this must refuse.
+    let (_, stderr) = env.xv_fail(&["mv", "app/", "svc/"]);
+    assert!(
+        stderr.contains("--yes"),
+        "should tell the user about --yes: {stderr}"
+    );
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"app\""), "refusal must not mutate: {json}");
+}
+
+#[test]
+fn mv_folder_bulk_empty_prefix_errors() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("a", "1", &["--folder", "app"]);
+    let (_, stderr) = env.xv_fail(&["mv", "ghost/", "svc/", "--yes"]);
+    assert!(stderr.contains("no secrets under 'ghost/'"), "{stderr}");
+}
+
+#[test]
+fn mv_folder_to_root() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("a", "1", &["--folder", "app"]);
+    env.set_secret_with_args("b", "2", &["--folder", "app/db"]);
+
+    env.xv_ok(&["mv", "app/", "/", "--yes"]);
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    // 'a' is now at the root; 'b' keeps its remainder 'db'.
+    assert!(!json.contains("\"app\""), "{json}");
+    assert!(json.contains("\"db\""), "remainder folder lost: {json}");
+}
