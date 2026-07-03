@@ -941,6 +941,792 @@ fn get_unknown_type_degrades() {
     assert_eq!(common::stdout_str(&out_field), "bob");
 }
 
+// ---------------------------------------------------------------------------
+// Task 8: `xv update --field`/`--field-secret`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_metadata_field_is_tag_only() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "cred");
+    let version_before = before["version"].clone();
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--field", "username=alice"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(after["tags"]["f.username"], "alice");
+    // Tag-only update: no new version.
+    assert_eq!(after["version"], version_before);
+
+    // Primary value untouched.
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "hunter2");
+}
+
+#[test]
+fn update_secret_field_writes_new_envelope() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "cred");
+    let version_before = before["version"].clone();
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--field-secret", "totp-seed=ABCDEF"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    // New secret-field value forces a new version.
+    assert_ne!(after["version"], version_before);
+    assert!(after["tags"].get("f.totp-seed").is_none());
+    // Record identity must survive a secret-field edit (Bugbot BLOCKER:
+    // an Azure-specific bug relied on backend merge-on-None semantics for
+    // content_type/tags on this exact write shape — content_type: None
+    // and, when no --field accompanies --field-secret, tags: None too —
+    // which the Azure full-PUT path takes literally rather than treating
+    // as "leave unchanged". Local never had this bug (it does treat None
+    // as unchanged), so this assertion is a regression guard for the fix
+    // itself, not a reproduction of the original Azure bug.
+    assert_eq!(after["content_type"], "application/vnd.xv.record");
+    assert_eq!(after["tags"]["xv-type"], "login");
+    assert_eq!(after["tags"]["f.username"], "bob");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "cred", "--field", "totp-seed", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "ABCDEF");
+
+    // Primary value untouched by the merge.
+    let out4 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert_eq!(common::stdout_str(&out4), "hunter2");
+}
+
+/// Bugbot MEDIUM review, round 3: `SecretProperties.tags` (as returned by
+/// `get_secret`) is DENORMALIZED for display — groups/note/folder are
+/// folded into plain tag keys. The record write-back paths built their
+/// `replace_tags: true` map directly from `secret.tags.clone()`, so those
+/// denormalized keys rode along into the write. On local this means they'd
+/// persist into `SecretMeta.tags` even though the real values live in the
+/// dedicated `.groups`/`.note`/`.folder` fields — the exact bug class the
+/// #315 copy/move review caught. This test pins the fix: group/note/folder
+/// metadata survives a secret-field edit, AND `meta.tags` (the raw on-disk
+/// tag map) never contains `groups`/`note`/`folder` keys.
+#[test]
+fn update_secret_field_preserves_group_note_folder_without_denormalizing_into_tags() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--group",
+            "prod",
+            "--group",
+            "team-a",
+            "--note",
+            "rotate monthly",
+            "--folder",
+            "app/db",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let before = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(before["groups"], serde_json::json!(["prod", "team-a"]));
+    assert_eq!(before["note"], "rotate monthly");
+    assert_eq!(before["folder"], "app/db");
+    // Never denormalized into tags in the first place (set path).
+    assert!(before["tags"].get("groups").is_none());
+    assert!(before["tags"].get("note").is_none());
+    assert!(before["tags"].get("folder").is_none());
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--field-secret", "totp-seed=ABCDEF"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    // Dedicated metadata fields intact.
+    assert_eq!(after["groups"], serde_json::json!(["prod", "team-a"]));
+    assert_eq!(after["note"], "rotate monthly");
+    assert_eq!(after["folder"], "app/db");
+    // Never leaked into the raw tag map by the write-back.
+    assert!(
+        after["tags"].get("groups").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("note").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("folder").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    // Record identity and the field edit itself still landed correctly.
+    assert_eq!(after["content_type"], "application/vnd.xv.record");
+    assert_eq!(after["tags"]["xv-type"], "login");
+    assert_eq!(after["tags"]["f.username"], "bob");
+}
+
+/// Same denormalization guard as above, for `--type` conversion.
+#[test]
+fn type_conversion_preserves_group_note_folder_without_denormalizing_into_tags() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "bare",
+            "--value",
+            "hunter2",
+            "--group",
+            "prod",
+            "--group",
+            "team-a",
+            "--note",
+            "rotate monthly",
+            "--folder",
+            "app/db",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "bare", "--type", "login"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "bare");
+    assert_eq!(after["groups"], serde_json::json!(["prod", "team-a"]));
+    assert_eq!(after["note"], "rotate monthly");
+    assert_eq!(after["folder"], "app/db");
+    assert!(
+        after["tags"].get("groups").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("note").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("folder").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+}
+
+/// Same denormalization guard as above, for `--untype`.
+#[test]
+fn untype_preserves_group_note_folder_without_denormalizing_into_tags() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--group",
+            "prod",
+            "--group",
+            "team-a",
+            "--note",
+            "rotate monthly",
+            "--folder",
+            "app/db",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--untype", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(after["groups"], serde_json::json!(["prod", "team-a"]));
+    assert_eq!(after["note"], "rotate monthly");
+    assert_eq!(after["folder"], "app/db");
+    assert!(
+        after["tags"].get("groups").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("note").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("folder").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+}
+
+#[test]
+fn update_field_on_untyped_errors() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "plain", "--field", "username=bob"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+}
+
+/// Bugbot MEDIUM review: combining a record-path flag (`--field`,
+/// `--field-secret`, `--type`, `--untype`) with a classic update flag
+/// (`--note`, `--tags`, `--folder`, the positional value, etc.) used to
+/// early-return after applying only the record edit, silently ignoring the
+/// classic flag while still reporting success. Now a clap usage error
+/// (exit 2) before anything runs, and nothing is changed.
+#[test]
+fn update_field_with_classic_flag_is_a_usage_error() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "cred");
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--field", "username=alice", "--note", "n"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(2),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    // Nothing changed — neither the field edit nor the note was applied.
+    let after = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(before, after);
+}
+
+/// Bugbot MEDIUM review: `xv update <name> --type <t>` converting AND
+/// replacing the primary value in the same command (a positional VALUE
+/// arg alongside `--type`) is now a usage error — convert first, then set
+/// the primary via `xv update <name> --field-secret <primary>=<value>`.
+#[test]
+fn update_type_with_positional_value_is_a_usage_error() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "bare", "--value", "hunter2"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "bare", "--type", "login", "new-value"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(2),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("--type"), "stderr: {stderr}");
+
+    // Nothing changed — the secret is still untyped with its original value.
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "bare", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "hunter2");
+}
+
+// ---------------------------------------------------------------------------
+// Task 9: `xv update --type` / `--untype` conversion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn type_conversion_roundtrip() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "bare", "--value", "hunter2"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "bare", "--type", "login"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let meta = read_local_meta(temp.path(), "default", "bare");
+    assert_eq!(meta["content_type"], "application/vnd.xv.record");
+    assert_eq!(meta["tags"]["xv-type"], "login");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "bare", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "hunter2");
+
+    let out4 = xv_same_env(temp.path())
+        .args(["update", "bare", "--untype", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out4.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out4)
+    );
+    let meta2 = read_local_meta(temp.path(), "default", "bare");
+    assert_eq!(meta2["content_type"], "");
+    assert!(meta2["tags"].get("xv-type").is_none());
+
+    let out5 = xv_same_env(temp.path())
+        .args(["get", "bare", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out5.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out5)
+    );
+    assert_eq!(common::stdout_str(&out5), "hunter2");
+}
+
+#[test]
+fn untype_with_extra_secret_fields_requires_yes() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--field-secret",
+            "totp-seed=ABCDEF",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    // Non-TTY without --yes: refuses, exit 3, nothing changed.
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--untype"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("--yes"), "stderr: {stderr}");
+    let meta_unchanged = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta_unchanged["content_type"], "application/vnd.xv.record");
+
+    // With --yes: succeeds, drops totp-seed, names it in output.
+    let out3 = xv_same_env(temp.path())
+        .args(["update", "cred", "--untype", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    let stderr3 = common::stderr_str(&out3);
+    assert!(stderr3.contains("totp-seed"), "stderr: {stderr3}");
+
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["content_type"], "");
+    assert!(meta["tags"].get("xv-type").is_none());
+    assert!(meta["tags"].get("f.username").is_none());
+
+    let out4 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert_eq!(common::stdout_str(&out4), "hunter2");
+}
+
+#[test]
+fn type_on_existing_record_errors() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--type", "api-key"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("already"), "stderr: {stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// Task 10: `ls` — type column, f.* fields in JSON, --type filter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ls_shows_type_column_when_typed_present() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let out_plain = xv_same_env(temp.path())
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(
+        out_plain.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out_plain)
+    );
+
+    let out2 = xv_same_env(temp.path())
+        .args(["ls", "--format", "table"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    assert!(stdout.contains("Type"), "stdout: {stdout}");
+    assert!(stdout.contains("login"), "stdout: {stdout}");
+}
+
+#[test]
+fn ls_untyped_only_output_unchanged() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["ls", "--format", "table"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    // Byte-compare the table header line against the pre-Task-10 shape:
+    // TableFormatter drops all-empty columns, so this fixture's table only
+    // ever showed Name/Updated — the point of this test is that adding
+    // record-types support doesn't introduce a Type column (or any other
+    // column) for an untyped-only listing.
+    let header_line = stdout
+        .lines()
+        .find(|l| l.contains("Name"))
+        .unwrap_or_else(|| panic!("no header line in: {stdout}"));
+    assert_eq!(
+        header_line.trim(),
+        "│ Name  │  Updated   │",
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains("Type"), "stdout: {stdout}");
+
+    // Byte-compare a DATA row too, not just the header — the date portion
+    // is the only part that legitimately varies run to run, so extract it
+    // from the actual row and rebuild the expected line around it; every
+    // other byte (name padding, column widths, box-drawing characters)
+    // must still match exactly.
+    let data_line = stdout
+        .lines()
+        .find(|l| l.contains("plain"))
+        .unwrap_or_else(|| panic!("no data row in: {stdout}"));
+    let date = data_line
+        .trim()
+        .split('│')
+        .nth(2)
+        .unwrap_or_else(|| panic!("row has no second column: {data_line}"))
+        .trim();
+    assert_eq!(
+        data_line.trim(),
+        format!("│ plain │ {date} │"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn ls_json_lifts_fields_and_type() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["ls", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let entries = parsed.as_array().expect("array");
+    let cred = entries
+        .iter()
+        .find(|e| e["name"] == "cred")
+        .expect("cred entry present");
+    assert_eq!(cred["record_type"], "login");
+    assert_eq!(cred["fields"]["username"], "bob");
+}
+
+#[test]
+fn ls_type_filter() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let out_plain = xv_same_env(temp.path())
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(
+        out_plain.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out_plain)
+    );
+
+    let out2 = xv_same_env(temp.path())
+        .args(["ls", "--type", "login", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let entries = parsed.as_array().expect("array");
+    assert_eq!(entries.len(), 1, "stdout: {stdout}");
+    assert_eq!(entries[0]["name"], "cred");
+}
+
+/// Bugbot LOW review, round 3: `DeletedSecretSummary` (the shape returned
+/// by `ls --deleted` on every backend) has no `tags` field at all — deleted
+/// listings never carry `xv-type`, so `--type` can't be threaded through
+/// and filtered without a bigger cross-backend change to start fetching
+/// tags for every deleted secret. Rather than a silent no-op (the filter
+/// looking like it did nothing), `--deleted --type` is a hard clap usage
+/// error in both flag orders.
+#[test]
+fn ls_deleted_with_type_filter_is_a_usage_error() {
+    let (mut cmd, _temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["ls", "--deleted", "--type", "login"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+
+    let (mut cmd2, _temp2) = common::xv_isolated_local();
+    let out2 = cmd2
+        .args(["ls", "--type", "login", "--deleted"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(2),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+}
+
 #[test]
 fn get_field_on_untyped_errors() {
     let (mut cmd, temp) = common::xv_isolated_local();

@@ -220,6 +220,7 @@ mod tests {
             updated_on: String::new(),
             enabled: true,
             content_type: String::new(),
+            tags: std::collections::HashMap::new(),
         };
         let item = CandidateItem::from_secret_summary(&summary);
         // Prefer original_name over sanitized name (matches the user-typed form).

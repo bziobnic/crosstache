@@ -110,16 +110,20 @@ pub fn spawn_load_value(
                 .await
                 .map_err(CrosstacheError::from);
             let msg = match result {
-                Ok(props) => match props.value {
-                    Some(v) => Message::ValueLoaded {
-                        vault,
-                        name,
-                        value: zeroize::Zeroizing::new(v.as_str().to_string()),
-                    },
-                    None => Message::Error(CrosstacheError::config(format!(
-                        "secret {name} has no value"
-                    ))),
-                },
+                Ok(props) => {
+                    let content_type = props.content_type.clone();
+                    match props.value {
+                        Some(v) => Message::ValueLoaded {
+                            vault,
+                            name,
+                            value: zeroize::Zeroizing::new(v.as_str().to_string()),
+                            content_type,
+                        },
+                        None => Message::Error(CrosstacheError::config(format!(
+                            "secret {name} has no value"
+                        ))),
+                    }
+                }
                 Err(e) => Message::Error(e),
             };
             let _ = tx.send(msg).await;
@@ -139,16 +143,20 @@ pub fn spawn_load_value(
             }
             .await;
             let msg = match result {
-                Ok(props) => match props.value {
-                    Some(v) => Message::ValueLoaded {
-                        vault,
-                        name,
-                        value: zeroize::Zeroizing::new(v.as_str().to_string()),
-                    },
-                    None => Message::Error(CrosstacheError::config(format!(
-                        "secret {name} has no value"
-                    ))),
-                },
+                Ok(props) => {
+                    let content_type = props.content_type.clone();
+                    match props.value {
+                        Some(v) => Message::ValueLoaded {
+                            vault,
+                            name,
+                            value: zeroize::Zeroizing::new(v.as_str().to_string()),
+                            content_type,
+                        },
+                        None => Message::Error(CrosstacheError::config(format!(
+                            "secret {name} has no value"
+                        ))),
+                    }
+                }
                 Err(e) => Message::Error(e),
             };
             let _ = tx.send(msg).await;

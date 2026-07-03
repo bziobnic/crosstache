@@ -552,9 +552,14 @@ pub enum Commands {
         /// secrets (backend must support soft delete)
         #[arg(
             long,
-            conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired"]
+            conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired", "type_filter"]
         )]
         deleted: bool,
+        /// Filter by record type (built-in or custom `[types.*]`, e.g. `login`).
+        /// Not supported with --deleted: deleted-secret summaries don't carry
+        /// tags on any backend, so there's no `xv-type` to filter on.
+        #[arg(long = "type")]
+        type_filter: Option<String>,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -731,6 +736,64 @@ pub enum Commands {
         /// Enable or disable the secret (true/false)
         #[arg(long)]
         enabled: Option<bool>,
+        /// Edit one metadata (or type-declared non-primary secret) field of
+        /// a typed record, `name=value` (repeatable). A metadata-field edit
+        /// is tag-only; a secret-field edit rewrites the record envelope as
+        /// a new version. Errors if the secret is untyped. Mutually
+        /// exclusive with --type/--untype and with every classic update
+        /// flag (--value/--stdin/--note/--tags/--folder/etc.) — a record
+        /// field edit is a standalone operation in v1; compound edits are
+        /// two commands (e.g. `xv update x --note n` then
+        /// `xv update x --field a=b`).
+        #[arg(long = "field", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = [
+            "type", "untype",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        fields: Vec<(String, String)>,
+        /// Edit an ad-hoc secret field of a typed record, `name=value`
+        /// (repeatable) — stored in the record envelope. Mutually
+        /// exclusive with --type/--untype and with every classic update
+        /// flag; see --field's note.
+        #[arg(long = "field-secret", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = [
+            "type", "untype",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        secret_fields: Vec<(String, String)>,
+        /// Explicitly convert a bare secret into a typed record: its
+        /// current value becomes the primary field. Errors if the secret
+        /// is already a record. Mutually exclusive with --untype/--field/
+        /// --field-secret and with every classic update flag, INCLUDING
+        /// --value/--stdin: converting and replacing the primary value in
+        /// one step is not supported in v1 — convert first (this command,
+        /// no --value/--stdin), then set the primary via
+        /// `xv update <name> --field-secret <primary-field>=<value>`.
+        #[arg(long = "type", conflicts_with_all = [
+            "untype", "fields", "secret_fields",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        r#type: Option<String>,
+        /// Flatten a typed record back to a bare secret holding the
+        /// primary field's value. Dropping non-primary secret fields
+        /// prompts for confirmation unless --yes is given. Mutually
+        /// exclusive with --type/--field/--field-secret and with every
+        /// classic update flag; see --field's note.
+        #[arg(long, conflicts_with_all = [
+            "type", "fields", "secret_fields",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        untype: bool,
+        /// Skip the confirmation prompt when --untype would drop
+        /// non-primary secret fields.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Move or rename a secret, or re-folder a whole folder (trailing / = folder)
     Mv {
@@ -1637,6 +1700,7 @@ impl Cli {
                 names_only,
                 sort,
                 deleted,
+                type_filter,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
@@ -1657,8 +1721,21 @@ impl Cli {
                         None => String::new(),
                     };
                     crate::cli::secret_ops::execute_secret_list_direct(
-                        path, group, all, expiring, expired, no_cache, pagination, pager,
-                        names_only, long, recursive, sort, config, registry,
+                        path,
+                        group,
+                        all,
+                        expiring,
+                        expired,
+                        no_cache,
+                        pagination,
+                        pager,
+                        names_only,
+                        long,
+                        recursive,
+                        sort,
+                        type_filter,
+                        config,
+                        registry,
                     )
                     .await
                 }
@@ -1766,6 +1843,11 @@ impl Cli {
                 clear_note,
                 clear_folder,
                 enabled,
+                fields,
+                secret_fields,
+                r#type,
+                untype,
+                yes,
             } => {
                 crate::cli::secret_ops::execute_secret_update_direct(
                     &name,
@@ -1786,6 +1868,11 @@ impl Cli {
                     clear_note,
                     clear_folder,
                     enabled,
+                    fields,
+                    secret_fields,
+                    r#type,
+                    untype,
+                    yes,
                     config,
                     registry,
                 )

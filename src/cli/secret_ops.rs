@@ -1057,6 +1057,27 @@ struct GroupListRow {
     secrets: usize,
 }
 
+/// Table row shape used only when at least one listed secret is a typed
+/// record (record-types plan Task 10) — adds a `Type` column. Kept as a
+/// separate struct (rather than always adding the column to
+/// `SecretListDisplayRow`) so an untyped-only listing's table output stays
+/// byte-identical to pre-Task-10 behavior.
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct SecretListDisplayRowTyped {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Type")]
+    record_type: String,
+    #[tabled(rename = "Note")]
+    note: String,
+    #[tabled(rename = "Folder")]
+    folder: String,
+    #[tabled(rename = "Groups")]
+    groups: String,
+    #[tabled(rename = "Updated")]
+    updated_on: String,
+}
+
 fn format_secret_list_rows_for_human(
     secrets: &[crate::secret::manager::SecretSummary],
 ) -> Vec<SecretListDisplayRow> {
@@ -1074,6 +1095,72 @@ fn format_secret_list_rows_for_human(
             updated_on: crate::cli::ls_view::date_portion_for_display(&secret.updated_on),
         })
         .collect()
+}
+
+fn format_secret_list_rows_for_human_typed(
+    secrets: &[crate::secret::manager::SecretSummary],
+) -> Vec<SecretListDisplayRowTyped> {
+    secrets
+        .iter()
+        .map(|secret| SecretListDisplayRowTyped {
+            name: secret.name.clone(),
+            record_type: secret.tags.get(TYPE_TAG).cloned().unwrap_or_default(),
+            note: secret
+                .note
+                .as_deref()
+                .map(|note| wrap_text_to_width(note, SECRET_LIST_NOTE_WRAP_WIDTH))
+                .unwrap_or_default(),
+            folder: secret.folder.clone().unwrap_or_default(),
+            groups: secret.groups.clone().unwrap_or_default(),
+            updated_on: crate::cli::ls_view::date_portion_for_display(&secret.updated_on),
+        })
+        .collect()
+}
+
+/// True when any secret in `secrets` carries the reserved `xv-type` tag —
+/// decides whether the table view gains a `Type` column.
+fn any_secret_typed(secrets: &[crate::secret::manager::SecretSummary]) -> bool {
+    secrets.iter().any(|s| s.tags.contains_key(TYPE_TAG))
+}
+
+/// Filters `secrets` down to those whose `xv-type` tag matches `type_name`
+/// (record-types plan Task 10's `ls --type` filter).
+fn filter_secrets_by_type(
+    mut secrets: Vec<crate::secret::manager::SecretSummary>,
+    type_name: Option<&str>,
+) -> Vec<crate::secret::manager::SecretSummary> {
+    if let Some(t) = type_name {
+        secrets.retain(|s| s.tags.get(TYPE_TAG).map(String::as_str) == Some(t));
+    }
+    secrets
+}
+
+/// Lifts a `SecretSummary`'s `f.*` tags into a `fields` map and its
+/// `xv-type` tag into `record_type`, for `ls --format json` (record-types
+/// plan Task 10). Other keys match `SecretSummary`'s existing JSON shape
+/// exactly (same field names, no `tags` key) so untyped-secret JSON output
+/// is unaffected beyond the two new keys.
+fn secret_summary_to_json_with_fields(
+    s: &crate::secret::manager::SecretSummary,
+) -> serde_json::Value {
+    let mut fields = serde_json::Map::new();
+    for (k, v) in &s.tags {
+        if let Some(f) = k.strip_prefix(FIELD_TAG_PREFIX) {
+            fields.insert(f.to_string(), serde_json::Value::String(v.clone()));
+        }
+    }
+    serde_json::json!({
+        "name": s.name,
+        "original_name": s.original_name,
+        "note": s.note,
+        "folder": s.folder,
+        "groups": s.groups,
+        "updated_on": s.updated_on,
+        "enabled": s.enabled,
+        "content_type": s.content_type,
+        "record_type": s.tags.get(TYPE_TAG),
+        "fields": fields,
+    })
 }
 
 fn wrap_text_to_width(input: &str, width: usize) -> String {
@@ -1158,6 +1245,7 @@ pub(crate) fn display_cached_secret_list(
     vault_name: &str,
     config: &Config,
     names_only: bool,
+    type_filter: Option<&str>,
 ) -> Result<()> {
     use crate::cli::ls_view::{self, LsEntry};
     use crate::utils::format::TableFormatter;
@@ -1165,6 +1253,7 @@ pub(crate) fn display_cached_secret_list(
     use std::fmt::Write as _;
 
     let filtered = filter_secret_summaries_for_display(secrets, group.as_deref(), all);
+    let filtered = filter_secrets_by_type(filtered, type_filter);
     let mut scoped = ls_view::scope_secrets(filtered, path);
     if sort == crate::cli::commands::LsSort::Updated {
         ls_view::sort_secrets_by_updated_desc(&mut scoped.secrets);
@@ -1195,6 +1284,20 @@ pub(crate) fn display_cached_secret_list(
             crate::utils::output::warn("--long is ignored for machine-readable formats");
         }
         let page = paginate_slice(&scoped.subtree, pagination);
+        if fmt == OutputFormat::Json {
+            // JSON output lifts `f.*` tags into a `fields` map and
+            // `xv-type` into `record_type` (record-types plan Task 10).
+            let body: Vec<serde_json::Value> = page
+                .items
+                .iter()
+                .map(secret_summary_to_json_with_fields)
+                .collect();
+            let output = serde_json::to_string_pretty(&body).map_err(|e| {
+                CrosstacheError::serialization(format!("JSON serialization failed: {e}"))
+            })?;
+            crate::utils::pager::print_output(&output, pager)?;
+            return Ok(());
+        }
         let formatter = TableFormatter::new(
             fmt,
             config.no_color,
@@ -1275,8 +1378,16 @@ pub(crate) fn display_cached_secret_list(
             config.template.clone(),
             config.runtime_columns.clone(),
         );
-        let display_rows = format_secret_list_rows_for_human(&page.items);
-        output.push_str(&formatter.format_table(&display_rows)?);
+        // TYPE column only when at least one listed secret is typed, so an
+        // untyped-only listing's table output stays byte-identical to
+        // pre-Task-10 behavior (record-types plan Task 10).
+        if any_secret_typed(&page.items) {
+            let display_rows = format_secret_list_rows_for_human_typed(&page.items);
+            output.push_str(&formatter.format_table(&display_rows)?);
+        } else {
+            let display_rows = format_secret_list_rows_for_human(&page.items);
+            output.push_str(&formatter.format_table(&display_rows)?);
+        }
         output.push('\n');
         let _ = writeln!(
             output,
@@ -1593,6 +1704,7 @@ pub(crate) async fn execute_secret_list_direct(
     long: bool,
     recursive: bool,
     sort: crate::cli::commands::LsSort,
+    type_filter: Option<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -1624,6 +1736,7 @@ pub(crate) async fn execute_secret_list_direct(
                     &vault_name,
                     &config,
                     names_only,
+                    type_filter.as_deref(),
                 );
             }
         }
@@ -1709,6 +1822,7 @@ pub(crate) async fn execute_secret_list_direct(
             &vault_name,
             &config,
             names_only,
+            type_filter.as_deref(),
         );
     }
 
@@ -2117,6 +2231,478 @@ pub(crate) async fn execute_secret_inject_direct(
     execute_secret_inject(reg, None, template, out, group, best_effort, &config).await
 }
 
+/// Like [`crate::cli::helpers::confirm_proceed`], but exits with code 3
+/// (`CrosstacheError::config`) instead of 2 — record-types plan Task 9
+/// requires `xv update --untype` (when it would drop non-primary secret
+/// fields) to exit 3 without `--yes` on a non-interactive session,
+/// consistent with every other record-types validation failure, even
+/// though it mirrors `mv`'s bulk-confirm *behavior* (prompt unless `--yes`,
+/// hard-fail without a TTY).
+fn confirm_record_action(yes: bool, prompt: &str) -> Result<bool> {
+    use std::io::IsTerminal;
+
+    if yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(CrosstacheError::config(format!(
+            "Refusing to proceed without confirmation in a non-interactive session ({prompt}). \
+             Re-run with --yes to confirm."
+        )));
+    }
+    crate::utils::interactive::InteractivePrompt::new().confirm(prompt, false)
+}
+
+/// Non-reserved, non-`f.*` user tag entries of `tags` — the same "everything
+/// else" set the tag-budget check counts as `user_tags` on `xv set --type`.
+fn user_tags_of(tags: &std::collections::HashMap<String, String>) -> BTreeMap<String, String> {
+    tags.iter()
+        .filter(|(k, _)| {
+            let k = k.as_str();
+            k != TYPE_TAG
+                && !k.starts_with(FIELD_TAG_PREFIX)
+                && k != crate::backend::TAG_ORIGINAL_NAME
+                && k != crate::backend::TAG_CREATED_BY
+                && k != "groups"
+                && k != "note"
+                && k != "folder"
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// `xv update <name> --field NAME=VALUE [--field-secret NAME=VALUE ...]`
+/// (record-types plan Task 8). A metadata-field change is tag-only
+/// (no new version); a secret-field change fetches the envelope, merges,
+/// re-encodes, and writes a new version. Both re-run the tag budget with
+/// the same collision/required-field rules as `xv set --type`.
+async fn execute_record_field_update(
+    name: &str,
+    fields: &[(String, String)],
+    secret_fields: &[(String, String)],
+    vault_name: &str,
+    config: &Config,
+    reg: &BackendRegistry,
+) -> Result<()> {
+    let secret = reg
+        .active()
+        .secrets()
+        .get_secret(vault_name, name, true)
+        .await?;
+    if !crate::records::is_record(&secret.content_type) {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' is not a typed record (value is not marked {}); --field/--field-secret \
+             only apply to typed records. Use 'xv update {name} --type <type>' to convert it.",
+            crate::records::RECORD_CONTENT_TYPE
+        )));
+    }
+
+    let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
+    let types = config.resolve_record_types().await?;
+    let Some(record_type) = find_type(&types, &type_name) else {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' has type '{type_name}', which has no resolvable type definition \
+             (check your [types.*] config); --field/--field-secret can't be validated against it."
+        )));
+    };
+
+    let (metadata_updates, secret_updates) = route_fields(record_type, fields, secret_fields)?;
+
+    // Required-field-emptying guard, matching `xv set --type`'s
+    // has_non_blank_value rule: an explicit empty/whitespace value on a
+    // required field isn't meaningfully "set".
+    for (field_name, value) in metadata_updates.iter().chain(secret_updates.iter()) {
+        if let Some(def) = record_type.field(field_name) {
+            if def.required && value.trim().is_empty() {
+                return Err(CrosstacheError::config(format!(
+                    "field '{field_name}' is required for type '{type_name}' and cannot be set to \
+                     an empty value"
+                )));
+            }
+        }
+    }
+
+    let mut new_value: Option<Zeroizing<String>> = None;
+    if !secret_updates.is_empty() {
+        let raw = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+        let mut envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw)?;
+        for (k, v) in &secret_updates {
+            envelope.insert(k.clone(), v.clone());
+        }
+        new_value = Some(Zeroizing::new(encode_envelope(&envelope)?));
+    }
+
+    // Tags + content type + replace_tags/replace_groups + groups/note/
+    // folder. Two distinct write shapes:
+    //
+    // - Secret-field edit (`new_value.is_some()`): this forces the full-PUT
+    //   path on Azure's `update_secret` (it only takes the lighter
+    //   attributes-only PATCH when `request.value.is_none()` — see
+    //   `AzureSecretBackendCompat::update_secret`, src/backend/azure/secrets.rs
+    //   ~L214-265). The full-PUT branch writes `content_type`/`tags` from the
+    //   request EXACTLY as given — `None` there does not mean "leave
+    //   unchanged" the way it does on the attributes-only PATCH; it means
+    //   "no content type" / "rebuild tags from empty" respectively. Relying
+    //   on backend merge-on-`None` semantics here silently destroyed the
+    //   record's content-type marker and dropped xv-type/f.*/groups/etc.
+    //   (Bugbot review, round 1). So whenever a secret-field edit is in
+    //   play we build the COMPLETE desired tag map ourselves (existing tags
+    //   + the metadata overlay) and set `replace_tags: true`, exactly like
+    //   `execute_record_type_conversion`/`execute_record_untype` already do
+    //   — never a partial delta.
+    //
+    //   That full-PUT path ALSO does not treat `groups: None` as
+    //   "unchanged": Azure's `prepare_secret_request` (src/secret/manager.rs)
+    //   only re-adds the `groups` tag when `SecretRequest.groups` is `Some`,
+    //   so sending `None` after stripping the denormalized `groups` key out
+    //   of the tags map above silently ERASED group membership on Azure —
+    //   `note`/`folder` happened to survive only because they ride
+    //   `FieldUpdate::Unchanged`, which Azure's translation layer explicitly
+    //   re-fetches and carries forward before reaching `prepare_secret_
+    //   request`; `groups` has no such tri-state fallback (Bugbot review,
+    //   round 3). Fix: use the tuple `split_denormalized_tags` returns —
+    //   `groups` goes into the request's dedicated field as `Some(vec)`
+    //   with `replace_groups: true` (exact carry-forward, mirrors
+    //   `rename_request_from_properties`'s use of the same tuple); `note`/
+    //   `folder` switch from `Unchanged` to `Set`-when-known so they no
+    //   longer rely on any backend's "Unchanged re-fetches current"
+    //   behavior specifically — they're asserted directly from the same
+    //   `secret` this function already fetched.
+    // - Metadata-only edit (`new_value.is_none()`): stays on Azure's
+    //   attributes-only PATCH, which already merges a partial tag delta
+    //   against the current tags itself (`build_patched_tags`) and already
+    //   correctly leaves groups/note/folder alone when their request fields
+    //   are None/Unchanged — untouched, still correct.
+    let (new_tags, content_type, replace_tags, groups, note, folder, replace_groups) =
+        if !secret_updates.is_empty() {
+            let mut full = secret.tags.clone();
+            for (k, v) in &metadata_updates {
+                full.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
+            }
+            // `secret.tags` is DENORMALIZED for display (groups/note/folder
+            // folded into plain keys by every backend's get_secret) — strip
+            // them before this map becomes a literal `replace_tags: true`
+            // write, or they'd land as extra plain user tags on AWS / the
+            // wrong SecretMeta field on local (Bugbot review, round 2; same
+            // helper `rename_request_from_properties` already relies on).
+            let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut full);
+            (
+                Some(full),
+                Some(RECORD_CONTENT_TYPE.to_string()),
+                true,
+                groups,
+                note.map(crate::secret::manager::FieldUpdate::Set)
+                    .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+                folder
+                    .map(crate::secret::manager::FieldUpdate::Set)
+                    .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+                true,
+            )
+        } else if !metadata_updates.is_empty() {
+            let mut t = std::collections::HashMap::new();
+            for (k, v) in &metadata_updates {
+                t.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
+            }
+            (
+                Some(t),
+                None,
+                false,
+                None,
+                crate::secret::manager::FieldUpdate::Unchanged,
+                crate::secret::manager::FieldUpdate::Unchanged,
+                false,
+            )
+        } else {
+            (
+                None,
+                None,
+                false,
+                None,
+                crate::secret::manager::FieldUpdate::Unchanged,
+                crate::secret::manager::FieldUpdate::Unchanged,
+                false,
+            )
+        };
+
+    // Re-run the tag budget: projected f.* tags (existing, minus any this
+    // write overwrites, plus the new values) + existing user tags. This
+    // write never adds a *new* user tag, but a field update can still push
+    // an existing f.* tag over the backend's per-value length cap.
+    let mut projected_field_tags: BTreeMap<String, String> = secret
+        .tags
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix(FIELD_TAG_PREFIX)
+                .map(|f| (f.to_string(), v.clone()))
+        })
+        .collect();
+    for (k, v) in &metadata_updates {
+        projected_field_tags.insert(k.clone(), v.clone());
+    }
+    let user_tags = user_tags_of(&secret.tags);
+    let reserved_count = crate::records::predicted_reserved_tag_count(
+        reg.active().kind(),
+        true,
+        secret.tags.contains_key("groups"),
+        secret.tags.contains_key("note"),
+        secret.tags.contains_key("folder"),
+        secret.expires_on.is_some(),
+    );
+    crate::records::check_tag_budget(
+        &reg.active().capabilities(),
+        reserved_count,
+        &projected_field_tags,
+        &user_tags,
+    )?;
+
+    let request = crate::secret::manager::SecretUpdateRequest {
+        name: name.to_string(),
+        value: new_value,
+        content_type,
+        enabled: None,
+        expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+        not_before: crate::secret::manager::FieldUpdate::Unchanged,
+        tags: new_tags,
+        groups,
+        note,
+        folder,
+        replace_tags,
+        replace_groups,
+    };
+    let props = reg
+        .active()
+        .secrets()
+        .update_secret(vault_name, name, request)
+        .await?;
+    output::success(&format!(
+        "Successfully updated field(s) on record '{}'",
+        props.original_name
+    ));
+    invalidate_trait_secret_cache(config, vault_name);
+    Ok(())
+}
+
+/// `xv update <name> --type <type>` (record-types plan Task 9): explicit
+/// conversion of a bare secret into a typed record. The current value
+/// becomes the primary field; existing groups/note/folder/user tags are
+/// untouched. Errors if the secret is already a record.
+async fn execute_record_type_conversion(
+    name: &str,
+    type_name: &str,
+    vault_name: &str,
+    config: &Config,
+    reg: &BackendRegistry,
+) -> Result<()> {
+    let secret = reg
+        .active()
+        .secrets()
+        .get_secret(vault_name, name, true)
+        .await?;
+    if crate::records::is_record(&secret.content_type) {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' is already a typed record (type: {}); use --field/--field-secret to \
+             edit it, or --untype first to convert it back to a bare secret.",
+            secret.tags.get(TYPE_TAG).cloned().unwrap_or_default()
+        )));
+    }
+
+    let types = config.resolve_record_types().await?;
+    let Some(record_type) = find_type(&types, type_name) else {
+        let mut known: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        known.sort_unstable();
+        return Err(CrosstacheError::config(format!(
+            "unknown type '{type_name}'. Known types: {}",
+            known.join(", ")
+        )));
+    };
+
+    let current_value = secret.value.clone().unwrap_or_default();
+    if current_value.is_empty() {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' has no value to convert"
+        )));
+    }
+
+    let mut envelope = BTreeMap::new();
+    envelope.insert(
+        record_type.primary().name.clone(),
+        current_value.as_str().to_string(),
+    );
+    let envelope_value = encode_envelope(&envelope)?;
+
+    // Tag budget: existing tags (unchanged) + the new xv-type tag. No f.*
+    // fields are added by a bare `--type` conversion (only the primary is
+    // set, and the primary never gets an f.* tag).
+    let user_tags = user_tags_of(&secret.tags);
+    let reserved_count = crate::records::predicted_reserved_tag_count(
+        reg.active().kind(),
+        true,
+        secret.tags.contains_key("groups"),
+        secret.tags.contains_key("note"),
+        secret.tags.contains_key("folder"),
+        secret.expires_on.is_some(),
+    );
+    crate::records::check_tag_budget(
+        &reg.active().capabilities(),
+        reserved_count,
+        &BTreeMap::new(),
+        &user_tags,
+    )?;
+
+    let mut new_tags = secret.tags.clone();
+    // Strip denormalized groups/note/folder (see
+    // `split_denormalized_tags`'s doc comment) before this becomes a
+    // `replace_tags: true` write, and USE the extracted values via the
+    // request's dedicated fields (`groups: Some(vec)` +
+    // `replace_groups: true`, `note`/`folder` as `Set`-when-known) rather
+    // than `None`/`Unchanged` — a value-changing update takes Azure's
+    // full-PUT path, which does not treat `groups: None` as "leave
+    // unchanged" the way local/AWS's delta model does: `prepare_secret_
+    // request` only re-adds the `groups` tag when the request field is
+    // `Some`, so `None` here previously erased group membership on Azure
+    // (Bugbot review, round 3).
+    let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut new_tags);
+    new_tags.insert(TYPE_TAG.to_string(), record_type.name.clone());
+
+    let request = crate::secret::manager::SecretUpdateRequest {
+        name: name.to_string(),
+        value: Some(Zeroizing::new(envelope_value)),
+        content_type: Some(RECORD_CONTENT_TYPE.to_string()),
+        enabled: None,
+        expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+        not_before: crate::secret::manager::FieldUpdate::Unchanged,
+        tags: Some(new_tags),
+        groups,
+        note: note
+            .map(crate::secret::manager::FieldUpdate::Set)
+            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+        folder: folder
+            .map(crate::secret::manager::FieldUpdate::Set)
+            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+        replace_tags: true,
+        replace_groups: true,
+    };
+    let props = reg
+        .active()
+        .secrets()
+        .update_secret(vault_name, name, request)
+        .await?;
+    output::success(&format!(
+        "Successfully converted '{}' to type '{}'",
+        props.original_name, record_type.name
+    ));
+    invalidate_trait_secret_cache(config, vault_name);
+    Ok(())
+}
+
+/// `xv update <name> --untype` (record-types plan Task 9): flattens a
+/// typed record back to a bare secret holding the primary field's value.
+/// Non-primary secret fields are dropped with an interactive confirmation
+/// (or `--yes`); metadata fields are removed from tags. Non-TTY without
+/// `--yes` when fields would be dropped exits 3.
+async fn execute_record_untype(
+    name: &str,
+    yes: bool,
+    vault_name: &str,
+    config: &Config,
+    reg: &BackendRegistry,
+) -> Result<()> {
+    let secret = reg
+        .active()
+        .secrets()
+        .get_secret(vault_name, name, true)
+        .await?;
+    if !crate::records::is_record(&secret.content_type) {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' is not a typed record; nothing to untype."
+        )));
+    }
+
+    let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
+    let raw = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+    let envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw)?;
+
+    let types = config.resolve_record_types().await?;
+    let Some(record_type) = find_type(&types, &type_name) else {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' has type '{type_name}', which has no resolvable type definition \
+             (check your [types.*] config); its primary field can't be determined, so it can't be \
+             untyped automatically. Use 'xv get {name} --record' to inspect its raw fields."
+        )));
+    };
+
+    let primary_name = &record_type.primary().name;
+    let Some(primary_value) = envelope.get(primary_name) else {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' is missing its primary field '{primary_name}' in the record envelope"
+        )));
+    };
+    let primary_value = primary_value.clone();
+
+    let mut dropped: Vec<String> = envelope
+        .keys()
+        .filter(|k| *k != primary_name)
+        .cloned()
+        .collect();
+    dropped.sort();
+
+    if !dropped.is_empty() {
+        let prompt = format!(
+            "Untyping '{name}' will permanently drop {} non-primary secret field(s): {}. Continue?",
+            dropped.len(),
+            dropped.join(", ")
+        );
+        if !confirm_record_action(yes, &prompt)? {
+            output::info("Aborted; secret not untyped.");
+            return Ok(());
+        }
+        output::warn(&format!("Dropped field(s): {}", dropped.join(", ")));
+    }
+
+    let mut new_tags = secret.tags.clone();
+    new_tags.remove(TYPE_TAG);
+    new_tags.retain(|k, _| !k.starts_with(FIELD_TAG_PREFIX));
+    // Strip denormalized groups/note/folder — see
+    // `split_denormalized_tags`'s doc comment — and USE the extracted
+    // values via the request's dedicated fields. Untyping is a
+    // value-changing update (Azure's full-PUT path), which does not treat
+    // `groups: None` as "leave unchanged": `prepare_secret_request` only
+    // re-adds the `groups` tag when the request field is `Some`, so
+    // `None` here previously erased group membership on Azure (Bugbot
+    // review, round 3).
+    let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut new_tags);
+
+    let request = crate::secret::manager::SecretUpdateRequest {
+        name: name.to_string(),
+        value: Some(Zeroizing::new(primary_value)),
+        content_type: Some(String::new()),
+        enabled: None,
+        expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+        not_before: crate::secret::manager::FieldUpdate::Unchanged,
+        tags: Some(new_tags),
+        groups,
+        note: note
+            .map(crate::secret::manager::FieldUpdate::Set)
+            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+        folder: folder
+            .map(crate::secret::manager::FieldUpdate::Set)
+            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
+        replace_tags: true,
+        replace_groups: true,
+    };
+    let props = reg
+        .active()
+        .secrets()
+        .update_secret(vault_name, name, request)
+        .await?;
+    output::success(&format!(
+        "Successfully untyped '{}' (was type '{type_name}')",
+        props.original_name
+    ));
+    invalidate_trait_secret_cache(config, vault_name);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_update_direct(
     name: &str,
@@ -2137,6 +2723,11 @@ pub(crate) async fn execute_secret_update_direct(
     clear_note: bool,
     clear_folder: bool,
     enabled: Option<bool>,
+    fields: Vec<(String, String)>,
+    secret_fields: Vec<(String, String)>,
+    type_name: Option<String>,
+    untype: bool,
+    yes: bool,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -2144,6 +2735,32 @@ pub(crate) async fn execute_secret_update_direct(
     if use_trait_path(registry) {
         use crate::secret::manager::FieldUpdate;
         use crate::utils::datetime::parse_datetime_or_duration;
+
+        // Record-types edit/conversion paths (record-types plan Tasks 8/9)
+        // take over completely — clap's `conflicts_with_all` on --type/
+        // --untype/--field/--field-secret already guarantees at most one
+        // of these fires alongside the classic metadata-update flags below.
+        if let Some(reg) = registry {
+            let vault_name = resolve_vault_for_trait(&config, registry).await?;
+            if let Some(type_name) = type_name {
+                return execute_record_type_conversion(name, &type_name, &vault_name, &config, reg)
+                    .await;
+            }
+            if untype {
+                return execute_record_untype(name, yes, &vault_name, &config, reg).await;
+            }
+            if !fields.is_empty() || !secret_fields.is_empty() {
+                return execute_record_field_update(
+                    name,
+                    &fields,
+                    &secret_fields,
+                    &vault_name,
+                    &config,
+                    reg,
+                )
+                .await;
+            }
+        }
 
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
@@ -5000,6 +5617,7 @@ mod tests {
             updated_on: "2026-04-28".to_string(),
             enabled,
             content_type: String::new(),
+            tags: std::collections::HashMap::new(),
         }
     }
 
@@ -5271,6 +5889,7 @@ mod tests {
                 updated_on: String::new(),
                 enabled: true,
                 content_type: String::new(),
+                tags: std::collections::HashMap::new(),
             }
         }
         let rows = derive_group_rows(&[
@@ -5524,6 +6143,7 @@ mod tests {
                 updated_on: String::new(),
                 enabled: true,
                 content_type: String::new(),
+                tags: std::collections::HashMap::new(),
             }
         }
         let paths = folder_completion_paths(&[
@@ -5756,6 +6376,11 @@ mod tests {
             false,
             false,
             None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+            false,
             config.clone(),
             Some(&registry),
         )

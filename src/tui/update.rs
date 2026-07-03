@@ -36,7 +36,14 @@ pub fn update(app: &mut App, msg: Message) -> Vec<Command> {
                 app.secret_state.select(Some(0));
             }
         }
-        Message::ValueLoaded { vault, name, value } => {
+        Message::ValueLoaded {
+            vault,
+            name,
+            value,
+            content_type,
+        } => {
+            app.value_content_types
+                .insert((vault.clone(), name.clone()), content_type);
             app.values.insert((vault, name), value);
             app.value_loading = false;
         }

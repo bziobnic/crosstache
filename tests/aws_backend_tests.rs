@@ -501,6 +501,195 @@ async fn update_secret_enabled_flag_is_unsupported() {
     );
 }
 
+/// Bugbot MAJOR review on the record-types edit paths (Tasks 8/9):
+/// `AwsSecretBackend::update_secret` previously applied only note/tag/
+/// folder/expiry deltas and never wrote a value or touched content type —
+/// so `xv update --field-secret` silently discarded the new envelope on
+/// AWS while reporting success, and a record's content-type marker was
+/// never (re)written. This mirrors exactly what `xv update --field-secret`
+/// sends: `value: Some(new_envelope)`, `content_type:
+/// Some(RECORD_CONTENT_TYPE)`, and the FULL desired tag map with
+/// `replace_tags: true` (per the BLOCKER fix in
+/// `execute_record_field_update`, src/cli/secret_ops.rs).
+#[tokio::test]
+async fn update_secret_with_value_writes_value_and_content_type_tag() {
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use aws_sdk_secretsmanager::operation::put_secret_value::PutSecretValueOutput;
+    use aws_sdk_secretsmanager::operation::tag_resource::TagResourceOutput;
+    use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceOutput;
+    use aws_sdk_secretsmanager::types::Tag;
+    use crosstache::backend::SecretBackend;
+    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use std::collections::HashMap;
+    use zeroize::Zeroizing;
+
+    // Step 1: the new envelope value must actually be written.
+    let put_value = mock!(Client::put_secret_value)
+        .match_requests(|req| {
+            req.secret_id() == Some("myproj-kv/cred")
+                && req.secret_string() == Some(r#"{"password":"hunter2"}"#)
+        })
+        .then_output(|| PutSecretValueOutput::builder().version_id("v2").build());
+
+    // Step 2 (replace_tags diff): current AWS-side tags include a plain
+    // "f.old-field" (must be dropped — absent from the new full map) and
+    // an "xv:groups" bookkeeping tag (must NOT be touched by the generic
+    // tags diff — it's managed by its own dedicated request field).
+    let describe_for_diff = mock!(Client::describe_secret)
+        .match_requests(|req| req.secret_id() == Some("myproj-kv/cred"))
+        .then_output(|| {
+            DescribeSecretOutput::builder()
+                .name("myproj-kv/cred")
+                .tags(Tag::builder().key("xv:groups").value("prod").build())
+                .tags(Tag::builder().key("xv-type").value("login").build())
+                .tags(Tag::builder().key("f.old-field").value("stale").build())
+                .build()
+        });
+
+    let untag = mock!(Client::untag_resource)
+        .match_requests(|req| req.tag_keys() == ["f.old-field".to_string()])
+        .then_output(|| UntagResourceOutput::builder().build());
+
+    let tag = mock!(Client::tag_resource)
+        .match_requests(|req| {
+            let tags = req.tags();
+            let has_content_type = tags.iter().any(|t| {
+                t.key() == Some("xv:content_type") && t.value() == Some("application/vnd.xv.record")
+            });
+            let has_type = tags
+                .iter()
+                .any(|t| t.key() == Some("xv-type") && t.value() == Some("login"));
+            let has_username = tags
+                .iter()
+                .any(|t| t.key() == Some("f.username") && t.value() == Some("bob"));
+            has_content_type && has_type && has_username
+        })
+        .then_output(|| TagResourceOutput::builder().build());
+
+    // Final `self.get_secret(vault, name, false)` at the end of update_secret.
+    let describe_final = mock!(Client::describe_secret).then_output(|| {
+        DescribeSecretOutput::builder()
+            .name("myproj-kv/cred")
+            .build()
+    });
+
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[
+            &put_value,
+            &describe_for_diff,
+            &untag,
+            &tag,
+            &describe_final
+        ]
+    );
+    let backend = aws_secret_backend(client);
+
+    let mut full_tags = HashMap::new();
+    full_tags.insert("xv-type".to_string(), "login".to_string());
+    full_tags.insert("f.username".to_string(), "bob".to_string());
+
+    let request = SecretUpdateRequest {
+        name: "cred".to_string(),
+        value: Some(Zeroizing::new(r#"{"password":"hunter2"}"#.to_string())),
+        content_type: Some("application/vnd.xv.record".to_string()),
+        enabled: None,
+        expires_on: FieldUpdate::Unchanged,
+        not_before: FieldUpdate::Unchanged,
+        tags: Some(full_tags),
+        groups: None,
+        note: FieldUpdate::Unchanged,
+        folder: FieldUpdate::Unchanged,
+        replace_tags: true,
+        replace_groups: false,
+    };
+
+    backend
+        .update_secret("myproj-kv", "cred", request)
+        .await
+        .expect("update_secret should write the value and content-type tag");
+}
+
+/// Companion to the test above: `xv update --untype` on AWS must actually
+/// remove the `xv-type`/`f.*` tags (previously a no-op — Bugbot MAJOR:
+/// "untype no-ops ... xv-type tag survives since absent-from-map !=
+/// removed"). This exercises the metadata-only path (`value: None`), which
+/// stays off the `put_secret_value` call but must still honor
+/// `replace_tags` for the tag removal diff.
+#[tokio::test]
+async fn update_secret_untype_replace_tags_removes_dropped_keys() {
+    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
+    use aws_sdk_secretsmanager::operation::untag_resource::UntagResourceOutput;
+    use aws_sdk_secretsmanager::types::Tag;
+    use crosstache::backend::SecretBackend;
+    use crosstache::secret::manager::{FieldUpdate, SecretUpdateRequest};
+    use std::collections::HashMap;
+
+    // Untyping drops xv-type and every f.* tag entirely — the caller sends
+    // an EMPTY desired map (`execute_record_untype` omits them, it never
+    // sends them with an empty value), so the whole plain-tag namespace on
+    // the existing secret must be removed via the replace_tags diff.
+    let describe_for_diff = mock!(Client::describe_secret)
+        .match_requests(|req| req.secret_id() == Some("myproj-kv/cred"))
+        .then_output(|| {
+            DescribeSecretOutput::builder()
+                .name("myproj-kv/cred")
+                .tags(Tag::builder().key("xv:groups").value("prod").build())
+                .tags(Tag::builder().key("xv-type").value("login").build())
+                .tags(Tag::builder().key("f.username").value("bob").build())
+                .build()
+        });
+
+    let untag = mock!(Client::untag_resource)
+        .match_requests(|req| {
+            let keys = req.tag_keys();
+            // xv-type and f.username (plain namespace, absent from the
+            // empty desired map) must be removed, PLUS the content-type
+            // tag (content_type: Some("") below); the "xv:"-prefixed
+            // groups bookkeeping tag must be left alone — it isn't part
+            // of the generic tags diff at all.
+            keys.contains(&"xv-type".to_string())
+                && keys.contains(&"f.username".to_string())
+                && keys.contains(&"xv:content_type".to_string())
+                && !keys.contains(&"xv:groups".to_string())
+        })
+        .then_output(|| UntagResourceOutput::builder().build());
+
+    let describe_final = mock!(Client::describe_secret).then_output(|| {
+        DescribeSecretOutput::builder()
+            .name("myproj-kv/cred")
+            .build()
+    });
+
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::Sequential,
+        &[&describe_for_diff, &untag, &describe_final]
+    );
+    let backend = aws_secret_backend(client);
+
+    let request = SecretUpdateRequest {
+        name: "cred".to_string(),
+        value: None,
+        content_type: Some(String::new()),
+        enabled: None,
+        expires_on: FieldUpdate::Unchanged,
+        not_before: FieldUpdate::Unchanged,
+        tags: Some(HashMap::new()),
+        groups: None,
+        note: FieldUpdate::Unchanged,
+        folder: FieldUpdate::Unchanged,
+        replace_tags: true,
+        replace_groups: false,
+    };
+
+    backend
+        .update_secret("myproj-kv", "cred", request)
+        .await
+        .expect("untype's replace_tags update should succeed");
+}
+
 #[tokio::test]
 async fn list_versions_returns_history() {
     use aws_sdk_secretsmanager::operation::list_secret_version_ids::ListSecretVersionIdsOutput;
