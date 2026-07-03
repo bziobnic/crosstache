@@ -1706,6 +1706,293 @@ fn run_best_effort_launches_child_despite_failing_uri_reference() {
 }
 
 // ===========================================================================
+// xv inject — fail-fast on secret resolution failures (#313)
+// ===========================================================================
+
+#[test]
+fn inject_happy_path_renders_output() {
+    let env = TestEnv::new();
+    env.set_secret("DB_PASSWORD", "hunter2");
+    env.set_secret("API_KEY", "sk-live-abc123");
+
+    let template_path = env.tmp_path().join("happy_template.yml");
+    std::fs::write(
+        &template_path,
+        "db_password: \"{{ secret:DB_PASSWORD }}\"\napi_key: \"{{ secret:API_KEY }}\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("happy_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert!(
+        output.status.success(),
+        "xv inject should succeed when all references resolve:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let rendered = std::fs::read_to_string(&out_path).expect("read rendered output");
+    assert!(
+        rendered.contains("hunter2") && rendered.contains("sk-live-abc123"),
+        "rendered output should contain both resolved secret values: {rendered}"
+    );
+    assert!(
+        !rendered.contains("{{ secret:"),
+        "rendered output should not contain any unresolved placeholders: {rendered}"
+    );
+}
+
+#[test]
+fn inject_aborts_on_missing_secret_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+
+    let template_path = env.tmp_path().join("missing_template.yml");
+    std::fs::write(
+        &template_path,
+        "present: \"{{ secret:PRESENT }}\"\nmissing: \"{{ secret:DOES_NOT_EXIST }}\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("missing_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    // Pin the exact exit code (3 == CrosstacheError::Config, see src/error.rs)
+    // so an accidental change of error variant is caught, not just "any
+    // non-zero exit" — matches the convention set by the `xv run` fail-fast
+    // tests (#314).
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv inject should fail with the config-error exit code (3) when a referenced secret cannot be resolved:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DOES_NOT_EXIST"),
+        "stderr should name the missing reference: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when a reference fails to resolve (fail-fast default)"
+    );
+}
+
+// Note: the `{{ secret:name }}` abort path above was already correct before
+// this fix — `execute_secret_inject` already collected unresolved
+// `{{ secret:name }}` references and returned an error before writing. The
+// actual regression this issue (#313) fixes is (a) the lack of a
+// `--best-effort` escape hatch (covered below) and (b) a malformed
+// `xv://backend:vault/secret` URI in the template being silently skipped
+// with only a warning instead of being treated as a failure — covered by
+// `inject_aborts_on_invalid_uri_reference` below, which does fail against
+// unpatched code (verified via `git stash` during development).
+#[test]
+fn inject_aborts_on_invalid_uri_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+
+    let template_path = env.tmp_path().join("invalid_uri_template.yml");
+    std::fs::write(
+        &template_path,
+        "present: \"{{ secret:PRESENT }}\"\nbad: \"xv://notabackend:somevault/somesecret\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("invalid_uri_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv inject should fail with the config-error exit code (3) when a template contains an unparseable xv:// URI:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notabackend"),
+        "stderr should name the invalid backend/URI: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when a URI fails to parse (fail-fast default)"
+    );
+}
+
+// Regression test for a bug found in code review of the fix above: the
+// "no secret references found in template" early-return only checked
+// `required_secrets.is_empty() && cross_vault_refs.is_empty()`. An invalid
+// `xv://` URI is pushed into `fetch_failures` but NOT into `cross_vault_refs`
+// (it never becomes a resolvable reference), so when the invalid URI is the
+// template's ONLY reference, both vectors are empty and the early-return
+// fired BEFORE the abort gate — silently warning, writing the template
+// verbatim, and exiting 0. This test targets that exact path (no other
+// reference present) and fails against the code prior to this follow-up fix.
+#[test]
+fn inject_aborts_when_only_reference_is_invalid_uri() {
+    let env = TestEnv::new();
+
+    let template_path = env.tmp_path().join("only_invalid_uri_template.yml");
+    std::fs::write(
+        &template_path,
+        "bad: \"xv://notabackend:somevault/somesecret\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("only_invalid_uri_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv inject should fail with the config-error exit code (3) when the template's only reference is an unparseable xv:// URI:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notabackend"),
+        "stderr should name the invalid backend/URI: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when the only reference fails to parse (fail-fast default)"
+    );
+}
+
+#[test]
+fn inject_best_effort_writes_verbatim_when_only_reference_is_invalid_uri() {
+    let env = TestEnv::new();
+
+    let template_path = env
+        .tmp_path()
+        .join("only_invalid_uri_best_effort_template.yml");
+    let template_content = "bad: \"xv://notabackend:somevault/somesecret\"\n";
+    std::fs::write(&template_path, template_content).expect("write template");
+    let out_path = env.tmp_path().join("only_invalid_uri_best_effort_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+            "--best-effort",
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert!(
+        output.status.success(),
+        "--best-effort should write the template verbatim and exit 0 despite the invalid URI:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notabackend"),
+        "a warning should still be emitted for the invalid URI: {stderr}"
+    );
+    let rendered = std::fs::read_to_string(&out_path).expect("read rendered output");
+    assert_eq!(
+        rendered, template_content,
+        "under --best-effort the template should be written back verbatim: {rendered}"
+    );
+}
+
+#[test]
+fn inject_best_effort_renders_output_despite_missing_secret_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+
+    let template_path = env.tmp_path().join("missing_best_effort_template.yml");
+    std::fs::write(
+        &template_path,
+        "present: \"{{ secret:PRESENT }}\"\nmissing: \"{{ secret:DOES_NOT_EXIST }}\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("missing_best_effort_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+            "--best-effort",
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert!(
+        output.status.success(),
+        "--best-effort should render and write the output despite the failing reference:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DOES_NOT_EXIST"),
+        "a warning should still be emitted for the failing reference: {stderr}"
+    );
+    let rendered = std::fs::read_to_string(&out_path).expect("read rendered output");
+    assert!(
+        rendered.contains("present-value"),
+        "the resolved reference should still be substituted: {rendered}"
+    );
+    assert!(
+        rendered.contains("{{ secret:DOES_NOT_EXIST }}"),
+        "the unresolved reference should be left in place under --best-effort: {rendered}"
+    );
+}
+
+// ===========================================================================
 // Cross-vault move / copy (issue #307)
 // ===========================================================================
 

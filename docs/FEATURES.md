@@ -95,7 +95,7 @@ a two-decimal string, `folder`/`groups` default to empty strings.
 | Command | Description |
 |---------|-------------|
 | `xv run -- <command>` | Run a process with secrets as env vars (`--group`, `--include`, `--exclude`, `--no-masking`, `--best-effort`) |
-| `xv inject` | Render templates with `{{ secret:name }}` and `xv://vault/secret` refs |
+| `xv inject` | Render templates with `{{ secret:name }}` and `xv://vault/secret` refs (`--group`, `--best-effort`) |
 
 Advanced workflows (`run`, `inject`, default `rotate`, `scan`, `env pull`, and
 `env push`) route through the active backend trait. They work with Azure, AWS,
@@ -117,6 +117,12 @@ By default, `xv run` also aborts before spawning the child if any selected
 secret or `xv://` reference fails to fetch — every failure is reported before
 the non-zero exit. Pass `--best-effort` to fall back to the previous
 warn-and-continue behavior.
+
+By default, `xv inject` also aborts before writing/printing the rendered
+output if any `{{ secret:name }}` or `xv://` reference fails to resolve —
+every failure is reported before the non-zero exit, and no
+partially-resolved output is ever written. Pass `--best-effort` to fall back
+to the previous warn-and-continue behavior.
 
 ---
 

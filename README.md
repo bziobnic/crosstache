@@ -675,9 +675,17 @@ Render config files with `{{ secret:NAME }}` references resolved:
 
 xv inject --template template.yml --out app.config
 cat template.yml | xv inject > resolved.yml          # also reads stdin
+xv inject --template template.yml --out app.config --best-effort  # render even if some references fail
 
 # Cross-vault references (xv://vault-name/secret-name) work without context switching.
 ```
+
+By default, `xv inject` aborts **before** writing the output (or printing to
+stdout) if any `{{ secret:name }}` or `xv://` reference fails to resolve
+(missing secret, transient backend error, malformed URI, etc.) — every
+failure is printed, and no partially-rendered output is ever written. Pass
+`--best-effort` to restore the previous behavior: warn on each failure and
+render anyway, leaving unresolved references in the output.
 
 ---
 
