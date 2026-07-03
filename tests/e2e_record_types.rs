@@ -245,6 +245,89 @@ fn set_field_secret_goes_to_envelope() {
     );
 }
 
+/// Bugbot PR #322 follow-up: a user `--tag xv-type=...` on a typed `set`
+/// must be rejected before write, not silently override the record's own
+/// type marker (which would desync tags from the envelope and break type
+/// resolution / plain `get`).
+#[test]
+fn set_typed_rejects_tag_colliding_with_xv_type() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--tag",
+            "xv-type=other",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("xv-type"), "stderr: {stderr}");
+
+    let meta_path = temp
+        .path()
+        .join("store")
+        .join("vaults")
+        .join("default")
+        .join("secrets")
+        .join("cred.meta.json");
+    assert!(!meta_path.exists(), "nothing must be written on rejection");
+}
+
+/// Same as above but for a `--tag f.<name>=...` collision (the `f.*`
+/// metadata-field tag prefix is just as reserved as `xv-type` itself).
+#[test]
+fn set_typed_rejects_tag_colliding_with_field_prefix() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--tag",
+            "f.something=x",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(
+        stderr.contains("f.something") || stderr.contains("f.*"),
+        "stderr: {stderr}"
+    );
+
+    let meta_path = temp
+        .path()
+        .join("store")
+        .join("vaults")
+        .join("default")
+        .join("secrets")
+        .join("cred.meta.json");
+    assert!(!meta_path.exists(), "nothing must be written on rejection");
+}
+
 #[test]
 fn type_show_unknown_errors() {
     let (mut cmd, _temp) = common::xv_isolated_local();

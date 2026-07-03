@@ -30,16 +30,20 @@ use std::collections::BTreeMap;
 /// `reserved_count` is the number of reserved bookkeeping tags actually
 /// present on this write (`xv-type`, `groups`, `note`, `folder`,
 /// `original_name`, `created_by`); `field_tags` are the record's `f.*`
-/// metadata-field tags; `user_tag_count` is the count of additional
-/// user-supplied tags. A backend with `max_tags = None` (unbounded) never
-/// errors on count. Each `field_tags` value is also checked against
-/// `max_tag_value_len` (when set) independently of the count check.
+/// metadata-field tags; `user_tags` are additional user-supplied
+/// (`--tag`) tags. A backend with `max_tags = None` (unbounded) never
+/// errors on count. Both `field_tags` and `user_tags` values are checked
+/// against `max_tag_value_len` (when set) independently of the count
+/// check — a user tag is exactly as capable of exceeding the backend's
+/// per-value limit as a metadata field is, so skipping it here would let
+/// an oversized `--tag` pass this pre-check and fail at the backend,
+/// contradicting fail-before-write.
 #[allow(dead_code)] // consumed by `xv set --type` / `xv update --field` (Tasks 6/8)
 pub fn check_tag_budget(
     caps: &BackendCapabilities,
     reserved_count: usize,
     field_tags: &BTreeMap<String, String>,
-    user_tag_count: usize,
+    user_tags: &BTreeMap<String, String>,
 ) -> Result<()> {
     if let Some(max_len) = caps.max_tag_value_len {
         for (field, value) in field_tags {
@@ -51,10 +55,20 @@ pub fn check_tag_budget(
                 )));
             }
         }
+        for (tag, value) in user_tags {
+            if value.len() > max_len {
+                return Err(CrosstacheError::config(format!(
+                    "--tag '{tag}' value is {} characters, exceeding the backend's {max_len}-character \
+                     tag value limit.",
+                    value.len()
+                )));
+            }
+        }
     }
 
     if let Some(max_tags) = caps.max_tags {
         let field_count = field_tags.len();
+        let user_tag_count = user_tags.len();
         let total = reserved_count + field_count + user_tag_count;
         if total > max_tags {
             return Err(CrosstacheError::config(format!(
@@ -127,12 +141,20 @@ mod tag_budget_tests {
         }
     }
 
+    /// `n` dummy user tags with short values, for tests that only care
+    /// about the *count* toward the tag budget.
+    fn user_tags(n: usize) -> BTreeMap<String, String> {
+        (0..n)
+            .map(|i| (format!("user{i}"), "v".to_string()))
+            .collect()
+    }
+
     #[test]
     fn budget_ok_under_cap() {
         let c = caps(Some(15), Some(256));
         let mut fields = BTreeMap::new();
         fields.insert("username".to_string(), "bob".to_string());
-        assert!(check_tag_budget(&c, 2, &fields, 1).is_ok());
+        assert!(check_tag_budget(&c, 2, &fields, &user_tags(1)).is_ok());
     }
 
     #[test]
@@ -141,7 +163,7 @@ mod tag_budget_tests {
         let mut fields = BTreeMap::new();
         fields.insert("a".to_string(), "1".to_string());
         fields.insert("b".to_string(), "2".to_string());
-        let err = check_tag_budget(&c, 2, &fields, 1).unwrap_err();
+        let err = check_tag_budget(&c, 2, &fields, &user_tags(1)).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("reserved"), "{msg}");
         assert!(msg.contains("fields"), "{msg}");
@@ -153,10 +175,29 @@ mod tag_budget_tests {
         let c = caps(Some(15), Some(4));
         let mut fields = BTreeMap::new();
         fields.insert("username".to_string(), "toolong".to_string());
-        let err = check_tag_budget(&c, 1, &fields, 0).unwrap_err();
+        let err = check_tag_budget(&c, 1, &fields, &BTreeMap::new()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("username"), "{msg}");
         assert!(msg.contains("kind = \"secret\""), "{msg}");
+    }
+
+    #[test]
+    fn budget_errors_on_long_user_tag_value() {
+        // Azure's real per-value cap (256 chars): a 257-char user --tag
+        // value must fail before write, naming the offending tag key; a
+        // 256-char value must pass.
+        let c = caps(Some(15), Some(256));
+
+        let mut over = BTreeMap::new();
+        over.insert("owner".to_string(), "x".repeat(257));
+        let err = check_tag_budget(&c, 1, &BTreeMap::new(), &over).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("owner"), "{msg}");
+        assert!(msg.contains("257"), "{msg}");
+
+        let mut at_limit = BTreeMap::new();
+        at_limit.insert("owner".to_string(), "x".repeat(256));
+        assert!(check_tag_budget(&c, 1, &BTreeMap::new(), &at_limit).is_ok());
     }
 
     #[test]
@@ -166,7 +207,7 @@ mod tag_budget_tests {
         for i in 0..100 {
             fields.insert(format!("field{i}"), "x".repeat(10_000));
         }
-        assert!(check_tag_budget(&c, 100, &fields, 100).is_ok());
+        assert!(check_tag_budget(&c, 100, &fields, &user_tags(100)).is_ok());
     }
 
     #[test]
@@ -198,13 +239,13 @@ mod tag_budget_tests {
         for i in 0..11 {
             fields_15.insert(format!("field{i}"), "v".to_string());
         }
-        assert!(check_tag_budget(&c, reserved, &fields_15, 0).is_ok());
+        assert!(check_tag_budget(&c, reserved, &fields_15, &BTreeMap::new()).is_ok());
 
         // One more f.* field pushes the real wire total to 16. Must fail
         // before write.
         let mut fields_16 = fields_15.clone();
         fields_16.insert("field11".to_string(), "v".to_string());
-        let err = check_tag_budget(&c, reserved, &fields_16, 0).unwrap_err();
+        let err = check_tag_budget(&c, reserved, &fields_16, &BTreeMap::new()).unwrap_err();
         assert!(err.to_string().contains("16"), "{err}");
     }
 }

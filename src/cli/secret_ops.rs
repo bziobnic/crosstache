@@ -234,6 +234,30 @@ async fn build_record_set_request(
         )));
     };
 
+    // Reject any user `--tag` that collides with a reserved record tag
+    // name, before any prompting or backend call. Applying `--tag` after
+    // xv-type/f.* would silently overwrite the record's own bookkeeping
+    // (e.g. `--tag xv-type=other` desyncs the type marker from the
+    // envelope, breaking type resolution and plain `get`); rejecting is at
+    // least as strict as the untyped `set` path, which already loses a
+    // user-supplied `original_name`/`created_by` tag to the backend's own
+    // unconditional overwrite (see `crate::backend::ALWAYS_WRITTEN_TAGS`).
+    for key in meta.tag.iter().map(|(k, _)| k.as_str()) {
+        let collides = key == TYPE_TAG
+            || key.starts_with(FIELD_TAG_PREFIX)
+            || key == crate::backend::TAG_ORIGINAL_NAME
+            || key == crate::backend::TAG_CREATED_BY;
+        if collides {
+            return Err(CrosstacheError::config(format!(
+                "--tag '{key}' collides with a reserved record tag name ({}, {FIELD_TAG_PREFIX}*, \
+                 {}, {}); rename it",
+                TYPE_TAG,
+                crate::backend::TAG_ORIGINAL_NAME,
+                crate::backend::TAG_CREATED_BY
+            )));
+        }
+    }
+
     let (metadata, mut secret_map, primary_value) =
         if fields.is_empty() && secret_fields.is_empty() && value.is_none() && !stdin {
             if std::io::stdin().is_terminal() {
@@ -304,7 +328,8 @@ async fn build_record_set_request(
         .iter()
         .map(|(k, v)| (format!("{FIELD_TAG_PREFIX}{k}"), v.clone()))
         .collect();
-    crate::records::check_tag_budget(&caps, reserved_count, &field_tags, meta.tag.len())?;
+    let user_tags: BTreeMap<String, String> = meta.tag.iter().cloned().collect();
+    crate::records::check_tag_budget(&caps, reserved_count, &field_tags, &user_tags)?;
 
     // Build the envelope: secret fields + primary.
     secret_map.insert(record_type.primary().name.clone(), primary_value);
@@ -316,7 +341,7 @@ async fn build_record_set_request(
     for (k, v) in &field_tags {
         tags.insert(k.clone(), v.clone());
     }
-    for (k, v) in &meta.tag {
+    for (k, v) in &user_tags {
         tags.insert(k.clone(), v.clone());
     }
     let _ = metadata; // folded into field_tags above; kept for clarity at the call site
@@ -629,9 +654,10 @@ pub(crate) async fn execute_secret_get_direct(
         if record {
             if !is_rec {
                 return Err(CrosstacheError::config(format!(
-                    "secret '{name}' is not a record (has no {} tag); --record only applies to \
-                     typed records",
-                    crate::records::TYPE_TAG
+                    "secret '{name}' is not a typed record (value is not marked {}); \
+                     --record only applies to typed records. Use 'xv update {name} --type <type>' \
+                     to convert it.",
+                    crate::records::RECORD_CONTENT_TYPE
                 )));
             }
             let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
@@ -676,9 +702,10 @@ pub(crate) async fn execute_secret_get_direct(
         if let Some(field_name) = field {
             if !is_rec {
                 return Err(CrosstacheError::config(format!(
-                    "secret '{name}' is not a record (has no {} tag); --field only applies to \
-                     typed records",
-                    crate::records::TYPE_TAG
+                    "secret '{name}' is not a typed record (value is not marked {}); \
+                     --field only applies to typed records. Use 'xv update {name} --type <type>' \
+                     to convert it.",
+                    crate::records::RECORD_CONTENT_TYPE
                 )));
             }
             let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
