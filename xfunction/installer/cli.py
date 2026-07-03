@@ -265,7 +265,13 @@ def _offer_xv_storage(config: InstallerConfig, app_reg_data: dict, prereq_data: 
         secrets.append(("azure-client-secret", client_secret))
     for name, value in secrets:
         if value:
-            subprocess.run(["xv", "set", name, "--value", value, "--group", "xfunction"], capture_output=True, timeout=10)
+            subprocess.run(
+                ["xv", "set", name, "--stdin", "--group", "xfunction"],
+                input=value,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
     success("Credentials stored in xv (group: xfunction)")
 
 def run_uninstall(config: InstallerConfig) -> int:
