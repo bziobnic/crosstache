@@ -15,6 +15,7 @@ pub(crate) mod helpers;
 pub(crate) mod local_ops;
 pub(crate) mod ls_view;
 pub(crate) mod migrate_ops;
+pub(crate) mod mv_ops;
 pub(crate) mod scan_ops;
 pub(crate) mod secret_ops;
 pub(crate) mod system_ops;
