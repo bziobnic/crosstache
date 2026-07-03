@@ -263,10 +263,21 @@ def _offer_xv_storage(config: InstallerConfig, app_reg_data: dict, prereq_data: 
     secrets = [("azure-tenant-id", tenant_id), ("azure-client-id", client_id), ("function-app-url", url)]
     if client_secret:
         secrets.append(("azure-client-secret", client_secret))
+    all_succeeded = True
     for name, value in secrets:
         if value:
-            subprocess.run(["xv", "set", name, "--value", value, "--group", "xfunction"], capture_output=True, timeout=10)
-    success("Credentials stored in xv (group: xfunction)")
+            result = subprocess.run(
+                ["xv", "set", name, "--stdin", "--group", "xfunction"],
+                input=value,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                all_succeeded = False
+                warning(f"Failed to store '{name}' in xv: {result.stderr.strip()}")
+    if all_succeeded:
+        success("Credentials stored in xv (group: xfunction)")
 
 def run_uninstall(config: InstallerConfig) -> int:
     az = AzCli(verbose=config.verbose)
