@@ -6,8 +6,14 @@
 //! means "vault root + rename".
 
 use crate::backend::BackendRegistry;
+use crate::cli::helpers::{resolve_vault_for_trait, use_trait_path};
+use crate::cli::ls_view::{display_name, qualified_display_name};
+use crate::cli::secret_ops::invalidate_trait_secret_cache;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
+use crate::secret::manager::{FieldUpdate, SecretSummary, SecretUpdateRequest};
+use crate::utils::output;
+use crate::utils::suggestions::closest_match;
 
 /// Plan for moving secrets or folders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +121,12 @@ fn split_secret_path(path: &str) -> Result<(Option<String>, String)> {
     Ok((folder.map(String::from), name.to_string()))
 }
 
+/// Normalize a folder value for comparison: `None` and `Some("")` are both
+/// "the vault root".
+fn norm_folder(folder: Option<&str>) -> Option<&str> {
+    folder.filter(|f| !f.is_empty())
+}
+
 pub(crate) async fn execute_mv(
     source: String,
     dest: String,
@@ -123,10 +135,185 @@ pub(crate) async fn execute_mv(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    let _ = (dry_run, yes, config, registry);
-    let _plan = parse_mv(&source, &dest)?;
+    if !use_trait_path(registry) {
+        return Err(CrosstacheError::config(
+            "No backend registry available. Run 'xv config show' to check your configuration.",
+        ));
+    }
+    let reg = registry.expect("use_trait_path guarantees Some");
+    let vault_name = resolve_vault_for_trait(&config, registry).await?;
+    let secrets = reg
+        .active()
+        .secrets()
+        .list_secrets(&vault_name, None)
+        .await?;
+
+    match parse_mv(&source, &dest)? {
+        MvPlan::Secret {
+            src_folder,
+            src_name,
+            dest_folder,
+            dest_name,
+        } => {
+            execute_secret_mv(
+                reg,
+                &config,
+                &vault_name,
+                secrets,
+                &source,
+                &dest,
+                src_folder,
+                src_name,
+                dest_folder,
+                dest_name,
+            )
+            .await
+        }
+        MvPlan::Folder {
+            src_prefix,
+            dest_prefix,
+        } => {
+            execute_folder_mv(
+                reg,
+                &config,
+                &vault_name,
+                secrets,
+                src_prefix,
+                dest_prefix,
+                dry_run,
+                yes,
+            )
+            .await
+        }
+    }
+}
+
+/// Move/rename a single secret. Ordering is binding (spec 2026-07-02-fs-verbs):
+/// find source → no-op check → collision pre-check → folder update →
+/// rename. The collision pre-check happens before the folder update so a
+/// doomed rename never leaves a half-applied folder change behind.
+#[allow(clippy::too_many_arguments)]
+async fn execute_secret_mv(
+    reg: &BackendRegistry,
+    config: &Config,
+    vault_name: &str,
+    secrets: Vec<SecretSummary>,
+    source: &str,
+    dest: &str,
+    src_folder: Option<String>,
+    src_name: String,
+    dest_folder: Option<String>,
+    dest_name: String,
+) -> Result<()> {
+    let src_folder_norm = norm_folder(src_folder.as_deref());
+
+    let found = secrets.iter().find(|s| {
+        display_name(s) == src_name && norm_folder(s.folder.as_deref()) == src_folder_norm
+    });
+
+    let Some(found) = found else {
+        let candidates: Vec<String> = secrets
+            .iter()
+            .map(|s| qualified_display_name(s, ""))
+            .collect();
+        return Err(CrosstacheError::secret_not_found(format!(
+            "{source} (in vault '{vault_name}')"
+        ))
+        .with_suggestion(closest_match(source, &candidates).map(String::from)));
+    };
+
+    let current_folder_norm = norm_folder(found.folder.as_deref());
+    let dest_folder_norm = norm_folder(dest_folder.as_deref());
+
+    // No-op: same folder, same name.
+    if dest_folder_norm == current_folder_norm && dest_name == src_name {
+        output::info(&format!(
+            "'{source}' is already at '{dest}' — nothing to do"
+        ));
+        return Ok(());
+    }
+
+    // Collision pre-check — before any mutation — only relevant when the
+    // name is actually changing.
+    if dest_name != src_name && secrets.iter().any(|s| display_name(s) == dest_name) {
+        return Err(CrosstacheError::conflict(format!(
+            "secret '{dest_name}' already exists in vault '{vault_name}' — delete it first or pick another name"
+        )));
+    }
+
+    let mut folder_updated = false;
+    if dest_folder_norm != current_folder_norm {
+        let request = SecretUpdateRequest {
+            name: src_name.clone(),
+            value: None,
+            content_type: None,
+            enabled: None,
+            expires_on: FieldUpdate::Unchanged,
+            not_before: FieldUpdate::Unchanged,
+            tags: None,
+            groups: None,
+            note: FieldUpdate::Unchanged,
+            folder: match &dest_folder {
+                Some(f) => FieldUpdate::Set(f.clone()),
+                None => FieldUpdate::Clear,
+            },
+            replace_tags: false,
+            replace_groups: false,
+        };
+        reg.active()
+            .secrets()
+            .update_secret(vault_name, &src_name, request)
+            .await?;
+        invalidate_trait_secret_cache(config, vault_name);
+        folder_updated = true;
+    }
+
+    if dest_name != src_name {
+        let rename_result = reg
+            .active()
+            .secrets()
+            .rename_secret(vault_name, &src_name, &dest_name)
+            .await;
+        // Rename may mutate state even when it errors (e.g. RenameIncomplete),
+        // so invalidate unconditionally before inspecting the result.
+        invalidate_trait_secret_cache(config, vault_name);
+        if let Err(e) = rename_result {
+            if folder_updated {
+                let msg = if matches!(
+                    e,
+                    crate::backend::error::BackendError::RenameIncomplete { .. }
+                ) {
+                    "the folder update was applied; the rename did not complete cleanly — both names currently exist (see the error below for recovery)"
+                } else {
+                    "the folder update was applied; the rename did not complete — the secret keeps its original name"
+                };
+                output::warn(msg);
+            }
+            return Err(e.into());
+        }
+    }
+
+    let dest_qualified = match &dest_folder {
+        Some(f) if !f.is_empty() => format!("{f}/{dest_name}"),
+        _ => dest_name,
+    };
+    output::success(&format!("Moved '{source}' to '{dest_qualified}'"));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_folder_mv(
+    _reg: &BackendRegistry,
+    _config: &Config,
+    _vault_name: &str,
+    _secrets: Vec<SecretSummary>,
+    _src_prefix: String,
+    _dest_prefix: Option<String>,
+    _dry_run: bool,
+    _yes: bool,
+) -> Result<()> {
     Err(CrosstacheError::invalid_argument(
-        "mv is not implemented yet",
+        "folder mv is not implemented yet",
     ))
 }
 

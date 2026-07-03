@@ -1343,3 +1343,78 @@ fn update_rename_of_a_missing_secret_fails() {
     let (_, stderr) = env.xv_fail(&["update", "ghost", "--rename", "anything"]);
     assert!(stderr.to_lowercase().contains("not found"), "{stderr}");
 }
+
+// ===========================================================================
+// xv mv — single-secret move/rename
+// ===========================================================================
+
+#[test]
+fn mv_secret_between_folders_keeps_name_and_value() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("pass", "v1", &["--folder", "db", "--note", "n1"]);
+
+    env.xv_ok(&["mv", "db/pass", "app/"]);
+
+    assert_eq!(env.get_raw("pass"), "v1");
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"app\""), "folder not updated:\n{json}");
+    assert!(json.contains("n1"), "note lost on folder move:\n{json}");
+}
+
+#[test]
+fn mv_secret_rename_to_root() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("pass", "v1", &["--folder", "db"]);
+
+    env.xv_ok(&["mv", "db/pass", "newname"]);
+
+    assert_eq!(env.get_raw("newname"), "v1");
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        !json.contains("\"db\""),
+        "folder should be cleared:\n{json}"
+    );
+}
+
+#[test]
+fn mv_secret_combined_move_and_rename() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("pass", "v1", &["--folder", "db"]);
+
+    env.xv_ok(&["mv", "db/pass", "app/pw"]);
+
+    assert_eq!(env.get_raw("pw"), "v1");
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"app\"") && json.contains("pw"), "{json}");
+}
+
+#[test]
+fn mv_noop_and_errors() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("pass", "v1", &["--folder", "db"]);
+    env.set_secret_with_args("taken", "v2", &[]);
+
+    // No-op exits 0 and says so.
+    let out = env
+        .xv()
+        .args(["mv", "db/pass", "db/pass"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Destination collision refused before any change.
+    let (_, stderr) = env.xv_fail(&["mv", "db/pass", "taken"]);
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert_eq!(env.get_raw("pass"), "v1", "source must be untouched");
+
+    // Wrong source folder → not found (the secret lives in db/, not prod/).
+    let (_, stderr) = env.xv_fail(&["mv", "prod/pass", "app/"]);
+    assert!(stderr.to_lowercase().contains("not found"), "{stderr}");
+
+    // Typo in the path → not found, with a closest-match suggestion.
+    let (_, stderr) = env.xv_fail(&["mv", "db/pas", "app/"]);
+    assert!(
+        stderr.contains("db/pass"),
+        "expected suggestion in: {stderr}"
+    );
+}
