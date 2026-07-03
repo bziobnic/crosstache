@@ -1431,6 +1431,55 @@ fn mv_secret_dry_run_does_not_mutate() {
     assert!(json.contains("\"db\""), "dry-run must not mutate: {json}");
 }
 
+// Local backend never diverges name/original_name (no sanitization: the
+// display name IS the backend key end-to-end — the on-disk stem encoding,
+// legacy percent-encoded or opaque keyed-hash, is a filesystem-only detail
+// never surfaced through `SecretBackend`). Confirmed by reading
+// `src/backend/local/secrets.rs::set_secret`, which always sets
+// `SecretMeta { name: name.clone(), original_name: name.clone(), .. }`.
+// These tests still cover the issue's real concern end-to-end on this
+// backend: names containing characters that *would* need sanitization on
+// Azure (spaces, dots) must round-trip correctly through `xv mv`.
+#[test]
+fn mv_sanitized_name_rename_with_space() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("my secret", "v1", &["--folder", "db"]);
+
+    // original_name == name on the local backend; no divergence to exploit,
+    // but the name must still survive quoting/parsing through mv's grammar.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"my secret\""), "{json}");
+
+    env.xv_ok(&["mv", "db/my secret", "newname"]);
+
+    assert_eq!(env.get_raw("newname"), "v1");
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        !json.contains("\"my secret\""),
+        "old name still listed: {json}"
+    );
+    assert!(
+        !json.contains("\"db\""),
+        "folder should be cleared: {json}"
+    );
+}
+
+#[test]
+fn mv_sanitized_name_folder_move() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("my secret", "v1", &["--folder", "db"]);
+
+    env.xv_ok(&["mv", "db/my secret", "app/"]);
+
+    assert_eq!(env.get_raw("my secret"), "v1");
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"app\""), "folder not updated: {json}");
+    assert!(
+        json.contains("\"my secret\""),
+        "display name lost on folder move: {json}"
+    );
+}
+
 // ===========================================================================
 // xv mv — bulk folder move
 // ===========================================================================
