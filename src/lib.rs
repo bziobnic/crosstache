@@ -11,6 +11,7 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod records;
 pub mod scan;
 pub mod secret;
 #[cfg(feature = "tui")]

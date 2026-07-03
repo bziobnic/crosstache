@@ -1,5 +1,6 @@
 //! Secret command execution handlers.
 
+use crate::backend::BackendCapabilities;
 use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, SecretWriteArgs, ShareCommands};
 use crate::cli::helpers::{
@@ -9,10 +10,16 @@ use crate::cli::helpers::{
 };
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
+use crate::records::{
+    encode_envelope, find_type, FieldDef, FieldKind, RecordType, FIELD_TAG_PREFIX,
+    RECORD_CONTENT_TYPE, TYPE_TAG,
+};
 use crate::secret::manager::SecretManager;
 use crate::utils::format::OutputFormat;
 use crate::utils::output;
 use crate::utils::pagination::Pagination;
+use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -56,12 +63,394 @@ pub(crate) async fn apply_profile_write_defaults(
     Ok(())
 }
 
+/// Routes user-supplied `--field`/`--field-secret` pairs into metadata-tag
+/// and envelope (secret) maps, per record-types plan Task 6:
+/// - `--field name=value`: uses the type's declared kind when `name` is a
+///   declared field; ad-hoc names default to metadata.
+/// - `--field-secret name=value`: always routes to the envelope
+///   (secret), overriding the type's declared kind if any.
+/// - Either flag targeting the type's primary field is an error — the
+///   primary value only ever arrives via `--value`/`--stdin`/prompt.
+fn route_fields(
+    record_type: &RecordType,
+    fields: &[(String, String)],
+    secret_fields: &[(String, String)],
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+    // Reject the same field name appearing more than once across
+    // --field/--field-secret (or repeated within one flag) before doing
+    // anything else. Two values for one field would otherwise silently
+    // pick a winner depending on kind/insertion order — e.g. `--field
+    // a=1 --field-secret a=2` would store `a` as both an f.* tag AND an
+    // envelope entry, and `get --field a` would only ever see the
+    // envelope one, silently ignoring the tag.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (name, _) in fields.iter().chain(secret_fields.iter()) {
+        if !seen.insert(name.as_str()) {
+            return Err(CrosstacheError::config(format!(
+                "field '{name}' was supplied more than once across --field/--field-secret; \
+                 each field may only be set once"
+            )));
+        }
+    }
+
+    let mut metadata: BTreeMap<String, String> = BTreeMap::new();
+    let mut secret: BTreeMap<String, String> = BTreeMap::new();
+
+    for (name, val) in fields {
+        if let Some(def) = record_type.field(name) {
+            if def.primary {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "field '{name}' is the primary field of type '{}'; set it via --value/--stdin, not --field",
+                    record_type.name
+                )));
+            }
+            match def.kind {
+                FieldKind::Metadata => {
+                    metadata.insert(name.clone(), val.clone());
+                }
+                FieldKind::Secret => {
+                    secret.insert(name.clone(), val.clone());
+                }
+            }
+        } else {
+            metadata.insert(name.clone(), val.clone());
+        }
+    }
+
+    for (name, val) in secret_fields {
+        if let Some(def) = record_type.field(name) {
+            if def.primary {
+                return Err(CrosstacheError::invalid_argument(format!(
+                    "field '{name}' is the primary field of type '{}'; set it via --value/--stdin, not --field-secret",
+                    record_type.name
+                )));
+            }
+        }
+        secret.insert(name.clone(), val.clone());
+    }
+
+    Ok((metadata, secret))
+}
+
+/// True when `name` is present in `metadata` or `secret` with a
+/// non-blank value. Only meaningful for required fields: a non-required
+/// field is free to keep an explicit empty value (an explicit empty is a
+/// legitimate user choice there — mirrors how env-profile defaults treat
+/// blank-as-absent per #320, applied here only to the required-ness
+/// check, not to whether the field gets stored), but a required field
+/// supplied as `--field name=` or `--field name=" "` isn't meaningfully
+/// "set" and must be treated as missing — matching the interactive
+/// prompt path, which already rejects a blank answer for a required
+/// field.
+fn has_non_blank_value(
+    name: &str,
+    metadata: &BTreeMap<String, String>,
+    secret: &BTreeMap<String, String>,
+) -> bool {
+    metadata
+        .get(name)
+        .or_else(|| secret.get(name))
+        .is_some_and(|v| !v.trim().is_empty())
+}
+
+/// Every required field (except the primary, which is always required and
+/// supplied separately) that is missing — absent, or present with an
+/// empty/whitespace-only value — from both maps, in declared order.
+fn missing_required_fields<'a>(
+    record_type: &'a RecordType,
+    metadata: &BTreeMap<String, String>,
+    secret: &BTreeMap<String, String>,
+) -> Vec<&'a FieldDef> {
+    record_type
+        .fields
+        .iter()
+        .filter(|f| f.required && !f.primary)
+        .filter(|f| !has_non_blank_value(&f.name, metadata, secret))
+        .collect()
+}
+
+/// Ordered list of fields still needing a value, primary last. Extracted as
+/// a pure function so the field-ordering rule (primary prompted last) is
+/// unit-testable without a TTY.
+fn prompt_plan<'a>(
+    record_type: &'a RecordType,
+    provided: &BTreeMap<String, String>,
+) -> Vec<&'a FieldDef> {
+    let mut non_primary: Vec<&FieldDef> = record_type
+        .fields
+        .iter()
+        .filter(|f| !f.primary && !provided.contains_key(&f.name))
+        .collect();
+    if let Some(primary) = record_type.fields.iter().find(|f| f.primary) {
+        non_primary.push(primary);
+    }
+    non_primary
+}
+
+/// Interactively prompts for every field in `prompt_plan`, splitting the
+/// results into (metadata, secret, primary_value). Metadata fields accept
+/// an empty answer unless required; secret fields are masked via
+/// `rpassword`. Called only when the caller supplied no `--field`s and no
+/// `--value`/`--stdin` on an interactive TTY.
+/// (metadata fields, secret fields, primary field value)
+type RecordFieldPlan = (BTreeMap<String, String>, BTreeMap<String, String>, String);
+
+fn interactive_prompt_record_fields(
+    record_type: &RecordType,
+    already_provided: &BTreeMap<String, String>,
+) -> Result<RecordFieldPlan> {
+    use crate::utils::interactive::InteractivePrompt;
+
+    let prompt = InteractivePrompt::new();
+    let mut metadata = BTreeMap::new();
+    let mut secret = BTreeMap::new();
+    let mut primary_value = String::new();
+
+    for field in prompt_plan(record_type, already_provided) {
+        match field.kind {
+            FieldKind::Metadata => {
+                let label = if field.required {
+                    format!("{} (required)", field.name)
+                } else {
+                    field.name.clone()
+                };
+                let answer = prompt.input_text(&label, None)?;
+                if field.required && answer.trim().is_empty() {
+                    return Err(CrosstacheError::config(format!(
+                        "field '{}' is required for type '{}'",
+                        field.name, record_type.name
+                    )));
+                }
+                if !answer.is_empty() {
+                    metadata.insert(field.name.clone(), answer);
+                }
+            }
+            FieldKind::Secret => {
+                let answer = rpassword::prompt_password(format!("{}: ", field.name))?;
+                if field.required && answer.is_empty() {
+                    return Err(CrosstacheError::config(format!(
+                        "field '{}' is required for type '{}'",
+                        field.name, record_type.name
+                    )));
+                }
+                if field.primary {
+                    primary_value = answer;
+                } else if !answer.is_empty() {
+                    secret.insert(field.name.clone(), answer);
+                }
+            }
+        }
+    }
+
+    Ok((metadata, secret, primary_value))
+}
+
+/// Builds the `SecretRequest` for `xv set <name> --type <type>`: resolves
+/// the type, routes `--field`/`--field-secret` (or runs the interactive
+/// prompt when none were given and no `--value`/`--stdin`), enforces
+/// required fields, checks the tag budget, and encodes the envelope. Fails
+/// before any backend call on every validation error.
+#[allow(clippy::too_many_arguments)]
+async fn build_record_set_request(
+    name: &str,
+    value: Option<String>,
+    stdin: bool,
+    trim: bool,
+    type_name: &str,
+    fields: &[(String, String)],
+    secret_fields: &[(String, String)],
+    meta: &SecretWriteArgs,
+    config: &Config,
+    caps: BackendCapabilities,
+    backend_kind: crate::backend::BackendKind,
+) -> Result<crate::secret::manager::SecretRequest> {
+    let types = config.resolve_record_types().await?;
+    let Some(record_type) = find_type(&types, type_name) else {
+        let mut known: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        known.sort_unstable();
+        return Err(CrosstacheError::config(format!(
+            "unknown type '{type_name}'. Known types: {}",
+            known.join(", ")
+        )));
+    };
+
+    // Reject any user `--tag` that collides with a reserved record tag
+    // name, before any prompting or backend call. Applying `--tag` after
+    // xv-type/f.* would silently overwrite the record's own bookkeeping
+    // (e.g. `--tag xv-type=other` desyncs the type marker from the
+    // envelope, breaking type resolution and plain `get`); rejecting is at
+    // least as strict as the untyped `set` path, which already loses a
+    // user-supplied `original_name`/`created_by` tag to the backend's own
+    // unconditional overwrite (see `crate::backend::ALWAYS_WRITTEN_TAGS`).
+    //
+    // Also reject `groups`/`note`/`folder` — on the untyped `set` path
+    // these keys don't error either, but they're not silently ignored:
+    // `SecretManager::prepare_secret_request` (Azure's real write path)
+    // copies `request.tags` (which would include a user `--tag note=y`)
+    // into the tag map FIRST, then unconditionally re-inserts
+    // `groups`/`note`/`folder` from the dedicated `--group`/`--note`/
+    // `--folder` flags when those flags were passed — so `--note x --tag
+    // note=y` deterministically keeps `x` (the dedicated flag always wins
+    // over the same-named `--tag`), never `y`, and never errors. That
+    // silent "last write wins" merge is exactly the desync class round 1
+    // already rejected for xv-type/f.*/original_name/created_by, so the
+    // record path is intentionally stricter here than the untyped path:
+    // fail loud instead of silently picking a winner.
+    for key in meta.tag.iter().map(|(k, _)| k.as_str()) {
+        let collides = key == TYPE_TAG
+            || key.starts_with(FIELD_TAG_PREFIX)
+            || key == crate::backend::TAG_ORIGINAL_NAME
+            || key == crate::backend::TAG_CREATED_BY
+            || key == "groups"
+            || key == "note"
+            || key == "folder";
+        if collides {
+            return Err(CrosstacheError::config(format!(
+                "--tag '{key}' collides with a reserved record tag name ({}, {FIELD_TAG_PREFIX}*, \
+                 {}, {}, groups, note, folder); rename it or use --group/--note/--folder instead",
+                TYPE_TAG,
+                crate::backend::TAG_ORIGINAL_NAME,
+                crate::backend::TAG_CREATED_BY
+            )));
+        }
+    }
+
+    let (metadata, mut secret_map, primary_value) =
+        if fields.is_empty() && secret_fields.is_empty() && value.is_none() && !stdin {
+            if std::io::stdin().is_terminal() {
+                interactive_prompt_record_fields(record_type, &BTreeMap::new())?
+            } else {
+                return Err(CrosstacheError::config(format!(
+                    "type '{type_name}' requires field values; pass --value/--stdin for the \
+                     primary field and --field/--field-secret for the rest (no TTY available \
+                     for interactive prompts)"
+                )));
+            }
+        } else {
+            let (metadata, secret_map) = route_fields(record_type, fields, secret_fields)?;
+            // Fail before prompting for the primary value: a user
+            // shouldn't be asked for a (possibly masked, hard-to-retype)
+            // secret and only afterward be told a required metadata field
+            // was missing.
+            let missing = missing_required_fields(record_type, &metadata, &secret_map);
+            if !missing.is_empty() {
+                let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+                return Err(CrosstacheError::config(format!(
+                    "type '{type_name}' is missing required field(s): {}",
+                    names.join(", ")
+                )));
+            }
+            let primary_value = if let Some(v) = value {
+                v
+            } else if stdin {
+                read_secret_value_from_stdin(trim)?
+            } else if std::io::stdin().is_terminal() {
+                rpassword::prompt_password(format!(
+                    "Enter value for '{}' (primary field of '{type_name}'): ",
+                    record_type.primary().name
+                ))?
+            } else {
+                // No TTY to prompt on: don't hang scripts/CI waiting on
+                // stdin that will never produce input. Fail before write
+                // with a clear, actionable message instead of an opaque
+                // "empty primary" error further down.
+                return Err(CrosstacheError::config(format!(
+                    "type '{type_name}' requires a value for its primary field \
+                     ('{}'), and no TTY is available to prompt for one; pass \
+                     --value or --stdin",
+                    record_type.primary().name
+                )));
+            };
+            (metadata, secret_map, primary_value)
+        };
+
+    if primary_value.is_empty() {
+        return Err(CrosstacheError::config(
+            "primary field value cannot be empty",
+        ));
+    }
+
+    let missing = missing_required_fields(record_type, &metadata, &secret_map);
+    if !missing.is_empty() {
+        let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+        return Err(CrosstacheError::config(format!(
+            "type '{type_name}' is missing required field(s): {}",
+            names.join(", ")
+        )));
+    }
+
+    // Tag budget: reserved (backend-specific bookkeeping tags this write
+    // will actually cause the active backend's `set_secret` to attach) +
+    // f.* metadata fields + user --tag count. `predicted_reserved_tag_count`
+    // is derived per-backend from what each backend's `set_secret` really
+    // puts on the wire (see its doc comment) — a single universal count
+    // would either under-count (missing a backend-specific tag, letting a
+    // write pass this pre-check and still blow the real cap) or
+    // over-count (assuming a tag every backend doesn't actually write,
+    // falsely rejecting a write that would have succeeded).
+    let reserved_count = crate::records::predicted_reserved_tag_count(
+        backend_kind,
+        true, // xv-type: always present on a record write
+        !meta.group.is_empty(),
+        meta.note.is_some(),
+        meta.folder.is_some(),
+        meta.expires.is_some(),
+    );
+    let field_tags: BTreeMap<String, String> = metadata
+        .iter()
+        .map(|(k, v)| (format!("{FIELD_TAG_PREFIX}{k}"), v.clone()))
+        .collect();
+    let user_tags: BTreeMap<String, String> = meta.tag.iter().cloned().collect();
+    crate::records::check_tag_budget(&caps, reserved_count, &field_tags, &user_tags)?;
+
+    // Build the envelope: secret fields + primary.
+    secret_map.insert(record_type.primary().name.clone(), primary_value);
+    let envelope_value = encode_envelope(&secret_map)?;
+
+    // Tags: xv-type + f.* metadata fields + user --tag.
+    let mut tags: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    tags.insert(TYPE_TAG.to_string(), record_type.name.clone());
+    for (k, v) in &field_tags {
+        tags.insert(k.clone(), v.clone());
+    }
+    for (k, v) in &user_tags {
+        tags.insert(k.clone(), v.clone());
+    }
+    let _ = metadata; // folded into field_tags above; kept for clarity at the call site
+
+    use crate::utils::datetime::parse_datetime_or_duration;
+    let expires_on = match meta.expires.as_deref() {
+        Some(s) => Some(parse_datetime_or_duration(s)?),
+        None => None,
+    };
+    let not_before_on = match meta.not_before.as_deref() {
+        Some(s) => Some(parse_datetime_or_duration(s)?),
+        None => None,
+    };
+
+    Ok(crate::secret::manager::SecretRequest {
+        name: name.to_string(),
+        value: Zeroizing::new(envelope_value),
+        content_type: Some(RECORD_CONTENT_TYPE.to_string()),
+        enabled: Some(true),
+        expires_on,
+        not_before: not_before_on,
+        tags: Some(tags),
+        groups: meta.groups_opt(),
+        note: meta.note.clone(),
+        folder: meta.folder.clone(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_set_direct(
     args: Vec<String>,
     stdin: bool,
     trim: bool,
     value: Option<String>,
+    type_name: Option<String>,
+    fields: Vec<(String, String)>,
+    secret_fields: Vec<(String, String)>,
     meta: SecretWriteArgs,
     config: Config,
     registry: Option<&BackendRegistry>,
@@ -83,6 +472,11 @@ pub(crate) async fn execute_secret_set_direct(
             "--value can only be used when setting a single secret (not with KEY=value bulk args)",
         ));
     }
+    if type_name.is_some() && is_bulk {
+        return Err(CrosstacheError::invalid_argument(
+            "--type can only be used when setting a single secret (not with KEY=value bulk args)",
+        ));
+    }
 
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
@@ -95,7 +489,37 @@ pub(crate) async fn execute_secret_set_direct(
         let mut meta = meta;
         apply_profile_write_defaults(&mut meta, &config).await?;
 
-        if args.len() == 1 && !args[0].contains('=') {
+        if args.len() == 1 && !args[0].contains('=') && type_name.is_some() {
+            // Typed record single-secret set.
+            let name = &args[0];
+            let request = build_record_set_request(
+                name,
+                value.clone(),
+                stdin,
+                trim,
+                type_name.as_deref().expect("checked Some above"),
+                &fields,
+                &secret_fields,
+                &meta,
+                &config,
+                reg.active().capabilities(),
+                reg.active().kind(),
+            )
+            .await?;
+            let props = reg
+                .active()
+                .secrets()
+                .set_secret(&vault_name, request)
+                .await?;
+            output::success(&format!(
+                "Successfully set record '{}' (type: {})",
+                props.original_name,
+                type_name.as_deref().unwrap_or("")
+            ));
+            println!("   Vault: {vault_name}");
+            println!("   Version: {}", props.version);
+            output::hint(&format!("Verify with 'xv get {}'", props.original_name));
+        } else if args.len() == 1 && !args[0].contains('=') {
             // Single secret set
             let name = &args[0];
             let secret_value = if let Some(v) = value.clone() {
@@ -192,10 +616,91 @@ pub(crate) async fn execute_secret_set_direct(
     ))
 }
 
+/// Parses a record's envelope, failing loud (never returning raw JSON as if
+/// it were a value) when the content type says "record" but the value
+/// isn't a valid envelope.
+fn parse_record_envelope_or_fail(
+    name: &str,
+    content_type: &str,
+    value: &str,
+) -> Result<BTreeMap<String, String>> {
+    crate::records::parse_envelope(value).map_err(|e| {
+        CrosstacheError::config(format!(
+            "secret '{name}' is marked as a record (content-type: {content_type}) but its \
+             value is not a valid record envelope: {e}"
+        ))
+    })
+}
+
+/// All field names a record exposes: envelope keys (secret fields) union
+/// `f.*` tag names (metadata fields), for "unknown field" error messages.
+fn record_field_names(
+    envelope: &BTreeMap<String, String>,
+    tags: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut names: Vec<String> = envelope.keys().cloned().collect();
+    for key in tags.keys() {
+        if let Some(field) = key.strip_prefix(FIELD_TAG_PREFIX) {
+            names.push(field.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Looks up one field's value: envelope (secret fields) first, then the
+/// `f.<name>` tag (metadata fields).
+fn lookup_record_field<'a>(
+    field: &str,
+    envelope: &'a BTreeMap<String, String>,
+    tags: &'a std::collections::HashMap<String, String>,
+) -> Option<&'a str> {
+    if let Some(v) = envelope.get(field) {
+        return Some(v.as_str());
+    }
+    tags.get(&format!("{FIELD_TAG_PREFIX}{field}"))
+        .map(|s| s.as_str())
+}
+
+/// Decides the clipboard success message and whether to schedule an
+/// auto-clear for `xv get --field`, mirroring plain `get`'s clipboard
+/// handling for secret-kind fields exactly (same message shape, same
+/// `schedule_clipboard_clear` call when `timeout > 0`). Metadata-kind
+/// fields intentionally never schedule a clear: they're listable without
+/// fetching the secret at all (e.g. via `--record`, or a future `ls` field
+/// lift), so treating a clipboard copy of one as equally sensitive as a
+/// secret buys nothing. Extracted as a pure function so this branching is
+/// unit-testable without a real clipboard.
+fn field_clipboard_outcome(
+    name: &str,
+    field_name: &str,
+    is_secret_field: bool,
+    clipboard_timeout: u64,
+) -> (String, bool) {
+    if is_secret_field && clipboard_timeout > 0 {
+        (
+            format!(
+                "Field '{field_name}' of '{name}' copied to clipboard (auto-clears in {clipboard_timeout}s)"
+            ),
+            true,
+        )
+    } else {
+        (
+            format!("Field '{field_name}' of '{name}' copied to clipboard"),
+            false,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_get_direct(
     name: &str,
     raw: bool,
     version: Option<String>,
+    field: Option<String>,
+    record: bool,
+    format: OutputFormat,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -216,11 +721,139 @@ pub(crate) async fn execute_secret_get_direct(
                 .await?
         };
 
+        let is_rec = crate::records::is_record(&secret.content_type);
+
+        // ── `--record`: full record view, all fields, requested format ──
+        if record {
+            if !is_rec {
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' is not a typed record (value is not marked {}); \
+                     --record only applies to typed records. Use 'xv update {name} --type <type>' \
+                     to convert it.",
+                    crate::records::RECORD_CONTENT_TYPE
+                )));
+            }
+            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
+            let mut all_fields: std::collections::BTreeMap<String, String> = envelope.clone();
+            for (k, v) in &secret.tags {
+                if let Some(f) = k.strip_prefix(FIELD_TAG_PREFIX) {
+                    all_fields.insert(f.to_string(), v.clone());
+                }
+            }
+            let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
+            let resolved = format.resolve_for_stdout();
+            let body = serde_json::json!({
+                "name": name,
+                "type": type_name,
+                "fields": all_fields,
+            });
+            match resolved {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&body).map_err(|e| {
+                        CrosstacheError::serialization(format!("JSON serialization failed: {e}"))
+                    })?
+                ),
+                OutputFormat::Yaml => println!(
+                    "{}",
+                    serde_yaml::to_string(&body).map_err(|e| {
+                        CrosstacheError::serialization(format!("YAML serialization failed: {e}"))
+                    })?
+                ),
+                _ => {
+                    println!("{name}  (type: {type_name})");
+                    for (k, v) in &all_fields {
+                        println!("  {k}: {v}");
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // ── `--field NAME`: one field, either kind ──
+        if let Some(field_name) = field {
+            if !is_rec {
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' is not a typed record (value is not marked {}); \
+                     --field only applies to typed records. Use 'xv update {name} --type <type>' \
+                     to convert it.",
+                    crate::records::RECORD_CONTENT_TYPE
+                )));
+            }
+            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
+            let Some(field_value) = lookup_record_field(&field_name, &envelope, &secret.tags)
+            else {
+                let known = record_field_names(&envelope, &secret.tags);
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' has no field '{field_name}'. Known fields: {}",
+                    known.join(", ")
+                )));
+            };
+            // A field found in the envelope is secret-kind; one found only
+            // via the f.<name> tag is metadata-kind (listable without
+            // fetching the secret in the first place).
+            let is_secret_field = envelope.contains_key(&field_name);
+
+            if raw {
+                print!("{field_value}");
+            } else {
+                match copy_to_clipboard(field_value) {
+                    Ok(()) => {
+                        let (message, schedule_clear) = field_clipboard_outcome(
+                            name,
+                            &field_name,
+                            is_secret_field,
+                            config.clipboard_timeout,
+                        );
+                        output::success(&message);
+                        if schedule_clear {
+                            schedule_clipboard_clear(config.clipboard_timeout);
+                        }
+                    }
+                    Err(e) => {
+                        output::warn(&format!("Failed to copy to clipboard: {e}"));
+                        eprintln!(
+                            "Use 'xv get {name} --field {field_name} --raw' to print the value to stdout instead."
+                        );
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // ── Plain `get`: primary field for records, untouched for untyped ──
+        let effective_value: Option<Zeroizing<String>> = if is_rec {
+            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
+
+            let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
+            let types = config.resolve_record_types().await?;
+            let Some(record_type) = crate::records::find_type(&types, &type_name) else {
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' has type '{type_name}', which has no resolvable type \
+                     definition (check your [types.*] config). Its primary field can't be \
+                     determined; use --field or --record to access this record's raw fields."
+                )));
+            };
+            let primary_name = &record_type.primary().name;
+            let Some(primary_value) = envelope.get(primary_name) else {
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' is missing its primary field '{primary_name}' in the record \
+                     envelope"
+                )));
+            };
+            Some(Zeroizing::new(primary_value.clone()))
+        } else {
+            secret.value
+        };
+
         if raw {
-            if let Some(value) = secret.value {
+            if let Some(value) = effective_value {
                 print!("{}", value.as_str());
             }
-        } else if let Some(ref value) = secret.value {
+        } else if let Some(ref value) = effective_value {
             match copy_to_clipboard(value) {
                 Ok(()) => {
                     let timeout = config.clipboard_timeout;
@@ -4284,6 +4917,8 @@ mod tests {
                 max_secret_size: None,
                 max_name_length: None,
                 name_charset: NameCharset::Unrestricted,
+                max_tags: None,
+                max_tag_value_len: None,
             }
         }
 
@@ -5025,6 +5660,8 @@ mod tests {
                 max_secret_size: None,
                 max_name_length: None,
                 name_charset: NameCharset::Unrestricted,
+                max_tags: None,
+                max_tag_value_len: None,
             }
         }
 
@@ -5149,5 +5786,170 @@ mod tests {
             "cache must be invalidated once the in-place update applied, \
              even though the following rename failed"
         );
+    }
+
+    // ── Record-types Task 6 helpers ─────────────────────────────────────
+
+    fn login_type() -> crate::records::RecordType {
+        crate::records::builtin_types()
+            .into_iter()
+            .find(|t| t.name == "login")
+            .unwrap()
+    }
+
+    #[test]
+    fn prompt_plan_orders_non_primary_then_primary_last() {
+        let t = login_type();
+        let plan = prompt_plan(&t, &BTreeMap::new());
+        let names: Vec<&str> = plan.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["username", "url", "password"]);
+        assert!(plan.last().unwrap().primary);
+    }
+
+    #[test]
+    fn prompt_plan_skips_already_provided_fields() {
+        let t = login_type();
+        let mut provided = BTreeMap::new();
+        provided.insert("username".to_string(), "bob".to_string());
+        let plan = prompt_plan(&t, &provided);
+        let names: Vec<&str> = plan.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["url", "password"]);
+    }
+
+    #[test]
+    fn route_fields_declared_metadata_and_adhoc() {
+        let t = login_type();
+        let fields = vec![
+            ("username".to_string(), "bob".to_string()),
+            ("custom".to_string(), "x".to_string()),
+        ];
+        let (metadata, secret) = route_fields(&t, &fields, &[]).unwrap();
+        assert_eq!(metadata.get("username"), Some(&"bob".to_string()));
+        assert_eq!(metadata.get("custom"), Some(&"x".to_string()));
+        assert!(secret.is_empty());
+    }
+
+    #[test]
+    fn route_fields_rejects_primary_via_field() {
+        let t = login_type();
+        let fields = vec![("password".to_string(), "x".to_string())];
+        assert!(route_fields(&t, &fields, &[]).is_err());
+    }
+
+    #[test]
+    fn route_fields_secret_flag_always_goes_to_envelope() {
+        let t = login_type();
+        let secret_fields = vec![("totp".to_string(), "x".to_string())];
+        let (metadata, secret) = route_fields(&t, &[], &secret_fields).unwrap();
+        assert!(metadata.is_empty());
+        assert_eq!(secret.get("totp"), Some(&"x".to_string()));
+    }
+
+    #[test]
+    fn route_fields_rejects_duplicate_across_field_and_field_secret() {
+        // Bugbot follow-up: `--field a=1 --field-secret a=2` must not
+        // silently store `a` as both an f.* tag and an envelope entry.
+        let t = login_type();
+        let fields = vec![("custom".to_string(), "1".to_string())];
+        let secret_fields = vec![("custom".to_string(), "2".to_string())];
+        let err = route_fields(&t, &fields, &secret_fields).unwrap_err();
+        assert!(err.to_string().contains("custom"), "{err}");
+    }
+
+    #[test]
+    fn route_fields_rejects_duplicate_within_field_alone() {
+        let t = login_type();
+        let fields = vec![
+            ("custom".to_string(), "1".to_string()),
+            ("custom".to_string(), "2".to_string()),
+        ];
+        assert!(route_fields(&t, &fields, &[]).is_err());
+    }
+
+    #[test]
+    fn missing_required_fields_reports_absent_username() {
+        let t = login_type();
+        let missing = missing_required_fields(&t, &BTreeMap::new(), &BTreeMap::new());
+        let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["username"]);
+    }
+
+    // ── Empty required fields (Bugbot round 3 follow-up) ────────────────
+
+    #[test]
+    fn missing_required_fields_treats_empty_value_as_missing() {
+        let t = login_type();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("username".to_string(), String::new());
+        let missing = missing_required_fields(&t, &metadata, &BTreeMap::new());
+        let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["username"], "empty value must count as missing");
+    }
+
+    #[test]
+    fn missing_required_fields_treats_whitespace_only_value_as_missing() {
+        let t = login_type();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("username".to_string(), "   ".to_string());
+        let missing = missing_required_fields(&t, &metadata, &BTreeMap::new());
+        let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["username"],
+            "whitespace-only value must count as missing"
+        );
+    }
+
+    #[test]
+    fn missing_required_fields_non_required_field_may_stay_empty() {
+        // `url` on `login` is optional metadata; an explicit empty value is
+        // a legitimate user choice and must not affect required-field
+        // reporting (only `username`, the required field, is missing).
+        let t = login_type();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("url".to_string(), String::new());
+        let missing = missing_required_fields(&t, &metadata, &BTreeMap::new());
+        let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["username"]);
+    }
+
+    #[test]
+    fn has_non_blank_value_true_for_real_value() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("username".to_string(), "bob".to_string());
+        assert!(has_non_blank_value("username", &metadata, &BTreeMap::new()));
+    }
+
+    // ── `xv get --field` clipboard auto-clear (code review follow-up) ──
+
+    #[test]
+    fn field_clipboard_outcome_secret_field_schedules_clear_like_plain_get() {
+        let (message, schedule_clear) = field_clipboard_outcome("cred", "password", true, 30);
+        assert!(schedule_clear, "secret-kind fields must schedule a clear");
+        assert!(message.contains("auto-clears in 30s"), "{message}");
+        assert!(message.contains("password"), "{message}");
+        assert!(message.contains("cred"), "{message}");
+    }
+
+    #[test]
+    fn field_clipboard_outcome_secret_field_no_clear_when_timeout_disabled() {
+        let (message, schedule_clear) = field_clipboard_outcome("cred", "password", true, 0);
+        assert!(!schedule_clear, "timeout=0 must never schedule a clear");
+        assert!(
+            !message.contains("auto-clears"),
+            "no affordance text when disabled: {message}"
+        );
+    }
+
+    #[test]
+    fn field_clipboard_outcome_metadata_field_never_schedules_clear() {
+        // Even with a non-zero timeout, a metadata-kind field (listable
+        // without fetching the secret) intentionally skips the auto-clear.
+        let (message, schedule_clear) = field_clipboard_outcome("cred", "username", false, 30);
+        assert!(
+            !schedule_clear,
+            "metadata-kind fields must not schedule a clear"
+        );
+        assert!(!message.contains("auto-clears"), "{message}");
     }
 }

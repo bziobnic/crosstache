@@ -34,6 +34,12 @@ pub struct ProjectConfig {
     /// Optional scanner configuration for leak detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<ScanConfig>,
+
+    /// Custom record types declared as `[types.<name>]` blocks, overriding
+    /// global config / built-in types of the same name. See
+    /// `crate::records::resolve_types`.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub types: std::collections::HashMap<String, crate::records::RecordTypeConfig>,
 }
 
 /// One environment's defaults. All fields optional; a missing field
@@ -481,6 +487,7 @@ resource_group = "rg"
             default_env: default_env.map(String::from),
             envs: envs_map,
             scan: None,
+            types: std::collections::HashMap::new(),
         }
     }
 

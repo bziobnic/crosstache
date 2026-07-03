@@ -283,6 +283,13 @@ pub struct Config {
     #[serde(skip)]
     #[tabled(skip)]
     pub disk_backend: Option<String>,
+
+    /// Custom record types declared as `[types.<name>]` blocks. Merged with
+    /// built-in types and any `.xv.toml` project-level types via
+    /// `records::resolve_types` (project overrides global overrides builtin).
+    #[tabled(skip)]
+    #[serde(default)]
+    pub types: std::collections::HashMap<String, crate::records::RecordTypeConfig>,
 }
 
 fn default_clipboard_timeout() -> u64 {
@@ -326,6 +333,7 @@ impl Default for Config {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            types: std::collections::HashMap::new(),
         }
     }
 }
@@ -403,6 +411,24 @@ impl Config {
     #[allow(dead_code)]
     pub fn effective_backend_name(&self) -> &str {
         self.backend.as_deref().unwrap_or("azure")
+    }
+
+    /// Resolve the effective set of record types: built-ins merged with
+    /// this config's `[types.*]` blocks and (if present) the project
+    /// `.xv.toml`'s `[types.*]` blocks, with precedence project > global >
+    /// builtin. Same project-config discovery walk as `resolve_group`.
+    pub async fn resolve_record_types(&self) -> Result<Vec<crate::records::RecordType>> {
+        use crate::config::project;
+
+        let project_types = {
+            let cwd = std::env::current_dir()?;
+            match project::find_project_config(&cwd).await {
+                Ok(Some((_, cfg))) => cfg.types,
+                _ => std::collections::HashMap::new(),
+            }
+        };
+
+        crate::records::resolve_types(&self.types, &project_types)
     }
 
     /// Resolve vault name with context awareness

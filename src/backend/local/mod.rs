@@ -228,6 +228,8 @@ impl Backend for LocalBackend {
             max_secret_size: None,
             max_name_length: Some(255),
             name_charset: NameCharset::Unrestricted,
+            max_tags: None,
+            max_tag_value_len: None,
         }
     }
 

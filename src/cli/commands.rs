@@ -422,6 +422,19 @@ pub enum Commands {
         /// secret name; mutually exclusive with --stdin.
         #[arg(long, conflicts_with = "stdin")]
         value: Option<String>,
+        /// Create a typed record of this type (built-in or custom `[types.*]`).
+        /// Only valid for a single secret. See `xv type list`/`xv type show`.
+        #[arg(long = "type")]
+        r#type: Option<String>,
+        /// Set a metadata (or type-declared non-primary secret) field
+        /// value, `name=value` (repeatable). Fields not declared by the
+        /// type are accepted as ad-hoc metadata. Requires --type.
+        #[arg(long = "field", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, requires = "type")]
+        fields: Vec<(String, String)>,
+        /// Set an ad-hoc secret field value, `name=value` (repeatable) —
+        /// stored in the record envelope rather than as a tag. Requires --type.
+        #[arg(long = "field-secret", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, requires = "type")]
+        secret_fields: Vec<(String, String)>,
         /// Write-time metadata (group/note/folder/expires/not-before)
         #[command(flatten)]
         meta: SecretWriteArgs,
@@ -436,6 +449,14 @@ pub enum Commands {
         /// Get a specific version of the secret
         #[arg(long)]
         version: Option<String>,
+        /// Read a single field from a typed record (metadata or secret).
+        /// Errors if the secret is untyped. Mutually exclusive with --record.
+        #[arg(long, conflicts_with = "record")]
+        field: Option<String>,
+        /// Print the full record (all fields) in the requested --format.
+        /// Errors if the secret is untyped. Mutually exclusive with --field.
+        #[arg(long, conflicts_with = "field")]
+        record: bool,
     },
     /// Ranked fuzzy search over secrets (alias: search). Non-interactive;
     /// pipe the output through fzf or similar for an interactive picker.
@@ -894,6 +915,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: LocalCommands,
     },
+    /// Record type management (built-in + custom `[types.*]` config blocks).
+    /// Config-only: never talks to a secrets backend.
+    Type {
+        #[command(subcommand)]
+        command: TypeCommands,
+    },
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
@@ -1300,6 +1327,20 @@ pub enum LocalCommands {
     },
 }
 
+/// Record-type subcommands (`xv type ...`).
+#[derive(Subcommand)]
+pub enum TypeCommands {
+    /// List resolved record types (built-in + global + project), with
+    /// their source (alias: ls)
+    #[command(alias = "ls")]
+    List,
+    /// Show a single resolved record type's field table
+    Show {
+        /// Type name
+        name: String,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum ContextCommands {
     /// Show current vault context
@@ -1520,16 +1561,41 @@ impl Cli {
                 stdin,
                 trim,
                 value,
+                r#type,
+                fields,
+                secret_fields,
                 meta,
             } => {
                 crate::cli::secret_ops::execute_secret_set_direct(
-                    args, stdin, trim, value, meta, config, registry,
+                    args,
+                    stdin,
+                    trim,
+                    value,
+                    r#type,
+                    fields,
+                    secret_fields,
+                    meta,
+                    config,
+                    registry,
                 )
                 .await
             }
-            Commands::Get { name, raw, version } => {
+            Commands::Get {
+                name,
+                raw,
+                version,
+                field,
+                record,
+            } => {
                 crate::cli::secret_ops::execute_secret_get_direct(
-                    &name, raw, version, config, registry,
+                    &name,
+                    raw,
+                    version,
+                    field,
+                    record,
+                    self.format,
+                    config,
+                    registry,
                 )
                 .await
             }
@@ -1862,6 +1928,9 @@ impl Cli {
             }
             Commands::Local { command } => {
                 crate::cli::local_ops::execute_local_command(command, config).await
+            }
+            Commands::Type { command } => {
+                crate::cli::type_ops::execute_type_command(command, config).await
             }
             #[cfg(feature = "file-ops")]
             Commands::Upload {

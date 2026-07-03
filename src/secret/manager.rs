@@ -404,8 +404,14 @@ impl AzureSecretOperations {
         let mut tags = request.tags.clone().unwrap_or_default();
 
         // Store original name in tags for mapping
-        tags.insert("original_name".to_string(), request.name.clone());
-        tags.insert("created_by".to_string(), "crosstache".to_string());
+        tags.insert(
+            crate::backend::TAG_ORIGINAL_NAME.to_string(),
+            request.name.clone(),
+        );
+        tags.insert(
+            crate::backend::TAG_CREATED_BY.to_string(),
+            "crosstache".to_string(),
+        );
 
         // Handle groups from request
         if let Some(ref groups) = request.groups {
