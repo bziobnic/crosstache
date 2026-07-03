@@ -2322,15 +2322,6 @@ async fn execute_record_field_update(
         }
     }
 
-    let mut new_tags: Option<std::collections::HashMap<String, String>> = None;
-    if !metadata_updates.is_empty() {
-        let mut t = std::collections::HashMap::new();
-        for (k, v) in &metadata_updates {
-            t.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
-        }
-        new_tags = Some(t);
-    }
-
     let mut new_value: Option<Zeroizing<String>> = None;
     if !secret_updates.is_empty() {
         let raw = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
@@ -2340,6 +2331,44 @@ async fn execute_record_field_update(
         }
         new_value = Some(Zeroizing::new(encode_envelope(&envelope)?));
     }
+
+    // Tags + content type + replace_tags. Two distinct write shapes:
+    //
+    // - Secret-field edit (`new_value.is_some()`): this forces the full-PUT
+    //   path on Azure's `update_secret` (it only takes the lighter
+    //   attributes-only PATCH when `request.value.is_none()` — see
+    //   `AzureSecretBackendCompat::update_secret`, src/backend/azure/secrets.rs
+    //   ~L214-265). The full-PUT branch writes `content_type`/`tags` from the
+    //   request EXACTLY as given — `None` there does not mean "leave
+    //   unchanged" the way it does on the attributes-only PATCH; it means
+    //   "no content type" / "rebuild tags from empty" respectively. Relying
+    //   on backend merge-on-`None` semantics here silently destroyed the
+    //   record's content-type marker and dropped xv-type/f.*/groups/etc.
+    //   (Bugbot review on the first cut of this function). So whenever a
+    //   secret-field edit is in play we build the COMPLETE desired tag map
+    //   ourselves (existing tags + the metadata overlay) and set
+    //   `replace_tags: true`, exactly like `execute_record_type_conversion`/
+    //   `execute_record_untype` already do — never a partial delta.
+    // - Metadata-only edit (`new_value.is_none()`): stays on Azure's
+    //   attributes-only PATCH, which already merges a partial tag delta
+    //   against the current tags itself (`build_patched_tags`), so a
+    //   partial map + `replace_tags: false` is correct and cheaper (no new
+    //   version).
+    let (new_tags, content_type, replace_tags) = if !secret_updates.is_empty() {
+        let mut full = secret.tags.clone();
+        for (k, v) in &metadata_updates {
+            full.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
+        }
+        (Some(full), Some(RECORD_CONTENT_TYPE.to_string()), true)
+    } else if !metadata_updates.is_empty() {
+        let mut t = std::collections::HashMap::new();
+        for (k, v) in &metadata_updates {
+            t.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
+        }
+        (Some(t), None, false)
+    } else {
+        (None, None, false)
+    };
 
     // Re-run the tag budget: projected f.* tags (existing, minus any this
     // write overwrites, plus the new values) + existing user tags. This
@@ -2375,7 +2404,7 @@ async fn execute_record_field_update(
     let request = crate::secret::manager::SecretUpdateRequest {
         name: name.to_string(),
         value: new_value,
-        content_type: None,
+        content_type,
         enabled: None,
         expires_on: crate::secret::manager::FieldUpdate::Unchanged,
         not_before: crate::secret::manager::FieldUpdate::Unchanged,
@@ -2383,7 +2412,7 @@ async fn execute_record_field_update(
         groups: None,
         note: crate::secret::manager::FieldUpdate::Unchanged,
         folder: crate::secret::manager::FieldUpdate::Unchanged,
-        replace_tags: false,
+        replace_tags,
         replace_groups: false,
     };
     let props = reg

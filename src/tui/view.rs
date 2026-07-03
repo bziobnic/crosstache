@@ -12,6 +12,42 @@ use std::collections::BTreeMap;
 /// reveal state), matching record-types plan Task 11.
 const MASKED_FIELD_VALUE: &str = "●●●●●●●●";
 
+/// Placeholder for the top `value:` line on typed records, regardless of
+/// reveal state. Showing the raw fetched value there for a typed record
+/// means showing the raw envelope JSON — every secret field's value at
+/// once — which defeats the masked "Fields" section below it (MINOR
+/// review finding on the first cut of Task 11: "TUI top value: line
+/// reveals the raw envelope JSON ... undermining the masked Fields
+/// section"). Untyped secrets are unaffected — they keep the existing
+/// reveal/mask/loading behavior exactly.
+const TYPED_RECORD_VALUE_PLACEHOLDER: &str = "value: <typed record — see Fields>";
+
+/// Pure formatter for the top `value:` line, so its branching (typed vs
+/// untyped, revealed vs masked vs loading vs no-selection) is unit
+/// testable without a real `App`/terminal.
+fn value_line(
+    is_typed_record: bool,
+    revealed: bool,
+    has_selection: bool,
+    fetched: Option<&str>,
+    loading: bool,
+) -> String {
+    if is_typed_record {
+        return TYPED_RECORD_VALUE_PLACEHOLDER.to_string();
+    }
+    if !has_selection {
+        return "value: ()".to_string();
+    }
+    if !revealed {
+        return "value: ●●●●●●●●".to_string();
+    }
+    match fetched {
+        Some(v) => format!("value: {v}"),
+        None if loading => "value: (loading…)".to_string(),
+        None => "value: (press Space)".to_string(),
+    }
+}
+
 /// Pure formatter for a record's "Fields" section in the TUI detail pane
 /// (record-types plan Task 11): one line per field, sorted by name.
 /// Metadata fields render `name: value` plainly; fields named in
@@ -139,22 +175,17 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
             s.original_name.as_str()
         };
         lines.push(Line::raw(format!("name: {display}")));
-        let value_line = if app.value_revealed {
-            if let Some((v, n)) = app.selected_vault_and_name() {
-                if let Some(val) = app.values.get(&(v, n)) {
-                    format!("value: {}", val.as_str())
-                } else if app.value_loading {
-                    "value: (loading…)".to_string()
-                } else {
-                    "value: (press Space)".to_string()
-                }
-            } else {
-                "value: ()".to_string()
-            }
-        } else {
-            "value: ●●●●●●●●".to_string()
-        };
-        lines.push(Line::raw(value_line));
+        let is_typed_record = s.tags.contains_key(crate::records::TYPE_TAG);
+        let selection_key = app.selected_vault_and_name();
+        let fetched = selection_key.as_ref().and_then(|k| app.values.get(k));
+        let line = value_line(
+            is_typed_record,
+            app.value_revealed,
+            selection_key.is_some(),
+            fetched.map(|v| v.as_str()),
+            app.value_loading,
+        );
+        lines.push(Line::raw(line));
         if let Some(g) = &s.groups {
             lines.push(Line::raw(format!("groups: {g}")));
         }
@@ -178,9 +209,7 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
                         .map(|f| (f.to_string(), v.clone()))
                 })
                 .collect();
-            let secret_names: Vec<String> = app
-                .selected_vault_and_name()
-                .and_then(|key| app.values.get(&key))
+            let secret_names: Vec<String> = fetched
                 .and_then(|val| crate::records::parse_envelope(val.as_str()).ok())
                 .map(|envelope| envelope.into_keys().collect())
                 .unwrap_or_default();
@@ -249,6 +278,42 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn value_line_typed_record_never_reveals_raw_envelope() {
+        // Even "revealed" with a fetched value present, a typed record
+        // shows the placeholder, not the raw envelope JSON.
+        assert_eq!(
+            value_line(true, true, true, Some(r#"{"password":"hunter2"}"#), false),
+            TYPED_RECORD_VALUE_PLACEHOLDER,
+        );
+        // ...and while masked/unrevealed too.
+        assert_eq!(
+            value_line(true, false, true, None, false),
+            TYPED_RECORD_VALUE_PLACEHOLDER,
+        );
+    }
+
+    #[test]
+    fn value_line_untyped_secret_unaffected() {
+        assert_eq!(
+            value_line(false, false, true, None, false),
+            "value: ●●●●●●●●"
+        );
+        assert_eq!(
+            value_line(false, true, true, Some("hunter2"), false),
+            "value: hunter2"
+        );
+        assert_eq!(
+            value_line(false, true, true, None, true),
+            "value: (loading…)"
+        );
+        assert_eq!(
+            value_line(false, true, true, None, false),
+            "value: (press Space)"
+        );
+        assert_eq!(value_line(false, true, false, None, false), "value: ()");
     }
 
     #[test]

@@ -1027,6 +1027,17 @@ fn update_secret_field_writes_new_envelope() {
     // New secret-field value forces a new version.
     assert_ne!(after["version"], version_before);
     assert!(after["tags"].get("f.totp-seed").is_none());
+    // Record identity must survive a secret-field edit (Bugbot BLOCKER:
+    // an Azure-specific bug relied on backend merge-on-None semantics for
+    // content_type/tags on this exact write shape — content_type: None
+    // and, when no --field accompanies --field-secret, tags: None too —
+    // which the Azure full-PUT path takes literally rather than treating
+    // as "leave unchanged". Local never had this bug (it does treat None
+    // as unchanged), so this assertion is a regression guard for the fix
+    // itself, not a reproduction of the original Azure bug.
+    assert_eq!(after["content_type"], "application/vnd.xv.record");
+    assert_eq!(after["tags"]["xv-type"], "login");
+    assert_eq!(after["tags"]["f.username"], "bob");
 
     let out3 = xv_same_env(temp.path())
         .args(["get", "cred", "--field", "totp-seed", "--raw"])
@@ -1302,6 +1313,27 @@ fn ls_untyped_only_output_unchanged() {
         "stdout: {stdout}"
     );
     assert!(!stdout.contains("Type"), "stdout: {stdout}");
+
+    // Byte-compare a DATA row too, not just the header — the date portion
+    // is the only part that legitimately varies run to run, so extract it
+    // from the actual row and rebuild the expected line around it; every
+    // other byte (name padding, column widths, box-drawing characters)
+    // must still match exactly.
+    let data_line = stdout
+        .lines()
+        .find(|l| l.contains("plain"))
+        .unwrap_or_else(|| panic!("no data row in: {stdout}"));
+    let date = data_line
+        .trim()
+        .split('│')
+        .nth(2)
+        .unwrap_or_else(|| panic!("row has no second column: {data_line}"))
+        .trim();
+    assert_eq!(
+        data_line.trim(),
+        format!("│ plain │ {date} │"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]

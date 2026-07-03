@@ -695,7 +695,9 @@ impl SecretBackend for AwsSecretBackend {
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
         use crate::backend::aws::encoding::aws_name;
-        use crate::backend::aws::metadata::{TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS};
+        use crate::backend::aws::metadata::{
+            TAG_CONTENT_TYPE, TAG_EXPIRES_AT, TAG_FOLDER, TAG_GROUPS,
+        };
         use aws_sdk_secretsmanager::types::Tag;
 
         // AWS Secrets Manager has no enable/disable concept — fail loudly
@@ -707,6 +709,23 @@ impl SecretBackend for AwsSecretBackend {
         }
 
         let aws_full_name = aws_name(vault, name);
+
+        // Write a new secret version when the caller supplied a new value —
+        // mirrors `set_secret`'s (via `update_existing_secret`) Step 1.
+        // Bugbot review on the first cut of the record-types edit paths:
+        // this backend previously applied only note/tag/folder/expiry
+        // deltas and NEVER wrote a value, so `xv update --field-secret`
+        // silently discarded the new envelope on AWS while reporting
+        // success.
+        if let Some(ref new_value) = request.value {
+            self.client
+                .put_secret_value()
+                .secret_id(&aws_full_name)
+                .secret_string(new_value.as_str().to_string())
+                .send()
+                .await
+                .map_err(|e| super::errors::from_put_value(name, e))?;
+        }
 
         // Update description (note): Set writes the new text, Clear empties it.
         match &request.note {
@@ -765,12 +784,62 @@ impl SecretBackend for AwsSecretBackend {
             FieldUpdate::Clear => keys_to_remove.push(TAG_EXPIRES_AT.into()),
             FieldUpdate::Unchanged => {}
         }
+        // Content type: `Some("")` (used by `xv update --untype` to clear a
+        // record's content-type marker) removes the tag; `Some(nonempty)`
+        // (used by a secret-field edit / `--type` conversion to (re)stamp
+        // `application/vnd.xv.record`) sets it. `None` leaves it untouched
+        // — mirrors `set_secret`'s handling of `TAG_CONTENT_TYPE`. Bugbot
+        // review: this backend previously never looked at
+        // `request.content_type` at all, so a record's content-type marker
+        // was never written/cleared here.
+        if let Some(ref ct) = request.content_type {
+            if ct.is_empty() {
+                keys_to_remove.push(TAG_CONTENT_TYPE.into());
+            } else {
+                tags_to_set.push(Tag::builder().key(TAG_CONTENT_TYPE).value(ct).build());
+            }
+        }
         if let Some(ref user_tags) = request.tags {
             for (k, v) in user_tags {
                 if v.is_empty() {
                     keys_to_remove.push(k.clone());
                 } else if preserves_request_tag(k) {
                     tags_to_set.push(Tag::builder().key(k).value(v).build());
+                }
+            }
+
+            // `replace_tags`: the loop above is a per-key DELTA (only keys
+            // present in `user_tags` are touched; a key silently absent
+            // from the map is left alone). Record-types plan Tasks 8/9
+            // build a FULL desired tag map and set `replace_tags: true`
+            // expecting "this map IS the whole picture" semantics — e.g.
+            // `xv update --untype` drops `xv-type`/`f.*` by omitting them
+            // from the map entirely, not by sending them with an empty
+            // value. Without this branch that omission was silently a
+            // no-op on AWS (Bugbot review: "untype no-ops ... xv-type tag
+            // survives since absent-from-map != removed"). Only plain
+            // (non "xv:"-prefixed) existing tags participate: the "xv:"
+            // namespace (original_name/groups/folder/content_type/
+            // expires_at/migration markers) is always managed by its own
+            // dedicated request field above, never by this generic diff.
+            if request.replace_tags {
+                let describe = self
+                    .client
+                    .describe_secret()
+                    .secret_id(&aws_full_name)
+                    .send()
+                    .await
+                    .map_err(|e| super::errors::from_describe(name, e))?;
+                let desired_keys: std::collections::HashSet<&str> =
+                    user_tags.keys().map(String::as_str).collect();
+                for tag in describe.tags() {
+                    let Some(key) = tag.key() else { continue };
+                    if key.starts_with("xv:") {
+                        continue;
+                    }
+                    if !desired_keys.contains(key) && !keys_to_remove.iter().any(|k| k == key) {
+                        keys_to_remove.push(key.to_string());
+                    }
                 }
             }
         }
