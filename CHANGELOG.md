@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- **Breaking: `xv run` now aborts before launching the child when any selected secret or `xv://` reference fails to fetch; use `--best-effort` for the old behavior** (#306). Previously a per-secret fetch failure only printed a warning and the command ran anyway, which could silently launch a process missing an env var (e.g. after a transient backend error or a permission problem). All failures across both the selected-secret list and `xv://` reference resolution are now collected and reported together before the exit.
+
 ### Fixed
 
 - AWS: `list_deleted_secrets` now exposes the `xv:original_name` tag in its summaries (matching `list_secrets`), so `xv ls --deleted` no longer loses the user-facing name on AWS (#301).

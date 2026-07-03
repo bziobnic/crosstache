@@ -1407,6 +1407,7 @@ pub(crate) async fn execute_secret_run_direct(
     exclude: Vec<String>,
     no_masking: bool,
     inherit_env: bool,
+    best_effort: bool,
     command: Vec<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
@@ -1428,6 +1429,7 @@ pub(crate) async fn execute_secret_run_direct(
         exclude,
         no_masking,
         inherit_env,
+        best_effort,
         command,
         &config,
     )
@@ -2719,6 +2721,7 @@ async fn execute_secret_run(
     exclude: Vec<String>,
     no_masking: bool,
     inherit_env: bool,
+    best_effort: bool,
     command: Vec<String>,
     config: &Config,
 ) -> Result<()> {
@@ -2844,6 +2847,12 @@ async fn execute_secret_run(
     let mut secret_values: Vec<Zeroizing<String>> = Vec::new(); // For masking
     let mut uri_values: HashMap<String, Zeroizing<String>> = HashMap::new(); // URI -> value mapping
 
+    // Fetch failures are collected rather than aborting immediately, so the
+    // user sees every failing secret/reference in one shot. By default any
+    // failure aborts before the child is spawned; `--best-effort` restores
+    // the old warn-and-continue behavior.
+    let mut fetch_failures: Vec<String> = Vec::new();
+
     // Fetch secrets from current vault (group-filtered)
     for secret in filtered_secrets {
         // Get the secret value
@@ -2862,13 +2871,16 @@ async fn execute_secret_run(
                     if !no_masking && !value.is_empty() {
                         secret_values.push(value.clone());
                     }
+                } else {
+                    let msg = format!("Secret '{}' resolved but has no value", secret.name);
+                    output::warn(&msg);
+                    fetch_failures.push(msg);
                 }
             }
             Err(e) => {
-                output::warn(&format!(
-                    "Failed to get value for secret '{}': {}",
-                    secret.name, e
-                ));
+                let msg = format!("Failed to get value for secret '{}': {}", secret.name, e);
+                output::warn(&msg);
+                fetch_failures.push(msg);
             }
         }
     }
@@ -2915,14 +2927,36 @@ async fn execute_secret_run(
                             secret_values.push(value);
                         }
                     } else {
-                        output::warn(&format!("URI '{uri}' resolved but has no value"));
+                        let msg = format!("URI '{uri}' resolved but has no value");
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
                     }
                 }
                 Err(e) => {
-                    output::warn(&format!("Failed to resolve URI '{uri}': {e}"));
+                    let msg = format!("Failed to resolve URI '{uri}': {e}");
+                    output::warn(&msg);
+                    fetch_failures.push(msg);
                 }
             }
         }
+    }
+
+    // Abort before the child is built/spawned if any secret or xv:// reference
+    // failed to fetch, unless --best-effort was requested (the previous
+    // default: warn-and-continue).
+    if !fetch_failures.is_empty() && !best_effort {
+        output::error(&format!(
+            "Aborting: {} secret(s)/reference(s) failed to fetch. Use --best-effort to launch anyway.",
+            fetch_failures.len()
+        ));
+        for failure in &fetch_failures {
+            output::error(&format!("  - {failure}"));
+        }
+        return Err(CrosstacheError::config(format!(
+            "xv run aborted: {} secret(s)/reference(s) failed to fetch: {}",
+            fetch_failures.len(),
+            fetch_failures.join("; ")
+        )));
     }
 
     // Set up the command
