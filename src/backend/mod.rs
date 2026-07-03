@@ -102,7 +102,7 @@ pub enum NameCharset {
 
 impl NameCharset {
     /// Returns true if `name` is valid under this charset.
-    #[allow(dead_code)] // public API; currently exercised only by tests
+    #[cfg_attr(not(feature = "aws"), allow(dead_code))] // used by the AWS backend's name validation
     pub fn is_valid(&self, name: &str) -> bool {
         match self {
             Self::AlphanumericHyphen => name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),

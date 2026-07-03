@@ -40,11 +40,31 @@ impl CacheManager {
     }
 
     pub fn from_config(config: &crate::config::Config) -> Self {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("xv");
+        Self::from_config_with_dir(config, Self::resolve_cache_dir())
+    }
+
+    /// Create a `CacheManager` from config, rooted at an explicit directory
+    /// rather than the resolved `XV_CACHE_DIR`/`dirs::cache_dir()` location.
+    ///
+    /// Intended for tests that need an isolated cache directory (e.g. a
+    /// `tempfile::TempDir`) without touching the real OS cache path.
+    pub fn from_config_with_dir(config: &crate::config::Config, cache_dir: PathBuf) -> Self {
         let enabled = config.cache_enabled && config.cache_ttl_secs > 0;
         Self::new(cache_dir, enabled, config.cache_ttl_secs)
+    }
+
+    /// Resolve the root cache directory: `XV_CACHE_DIR` env var override
+    /// (if set and non-empty), else the OS cache directory joined with
+    /// `xv`, else `/tmp/xv` as a last resort.
+    fn resolve_cache_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("XV_CACHE_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
+        dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("xv")
     }
 
     // ------------------------------------------------------------------
