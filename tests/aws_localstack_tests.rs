@@ -71,8 +71,10 @@ async fn localstack_set_get_round_trip() {
         got.value.as_ref().map(|v| v.as_str().to_string()),
         Some("test-value-42".to_string())
     );
-    // Groups are stored in tags as "xv:groups"
-    let groups_tag = got.tags.get("xv:groups").map(|s| s.as_str()).unwrap_or("");
+    // Groups are written as the "xv:groups" resource tag, but get_secret
+    // decodes that into the plain "groups" user-tag key (props_from_describe)
+    // — the raw xv: key is deliberately consumed and never re-exposed.
+    let groups_tag = got.tags.get("groups").map(|s| s.as_str()).unwrap_or("");
     assert_eq!(groups_tag, "test");
 
     backend
