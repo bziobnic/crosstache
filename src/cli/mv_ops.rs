@@ -715,6 +715,8 @@ mod tests {
                 max_secret_size: None,
                 max_name_length: None,
                 name_charset: NameCharset::Unrestricted,
+                max_tags: None,
+                max_tag_value_len: None,
             }
         }
 

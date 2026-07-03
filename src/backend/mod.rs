@@ -151,6 +151,14 @@ pub struct BackendCapabilities {
     pub max_name_length: Option<usize>,
     /// Valid character set for secret names.
     pub name_charset: NameCharset,
+    /// Maximum number of tags per secret (None = unlimited). Used by
+    /// `records::check_tag_budget` to fail record writes before they
+    /// exceed the backend's tag cap.
+    pub max_tags: Option<usize>,
+    /// Maximum length of a single tag value (None = unlimited). Used by
+    /// `records::check_tag_budget` to fail record writes whose metadata
+    /// field value is too long for a tag.
+    pub max_tag_value_len: Option<usize>,
 }
 
 impl Default for BackendCapabilities {
@@ -171,6 +179,8 @@ impl Default for BackendCapabilities {
             max_secret_size: None,
             max_name_length: None,
             name_charset: NameCharset::Unrestricted,
+            max_tags: None,
+            max_tag_value_len: None,
         }
     }
 }

@@ -100,6 +100,8 @@ impl Backend for AwsBackend {
             max_secret_size: Some(65_536),
             max_name_length: Some(encoding::MAX_NAME_LEN),
             name_charset: NameCharset::AwsRelaxed,
+            max_tags: Some(50),
+            max_tag_value_len: Some(256),
         }
     }
 
