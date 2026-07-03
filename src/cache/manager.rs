@@ -55,7 +55,9 @@ impl CacheManager {
 
     /// Resolve the root cache directory: `XV_CACHE_DIR` env var override
     /// (if set and non-empty), else the OS cache directory joined with
-    /// `xv`, else `/tmp/xv` as a last resort.
+    /// `xv`, else `/tmp/xv` as a last resort. A relative `XV_CACHE_DIR` is
+    /// resolved against the process's current working directory, which can
+    /// shift under `cd`/`chdir` — an absolute path is recommended.
     fn resolve_cache_dir() -> PathBuf {
         if let Ok(dir) = std::env::var("XV_CACHE_DIR") {
             if !dir.is_empty() {
