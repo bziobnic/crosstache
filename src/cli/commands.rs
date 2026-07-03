@@ -2533,11 +2533,16 @@ mod tests {
             vec!["xv", "vault", "share", "ls", "myvault"],
             vec!["xv", "context", "ls"],
             vec!["xv", "env", "ls"],
-            vec!["xv", "file", "ls"],
         ] {
             let result = Cli::try_parse_from(&args);
             assert!(result.is_ok(), "{args:?} should parse");
         }
+    }
+
+    #[test]
+    #[cfg(feature = "file-ops")]
+    fn test_ls_alias_on_file_list() {
+        assert!(Cli::try_parse_from(["xv", "file", "ls"]).is_ok());
     }
 
     #[test]

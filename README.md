@@ -451,7 +451,10 @@ machinery as `xv update --rename`, including its recovery semantics. Bulk
 folder moves print a count and a sample of the planned renames and require
 confirmation (`--yes` to skip, `--dry-run` to preview only). This is
 within-vault only — for moving a secret between vaults see `xv move` under
-[Cross-vault operations](#cross-vault-operations--diff-copy-move).
+[Cross-vault operations](#cross-vault-operations--diff-copy-move). On Azure, a
+name-changing `mv` of a *disabled* secret can partially apply: the folder
+update succeeds but the rename fails with 403 because the value can't be
+read — the same limitation as `xv update --rename` on disabled secrets.
 
 ### Delete and recover
 

@@ -32,12 +32,8 @@ pub(crate) enum MvPlan {
     },
 }
 
-/// Parse the `xv mv` operands into a move plan.
-///
-/// Grammar (spec 2026-07-02-fs-verbs): a trailing `/` marks a folder;
-/// `/` alone is the vault root; otherwise the last segment is the secret
-/// name and everything before it the folder. A bare destination therefore
-/// means "vault root + rename".
+/// Parse the `xv mv` operands into a move plan. See the module doc for the
+/// full grammar.
 pub(crate) fn parse_mv(source: &str, dest: &str) -> Result<MvPlan> {
     let source = source.trim();
     let dest = dest.trim();
@@ -47,7 +43,8 @@ pub(crate) fn parse_mv(source: &str, dest: &str) -> Result<MvPlan> {
         ));
     }
 
-    let src_is_folder = source == "/" || source.ends_with('/');
+    // `/` alone also ends in '/', so this single check covers both cases.
+    let src_is_folder = source.ends_with('/');
     if src_is_folder {
         let src_prefix = source.trim_matches('/');
         if src_prefix.is_empty() {
@@ -140,6 +137,7 @@ pub(crate) async fn execute_mv(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         ));
     }
+    let plan = parse_mv(&source, &dest)?;
     let reg = registry.expect("use_trait_path guarantees Some");
     let vault_name = resolve_vault_for_trait(&config, registry).await?;
     let secrets = reg
@@ -148,7 +146,7 @@ pub(crate) async fn execute_mv(
         .list_secrets(&vault_name, None)
         .await?;
 
-    match parse_mv(&source, &dest)? {
+    match plan {
         MvPlan::Secret {
             src_folder,
             src_name,
@@ -327,6 +325,12 @@ async fn execute_folder_mv(
     use crate::cli::helpers::confirm_proceed;
     use crate::cli::ls_view::{display_name, relative_to_scope};
 
+    if dest_prefix.as_deref() == Some(src_prefix.as_str()) {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "source and destination folders are identical ('{src_prefix}/')"
+        )));
+    }
+
     // (old qualified path, new qualified path, name to call the API with, new folder tag or None=clear)
     let mut moves: Vec<(String, String, String, Option<String>)> = Vec::new();
     for s in &secrets {
@@ -340,6 +344,9 @@ async fn execute_folder_mv(
             (None, "") => None,
             (None, rest) => Some(rest.to_string()),
         };
+        if norm_folder(new_folder.as_deref()) == norm_folder(Some(folder)) {
+            continue; // already at destination
+        }
         let name = display_name(s).to_string();
         let old_path = format!("{folder}/{name}");
         let new_path = match &new_folder {

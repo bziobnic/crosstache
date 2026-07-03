@@ -1498,6 +1498,18 @@ fn mv_folder_bulk_empty_prefix_errors() {
 }
 
 #[test]
+fn mv_folder_identical_prefixes_errors() {
+    let env = TestEnv::new();
+    env.set_secret_with_args("a", "1", &["--folder", "app"]);
+
+    let (_, stderr) = env.xv_fail(&["mv", "app/", "app/", "--yes"]);
+    assert!(stderr.contains("identical"), "{stderr}");
+
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(json.contains("\"app\""), "{json}");
+}
+
+#[test]
 fn mv_folder_to_root() {
     let env = TestEnv::new();
     env.set_secret_with_args("a", "1", &["--folder", "app"]);
