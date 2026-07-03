@@ -434,6 +434,25 @@ Combining `--enabled false` with `--rename` in one call fails on Azure: the
 disable applies first, then the rename's read of the (now-disabled) secret
 gets a 403; re-enable first, or rename before disabling, to avoid the trap.
 
+### Move and rename
+
+```bash
+xv mv db/pass app/          # move into folder 'app', keep name 'pass'
+xv mv db/pass app/pw        # move to folder 'app' and rename to 'pw'
+xv mv db/pass newname       # rename to 'newname' at root
+xv mv app/pass /            # move to root (clears the folder tag)
+xv mv app/ svc/             # bulk: re-folder every secret under 'app/' to 'svc/'
+```
+
+A trailing `/` marks a folder path (source or destination); `/` alone means
+the vault root. Folder-only moves (name unchanged) are a cheap metadata-only
+tag update; anything that changes the name rides the same `--rename`
+machinery as `xv update --rename`, including its recovery semantics. Bulk
+folder moves print a count and a sample of the planned renames and require
+confirmation (`--yes` to skip, `--dry-run` to preview only). This is
+within-vault only — for moving a secret between vaults see `xv move` under
+[Cross-vault operations](#cross-vault-operations--diff-copy-move).
+
 ### Delete and recover
 
 ```bash
