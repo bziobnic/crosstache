@@ -2359,6 +2359,17 @@ async fn execute_record_field_update(
         for (k, v) in &metadata_updates {
             full.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
         }
+        // `secret.tags` is DENORMALIZED for display (groups/note/folder
+        // folded into plain keys by every backend's get_secret) — strip
+        // them before this map becomes a literal `replace_tags: true`
+        // write, or they'd land as extra plain user tags on AWS / the
+        // wrong SecretMeta field on local (Bugbot review; same helper
+        // `rename_request_from_properties` already relies on). The
+        // request's own `groups: None`/`note`/`folder: Unchanged` below
+        // already preserves their real values via each backend's normal
+        // "leave unchanged" handling — this call only needs to run for
+        // its stripping side effect.
+        let _ = crate::backend::secret::split_denormalized_tags(&mut full);
         (Some(full), Some(RECORD_CONTENT_TYPE.to_string()), true)
     } else if !metadata_updates.is_empty() {
         let mut t = std::collections::HashMap::new();
@@ -2496,6 +2507,11 @@ async fn execute_record_type_conversion(
     )?;
 
     let mut new_tags = secret.tags.clone();
+    // Strip denormalized groups/note/folder (see
+    // `split_denormalized_tags`'s doc comment) before this becomes a
+    // `replace_tags: true` write — their real values are preserved via
+    // `groups: None`/`note`/`folder: Unchanged` below, not this map.
+    let _ = crate::backend::secret::split_denormalized_tags(&mut new_tags);
     new_tags.insert(TYPE_TAG.to_string(), record_type.name.clone());
 
     let request = crate::secret::manager::SecretUpdateRequest {
@@ -2592,6 +2608,11 @@ async fn execute_record_untype(
     let mut new_tags = secret.tags.clone();
     new_tags.remove(TYPE_TAG);
     new_tags.retain(|k, _| !k.starts_with(FIELD_TAG_PREFIX));
+    // Strip denormalized groups/note/folder — see
+    // `split_denormalized_tags`'s doc comment. Untyping doesn't touch
+    // groups/note/folder either; `groups: None`/`note`/`folder: Unchanged`
+    // below preserve their real values.
+    let _ = crate::backend::secret::split_denormalized_tags(&mut new_tags);
 
     let request = crate::secret::manager::SecretUpdateRequest {
         name: name.to_string(),

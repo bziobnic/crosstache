@@ -1058,6 +1058,194 @@ fn update_secret_field_writes_new_envelope() {
     assert_eq!(common::stdout_str(&out4), "hunter2");
 }
 
+/// Bugbot MEDIUM review, round 3: `SecretProperties.tags` (as returned by
+/// `get_secret`) is DENORMALIZED for display — groups/note/folder are
+/// folded into plain tag keys. The record write-back paths built their
+/// `replace_tags: true` map directly from `secret.tags.clone()`, so those
+/// denormalized keys rode along into the write. On local this means they'd
+/// persist into `SecretMeta.tags` even though the real values live in the
+/// dedicated `.groups`/`.note`/`.folder` fields — the exact bug class the
+/// #315 copy/move review caught. This test pins the fix: group/note/folder
+/// metadata survives a secret-field edit, AND `meta.tags` (the raw on-disk
+/// tag map) never contains `groups`/`note`/`folder` keys.
+#[test]
+fn update_secret_field_preserves_group_note_folder_without_denormalizing_into_tags() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--group",
+            "prod",
+            "--note",
+            "rotate monthly",
+            "--folder",
+            "app/db",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let before = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(before["groups"], serde_json::json!(["prod"]));
+    assert_eq!(before["note"], "rotate monthly");
+    assert_eq!(before["folder"], "app/db");
+    // Never denormalized into tags in the first place (set path).
+    assert!(before["tags"].get("groups").is_none());
+    assert!(before["tags"].get("note").is_none());
+    assert!(before["tags"].get("folder").is_none());
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--field-secret", "totp-seed=ABCDEF"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    // Dedicated metadata fields intact.
+    assert_eq!(after["groups"], serde_json::json!(["prod"]));
+    assert_eq!(after["note"], "rotate monthly");
+    assert_eq!(after["folder"], "app/db");
+    // Never leaked into the raw tag map by the write-back.
+    assert!(
+        after["tags"].get("groups").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("note").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("folder").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    // Record identity and the field edit itself still landed correctly.
+    assert_eq!(after["content_type"], "application/vnd.xv.record");
+    assert_eq!(after["tags"]["xv-type"], "login");
+    assert_eq!(after["tags"]["f.username"], "bob");
+}
+
+/// Same denormalization guard as above, for `--type` conversion.
+#[test]
+fn type_conversion_preserves_group_note_folder_without_denormalizing_into_tags() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "bare",
+            "--value",
+            "hunter2",
+            "--group",
+            "prod",
+            "--note",
+            "rotate monthly",
+            "--folder",
+            "app/db",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "bare", "--type", "login"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "bare");
+    assert_eq!(after["groups"], serde_json::json!(["prod"]));
+    assert_eq!(after["note"], "rotate monthly");
+    assert_eq!(after["folder"], "app/db");
+    assert!(
+        after["tags"].get("groups").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("note").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("folder").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+}
+
+/// Same denormalization guard as above, for `--untype`.
+#[test]
+fn untype_preserves_group_note_folder_without_denormalizing_into_tags() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+            "--group",
+            "prod",
+            "--note",
+            "rotate monthly",
+            "--folder",
+            "app/db",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--untype", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(after["groups"], serde_json::json!(["prod"]));
+    assert_eq!(after["note"], "rotate monthly");
+    assert_eq!(after["folder"], "app/db");
+    assert!(
+        after["tags"].get("groups").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("note").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+    assert!(
+        after["tags"].get("folder").is_none(),
+        "meta.tags: {:?}",
+        after["tags"]
+    );
+}
+
 #[test]
 fn update_field_on_untyped_errors() {
     let (mut cmd, temp) = common::xv_isolated_local();
