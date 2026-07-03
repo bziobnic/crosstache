@@ -4027,6 +4027,50 @@ mod tests {
     use crate::backend::secret::SecretBackend;
     use crate::backend::{Backend, BackendCapabilities, BackendKind, NameCharset};
     use std::process::{Command, Stdio};
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    /// Serializes tests that mutate the process-global `XV_CACHE_DIR`
+    /// env var, so parallel test threads don't stomp on each other's
+    /// override while it is set. Async-aware so the guard can be held
+    /// across `.await` points.
+    ///
+    /// This only protects callers that opt in by acquiring the lock: any
+    /// future test that *reads* the cache dir (e.g. builds a cache-enabled
+    /// `CacheManager::from_config`) must also acquire this lock for the
+    /// duration it relies on `XV_CACHE_DIR`/the default resolution being
+    /// stable, or it can observe another test's temporary override.
+    fn cache_dir_env_lock() -> &'static AsyncMutex<()> {
+        static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| AsyncMutex::new(()))
+    }
+
+    /// RAII guard that sets an env var for its lifetime and restores the
+    /// previous value (or removes it, if previously unset) on drop — including
+    /// during a panic unwind, since `tokio::sync::Mutex` does not poison.
+    /// Callers must hold `cache_dir_env_lock()` for the guard's lifetime when
+    /// mutating `XV_CACHE_DIR`.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     struct TestBackend {
         kind: BackendKind,
@@ -4920,18 +4964,23 @@ mod tests {
     async fn rename_failure_after_successful_update_invalidates_cache() {
         let registry = BackendRegistry::new(Arc::new(RenameFailBackend));
 
-        // Unique per-process vault name: the cache dir is the real OS cache
-        // dir (`CacheManager::from_config` always resolves `dirs::cache_dir()`),
-        // so this keeps the test from colliding with any other cache entry
-        // and lets us safely clean up exactly the key we touched.
-        let vault_name = format!(
-            "xv-test-rename-cache-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        // `execute_secret_update_direct` invalidates its cache internally via
+        // `invalidate_trait_secret_cache`, which builds its own `CacheManager`
+        // from `config` (`CacheManager::from_config`). To observe that
+        // invalidation from this test we need our own `CacheManager` to
+        // resolve to the *same* directory, so we point both at an isolated
+        // `tempfile::TempDir` via the `XV_CACHE_DIR` override rather than
+        // touching the real OS cache path. `XV_CACHE_DIR` is a process-global
+        // env var, so mutation is serialized with `cache_dir_env_lock()` to
+        // avoid racing other tests that also set it, and `EnvVarGuard`
+        // restores the previous value on drop — including on panic unwind,
+        // so a failing assertion below can never leak the override pointing
+        // at an already-deleted `TempDir` for the rest of the test binary.
+        let _env_guard = cache_dir_env_lock().lock().await;
+        let temp_cache_dir = tempfile::tempdir().unwrap();
+        let _cache_dir_guard = EnvVarGuard::set("XV_CACHE_DIR", temp_cache_dir.path());
+
+        let vault_name = "xv-test-rename-cache".to_string();
         let config = Config {
             backend: Some("local".to_string()),
             cache_enabled: true,
@@ -4984,16 +5033,16 @@ mod tests {
         )
         .await;
 
-        // Clean up regardless of assertion outcome so a failing run never
-        // leaves stray state in the real OS cache dir.
-        let cleanup = || cache_manager.invalidate(&cache_key);
-
-        // Observe the cache and clean up BEFORE any assertion, so a failing
-        // assertion can never leave stray state in the real OS cache dir.
+        // Observe the cache while the env override is still active, so both
+        // this test's `cache_manager` and the internal invalidation performed
+        // by `execute_secret_update_direct` are still looking at the same
+        // temp dir. `_cache_dir_guard` and `_env_guard` are dropped at the
+        // end of the function (in reverse declaration order — guard, then
+        // mutex), restoring `XV_CACHE_DIR` before the lock is released even
+        // if an assertion below panics.
         let cache_still_present = cache_manager
             .get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
             .is_some();
-        cleanup();
 
         let err = match result {
             Ok(()) => panic!("rename phase must fail for this backend"),
