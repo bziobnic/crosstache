@@ -46,6 +46,67 @@ fn scan_with_aws_key_exits_50() {
     }
 }
 
+/// Issue #309 Finding 6: `XV_SCAN_DISABLE=1` was documented but read
+/// nowhere. It must now bypass the scan entirely — exit 0 with no
+/// findings — even against a file that would otherwise trip a built-in
+/// pattern.
+///
+/// Uses `common::xv_isolated_local()` (local age-encrypted backend, fully
+/// offline, valid `xv.conf`) rather than the bare host environment: a plain
+/// `xv scan` with no config at all fails `Config::validate()` (missing
+/// Azure subscription/tenant ID) before `execute_scan_command` ever reaches
+/// the `XV_SCAN_DISABLE` check, which is exactly the false-pass this test
+/// hit in CI (exit 3, not the disable path) when it relied on ambient host
+/// config. The local backend needs no credentials, so the *second* run
+/// below (without the disable var) deterministically reaches real content
+/// scanning and finds the leak — proving the first run's exit 0 came from
+/// the disable check, not from the scan failing to run at all.
+#[test]
+fn scan_disabled_via_env_skips_scan_even_with_leak() {
+    // Run 1: XV_SCAN_DISABLE=1 must skip the scan entirely (exit 0), even
+    // though leak.txt contains a value that trips a built-in pattern.
+    let (mut cmd_disabled, temp_disabled) = common::xv_isolated_local();
+    std::fs::write(
+        temp_disabled.path().join("leak.txt"),
+        "aws=AKIAIOSFODNN7EXAMPLE\n",
+    )
+    .unwrap();
+    let out_disabled = cmd_disabled
+        .args(["scan"])
+        .env("XV_SCAN_DISABLE", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out_disabled.status.code(),
+        Some(0),
+        "stderr: {}",
+        common::stderr_str(&out_disabled)
+    );
+    let stderr_disabled = common::stderr_str(&out_disabled);
+    assert!(
+        stderr_disabled.contains("XV_SCAN_DISABLE"),
+        "must print a notice that the scan was skipped: {stderr_disabled}"
+    );
+
+    // Run 2: same fixture, same isolated local backend, no disable var —
+    // the scan must actually run and find the leak (exit 50). This is the
+    // control that proves run 1's exit 0 came from the disable check, not
+    // from the scan silently failing to run for some unrelated reason.
+    let (mut cmd_enabled, temp_enabled) = common::xv_isolated_local();
+    std::fs::write(
+        temp_enabled.path().join("leak.txt"),
+        "aws=AKIAIOSFODNN7EXAMPLE\n",
+    )
+    .unwrap();
+    let out_enabled = cmd_enabled.args(["scan"]).output().unwrap();
+    assert_eq!(
+        out_enabled.status.code(),
+        Some(50),
+        "without XV_SCAN_DISABLE the scan must run and detect the leak; stderr: {}",
+        common::stderr_str(&out_enabled)
+    );
+}
+
 #[test]
 fn scan_install_outside_git_repo_errors() {
     let temp = tempfile::tempdir().unwrap();

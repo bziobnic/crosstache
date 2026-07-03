@@ -176,7 +176,11 @@ mod tests {
             value: Zeroizing::new("hunter2-very-long-password".to_string()),
         }];
         let patterns = builtin_patterns();
-        let engine = MatchEngine::new(&secrets, &patterns);
+        let engine = MatchEngine::new(
+            &secrets,
+            &patterns,
+            crate::scan::engine::DEFAULT_MIN_VALUE_LENGTH,
+        );
         let paths = walk(&[temp.path()], &WalkConfig::default()).unwrap();
         let outcome = scan_paths(&paths, &engine).unwrap();
         assert_eq!(outcome.findings.len(), 1);
@@ -210,7 +214,11 @@ mod tests {
             value: Zeroizing::new(secret.to_string()),
         }];
         let patterns = builtin_patterns();
-        let engine = MatchEngine::new(&secrets, &patterns);
+        let engine = MatchEngine::new(
+            &secrets,
+            &patterns,
+            crate::scan::engine::DEFAULT_MIN_VALUE_LENGTH,
+        );
         let outcome = scan_paths(std::slice::from_ref(&big), &engine).unwrap();
         assert!(
             outcome.findings.is_empty(),

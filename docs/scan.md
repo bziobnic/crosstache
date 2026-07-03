@@ -27,7 +27,7 @@ xv scan uninstall           # remove the managed hook
 | Mode | Reads from | Typical use | Notes |
 |------|------------|-------------|-------|
 | `xv scan [PATH]...` | Working tree files under the requested paths | Local checks before staging | Honors default excludes, `.xvignore`, and `[scan].exclude`; prints skipped-file warnings outside hook mode. |
-| `xv scan --staged` | Git index via `git diff --cached` + `git show :PATH` | Pre-commit hooks | Scans exactly what would be committed, not unstaged edits. |
+| `xv scan --staged` | Git index via `git diff --cached` + `git show :PATH` | Pre-commit hooks | Scans exactly what would be committed, not unstaged edits; honors the same default and `[scan].exclude` globs as path scans (this is a behavior change from earlier releases, which scanned every staged file regardless of excludes). |
 | `xv scan --all` | Committed `HEAD` tree via `git ls-tree HEAD` + `git show HEAD:PATH` | CI sweeps of the current revision | Ignores unstaged and staged-but-uncommitted edits; honors the same default and `[scan].exclude` globs as path scans. |
 
 `--staged` and `--all` are mutually exclusive. Use a path scan for working-tree
@@ -67,8 +67,16 @@ on stderr and the command continues.
 [scan]
 exclude = ["dist/**", "*.lock"]
 min_value_length = 12
-patterns = ["aws", "github", "stripe"]
+patterns = ["aws-access-key-id", "github-token", "stripe-secret-key"]
 ```
+
+`patterns` is an allowlist matched against the built-in pattern names
+exactly: `aws-access-key-id`, `github-token`, `stripe-secret-key`,
+`slack-token`, `jwt`, `ssh-private-key`, `low-confidence-high-entropy`.
+Leave it empty (or omit it) to enable all built-ins. If it is non-empty but
+none of the names match a known pattern, `xv scan` fails with a config error
+listing the valid names — this is deliberate: a typo'd allowlist must never
+silently disable the whole built-in safety net.
 
 ## `.xvignore`
 
@@ -110,4 +118,4 @@ gitleaks protect --staged && xv scan --staged --hook
 Scanner is in-memory and re-fetches values per process. Expect 1–3 s on a 50-secret vault for `--staged`. To speed up:
 
 - `[scan].min_value_length = 12` — skip short values.
-- `XV_SCAN_DISABLE=1` — bypass entirely (escape hatch for emergencies).
+- `XV_SCAN_DISABLE=1` (or `=true`, case-insensitive) — bypass entirely (escape hatch for emergencies). The check runs *after* global config is loaded and validated, so a broken or missing config (e.g. no Azure subscription/tenant ID configured) still fails before this escape hatch applies — it is not a general "xv is broken" bypass.

@@ -9,6 +9,7 @@
 ### Fixed
 
 - AWS: `list_deleted_secrets` now exposes the `xv:original_name` tag in its summaries (matching `list_secrets`), so `xv ls --deleted` no longer loses the user-facing name on AWS (#301).
+- **`xv scan` now honors every `[scan]` knob it already documented (#309).** `[scan].min_value_length` and `[scan].patterns` were parsed but silently ignored — the engine always used the hard-coded default minimum length, and every scan mode enabled all built-in patterns regardless of the allowlist. `XV_SCAN_DISABLE=1` (or `=true`) was documented as an escape hatch but read nowhere. All three now work, uniformly, across `xv scan [PATH]...`, `--staged`, and `--all`. An `[scan].patterns` allowlist that resolves to zero known pattern names (e.g. a typo) is now a hard config error listing the valid names, rather than a silent all-patterns-disabled scan that still exits 0. **Behavior change:** `xv scan --staged` (and therefore the installed pre-commit hook) now applies the same default excludes and `[scan].exclude` globs that `scan .` and `scan --all` already applied — previously it scanned every staged file regardless of excludes.
 
 ## v0.18.0 — Filesystem verbs: xv mv, ls aliases everywhere, and reliable rename (2026-07-02)
 

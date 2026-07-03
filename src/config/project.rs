@@ -778,7 +778,7 @@ resource_group = "rg"
 [scan]
 exclude = ["dist/**", "*.lock"]
 min_value_length = 12
-patterns = ["aws", "github"]
+patterns = ["aws-access-key-id", "github-token"]
 
 [env.dev]
 vault = "v"
@@ -788,6 +788,6 @@ resource_group = "rg"
         let scan = cfg.scan.as_ref().expect("must have [scan]");
         assert_eq!(scan.exclude, vec!["dist/**", "*.lock"]);
         assert_eq!(scan.min_value_length, Some(12));
-        assert_eq!(scan.patterns, vec!["aws", "github"]);
+        assert_eq!(scan.patterns, vec!["aws-access-key-id", "github-token"]);
     }
 }
