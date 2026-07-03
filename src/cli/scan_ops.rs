@@ -63,16 +63,29 @@ async fn load_scan_config() -> Result<Option<ScanConfig>> {
     let cwd = std::env::current_dir()?;
     match crate::config::project::find_project_config(&cwd).await {
         Ok(Some((_, project))) => Ok(project.scan),
-        _ => Ok(None),
+        Ok(None) => Ok(None),
+        Err(e) => {
+            // A typo'd .xv.toml must not silently disable [scan] settings
+            // (excludes, min_value_length, patterns) without the user
+            // noticing. Warn and fall back to scanner defaults — scanning
+            // *more* (all built-ins, default excludes) is the safe
+            // direction to fail in for a leak scanner.
+            eprintln!(
+                "xv scan: warning: failed to parse .xv.toml, using default [scan] settings: {e}"
+            );
+            Ok(None)
+        }
     }
 }
 
 /// Resolve the effective minimum secret-value length from `[scan].min_value_length`,
-/// falling back to [`DEFAULT_MIN_VALUE_LENGTH`] when unset.
+/// falling back to [`DEFAULT_MIN_VALUE_LENGTH`] when unset. Clamped to a floor of 1
+/// so a configured `0` can't produce a zero-length Aho-Corasick needle.
 fn effective_min_value_length(scan_cfg: Option<&ScanConfig>) -> usize {
     scan_cfg
         .and_then(|s| s.min_value_length)
         .unwrap_or(DEFAULT_MIN_VALUE_LENGTH)
+        .max(1)
 }
 
 /// Resolve the effective exclude globs from `[scan].exclude` (empty when unset).
@@ -83,11 +96,17 @@ fn effective_excludes(scan_cfg: Option<&ScanConfig>) -> Vec<String> {
 /// Filter `builtin_patterns()` by `[scan].patterns` allowlist. An empty
 /// allowlist enables all built-ins (per `docs/scan.md`). Unknown names in
 /// the allowlist are warned about on stderr rather than silently ignored.
-fn effective_patterns(scan_cfg: Option<&ScanConfig>) -> Vec<BuiltinPattern> {
+///
+/// If the allowlist is non-empty but resolves to zero known patterns (e.g.
+/// every name is a typo, like the pre-#309 docs example `["aws", "github",
+/// "stripe"]` instead of `["aws-access-key-id", ...]`), this is a hard
+/// error rather than a silent all-patterns-disabled scan: a leak scanner
+/// must never fail open without the user noticing.
+fn effective_patterns(scan_cfg: Option<&ScanConfig>) -> Result<Vec<BuiltinPattern>> {
     let all = builtin_patterns();
     let allowlist = match scan_cfg {
         Some(s) if !s.patterns.is_empty() => &s.patterns,
-        _ => return all,
+        _ => return Ok(all),
     };
     let known: std::collections::HashSet<&str> = all.iter().map(|p| p.name).collect();
     for name in allowlist {
@@ -97,9 +116,22 @@ fn effective_patterns(scan_cfg: Option<&ScanConfig>) -> Vec<BuiltinPattern> {
             );
         }
     }
-    all.into_iter()
+    let filtered: Vec<BuiltinPattern> = all
+        .into_iter()
         .filter(|p| allowlist.iter().any(|a| a == p.name))
-        .collect()
+        .collect();
+
+    if filtered.is_empty() {
+        let mut valid_names: Vec<&str> = known.into_iter().collect();
+        valid_names.sort_unstable();
+        return Err(CrosstacheError::config(format!(
+            "[scan].patterns = {allowlist:?} matched none of the built-in pattern names; \
+             valid names are: {}. Leave [scan].patterns empty to enable all built-ins.",
+            valid_names.join(", ")
+        )));
+    }
+
+    Ok(filtered)
 }
 
 /// Resolve the active backend and the set of vaults to scan, then fetch every
@@ -159,7 +191,7 @@ async fn execute_scan_paths(
     let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
 
     let scan_cfg = load_scan_config().await?;
-    let patterns = effective_patterns(scan_cfg.as_ref());
+    let patterns = effective_patterns(scan_cfg.as_ref())?;
     let min_value_length = effective_min_value_length(scan_cfg.as_ref());
     let engine = MatchEngine::new(&secrets, &patterns, min_value_length);
 
@@ -204,7 +236,7 @@ async fn execute_scan_staged(
     let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
 
     let scan_cfg = load_scan_config().await?;
-    let patterns = effective_patterns(scan_cfg.as_ref());
+    let patterns = effective_patterns(scan_cfg.as_ref())?;
     let min_value_length = effective_min_value_length(scan_cfg.as_ref());
     let engine = MatchEngine::new(&secrets, &patterns, min_value_length);
 
@@ -235,7 +267,7 @@ async fn execute_scan_head(
     // committed paths that `scan .` would skip.
     let excludes = build_exclude_set(&effective_excludes(scan_cfg.as_ref()))?;
 
-    let patterns = effective_patterns(scan_cfg.as_ref());
+    let patterns = effective_patterns(scan_cfg.as_ref())?;
     let min_value_length = effective_min_value_length(scan_cfg.as_ref());
     let engine = MatchEngine::new(&secrets, &patterns, min_value_length);
     let findings = scan_head(&engine, &excludes)?;
@@ -380,9 +412,21 @@ mod tests {
     }
 
     #[test]
+    fn effective_min_value_length_clamps_zero_to_floor_of_one() {
+        // Review follow-up on #309: [scan].min_value_length = 0 must not
+        // reach MatchEngine::new as 0 (which combined with a would-be
+        // empty secret value could produce a zero-length needle).
+        let cfg = ScanConfig {
+            min_value_length: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(effective_min_value_length(Some(&cfg)), 1);
+    }
+
+    #[test]
     fn effective_patterns_empty_allowlist_enables_all_builtins() {
         let cfg = ScanConfig::default();
-        let patterns = effective_patterns(Some(&cfg));
+        let patterns = effective_patterns(Some(&cfg)).expect("empty allowlist must not error");
         assert_eq!(patterns.len(), builtin_patterns().len());
     }
 
@@ -395,7 +439,8 @@ mod tests {
             patterns: vec!["aws-access-key-id".to_string()],
             ..Default::default()
         };
-        let patterns = effective_patterns(Some(&cfg));
+        let patterns =
+            effective_patterns(Some(&cfg)).expect("a valid allowlisted name must not error");
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].name, "aws-access-key-id");
 
@@ -420,19 +465,48 @@ mod tests {
     }
 
     #[test]
-    fn effective_patterns_unknown_name_is_dropped_not_matched() {
-        // Unknown pattern names in the allowlist are warned about (stderr)
-        // rather than silently ignored, but must not cause a panic and must
-        // not match anything themselves.
+    fn effective_patterns_all_unknown_names_is_a_hard_error() {
+        // Issue #309 review follow-up: an allowlist that resolves to zero
+        // known patterns (every name is a typo) must be a hard config
+        // error, not a silent all-patterns-disabled scan that still exits
+        // 0. Bugbot example: docs used to say `["aws", "github", "stripe"]`
+        // instead of the real names — that must fail loud, not scan nothing.
         let cfg = ScanConfig {
             patterns: vec!["not-a-real-pattern".to_string()],
             ..Default::default()
         };
-        let patterns = effective_patterns(Some(&cfg));
+        let result = effective_patterns(Some(&cfg));
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("an allowlist matching zero known patterns must error"),
+        };
+        let msg = err.to_string();
         assert!(
-            patterns.is_empty(),
-            "unknown allowlisted name must not resolve to any built-in pattern"
+            msg.contains("not-a-real-pattern"),
+            "error should name the bad value; got: {msg}"
         );
+        assert!(
+            msg.contains("aws-access-key-id"),
+            "error should list the valid pattern names; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn effective_patterns_mixed_known_and_unknown_keeps_known_and_warns() {
+        // A mix of one valid + one unknown name must keep the valid pattern
+        // (not error) — only an allowlist resolving to zero known patterns
+        // is a hard error.
+        let cfg = ScanConfig {
+            patterns: vec![
+                "aws-access-key-id".to_string(),
+                "not-a-real-pattern".to_string(),
+            ],
+            ..Default::default()
+        };
+        let patterns = effective_patterns(Some(&cfg))
+            .expect("at least one valid name in the allowlist must not error");
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].name, "aws-access-key-id");
     }
 
     #[test]

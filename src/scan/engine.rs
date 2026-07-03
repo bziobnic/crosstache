@@ -67,9 +67,14 @@ impl MatchEngine {
         patterns: &[BuiltinPattern],
         min_value_length: usize,
     ) -> Self {
+        // `!s.value.is_empty()` is a defensive floor independent of
+        // `min_value_length`: an empty-string needle handed to the
+        // Aho-Corasick builder is a degenerate input we never want to
+        // build against, regardless of what the caller passed as the
+        // configured minimum (e.g. an unclamped `min_value_length = 0`).
         let mut filtered: Vec<&SecretRef> = secrets
             .iter()
-            .filter(|s| s.value.len() >= min_value_length)
+            .filter(|s| !s.value.is_empty() && s.value.len() >= min_value_length)
             .collect();
         // Sort by descending value length so longest-leftmost matching
         // produces the longest match when two secrets share a prefix.
@@ -251,6 +256,34 @@ mod tests {
             1,
             "5-char value must be caught when min_value_length is configured to 4"
         );
+    }
+
+    #[test]
+    fn min_value_length_zero_does_not_panic_on_empty_secret_value() {
+        // Review follow-up on #309: min_value_length is clamped to a floor
+        // of 1 in scan_ops::effective_min_value_length, but the engine
+        // itself must not trust that — an empty secret value (`value.len()
+        // == 0`) combined with an unclamped `min_value_length = 0` must
+        // never reach the Aho-Corasick builder as a zero-length needle.
+        let secrets = vec![
+            SecretRef {
+                name: "EMPTY".to_string(),
+                vault: "v".to_string(),
+                value: Zeroizing::new(String::new()),
+            },
+            SecretRef {
+                name: "NONEMPTY".to_string(),
+                vault: "v".to_string(),
+                value: Zeroizing::new("x".to_string()),
+            },
+        ];
+        // Must not panic.
+        let engine = MatchEngine::new(&secrets, &[], 0);
+        let findings = engine.scan_text(Path::new("x"), "some content with x in it");
+        // The 1-char secret is still short but non-empty, so it is a valid
+        // (if noisy) needle at min_value_length = 0; the point of this test
+        // is the absence of a panic, not a specific finding count.
+        let _ = findings;
     }
 
     #[test]

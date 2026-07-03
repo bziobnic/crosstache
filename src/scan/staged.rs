@@ -155,6 +155,31 @@ mod tests {
     /// tests, which deliberately avoid cwd-dependent code paths).
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Restores the process cwd to the path captured at construction time
+    /// when dropped — including on an early return via `?`/panic/unwrap
+    /// between the `set_current_dir` call and the end of the test. Without
+    /// this, a panicking `unwrap()` in the guarded region would leave the
+    /// whole test binary's cwd pointed at a tempdir that gets deleted when
+    /// `TempDir` drops, breaking every subsequently-run test that touches
+    /// the process cwd.
+    struct CwdGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn change_to(dir: &Path) -> Self {
+            let original = std::env::current_dir().expect("must read current cwd");
+            std::env::set_current_dir(dir).expect("must change cwd");
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
             .args(args)
@@ -188,18 +213,21 @@ mod tests {
         let patterns = builtin_patterns();
         let engine = MatchEngine::new(&secrets, &patterns, DEFAULT_MIN_VALUE_LENGTH);
 
-        let original_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
+        let (unfiltered, filtered) = {
+            let _cwd_guard = CwdGuard::change_to(dir);
 
-        // Sanity check: without excludes, the staged leak is found.
-        let no_excludes = build_exclude_set(&[]).unwrap();
-        let unfiltered = scan_staged(&engine, &no_excludes).unwrap();
+            // Sanity check: without excludes, the staged leak is found.
+            let no_excludes = build_exclude_set(&[]).unwrap();
+            let unfiltered = scan_staged(&engine, &no_excludes).unwrap();
 
-        // With [scan].exclude = ["*.env"], the same staged file is skipped.
-        let with_excludes = build_exclude_set(&["*.env".to_string()]).unwrap();
-        let filtered = scan_staged(&engine, &with_excludes).unwrap();
+            // With [scan].exclude = ["*.env"], the same staged file is skipped.
+            let with_excludes = build_exclude_set(&["*.env".to_string()]).unwrap();
+            let filtered = scan_staged(&engine, &with_excludes).unwrap();
 
-        std::env::set_current_dir(&original_cwd).unwrap();
+            (unfiltered, filtered)
+            // _cwd_guard drops here, restoring cwd even if one of the
+            // unwraps above had panicked.
+        };
 
         assert!(
             !unfiltered.is_empty(),
