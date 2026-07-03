@@ -422,6 +422,19 @@ pub enum Commands {
         /// secret name; mutually exclusive with --stdin.
         #[arg(long, conflicts_with = "stdin")]
         value: Option<String>,
+        /// Create a typed record of this type (built-in or custom `[types.*]`).
+        /// Only valid for a single secret. See `xv type list`/`xv type show`.
+        #[arg(long = "type")]
+        r#type: Option<String>,
+        /// Set a metadata (or type-declared non-primary secret) field
+        /// value, `name=value` (repeatable). Fields not declared by the
+        /// type are accepted as ad-hoc metadata. Requires --type.
+        #[arg(long = "field", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, requires = "type")]
+        fields: Vec<(String, String)>,
+        /// Set an ad-hoc secret field value, `name=value` (repeatable) —
+        /// stored in the record envelope rather than as a tag. Requires --type.
+        #[arg(long = "field-secret", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, requires = "type")]
+        secret_fields: Vec<(String, String)>,
         /// Write-time metadata (group/note/folder/expires/not-before)
         #[command(flatten)]
         meta: SecretWriteArgs,
@@ -1540,10 +1553,22 @@ impl Cli {
                 stdin,
                 trim,
                 value,
+                r#type,
+                fields,
+                secret_fields,
                 meta,
             } => {
                 crate::cli::secret_ops::execute_secret_set_direct(
-                    args, stdin, trim, value, meta, config, registry,
+                    args,
+                    stdin,
+                    trim,
+                    value,
+                    r#type,
+                    fields,
+                    secret_fields,
+                    meta,
+                    config,
+                    registry,
                 )
                 .await
             }
