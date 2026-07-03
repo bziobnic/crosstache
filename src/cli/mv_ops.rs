@@ -562,4 +562,215 @@ mod tests {
         let secrets = vec![summary("sanitized-name", "pretty-name")];
         assert!(!dest_collides(&secrets, "unrelated-name"));
     }
+
+    // -----------------------------------------------------------------
+    // execute_folder_mv — partial bulk failure
+    // -----------------------------------------------------------------
+
+    use crate::backend::error::BackendError;
+    use crate::backend::{Backend, BackendCapabilities, BackendKind, NameCharset, SecretBackend};
+    use crate::secret::manager::SecretProperties;
+    use std::sync::{Arc, Mutex};
+
+    fn fake_secret_properties(name: &str) -> SecretProperties {
+        SecretProperties {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            value: None,
+            version: "v1".to_string(),
+            version_number: Some(1),
+            created_timestamp: 0,
+            created_on: "2026-07-02".to_string(),
+            updated_on: "2026-07-02".to_string(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags: std::collections::HashMap::new(),
+            content_type: String::new(),
+            recovery_level: None,
+        }
+    }
+
+    fn folder_summary(name: &str, folder: &str) -> SecretSummary {
+        SecretSummary {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            note: None,
+            folder: Some(folder.to_string()),
+            groups: None,
+            updated_on: String::new(),
+            enabled: true,
+            content_type: String::new(),
+        }
+    }
+
+    /// Backend whose `update_secret` fails for one specific secret name and
+    /// succeeds for every other, recording every name it was called with —
+    /// exercises `execute_folder_mv`'s partial-failure path (sequential
+    /// apply, per-failure warning, single cache invalidation, and the
+    /// "moved X of Y" error).
+    struct PartialFailBackend {
+        fail_name: String,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl PartialFailBackend {
+        fn new(fail_name: &str) -> Self {
+            Self {
+                fail_name: fail_name.to_string(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn called_names(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SecretBackend for PartialFailBackend {
+        async fn set_secret(
+            &self,
+            _vault: &str,
+            _request: crate::secret::manager::SecretRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn get_secret_version(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn list_secrets(
+            &self,
+            _vault: &str,
+            _group_filter: Option<&str>,
+        ) -> std::result::Result<Vec<SecretSummary>, BackendError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<(), BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            name: &str,
+            _request: SecretUpdateRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            self.calls.lock().unwrap().push(name.to_string());
+            if name == self.fail_name {
+                Err(BackendError::Internal(format!(
+                    "simulated failure updating '{name}'"
+                )))
+            } else {
+                Ok(fake_secret_properties(name))
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for PartialFailBackend {
+        fn name(&self) -> &'static str {
+            "local"
+        }
+
+        fn kind(&self) -> BackendKind {
+            BackendKind::Local
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                has_vaults: true,
+                has_file_storage: false,
+                has_rbac: false,
+                has_audit: false,
+                has_versioning: true,
+                has_soft_delete: true,
+                has_secret_rotation: false,
+                has_groups: true,
+                has_folders: true,
+                has_notes: true,
+                has_expiry: true,
+                max_secret_size: None,
+                max_name_length: None,
+                name_charset: NameCharset::Unrestricted,
+            }
+        }
+
+        fn secrets(&self) -> &dyn SecretBackend {
+            self
+        }
+
+        async fn health_check(&self) -> std::result::Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_folder_mv_partial_failure_reports_count_and_attempts_all() {
+        let backend = Arc::new(PartialFailBackend::new("b"));
+        let registry = BackendRegistry::new(backend.clone());
+        let config = Config::default();
+
+        let secrets = vec![
+            folder_summary("a", "app"),
+            folder_summary("b", "app"),
+            folder_summary("c", "app"),
+        ];
+
+        let result = execute_folder_mv(
+            &registry,
+            &config,
+            "test-vault",
+            secrets,
+            "app".to_string(),
+            Some("svc".to_string()),
+            false,
+            true,
+        )
+        .await;
+
+        let err = match result {
+            Ok(()) => panic!("one secret's update fails; execute_folder_mv must report it"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("moved 2 of 3"),
+            "expected moved-count message, got: {msg}"
+        );
+        assert!(
+            msg.contains('1') && msg.to_lowercase().contains("failed"),
+            "expected failure count in message, got: {msg}"
+        );
+
+        // All three secrets were attempted, not just up to the failure.
+        let mut called = backend.called_names();
+        called.sort();
+        assert_eq!(
+            called,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
 }

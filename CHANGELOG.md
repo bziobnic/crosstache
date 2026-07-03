@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- AWS: `list_deleted_secrets` now exposes the `xv:original_name` tag in its summaries (matching `list_secrets`), so `xv ls --deleted` no longer loses the user-facing name on AWS (#301).
+
 ## v0.18.0 — Filesystem verbs: xv mv, ls aliases everywhere, and reliable rename (2026-07-02)
 
 ### Added
