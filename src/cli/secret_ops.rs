@@ -3281,7 +3281,7 @@ async fn execute_secret_inject(
         }
     }
 
-    if required_secrets.is_empty() && cross_vault_refs.is_empty() {
+    if required_secrets.is_empty() && cross_vault_refs.is_empty() && fetch_failures.is_empty() {
         output::warn("No secret references found in template");
         println!("    Use {{ secret:name }} syntax or xv://[backend:]vault/secret URIs");
 

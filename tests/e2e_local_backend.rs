@@ -1851,6 +1851,99 @@ fn inject_aborts_on_invalid_uri_reference() {
     );
 }
 
+// Regression test for a bug found in code review of the fix above: the
+// "no secret references found in template" early-return only checked
+// `required_secrets.is_empty() && cross_vault_refs.is_empty()`. An invalid
+// `xv://` URI is pushed into `fetch_failures` but NOT into `cross_vault_refs`
+// (it never becomes a resolvable reference), so when the invalid URI is the
+// template's ONLY reference, both vectors are empty and the early-return
+// fired BEFORE the abort gate — silently warning, writing the template
+// verbatim, and exiting 0. This test targets that exact path (no other
+// reference present) and fails against the code prior to this follow-up fix.
+#[test]
+fn inject_aborts_when_only_reference_is_invalid_uri() {
+    let env = TestEnv::new();
+
+    let template_path = env.tmp_path().join("only_invalid_uri_template.yml");
+    std::fs::write(
+        &template_path,
+        "bad: \"xv://notabackend:somevault/somesecret\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("only_invalid_uri_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv inject should fail with the config-error exit code (3) when the template's only reference is an unparseable xv:// URI:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notabackend"),
+        "stderr should name the invalid backend/URI: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when the only reference fails to parse (fail-fast default)"
+    );
+}
+
+#[test]
+fn inject_best_effort_writes_verbatim_when_only_reference_is_invalid_uri() {
+    let env = TestEnv::new();
+
+    let template_path = env
+        .tmp_path()
+        .join("only_invalid_uri_best_effort_template.yml");
+    let template_content = "bad: \"xv://notabackend:somevault/somesecret\"\n";
+    std::fs::write(&template_path, template_content).expect("write template");
+    let out_path = env.tmp_path().join("only_invalid_uri_best_effort_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+            "--best-effort",
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert!(
+        output.status.success(),
+        "--best-effort should write the template verbatim and exit 0 despite the invalid URI:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notabackend"),
+        "a warning should still be emitted for the invalid URI: {stderr}"
+    );
+    let rendered = std::fs::read_to_string(&out_path).expect("read rendered output");
+    assert_eq!(
+        rendered, template_content,
+        "under --best-effort the template should be written back verbatim: {rendered}"
+    );
+}
+
 #[test]
 fn inject_best_effort_renders_output_despite_missing_secret_reference() {
     let env = TestEnv::new();
