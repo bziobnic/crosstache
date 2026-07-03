@@ -63,7 +63,7 @@ pub enum FileCommands {
         #[arg(long)]
         continue_on_error: bool,
     },
-    /// List files in blob storage
+    /// List files in blob storage (alias: ls)
     ///
     /// By default, lists only immediate children (files and directories) at the
     /// current prefix level. Use --recursive to list all files recursively.
