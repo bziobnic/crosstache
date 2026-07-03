@@ -42,12 +42,25 @@ Priority (highest first):
 
 Each command's `--vault` / `--resource-group` / `--group` / `--folder`
 flag still overrides everything. When the flag is absent, `xv`
-resolves in this order:
+resolves `vault` and `resource_group` in this order:
 
 1. CLI flag (if provided)
 2. The active env's field in `.xv.toml`
 3. The legacy `.xv/context` JSON (deprecated; see below)
 4. The user's global config default
+
+`group` and `folder` only have two layers — CLI flag, then the active
+env's field in `.xv.toml` — there is no legacy-context or global-config
+fallback for either. They're also scoped narrowly, not applied to every
+command that happens to accept a `--group`/`--folder` flag:
+
+- `group` default: applied by `xv run` as the injection filter when
+  `--group` is omitted, and by `xv set`/`xv gen --save` as the write-time
+  group when `--group` is omitted. It is **not** applied by `xv list`/`ls`
+  — listing an env's secrets is never implicitly narrowed by the profile.
+- `folder` default: applied only on writes (`xv set`/`xv gen --save`) when
+  `--folder` is omitted. It is **not** applied by `xv list`/`ls` — the
+  write-side folder default does not scope which secrets a listing shows.
 
 ### Backend resolution
 

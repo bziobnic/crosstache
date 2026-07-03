@@ -33,6 +33,29 @@ fn read_secret_value_from_stdin(trim: bool) -> Result<String> {
     read_secret_value(&mut std::io::stdin(), trim)
 }
 
+/// Apply env-profile `group`/`folder` write-time defaults to `meta` in
+/// place, when the caller didn't pass an explicit `--group`/`--folder`.
+/// Shared by `xv set` (`execute_secret_set_direct`) and `xv gen --save`
+/// (`save_generated_secret` in `system_ops.rs`) so both construct identical
+/// requests from the same metadata flags via `SecretWriteArgs::to_secret_request`
+/// — the "set and gen --save produce byte-identical requests" invariant.
+/// CLI values always win; an explicit `--folder` (including one that
+/// resolves to an empty value) short-circuits inside `resolve_folder`.
+pub(crate) async fn apply_profile_write_defaults(
+    meta: &mut SecretWriteArgs,
+    config: &Config,
+) -> Result<()> {
+    if meta.group.is_empty() {
+        if let Some(group) = config.resolve_group(None).await? {
+            meta.group = vec![group];
+        }
+    }
+    if meta.folder.is_none() {
+        meta.folder = config.resolve_folder(None).await?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_set_direct(
     args: Vec<String>,
@@ -65,6 +88,12 @@ pub(crate) async fn execute_secret_set_direct(
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
+
+        // Apply env-profile `group`/`folder` write-time defaults when the
+        // caller didn't pass an explicit `--group`/`--folder`. Shared with
+        // `xv gen --save` via `apply_profile_write_defaults`.
+        let mut meta = meta;
+        apply_profile_write_defaults(&mut meta, &config).await?;
 
         if args.len() == 1 && !args[0].contains('=') {
             // Single secret set
@@ -2739,6 +2768,24 @@ async fn execute_secret_run(
         return Err(CrosstacheError::config("No command specified"));
     }
 
+    // No `--group` given on the CLI: fall back to the active env profile's
+    // `group` default as the injection filter. An explicit `--group` (even
+    // repeated) always wins; the profile default never adds to it. Track
+    // whether the filter came from the profile so a fail-loud "nothing
+    // matched" error can be attributed correctly (the user never typed it).
+    let mut group_from_profile_default = false;
+    let groups = if groups.is_empty() {
+        match config.resolve_group(None).await? {
+            Some(g) => {
+                group_from_profile_default = true;
+                vec![g]
+            }
+            None => groups,
+        }
+    } else {
+        groups
+    };
+
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;
 
@@ -2820,9 +2867,14 @@ async fn execute_secret_run(
         .collect();
     let positive_selector = !groups.is_empty() || !include.is_empty();
     if selected.is_empty() && positive_selector {
+        let group_source = if group_from_profile_default {
+            " (from env profile default)"
+        } else {
+            ""
+        };
         return Err(CrosstacheError::invalid_argument(format!(
             "No secrets matched the requested selection in vault '{vault_name}' \
-             (group={groups:?}, include={include:?}). \
+             (group={groups:?}{group_source}, include={include:?}). \
              Refusing to run the command with nothing injected — check the values."
         )));
     }
