@@ -1402,14 +1402,23 @@ async fn execute_env_list(config: &Config) -> Result<()> {
         .map(|(name, _)| name.to_string());
 
     use crate::config::project::resolve_effective_backend;
-    // Precedence for every row mirrors `resolve_effective_backend`:
-    //   cli_backend (--backend / XV_BACKEND via clap) > profile.backend > global.
-    // `cli_backend` is the raw flag/env snapshot; `disk_backend` is the global
-    // config value taken BEFORE main.rs folded the active env's profile in
-    // (using `effective_backend_name()` here would make inactive envs inherit
-    // the active env's backend). A `None` profile backend falls through to the
+    // Precedence for every row mirrors `resolve_effective_backend` as fixed
+    // by issue #305: a true `--backend` flag > profile.backend > global
+    // (which already folds in XV_BACKEND via `load_from_env`). `cli_backend`
+    // is the raw flag/env snapshot — clap cannot distinguish a real flag from
+    // one populated by `XV_BACKEND`, so it is only fed into the CLI slot when
+    // `cli_backend_was_arg` confirms it was an actual argument; otherwise it
+    // falls through to the profile / global layers like any other
+    // XV_BACKEND-sourced value. `disk_backend` is the global config value
+    // taken BEFORE main.rs folded the active env's profile in (using
+    // `effective_backend_name()` here would make inactive envs inherit the
+    // active env's backend). A `None` profile backend falls through to the
     // global layer rather than silently defaulting to "azure".
-    let cli_backend = config.cli_backend.as_deref();
+    let cli_backend = if config.cli_backend_was_arg {
+        config.cli_backend.as_deref()
+    } else {
+        None
+    };
     let global_backend = config.disk_backend.as_deref();
 
     #[derive(tabled::Tabled, serde::Serialize)]
@@ -1434,8 +1443,9 @@ async fn execute_env_list(config: &Config) -> Result<()> {
                 resolve_effective_backend(cli_backend, profile.backend.as_deref(), global_backend);
             // "(inherited)" marks rows whose env profile set no `backend` of
             // its own — the displayed value came from outside the profile.
-            // Keys strictly on the profile field: the CLI override is populated
-            // from XV_BACKEND even when --backend is absent.
+            // Keys strictly on the profile field, independent of where the
+            // resolved value ultimately came from (CLI flag / XV_BACKEND /
+            // global config / built-in default).
             let backend_note = if profile.backend.is_none() {
                 " (inherited)"
             } else {
