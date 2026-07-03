@@ -481,7 +481,7 @@ pub enum Commands {
         #[arg(long)]
         names_only: bool,
     },
-    /// List secrets in the current vault context (alias: ls)
+    /// List secrets in the current vault context (alias: ls). Use --format table for the classic table view
     #[command(alias = "ls")]
     List {
         /// Folder path to list (e.g. `prod` or `prod/db`). Omit for the vault
@@ -969,7 +969,8 @@ pub enum VaultCommands {
         #[arg(short, long)]
         location: Option<String>,
     },
-    /// List vaults
+    /// List vaults (alias: ls)
+    #[command(alias = "ls")]
     List {
         /// Resource group
         #[arg(short, long)]
@@ -1138,7 +1139,8 @@ pub enum VaultShareCommands {
         #[arg(short, long)]
         resource_group: Option<String>,
     },
-    /// List vault access assignments
+    /// List vault access assignments (alias: ls)
+    #[command(alias = "ls")]
     List {
         /// Vault name
         vault_name: String,
@@ -1180,7 +1182,8 @@ pub enum ShareCommands {
         /// User email or service principal ID
         user: String,
     },
-    /// List access permissions for a secret in the current vault context
+    /// List access permissions for a secret in the current vault context (alias: ls)
+    #[command(alias = "ls")]
     List {
         /// Secret name
         secret_name: String,
@@ -1296,7 +1299,8 @@ pub enum ContextCommands {
         #[arg(long)]
         local: bool,
     },
-    /// List recent vault contexts
+    /// List recent vault contexts (alias: ls)
+    #[command(alias = "ls")]
     List,
     /// Clear current context
     Clear {
@@ -1330,7 +1334,8 @@ pub enum ContextCommands {
 
 #[derive(Subcommand)]
 pub enum EnvCommands {
-    /// List `.xv.toml` environments from the resolved project config
+    /// List `.xv.toml` environments from the resolved project config (alias: ls)
+    #[command(alias = "ls")]
     List,
     /// Write `default_env = "<name>"` into the nearest `.xv.toml`
     Use {
@@ -1397,7 +1402,8 @@ pub enum EnvCommands {
 
 #[derive(Subcommand)]
 pub enum GroupCommands {
-    /// List groups and member counts derived from secret metadata
+    /// List groups and member counts derived from secret metadata (alias: ls)
+    #[command(alias = "ls")]
     List {
         /// Bypass the local cache and fetch fresh data
         #[arg(long)]
@@ -2496,5 +2502,22 @@ mod tests {
         };
         let res = meta.to_secret_request("n", zeroize::Zeroizing::new("v".to_string()));
         assert!(res.is_err(), "invalid --expires should be rejected");
+    }
+
+    #[test]
+    fn test_ls_alias_on_all_list_subcommands() {
+        // Each pair must parse to the same subcommand variant.
+        for args in [
+            vec!["xv", "vault", "ls"],
+            vec!["xv", "group", "ls"],
+            vec!["xv", "share", "ls", "mysecret"],
+            vec!["xv", "vault", "share", "ls", "myvault"],
+            vec!["xv", "context", "ls"],
+            vec!["xv", "env", "ls"],
+            vec!["xv", "file", "ls"],
+        ] {
+            let result = Cli::try_parse_from(&args);
+            assert!(result.is_ok(), "{args:?} should parse");
+        }
     }
 }
