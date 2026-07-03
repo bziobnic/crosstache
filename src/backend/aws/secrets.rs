@@ -642,6 +642,17 @@ impl SecretBackend for AwsSecretBackend {
                     .map(String::from)
                     .filter(|n| !n.is_empty());
 
+                // Full tag map (record-types plan Task 10): xv-type/f.*
+                // fields ride as plain user tags (see `request.tags` in
+                // `set_secret`), unprefixed — unlike the "xv:*" bookkeeping
+                // tags above, so they're captured verbatim here.
+                let tags_val: std::collections::HashMap<String, String> = entry
+                    .tags()
+                    .iter()
+                    .filter_map(|t| t.key().zip(t.value()))
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+
                 summaries.push(SecretSummary {
                     name: secret_name,
                     original_name: original_name_val,
@@ -651,6 +662,7 @@ impl SecretBackend for AwsSecretBackend {
                     updated_on: String::new(),
                     enabled: true,
                     content_type: String::new(),
+                    tags: tags_val,
                 });
             }
 

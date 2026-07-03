@@ -539,6 +539,7 @@ mod tests {
             updated_on: String::new(),
             enabled: true,
             content_type: String::new(),
+            tags: std::collections::HashMap::new(),
         }
     }
 
@@ -601,6 +602,7 @@ mod tests {
             updated_on: String::new(),
             enabled: true,
             content_type: String::new(),
+            tags: std::collections::HashMap::new(),
         }
     }
 

@@ -731,6 +731,33 @@ pub enum Commands {
         /// Enable or disable the secret (true/false)
         #[arg(long)]
         enabled: Option<bool>,
+        /// Edit one metadata (or type-declared non-primary secret) field of
+        /// a typed record, `name=value` (repeatable). A metadata-field edit
+        /// is tag-only; a secret-field edit rewrites the record envelope as
+        /// a new version. Errors if the secret is untyped. Mutually
+        /// exclusive with --type/--untype.
+        #[arg(long = "field", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = ["type", "untype"])]
+        fields: Vec<(String, String)>,
+        /// Edit an ad-hoc secret field of a typed record, `name=value`
+        /// (repeatable) — stored in the record envelope. Mutually
+        /// exclusive with --type/--untype.
+        #[arg(long = "field-secret", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = ["type", "untype"])]
+        secret_fields: Vec<(String, String)>,
+        /// Explicitly convert a bare secret into a typed record: its
+        /// current value becomes the primary field. Errors if the secret
+        /// is already a record. Mutually exclusive with --untype/--field/--field-secret.
+        #[arg(long = "type", conflicts_with_all = ["untype", "fields", "secret_fields"])]
+        r#type: Option<String>,
+        /// Flatten a typed record back to a bare secret holding the
+        /// primary field's value. Dropping non-primary secret fields
+        /// prompts for confirmation unless --yes is given. Mutually
+        /// exclusive with --type/--field/--field-secret.
+        #[arg(long, conflicts_with_all = ["type", "fields", "secret_fields"])]
+        untype: bool,
+        /// Skip the confirmation prompt when --untype would drop
+        /// non-primary secret fields.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Move or rename a secret, or re-folder a whole folder (trailing / = folder)
     Mv {
@@ -1766,6 +1793,11 @@ impl Cli {
                 clear_note,
                 clear_folder,
                 enabled,
+                fields,
+                secret_fields,
+                r#type,
+                untype,
+                yes,
             } => {
                 crate::cli::secret_ops::execute_secret_update_direct(
                     &name,
@@ -1786,6 +1818,11 @@ impl Cli {
                     clear_note,
                     clear_folder,
                     enabled,
+                    fields,
+                    secret_fields,
+                    r#type,
+                    untype,
+                    yes,
                     config,
                     registry,
                 )

@@ -391,6 +391,7 @@ pub(crate) fn render_name_grid(names: &[String], width: usize) -> String {
                 updated_on: String::new(),
                 enabled: true,
                 content_type: String::new(),
+                tags: std::collections::HashMap::new(),
             })
         })
         .collect();
@@ -468,6 +469,7 @@ mod tests {
             updated_on: "2026-05-17 01:19:00 UTC".to_string(),
             enabled: true,
             content_type: "text/plain".to_string(),
+            tags: std::collections::HashMap::new(),
         }
     }
 

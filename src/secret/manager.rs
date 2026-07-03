@@ -180,6 +180,14 @@ pub struct SecretSummary {
     pub enabled: bool,
     #[tabled(skip)]
     pub content_type: String,
+    /// Full tag map, used to derive record-types metadata (`xv-type`,
+    /// `f.*` fields) for `ls --type` filtering and JSON field lifting
+    /// (record-types plan Task 10). `#[serde(default)]` so summaries
+    /// deserialized from an older cache entry (written before this field
+    /// existed) still parse.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
 }
 
 /// Summary of a soft-deleted secret awaiting purge.
@@ -1083,6 +1091,7 @@ impl SecretOperations for AzureSecretOperations {
                                 updated_on: updated,
                                 enabled,
                                 content_type: secret_details.content_type,
+                                tags: secret_details.tags,
                             }
                         }
                         Err(e) => {
@@ -1098,6 +1107,7 @@ impl SecretOperations for AzureSecretOperations {
                                 updated_on: updated,
                                 enabled,
                                 content_type: "text/plain".to_string(),
+                                tags: HashMap::new(),
                             }
                         }
                     }

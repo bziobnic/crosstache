@@ -941,6 +941,288 @@ fn get_unknown_type_degrades() {
     assert_eq!(common::stdout_str(&out_field), "bob");
 }
 
+// ---------------------------------------------------------------------------
+// Task 8: `xv update --field`/`--field-secret`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_metadata_field_is_tag_only() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "cred");
+    let version_before = before["version"].clone();
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--field", "username=alice"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(after["tags"]["f.username"], "alice");
+    // Tag-only update: no new version.
+    assert_eq!(after["version"], version_before);
+
+    // Primary value untouched.
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "hunter2");
+}
+
+#[test]
+fn update_secret_field_writes_new_envelope() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "cred");
+    let version_before = before["version"].clone();
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--field-secret", "totp-seed=ABCDEF"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    // New secret-field value forces a new version.
+    assert_ne!(after["version"], version_before);
+    assert!(after["tags"].get("f.totp-seed").is_none());
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "cred", "--field", "totp-seed", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "ABCDEF");
+
+    // Primary value untouched by the merge.
+    let out4 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert_eq!(common::stdout_str(&out4), "hunter2");
+}
+
+#[test]
+fn update_field_on_untyped_errors() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "plain", "--field", "username=bob"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 9: `xv update --type` / `--untype` conversion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn type_conversion_roundtrip() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "bare", "--value", "hunter2"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "bare", "--type", "login"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let meta = read_local_meta(temp.path(), "default", "bare");
+    assert_eq!(meta["content_type"], "application/vnd.xv.record");
+    assert_eq!(meta["tags"]["xv-type"], "login");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "bare", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "hunter2");
+
+    let out4 = xv_same_env(temp.path())
+        .args(["update", "bare", "--untype", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out4.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out4)
+    );
+    let meta2 = read_local_meta(temp.path(), "default", "bare");
+    assert_eq!(meta2["content_type"], "");
+    assert!(meta2["tags"].get("xv-type").is_none());
+
+    let out5 = xv_same_env(temp.path())
+        .args(["get", "bare", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out5.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out5)
+    );
+    assert_eq!(common::stdout_str(&out5), "hunter2");
+}
+
+#[test]
+fn untype_with_extra_secret_fields_requires_yes() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--field-secret",
+            "totp-seed=ABCDEF",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    // Non-TTY without --yes: refuses, exit 3, nothing changed.
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--untype"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("--yes"), "stderr: {stderr}");
+    let meta_unchanged = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta_unchanged["content_type"], "application/vnd.xv.record");
+
+    // With --yes: succeeds, drops totp-seed, names it in output.
+    let out3 = xv_same_env(temp.path())
+        .args(["update", "cred", "--untype", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    let stderr3 = common::stderr_str(&out3);
+    assert!(stderr3.contains("totp-seed"), "stderr: {stderr3}");
+
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["content_type"], "");
+    assert!(meta["tags"].get("xv-type").is_none());
+    assert!(meta["tags"].get("f.username").is_none());
+
+    let out4 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert_eq!(common::stdout_str(&out4), "hunter2");
+}
+
+#[test]
+fn type_on_existing_record_errors() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--type", "api-key"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("already"), "stderr: {stderr}");
+}
+
 #[test]
 fn get_field_on_untyped_errors() {
     let (mut cmd, temp) = common::xv_isolated_local();
