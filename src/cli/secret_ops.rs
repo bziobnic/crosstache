@@ -132,8 +132,30 @@ fn route_fields(
     Ok((metadata, secret))
 }
 
+/// True when `name` is present in `metadata` or `secret` with a
+/// non-blank value. Only meaningful for required fields: a non-required
+/// field is free to keep an explicit empty value (an explicit empty is a
+/// legitimate user choice there — mirrors how env-profile defaults treat
+/// blank-as-absent per #320, applied here only to the required-ness
+/// check, not to whether the field gets stored), but a required field
+/// supplied as `--field name=` or `--field name=" "` isn't meaningfully
+/// "set" and must be treated as missing — matching the interactive
+/// prompt path, which already rejects a blank answer for a required
+/// field.
+fn has_non_blank_value(
+    name: &str,
+    metadata: &BTreeMap<String, String>,
+    secret: &BTreeMap<String, String>,
+) -> bool {
+    metadata
+        .get(name)
+        .or_else(|| secret.get(name))
+        .is_some_and(|v| !v.trim().is_empty())
+}
+
 /// Every required field (except the primary, which is always required and
-/// supplied separately) that is missing from both maps, in declared order.
+/// supplied separately) that is missing — absent, or present with an
+/// empty/whitespace-only value — from both maps, in declared order.
 fn missing_required_fields<'a>(
     record_type: &'a RecordType,
     metadata: &BTreeMap<String, String>,
@@ -143,7 +165,7 @@ fn missing_required_fields<'a>(
         .fields
         .iter()
         .filter(|f| f.required && !f.primary)
-        .filter(|f| !metadata.contains_key(&f.name) && !secret.contains_key(&f.name))
+        .filter(|f| !has_non_blank_value(&f.name, metadata, secret))
         .collect()
 }
 
@@ -5835,6 +5857,52 @@ mod tests {
         let missing = missing_required_fields(&t, &BTreeMap::new(), &BTreeMap::new());
         let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["username"]);
+    }
+
+    // ── Empty required fields (Bugbot round 3 follow-up) ────────────────
+
+    #[test]
+    fn missing_required_fields_treats_empty_value_as_missing() {
+        let t = login_type();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("username".to_string(), String::new());
+        let missing = missing_required_fields(&t, &metadata, &BTreeMap::new());
+        let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["username"], "empty value must count as missing");
+    }
+
+    #[test]
+    fn missing_required_fields_treats_whitespace_only_value_as_missing() {
+        let t = login_type();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("username".to_string(), "   ".to_string());
+        let missing = missing_required_fields(&t, &metadata, &BTreeMap::new());
+        let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["username"],
+            "whitespace-only value must count as missing"
+        );
+    }
+
+    #[test]
+    fn missing_required_fields_non_required_field_may_stay_empty() {
+        // `url` on `login` is optional metadata; an explicit empty value is
+        // a legitimate user choice and must not affect required-field
+        // reporting (only `username`, the required field, is missing).
+        let t = login_type();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("url".to_string(), String::new());
+        let missing = missing_required_fields(&t, &metadata, &BTreeMap::new());
+        let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["username"]);
+    }
+
+    #[test]
+    fn has_non_blank_value_true_for_real_value() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("username".to_string(), "bob".to_string());
+        assert!(has_non_blank_value("username", &metadata, &BTreeMap::new()));
     }
 
     // ── `xv get --field` clipboard auto-clear (code review follow-up) ──

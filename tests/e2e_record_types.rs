@@ -179,6 +179,45 @@ fn set_typed_missing_required_field_fails_before_write() {
     assert!(!meta_path.exists());
 }
 
+/// Bugbot PR #322 round 3: `--field username= ` (empty/whitespace value)
+/// must not satisfy a required field — non-interactive validation must
+/// match the interactive prompt path, which already rejects a blank
+/// answer for a required field.
+#[test]
+fn set_typed_empty_required_field_fails_before_write() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username= ",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("username"), "stderr: {stderr}");
+
+    let meta_path = temp
+        .path()
+        .join("store")
+        .join("vaults")
+        .join("default")
+        .join("secrets")
+        .join("cred.meta.json");
+    assert!(!meta_path.exists(), "nothing must be written on rejection");
+}
+
 #[test]
 fn set_unknown_type_errors_listing_types() {
     let (mut cmd, _temp) = common::xv_isolated_local();
