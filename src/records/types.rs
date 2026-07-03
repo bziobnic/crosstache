@@ -4,8 +4,17 @@
 //! which are listable metadata and which are encrypted secret material,
 //! which are required, and which single field is the `primary` value
 //! returned by plain `xv get`.
+//!
+//! Consumed by the `xv type`/`xv set --type`/`xv get --field` CLI wiring
+//! added later in Phase A (record-types plan Tasks 4/6/7); until that
+//! wiring lands, this module's public API is unused from the `xv` binary
+//! target, hence the crate-wide `#[allow(dead_code)]` below.
+#![allow(dead_code)]
 
 use crate::error::{CrosstacheError, Result};
+use crate::utils::output;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Whether a field's value lives in tags (metadata) or in the encrypted
 /// secret value (secret).
@@ -163,6 +172,112 @@ pub fn builtin_types() -> Vec<RecordType> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Config-file parsing and resolution
+// ---------------------------------------------------------------------------
+
+/// On-disk shape of a `[types.<name>]` block, shared by both the global
+/// `xv.conf` and per-project `.xv.toml` config layers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecordTypeConfig {
+    pub fields: Vec<FieldDefConfig>,
+}
+
+/// On-disk shape of one field within a `[types.<name>]` block.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FieldDefConfig {
+    pub name: String,
+    /// `"metadata"` (default) | `"secret"`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub primary: bool,
+}
+
+impl RecordTypeConfig {
+    /// Converts this config-file shape into a `RecordType`, tagging it
+    /// with `source` and `name`. Does not validate — callers must call
+    /// `RecordType::validate()`.
+    fn into_record_type(self, name: &str, source: TypeSource) -> Result<RecordType> {
+        let mut fields = Vec::with_capacity(self.fields.len());
+        for f in self.fields {
+            let kind = match f.kind.as_deref() {
+                None | Some("metadata") => FieldKind::Metadata,
+                Some("secret") => FieldKind::Secret,
+                Some(other) => {
+                    return Err(CrosstacheError::config(format!(
+                        "type '{name}': field '{}' has invalid kind '{other}' (expected 'metadata' or 'secret')",
+                        f.name
+                    )));
+                }
+            };
+            fields.push(FieldDef {
+                name: f.name,
+                kind,
+                required: f.required,
+                primary: f.primary,
+            });
+        }
+        Ok(RecordType {
+            name: name.to_string(),
+            fields,
+            source,
+        })
+    }
+}
+
+/// Resolves the effective set of record types from built-ins, the global
+/// config, and the project config, with precedence project > global >
+/// builtin (matched by name). Shadowing a built-in type emits a warning
+/// but is allowed. Every resolved type is validated.
+pub fn resolve_types(
+    global: &HashMap<String, RecordTypeConfig>,
+    project: &HashMap<String, RecordTypeConfig>,
+) -> Result<Vec<RecordType>> {
+    let mut resolved: HashMap<String, RecordType> = HashMap::new();
+
+    for t in builtin_types() {
+        resolved.insert(t.name.clone(), t);
+    }
+
+    for (name, cfg) in global {
+        let is_shadow_builtin = resolved
+            .get(name)
+            .map(|t| t.source == TypeSource::Builtin)
+            .unwrap_or(false);
+        if is_shadow_builtin {
+            output::warn(&format!("type '{name}' shadows a built-in type"));
+        }
+        let record_type = cfg.clone().into_record_type(name, TypeSource::Global)?;
+        record_type.validate()?;
+        resolved.insert(name.clone(), record_type);
+    }
+
+    for (name, cfg) in project {
+        let is_shadow_builtin = resolved
+            .get(name)
+            .map(|t| t.source == TypeSource::Builtin)
+            .unwrap_or(false);
+        if is_shadow_builtin {
+            output::warn(&format!("type '{name}' shadows a built-in type"));
+        }
+        let record_type = cfg.clone().into_record_type(name, TypeSource::Project)?;
+        record_type.validate()?;
+        resolved.insert(name.clone(), record_type);
+    }
+
+    let mut result: Vec<RecordType> = resolved.into_values().collect();
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(result)
+}
+
+/// Looks up a resolved type by name.
+pub fn find_type<'a>(types: &'a [RecordType], name: &str) -> Option<&'a RecordType> {
+    types.iter().find(|t| t.name == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +348,105 @@ mod tests {
             fields: vec![field("totp-seed", FieldKind::Secret, true, true)],
         };
         assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_types_block_from_project_toml() {
+        let toml = r#"
+            [types.smtp]
+            fields = [
+              { name = "host" },
+              { name = "port" },
+              { name = "username", required = true },
+              { name = "password", kind = "secret", primary = true },
+            ]
+        "#;
+        #[derive(Deserialize)]
+        struct Wrapper {
+            types: HashMap<String, RecordTypeConfig>,
+        }
+        let parsed: Wrapper = toml::from_str(toml).unwrap();
+        let smtp = parsed.types.get("smtp").unwrap();
+        assert_eq!(smtp.fields.len(), 4);
+        let host = smtp.fields.iter().find(|f| f.name == "host").unwrap();
+        assert_eq!(host.kind, None); // omitted -> None, resolved to Metadata later
+        let password = smtp.fields.iter().find(|f| f.name == "password").unwrap();
+        assert_eq!(password.kind.as_deref(), Some("secret"));
+        assert!(password.primary);
+    }
+
+    fn smtp_config() -> RecordTypeConfig {
+        RecordTypeConfig {
+            fields: vec![
+                FieldDefConfig {
+                    name: "host".to_string(),
+                    kind: None,
+                    required: false,
+                    primary: false,
+                },
+                FieldDefConfig {
+                    name: "password".to_string(),
+                    kind: Some("secret".to_string()),
+                    required: true,
+                    primary: true,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn resolve_project_shadows_global() {
+        let mut global = HashMap::new();
+        global.insert("smtp".to_string(), smtp_config());
+
+        let mut project_cfg = smtp_config();
+        project_cfg.fields[0].name = "hostname".to_string(); // distinguishing tweak
+        let mut project = HashMap::new();
+        project.insert("smtp".to_string(), project_cfg);
+
+        let resolved = resolve_types(&global, &project).unwrap();
+        let smtp = find_type(&resolved, "smtp").unwrap();
+        assert_eq!(smtp.source, TypeSource::Project);
+        assert!(smtp.field("hostname").is_some());
+    }
+
+    #[test]
+    fn resolve_custom_shadows_builtin_with_warning() {
+        let mut global = HashMap::new();
+        global.insert("login".to_string(), smtp_config());
+        let project = HashMap::new();
+
+        let resolved = resolve_types(&global, &project).unwrap();
+        let login = find_type(&resolved, "login").unwrap();
+        assert_eq!(login.source, TypeSource::Global);
+        // Warning goes to stderr; asserting resolution result only per plan note.
+    }
+
+    #[test]
+    fn resolve_rejects_invalid_custom_type() {
+        let mut global = HashMap::new();
+        global.insert(
+            "bad".to_string(),
+            RecordTypeConfig {
+                fields: vec![
+                    FieldDefConfig {
+                        name: "a".to_string(),
+                        kind: Some("secret".to_string()),
+                        required: true,
+                        primary: true,
+                    },
+                    FieldDefConfig {
+                        name: "b".to_string(),
+                        kind: Some("secret".to_string()),
+                        required: true,
+                        primary: true,
+                    },
+                ],
+            },
+        );
+        let project = HashMap::new();
+
+        let err = resolve_types(&global, &project).unwrap_err();
+        assert!(err.to_string().contains("bad"));
     }
 }

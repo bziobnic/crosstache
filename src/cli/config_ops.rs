@@ -1321,6 +1321,7 @@ async fn execute_context_init(
         default_env: Some(env_name.clone()),
         envs,
         scan: None,
+        types: std::collections::HashMap::new(),
     };
 
     let body = toml::to_string_pretty(&cfg)

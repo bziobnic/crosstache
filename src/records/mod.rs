@@ -8,7 +8,14 @@
 pub mod envelope;
 pub mod types;
 
+// Re-exports consumed by CLI wiring added later in Phase A (Tasks 4/6/7);
+// unused from the `xv` binary target until then.
+#[allow(unused_imports)]
 pub use envelope::{
     encode_envelope, is_record, parse_envelope, FIELD_TAG_PREFIX, RECORD_CONTENT_TYPE, TYPE_TAG,
 };
-pub use types::{builtin_types, FieldDef, FieldKind, RecordType, TypeSource};
+#[allow(unused_imports)]
+pub use types::{
+    builtin_types, find_type, resolve_types, FieldDef, FieldDefConfig, FieldKind, RecordType,
+    RecordTypeConfig, TypeSource,
+};

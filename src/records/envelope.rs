@@ -1,5 +1,11 @@
 //! JSON envelope codec for record secret-kind fields, plus the reserved
 //! tag/content-type constants that mark a secret as a record.
+//!
+//! Consumed by the `xv set --type` / `xv get --field`/`--record` CLI
+//! wiring added later in Phase A (record-types plan Tasks 6/7); until
+//! that wiring lands, this module's public API is unused from the `xv`
+//! binary target, hence the crate-wide `#[allow(dead_code)]` below.
+#![allow(dead_code)]
 
 use crate::error::{CrosstacheError, Result};
 use std::collections::BTreeMap;

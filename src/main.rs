@@ -15,6 +15,7 @@ mod cache;
 mod cli;
 mod config;
 mod error;
+mod records;
 mod scan;
 mod secret;
 #[cfg(feature = "tui")]

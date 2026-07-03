@@ -283,6 +283,13 @@ pub struct Config {
     #[serde(skip)]
     #[tabled(skip)]
     pub disk_backend: Option<String>,
+
+    /// Custom record types declared as `[types.<name>]` blocks. Merged with
+    /// built-in types and any `.xv.toml` project-level types via
+    /// `records::resolve_types` (project overrides global overrides builtin).
+    #[tabled(skip)]
+    #[serde(default)]
+    pub types: std::collections::HashMap<String, crate::records::RecordTypeConfig>,
 }
 
 fn default_clipboard_timeout() -> u64 {
@@ -326,6 +333,7 @@ impl Default for Config {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            types: std::collections::HashMap::new(),
         }
     }
 }
