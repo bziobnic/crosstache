@@ -1894,7 +1894,9 @@ pub(crate) async fn execute_secret_copy_direct(
         from_vault,
         to_vault,
         new_name,
+        false,
         &config,
+        registry,
     )
     .await?;
 
@@ -1932,6 +1934,7 @@ pub(crate) async fn execute_secret_move_direct(
         new_name,
         force,
         &config,
+        registry,
     )
     .await?;
 
@@ -3510,13 +3513,16 @@ async fn execute_secret_restore(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_copy(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
     from_vault: &str,
     to_vault: &str,
     new_name: Option<String>,
-    _config: &Config,
+    force: bool,
+    config: &Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::config::ContextManager;
     use crate::secret::manager::SecretRequest;
@@ -3529,6 +3535,65 @@ async fn execute_secret_copy(
         name, from_vault, to_vault, target_name
     );
 
+    // ── Trait-based path (non-Azure backends, e.g. local/AWS) ──────────
+    if use_trait_path(registry) {
+        let reg = registry.expect("use_trait_path guarantees Some");
+        let backend = reg.active().secrets();
+
+        let source_secret = backend.get_secret(from_vault, name, true).await?;
+
+        if backend
+            .get_secret(to_vault, target_name, false)
+            .await
+            .is_ok()
+        {
+            if !force {
+                return Err(CrosstacheError::config(format!(
+                    "Secret '{}' already exists in vault '{}'. Use 'xv move' with --force or delete the target secret first.",
+                    target_name, to_vault
+                )));
+            }
+            output::warn(&format!(
+                "Overwriting existing secret '{}' in vault '{}'",
+                target_name, to_vault
+            ));
+        }
+
+        let secret_request = SecretRequest {
+            name: target_name.to_string(),
+            value: source_secret.value.unwrap_or_default(),
+            content_type: Some(source_secret.content_type),
+            enabled: Some(source_secret.enabled),
+            expires_on: source_secret.expires_on,
+            not_before: source_secret.not_before,
+            tags: Some(source_secret.tags),
+            groups: None,
+            note: None,
+            folder: None,
+        };
+
+        let copied_secret = backend.set_secret(to_vault, secret_request).await?;
+        invalidate_trait_secret_cache(config, to_vault);
+
+        output::success(&format!(
+            "Successfully copied secret '{}' to vault '{}'",
+            copied_secret.original_name, to_vault
+        ));
+        println!("   Source: {}/{}", from_vault, name);
+        println!("   Target: {}/{}", to_vault, target_name);
+        println!("   Version: {}", copied_secret.version);
+        println!("   Enabled: {}", copied_secret.enabled);
+
+        if let Some(expires_on) = copied_secret.expires_on {
+            use crate::utils::datetime::format_datetime;
+            println!("   Expires: {}", format_datetime(Some(expires_on)));
+        }
+
+        return Ok(());
+    }
+
+    // ── Legacy Azure REST path (no registry available) ─────────────────
+
     // Get the source secret with all its metadata
     let source_secret = secret_manager
         .get_secret_safe(from_vault, name, true, true)
@@ -3540,10 +3605,16 @@ async fn execute_secret_copy(
         .await
         .is_ok()
     {
-        return Err(CrosstacheError::config(format!(
-            "Secret '{}' already exists in vault '{}'. Use 'xv move' with --force or delete the target secret first.",
+        if !force {
+            return Err(CrosstacheError::config(format!(
+                "Secret '{}' already exists in vault '{}'. Use 'xv move' with --force or delete the target secret first.",
+                target_name, to_vault
+            )));
+        }
+        output::warn(&format!(
+            "Overwriting existing secret '{}' in vault '{}'",
             target_name, to_vault
-        )));
+        ));
     }
 
     // Create the request for the target vault preserving all metadata
@@ -3587,6 +3658,7 @@ async fn execute_secret_copy(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_secret_move(
     secret_manager: &crate::secret::manager::SecretManager,
     name: &str,
@@ -3595,6 +3667,7 @@ async fn execute_secret_move(
     new_name: Option<String>,
     force: bool,
     config: &Config,
+    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::utils::interactive::InteractivePrompt;
 
@@ -3605,6 +3678,31 @@ async fn execute_secret_move(
         "Moving secret '{}' from vault '{}' to vault '{}' as '{}'...",
         name, from_vault, to_vault, target_name
     );
+
+    // Check if target secret already exists and fail fast with a move-specific
+    // message when not forced, *before* prompting for confirmation — there is
+    // no point asking the user to confirm an operation that is guaranteed to
+    // fail. When forced, `execute_secret_copy` below emits its own
+    // "Overwriting existing secret" warning and performs the overwrite.
+    let target_exists = if use_trait_path(registry) {
+        let reg = registry.expect("use_trait_path guarantees Some");
+        reg.active()
+            .secrets()
+            .get_secret(to_vault, target_name, false)
+            .await
+            .is_ok()
+    } else {
+        secret_manager
+            .get_secret_safe(to_vault, target_name, false, true)
+            .await
+            .is_ok()
+    };
+    if !force && target_exists {
+        return Err(CrosstacheError::config(format!(
+            "Secret '{}' already exists in vault '{}'. Use --force to overwrite.",
+            target_name, to_vault
+        )));
+    }
 
     // Confirmation prompt if not forced
     if !force {
@@ -3619,33 +3717,16 @@ async fn execute_secret_move(
         }
     }
 
-    // Check if target secret already exists and handle accordingly
-    if secret_manager
-        .get_secret_safe(to_vault, target_name, false, true)
-        .await
-        .is_ok()
-    {
-        if !force {
-            return Err(CrosstacheError::config(format!(
-                "Secret '{}' already exists in vault '{}'. Use --force to overwrite.",
-                target_name, to_vault
-            )));
-        } else {
-            output::warn(&format!(
-                "Overwriting existing secret '{}' in vault '{}'",
-                target_name, to_vault
-            ));
-        }
-    }
-
-    // First copy the secret
+    // First copy the secret (source is only deleted after this succeeds)
     execute_secret_copy(
         secret_manager,
         name,
         from_vault,
         to_vault,
         new_name.clone(),
+        force,
         config,
+        registry,
     )
     .await?;
 
@@ -3654,9 +3735,18 @@ async fn execute_secret_move(
         "Deleting source secret '{}' from vault '{}'...",
         name, from_vault
     );
-    secret_manager
-        .delete_secret_safe(from_vault, name, true)
-        .await?;
+    if use_trait_path(registry) {
+        let reg = registry.expect("use_trait_path guarantees Some");
+        reg.active()
+            .secrets()
+            .delete_secret(from_vault, name)
+            .await?;
+        invalidate_trait_secret_cache(config, from_vault);
+    } else {
+        secret_manager
+            .delete_secret_safe(from_vault, name, true)
+            .await?;
+    }
 
     output::success(&format!(
         "Successfully moved secret '{}' from '{}' to '{}'",
