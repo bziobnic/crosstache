@@ -8,6 +8,7 @@
 use crate::error::{CrosstacheError, Result};
 
 /// Plan for moving secrets or folders.
+#[allow(dead_code)] // wired up by the mv executor (next task) — remove this attribute there
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MvPlan {
     /// Move a single secret.
@@ -30,6 +31,7 @@ pub(crate) enum MvPlan {
 /// `/` alone is the vault root; otherwise the last segment is the secret
 /// name and everything before it the folder. A bare destination therefore
 /// means "vault root + rename".
+#[allow(dead_code)] // wired up by the mv executor (next task) — remove this attribute there
 pub(crate) fn parse_mv(source: &str, dest: &str) -> Result<MvPlan> {
     let source = source.trim();
     let dest = dest.trim();
@@ -46,6 +48,11 @@ pub(crate) fn parse_mv(source: &str, dest: &str) -> Result<MvPlan> {
             return Err(CrosstacheError::invalid_argument(
                 "moving the vault root is not supported; name a folder (e.g. 'app/')",
             ));
+        }
+        if src_prefix.split('/').any(str::is_empty) {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "invalid source folder '{source}'"
+            )));
         }
         let dest_prefix = if dest == "/" {
             None
@@ -191,5 +198,7 @@ mod tests {
         assert!(parse_mv("x", "   ").is_err());
         // Destination that is only a slashless empty name after a folder.
         assert!(parse_mv("db/pass", "app//").is_err());
+        // Folder source with an internal empty segment.
+        assert!(parse_mv("app//db/", "svc/").is_err());
     }
 }
