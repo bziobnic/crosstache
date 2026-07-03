@@ -344,6 +344,76 @@ async fn e2e_azure_rename_roundtrip() {
     cleanup(&backend, &vault, &[&dest]).await;
 }
 
+/// mv semantics = folder tag update, then rename. Exercise the exact
+/// two-call sequence `execute_secret_mv` performs (`xv mv db/<src>
+/// app/<dst>`) against real Azure Key Vault.
+#[tokio::test]
+#[ignore]
+async fn e2e_azure_mv_sequence_roundtrip() {
+    let backend = azure_backend().await;
+    let vault = test_vault();
+    let source = unique_name("mv-src");
+    let dest = unique_name("mv-dst");
+
+    // 1. Create the source secret already tagged with folder "db".
+    let mut req = make_request(&source, "mv-me");
+    req.folder = Some("db".to_string());
+    backend
+        .secrets()
+        .set_secret(&vault, req)
+        .await
+        .expect("create mv source");
+
+    // 2. Folder update — what mv does first.
+    let update = SecretUpdateRequest {
+        name: source.clone(),
+        value: None,
+        content_type: None,
+        enabled: None,
+        expires_on: FieldUpdate::Unchanged,
+        not_before: FieldUpdate::Unchanged,
+        tags: None,
+        groups: None,
+        note: FieldUpdate::Unchanged,
+        folder: FieldUpdate::Set("app".to_string()),
+        replace_tags: false,
+        replace_groups: false,
+    };
+    backend
+        .secrets()
+        .update_secret(&vault, &source, update)
+        .await
+        .expect("folder update");
+
+    // 3. Rename — what mv does second.
+    let renamed = backend
+        .secrets()
+        .rename_secret(&vault, &source, &dest)
+        .await
+        .expect("rename_secret should succeed");
+    assert_eq!(renamed.name, dest);
+
+    // 4. Verify: value + new folder tag on dest, source soft-deleted.
+    let got = backend
+        .secrets()
+        .get_secret(&vault, &dest, true)
+        .await
+        .expect("get moved secret");
+    assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("mv-me"));
+    assert_eq!(got.tags.get("folder").map(String::as_str), Some("app"));
+
+    let exists = backend
+        .secrets()
+        .secret_exists(&vault, &source)
+        .await
+        .expect("exists check on the old name");
+    assert!(!exists, "source '{source}' should be soft-deleted after mv");
+
+    // Cleanup: soft-delete the destination (best-effort; matches the file's
+    // other tests). `source` is already soft-deleted.
+    cleanup(&backend, &vault, &[&dest]).await;
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_azure_bulk_set_and_get() {

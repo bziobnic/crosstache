@@ -5,6 +5,7 @@
 ### Added
 
 - `ls` is now an alias for `list` on every subcommand (`xv vault ls`, `xv group ls`, `xv share ls`, `xv vault share ls`, `xv context ls`, `xv env ls`, `xv file ls`), matching the top-level `xv ls`.
+- New `xv mv <SOURCE> <DEST>` moves/renames secrets and re-folders whole folders (trailing `/` = folder, `/` = vault root). Folder-only moves are metadata-only; renames ride the trait-level rename. Bulk moves confirm with a count + sample plan (`--dry-run`, `--yes`); `--dry-run` also previews single-secret moves.
 
 ### Fixed
 
