@@ -496,6 +496,76 @@ impl Config {
         Err(CrosstacheError::config("No resource group specified"))
     }
 
+    /// Resolve the secret `group` default with context awareness.
+    /// Priority: CLI argument > .xv.toml env profile > None.
+    ///
+    /// Unlike `resolve_vault_name` / `resolve_resource_group`, there is no
+    /// context or global-config layer here: `group` is a per-project
+    /// write/filter default that only exists as an env-profile field, so
+    /// falling through to `None` (not an error) is correct — callers treat
+    /// an unresolved group as "no default", not a hard failure.
+    pub async fn resolve_group(&self, group_arg: Option<String>) -> Result<Option<String>> {
+        use crate::config::project;
+
+        // 1. Command line argument takes precedence
+        if group_arg.is_some() {
+            return Ok(group_arg);
+        }
+
+        // 2. Project config (.xv.toml) — walk up from cwd
+        let cwd = std::env::current_dir()?;
+        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
+            // Emit the cross-boundary notice if the .xv.toml lives above cwd.
+            // `capture_cross_boundary_notice` is idempotent per-process, so
+            // this is safe even when `resolve_vault_name` already emitted it
+            // earlier in the same command.
+            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                    eprintln!("{line}");
+                }
+            }
+            if let Some(g) = profile.group.as_deref() {
+                return Ok(Some(g.to_string()));
+            }
+        }
+
+        // 3. No default at any layer.
+        Ok(None)
+    }
+
+    /// Resolve the secret `folder` default with context awareness.
+    /// Priority: CLI argument > .xv.toml env profile > None.
+    ///
+    /// Same reasoning as `resolve_group`: `folder` is a write-time default
+    /// that only exists as an env-profile field, with no context or
+    /// global-config fallback layer.
+    pub async fn resolve_folder(&self, folder_arg: Option<String>) -> Result<Option<String>> {
+        use crate::config::project;
+
+        // 1. Command line argument takes precedence
+        if folder_arg.is_some() {
+            return Ok(folder_arg);
+        }
+
+        // 2. Project config (.xv.toml) — walk up from cwd
+        let cwd = std::env::current_dir()?;
+        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
+            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                    eprintln!("{line}");
+                }
+            }
+            if let Some(f) = profile.folder.as_deref() {
+                return Ok(Some(f.to_string()));
+            }
+        }
+
+        // 3. No default at any layer.
+        Ok(None)
+    }
+
     /// Resolve subscription ID with context awareness
     /// Priority: CLI argument > context > config default
     #[allow(dead_code)]

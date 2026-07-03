@@ -66,6 +66,20 @@ pub(crate) async fn execute_secret_set_direct(
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
 
+        // Apply env-profile `group`/`folder` write-time defaults when the
+        // caller didn't pass an explicit `--group`/`--folder`. CLI values
+        // always win; an explicit `--folder` (including one that resolves
+        // to an empty value) short-circuits inside `resolve_folder`.
+        let mut meta = meta;
+        if meta.group.is_empty() {
+            if let Some(group) = config.resolve_group(None).await? {
+                meta.group = vec![group];
+            }
+        }
+        if meta.folder.is_none() {
+            meta.folder = config.resolve_folder(None).await?;
+        }
+
         if args.len() == 1 && !args[0].contains('=') {
             // Single secret set
             let name = &args[0];
@@ -2737,6 +2751,18 @@ async fn execute_secret_run(
     if command.is_empty() {
         return Err(CrosstacheError::config("No command specified"));
     }
+
+    // No `--group` given on the CLI: fall back to the active env profile's
+    // `group` default as the injection filter. An explicit `--group` (even
+    // repeated) always wins; the profile default never adds to it.
+    let groups = if groups.is_empty() {
+        match config.resolve_group(None).await? {
+            Some(g) => vec![g],
+            None => groups,
+        }
+    } else {
+        groups
+    };
 
     // Determine vault name using context resolution
     let vault_name = config.resolve_vault_name(vault).await?;

@@ -683,7 +683,7 @@ cat template.yml | xv inject > resolved.yml          # also reads stdin
 
 ## Project env profiles — `.xv.toml`
 
-Drop a `.xv.toml` at your project root and `xv` resolves vault, resource group, group, and folder defaults from it. Walks up from cwd to find the nearest one.
+Drop a `.xv.toml` at your project root and `xv` resolves vault, resource group, group, and folder defaults from it. Walks up from cwd to find the nearest one. The `group` default applies to `xv run` (injection filter) and `xv set`/`xv gen --save` (write-time group); the `folder` default applies to writes only (`xv set`/`xv gen --save`). Neither scopes `xv list`/`ls` — see [docs/env-profiles.md](docs/env-profiles.md) for the full resolution order.
 
 ### Schema
 
