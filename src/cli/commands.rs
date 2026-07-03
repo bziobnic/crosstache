@@ -633,6 +633,9 @@ pub enum Commands {
         /// Inherit the parent process environment (default: child starts with a clean env)
         #[arg(long)]
         inherit_env: bool,
+        /// Continue and launch the command even if some secrets fail to fetch (previous default)
+        #[arg(long)]
+        best_effort: bool,
         /// Command and arguments to run
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -1643,6 +1646,7 @@ impl Cli {
                 exclude,
                 no_masking,
                 inherit_env,
+                best_effort,
                 command,
             } => {
                 crate::cli::secret_ops::execute_secret_run_direct(
@@ -1651,6 +1655,7 @@ impl Cli {
                     exclude,
                     no_masking,
                     inherit_env,
+                    best_effort,
                     command,
                     config,
                     registry,

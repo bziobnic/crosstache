@@ -173,6 +173,12 @@ default_vault = "default"
     fn get_raw_exact(&self, name: &str) -> String {
         self.xv_ok(&["get", name, "--raw"])
     }
+
+    /// Path to this test's isolated temp directory (for scratch files such as
+    /// markers written by child processes spawned via `xv run`).
+    fn tmp_path(&self) -> &std::path::Path {
+        self._tmp.path()
+    }
 }
 
 // ===========================================================================
@@ -1566,4 +1572,112 @@ fn mv_folder_to_root() {
     // 'a' is now at the root; 'b' keeps its remainder 'db'.
     assert!(!json.contains("\"app\""), "{json}");
     assert!(json.contains("\"db\""), "remainder folder lost: {json}");
+}
+
+// ===========================================================================
+// xv run — fail-fast on secret fetch failures (#306)
+// ===========================================================================
+
+#[test]
+fn run_happy_path_launches_child() {
+    let env = TestEnv::new();
+    env.set_secret("HAPPY_KEY", "happy-value");
+    let marker = env.tmp_path().join("happy_marker.txt");
+
+    let output = env
+        .xv()
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("touch '{}'", marker.display()),
+        ])
+        .output()
+        .expect("execute xv run");
+
+    assert!(
+        output.status.success(),
+        "xv run should succeed when all secrets fetch:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        marker.exists(),
+        "child process should have run and created the marker file"
+    );
+}
+
+#[test]
+fn run_aborts_on_failing_uri_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+    let marker = env.tmp_path().join("uri_fail_marker.txt");
+
+    // A parent-environment variable holding an xv:// reference to a secret
+    // that does not exist. Reference resolution only scans the parent
+    // environment when --inherit-env is passed.
+    let mut cmd = env.xv();
+    cmd.env("REF_VAR", "xv://default/does-not-exist");
+    cmd.args([
+        "run",
+        "--inherit-env",
+        "--",
+        "sh",
+        "-c",
+        &format!("touch '{}'", marker.display()),
+    ]);
+    let output = cmd.output().expect("execute xv run");
+
+    assert!(
+        !output.status.success(),
+        "xv run should fail (non-zero exit) when a referenced secret cannot be fetched:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does-not-exist"),
+        "stderr should mention the failing reference: {stderr}"
+    );
+    assert!(
+        !marker.exists(),
+        "child process must NOT run when a secret fetch fails (fail-fast default)"
+    );
+}
+
+#[test]
+fn run_best_effort_launches_child_despite_failing_uri_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+    let marker = env.tmp_path().join("uri_fail_best_effort_marker.txt");
+
+    let mut cmd = env.xv();
+    cmd.env("REF_VAR", "xv://default/does-not-exist");
+    cmd.args([
+        "run",
+        "--inherit-env",
+        "--best-effort",
+        "--",
+        "sh",
+        "-c",
+        &format!("touch '{}'", marker.display()),
+    ]);
+    let output = cmd.output().expect("execute xv run");
+
+    assert!(
+        output.status.success(),
+        "--best-effort should launch the child (and reflect its exit code) despite the failing reference:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does-not-exist"),
+        "a warning should still be emitted for the failing reference: {stderr}"
+    );
+    assert!(
+        marker.exists(),
+        "child process should have run under --best-effort"
+    );
 }
