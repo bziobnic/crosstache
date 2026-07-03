@@ -46,6 +46,34 @@ fn scan_with_aws_key_exits_50() {
     }
 }
 
+/// Issue #309 Finding 6: `XV_SCAN_DISABLE=1` was documented but read
+/// nowhere. It must now bypass the scan entirely — exit 0 with no
+/// findings — even against a file that would otherwise trip a built-in
+/// pattern. This is deterministic (unlike `scan_with_aws_key_exits_50`)
+/// because the disable check happens before any vault/secret fetch.
+#[test]
+fn scan_disabled_via_env_skips_scan_even_with_leak() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("leak.txt"), "aws=AKIAIOSFODNN7EXAMPLE\n").unwrap();
+    let out = common::xv()
+        .args(["scan"])
+        .current_dir(temp.path())
+        .env("XV_SCAN_DISABLE", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(
+        stderr.contains("XV_SCAN_DISABLE"),
+        "must print a notice that the scan was skipped: {stderr}"
+    );
+}
+
 #[test]
 fn scan_install_outside_git_repo_errors() {
     let temp = tempfile::tempdir().unwrap();

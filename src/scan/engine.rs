@@ -58,12 +58,18 @@ struct NeedlessPattern {
 }
 
 impl MatchEngine {
-    /// Build the engine. `secrets` whose `value.len() < DEFAULT_MIN_VALUE_LENGTH`
-    /// are skipped to avoid trivially-matched short strings.
-    pub fn new(secrets: &[SecretRef], patterns: &[BuiltinPattern]) -> Self {
+    /// Build the engine. `secrets` whose `value.len() < min_value_length`
+    /// are skipped to avoid trivially-matched short strings. Callers pass
+    /// the effective `[scan].min_value_length` (falling back to
+    /// [`DEFAULT_MIN_VALUE_LENGTH`] when unset).
+    pub fn new(
+        secrets: &[SecretRef],
+        patterns: &[BuiltinPattern],
+        min_value_length: usize,
+    ) -> Self {
         let mut filtered: Vec<&SecretRef> = secrets
             .iter()
-            .filter(|s| s.value.len() >= DEFAULT_MIN_VALUE_LENGTH)
+            .filter(|s| s.value.len() >= min_value_length)
             .collect();
         // Sort by descending value length so longest-leftmost matching
         // produces the longest match when two secrets share a prefix.
@@ -190,7 +196,7 @@ mod tests {
             vault: "dev-kv".to_string(),
             value: Zeroizing::new("hunter2-very-long-password".to_string()),
         }];
-        let engine = MatchEngine::new(&secrets, &[]);
+        let engine = MatchEngine::new(&secrets, &[], DEFAULT_MIN_VALUE_LENGTH);
         let findings = engine.scan_text(
             Path::new("src/config.rs"),
             "let db_pw = \"hunter2-very-long-password\";\n",
@@ -214,16 +220,44 @@ mod tests {
             vault: "v".to_string(),
             value: Zeroizing::new("abc".to_string()),
         }];
-        let engine = MatchEngine::new(&secrets, &[]);
+        let engine = MatchEngine::new(&secrets, &[], DEFAULT_MIN_VALUE_LENGTH);
         let findings = engine.scan_text(Path::new("x"), "abc abc abc abc");
         assert!(findings.is_empty(), "short secret values must be skipped");
+    }
+
+    #[test]
+    fn custom_min_value_length_catches_shorter_values() {
+        // Issue #309 Finding 6: [scan].min_value_length was parsed but never
+        // threaded into the engine, which always used the hard-coded default
+        // of 8. A 5-char secret value must be caught when the configured
+        // min_value_length is 4, and must NOT be caught at the default of 8.
+        let secrets = vec![SecretRef {
+            name: "PIN".to_string(),
+            vault: "v".to_string(),
+            value: Zeroizing::new("ab123".to_string()),
+        }];
+
+        let default_engine = MatchEngine::new(&secrets, &[], DEFAULT_MIN_VALUE_LENGTH);
+        let default_findings = default_engine.scan_text(Path::new("x"), "code=ab123 done");
+        assert!(
+            default_findings.is_empty(),
+            "5-char value must be skipped at the default min length of 8"
+        );
+
+        let custom_engine = MatchEngine::new(&secrets, &[], 4);
+        let custom_findings = custom_engine.scan_text(Path::new("x"), "code=ab123 done");
+        assert_eq!(
+            custom_findings.len(),
+            1,
+            "5-char value must be caught when min_value_length is configured to 4"
+        );
     }
 
     #[test]
     fn matches_aws_key_pattern_when_no_secret_overlaps() {
         let secrets: Vec<SecretRef> = vec![];
         let patterns = builtin_patterns();
-        let engine = MatchEngine::new(&secrets, &patterns);
+        let engine = MatchEngine::new(&secrets, &patterns, DEFAULT_MIN_VALUE_LENGTH);
         let findings = engine.scan_text(Path::new("creds.txt"), "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n");
         assert_eq!(findings.len(), 1);
         let f = &findings[0];
@@ -242,7 +276,7 @@ mod tests {
             value: Zeroizing::new("AKIAIOSFODNN7EXAMPLE".to_string()),
         }];
         let patterns = builtin_patterns();
-        let engine = MatchEngine::new(&secrets, &patterns);
+        let engine = MatchEngine::new(&secrets, &patterns, DEFAULT_MIN_VALUE_LENGTH);
         let findings = engine.scan_text(Path::new("x"), "key = \"AKIAIOSFODNN7EXAMPLE\";");
         assert!(!findings.is_empty());
         let f = &findings[0];
@@ -257,7 +291,7 @@ mod tests {
             vault: "v".to_string(),
             value: Zeroizing::new("needle12345".to_string()),
         }];
-        let engine = MatchEngine::new(&secrets, &[]);
+        let engine = MatchEngine::new(&secrets, &[], DEFAULT_MIN_VALUE_LENGTH);
         let content = "line1\nline2 needle12345 line2 cont\nline3";
         let findings = engine.scan_text(Path::new("x"), content);
         assert_eq!(findings.len(), 1);
