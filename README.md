@@ -646,6 +646,7 @@ xv run --include DB_PASSWORD --include API_KEY -- ./script.sh
 xv run --exclude LEGACY_TOKEN -- ./script.sh
 xv run --no-masking -- ./debug.sh                 # don't mask values in stdout/stderr
 xv run --vault other-vault -- env                 # one-off vault override
+xv run --best-effort -- ./script.sh               # launch even if some secrets fail to fetch
 ```
 
 Values are masked in stdout/stderr by default — accidental `echo $DB_PASSWORD`
@@ -653,6 +654,12 @@ shows `[REDACTED]`. Masking streams in bounded chunks (64 KiB read windows with
 overlap for secrets split across chunk boundaries), so newline-free or very
 large child output does not grow memory without limit. Use `--no-masking` only
 when you understand the consequences.
+
+By default, `xv run` aborts **before** launching the child if any selected
+secret or `xv://` reference fails to fetch (transient backend error, missing
+secret, permission problem, etc.) — every failure is printed, and the command
+never runs with a variable silently missing. Pass `--best-effort` to restore
+the previous behavior: warn on each failure and launch the child anyway.
 
 ---
 

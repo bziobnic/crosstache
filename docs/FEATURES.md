@@ -94,7 +94,7 @@ a two-decimal string, `folder`/`groups` default to empty strings.
 
 | Command | Description |
 |---------|-------------|
-| `xv run -- <command>` | Run a process with secrets as env vars (`--group`, `--include`, `--exclude`, `--no-masking`) |
+| `xv run -- <command>` | Run a process with secrets as env vars (`--group`, `--include`, `--exclude`, `--no-masking`, `--best-effort`) |
 | `xv inject` | Render templates with `{{ secret:name }}` and `xv://vault/secret` refs |
 
 Advanced workflows (`run`, `inject`, default `rotate`, `scan`, `env pull`, and
@@ -112,6 +112,11 @@ the original user-facing name shown by `xv list` or the backend-specific stored
 name. If an explicit `--group`/`--include` filter matches nothing, `xv run`
 exits non-zero; an empty vault or an exclusion that removes everything warns
 and still runs the child process.
+
+By default, `xv run` also aborts before spawning the child if any selected
+secret or `xv://` reference fails to fetch — every failure is reported before
+the non-zero exit. Pass `--best-effort` to fall back to the previous
+warn-and-continue behavior.
 
 ---
 

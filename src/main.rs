@@ -84,30 +84,40 @@ async fn run_complete_folders() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     info!("Starting crosstache");
 
-    // Load configuration differently based on command
-    let mut config = match &cli.command {
-        crate::cli::Commands::Config { .. }
-        | crate::cli::Commands::Init
-        | crate::cli::Commands::Upgrade { .. }
-        | crate::cli::Commands::Version
-        | crate::cli::Commands::Completion { .. }
-        | crate::cli::Commands::Migrate { .. } => {
-            // These commands don't talk to Azure — skip credential validation.
-            load_config_without_validation().await?
-        }
-        _ => {
-            // For other commands, load with validation
-            config::load_config().await?
-        }
-    };
+    // Load configuration WITHOUT validation for every command. Validation is
+    // deferred until after the `.xv.toml` env-profile backend has been
+    // resolved and folded into `config.backend` below (and only performed
+    // for commands that actually need a backend) — a profile selecting
+    // `local`/`aws` must not be rejected against global Azure config that
+    // was never going to be used (issue #305).
+    let mut config = load_config_without_validation().await?;
 
     // Apply CLI --env flag to config (used by resolve_vault_name and
     // resolve_resource_group when consulting .xv.toml).
     config.env_flag = cli.env.clone();
 
+    // Determine whether `--backend` was actually passed as a CLI argument, as
+    // opposed to merely populated by clap from `XV_BACKEND` via `env =
+    // "XV_BACKEND"` on the flag (see src/cli/commands.rs). This must be
+    // computed BEFORE the profile-backend lookup below, since the lookup is
+    // now gated on it rather than on `cli.backend.is_none()` — a real
+    // `--backend` flag should suppress the profile lookup, but `XV_BACKEND`
+    // alone must not (issue #305).
+    // Stop scanning at the `--` separator: tokens after it belong to a
+    // passthrough child command (e.g. `xv run -- echo --backend prod`) and
+    // must not be mistaken for a real `--backend` flag on `xv` itself.
+    let cli_backend_was_arg = std::env::args_os()
+        .skip(1)
+        .take_while(|a| a != "--")
+        .any(|a| a == "--backend" || a.to_string_lossy().starts_with("--backend="));
+
     // Resolve env-profile backend (validate early; fail before touching Azure).
-    // Precedence: CLI --backend > env-profile backend > config-file backend > "azure".
-    let profile_backend: Option<String> = if cli.backend.is_none() {
+    // Precedence: true `--backend` flag > .xv.toml env-profile backend >
+    // XV_BACKEND / global config-file backend > built-in "azure".
+    // Gated on `!cli_backend_was_arg` (not `cli.backend.is_none()`) so that
+    // `XV_BACKEND` — which clap folds into `cli.backend` indistinguishably
+    // from a real flag — does not suppress the profile lookup.
+    let profile_backend: Option<String> = if !cli_backend_was_arg {
         match std::env::current_dir() {
             Err(_) => None, // degenerate env — skip project-config walk
             Ok(cwd) => {
@@ -159,12 +169,21 @@ async fn run(cli: Cli) -> Result<()> {
     // correctly when values across layers coincide.
     config.disk_backend = config.backend.clone();
     config.cli_backend = cli.backend.clone();
-    config.cli_backend_was_arg = std::env::args_os()
-        .any(|a| a == "--backend" || a.to_string_lossy().starts_with("--backend="));
+    config.cli_backend_was_arg = cli_backend_was_arg;
+
+    // Only feed the CLI slot when `--backend` was a real argument — when it
+    // was merely populated from `XV_BACKEND`, that value already flows into
+    // `config.backend` via `load_from_env` and participates at the
+    // config-file layer instead, letting the .xv.toml profile outrank it.
+    let cli_backend_for_resolution = if cli_backend_was_arg {
+        cli.backend.as_deref()
+    } else {
+        None
+    };
 
     config.backend = Some(
         crate::config::project::resolve_effective_backend(
-            cli.backend.as_deref(),
+            cli_backend_for_resolution,
             profile_backend.as_deref(),
             config.backend.as_deref(),
         )
@@ -183,12 +202,11 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
         ));
     }
 
-    // Build the backend registry for commands that talk to a secrets backend.
-    // Commands that are purely local (Config, Init, Cache, Context, etc.) skip
-    // this entirely.  For commands that *may* need the backend we attempt
-    // construction but treat failure as non-fatal: the registry becomes `None`
-    // and individual command handlers will create their own auth provider on
-    // demand via `get_azure_auth_provider(None, config)`.
+    // Commands that never talk to a secrets backend (this `matches!` is the
+    // source of truth for exactly which ones) must not be validated against
+    // one. Computed BEFORE validation (moved up from its original position
+    // just above the registry-construction block below) so `needs_backend`
+    // can gate both.
     let needs_backend = !matches!(
         cli.command,
         crate::cli::Commands::Config { .. }
@@ -221,6 +239,20 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
             }
     );
 
+    // Validate the effective backend config only for commands that actually
+    // need it. Validating unconditionally (as the pre-#305 code did, before
+    // the profile backend had even been folded in) rejects setup-oriented
+    // commands like `context init --backend aws` for lacking config that
+    // they exist to create in the first place.
+    if needs_backend {
+        config.validate()?;
+    }
+
+    // Build the backend registry for commands that talk to a secrets backend.
+    // For commands that *may* need the backend we attempt construction but
+    // treat failure as non-fatal: the registry becomes `None` and individual
+    // command handlers will create their own auth provider on demand via
+    // `get_azure_auth_provider(None, config)`.
     let registry = if needs_backend {
         match backend::BackendRegistry::from_config(&config) {
             Ok(r) => Some(r),
