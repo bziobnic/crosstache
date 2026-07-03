@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `ls` is now an alias for `list` on every subcommand (`xv vault ls`, `xv group ls`, `xv share ls`, `xv vault share ls`, `xv context ls`, `xv env ls`, `xv file ls`), matching the top-level `xv ls`.
+
 ### Fixed
 
 - **`xv update --rename` works again on every backend (#295).** Rename is now a real trait-level operation (`SecretBackend::rename_secret`): read value + metadata, create under the new name (user tags, groups, note, folder, content type, and expiry ride along), then delete the old name with the backend's normal delete. Previously Azure created the duplicate and never deleted the original, while local and AWS silently ignored the flag; the `SecretUpdateRequest.new_name` field is gone so a backend can never ignore a rename again. Combined with other update flags, the in-place updates apply first, then the rename. Renaming onto an existing name is refused (`xv-conflict`); version history does not carry over. On Azure the old name is left soft-deleted (visible in `xv ls --deleted`; renaming back within the retention window conflicts); on AWS it sits in the standard 30-day recovery window; on local it lands in trash.
