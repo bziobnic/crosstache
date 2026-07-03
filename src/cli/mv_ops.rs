@@ -124,6 +124,17 @@ fn norm_folder(folder: Option<&str>) -> Option<&str> {
     folder.filter(|f| !f.is_empty())
 }
 
+/// True if any secret in `secrets` already occupies `dest_name` — either as
+/// its display name or as its raw backend (sanitized) name. A secret whose
+/// backend key equals the destination but whose display label differs would
+/// otherwise slip past the pre-check, letting the folder update apply before
+/// `rename_secret`'s own exists-guard fails and leaving a half-applied move.
+fn dest_collides(secrets: &[SecretSummary], dest_name: &str) -> bool {
+    secrets
+        .iter()
+        .any(|s| display_name(s) == dest_name || s.name == dest_name)
+}
+
 pub(crate) async fn execute_mv(
     source: String,
     dest: String,
@@ -235,7 +246,7 @@ async fn execute_secret_mv(
 
     // Collision pre-check — before any mutation — only relevant when the
     // name is actually changing.
-    if dest_name != src_name && secrets.iter().any(|s| display_name(s) == dest_name) {
+    if dest_name != src_name && dest_collides(&secrets, &dest_name) {
         return Err(CrosstacheError::conflict(format!(
             "secret '{dest_name}' already exists in vault '{vault_name}' — delete it first or pick another name"
         )));
@@ -516,5 +527,39 @@ mod tests {
         assert!(parse_mv("db/pass", "app//").is_err());
         // Folder source with an internal empty segment.
         assert!(parse_mv("app//db/", "svc/").is_err());
+    }
+
+    fn summary(name: &str, original_name: &str) -> SecretSummary {
+        SecretSummary {
+            name: name.to_string(),
+            original_name: original_name.to_string(),
+            note: None,
+            folder: None,
+            groups: None,
+            updated_on: String::new(),
+            enabled: true,
+            content_type: String::new(),
+        }
+    }
+
+    #[test]
+    fn dest_collides_matches_display_name() {
+        let secrets = vec![summary("sanitized-name", "pretty-name")];
+        assert!(dest_collides(&secrets, "pretty-name"));
+    }
+
+    #[test]
+    fn dest_collides_matches_backend_name_only() {
+        // Backend (sanitized) name equals the destination, but the display
+        // label (original_name) differs — this is exactly the case that
+        // slipped past the old display-name-only pre-check.
+        let secrets = vec![summary("dest-name", "some-other-display-name")];
+        assert!(dest_collides(&secrets, "dest-name"));
+    }
+
+    #[test]
+    fn dest_collides_no_match() {
+        let secrets = vec![summary("sanitized-name", "pretty-name")];
+        assert!(!dest_collides(&secrets, "unrelated-name"));
     }
 }

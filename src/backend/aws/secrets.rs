@@ -565,7 +565,7 @@ impl SecretBackend for AwsSecretBackend {
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>, BackendError> {
         use crate::backend::aws::encoding::{is_marker, strip_prefix};
-        use crate::backend::aws::metadata::TAG_GROUPS;
+        use crate::backend::aws::metadata::{TAG_FOLDER, TAG_GROUPS, TAG_ORIGINAL_NAME};
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 
         let prefix = format!("{vault}/");
@@ -619,11 +619,34 @@ impl SecretBackend for AwsSecretBackend {
                     .map(|s| crate::backend::aws::metadata::decode_groups(s).join(","))
                     .filter(|s| !s.is_empty());
 
+                // Extract folder/original-name tags the same way
+                // props_from_describe does for get_secret, so folder-qualified
+                // `xv mv`/`xv ls` work on AWS-listed summaries too.
+                let folder_val = entry
+                    .tags()
+                    .iter()
+                    .find(|t| t.key() == Some(TAG_FOLDER))
+                    .and_then(|t| t.value())
+                    .map(String::from)
+                    .filter(|f| !f.is_empty());
+                let original_name_val = entry
+                    .tags()
+                    .iter()
+                    .find(|t| t.key() == Some(TAG_ORIGINAL_NAME))
+                    .and_then(|t| t.value())
+                    .map(String::from)
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| secret_name.clone());
+                let note_val = entry
+                    .description()
+                    .map(String::from)
+                    .filter(|n| !n.is_empty());
+
                 summaries.push(SecretSummary {
-                    name: secret_name.clone(),
-                    original_name: secret_name,
-                    note: None,
-                    folder: None,
+                    name: secret_name,
+                    original_name: original_name_val,
+                    note: note_val,
+                    folder: folder_val,
                     groups: groups_val,
                     updated_on: String::new(),
                     enabled: true,
