@@ -1458,10 +1458,7 @@ fn mv_sanitized_name_rename_with_space() {
         !json.contains("\"my secret\""),
         "old name still listed: {json}"
     );
-    assert!(
-        !json.contains("\"db\""),
-        "folder should be cleared: {json}"
-    );
+    assert!(!json.contains("\"db\""), "folder should be cleared: {json}");
 }
 
 #[test]

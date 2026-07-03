@@ -334,7 +334,11 @@ async fn localstack_deleted_listing_exposes_original_name() {
         .await
         .unwrap();
 
-    let deleted = backend.secrets().list_deleted_secrets(&vault).await.unwrap();
+    let deleted = backend
+        .secrets()
+        .list_deleted_secrets(&vault)
+        .await
+        .unwrap();
     let found = deleted
         .iter()
         .find(|s| s.name == "Round.Trip")
