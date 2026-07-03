@@ -705,6 +705,19 @@ pub enum Commands {
         #[arg(long)]
         enabled: Option<bool>,
     },
+    /// Move or rename a secret, or re-folder a whole folder (trailing / = folder)
+    Mv {
+        /// Source: 'folder/name', 'name', or a folder prefix ending in '/'
+        source: String,
+        /// Destination: 'folder/' (keep name), 'folder/newname', 'newname' (root), or '/'
+        dest: String,
+        /// Print the full move plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation prompt for bulk folder moves
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Compare secrets between two vaults
     Diff {
         /// First vault name
@@ -1698,6 +1711,12 @@ impl Cli {
                 )
                 .await
             }
+            Commands::Mv {
+                source,
+                dest,
+                dry_run,
+                yes,
+            } => crate::cli::mv_ops::execute_mv(source, dest, dry_run, yes, config, registry).await,
             Commands::Diff {
                 vault1,
                 vault2,
@@ -2519,5 +2538,27 @@ mod tests {
             let result = Cli::try_parse_from(&args);
             assert!(result.is_ok(), "{args:?} should parse");
         }
+    }
+
+    #[test]
+    fn test_mv_parse() {
+        let cli =
+            Cli::try_parse_from(["xv", "mv", "db/pass", "app/", "--dry-run", "--yes"]).unwrap();
+        match cli.command {
+            Commands::Mv {
+                source,
+                dest,
+                dry_run,
+                yes,
+            } => {
+                assert_eq!(source, "db/pass");
+                assert_eq!(dest, "app/");
+                assert!(dry_run);
+                assert!(yes);
+            }
+            _ => panic!("expected mv command"),
+        }
+        // Both operands are required.
+        assert!(Cli::try_parse_from(["xv", "mv", "onlyone"]).is_err());
     }
 }

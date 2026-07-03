@@ -5,10 +5,11 @@
 //! name and everything before it the folder. A bare destination therefore
 //! means "vault root + rename".
 
+use crate::backend::BackendRegistry;
+use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 
 /// Plan for moving secrets or folders.
-#[allow(dead_code)] // wired up by the mv executor (next task) — remove this attribute there
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MvPlan {
     /// Move a single secret.
@@ -31,7 +32,6 @@ pub(crate) enum MvPlan {
 /// `/` alone is the vault root; otherwise the last segment is the secret
 /// name and everything before it the folder. A bare destination therefore
 /// means "vault root + rename".
-#[allow(dead_code)] // wired up by the mv executor (next task) — remove this attribute there
 pub(crate) fn parse_mv(source: &str, dest: &str) -> Result<MvPlan> {
     let source = source.trim();
     let dest = dest.trim();
@@ -113,6 +113,21 @@ fn split_secret_path(path: &str) -> Result<(Option<String>, String)> {
         )));
     }
     Ok((folder.map(String::from), name.to_string()))
+}
+
+pub(crate) async fn execute_mv(
+    source: String,
+    dest: String,
+    dry_run: bool,
+    yes: bool,
+    config: Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<()> {
+    let _ = (dry_run, yes, config, registry);
+    let _plan = parse_mv(&source, &dest)?;
+    Err(CrosstacheError::invalid_argument(
+        "mv is not implemented yet",
+    ))
 }
 
 #[cfg(test)]
