@@ -135,21 +135,12 @@ fn set_typed_record_stores_envelope_and_tags() {
     // The primary field never appears as a tag.
     assert!(meta["tags"].get("f.password").is_none());
 
-    // The stored value is the JSON envelope, not the bare primary — proven
-    // via --raw (Task 7 hasn't landed record-aware `get` yet, so --raw
-    // returns the stored value verbatim). Reuses the same store/env as the
-    // `set` above (can't reuse `cmd`/xv_isolated_local() itself: each
-    // Command is single-use and a fresh xv_isolated_local() call would
-    // create a brand-new, empty store).
-    let out2 = common::xv()
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", temp.path())
-        .env("XDG_CONFIG_HOME", temp.path().join(".config"))
-        .env("XV_NO_PARENT_CONFIG", "1")
-        .env("XV_BACKEND", "local")
-        .env("NO_COLOR", "1")
-        .current_dir(temp.path())
+    // Plain `get --raw` returns the primary field bare (record-aware `get`,
+    // Task 7's compatibility contract) — not the JSON envelope. The
+    // envelope shape itself is asserted directly against the on-disk value
+    // in `set_field_secret_goes_to_envelope` below and via `--record` in
+    // `get_record_json_includes_all_fields`.
+    let out2 = xv_same_env(temp.path())
         .args(["get", "cred", "--raw"])
         .output()
         .unwrap();
@@ -158,10 +149,7 @@ fn set_typed_record_stores_envelope_and_tags() {
         "stderr: {}",
         common::stderr_str(&out2)
     );
-    let stdout2 = common::stdout_str(&out2);
-    let envelope: serde_json::Value = serde_json::from_str(&stdout2).expect("valid json envelope");
-    assert_eq!(envelope["password"], "hunter2");
-    assert_eq!(envelope.as_object().unwrap().len(), 1);
+    assert_eq!(common::stdout_str(&out2), "hunter2");
 }
 
 #[test]
@@ -279,5 +267,378 @@ fn type_show_unknown_errors() {
     assert!(
         stderr.contains("database"),
         "stderr should list known types: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 7: `xv get` — primary, --field, --record, failure modes
+// ---------------------------------------------------------------------------
+
+/// Builds a fresh `xv` `Command` bound to the same isolated store/env as an
+/// existing `xv_isolated_local()` tempdir, for a second CLI invocation
+/// against the same store (each `Command` is single-use).
+fn xv_same_env(temp: &std::path::Path) -> std::process::Command {
+    let mut cmd = common::xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp)
+        .env("XDG_CONFIG_HOME", temp.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(temp);
+    cmd
+}
+
+#[test]
+fn get_typed_record_returns_primary_bare() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    assert_eq!(common::stdout_str(&out2), "hunter2");
+}
+
+#[test]
+fn get_field_metadata_and_secret() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--field",
+            "url=https://example.com",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    // Metadata field (tag-backed).
+    let out_meta = xv_same_env(temp.path())
+        .args(["get", "cred", "--field", "username", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out_meta.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out_meta)
+    );
+    assert_eq!(common::stdout_str(&out_meta), "bob");
+
+    // Secret field (envelope-backed).
+    let out_secret = xv_same_env(temp.path())
+        .args(["get", "cred", "--field", "password", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out_secret.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out_secret)
+    );
+    assert_eq!(common::stdout_str(&out_secret), "hunter2");
+}
+
+#[test]
+fn get_record_json_includes_all_fields() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["get", "cred", "--record", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(parsed["type"], "login");
+    assert_eq!(parsed["fields"]["username"], "bob");
+    assert_eq!(parsed["fields"]["password"], "hunter2");
+}
+
+#[test]
+fn get_unknown_field_lists_fields() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["get", "cred", "--field", "nosuchfield"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("username"), "stderr: {stderr}");
+    assert!(stderr.contains("password"), "stderr: {stderr}");
+}
+
+/// Corrupt-envelope: a record-marked secret whose value fails JSON parsing.
+/// The CLI's plain `xv set` can't produce this state directly — a full
+/// `set_secret` write always replaces `content_type` from the request
+/// (`unwrap_or_default()` in the local backend), so overwriting a record's
+/// value through the CLI's untyped `xv set` path would also clear the
+/// record content-type rather than reproduce "record-tagged, bad JSON".
+/// Instead this drives the local backend library directly (same crate,
+/// same store/key as the CLI run above) to write a bogus value while
+/// keeping `content_type` and tags intact — reproducing the state a
+/// corrupted on-disk write (or manual tampering) would leave behind.
+#[test]
+fn get_corrupt_envelope_fails_loud() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let store_path = temp.path().join("store");
+    let key_file = temp.path().join("key.txt");
+    let local_config = crosstache::config::settings::LocalConfig {
+        store_path: Some(store_path.to_string_lossy().to_string()),
+        key_file: Some(key_file.to_string_lossy().to_string()),
+        default_vault: Some("default".to_string()),
+        encrypt_metadata: None,
+        opaque_filenames: None,
+    };
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        use crosstache::backend::local::LocalBackend;
+        use crosstache::backend::Backend;
+        use crosstache::secret::manager::SecretRequest;
+
+        let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
+        let existing = backend
+            .secrets()
+            .get_secret("default", "cred", false)
+            .await
+            .expect("get existing record");
+
+        let request = SecretRequest {
+            name: "cred".to_string(),
+            value: zeroize::Zeroizing::new("not-json".to_string()),
+            content_type: Some("application/vnd.xv.record".to_string()),
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: Some(existing.tags.clone()),
+            groups: None,
+            note: None,
+            folder: None,
+        };
+        backend
+            .secrets()
+            .set_secret("default", request)
+            .await
+            .expect("overwrite with corrupt envelope");
+    });
+
+    let out2 = xv_same_env(temp.path())
+        .args(["get", "cred"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("cred"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("application/vnd.xv.record"),
+        "stderr: {stderr}"
+    );
+    // Never print the raw JSON value as if it were valid.
+    assert!(!stderr.contains("not-json"), "stderr: {stderr}");
+}
+
+#[test]
+fn get_unknown_type_degrades() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    // Rewrite the xv-type tag to an unresolvable type name via the local
+    // backend library (same rationale as get_corrupt_envelope_fails_loud —
+    // no CLI verb yet edits tags in place; that's Task 8, out of Phase A).
+    let store_path = temp.path().join("store");
+    let key_file = temp.path().join("key.txt");
+    let local_config = crosstache::config::settings::LocalConfig {
+        store_path: Some(store_path.to_string_lossy().to_string()),
+        key_file: Some(key_file.to_string_lossy().to_string()),
+        default_vault: Some("default".to_string()),
+        encrypt_metadata: None,
+        opaque_filenames: None,
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        use crosstache::backend::local::LocalBackend;
+        use crosstache::backend::Backend;
+        use crosstache::secret::manager::SecretRequest;
+
+        let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
+        let existing = backend
+            .secrets()
+            .get_secret("default", "cred", true)
+            .await
+            .expect("get existing record");
+        let mut tags = existing.tags.clone();
+        tags.insert("xv-type".to_string(), "nosuch".to_string());
+
+        let request = SecretRequest {
+            name: "cred".to_string(),
+            value: existing.value.clone().unwrap(),
+            content_type: Some("application/vnd.xv.record".to_string()),
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: Some(tags),
+            groups: None,
+            note: None,
+            folder: None,
+        };
+        backend
+            .secrets()
+            .set_secret("default", request)
+            .await
+            .expect("rewrite with unknown type");
+    });
+
+    // Plain `get` can't determine the primary field: errors.
+    let out_plain = xv_same_env(temp.path())
+        .args(["get", "cred"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out_plain.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out_plain)
+    );
+
+    // `--field` still works via the raw envelope/tags.
+    let out_field = xv_same_env(temp.path())
+        .args(["get", "cred", "--field", "username", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out_field.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out_field)
+    );
+    assert_eq!(common::stdout_str(&out_field), "bob");
+}
+
+#[test]
+fn get_field_on_untyped_errors() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["get", "plain", "--field", "whatever"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "plain", "--record"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out3.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out3)
     );
 }

@@ -449,6 +449,14 @@ pub enum Commands {
         /// Get a specific version of the secret
         #[arg(long)]
         version: Option<String>,
+        /// Read a single field from a typed record (metadata or secret).
+        /// Errors if the secret is untyped. Mutually exclusive with --record.
+        #[arg(long, conflicts_with = "record")]
+        field: Option<String>,
+        /// Print the full record (all fields) in the requested --format.
+        /// Errors if the secret is untyped. Mutually exclusive with --field.
+        #[arg(long, conflicts_with = "field")]
+        record: bool,
     },
     /// Ranked fuzzy search over secrets (alias: search). Non-interactive;
     /// pipe the output through fzf or similar for an interactive picker.
@@ -1572,9 +1580,22 @@ impl Cli {
                 )
                 .await
             }
-            Commands::Get { name, raw, version } => {
+            Commands::Get {
+                name,
+                raw,
+                version,
+                field,
+                record,
+            } => {
                 crate::cli::secret_ops::execute_secret_get_direct(
-                    &name, raw, version, config, registry,
+                    &name,
+                    raw,
+                    version,
+                    field,
+                    record,
+                    self.format,
+                    config,
+                    registry,
                 )
                 .await
             }

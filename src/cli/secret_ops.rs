@@ -505,10 +505,61 @@ pub(crate) async fn execute_secret_set_direct(
     ))
 }
 
+/// Parses a record's envelope, failing loud (never returning raw JSON as if
+/// it were a value) when the content type says "record" but the value
+/// isn't a valid envelope.
+fn parse_record_envelope_or_fail(
+    name: &str,
+    content_type: &str,
+    value: &str,
+) -> Result<BTreeMap<String, String>> {
+    crate::records::parse_envelope(value).map_err(|e| {
+        CrosstacheError::config(format!(
+            "secret '{name}' is marked as a record (content-type: {content_type}) but its \
+             value is not a valid record envelope: {e}"
+        ))
+    })
+}
+
+/// All field names a record exposes: envelope keys (secret fields) union
+/// `f.*` tag names (metadata fields), for "unknown field" error messages.
+fn record_field_names(
+    envelope: &BTreeMap<String, String>,
+    tags: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut names: Vec<String> = envelope.keys().cloned().collect();
+    for key in tags.keys() {
+        if let Some(field) = key.strip_prefix(FIELD_TAG_PREFIX) {
+            names.push(field.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Looks up one field's value: envelope (secret fields) first, then the
+/// `f.<name>` tag (metadata fields).
+fn lookup_record_field<'a>(
+    field: &str,
+    envelope: &'a BTreeMap<String, String>,
+    tags: &'a std::collections::HashMap<String, String>,
+) -> Option<&'a str> {
+    if let Some(v) = envelope.get(field) {
+        return Some(v.as_str());
+    }
+    tags.get(&format!("{FIELD_TAG_PREFIX}{field}"))
+        .map(|s| s.as_str())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_get_direct(
     name: &str,
     raw: bool,
     version: Option<String>,
+    field: Option<String>,
+    record: bool,
+    format: OutputFormat,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -529,11 +580,123 @@ pub(crate) async fn execute_secret_get_direct(
                 .await?
         };
 
+        let is_rec = crate::records::is_record(&secret.content_type);
+
+        // ── `--record`: full record view, all fields, requested format ──
+        if record {
+            if !is_rec {
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' is not a record (has no {} tag); --record only applies to \
+                     typed records",
+                    crate::records::TYPE_TAG
+                )));
+            }
+            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
+            let mut all_fields: std::collections::BTreeMap<String, String> = envelope.clone();
+            for (k, v) in &secret.tags {
+                if let Some(f) = k.strip_prefix(FIELD_TAG_PREFIX) {
+                    all_fields.insert(f.to_string(), v.clone());
+                }
+            }
+            let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
+            let resolved = format.resolve_for_stdout();
+            let body = serde_json::json!({
+                "name": name,
+                "type": type_name,
+                "fields": all_fields,
+            });
+            match resolved {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&body).map_err(|e| {
+                        CrosstacheError::serialization(format!("JSON serialization failed: {e}"))
+                    })?
+                ),
+                OutputFormat::Yaml => println!(
+                    "{}",
+                    serde_yaml::to_string(&body).map_err(|e| {
+                        CrosstacheError::serialization(format!("YAML serialization failed: {e}"))
+                    })?
+                ),
+                _ => {
+                    println!("{name}  (type: {type_name})");
+                    for (k, v) in &all_fields {
+                        println!("  {k}: {v}");
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // ── `--field NAME`: one field, either kind ──
+        if let Some(field_name) = field {
+            if !is_rec {
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' is not a record (has no {} tag); --field only applies to \
+                     typed records",
+                    crate::records::TYPE_TAG
+                )));
+            }
+            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
+            let Some(field_value) = lookup_record_field(&field_name, &envelope, &secret.tags)
+            else {
+                let known = record_field_names(&envelope, &secret.tags);
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' has no field '{field_name}'. Known fields: {}",
+                    known.join(", ")
+                )));
+            };
+            if raw {
+                print!("{field_value}");
+            } else {
+                match copy_to_clipboard(field_value) {
+                    Ok(()) => output::success(&format!(
+                        "Field '{field_name}' of '{name}' copied to clipboard"
+                    )),
+                    Err(e) => {
+                        output::warn(&format!("Failed to copy to clipboard: {e}"));
+                        eprintln!(
+                            "Use 'xv get {name} --field {field_name} --raw' to print the value to stdout instead."
+                        );
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // ── Plain `get`: primary field for records, untouched for untyped ──
+        let effective_value: Option<Zeroizing<String>> = if is_rec {
+            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
+
+            let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
+            let types = config.resolve_record_types().await?;
+            let Some(record_type) = crate::records::find_type(&types, &type_name) else {
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' has type '{type_name}', which has no resolvable type \
+                     definition (check your [types.*] config). Its primary field can't be \
+                     determined; use --field or --record to access this record's raw fields."
+                )));
+            };
+            let primary_name = &record_type.primary().name;
+            let Some(primary_value) = envelope.get(primary_name) else {
+                return Err(CrosstacheError::config(format!(
+                    "secret '{name}' is missing its primary field '{primary_name}' in the record \
+                     envelope"
+                )));
+            };
+            Some(Zeroizing::new(primary_value.clone()))
+        } else {
+            secret.value
+        };
+
         if raw {
-            if let Some(value) = secret.value {
+            if let Some(value) = effective_value {
                 print!("{}", value.as_str());
             }
-        } else if let Some(ref value) = secret.value {
+        } else if let Some(ref value) = effective_value {
             match copy_to_clipboard(value) {
                 Ok(()) => {
                     let timeout = config.clipboard_timeout;
