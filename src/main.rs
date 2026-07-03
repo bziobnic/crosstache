@@ -218,6 +218,7 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
             | crate::cli::Commands::Parse { .. }
             | crate::cli::Commands::Cache { .. }
             | crate::cli::Commands::Local { .. }
+            | crate::cli::Commands::Type { .. }
             | crate::cli::Commands::Context { .. }
             // Env subcommands that only read/write `.xv.toml` need no backend.
             // `env pull` / `env push` DO talk to the active backend, so they are

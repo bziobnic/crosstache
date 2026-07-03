@@ -413,6 +413,24 @@ impl Config {
         self.backend.as_deref().unwrap_or("azure")
     }
 
+    /// Resolve the effective set of record types: built-ins merged with
+    /// this config's `[types.*]` blocks and (if present) the project
+    /// `.xv.toml`'s `[types.*]` blocks, with precedence project > global >
+    /// builtin. Same project-config discovery walk as `resolve_group`.
+    pub async fn resolve_record_types(&self) -> Result<Vec<crate::records::RecordType>> {
+        use crate::config::project;
+
+        let project_types = {
+            let cwd = std::env::current_dir()?;
+            match project::find_project_config(&cwd).await {
+                Ok(Some((_, cfg))) => cfg.types,
+                _ => std::collections::HashMap::new(),
+            }
+        };
+
+        crate::records::resolve_types(&self.types, &project_types)
+    }
+
     /// Resolve vault name with context awareness
     /// Priority: CLI argument > .xv.toml env profile > context > config default
     pub async fn resolve_vault_name(&self, vault_arg: Option<String>) -> Result<String> {

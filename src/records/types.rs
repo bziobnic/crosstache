@@ -18,14 +18,15 @@ use std::collections::HashMap;
 
 /// Whether a field's value lives in tags (metadata) or in the encrypted
 /// secret value (secret).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FieldKind {
     Metadata,
     Secret,
 }
 
 /// A single field declared by a record type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FieldDef {
     pub name: String,
     pub kind: FieldKind,
@@ -34,15 +35,26 @@ pub struct FieldDef {
 }
 
 /// Where a resolved `RecordType` came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TypeSource {
     Builtin,
     Global,
     Project,
 }
 
+impl std::fmt::Display for TypeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Builtin => write!(f, "built-in"),
+            Self::Global => write!(f, "global"),
+            Self::Project => write!(f, "project"),
+        }
+    }
+}
+
 /// A named collection of field definitions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecordType {
     pub name: String,
     pub fields: Vec<FieldDef>,
@@ -213,10 +225,16 @@ impl RecordTypeConfig {
                     )));
                 }
             };
+            // `primary` implies `kind = secret` and `required = true` (spec
+            // decision — the `[types.smtp]` example in the design doc
+            // marks its primary field `primary = true` without also
+            // repeating `required = true`), so a primary field is always
+            // treated as required regardless of what the config said.
+            let required = f.required || f.primary;
             fields.push(FieldDef {
                 name: f.name,
                 kind,
-                required: f.required,
+                required,
                 primary: f.primary,
             });
         }

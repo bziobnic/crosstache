@@ -19,6 +19,7 @@ pub(crate) mod mv_ops;
 pub(crate) mod scan_ops;
 pub(crate) mod secret_ops;
 pub(crate) mod system_ops;
+pub(crate) mod type_ops;
 pub(crate) mod upgrade_ops;
 pub(crate) mod vault_ops;
 

@@ -894,6 +894,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: LocalCommands,
     },
+    /// Record type management (built-in + custom `[types.*]` config blocks).
+    /// Config-only: never talks to a secrets backend.
+    Type {
+        #[command(subcommand)]
+        command: TypeCommands,
+    },
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
     #[command(alias = "up")]
@@ -1297,6 +1303,20 @@ pub enum LocalCommands {
         /// Print the rename plan without touching anything on disk.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+/// Record-type subcommands (`xv type ...`).
+#[derive(Subcommand)]
+pub enum TypeCommands {
+    /// List resolved record types (built-in + global + project), with
+    /// their source (alias: ls)
+    #[command(alias = "ls")]
+    List,
+    /// Show a single resolved record type's field table
+    Show {
+        /// Type name
+        name: String,
     },
 }
 
@@ -1862,6 +1882,9 @@ impl Cli {
             }
             Commands::Local { command } => {
                 crate::cli::local_ops::execute_local_command(command, config).await
+            }
+            Commands::Type { command } => {
+                crate::cli::type_ops::execute_type_command(command, config).await
             }
             #[cfg(feature = "file-ops")]
             Commands::Upload {
