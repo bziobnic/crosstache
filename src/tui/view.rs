@@ -4,6 +4,36 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
+use std::collections::BTreeMap;
+
+/// Placeholder shown for a secret-kind field's value in the TUI detail
+/// pane — the field's presence/name is informational, but its value is
+/// never rendered here (masked regardless of the top-level value's
+/// reveal state), matching record-types plan Task 11.
+const MASKED_FIELD_VALUE: &str = "●●●●●●●●";
+
+/// Pure formatter for a record's "Fields" section in the TUI detail pane
+/// (record-types plan Task 11): one line per field, sorted by name.
+/// Metadata fields render `name: value` plainly; fields named in
+/// `secret_names` always render with a masked placeholder value instead of
+/// whatever `fields` holds for them (defense in depth — even if a caller
+/// accidentally passes a real secret value in `fields` for a secret-kind
+/// field, it never reaches the rendered line).
+fn record_field_lines(
+    record_type: &str,
+    fields: &BTreeMap<String, String>,
+    secret_names: &[String],
+) -> Vec<String> {
+    let mut lines = vec![format!("type: {record_type}")];
+    for (name, value) in fields {
+        if secret_names.iter().any(|s| s == name) {
+            lines.push(format!("{name}: {MASKED_FIELD_VALUE}"));
+        } else {
+            lines.push(format!("{name}: {value}"));
+        }
+    }
+    lines
+}
 
 pub fn view(app: &App, frame: &mut Frame) {
     let area = frame.area();
@@ -132,6 +162,38 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
             lines.push(Line::raw(format!("folder: {f}")));
         }
         lines.push(Line::raw(format!("updated: {}", s.updated_on)));
+
+        // Record-types plan Task 11: a "Fields" section for typed records.
+        // Metadata fields (f.* tags) are known without fetching the value;
+        // secret field NAMES only become known once the value has been
+        // fetched (the existing Space-to-reveal detail-fetch path), and
+        // their values are always masked regardless of the top `value:`
+        // line's reveal state.
+        if let Some(record_type) = s.tags.get(crate::records::TYPE_TAG) {
+            let mut fields: BTreeMap<String, String> = s
+                .tags
+                .iter()
+                .filter_map(|(k, v)| {
+                    k.strip_prefix(crate::records::FIELD_TAG_PREFIX)
+                        .map(|f| (f.to_string(), v.clone()))
+                })
+                .collect();
+            let secret_names: Vec<String> = app
+                .selected_vault_and_name()
+                .and_then(|key| app.values.get(&key))
+                .and_then(|val| crate::records::parse_envelope(val.as_str()).ok())
+                .map(|envelope| envelope.into_keys().collect())
+                .unwrap_or_default();
+            for name in &secret_names {
+                fields.entry(name.clone()).or_default();
+            }
+
+            lines.push(Line::raw(""));
+            lines.push(Line::raw("Fields:"));
+            for line in record_field_lines(record_type, &fields, &secret_names) {
+                lines.push(Line::raw(format!("  {line}")));
+            }
+        }
     } else {
         lines.push(Line::raw("(no secret selected)"));
     }
@@ -175,5 +237,75 @@ fn render_toast(app: &App, frame: &mut Frame, area: Rect) {
         );
         let p = Paragraph::new(line).style(Style::default().fg(Color::Yellow));
         frame.render_widget(p, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fields(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn record_field_lines_includes_type_header() {
+        let lines = record_field_lines("login", &BTreeMap::new(), &[]);
+        assert_eq!(lines, vec!["type: login".to_string()]);
+    }
+
+    #[test]
+    fn record_field_lines_renders_metadata_plain() {
+        let f = fields(&[("username", "bob"), ("url", "https://example.com")]);
+        let lines = record_field_lines("login", &f, &[]);
+        assert!(lines.contains(&"username: bob".to_string()));
+        assert!(lines.contains(&"url: https://example.com".to_string()));
+    }
+
+    #[test]
+    fn record_field_lines_masks_secret_field_values() {
+        let f = fields(&[("username", "bob"), ("password", "hunter2")]);
+        let secret_names = vec!["password".to_string()];
+        let lines = record_field_lines("login", &f, &secret_names);
+        assert!(lines.contains(&"username: bob".to_string()));
+        assert!(lines.contains(&format!("password: {MASKED_FIELD_VALUE}")));
+        assert!(
+            !lines.iter().any(|l| l.contains("hunter2")),
+            "secret value must never appear: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn record_field_lines_masks_even_when_value_is_populated() {
+        // Defense in depth: even if the caller passes a real value for a
+        // name also listed in secret_names, the rendered line still masks
+        // it rather than trusting the caller never to make that mistake.
+        let f = fields(&[("totp-seed", "ABCDEF")]);
+        let secret_names = vec!["totp-seed".to_string()];
+        let lines = record_field_lines("login", &f, &secret_names);
+        assert_eq!(
+            lines,
+            vec![
+                "type: login".to_string(),
+                format!("totp-seed: {MASKED_FIELD_VALUE}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn record_field_lines_sorted_by_name() {
+        let f = fields(&[("zeta", "1"), ("alpha", "2")]);
+        let lines = record_field_lines("custom", &f, &[]);
+        assert_eq!(
+            lines,
+            vec![
+                "type: custom".to_string(),
+                "alpha: 2".to_string(),
+                "zeta: 1".to_string(),
+            ]
+        );
     }
 }
