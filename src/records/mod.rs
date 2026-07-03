@@ -68,6 +68,39 @@ pub fn check_tag_budget(
     Ok(())
 }
 
+/// Computes `reserved_count` for [`check_tag_budget`]: the number of
+/// reserved bookkeeping tags a record write actually consumes.
+///
+/// This always includes `crate::backend::ALWAYS_WRITTEN_TAGS` (currently
+/// `original_name` + `created_by`) — every backend `set_secret` write
+/// stamps these unconditionally regardless of what the caller requests, so
+/// a pre-check that omits them can pass here and still be rejected by the
+/// backend as over budget (undercounting defeats fail-before-write right
+/// at the boundary). `has_type` adds one more for the reserved `xv-type`
+/// tag (always present on a record write); `has_groups`/`has_note`/
+/// `has_folder` are conditional on whether this specific write sets them.
+pub fn reserved_tag_count(
+    has_type: bool,
+    has_groups: bool,
+    has_note: bool,
+    has_folder: bool,
+) -> usize {
+    let mut count = crate::backend::ALWAYS_WRITTEN_TAGS.len();
+    if has_type {
+        count += 1;
+    }
+    if has_groups {
+        count += 1;
+    }
+    if has_note {
+        count += 1;
+    }
+    if has_folder {
+        count += 1;
+    }
+    count
+}
+
 #[cfg(test)]
 mod tag_budget_tests {
     use super::*;
@@ -134,5 +167,44 @@ mod tag_budget_tests {
             fields.insert(format!("field{i}"), "x".repeat(10_000));
         }
         assert!(check_tag_budget(&c, 100, &fields, 100).is_ok());
+    }
+
+    #[test]
+    fn reserved_tag_count_includes_always_written_bookkeeping_tags() {
+        // xv-type + original_name + created_by, no groups/note/folder.
+        assert_eq!(reserved_tag_count(true, false, false, false), 3);
+        // All optional bookkeeping tags present too.
+        assert_eq!(reserved_tag_count(true, true, true, true), 6);
+        // Even with has_type = false, the two always-written tags still count.
+        assert_eq!(reserved_tag_count(false, false, false, false), 2);
+    }
+
+    /// Azure's real boundary (max_tags = 15): reserved_tag_count must
+    /// include original_name + created_by so a record that would total
+    /// exactly 15 tags on the wire passes, and one that would total 16
+    /// fails *before* any backend call — reproducing the under-count bug
+    /// where the old ad-hoc `reserved_count` computation (missing
+    /// original_name/created_by) let a request through that Azure's real
+    /// REST call would then reject.
+    #[test]
+    fn budget_boundary_at_azure_max_tags_matches_real_write() {
+        let c = caps(Some(15), Some(256));
+
+        // xv-type + original_name + created_by + groups = 4 reserved,
+        // plus 11 f.* metadata field tags = 15 total on the wire. Must pass.
+        let reserved = reserved_tag_count(true, true, false, false);
+        assert_eq!(reserved, 4);
+        let mut fields_15 = BTreeMap::new();
+        for i in 0..11 {
+            fields_15.insert(format!("field{i}"), "v".to_string());
+        }
+        assert!(check_tag_budget(&c, reserved, &fields_15, 0).is_ok());
+
+        // One more f.* field pushes the real wire total to 16. Must fail
+        // before write.
+        let mut fields_16 = fields_15.clone();
+        fields_16.insert("field11".to_string(), "v".to_string());
+        let err = check_tag_budget(&c, reserved, &fields_16, 0).unwrap_err();
+        assert!(err.to_string().contains("16"), "{err}");
     }
 }

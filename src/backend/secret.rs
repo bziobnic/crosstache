@@ -213,8 +213,8 @@ pub(crate) fn rename_request_from_properties(
         .filter(|g| !g.is_empty());
     let note = tags.remove("note");
     let folder = tags.remove("folder");
-    tags.remove("original_name");
-    tags.remove("created_by");
+    tags.remove(super::TAG_ORIGINAL_NAME);
+    tags.remove(super::TAG_CREATED_BY);
 
     Ok(SecretRequest {
         name: new_name.to_string(),

@@ -247,6 +247,18 @@ async fn build_record_set_request(
             }
         } else {
             let (metadata, secret_map) = route_fields(record_type, fields, secret_fields)?;
+            // Fail before prompting for the primary value: a user
+            // shouldn't be asked for a (possibly masked, hard-to-retype)
+            // secret and only afterward be told a required metadata field
+            // was missing.
+            let missing = missing_required_fields(record_type, &metadata, &secret_map);
+            if !missing.is_empty() {
+                let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
+                return Err(CrosstacheError::config(format!(
+                    "type '{type_name}' is missing required field(s): {}",
+                    names.join(", ")
+                )));
+            }
             let primary_value = if let Some(v) = value {
                 v
             } else if stdin {
@@ -275,18 +287,19 @@ async fn build_record_set_request(
         )));
     }
 
-    // Tag budget: reserved (xv-type, plus whatever SecretWriteArgs sets —
-    // groups/note/folder) + f.* metadata fields + user --tag count.
-    let mut reserved_count = 1; // xv-type
-    if !meta.group.is_empty() {
-        reserved_count += 1;
-    }
-    if meta.note.is_some() {
-        reserved_count += 1;
-    }
-    if meta.folder.is_some() {
-        reserved_count += 1;
-    }
+    // Tag budget: reserved (xv-type + the two backend-always-written
+    // bookkeeping tags + whatever SecretWriteArgs sets — groups/note/folder)
+    // + f.* metadata fields + user --tag count. `reserved_tag_count`
+    // includes `original_name`/`created_by` because every backend's
+    // `set_secret` stamps those unconditionally regardless of this
+    // pre-check — see its doc comment for why omitting them under-counts
+    // relative to what the real write attaches.
+    let reserved_count = crate::records::reserved_tag_count(
+        true, // xv-type: always present on a record write
+        !meta.group.is_empty(),
+        meta.note.is_some(),
+        meta.folder.is_some(),
+    );
     let field_tags: BTreeMap<String, String> = metadata
         .iter()
         .map(|(k, v)| (format!("{FIELD_TAG_PREFIX}{k}"), v.clone()))
@@ -552,6 +565,36 @@ fn lookup_record_field<'a>(
         .map(|s| s.as_str())
 }
 
+/// Decides the clipboard success message and whether to schedule an
+/// auto-clear for `xv get --field`, mirroring plain `get`'s clipboard
+/// handling for secret-kind fields exactly (same message shape, same
+/// `schedule_clipboard_clear` call when `timeout > 0`). Metadata-kind
+/// fields intentionally never schedule a clear: they're listable without
+/// fetching the secret at all (e.g. via `--record`, or a future `ls` field
+/// lift), so treating a clipboard copy of one as equally sensitive as a
+/// secret buys nothing. Extracted as a pure function so this branching is
+/// unit-testable without a real clipboard.
+fn field_clipboard_outcome(
+    name: &str,
+    field_name: &str,
+    is_secret_field: bool,
+    clipboard_timeout: u64,
+) -> (String, bool) {
+    if is_secret_field && clipboard_timeout > 0 {
+        (
+            format!(
+                "Field '{field_name}' of '{name}' copied to clipboard (auto-clears in {clipboard_timeout}s)"
+            ),
+            true,
+        )
+    } else {
+        (
+            format!("Field '{field_name}' of '{name}' copied to clipboard"),
+            false,
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_get_direct(
     name: &str,
@@ -648,13 +691,27 @@ pub(crate) async fn execute_secret_get_direct(
                     known.join(", ")
                 )));
             };
+            // A field found in the envelope is secret-kind; one found only
+            // via the f.<name> tag is metadata-kind (listable without
+            // fetching the secret in the first place).
+            let is_secret_field = envelope.contains_key(&field_name);
+
             if raw {
                 print!("{field_value}");
             } else {
                 match copy_to_clipboard(field_value) {
-                    Ok(()) => output::success(&format!(
-                        "Field '{field_name}' of '{name}' copied to clipboard"
-                    )),
+                    Ok(()) => {
+                        let (message, schedule_clear) = field_clipboard_outcome(
+                            name,
+                            &field_name,
+                            is_secret_field,
+                            config.clipboard_timeout,
+                        );
+                        output::success(&message);
+                        if schedule_clear {
+                            schedule_clipboard_clear(config.clipboard_timeout);
+                        }
+                    }
                     Err(e) => {
                         output::warn(&format!("Failed to copy to clipboard: {e}"));
                         eprintln!(
@@ -5694,5 +5751,38 @@ mod tests {
         let missing = missing_required_fields(&t, &BTreeMap::new(), &BTreeMap::new());
         let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["username"]);
+    }
+
+    // ── `xv get --field` clipboard auto-clear (code review follow-up) ──
+
+    #[test]
+    fn field_clipboard_outcome_secret_field_schedules_clear_like_plain_get() {
+        let (message, schedule_clear) = field_clipboard_outcome("cred", "password", true, 30);
+        assert!(schedule_clear, "secret-kind fields must schedule a clear");
+        assert!(message.contains("auto-clears in 30s"), "{message}");
+        assert!(message.contains("password"), "{message}");
+        assert!(message.contains("cred"), "{message}");
+    }
+
+    #[test]
+    fn field_clipboard_outcome_secret_field_no_clear_when_timeout_disabled() {
+        let (message, schedule_clear) = field_clipboard_outcome("cred", "password", true, 0);
+        assert!(!schedule_clear, "timeout=0 must never schedule a clear");
+        assert!(
+            !message.contains("auto-clears"),
+            "no affordance text when disabled: {message}"
+        );
+    }
+
+    #[test]
+    fn field_clipboard_outcome_metadata_field_never_schedules_clear() {
+        // Even with a non-zero timeout, a metadata-kind field (listable
+        // without fetching the secret) intentionally skips the auto-clear.
+        let (message, schedule_clear) = field_clipboard_outcome("cred", "username", false, 30);
+        assert!(
+            !schedule_clear,
+            "metadata-kind fields must not schedule a clear"
+        );
+        assert!(!message.contains("auto-clears"), "{message}");
     }
 }

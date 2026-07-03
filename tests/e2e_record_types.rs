@@ -320,6 +320,14 @@ fn get_typed_record_returns_primary_bare() {
     assert_eq!(common::stdout_str(&out2), "hunter2");
 }
 
+/// This test exercises `--field --raw`, not the clipboard path: every
+/// harness in `tests/common/mod.rs` sets `clipboard_timeout = 0` and CI
+/// runners are headless (no real clipboard), so asserting the "auto-clears
+/// in Ns" affordance line end-to-end would be flaky/environment-dependent
+/// here. The clipboard auto-clear-vs-skip decision for secret-kind vs
+/// metadata-kind fields (code review follow-up) is instead unit-tested
+/// directly against the extracted pure function `field_clipboard_outcome`
+/// — see the `field_clipboard_outcome_*` tests in `src/cli/secret_ops.rs`.
 #[test]
 fn get_field_metadata_and_secret() {
     let (mut cmd, temp) = common::xv_isolated_local();

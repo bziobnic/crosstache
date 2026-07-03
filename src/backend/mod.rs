@@ -28,6 +28,23 @@ pub mod registry;
 pub mod secret;
 pub mod vault;
 
+/// Reserved tag name for a secret's user-facing original name (before
+/// backend-specific sanitization).
+pub const TAG_ORIGINAL_NAME: &str = "original_name";
+
+/// Reserved tag name recording that crosstache wrote a secret.
+pub const TAG_CREATED_BY: &str = "created_by";
+
+/// Bookkeeping tags written unconditionally on every Azure secret write —
+/// `SecretManager::prepare_secret_request` (create, `src/secret/manager.rs`)
+/// and `azure::secrets::build_patched_tags` (attribute-only update,
+/// `src/backend/azure/secrets.rs`) — one tag slot each, always consumed
+/// regardless of what the caller requests. `records::check_tag_budget`'s
+/// pre-check must count these so it can't under-count relative to what the
+/// backend actually writes; both call sites reference this constant
+/// instead of repeating the literal strings, so the two can't drift apart.
+pub const ALWAYS_WRITTEN_TAGS: [&str; 2] = [TAG_ORIGINAL_NAME, TAG_CREATED_BY];
+
 // Re-exports for convenience.
 pub use addressing::BackendRef;
 pub use audit::{AuditBackend, AuditEvent};
