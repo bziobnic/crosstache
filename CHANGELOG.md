@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- **Record types: typed secrets with structured fields (#321). Not a breaking change** — only secrets explicitly created with `--type` or converted with `update --type` change shape; every existing/untyped secret is byte-identical on every code path (`get`/`run`/`inject`/`ls`), no envelope, no new tags, unless you opt in.
+  - Built-in types `login`, `api-key`, `database`, plus custom `[types.<name>]` blocks in `xv.conf`/`.xv.toml` (project shadows global, shadowing a built-in warns). Every type declares exactly one `primary` secret field, so plain `get`/`run` on a record return/inject that field, unchanged from today's contract.
+  - Per-field sensitivity: `metadata` fields ride tags (`f.<name>`, listable without fetching the secret); `secret` fields live in a JSON envelope inside the value, marked by a reserved `application/vnd.xv.record` content type (never JSON-sniffed).
+  - `xv type list`/`xv type show`; `xv set --type/--field/--field-secret`; `xv get --field/--record`; `xv update --field/--field-secret` (edit) and `--type/--untype` (explicit conversion, never implicit); `xv ls --type` filter plus `f.*`/`record_type` in JSON output.
+  - `xv inject`'s `{{ secret:name.field }}` template syntax and `xv://vault/name#field` URI fragment select one field; an exact secret name always wins first, so an untyped secret literally named `a.b` still resolves as itself. `xv run` gets no per-field expansion — it injects a record's primary field under its name, same as `get`.
+  - One invalid `[types.*]` block fails type resolution globally (fail-closed by design) rather than silently dropping just that type.
+  - External consumers (Azure portal, raw SDKs, older `xv` binaries) see a typed record's raw JSON envelope as its value — documented in the README, alongside the explicit-conversion rule.
+
 ### Changed
 
 - **Breaking: `xv run` now aborts before launching the child when any selected secret or `xv://` reference fails to fetch; use `--best-effort` for the old behavior** (#306). Previously a per-secret fetch failure only printed a warning and the command ran anyway, which could silently launch a process missing an env var (e.g. after a transient backend error or a permission problem). All failures across both the selected-secret list and `xv://` reference resolution are now collected and reported together before the exit.

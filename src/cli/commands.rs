@@ -667,6 +667,8 @@ pub enum Commands {
         command: Vec<String>,
     },
     /// Inject secrets into a template file using {{ secret:name }} syntax
+    /// (or {{ secret:name.field }} / xv://vault/name#field for one field of
+    /// a typed record)
     Inject {
         /// Template file path (reads from stdin if not specified)
         #[arg(short, long)]
