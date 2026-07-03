@@ -440,6 +440,62 @@ mod tests {
         assert_eq!(retrieved, Some(data));
     }
 
+    /// Bugbot MEDIUM review (record-types plan): `SecretSummary` gained a
+    /// `tags` field with `#[serde(default)]`, so a v1-schema secrets-list
+    /// cache entry written before that change would deserialize
+    /// successfully but with an empty `tags` map — silently hiding every
+    /// typed secret's `xv-type`/`f.*` tags from `ls --type`/the TYPE column
+    /// until TTL expiry. The fix renames the on-disk filename
+    /// (`secrets-list.json` -> `secrets-list-v2.json`, see
+    /// `SECRETS_LIST_FILENAME` in `cache::models`) so a pre-existing v1
+    /// entry simply misses instead of silently deserializing into
+    /// incomplete data. This test writes a legacy-shaped entry at the OLD
+    /// path directly (bypassing `CacheManager::set`, which only ever
+    /// writes the current path) and asserts `get` treats it as absent.
+    #[test]
+    fn test_get_misses_legacy_pre_v2_secrets_list_cache_file() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path(), true, 300);
+        let key = CacheKey::SecretsList {
+            vault_name: "myvault".to_string(),
+        };
+
+        // Simulate a cache entry written by a pre-Task-10 binary: same
+        // vault directory, but the OLD filename and a payload shaped like
+        // the OLD (tags-less) SecretSummary.
+        let legacy_dir = dir.path().join("myvault");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_path = legacy_dir.join("secrets-list.json");
+        let legacy_json = serde_json::json!({
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "ttl_secs": 300,
+            "vault_name": "myvault",
+            "entry_type": "SecretsList",
+            "data": [{"name": "cred", "note": null, "folder": null, "groups": null, "updated_on": "", "original_name": "cred"}]
+        });
+        std::fs::write(&legacy_path, legacy_json.to_string()).unwrap();
+
+        // The new code path never looks at the old filename — a cache
+        // miss, not a hit with an empty `tags` map masking a typed secret.
+        let result: Option<Vec<crate::secret::manager::SecretSummary>> = mgr.get(&key);
+        assert!(
+            result.is_none(),
+            "legacy pre-v2 cache entry must miss, not silently deserialize: {result:?}"
+        );
+
+        // The current writer never touches the legacy path either.
+        let data = vec![];
+        mgr.set::<Vec<crate::secret::manager::SecretSummary>>(&key, &data);
+        assert!(
+            legacy_path.exists(),
+            "set() must not overwrite/consume the legacy file"
+        );
+        assert!(
+            key.to_path(dir.path()).ends_with("secrets-list-v2.json"),
+            "current schema must resolve to the v2 filename"
+        );
+    }
+
     #[test]
     fn test_get_returns_none_for_expired_entry() {
         // TTL = 0 means every entry is immediately expired.

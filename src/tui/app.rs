@@ -43,6 +43,14 @@ pub struct App {
     pub secrets_loading: bool,
 
     pub values: HashMap<(String, String), Zeroizing<String>>,
+    /// Content type of the fetched value in `values`, keyed the same way.
+    /// Populated alongside `values` from `Message::ValueLoaded`. Lets the
+    /// detail pane gate value-line masking on the actual content-type
+    /// marker at reveal time (`crate::records::is_record`), not just the
+    /// list-summary's `xv-type` tag, which can be absent/stripped while
+    /// the secret is still a record (record-types plan, Bugbot LOW
+    /// review).
+    pub value_content_types: HashMap<(String, String), String>,
     pub value_revealed: bool,
     pub value_loading: bool,
     /// (vault, name, ticks_left) — when ticks_left hits 0, fire LoadValue.
@@ -71,6 +79,7 @@ impl App {
             secret_filter_active: false,
             secrets_loading: false,
             values: HashMap::new(),
+            value_content_types: HashMap::new(),
             value_revealed: false,
             value_loading: false,
             value_debounce: None,

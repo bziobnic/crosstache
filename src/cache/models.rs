@@ -27,6 +27,23 @@ pub enum CacheEntryType {
     FileList,
 }
 
+/// On-disk filename for the secrets-list cache entry, versioned in the name
+/// itself so a schema change to the cached payload (`SecretSummary`) makes
+/// old entries simply miss instead of deserializing into wrong/incomplete
+/// data.
+///
+/// Bumped v1 -> v2 for the record-types plan (Task 10): `SecretSummary`
+/// gained a `tags` field with `#[serde(default)]`, so a pre-existing v1
+/// cache entry written before that change would deserialize successfully
+/// but with an EMPTY `tags` map — silently hiding every typed secret's
+/// `xv-type`/`f.*` tags from `ls --type` and the `ls` TYPE column until the
+/// entry's TTL expired (Bugbot review: "a cache hit hides typed secrets").
+/// Renaming the file (rather than trying to detect "empty tags" as stale)
+/// is deliberate: legitimately untagged secrets exist, so an empty map is
+/// not itself evidence of staleness. Bump this suffix again on any future
+/// change to `SecretSummary`'s shape.
+const SECRETS_LIST_FILENAME: &str = "secrets-list-v2.json";
+
 /// Identifies a cache entry and determines its file path.
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
@@ -96,13 +113,13 @@ impl CacheKey {
                     Ok(()) => vault_name.clone(),
                     Err(_) => safe_fallback_dir(vault_name),
                 };
-                let candidate = cache_dir.join(&dir_name).join("secrets-list.json");
+                let candidate = cache_dir.join(&dir_name).join(SECRETS_LIST_FILENAME);
                 if ensure_cache_child_path(cache_dir, &candidate) {
                     candidate
                 } else {
                     cache_dir
                         .join(safe_fallback_dir(vault_name))
-                        .join("secrets-list.json")
+                        .join(SECRETS_LIST_FILENAME)
                 }
             }
             CacheKey::VaultList => cache_dir.join("vaults-list.json"),
@@ -332,7 +349,7 @@ mod tests {
         };
         assert_eq!(
             key.to_path(&base),
-            PathBuf::from("/cache/myvault/secrets-list.json")
+            PathBuf::from("/cache/myvault/secrets-list-v2.json")
         );
 
         let key = CacheKey::VaultList;

@@ -1079,6 +1079,86 @@ fn update_field_on_untyped_errors() {
     );
 }
 
+/// Bugbot MEDIUM review: combining a record-path flag (`--field`,
+/// `--field-secret`, `--type`, `--untype`) with a classic update flag
+/// (`--note`, `--tags`, `--folder`, the positional value, etc.) used to
+/// early-return after applying only the record edit, silently ignoring the
+/// classic flag while still reporting success. Now a clap usage error
+/// (exit 2) before anything runs, and nothing is changed.
+#[test]
+fn update_field_with_classic_flag_is_a_usage_error() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "cred");
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "--field", "username=alice", "--note", "n"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(2),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    // Nothing changed — neither the field edit nor the note was applied.
+    let after = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(before, after);
+}
+
+/// Bugbot MEDIUM review: `xv update <name> --type <t>` converting AND
+/// replacing the primary value in the same command (a positional VALUE
+/// arg alongside `--type`) is now a usage error — convert first, then set
+/// the primary via `xv update <name> --field-secret <primary>=<value>`.
+#[test]
+fn update_type_with_positional_value_is_a_usage_error() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "bare", "--value", "hunter2"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "bare", "--type", "login", "new-value"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(2),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("--type"), "stderr: {stderr}");
+
+    // Nothing changed — the secret is still untyped with its original value.
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "bare", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "hunter2");
+}
+
 // ---------------------------------------------------------------------------
 // Task 9: `xv update --type` / `--untype` conversion
 // ---------------------------------------------------------------------------

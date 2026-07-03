@@ -22,6 +22,20 @@ const MASKED_FIELD_VALUE: &str = "●●●●●●●●";
 /// reveal/mask/loading behavior exactly.
 const TYPED_RECORD_VALUE_PLACEHOLDER: &str = "value: <typed record — see Fields>";
 
+/// Whether the detail pane should treat the selected secret as a typed
+/// record, for value-line masking purposes (Bugbot LOW review). Gates on
+/// the fetched content-type marker whenever it's known (the authoritative
+/// signal — "content-type decides record-ness", never tag/JSON sniffing),
+/// OR-ed with the list-summary's `xv-type` tag for the pre-fetch state
+/// (before reveal there's no fetched content-type yet to check). A record
+/// whose `xv-type` tag is absent or stripped but whose content type is
+/// still `application/vnd.xv.record` must still be masked — tag-only
+/// detection previously let that combination fall through and print the
+/// raw envelope JSON.
+fn is_typed_record(summary_has_type_tag: bool, fetched_content_type: Option<&str>) -> bool {
+    summary_has_type_tag || fetched_content_type.is_some_and(crate::records::is_record)
+}
+
 /// Pure formatter for the top `value:` line, so its branching (typed vs
 /// untyped, revealed vs masked vs loading vs no-selection) is unit
 /// testable without a real `App`/terminal.
@@ -175,11 +189,16 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
             s.original_name.as_str()
         };
         lines.push(Line::raw(format!("name: {display}")));
-        let is_typed_record = s.tags.contains_key(crate::records::TYPE_TAG);
         let selection_key = app.selected_vault_and_name();
         let fetched = selection_key.as_ref().and_then(|k| app.values.get(k));
+        let fetched_content_type = selection_key
+            .as_ref()
+            .and_then(|k| app.value_content_types.get(k));
         let line = value_line(
-            is_typed_record,
+            is_typed_record(
+                s.tags.contains_key(crate::records::TYPE_TAG),
+                fetched_content_type.map(String::as_str),
+            ),
             app.value_revealed,
             selection_key.is_some(),
             fetched.map(|v| v.as_str()),
@@ -278,6 +297,35 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn is_typed_record_gates_on_content_type_when_tag_absent() {
+        // Bugbot LOW review: a record whose `xv-type` tag is absent/
+        // stripped but whose fetched content type still says
+        // `application/vnd.xv.record` must still be treated as typed.
+        assert!(is_typed_record(
+            false,
+            Some(crate::records::RECORD_CONTENT_TYPE)
+        ));
+        // Tag present, content type not yet fetched (pre-reveal state).
+        assert!(is_typed_record(true, None));
+        // Neither signal present: a genuinely untyped secret.
+        assert!(!is_typed_record(false, None));
+        // Tag absent, fetched content type says plain text: not a record.
+        assert!(!is_typed_record(false, Some("text/plain")));
+    }
+
+    #[test]
+    fn value_line_masks_when_only_content_type_signals_a_record() {
+        // End-to-end through value_line: is_typed_record(false, Some(record
+        // content type)) must still route to the masked placeholder, not
+        // the raw envelope JSON.
+        let typed = is_typed_record(false, Some(crate::records::RECORD_CONTENT_TYPE));
+        assert_eq!(
+            value_line(typed, true, true, Some(r#"{"password":"hunter2"}"#), false),
+            TYPED_RECORD_VALUE_PLACEHOLDER,
+        );
     }
 
     #[test]

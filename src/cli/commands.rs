@@ -738,24 +738,55 @@ pub enum Commands {
         /// a typed record, `name=value` (repeatable). A metadata-field edit
         /// is tag-only; a secret-field edit rewrites the record envelope as
         /// a new version. Errors if the secret is untyped. Mutually
-        /// exclusive with --type/--untype.
-        #[arg(long = "field", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = ["type", "untype"])]
+        /// exclusive with --type/--untype and with every classic update
+        /// flag (--value/--stdin/--note/--tags/--folder/etc.) — a record
+        /// field edit is a standalone operation in v1; compound edits are
+        /// two commands (e.g. `xv update x --note n` then
+        /// `xv update x --field a=b`).
+        #[arg(long = "field", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = [
+            "type", "untype",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
         fields: Vec<(String, String)>,
         /// Edit an ad-hoc secret field of a typed record, `name=value`
         /// (repeatable) — stored in the record envelope. Mutually
-        /// exclusive with --type/--untype.
-        #[arg(long = "field-secret", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = ["type", "untype"])]
+        /// exclusive with --type/--untype and with every classic update
+        /// flag; see --field's note.
+        #[arg(long = "field-secret", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = [
+            "type", "untype",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
         secret_fields: Vec<(String, String)>,
         /// Explicitly convert a bare secret into a typed record: its
         /// current value becomes the primary field. Errors if the secret
-        /// is already a record. Mutually exclusive with --untype/--field/--field-secret.
-        #[arg(long = "type", conflicts_with_all = ["untype", "fields", "secret_fields"])]
+        /// is already a record. Mutually exclusive with --untype/--field/
+        /// --field-secret and with every classic update flag, INCLUDING
+        /// --value/--stdin: converting and replacing the primary value in
+        /// one step is not supported in v1 — convert first (this command,
+        /// no --value/--stdin), then set the primary via
+        /// `xv update <name> --field-secret <primary-field>=<value>`.
+        #[arg(long = "type", conflicts_with_all = [
+            "untype", "fields", "secret_fields",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
         r#type: Option<String>,
         /// Flatten a typed record back to a bare secret holding the
         /// primary field's value. Dropping non-primary secret fields
         /// prompts for confirmation unless --yes is given. Mutually
-        /// exclusive with --type/--field/--field-secret.
-        #[arg(long, conflicts_with_all = ["type", "fields", "secret_fields"])]
+        /// exclusive with --type/--field/--field-secret and with every
+        /// classic update flag; see --field's note.
+        #[arg(long, conflicts_with_all = [
+            "type", "fields", "secret_fields",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
         untype: bool,
         /// Skip the confirmation prompt when --untype would drop
         /// non-primary secret fields.
