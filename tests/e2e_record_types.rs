@@ -328,6 +328,81 @@ fn set_typed_rejects_tag_colliding_with_field_prefix() {
     assert!(!meta_path.exists(), "nothing must be written on rejection");
 }
 
+/// Bugbot PR #322 re-review: `xv set --type` with `--field` values but no
+/// `--value`/`--stdin` must not hang waiting on a TTY that will never
+/// arrive — the test harness's stdin is not a TTY (it's whatever
+/// std::process::Command inherits/pipes by default in a test process), so
+/// this exercises exactly the non-interactive-without-primary path.
+#[test]
+fn set_typed_missing_value_non_tty_fails_before_write_mentions_stdin() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "cred", "--type", "login", "--field", "username=bob"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("--stdin"), "stderr: {stderr}");
+
+    let meta_path = temp
+        .path()
+        .join("store")
+        .join("vaults")
+        .join("default")
+        .join("secrets")
+        .join("cred.meta.json");
+    assert!(!meta_path.exists(), "nothing must be written on rejection");
+}
+
+/// Bugbot PR #322 re-review: `--field a=1 --field-secret a=2` must be
+/// rejected rather than silently storing `a` as both an f.* tag and an
+/// envelope entry (which `get --field a` would then read inconsistently —
+/// envelope first, silently ignoring the tag).
+#[test]
+fn set_typed_rejects_duplicate_field_across_field_and_field_secret() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--field",
+            "a=1",
+            "--field-secret",
+            "a=2",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains('a'), "stderr: {stderr}");
+
+    let meta_path = temp
+        .path()
+        .join("store")
+        .join("vaults")
+        .join("default")
+        .join("secrets")
+        .join("cred.meta.json");
+    assert!(!meta_path.exists(), "nothing must be written on rejection");
+}
+
 #[test]
 fn type_show_unknown_errors() {
     let (mut cmd, _temp) = common::xv_isolated_local();

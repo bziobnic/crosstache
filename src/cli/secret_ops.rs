@@ -76,6 +76,23 @@ fn route_fields(
     fields: &[(String, String)],
     secret_fields: &[(String, String)],
 ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+    // Reject the same field name appearing more than once across
+    // --field/--field-secret (or repeated within one flag) before doing
+    // anything else. Two values for one field would otherwise silently
+    // pick a winner depending on kind/insertion order — e.g. `--field
+    // a=1 --field-secret a=2` would store `a` as both an f.* tag AND an
+    // envelope entry, and `get --field a` would only ever see the
+    // envelope one, silently ignoring the tag.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (name, _) in fields.iter().chain(secret_fields.iter()) {
+        if !seen.insert(name.as_str()) {
+            return Err(CrosstacheError::config(format!(
+                "field '{name}' was supplied more than once across --field/--field-secret; \
+                 each field may only be set once"
+            )));
+        }
+    }
+
     let mut metadata: BTreeMap<String, String> = BTreeMap::new();
     let mut secret: BTreeMap<String, String> = BTreeMap::new();
 
@@ -223,6 +240,7 @@ async fn build_record_set_request(
     meta: &SecretWriteArgs,
     config: &Config,
     caps: BackendCapabilities,
+    backend_kind: crate::backend::BackendKind,
 ) -> Result<crate::secret::manager::SecretRequest> {
     let types = config.resolve_record_types().await?;
     let Some(record_type) = find_type(&types, type_name) else {
@@ -287,11 +305,22 @@ async fn build_record_set_request(
                 v
             } else if stdin {
                 read_secret_value_from_stdin(trim)?
-            } else {
+            } else if std::io::stdin().is_terminal() {
                 rpassword::prompt_password(format!(
                     "Enter value for '{}' (primary field of '{type_name}'): ",
                     record_type.primary().name
                 ))?
+            } else {
+                // No TTY to prompt on: don't hang scripts/CI waiting on
+                // stdin that will never produce input. Fail before write
+                // with a clear, actionable message instead of an opaque
+                // "empty primary" error further down.
+                return Err(CrosstacheError::config(format!(
+                    "type '{type_name}' requires a value for its primary field \
+                     ('{}'), and no TTY is available to prompt for one; pass \
+                     --value or --stdin",
+                    record_type.primary().name
+                )));
             };
             (metadata, secret_map, primary_value)
         };
@@ -313,17 +342,23 @@ async fn build_record_set_request(
 
     // Tag budget: reserved (xv-type + the two backend-always-written
     // bookkeeping tags + whatever SecretWriteArgs sets — groups/note/folder)
+    // + backend-specific extras (AWS's xv:content_type/xv:expires_at tags)
     // + f.* metadata fields + user --tag count. `reserved_tag_count`
     // includes `original_name`/`created_by` because every backend's
     // `set_secret` stamps those unconditionally regardless of this
     // pre-check — see its doc comment for why omitting them under-counts
-    // relative to what the real write attaches.
-    let reserved_count = crate::records::reserved_tag_count(
-        true, // xv-type: always present on a record write
-        !meta.group.is_empty(),
-        meta.note.is_some(),
-        meta.folder.is_some(),
-    );
+    // relative to what the real write attaches. `backend_extra_reserved_tags`
+    // covers AWS's additional always/conditionally-written tags that the
+    // universal (Azure-shaped) count above doesn't know about — without
+    // it, a record could pass this pre-check and still blow AWS's 50-tag
+    // cap at the API.
+    let reserved_count =
+        crate::records::reserved_tag_count(
+            true, // xv-type: always present on a record write
+            !meta.group.is_empty(),
+            meta.note.is_some(),
+            meta.folder.is_some(),
+        ) + crate::records::backend_extra_reserved_tags(backend_kind, meta.expires.is_some());
     let field_tags: BTreeMap<String, String> = metadata
         .iter()
         .map(|(k, v)| (format!("{FIELD_TAG_PREFIX}{k}"), v.clone()))
@@ -431,6 +466,7 @@ pub(crate) async fn execute_secret_set_direct(
                 &meta,
                 &config,
                 reg.active().capabilities(),
+                reg.active().kind(),
             )
             .await?;
             let props = reg
@@ -5770,6 +5806,27 @@ mod tests {
         let (metadata, secret) = route_fields(&t, &[], &secret_fields).unwrap();
         assert!(metadata.is_empty());
         assert_eq!(secret.get("totp"), Some(&"x".to_string()));
+    }
+
+    #[test]
+    fn route_fields_rejects_duplicate_across_field_and_field_secret() {
+        // Bugbot follow-up: `--field a=1 --field-secret a=2` must not
+        // silently store `a` as both an f.* tag and an envelope entry.
+        let t = login_type();
+        let fields = vec![("custom".to_string(), "1".to_string())];
+        let secret_fields = vec![("custom".to_string(), "2".to_string())];
+        let err = route_fields(&t, &fields, &secret_fields).unwrap_err();
+        assert!(err.to_string().contains("custom"), "{err}");
+    }
+
+    #[test]
+    fn route_fields_rejects_duplicate_within_field_alone() {
+        let t = login_type();
+        let fields = vec![
+            ("custom".to_string(), "1".to_string()),
+            ("custom".to_string(), "2".to_string()),
+        ];
+        assert!(route_fields(&t, &fields, &[]).is_err());
     }
 
     #[test]
