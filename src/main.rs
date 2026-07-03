@@ -84,27 +84,13 @@ async fn run_complete_folders() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     info!("Starting crosstache");
 
-    // Load configuration differently based on command
-    let mut config = match &cli.command {
-        crate::cli::Commands::Config { .. }
-        | crate::cli::Commands::Init
-        | crate::cli::Commands::Upgrade { .. }
-        | crate::cli::Commands::Version
-        | crate::cli::Commands::Completion { .. }
-        | crate::cli::Commands::Migrate { .. } => {
-            // These commands don't talk to Azure — skip credential validation.
-            load_config_without_validation().await?
-        }
-        _ => {
-            // For other commands: load WITHOUT validation here. Validation is
-            // deferred until after the `.xv.toml` env-profile backend has
-            // been resolved and folded into `config.backend` below — a
-            // profile selecting `local`/`aws` must not be rejected against
-            // global Azure config that was never going to be used
-            // (issue #305).
-            load_config_without_validation().await?
-        }
-    };
+    // Load configuration WITHOUT validation for every command. Validation is
+    // deferred until after the `.xv.toml` env-profile backend has been
+    // resolved and folded into `config.backend` below (and only performed
+    // for commands that actually need a backend) — a profile selecting
+    // `local`/`aws` must not be rejected against global Azure config that
+    // was never going to be used (issue #305).
+    let mut config = load_config_without_validation().await?;
 
     // Apply CLI --env flag to config (used by resolve_vault_name and
     // resolve_resource_group when consulting .xv.toml).
@@ -117,7 +103,12 @@ async fn run(cli: Cli) -> Result<()> {
     // now gated on it rather than on `cli.backend.is_none()` — a real
     // `--backend` flag should suppress the profile lookup, but `XV_BACKEND`
     // alone must not (issue #305).
+    // Stop scanning at the `--` separator: tokens after it belong to a
+    // passthrough child command (e.g. `xv run -- echo --backend prod`) and
+    // must not be mistaken for a real `--backend` flag on `xv` itself.
     let cli_backend_was_arg = std::env::args_os()
+        .skip(1)
+        .take_while(|a| a != "--")
         .any(|a| a == "--backend" || a.to_string_lossy().starts_with("--backend="));
 
     // Resolve env-profile backend (validate early; fail before touching Azure).
@@ -211,13 +202,11 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
         ));
     }
 
-    // Commands that are purely local (Config, Init, Cache, Context, etc.) never
-    // talk to a secrets backend and so must not be validated against one —
-    // Config/Init/Upgrade/Version/Completion/Migrate already returned an
-    // unvalidated config from the match above; the rest are excluded here.
-    // Computed BEFORE validation (moved up from its original position just
-    // above the registry-construction block below) so `needs_backend` can
-    // gate both.
+    // Commands that never talk to a secrets backend (this `matches!` is the
+    // source of truth for exactly which ones) must not be validated against
+    // one. Computed BEFORE validation (moved up from its original position
+    // just above the registry-construction block below) so `needs_backend`
+    // can gate both.
     let needs_backend = !matches!(
         cli.command,
         crate::cli::Commands::Config { .. }

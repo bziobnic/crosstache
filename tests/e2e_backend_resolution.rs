@@ -229,3 +229,37 @@ failed (exit {:?})\nstdout: {stdout}\nstderr: {stderr}",
         "XV_BACKEND=local should have selected the local backend: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test E: a literal `--backend` token after `--` (passthrough child-command
+// args) must not be mistaken for a real `--backend` flag on `xv` itself.
+// ---------------------------------------------------------------------------
+//
+// `xv run -- echo --backend prod` carries a `--backend` token that belongs
+// to the child command, not to `xv`. Before the fix, the `cli_backend_was_arg`
+// scan over `std::env::args_os()` did not stop at the `--` separator, so it
+// matched this passthrough token, set `cli_backend_was_arg = true`, and
+// suppressed the `.xv.toml` profile lookup — with `cli.backend` still `None`
+// (clap correctly left the real `--backend` flag unset), the effective
+// backend silently fell through to the global/azure layer instead of the
+// profile's `local` backend.
+#[test]
+fn backend_token_after_separator_is_not_mistaken_for_cli_flag() {
+    let env = BackendResolutionEnv::new();
+    env.write_local_profile();
+
+    let output = env.run(&mut env.xv(), &["run", "--", "echo", "--backend", "prod"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "expected the .xv.toml local profile to still win when a passthrough child-command arg \
+contains a literal `--backend` token, but the command failed (exit {:?})\nstdout: {stdout}\n\
+stderr: {stderr}",
+        output.status.code(),
+    );
+    assert!(
+        !stderr.contains("Subscription ID is required"),
+        "a passthrough `--backend` token after `--` must not suppress the .xv.toml profile: {stderr}"
+    );
+}
