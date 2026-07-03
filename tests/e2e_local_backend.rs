@@ -1704,3 +1704,169 @@ fn run_best_effort_launches_child_despite_failing_uri_reference() {
         "child process should have run under --best-effort"
     );
 }
+
+// ===========================================================================
+// Cross-vault move / copy (issue #307)
+// ===========================================================================
+
+#[test]
+fn move_without_force_refuses_to_overwrite_existing_target() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest"]);
+
+    env.set_secret("src-secret", "src-value");
+    // Set a target secret directly in the destination vault.
+    env.xv_ok(&["context", "use", "dest", "--global"]);
+    env.set_secret("dst-secret", "dst-original-value");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+
+    let (_stdout, stderr) = env.xv_fail(&[
+        "move",
+        "src-secret",
+        "--from",
+        "default",
+        "--to",
+        "dest",
+        "--new-name",
+        "dst-secret",
+    ]);
+    assert!(
+        stderr.contains("already exists"),
+        "expected 'already exists' error, got:\n{stderr}"
+    );
+
+    // Both secrets are unchanged.
+    assert_eq!(env.get_raw("src-secret"), "src-value");
+    env.xv_ok(&["context", "use", "dest", "--global"]);
+    assert_eq!(env.get_raw("dst-secret"), "dst-original-value");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+}
+
+#[test]
+fn move_with_force_overwrites_existing_target_and_deletes_source() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest"]);
+
+    env.set_secret("src-secret2", "src-value2");
+    env.xv_ok(&["context", "use", "dest", "--global"]);
+    env.set_secret("dst-secret2", "dst-original-value2");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+
+    env.xv_ok(&[
+        "move",
+        "src-secret2",
+        "--from",
+        "default",
+        "--to",
+        "dest",
+        "--new-name",
+        "dst-secret2",
+        "--force",
+    ]);
+
+    // Destination now holds the source's value.
+    env.xv_ok(&["context", "use", "dest", "--global"]);
+    assert_eq!(env.get_raw("dst-secret2"), "src-value2");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+
+    // Source is gone.
+    let (_, stderr) = env.xv_fail(&["get", "src-secret2", "--raw"]);
+    assert!(
+        stderr.to_lowercase().contains("not found"),
+        "source secret should be gone after forced move:\n{stderr}"
+    );
+}
+
+#[test]
+fn copy_refuses_to_overwrite_existing_target_even_semantics_unchanged() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest2"]);
+
+    env.set_secret("copy-src", "copy-src-value");
+    env.xv_ok(&["context", "use", "dest2", "--global"]);
+    env.set_secret("copy-dst", "copy-dst-original");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+
+    let (_stdout, stderr) = env.xv_fail(&[
+        "copy",
+        "copy-src",
+        "--from",
+        "default",
+        "--to",
+        "dest2",
+        "--new-name",
+        "copy-dst",
+    ]);
+    assert!(
+        stderr.contains("already exists"),
+        "expected 'already exists' error, got:\n{stderr}"
+    );
+
+    // Both secrets are unchanged; copy has no --force flag to override this.
+    assert_eq!(env.get_raw("copy-src"), "copy-src-value");
+    env.xv_ok(&["context", "use", "dest2", "--global"]);
+    assert_eq!(env.get_raw("copy-dst"), "copy-dst-original");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+}
+
+#[test]
+fn move_preserves_group_folder_and_note_metadata() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest3"]);
+
+    env.set_secret_with_args(
+        "meta-src",
+        "meta-value",
+        &[
+            "--group",
+            "backend",
+            "--folder",
+            "prod",
+            "--note",
+            "something",
+        ],
+    );
+
+    env.xv_ok(&[
+        "move",
+        "meta-src",
+        "--from",
+        "default",
+        "--to",
+        "dest3",
+        "--new-name",
+        "meta-dst",
+        "--force",
+    ]);
+
+    // Value moved.
+    env.xv_ok(&["context", "use", "dest3", "--global"]);
+    assert_eq!(env.get_raw("meta-dst"), "meta-value");
+
+    // Group/folder/note metadata rode along to the destination vault; the
+    // local backend's `set_secret` only reads these from the dedicated
+    // `SecretRequest` fields (not raw tags), so hand-building the request
+    // without lifting them out of `tags` silently drops them.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        json.contains("meta-dst")
+            && json.contains("backend")
+            && json.contains("prod")
+            && json.contains("something"),
+        "group/folder/note metadata missing after move:\n{json}"
+    );
+
+    let group_list = env.xv_ok(&["group", "list", "--format", "json"]);
+    assert!(
+        group_list.contains("backend"),
+        "moved secret's group not visible to 'group list':\n{group_list}"
+    );
+
+    let folder_ls = env.xv_ok(&["ls", "prod", "--format", "json"]);
+    assert!(
+        folder_ls.contains("meta-dst"),
+        "moved secret not visible under its folder via 'ls prod':\n{folder_ls}"
+    );
+
+    env.xv_ok(&["context", "use", "default", "--global"]);
+}
