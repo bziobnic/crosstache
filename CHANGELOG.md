@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.18.0 — Filesystem verbs: xv mv, ls aliases everywhere, and reliable rename (2026-07-02)
 
 ### Added
 
