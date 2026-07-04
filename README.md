@@ -5,13 +5,15 @@ A cross-platform secrets manager for the command line. Pluggable backends: Azure
 ```bash
 xv set DB_PASSWORD                     # store a secret (prompts for value)
 xv get DB_PASSWORD                     # copy to clipboard (auto-clears in 30s)
-xv get DB_PASSWORD --raw                # print to stdout (for scripts)
+xv get DB_PASSWORD --raw               # print to stdout (for scripts)
 xv run -- npm start                    # run a process with all secrets injected as env vars
-xv find db --names-only | fzf          # interactive picker, pipe-friendly
+xv set cred --type login --field username=bob   # structured record: username rides along
+xv find --filter 'test-*' --names-only # every secret starting with "test-"
+xv mv --filter 'test-*' archive/       # bulk-move them into a folder
 xv scan install                        # block secret leaks before commit
 ```
 
-**Phase 1 (v0.7) highlights:** structured exit codes for scripting · `.xv.toml` env profiles with walk-up resolution · ranked fuzzy `xv find` · pre-commit leak scanner that matches files against your *actual* vault values · optional read-only TUI behind a feature flag.
+**v0.19 highlights:** record types — structured secrets with typed fields (`login`, `api-key`, `database`, plus custom types) · `--filter <GLOB>` on `ls`/`find`/`mv` · fail-fast `xv run`/`xv inject` (no more silently-missing env vars or half-rendered configs; `--best-effort` opts out) · `.xv.toml` group/folder defaults actually applied · pre-commit leak scanner that matches files against your *actual* vault values.
 
 ---
 
@@ -59,8 +61,7 @@ xv get DB_PASSWORD --raw                 # prints to stdout (scripts)
 # 4. Inject secrets into a process
 xv run -- ./my-app                       # all secrets in active vault → env vars
 
-# 5. Browse interactively (optional TUI)
-cargo install crosstache --features tui
+# 5. Browse interactively (TUI — included in the pre-built release binaries)
 xv tui
 ```
 
@@ -372,6 +373,16 @@ xv scan install                          # writes .git/hooks/pre-commit
 git commit -m "..."                      # hook scans staged files; exit 50 blocks commit on findings
 ```
 
+### Finding and cleaning up by name pattern
+
+```bash
+xv find --filter 'test-*' --names-only   # what's there? (bare names, pipe-friendly)
+xv ls --filter 'test-*' -l               # same set, with metadata
+xv mv --filter 'test-*' archive/ --dry-run   # preview the bulk move
+xv mv --filter 'test-*' archive/ --yes       # move them all in one confirmed plan
+xv find scratch --min-score 0.5          # fuzzy, when you don't remember the exact prefix
+```
+
 ---
 
 ## Secrets — CRUD
@@ -443,7 +454,9 @@ xv mv db/pass app/pw        # move to folder 'app' and rename to 'pw'
 xv mv db/pass newname       # rename to 'newname' at root
 xv mv app/pass /            # move to root (clears the folder tag)
 xv mv app/ svc/             # bulk: re-folder every secret under 'app/' to 'svc/'
-xv mv --filter 'test-*' archive/   # bulk: re-folder every secret matching a glob
+xv mv --filter 'test-*' archive/ --dry-run   # preview a glob-matched bulk move
+xv mv --filter 'test-*' archive/             # then do it (count + sample confirmation)
+xv mv --filter 'tmp-*' / --yes               # send matches back to the vault root, no prompt
 ```
 
 A trailing `/` marks a folder path (source or destination); `/` alone means
@@ -581,6 +594,42 @@ xv ls --format json                       # includes "record_type" and a "fields
 exclusive with each other and with every classic update flag
 (`--value`/`--stdin`/`--note`/`--tags`/…) — a record field edit or
 conversion is a standalone operation in v1.
+
+### Worked example — a database record end to end
+
+```bash
+# Create: host/port/database/username are listable metadata; password is the
+# encrypted primary. Interactive `xv set prod-db --type database` prompts for
+# each field in order; non-interactive:
+xv set prod-db --type database \
+  --field host=db.prod.internal --field port=5432 \
+  --field database=main --field username=app_rw \
+  --value 's3cr3t-pw'
+
+xv get prod-db --raw                     # → s3cr3t-pw     (primary, same as any secret)
+xv get prod-db --field host --raw        # → db.prod.internal
+xv get prod-db --record --format json    # every field in one JSON object
+
+xv ls --type database                    # all database records
+xv run --include prod-db -- ./migrate.sh # child sees PROD_DB=s3cr3t-pw (primary only; dashes become underscores)
+
+# Rotate the primary: a bare-value update on a record sets its primary field,
+# leaving every other field and all metadata untouched:
+xv update prod-db n3w-pw
+
+# The optional connection-string secret field, when you need it:
+xv update prod-db --field-secret connection-string='postgres://app_rw:n3w-pw@db.prod.internal:5432/main'
+xv get prod-db --field connection-string --raw
+```
+
+And a custom type from the `[types.smtp]` block above:
+
+```bash
+xv type show smtp                        # confirm the resolved fields + source
+xv set mailer --type smtp --field host=smtp.example.com --field port=587 \
+  --field username=mailer@example.com --value 'smtp-password'
+xv get mailer --field username --raw     # → mailer@example.com
+```
 
 ### Inject field syntax
 
@@ -722,11 +771,19 @@ xv ls --filter 'test-*' --names-only     # glob filter on the name, applied befo
 
 `--names-only` overrides `--format` and writes to stdout regardless of TTY status. Designed for scripts and pipes.
 
-`--filter <GLOB>` matches a glob pattern against the secret's name (either its
-displayed name or its backend/sanitized name), the same rule `xv migrate
---filter` and `xv mv`/`xv run --include` use. Matching is case-sensitive and
+`--filter <GLOB>` matches a glob pattern against the secret's name — either its
+displayed name or its backend/sanitized name, the same either-name rule
+`xv mv` and `xv run --include` use. (`xv migrate --filter` shares the glob
+syntax but matches backend names only.) Matching is case-sensitive and
 whole-name (`test-*` matches `test-db`, never `latest-db`). Composes with the
-folder positional, `--type`, `--deleted`, and every output format.
+folder positional, `--type`, `--deleted`, and every output format:
+
+```bash
+xv ls --filter 'db-*'                    # just the db-* secrets, normal grid
+xv ls --filter '*-prod' --type login     # combine with a record-type filter
+xv ls --filter 'test-?' --deleted        # ? and [ab] glob classes work too
+xv ls --filter '[' ; echo "exit $?"      # invalid glob → error before any backend call (exit 2)
+```
 
 ### Fuzzy — `xv find`
 
@@ -980,8 +1037,13 @@ xv copy API_KEY --from vault-a --to vault-b --new-name API_KEY_V2
 xv copy --group production --from vault-a --to vault-b   # bulk
 
 xv move API_KEY --from vault-a --to vault-b
-xv move API_KEY --from vault-a --to vault-b --force      # skip confirmation
+xv move API_KEY --from vault-a --to vault-b --force      # overwrite an existing target and skip confirmation
 ```
+
+Without `--force`, `xv move` refuses when the destination already has a secret
+with that name; with it, the target is overwritten (the source is deleted only
+after the copy succeeds). `xv copy` always refuses to overwrite — there is no
+`--force` on copy.
 
 ### Find across vaults
 
@@ -1109,8 +1171,16 @@ JSON envelope (`--format json`) on **stdout**:
 [scan]
 exclude = ["dist/**", "*.lock", "vendor/**"]
 min_value_length = 12
-patterns = ["aws", "github", "stripe"]
+patterns = ["aws-access-key-id", "github-token", "stripe-secret-key"]
 ```
+
+`patterns` is an allowlist of built-in pattern *names* (`aws-access-key-id`,
+`github-token`, `stripe-secret-key`, `slack-token`, `jwt`, `ssh-private-key`,
+`low-confidence-high-entropy`); empty means all. An allowlist that matches no
+known name is a hard error listing the valid names — a typo can't silently
+disable the scanner. `XV_SCAN_DISABLE=1` (or `=true`) skips scanning entirely
+(one stderr notice, exit 0); `scan install`/`uninstall` still work while
+disabled.
 
 Plus `.xvignore` (gitignore syntax, scanner-specific):
 
@@ -1134,11 +1204,11 @@ See [`docs/scan.md`](docs/scan.md) for the full reference.
 
 ## Terminal UI — `xv tui`
 
-Read-only three-pane browser. Behind a `tui` feature flag (default off) so the scripting binary stays lean.
+Read-only three-pane browser. Included in the pre-built release binaries; behind a `tui` feature flag (default off) when building from source, so lean scripting builds stay possible.
 
 ```bash
-cargo install crosstache --features tui
-xv tui
+xv tui                                            # pre-built binaries: just works
+cargo install --path . --features tui,aws         # from a source checkout
 ```
 
 ### Layout
@@ -1205,6 +1275,7 @@ Stable across releases — part of the public scripting contract.
 | `34`  | SSL/TLS error | certificate or handshake failure |
 | `35`  | Invalid URL | malformed URL |
 | `40`  | Azure API error | Azure returned an error response |
+| `43`  | Rename incomplete | rename created the new secret but failed to delete the original |
 | `50`  | Scan: leak detected | `xv scan` found a finding |
 
 ### Stable error codes
@@ -1348,6 +1419,7 @@ configuration error.
 | `DEFAULT_LOCATION` | Default Azure location (e.g., `eastus`) |
 | `XV_ENV` | Active env from `.xv.toml` (highest priority for env selection) |
 | `XV_NO_PARENT_CONFIG` | `1` disables `.xv.toml` walk-up |
+| `XV_SCAN_DISABLE` | `1` / `true` skips `xv scan` entirely (stderr notice, exit 0) |
 | `CACHE_TTL` | Cache TTL in seconds |
 | `XV_CACHE_DIR` | Override the on-disk cache root directory (default: OS cache dir + `xv`) |
 | `DEBUG` | `true` / `1` enables debug logging |
@@ -1534,10 +1606,11 @@ Build without file operations: `cargo build --no-default-features`.
 
 ### Release process
 
-```bash
-cargo release patch                      # 0.7.0 → 0.7.1
-cargo release minor                      # 0.7.0 → 0.8.0
-```
+Versions live in `Cargo.toml` only. A release is: bump-version PR (retitle the
+CHANGELOG's `Unreleased` section) → merge → push an annotated `v<X.Y.Z>` tag on
+the merge commit. The tag triggers `.github/workflows/release.yml`, which
+verifies the tag matches `Cargo.toml`, creates the GitHub release, and uploads
+minisign-signed binaries for all four platforms.
 
 ### Documentation
 
