@@ -747,7 +747,8 @@ fn record_field_value(
         return Err(CrosstacheError::config(format!(
             "secret '{name}' has type '{type_name}', which has no resolvable type definition \
              (check your [types.*] config). Its primary field can't be determined; reference a \
-             specific field instead."
+             specific field, e.g. via 'xv get {name} --field <name>' or 'xv get {name} --record', \
+             to access this record's raw fields."
         )));
     };
     let primary_name = &record_type.primary().name;
@@ -788,6 +789,14 @@ pub(crate) async fn execute_secret_get_direct(
         };
 
         let is_rec = crate::records::is_record(&secret.content_type);
+        // Only resolved when the secret is actually a record: an untyped
+        // secret's `get` must never fail because of an unrelated broken
+        // `[types.*]` config block (byte-identical-everywhere guarantee).
+        let types = if is_rec {
+            config.resolve_record_types().await?
+        } else {
+            Vec::new()
+        };
 
         // ── `--record`: full record view, all fields, requested format ──
         if record {
@@ -847,25 +856,21 @@ pub(crate) async fn execute_secret_get_direct(
                     crate::records::RECORD_CONTENT_TYPE
                 )));
             }
-            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
-            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
-            let Some(field_value) = lookup_record_field(&field_name, &envelope, &secret.tags)
-            else {
-                let known = record_field_names(&envelope, &secret.tags);
-                return Err(CrosstacheError::config(format!(
-                    "secret '{name}' has no field '{field_name}'. Known fields: {}",
-                    known.join(", ")
-                )));
-            };
+            let field_value = record_field_value(name, &secret, Some(&field_name), &types)?;
             // A field found in the envelope is secret-kind; one found only
             // via the f.<name> tag is metadata-kind (listable without
-            // fetching the secret in the first place).
+            // fetching the secret in the first place). `record_field_value`
+            // already validated the field exists, so re-parsing the
+            // envelope here is purely for this classification, not for the
+            // lookup/error-message logic (which lives in one place now).
+            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
             let is_secret_field = envelope.contains_key(&field_name);
 
             if raw {
-                print!("{field_value}");
+                print!("{}", field_value.as_str());
             } else {
-                match copy_to_clipboard(field_value) {
+                match copy_to_clipboard(&field_value) {
                     Ok(()) => {
                         let (message, schedule_clear) = field_clipboard_outcome(
                             name,
@@ -890,27 +895,11 @@ pub(crate) async fn execute_secret_get_direct(
         }
 
         // ── Plain `get`: primary field for records, untouched for untyped ──
+        // Routed through `record_field_value` for the record case so the
+        // primary/field extraction logic lives in exactly one place, shared
+        // with `--field` above and `xv inject`'s record grammar.
         let effective_value: Option<Zeroizing<String>> = if is_rec {
-            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
-            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
-
-            let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
-            let types = config.resolve_record_types().await?;
-            let Some(record_type) = crate::records::find_type(&types, &type_name) else {
-                return Err(CrosstacheError::config(format!(
-                    "secret '{name}' has type '{type_name}', which has no resolvable type \
-                     definition (check your [types.*] config). Its primary field can't be \
-                     determined; use --field or --record to access this record's raw fields."
-                )));
-            };
-            let primary_name = &record_type.primary().name;
-            let Some(primary_value) = envelope.get(primary_name) else {
-                return Err(CrosstacheError::config(format!(
-                    "secret '{name}' is missing its primary field '{primary_name}' in the record \
-                     envelope"
-                )));
-            };
-            Some(Zeroizing::new(primary_value.clone()))
+            Some(record_field_value(name, &secret, None, &types)?)
         } else {
             secret.value
         };
@@ -4619,7 +4608,7 @@ async fn execute_secret_inject(
     // fragment is unambiguous up front since `#` is invalid in secret names
     // on every backend.
     let secret_regex = Regex::new(r"\{\{\s*secret:([^}\s]+)\s*\}\}").unwrap();
-    let uri_regex = Regex::new(r"xv://([^/\s]+)/([^/\s#]+)(?:#([^\s]+))?").unwrap();
+    let uri_regex = Regex::new(r"xv://([^/\s]+)/([^/\s#]+)(?:#([A-Za-z0-9._-]+))?").unwrap();
 
     let mut required_secrets: Vec<String> = Vec::new();
     // (original_uri, parsed_ref, optional #field)
@@ -4927,8 +4916,19 @@ async fn execute_secret_inject(
             .to_string();
     }
 
-    // Replace xv://vault/secret URI references
-    for (uri, secret_value) in &cross_vault_values {
+    // Replace xv://vault/secret URI references. Longest-key-first: a bare
+    // `xv://vault/name` is a strict prefix of its own `#field` form (and,
+    // more generally, of any other URI key that happens to extend it), so
+    // substituting in `HashMap` iteration order (nondeterministic) can
+    // rewrite part of a longer reference before it's ever matched whole —
+    // e.g. `xv://vault/name` replacing inside `xv://vault/name#username`
+    // and leaving a mangled `<value>#username` behind. Sorting by
+    // descending key length guarantees every longer (more specific) URI is
+    // substituted before any of its prefixes.
+    let mut cross_vault_entries: Vec<(&String, &Zeroizing<String>)> =
+        cross_vault_values.iter().collect();
+    cross_vault_entries.sort_by_key(|(uri, _)| std::cmp::Reverse(uri.len()));
+    for (uri, secret_value) in cross_vault_entries {
         *result_content = result_content.replace(uri, secret_value.as_str());
     }
 

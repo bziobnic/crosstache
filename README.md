@@ -580,7 +580,7 @@ so unambiguous):
 # template.yml:
 #   smtp_user: "{{ secret:mail-cred.username }}"
 #   smtp_pass: "{{ secret:mail-cred }}"                     # bare name — primary field
-#   smtp_pass_uri: "{{ xv://other-vault/mail-cred#password }}"
+#   smtp_pass_uri: "xv://other-vault/mail-cred#password"
 
 xv inject --template template.yml --out app.config
 ```

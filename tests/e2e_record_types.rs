@@ -1968,6 +1968,51 @@ fn inject_uri_fragment_field() {
     assert!(!rendered.contains("xv://"), "rendered: {rendered}");
 }
 
+/// Bugbot review (round on #321 Phase C): a bare `xv://vault/name` is a
+/// strict prefix of its own `xv://vault/name#field` form. Substituting via
+/// `HashMap` iteration order (nondeterministic) could rewrite part of the
+/// longer `#field` reference before it was ever matched whole, mangling the
+/// output. Referencing a record's primary *and* one of its fields in the
+/// same template is exactly the workflow this feature invites, so both
+/// forms must always resolve correctly regardless of iteration order — run
+/// several times to guard against order-dependent flakiness.
+#[test]
+fn inject_bare_and_fragment_uri_for_same_secret_both_resolve() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    set_cred_login_record(temp.path());
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(
+        &template_path,
+        "primary: xv://default/cred\nusername: xv://default/cred#username\n",
+    )
+    .unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    for _ in 0..10 {
+        let out = xv_same_env(temp.path())
+            .args([
+                "inject",
+                "--template",
+                template_path.to_str().unwrap(),
+                "--out",
+                out_path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+        let rendered = std::fs::read_to_string(&out_path).unwrap();
+        assert!(
+            rendered.contains("primary: hunter2"),
+            "rendered: {rendered}"
+        );
+        assert!(rendered.contains("username: bob"), "rendered: {rendered}");
+        assert!(!rendered.contains('#'), "rendered: {rendered}");
+        assert!(!rendered.contains("xv://"), "rendered: {rendered}");
+    }
+}
+
 #[test]
 fn inject_field_best_effort_renders_with_warning() {
     let (_cmd, temp) = common::xv_isolated_local();
