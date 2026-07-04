@@ -497,13 +497,14 @@ pub(crate) async fn execute_secret_set_direct(
             // returns exactly (reg.active_arc(), vault_name, args[0]) —
             // byte-identical to the pre-workspace behavior. Writes never
             // search: an unqualified name always targets the default entry.
-            let (backend, vault_name, name) = crate::cli::helpers::resolve_workspace_or_default(
-                &args[0],
-                &config,
-                reg,
-                crate::workspace::TargetMode::Write,
-            )
-            .await?;
+            let (backend, backend_name, vault_name, name) =
+                crate::cli::helpers::resolve_workspace_or_default(
+                    &args[0],
+                    &config,
+                    reg,
+                    crate::workspace::TargetMode::Write,
+                )
+                .await?;
             let name = &name;
             let request = build_record_set_request(
                 name,
@@ -528,17 +529,18 @@ pub(crate) async fn execute_secret_set_direct(
             println!("   Vault: {vault_name}");
             println!("   Version: {}", props.version);
             output::hint(&format!("Verify with 'xv get {}'", props.original_name));
-            invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
+            invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
             return Ok(());
         } else if args.len() == 1 && !args[0].contains('=') {
             // Single secret set. Same workspace-aware resolution as above.
-            let (backend, vault_name, name) = crate::cli::helpers::resolve_workspace_or_default(
-                &args[0],
-                &config,
-                reg,
-                crate::workspace::TargetMode::Write,
-            )
-            .await?;
+            let (backend, backend_name, vault_name, name) =
+                crate::cli::helpers::resolve_workspace_or_default(
+                    &args[0],
+                    &config,
+                    reg,
+                    crate::workspace::TargetMode::Write,
+                )
+                .await?;
             let name = &name;
             let secret_value = if let Some(v) = value.clone() {
                 v
@@ -561,7 +563,7 @@ pub(crate) async fn execute_secret_set_direct(
             println!("   Vault: {vault_name}");
             println!("   Version: {}", props.version);
             output::hint(&format!("Verify with 'xv get {}'", props.original_name));
-            invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
+            invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
             return Ok(());
         } else {
             // Bulk set
@@ -599,7 +601,7 @@ pub(crate) async fn execute_secret_set_direct(
                 // contract as the single-secret path above. No workspace
                 // attached ⇒ every key resolves to (reg.active_arc(),
                 // vault_name, key) exactly as before.
-                let (backend, key_vault_name, resolved_key) =
+                let (backend, backend_name, key_vault_name, resolved_key) =
                     match crate::cli::helpers::resolve_workspace_or_default(
                         &key,
                         &config,
@@ -620,7 +622,6 @@ pub(crate) async fn execute_secret_set_direct(
                 // as the single-secret path. (--expires/--not-before are rejected
                 // for bulk above, so they're always None here.)
                 let request = meta.to_secret_request(&resolved_key, Zeroizing::new(value))?;
-                let backend_name = backend.name().to_string();
                 match backend.secrets().set_secret(&key_vault_name, request).await {
                     Ok(props) => {
                         output::success(&format!("  ✓ {}", props.original_name));
@@ -848,13 +849,14 @@ pub(crate) async fn execute_secret_get_direct(
         // Workspace-aware resolution: no workspace attached ⇒ this returns
         // exactly (reg.active_arc(), resolve_vault_for_trait(...), name) —
         // byte-identical to the pre-workspace behavior.
-        let (backend, vault_name, name) = crate::cli::helpers::resolve_workspace_or_default(
-            name,
-            &config,
-            reg,
-            crate::workspace::TargetMode::Read,
-        )
-        .await?;
+        let (backend, _backend_name, vault_name, name) =
+            crate::cli::helpers::resolve_workspace_or_default(
+                name,
+                &config,
+                reg,
+                crate::workspace::TargetMode::Read,
+            )
+            .await?;
         let name = name.as_str();
 
         let secret = if let Some(ref ver) = version {
@@ -1538,6 +1540,11 @@ pub(crate) fn display_cached_secret_list(
     let filtered = filter_secrets_by_glob(filtered, filter)?;
     let mut scoped = ls_view::scope_secrets(filtered, path);
     if sort == crate::cli::commands::LsSort::Updated {
+        // Deliberate: `--sort updated` is an explicit user request for time
+        // order and intentionally drops the alias-primary ordering below —
+        // the spec's "stable sort: alias, then name" is union `ls`'s
+        // *default* merge order, not a rule that overrides an explicit
+        // `--sort`.
         ls_view::sort_secrets_by_updated_desc(&mut scoped.secrets);
         ls_view::sort_secrets_by_updated_desc(&mut scoped.subtree);
     } else if show_vault {
@@ -2574,13 +2581,14 @@ pub(crate) async fn execute_secret_delete_direct(
             // workspace's default vault (Write mode never searches), same
             // as every other unqualified write. No workspace attached ⇒
             // byte-identical to the pre-workspace resolution.
-            let (backend, vault_name, _) = crate::cli::helpers::resolve_workspace_or_default(
-                "",
-                &config,
-                reg,
-                crate::workspace::TargetMode::Write,
-            )
-            .await?;
+            let (backend, backend_name, vault_name, _) =
+                crate::cli::helpers::resolve_workspace_or_default(
+                    "",
+                    &config,
+                    reg,
+                    crate::workspace::TargetMode::Write,
+                )
+                .await?;
             // List, filter by group, delete matching
             let secrets = backend
                 .secrets()
@@ -2607,12 +2615,12 @@ pub(crate) async fn execute_secret_delete_direct(
                     .await?;
                 output::success(&format!("Deleted '{}'", s.name));
             }
-            invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
+            invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         } else if let Some(secret_name) = name {
             // Workspace-aware resolution (unqualified → default vault, never
             // searched; `alias:name` targets that vault directly). No
             // workspace attached ⇒ byte-identical to the pre-workspace path.
-            let (backend, vault_name, resolved_name) =
+            let (backend, backend_name, vault_name, resolved_name) =
                 crate::cli::helpers::resolve_workspace_or_default(
                     &secret_name,
                     &config,
@@ -2629,7 +2637,7 @@ pub(crate) async fn execute_secret_delete_direct(
                 .delete_secret(&vault_name, &resolved_name)
                 .await?;
             output::success(&format!("Successfully deleted secret '{resolved_name}'"));
-            invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
+            invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         } else {
             return Err(CrosstacheError::invalid_argument(
                 "Either secret name or --group must be specified",
@@ -2655,7 +2663,7 @@ pub(crate) async fn execute_secret_history_direct(
         // Workspace-aware resolution (Read mode: searches attached vaults
         // on an unqualified name; ambiguous → exit 13). No workspace
         // attached ⇒ byte-identical to the pre-workspace path.
-        let (backend, vault_name, resolved_name) =
+        let (backend, _backend_name, vault_name, resolved_name) =
             crate::cli::helpers::resolve_workspace_or_default(
                 name,
                 &config,
@@ -2759,7 +2767,7 @@ pub(crate) async fn execute_secret_rollback_direct(
         // this resolves to exactly (reg.active_arc(),
         // resolve_vault_for_trait(...), name) — the same vault-resolution
         // call the legacy path always made, just reached from here first.
-        let (backend, vault_name, resolved_name) =
+        let (backend, backend_name, vault_name, resolved_name) =
             crate::cli::helpers::resolve_workspace_or_default(
                 name,
                 &config,
@@ -2817,7 +2825,7 @@ pub(crate) async fn execute_secret_rollback_direct(
             props.original_name
         ));
         // Invalidate the secrets list cache for the resolved vault
-        invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
+        invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         return Ok(());
     }
 
@@ -2904,17 +2912,19 @@ pub(crate) async fn execute_secret_rotate_direct(
     // Workspace-aware resolution: rotate is a write/destructive verb —
     // unqualified names always target the default entry, never searched.
     // No workspace attached ⇒ byte-identical to the pre-workspace path.
-    let (backend, vault_name, resolved_name) = crate::cli::helpers::resolve_workspace_or_default(
-        name,
-        &config,
-        reg,
-        crate::workspace::TargetMode::Write,
-    )
-    .await?;
+    let (backend, backend_name, vault_name, resolved_name) =
+        crate::cli::helpers::resolve_workspace_or_default(
+            name,
+            &config,
+            reg,
+            crate::workspace::TargetMode::Write,
+        )
+        .await?;
     let local_registry = BackendRegistry::new(backend);
 
     execute_secret_rotate(
         &local_registry,
+        &backend_name,
         &resolved_name,
         Some(vault_name.clone()),
         length,
@@ -2926,10 +2936,15 @@ pub(crate) async fn execute_secret_rotate_direct(
     )
     .await?;
 
-    // Invalidate the secrets list cache for the resolved vault
+    // Invalidate the secrets list cache for the resolved vault. Must use
+    // the RESOLVED workspace entry's registry name (`backend_name`), not
+    // `local_registry.active().name()` — the latter is the backend's
+    // hardcoded KIND (e.g. "local"), which silently invalidates the wrong
+    // `(backend, vault)` cache path whenever the entry's registry name
+    // differs from its kind (any named backend) — Bugbot review.
     let cache_manager = crate::cache::CacheManager::from_config(&config);
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: local_registry.active().name().to_string(),
+        backend: backend_name,
         vault_name,
     });
 
@@ -2980,13 +2995,14 @@ async fn execute_secret_rotate_native(
     // Workspace-aware resolution: native rotate is a write/destructive verb
     // — unqualified names always target the default entry, never searched.
     // No workspace attached ⇒ byte-identical to the pre-workspace path.
-    let (backend, vault_name, resolved_name) = crate::cli::helpers::resolve_workspace_or_default(
-        name,
-        &config,
-        reg,
-        crate::workspace::TargetMode::Write,
-    )
-    .await?;
+    let (backend, backend_name, vault_name, resolved_name) =
+        crate::cli::helpers::resolve_workspace_or_default(
+            name,
+            &config,
+            reg,
+            crate::workspace::TargetMode::Write,
+        )
+        .await?;
     let name = resolved_name.as_str();
 
     // Capability check: native rotation requires backend support. Gated on
@@ -3027,7 +3043,7 @@ async fn execute_secret_rotate_native(
     ));
 
     // Invalidate the secrets list cache for the resolved vault
-    invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
+    invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
 
     Ok(())
 }
@@ -3139,6 +3155,7 @@ async fn execute_record_field_update(
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
+    backend_name: &str,
 ) -> Result<()> {
     let secret = reg
         .active()
@@ -3187,6 +3204,7 @@ async fn execute_record_field_update(
         vault_name,
         config,
         reg,
+        backend_name,
     )
     .await?;
     output::success(&format!(
@@ -3266,6 +3284,7 @@ async fn apply_record_field_changes(
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
+    backend_name: &str,
 ) -> Result<crate::secret::manager::SecretProperties> {
     let mut new_value: Option<Zeroizing<String>> = None;
     if !secret_updates.is_empty() {
@@ -3378,7 +3397,7 @@ async fn apply_record_field_changes(
         .secrets()
         .update_secret(vault_name, name, request)
         .await?;
-    invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
+    invalidate_trait_secret_cache(config, backend_name, vault_name);
     Ok(props)
 }
 
@@ -3410,6 +3429,7 @@ fn resolve_primary_field<'a>(
 /// `apply_record_field_changes`, so tags/groups/note/folder and every other
 /// envelope field are preserved exactly like a `--field`/`--field-secret`
 /// edit.
+#[allow(clippy::too_many_arguments)]
 async fn execute_record_primary_update(
     name: &str,
     new_primary_value: &str,
@@ -3418,6 +3438,7 @@ async fn execute_record_primary_update(
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
+    backend_name: &str,
 ) -> Result<crate::secret::manager::SecretProperties> {
     let types = config.resolve_record_types().await?;
     let record_type = resolve_primary_field(name, secret, &types)?;
@@ -3440,6 +3461,7 @@ async fn execute_record_primary_update(
         vault_name,
         config,
         reg,
+        backend_name,
     )
     .await
 }
@@ -3454,6 +3476,7 @@ async fn execute_record_type_conversion(
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
+    backend_name: &str,
 ) -> Result<()> {
     let secret = reg
         .active()
@@ -3553,7 +3576,7 @@ async fn execute_record_type_conversion(
         "Successfully converted '{}' to type '{}'",
         props.original_name, record_type.name
     ));
-    invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
+    invalidate_trait_secret_cache(config, backend_name, vault_name);
     Ok(())
 }
 
@@ -3568,6 +3591,7 @@ async fn execute_record_untype(
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
+    backend_name: &str,
 ) -> Result<()> {
     let secret = reg
         .active()
@@ -3661,7 +3685,7 @@ async fn execute_record_untype(
         "Successfully untyped '{}' (was type '{type_name}')",
         props.original_name
     ));
-    invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
+    invalidate_trait_secret_cache(config, backend_name, vault_name);
     Ok(())
 }
 
@@ -3779,7 +3803,7 @@ pub(crate) async fn execute_secret_update_direct(
         // untype, field update, bare-value-on-record, and the classic
         // metadata update) via a single-backend registry wrapping the
         // resolved backend, so none of those helpers need to change shape.
-        let (resolved_backend, vault_name, resolved_name) =
+        let (resolved_backend, backend_name, vault_name, resolved_name) =
             crate::cli::helpers::resolve_workspace_or_default(
                 name,
                 &config,
@@ -3797,11 +3821,19 @@ pub(crate) async fn execute_secret_update_direct(
         // of these fires alongside the classic metadata-update flags below.
         {
             if let Some(type_name) = type_name {
-                return execute_record_type_conversion(name, &type_name, &vault_name, &config, reg)
-                    .await;
+                return execute_record_type_conversion(
+                    name,
+                    &type_name,
+                    &vault_name,
+                    &config,
+                    reg,
+                    &backend_name,
+                )
+                .await;
             }
             if untype {
-                return execute_record_untype(name, yes, &vault_name, &config, reg).await;
+                return execute_record_untype(name, yes, &vault_name, &config, reg, &backend_name)
+                    .await;
             }
             if !fields.is_empty() || !secret_fields.is_empty() {
                 return execute_record_field_update(
@@ -3811,6 +3843,7 @@ pub(crate) async fn execute_secret_update_direct(
                     &vault_name,
                     &config,
                     reg,
+                    &backend_name,
                 )
                 .await;
             }
@@ -3894,6 +3927,7 @@ pub(crate) async fn execute_secret_update_direct(
                         &vault_name,
                         &config,
                         reg,
+                        &backend_name,
                     )
                     .await?;
                     output::success(&format!(
@@ -3990,7 +4024,7 @@ pub(crate) async fn execute_secret_update_direct(
             // The in-place update just mutated state (value/tags/groups/etc.);
             // invalidate immediately so a rename-phase failure below can't
             // leave a stale cached list behind.
-            invalidate_trait_secret_cache(&config, reg.active().name(), &vault_name);
+            invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         }
 
         if let Some(ref new_name) = rename {
@@ -4002,7 +4036,7 @@ pub(crate) async fn execute_secret_update_direct(
             // Rename may mutate state even when it errors (e.g. RenameIncomplete:
             // the new name was created but deleting the old one failed), so
             // invalidate unconditionally before inspecting the result.
-            invalidate_trait_secret_cache(&config, reg.active().name(), &vault_name);
+            invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
             match rename_result {
                 Ok(props) => {
                     output::success(&format!(
@@ -4057,7 +4091,7 @@ pub(crate) async fn execute_secret_purge_direct(
         // target the default entry, never searched. No workspace attached
         // ⇒ byte-identical: resolves to exactly (reg.active_arc(),
         // resolve_vault_for_trait(...), name).
-        let (backend, vault_name, resolved_name) =
+        let (backend, backend_name, vault_name, resolved_name) =
             crate::cli::helpers::resolve_workspace_or_default(
                 name,
                 &config,
@@ -4103,7 +4137,7 @@ pub(crate) async fn execute_secret_purge_direct(
         backend.secrets().purge_secret(&vault_name, name).await?;
         output::success(&format!("Successfully purged secret '{name}'"));
         // Invalidate the secrets list cache for the resolved vault
-        invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
+        invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         return Ok(());
     }
 
@@ -4164,7 +4198,7 @@ pub(crate) async fn execute_secret_restore_direct(
         // Workspace-aware resolution: restore is a write/destructive verb —
         // unqualified names always target the default entry, never
         // searched. No workspace attached ⇒ byte-identical.
-        let (backend, vault_name, resolved_name) =
+        let (backend, backend_name, vault_name, resolved_name) =
             crate::cli::helpers::resolve_workspace_or_default(
                 name,
                 &config,
@@ -4194,7 +4228,7 @@ pub(crate) async fn execute_secret_restore_direct(
             props.original_name
         ));
         // Invalidate the secrets list cache for the resolved vault
-        invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
+        invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         return Ok(());
     }
 
@@ -5199,6 +5233,7 @@ async fn execute_secret_rollback(
 #[allow(clippy::too_many_arguments)]
 async fn execute_secret_rotate(
     reg: &BackendRegistry,
+    backend_name: &str,
     name: &str,
     vault: Option<String>,
     length: usize,
@@ -5285,6 +5320,7 @@ async fn execute_secret_rotate(
             &vault_name,
             config,
             reg,
+            backend_name,
         )
         .await?;
         props.version

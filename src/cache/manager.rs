@@ -224,6 +224,20 @@ impl CacheManager {
     ///   backends. Every backend directory is walked so `xv cache clear
     ///   <vault>` still finds and removes the entry regardless of which
     ///   backend it belongs to.
+    ///
+    /// Guard (Bugbot review MINOR): a vault can be literally named the same
+    /// as a backend (a built-in kind like `"local"`/`"azure"`/`"aws"`, or a
+    /// `named_backends` key like `"local-a"`) — in that case `cache_dir/
+    /// <vault_name>` is ALSO the v3 backend directory holding every OTHER
+    /// vault's `secrets-list-v3.json` for that backend. Blindly
+    /// `remove_dir_all`-ing the depth-1 path in that situation would nuke
+    /// every unrelated vault's cache under that backend, not just the one
+    /// vault named `vault_name`. [`looks_like_v3_backend_dir`] detects this
+    /// (any immediate child directory contains `secrets-list-v3.json`) and
+    /// skips the depth-1 removal entirely rather than collaterally
+    /// destroying it; the depth-2 walk below still correctly removes this
+    /// vault's OWN entries from every backend directory (including, as a
+    /// harmless edge case, one nested under itself).
     pub fn invalidate_vault(&self, vault_name: &str) {
         if let Err(reason) = validate_cache_vault_name(vault_name) {
             debug!("invalidate_vault({vault_name}): rejected — {reason}");
@@ -232,7 +246,16 @@ impl CacheManager {
 
         let vault_dir = self.cache_dir.join(vault_name);
         if vault_dir.starts_with(&self.cache_dir) && vault_dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&vault_dir) {
+            if looks_like_v3_backend_dir(&vault_dir) {
+                debug!(
+                    "invalidate_vault({vault_name}): {} looks like a v3 backend directory \
+                     (contains a child with {}) — skipping the depth-1 removal to avoid \
+                     deleting other vaults' cached entries; the depth-2 walk below still \
+                     removes this vault's own entries",
+                    vault_dir.display(),
+                    crate::cache::models::SECRETS_LIST_FILENAME
+                );
+            } else if let Err(e) = std::fs::remove_dir_all(&vault_dir) {
                 debug!("invalidate_vault({vault_name}): {e}");
             } else {
                 debug!(
@@ -336,6 +359,27 @@ fn remove_file_if_exists(path: &Path, context: &str) {
             debug!("{context}: removed {}", path.display());
         }
     }
+}
+
+/// True if `dir` has any immediate child DIRECTORY that itself contains a
+/// `secrets-list-v3.json` file — i.e. `dir` is (also) serving as a v3
+/// backend directory (`cache_dir/<backend>/<vault>/secrets-list-v3.json`),
+/// per [`CacheManager::invalidate_vault`]'s collision guard.
+fn looks_like_v3_backend_dir(dir: &Path) -> bool {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in read_dir.flatten() {
+        let child = entry.path();
+        if child.is_dir()
+            && child
+                .join(crate::cache::models::SECRETS_LIST_FILENAME)
+                .exists()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Recursively walk `dir`, collecting metadata for every `.json` cache file.
@@ -638,6 +682,71 @@ mod tests {
 
         assert!(mgr.get::<Vec<String>>(&key1).is_none());
         assert!(mgr.get::<Vec<String>>(&key2).is_none());
+    }
+
+    /// Bugbot review MINOR: a vault can be literally named the same as a
+    /// backend (a built-in kind or a `named_backends` key) — `cache_dir/
+    /// <that name>` is then simultaneously a depth-1 `FileList` directory
+    /// AND the v3 `SecretsList` backend directory holding every OTHER
+    /// vault's cache for that backend. `invalidate_vault` must not
+    /// `remove_dir_all` that shared directory wholesale, or invalidating
+    /// the colliding-named vault would silently destroy unrelated vaults'
+    /// cached listings too.
+    #[test]
+    fn test_invalidate_vault_does_not_nuke_backend_dir_when_vault_name_collides() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path(), true, 300);
+
+        // A SecretsList entry for a DIFFERENT vault under backend "azure":
+        // cache_dir/azure/other-vault/secrets-list-v3.json.
+        let other_vault_key = CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name: "other-vault".to_string(),
+        };
+        mgr.set(&other_vault_key, &vec!["s1".to_string()]);
+
+        // A vault literally named "azure" — its FileList entry lands at the
+        // SAME depth-1 path (`cache_dir/azure/files-list.json`) that also
+        // hosts the backend directory above.
+        let colliding_file_key = CacheKey::FileList {
+            vault_name: "azure".to_string(),
+            recursive: false,
+        };
+        mgr.set(&colliding_file_key, &vec!["f1".to_string()]);
+
+        assert!(mgr.get::<Vec<String>>(&other_vault_key).is_some());
+        assert!(mgr.get::<Vec<String>>(&colliding_file_key).is_some());
+
+        mgr.invalidate_vault("azure");
+
+        // The critical guarantee: an unrelated vault's cache must survive
+        // just because its backend directory shares a name with the vault
+        // being invalidated.
+        assert!(
+            mgr.get::<Vec<String>>(&other_vault_key).is_some(),
+            "unrelated vault's cache must survive a same-named-as-backend invalidate_vault call"
+        );
+    }
+
+    #[test]
+    fn test_looks_like_v3_backend_dir_detects_nested_secrets_list_file() {
+        let dir = tempdir().unwrap();
+        let backend_dir = dir.path().join("azure");
+        let vault_dir = backend_dir.join("some-vault");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        std::fs::write(vault_dir.join("secrets-list-v3.json"), b"{}").unwrap();
+
+        assert!(looks_like_v3_backend_dir(&backend_dir));
+    }
+
+    #[test]
+    fn test_looks_like_v3_backend_dir_false_for_plain_vault_dir() {
+        let dir = tempdir().unwrap();
+        let vault_dir = dir.path().join("my-vault");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        std::fs::write(vault_dir.join("files-list.json"), b"[]").unwrap();
+
+        assert!(!looks_like_v3_backend_dir(&vault_dir));
     }
 
     #[test]

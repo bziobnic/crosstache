@@ -52,7 +52,7 @@ pub enum CacheEntryType {
 /// layout also nests under a `backend` component (see `to_path` below), so a
 /// pre-existing `v2`-era entry (no backend component in its path) simply
 /// misses rather than being read by the wrong backend's listing.
-const SECRETS_LIST_FILENAME: &str = "secrets-list-v3.json";
+pub(crate) const SECRETS_LIST_FILENAME: &str = "secrets-list-v3.json";
 
 /// Identifies a cache entry and determines its file path.
 #[allow(clippy::enum_variant_names)]
