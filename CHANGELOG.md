@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.19.3 — Record write-path integrity and types-only .xv.toml fixes (2026-07-04)
 
 ### Fixed
 
