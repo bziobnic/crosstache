@@ -64,13 +64,18 @@ impl Workspace {
 
     /// The workspace's default (write) entry.
     ///
-    /// Panics if `default_alias` doesn't match any entry — this is an
-    /// invariant maintained by construction (`build_workspace` /
-    /// `resolve_workspace`); a `Workspace` built any other way must uphold
-    /// it too.
-    pub fn default_entry(&self) -> &WorkspaceEntry {
-        self.entry(&self.default_alias)
-            .expect("Workspace invariant violated: default_alias must match an entry")
+    /// `default_alias` matching an entry is an invariant maintained by
+    /// construction (`build_workspace` / `resolve_workspace`), but this is
+    /// a shared resolution layer reachable from hand-built `Workspace`
+    /// values (tests, future callers) — so a violation returns a config
+    /// error naming the missing alias instead of panicking.
+    pub fn default_entry(&self) -> Result<&WorkspaceEntry> {
+        self.entry(&self.default_alias).ok_or_else(|| {
+            CrosstacheError::config(format!(
+                "workspace invariant violated: default alias '{}' does not match any attached entry",
+                self.default_alias
+            ))
+        })
     }
 
     /// Fail-closed structural validation, following the `[types.*]`
@@ -440,9 +445,24 @@ mod tests {
             &["azure", "local", "aws"],
         )
         .expect("must build");
-        assert_eq!(built.default_entry().alias, "work");
+        assert_eq!(built.default_entry().unwrap().alias, "work");
         assert_eq!(built.entry("stage").unwrap().vault, "stage-sm");
         assert!(built.entry("nope").is_none());
+    }
+
+    /// `default_entry()` must return a `Result` (config error naming the
+    /// missing alias), not panic, when a hand-built `Workspace` violates
+    /// the default_alias-matches-an-entry invariant — this resolution
+    /// layer is reachable from more than just `build_workspace`'s own
+    /// guaranteed-valid output.
+    #[test]
+    fn default_entry_on_broken_invariant_errors_instead_of_panicking() {
+        let broken = ws(
+            vec![entry("work", "azure", "work-kv", true)],
+            "no-such-alias",
+        );
+        let err = broken.default_entry().unwrap_err();
+        assert!(err.to_string().contains("no-such-alias"), "{err}");
     }
 
     #[tokio::test]

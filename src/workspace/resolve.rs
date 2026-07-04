@@ -70,7 +70,7 @@ pub async fn resolve_secret_target(
                     .entry(alias)
                     .cloned()
                     .ok_or_else(|| unknown_alias_error(ws, alias))?,
-                None => ws.default_entry().clone(),
+                None => ws.default_entry()?.clone(),
             };
             let backend = materialize(registry, &entry)?;
             let path = addr.alias.map(|_| addr.path.clone()).unwrap_or(addr.path);

@@ -1270,6 +1270,16 @@ async fn workspace_touching_only_aws_never_builds_azure() {
 
     let config = Config {
         named_backends,
+        // Deliberately invalid vault name (Azure Key Vault names forbid
+        // underscores/`!`): `AzureBackend::new` validates it eagerly and
+        // errors before ever touching auth. "Materialize succeeded" vs.
+        // "no real credentials were present" are indistinguishable on their
+        // own (the Azure SDK resolves credentials lazily — a prior probe in
+        // this file confirmed a credential-less config still constructs
+        // successfully), but "this vault name is invalid" is deterministic
+        // and construction-time-only, which is what lets the assertion
+        // below actually prove something.
+        default_vault: "not_a_valid_vault_name!".to_string(),
         ..Default::default()
     };
 
@@ -1286,4 +1296,15 @@ async fn workspace_touching_only_aws_never_builds_azure() {
     // "azure" was registered but never materialized above — the whole
     // point of lazy construction is that the two steps are decoupled, so
     // Azure auth is never attempted for an AWS-only workspace command.
+    //
+    // Pin that decoupling from both directions: explicitly materializing
+    // "azure" on this config DOES fail (proving construction is real and
+    // reachable, not silently skipped/cached-as-ok), independently of the
+    // successful aws-mock materialize just performed above.
+    let azure_result = registry.materialize("azure");
+    assert!(
+        azure_result.is_err(),
+        "azure should fail to construct against an invalid vault name, proving construction \
+         is real (not a no-op) and decoupled from the successful aws-mock materialize above"
+    );
 }

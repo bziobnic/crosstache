@@ -143,6 +143,7 @@ default_vault = "default"
     /// `hint` messages are written to stderr (stdout is reserved for
     /// machine-consumable payloads), so assertions on human-readable
     /// confirmation text need both streams.
+    #[allow(dead_code)]
     fn ok_combined(&self, args: &[&str]) -> String {
         let out = self.run(args);
         assert!(
@@ -577,23 +578,69 @@ fn exact_name_with_colon_wins_over_alias() {
 // No-workspace degenerate case: byte-identical to pre-workspace behavior.
 // ---------------------------------------------------------------------------
 
+/// True byte-golden comparison: no `cx add` is ever called in this test (the
+/// workspace code path is provably inert — `resolve_workspace` sees no
+/// context workspace and no `.xv.toml` overlay, so it returns `None` and
+/// every verb takes the exact pre-workspace branch), so `set`/`get`'s full
+/// stdout AND stderr must match these fixed golden strings byte-for-byte —
+/// not just "contains a success-looking substring". A fresh hermetic store
+/// makes both the vault name ("default") and the version ("v1", first
+/// write) deterministic, so the golden is stable across runs.
 #[test]
 fn no_workspace_byte_identical() {
     let env = WorkspaceEnv::new();
-    // No `cx add` at all — single-vault mode, using the top-level "local"
-    // backend/default vault exactly as every pre-workspace test does.
-    let set_out = env.ok_combined(&["set", "PLAIN_SECRET", "--value", "plain-value"]);
-    assert!(set_out.contains("Successfully set secret"), "{set_out}");
 
-    let get_out = env.ok(&["get", "PLAIN_SECRET", "--raw"]);
-    assert_eq!(get_out, "plain-value");
+    let set_result = env.run(&["set", "PLAIN_SECRET", "--value", "plain-value"]);
+    assert!(set_result.status.success(), "{}", combined(&set_result));
+    // `output::success`/`hint` go to stderr; the "Vault:"/"Version:" lines
+    // are plain `println!` and land on stdout — both streams are pinned so
+    // a future change that moves a line between them would fail loud here.
+    assert_eq!(
+        stdout_str(&set_result),
+        "   Vault: default\n   Version: v1\n",
+        "set's Vault/Version lines must be byte-identical to the pre-workspace golden"
+    );
+    assert_eq!(
+        stderr_str(&set_result),
+        "[ok] Successfully set secret 'PLAIN_SECRET'\n\
+         [hint] Verify with 'xv get PLAIN_SECRET'\n",
+        "set's human-readable confirmation output must be byte-identical to the pre-workspace golden"
+    );
+
+    let get_result = env.run(&["get", "PLAIN_SECRET", "--raw"]);
+    assert!(get_result.status.success(), "{}", combined(&get_result));
+    assert_eq!(stdout_str(&get_result), "plain-value");
+    assert_eq!(
+        stderr_str(&get_result),
+        "",
+        "get --raw must write nothing to stderr on success"
+    );
 
     // Colon-looking input with no workspace attached must be treated as a
     // plain (unparsed) name — resolve_workspace returns None, so the
     // colon-address parser is never even consulted for this command.
-    env.ok(&["set", "literal:with:colons", "--value", "colon-value"]);
-    let colon_value = env.ok(&["get", "literal:with:colons", "--raw"]);
-    assert_eq!(colon_value, "colon-value");
+    let colon_set = env.run(&["set", "literal:with:colons", "--value", "colon-value"]);
+    assert!(colon_set.status.success(), "{}", combined(&colon_set));
+    assert_eq!(
+        stdout_str(&colon_set),
+        "   Vault: default\n   Version: v1\n",
+    );
+    assert_eq!(
+        stderr_str(&colon_set),
+        "[ok] Successfully set secret 'literal:with:colons'\n\
+         [hint] Verify with 'xv get literal:with:colons'\n",
+    );
+    let colon_get = env.run(&["get", "literal:with:colons", "--raw"]);
+    assert!(colon_get.status.success(), "{}", combined(&colon_get));
+    assert_eq!(stdout_str(&colon_get), "colon-value");
+}
+
+fn stdout_str(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+fn stderr_str(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).to_string()
 }
 
 /// Independent proof that the `no_workspace_byte_identical` test above is
@@ -608,4 +655,536 @@ fn no_workspace_colon_name_is_never_split() {
     env.ok(&["set", "foo:bar/baz", "--value", "v1"]);
     let value = env.ok(&["get", "foo:bar/baz", "--raw"]);
     assert_eq!(value, "v1");
+}
+
+// ---------------------------------------------------------------------------
+// Code-review follow-up: bulk `set` per-key workspace resolution (BLOCKER).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bulk_set_unqualified_lands_in_workspace_default() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    // "work" is the default (first add), which differs from the top-level
+    // active backend/vault a no-workspace command would have used.
+
+    env.ok(&["set", "BULK_B=b", "BULK_C=c"]);
+
+    assert_eq!(env.ok(&["get", "work:BULK_B", "--raw"]), "b");
+    assert_eq!(env.ok(&["get", "work:BULK_C", "--raw"]), "c");
+
+    // Must be absent from "stage" — an unqualified bulk key never searches,
+    // it always targets the default entry, same as the single-secret path.
+    let stage_lookup = env.err(&["get", "stage:BULK_B"]);
+    assert!(!stage_lookup.status.success());
+}
+
+#[test]
+fn bulk_set_alias_qualified_key_lands_in_named_vault() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // Mixed bulk set: one key qualified to each vault in the same command.
+    env.ok(&["set", "work:BULK_A=a", "stage:BULK_D=d"]);
+
+    assert_eq!(env.ok(&["get", "work:BULK_A", "--raw"]), "a");
+    assert_eq!(env.ok(&["get", "stage:BULK_D", "--raw"]), "d");
+
+    // Cross-check: each landed ONLY in its qualified vault.
+    let work_lookup_d = env.err(&["get", "work:BULK_D"]);
+    assert!(!work_lookup_d.status.success());
+    let stage_lookup_a = env.err(&["get", "stage:BULK_A"]);
+    assert!(!stage_lookup_a.status.success());
+}
+
+#[test]
+fn bulk_set_no_workspace_unchanged() {
+    let env = WorkspaceEnv::new();
+    // No `cx add` at all — bulk set must behave exactly as before workspaces.
+    env.ok(&["set", "BULK_X=x", "BULK_Y=y"]);
+    assert_eq!(env.ok(&["get", "BULK_X", "--raw"]), "x");
+    assert_eq!(env.ok(&["get", "BULK_Y", "--raw"]), "y");
+}
+
+// ---------------------------------------------------------------------------
+// Code-review follow-up: destructive/write verbs (delete/update/rotate/
+// restore/purge) and read-resolution verbs (history/rollback) now route
+// through the same workspace resolver as get/set (MAJOR).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delete_unqualified_targets_default_never_searches() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // Secret exists ONLY in the non-default vault ("stage"). An unqualified
+    // delete must target the default ("work") only — erroring not-found —
+    // rather than searching and deleting the stage copy.
+    env.ok(&["set", "stage:DEL_ONLY_STAGE", "--value", "v"]);
+    let delete_result = env.err(&["delete", "DEL_ONLY_STAGE", "--force"]);
+    assert!(!delete_result.status.success());
+
+    // The stage copy must be untouched.
+    assert_eq!(env.ok(&["get", "stage:DEL_ONLY_STAGE", "--raw"]), "v");
+}
+
+#[test]
+fn delete_qualified_targets_named_vault() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    env.ok(&["set", "stage:DEL_ME", "--value", "v"]);
+    env.ok(&["delete", "stage:DEL_ME", "--force"]);
+    let lookup = env.err(&["get", "stage:DEL_ME"]);
+    assert!(!lookup.status.success());
+}
+
+#[test]
+fn delete_group_unqualified_targets_default_only() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // `--group` has no single secret name to alias-qualify — it must still
+    // target the default vault only, never the whole workspace.
+    env.ok(&["set", "--group", "demo", "work:GRP_B", "--value", "b"]);
+    env.ok(&["set", "--group", "demo", "stage:GRP_C", "--value", "c"]);
+
+    env.ok(&["delete", "--group", "demo", "--force"]);
+
+    let work_lookup = env.err(&["get", "work:GRP_B"]);
+    assert!(!work_lookup.status.success());
+    // "stage" must be untouched — group delete never spans the workspace.
+    assert_eq!(env.ok(&["get", "stage:GRP_C", "--raw"]), "c");
+}
+
+#[test]
+fn update_unqualified_targets_default_never_searches() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // Secret exists ONLY in "stage"; an unqualified update must target
+    // "work" only and fail not-found rather than updating the stage copy.
+    env.ok(&["set", "stage:UPD_ONLY_STAGE", "--value", "orig"]);
+    let update_result = env.err(&["update", "UPD_ONLY_STAGE", "--note", "changed"]);
+    assert!(!update_result.status.success());
+}
+
+#[test]
+fn update_qualified_targets_named_vault() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    env.ok(&["set", "stage:UPD_ME", "--value", "orig"]);
+    env.ok(&["update", "stage:UPD_ME", "orig-updated"]);
+    assert_eq!(env.ok(&["get", "stage:UPD_ME", "--raw"]), "orig-updated");
+}
+
+#[test]
+fn rotate_unqualified_targets_default_never_searches() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // Secret exists ONLY in "stage"; an unqualified rotate must target
+    // "work" only and fail not-found rather than rotating the stage copy.
+    env.ok(&["set", "stage:ROT_ONLY_STAGE", "--value", "orig"]);
+    let rotate_result = env.err(&["rotate", "ROT_ONLY_STAGE", "--force"]);
+    assert!(!rotate_result.status.success());
+    // The stage copy's value must be unchanged.
+    assert_eq!(env.ok(&["get", "stage:ROT_ONLY_STAGE", "--raw"]), "orig");
+}
+
+#[test]
+fn rotate_qualified_targets_named_vault() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    env.ok(&["set", "stage:ROT_ME", "--value", "orig"]);
+    env.ok(&["rotate", "stage:ROT_ME", "--force"]);
+    let rotated = env.ok(&["get", "stage:ROT_ME", "--raw"]);
+    assert_ne!(rotated, "orig", "rotate must have generated a new value");
+}
+
+#[test]
+fn history_ambiguous_errors_exit_13() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    env.ok(&["set", "work:HIST_DUP", "--value", "v1"]);
+    env.ok(&["set", "stage:HIST_DUP", "--value", "v1"]);
+
+    let out = env.err(&["history", "HIST_DUP"]);
+    assert_eq!(out.status.code(), Some(13), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(msg.contains("work:HIST_DUP"), "{msg}");
+    assert!(msg.contains("stage:HIST_DUP"), "{msg}");
+}
+
+#[test]
+fn history_qualified_reads_named_vault() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    env.ok(&["set", "stage:HIST_ME", "--value", "v1"]);
+    let out = env.ok(&["history", "stage:HIST_ME"]);
+    assert!(out.contains("HIST_ME") || !out.is_empty(), "{out}");
+}
+
+#[test]
+fn rollback_unqualified_unique_match_searches_and_resolves() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // Rollback is grouped with `get`/`history` as a read-resolution verb
+    // (searches attached vaults on an unqualified name), NOT a
+    // default-vault-only write — unlike delete/update/rotate/restore/purge.
+    // The secret exists ONLY in "stage" (not the default, "work"); an
+    // unqualified rollback must still find and roll it back there.
+    env.ok(&["set", "stage:ROLL_ONLY_STAGE", "--value", "v1val"]);
+    env.ok(&["update", "stage:ROLL_ONLY_STAGE", "v2val"]);
+    env.ok(&["rollback", "ROLL_ONLY_STAGE", "--version", "v1", "--force"]);
+    assert_eq!(env.ok(&["get", "stage:ROLL_ONLY_STAGE", "--raw"]), "v1val");
+}
+
+#[test]
+fn rollback_ambiguous_errors_exit_13() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // Same name, with a version history, in both vaults — an unqualified
+    // rollback must be ambiguous (exit 13), same as `get`.
+    env.ok(&["set", "work:ROLL_DUP", "--value", "v1val"]);
+    env.ok(&["update", "work:ROLL_DUP", "v2val"]);
+    env.ok(&["set", "stage:ROLL_DUP", "--value", "v1val"]);
+    env.ok(&["update", "stage:ROLL_DUP", "v2val"]);
+
+    let out = env.err(&["rollback", "ROLL_DUP", "--version", "v1", "--force"]);
+    assert_eq!(out.status.code(), Some(13), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(msg.contains("work:ROLL_DUP"), "{msg}");
+    assert!(msg.contains("stage:ROLL_DUP"), "{msg}");
+}
+
+#[test]
+fn rollback_qualified_targets_named_vault() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    env.ok(&["set", "stage:ROLL_ME", "--value", "v1val"]);
+    env.ok(&["update", "stage:ROLL_ME", "v2val"]);
+    env.ok(&["rollback", "stage:ROLL_ME", "--version", "v1", "--force"]);
+    assert_eq!(env.ok(&["get", "stage:ROLL_ME", "--raw"]), "v1val");
+}
+
+#[test]
+fn restore_and_purge_unqualified_target_default() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // Seed the SAME name in both vaults, soft-delete both, then restore the
+    // default ("work") unqualified — the "stage" copy must stay deleted.
+    env.ok(&["set", "work:RESTORE_ME", "--value", "v"]);
+    env.ok(&["set", "stage:RESTORE_ME", "--value", "v"]);
+    env.ok(&["delete", "work:RESTORE_ME", "--force"]);
+    env.ok(&["delete", "stage:RESTORE_ME", "--force"]);
+
+    env.ok(&["restore", "RESTORE_ME"]);
+    assert_eq!(env.ok(&["get", "work:RESTORE_ME", "--raw"]), "v");
+    let stage_still_deleted = env.err(&["get", "stage:RESTORE_ME"]);
+    assert!(!stage_still_deleted.status.success());
+
+    // Purge the (now-restored, then re-deleted) default copy; qualified
+    // purge on "stage" must independently succeed on its own deleted copy.
+    env.ok(&["delete", "work:RESTORE_ME", "--force"]);
+    env.ok(&["purge", "RESTORE_ME", "--force"]);
+    env.ok(&["purge", "stage:RESTORE_ME", "--force"]);
+}
+
+/// No-workspace guard, extended to every write/read verb touched by this
+/// follow-up: with no `cx add` at all, delete/update/rotate/restore/purge/
+/// history/rollback must all behave exactly as before workspaces existed.
+#[test]
+fn no_workspace_write_and_read_verbs_unchanged() {
+    let env = WorkspaceEnv::new();
+
+    env.ok(&["set", "GUARD_ME", "--value", "orig"]);
+    let hist = env.ok(&["history", "GUARD_ME"]);
+    assert!(!hist.is_empty());
+
+    env.ok(&["update", "GUARD_ME", "orig-updated"]);
+    assert_eq!(env.ok(&["get", "GUARD_ME", "--raw"]), "orig-updated");
+
+    env.ok(&["rollback", "GUARD_ME", "--version", "v1", "--force"]);
+    assert_eq!(env.ok(&["get", "GUARD_ME", "--raw"]), "orig");
+    // Put it back to the updated value so the rest of the guard proceeds
+    // as it did before rollback was added to this test.
+    env.ok(&["update", "GUARD_ME", "orig-updated"]);
+
+    env.ok(&["rotate", "GUARD_ME", "--force"]);
+    let rotated = env.ok(&["get", "GUARD_ME", "--raw"]);
+    assert_ne!(rotated, "orig-updated");
+
+    env.ok(&["delete", "GUARD_ME", "--force"]);
+    let deleted_lookup = env.err(&["get", "GUARD_ME"]);
+    assert!(!deleted_lookup.status.success());
+
+    env.ok(&["restore", "GUARD_ME"]);
+    assert_eq!(env.ok(&["get", "GUARD_ME", "--raw"]), rotated);
+
+    env.ok(&["delete", "GUARD_ME", "--force"]);
+    env.ok(&["purge", "GUARD_ME", "--force"]);
 }
