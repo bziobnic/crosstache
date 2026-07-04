@@ -26,10 +26,29 @@ struct WorkspaceEnv {
     _tmp: TempDir,
     home: PathBuf,
     config_dir: PathBuf,
+    /// Dedicated, hermetic `XV_CACHE_DIR` for this environment — always set
+    /// (even when the config disables caching) so no test can ever read or
+    /// write the real OS cache directory.
+    cache_dir: PathBuf,
 }
 
 impl WorkspaceEnv {
     fn new() -> Self {
+        Self::with_cache(false, 0)
+    }
+
+    /// Same hermetic two-local-backend setup as [`Self::new`], but with the
+    /// on-disk secrets-list cache ENABLED (`cache_enabled = true`) and a
+    /// generous `ttl_secs` — for tests that must observe cache
+    /// hit/invalidate behavior (Bugbot review MINOR: every other
+    /// `WorkspaceEnv` test runs with caching disabled, so a cache-keying
+    /// bug like the alias-vs-kind mismatch this fix addresses would never
+    /// surface here otherwise).
+    fn with_cache_enabled(ttl_secs: u64) -> Self {
+        Self::with_cache(true, ttl_secs)
+    }
+
+    fn with_cache(cache_enabled: bool, ttl_secs: u64) -> Self {
         let tmp = TempDir::new().expect("tempdir");
         let home = tmp.path().join("home");
         let config_dir = home.join(".config");
@@ -37,6 +56,7 @@ impl WorkspaceEnv {
         let store_default = tmp.path().join("default").join("store");
         let store_a = tmp.path().join("a").join("store");
         let store_b = tmp.path().join("b").join("store");
+        let cache_dir = tmp.path().join("cache");
         // Each backend's key file must live in its OWN directory: the local
         // backend derives `recipients_file` from `key_file.parent()`
         // (src/backend/local/config.rs), so key files sharing a parent
@@ -47,6 +67,7 @@ impl WorkspaceEnv {
         let key_b = tmp.path().join("b").join("key.txt");
 
         std::fs::create_dir_all(&xv_dir).expect("create config dir");
+        std::fs::create_dir_all(&cache_dir).expect("create cache dir");
         for d in [&store_default, &store_a, &store_b] {
             std::fs::create_dir_all(d).expect("create store dir");
         }
@@ -61,8 +82,8 @@ default_location = ""
 tenant_id = ""
 output_json = false
 no_color = true
-cache_enabled = false
-cache_ttl_secs = 0
+cache_enabled = {cache_enabled}
+cache_ttl_secs = {ttl_secs}
 clipboard_timeout = 0
 
 [local]
@@ -105,6 +126,7 @@ default_vault = "default"
             _tmp: tmp,
             home,
             config_dir,
+            cache_dir,
         }
     }
 
@@ -120,12 +142,47 @@ default_vault = "default"
             .env("XV_NO_PARENT_CONFIG", "1")
             .env("XV_BACKEND", "local")
             .env("NO_COLOR", "1")
+            // Always hermetic, even when the config disables caching: no
+            // test may ever read/write the real OS cache directory.
+            .env("XV_CACHE_DIR", &self.cache_dir)
             .current_dir(&self.home);
         cmd
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
         self.xv().args(args).output().expect("execute xv binary")
+    }
+
+    /// Like `xv()`, but with the top-level active backend overridden to
+    /// `backend_name` via `XV_BACKEND` (clap env-populates `config.backend`
+    /// from it) — for tests that need a NAMED backend (e.g. `"local-a"`)
+    /// active with NO workspace attached, reusing this environment's
+    /// existing `[named_backends.local-a]`/`[named_backends.local-b]`
+    /// entries (Bugbot review round 3: no-workspace cache keys must
+    /// converge on `config.effective_backend_name()`, which is exactly what
+    /// this override exercises).
+    fn xv_with_backend(&self, backend_name: &str) -> Command {
+        let mut cmd = self.xv();
+        cmd.env("XV_BACKEND", backend_name);
+        cmd
+    }
+
+    fn run_with_backend(&self, backend_name: &str, args: &[&str]) -> std::process::Output {
+        self.xv_with_backend(backend_name)
+            .args(args)
+            .output()
+            .expect("execute xv binary")
+    }
+
+    fn ok_with_backend(&self, backend_name: &str, args: &[&str]) -> String {
+        let out = self.run_with_backend(backend_name, args);
+        assert!(
+            out.status.success(),
+            "command {args:?} (backend {backend_name}) failed.\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
     }
 
     /// Like `xv()`, but overrides the working directory — for tests that
@@ -1667,4 +1724,766 @@ fn no_workspace_write_and_read_verbs_unchanged() {
 
     env.ok(&["delete", "GUARD_ME", "--force"]);
     env.ok(&["purge", "GUARD_ME", "--force"]);
+}
+
+// ---------------------------------------------------------------------------
+// Union `ls` (Phase B, Task 7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ls_union_shows_vault_column_when_multi() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:WORK_SECRET", "--value", "v1"]);
+    env.ok(&["set", "stage:STAGE_SECRET", "--value", "v2"]);
+
+    let out = env.ok(&["ls", "--format", "table"]);
+    assert!(out.contains("Vault"), "expected a Vault column: {out}");
+    assert!(out.contains("WORK_SECRET") && out.contains("work"), "{out}");
+    assert!(
+        out.contains("STAGE_SECRET") && out.contains("stage"),
+        "{out}"
+    );
+}
+
+/// The alias is carried through the union `ls` render pipeline via a
+/// synthetic, in-memory-only tag (`WORKSPACE_ALIAS_TAG` in
+/// `src/cli/secret_ops.rs`) so the existing folder-scoping/sort/render
+/// helpers can be reused unchanged. This pins the invariant that shortcut
+/// depends on: `--format json` must expose the alias ONLY under the
+/// intentional `"vault"` key — never under its raw internal tag name, and
+/// never inside the `"fields"` map (which only lifts `f.*`-prefixed tags).
+#[test]
+fn ls_union_json_exposes_alias_only_under_vault_key_never_leaks_internal_tag() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:WORK_SECRET", "--value", "v1"]);
+    env.ok(&["set", "stage:STAGE_SECRET", "--value", "v2"]);
+
+    let out = env.ok(&["ls", "--format", "json"]);
+
+    // The synthetic tag's internal name must never reach output in any form.
+    assert!(
+        !out.contains("__xv_workspace_alias") && !out.contains("workspace_alias"),
+        "the synthetic alias tag must never leak under its raw internal name: {out}"
+    );
+
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&out).expect("ls --format json must produce valid JSON");
+    assert_eq!(rows.len(), 2, "{out}");
+
+    for row in &rows {
+        let name = row["name"].as_str().expect("name field");
+        let expected_vault = match name {
+            "WORK_SECRET" => "work",
+            "STAGE_SECRET" => "stage",
+            other => panic!("unexpected secret in output: {other}"),
+        };
+        assert_eq!(
+            row["vault"].as_str(),
+            Some(expected_vault),
+            "alias must appear under the 'vault' key: {row}"
+        );
+
+        // The alias must not leak into the fields map (which only lifts
+        // f.*-prefixed tags for typed records — neither of these secrets is
+        // typed, so `fields` must be empty).
+        let fields = row["fields"].as_object().expect("fields must be an object");
+        assert!(
+            fields.is_empty(),
+            "alias must not leak into the fields map: {row}"
+        );
+        assert!(
+            row.get("tags").is_none(),
+            "no raw 'tags' key should be present at all in ls JSON output: {row}"
+        );
+    }
+}
+
+/// Byte-golden pin (spec §Backward compatibility): a single-entry workspace
+/// must render EXACTLY like the no-workspace path against the same vault —
+/// no VAULT column, identical header/footer text. Reuses the SAME env: the
+/// bare (pre-`cx add`) local backend and `local-a` (post-`cx add`, aliased
+/// "work") both use vault name "default", so their `ls --format table`
+/// output for an identical secret is directly comparable byte-for-byte.
+#[test]
+fn ls_single_vault_output_unchanged() {
+    let env = WorkspaceEnv::new();
+
+    env.ok(&["set", "PINNED_SECRET", "--value", "v1"]);
+    let before = env.ok(&["ls", "--format", "table"]);
+    assert!(
+        !before.contains("Vault") || before.contains("Vault:"),
+        "sanity: no VAULT *column* pre-workspace: {before}"
+    );
+
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:PINNED_SECRET", "--value", "v1"]);
+    let after = env.ok(&["ls", "--format", "table"]);
+
+    assert_eq!(
+        before, after,
+        "single-entry workspace ls output must be byte-identical to the no-workspace path"
+    );
+}
+
+/// Same byte-golden pin as `ls_single_vault_output_unchanged`, extended to
+/// `--names-only` (Bugbot review MEDIUM): that branch used to prefix
+/// `alias/` whenever the synthetic alias tag was present at all, ignoring
+/// the `show_vault` (>=2 entries) gate every other render path honors — a
+/// single-entry workspace must be byte-identical to no-workspace in EVERY
+/// output form, not just `--format table`.
+#[test]
+fn ls_single_vault_names_only_output_unchanged() {
+    let env = WorkspaceEnv::new();
+
+    env.ok(&["set", "PINNED_SECRET", "--value", "v1"]);
+    let before = env.ok(&["ls", "--names-only"]);
+    assert!(
+        !before.contains('/'),
+        "sanity: no alias prefix pre-workspace: {before}"
+    );
+
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:PINNED_SECRET", "--value", "v1"]);
+    let after = env.ok(&["ls", "--names-only"]);
+
+    assert_eq!(
+        before, after,
+        "single-entry workspace ls --names-only output must be byte-identical to the \
+         no-workspace path — no alias/ prefix with only one attached vault"
+    );
+}
+
+#[test]
+fn ls_union_composes_with_filter_and_type() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:PROD_DB", "--value", "v1"]);
+    env.ok(&["set", "work:DEV_DB", "--value", "v2"]);
+    env.ok(&["set", "stage:PROD_API", "--value", "v3"]);
+    env.ok(&["set", "stage:DEV_API", "--value", "v4"]);
+
+    let out = env.ok(&["ls", "--format", "table", "--filter", "PROD_*"]);
+    assert!(out.contains("PROD_DB"), "{out}");
+    assert!(out.contains("PROD_API"), "{out}");
+    assert!(!out.contains("DEV_DB"), "{out}");
+    assert!(!out.contains("DEV_API"), "{out}");
+}
+
+#[test]
+fn ls_union_pagination_over_merged_set() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:AAA", "--value", "v1"]);
+    env.ok(&["set", "work:BBB", "--value", "v2"]);
+    env.ok(&["set", "stage:CCC", "--value", "v3"]);
+    env.ok(&["set", "stage:DDD", "--value", "v4"]);
+
+    // Merged set (alias-then-name sorted, "stage" < "work" alphabetically):
+    // stage/CCC, stage/DDD, work/AAA, work/BBB. Page 1 of size 2 must be
+    // exactly the first two — pagination over the MERGED set, not per-vault
+    // (which would instead yield the first page from EACH vault, 4 rows
+    // total).
+    let page1 = env.ok(&["ls", "--format", "table", "--page", "1", "--page-size", "2"]);
+    assert!(page1.contains("CCC"), "{page1}");
+    assert!(page1.contains("DDD"), "{page1}");
+    assert!(!page1.contains("AAA"), "{page1}");
+    assert!(!page1.contains("BBB"), "{page1}");
+
+    let page2 = env.ok(&["ls", "--format", "table", "--page", "2", "--page-size", "2"]);
+    assert!(!page2.contains("CCC"), "{page2}");
+    assert!(!page2.contains("DDD"), "{page2}");
+    assert!(page2.contains("AAA"), "{page2}");
+    assert!(page2.contains("BBB"), "{page2}");
+}
+
+/// Any attached vault erroring during a union read must fail the WHOLE
+/// command, naming the vault — no partial unions (spec §Read semantics).
+/// `--force` skips `cx add`'s vault-exists probe, attaching an entry whose
+/// backend name ("ghost-backend") is neither a built-in kind nor a
+/// `named_backends` entry — `materialize` fails the first (and only) time
+/// it's touched.
+#[test]
+fn ls_union_fails_loud_when_vault_unreachable() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "ghost-vault",
+        "--backend",
+        "ghost-backend",
+        "--as",
+        "ghost",
+        "--force",
+    ]);
+    env.ok(&["set", "work:REAL_SECRET", "--value", "v1"]);
+
+    let out = env.err(&["ls", "--format", "table"]);
+    let msg = combined(&out);
+    assert!(
+        msg.contains("ghost"),
+        "must name the unreachable vault/alias: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cache-enabled workspace coverage (Bugbot review BLOCKER follow-up):
+// union-ls keys its per-vault cache entries by the workspace entry's
+// REGISTRY name (`entry.backend`, e.g. "local-a"), but every write-side
+// invalidation used to pass `Backend::name()` — the hardcoded backend KIND
+// ("local") — so for named backends the invalidation targeted the wrong
+// `(backend, vault)` cache path and a write within the TTL left a stale
+// listing behind. Every other `WorkspaceEnv` test in this file runs with
+// caching disabled (`cache_enabled = false`), so this class of bug was
+// invisible to the whole suite until traced by code review — these tests
+// exist specifically to keep that gap closed.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ls_then_qualified_set_then_ls_reflects_write_with_cache_enabled() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:EXISTING", "--value", "v0"]);
+
+    // Populate the cache for both attached vaults.
+    let before = env.ok(&["ls", "--format", "table"]);
+    assert!(before.contains("EXISTING"), "{before}");
+    assert!(!before.contains("NEW_SECRET"), "{before}");
+
+    // A qualified write into "work" — if invalidation had keyed off
+    // `Backend::name()` ("local", the kind) instead of the resolved entry's
+    // registry name ("local-a"), this write would invalidate a cache path
+    // union-ls never reads from, leaving the stale `before` listing behind.
+    env.ok(&["set", "work:NEW_SECRET", "--value", "v1"]);
+
+    let after = env.ok(&["ls", "--format", "table"]);
+    assert!(
+        after.contains("NEW_SECRET"),
+        "union ls must reflect the write within the cache TTL, not serve a stale cached listing: {after}"
+    );
+    assert!(after.contains("EXISTING"), "{after}");
+}
+
+#[test]
+fn ls_then_qualified_delete_then_ls_reflects_write_with_cache_enabled() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:TO_DELETE", "--value", "v0"]);
+    env.ok(&["set", "stage:KEEP_ME", "--value", "v1"]);
+
+    let before = env.ok(&["ls", "--format", "table"]);
+    assert!(before.contains("TO_DELETE"), "{before}");
+
+    env.ok(&["delete", "work:TO_DELETE", "--force"]);
+
+    let after = env.ok(&["ls", "--format", "table"]);
+    assert!(
+        !after.contains("TO_DELETE"),
+        "union ls must not still show a deleted secret from a stale cached listing: {after}"
+    );
+    assert!(after.contains("KEEP_ME"), "{after}");
+}
+
+/// Guard: the plain no-workspace path must ALSO pair correctly with caching
+/// enabled — the read side (`ls`) keys its cache entry by
+/// `config.effective_backend_name()`, and `resolve_workspace_or_default`'s
+/// degenerate (no-workspace) branch returns that exact same string, so a
+/// write must still invalidate what `ls` actually reads from.
+#[test]
+fn no_workspace_ls_then_set_then_ls_reflects_write_with_cache_enabled() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+
+    env.ok(&["set", "PLAIN_EXISTING", "--value", "v0"]);
+    let before = env.ok(&["ls", "--format", "table"]);
+    assert!(before.contains("PLAIN_EXISTING"), "{before}");
+    assert!(!before.contains("PLAIN_NEW"), "{before}");
+
+    env.ok(&["set", "PLAIN_NEW", "--value", "v1"]);
+    let after = env.ok(&["ls", "--format", "table"]);
+    assert!(
+        after.contains("PLAIN_NEW"),
+        "no-workspace ls must reflect the write within the cache TTL: {after}"
+    );
+
+    env.ok(&["delete", "PLAIN_EXISTING", "--force"]);
+    let after_delete = env.ok(&["ls", "--format", "table"]);
+    assert!(
+        !after_delete.contains("PLAIN_EXISTING"),
+        "no-workspace ls must not still show a deleted secret from a stale cached listing: {after_delete}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bugbot review round 2 (HIGH): no-workspace cache keys must converge on
+// `config.effective_backend_name()` (the registry/config name), not
+// `Backend::name()`/`registry.active().name()` (the backend kind) — the
+// same class of bug as round 1's workspace-vs-kind mismatch, but for the
+// NO-WORKSPACE path: a NAMED backend active with no workspace attached
+// (`config.backend = "local-a"`) was sharing one cache file with the
+// built-in `local` backend for the same vault name, and a workspace write
+// (keyed by `entry.backend`, e.g. "local-a") could invalidate a path a
+// LATER no-workspace `ls` (active = "local-a") never reads from (it read
+// the kind-keyed "local" path instead). All three tests below use
+// `xv_with_backend("local-a", ..)` to make a NAMED backend the top-level
+// active one with NO workspace attached, reusing this environment's
+// existing `[named_backends.local-a]` entry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn named_backend_active_no_workspace_cache_pairs() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+
+    env.ok_with_backend("local-a", &["set", "NAMED_EXISTING", "--value", "v0"]);
+    let before = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(before.contains("NAMED_EXISTING"), "{before}");
+    assert!(!before.contains("NAMED_NEW"), "{before}");
+
+    // If the write and read cache keys diverged (write keyed by the kind
+    // "local", read keyed by the config name "local-a", or vice versa),
+    // this second `ls` would still serve the stale `before` listing.
+    env.ok_with_backend("local-a", &["set", "NAMED_NEW", "--value", "v1"]);
+    let after = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(
+        after.contains("NAMED_NEW"),
+        "named-backend-active (no workspace) ls must reflect the write within the \
+         cache TTL — read/write cache keys must not diverge: {after}"
+    );
+    assert!(after.contains("NAMED_EXISTING"), "{after}");
+}
+
+#[test]
+fn named_backend_does_not_share_cache_with_builtin_kind() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+
+    // Populate the cache while the BUILT-IN "local" backend is active
+    // (vault "default", store_default).
+    env.ok(&["set", "BUILTIN_LOCAL_SECRET", "--value", "v0"]);
+    let builtin_listing = env.ok(&["ls", "--format", "table"]);
+    assert!(
+        builtin_listing.contains("BUILTIN_LOCAL_SECRET"),
+        "{builtin_listing}"
+    );
+
+    // Switch the active backend to the NAMED "local-a" entry — same vault
+    // NAME ("default"), but a completely different on-disk store with
+    // nothing set in it yet. If the two shared one cache file (both keyed
+    // by the kind "local"), this `ls` would incorrectly show the builtin
+    // backend's secret.
+    let named_listing = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(
+        !named_listing.contains("BUILTIN_LOCAL_SECRET"),
+        "named backend 'local-a' must not see the built-in 'local' backend's cached \
+         listing just because they share a vault name: {named_listing}"
+    );
+}
+
+/// A read/write key MISMATCH manifests as a stale HIT, not a miss — a
+/// mismatched write invalidates a path nothing reads from, leaving
+/// whatever the read path's own (different) key already cached untouched.
+/// So this test must first populate a cache entry at the NO-WORKSPACE read
+/// key (a plain miss would silently "work" regardless of any mismatch),
+/// THEN write through the workspace path and confirm that entry — not some
+/// entry nothing ever reads — got invalidated.
+#[test]
+fn workspace_write_invalidates_entry_seen_by_no_workspace_ls() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+
+    // Step 1: populate the cache at the NO-WORKSPACE read key (active
+    // backend = "local-a", no workspace attached yet).
+    env.ok_with_backend("local-a", &["set", "OLD_SECRET", "--value", "v0"]);
+    let seed_listing = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(seed_listing.contains("OLD_SECRET"), "{seed_listing}");
+
+    // Step 2: attach a workspace over the SAME backend/vault and write a
+    // NEW secret through it — the qualified write is keyed by the
+    // workspace entry's registry name (`entry.backend` = "local-a").
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:NEW_SECRET", "--value", "v1"]);
+
+    // Step 3: remove the workspace (its only entry — this restores
+    // single-vault behavior) and read again via the NO-WORKSPACE path with
+    // the SAME active backend. If the workspace write's invalidation key
+    // ("local-a") diverged from what step 1's read populated
+    // (`config.effective_backend_name()`, also "local-a" when they're the
+    // same backend), this read would still serve the STALE `seed_listing`
+    // from step 1, missing NEW_SECRET entirely.
+    env.ok(&["cx", "rm", "work"]);
+    let no_workspace_listing = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(
+        no_workspace_listing.contains("NEW_SECRET"),
+        "no-workspace ls (active=local-a) must see the write made through the \
+         workspace, not serve the stale pre-workspace cached listing — read/write \
+         cache key shape must match across modes: {no_workspace_listing}"
+    );
+    assert!(
+        no_workspace_listing.contains("OLD_SECRET"),
+        "{no_workspace_listing}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Union `find` (Phase B, Task 8)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn find_unions_workspace() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:DATABASE_PASSWORD", "--value", "v1"]);
+    env.ok(&["set", "stage:DATABASE_TOKEN", "--value", "v2"]);
+
+    let out = env.ok(&["find", "database"]);
+    assert!(out.contains("work/DATABASE_PASSWORD"), "{out}");
+    assert!(out.contains("stage/DATABASE_TOKEN"), "{out}");
+}
+
+/// `--all-vaults` keeps its existing, documented meaning (every vault the
+/// active backend can list) — a strict superset of the workspace's
+/// attached vaults — and takes priority even with a workspace present.
+/// Here the active backend is the top-level `local` store (a THIRD vault,
+/// not attached to the workspace at all): `--all-vaults` must reach it,
+/// which the union-workspace path alone never would.
+#[test]
+fn find_all_vaults_still_superset() {
+    let env = WorkspaceEnv::new();
+    // Written to the top-level active ("local") backend directly, BEFORE
+    // any workspace is attached — once a workspace exists, an unqualified
+    // write always targets the workspace's default entry instead (spec
+    // §Write semantics: unqualified writes never search, never fall back to
+    // "the top-level active backend"), so this ordering is required to land
+    // the secret in the unattached top-level vault at all.
+    env.ok(&["set", "TOPLEVEL_ONLY", "--value", "v2"]);
+
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:WORKSPACE_ONLY", "--value", "v1"]);
+
+    let workspace_only = env.ok(&["find", "only"]);
+    assert!(
+        workspace_only.contains("WORKSPACE_ONLY"),
+        "{workspace_only}"
+    );
+    assert!(
+        !workspace_only.contains("TOPLEVEL_ONLY"),
+        "workspace union must not see the unattached top-level vault: {workspace_only}"
+    );
+
+    let all_vaults = env.ok(&["find", "only", "--all-vaults"]);
+    assert!(
+        all_vaults.contains("TOPLEVEL_ONLY"),
+        "--all-vaults must reach the top-level vault even with a workspace attached: {all_vaults}"
+    );
+}
+
+#[test]
+fn find_filter_composes_in_union() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:PROD_KEY", "--value", "v1"]);
+    env.ok(&["set", "work:DEV_KEY", "--value", "v2"]);
+    env.ok(&["set", "stage:PROD_TOKEN", "--value", "v3"]);
+
+    let out = env.ok(&["find", "", "--filter", "PROD_*"]);
+    assert!(out.contains("work/PROD_KEY"), "{out}");
+    assert!(out.contains("stage/PROD_TOKEN"), "{out}");
+    assert!(!out.contains("DEV_KEY"), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// `ls --deleted` capability gating in a union workspace (Phase B, Task 9
+// remaining scope)
+// ---------------------------------------------------------------------------
+
+/// Every shipped backend (Azure/local/AWS) supports soft-delete today, so
+/// the actual "skip an incapable vault" branch isn't e2e-drivable (the same
+/// class of limitation documented on `src/workspace/resolve.rs`'s
+/// capability tests; `deleted_list_capability_skip_note` in
+/// `src/cli/secret_ops.rs` unit-tests the note's wording directly). This
+/// instead pins the POSITIVE union path: `--deleted` across two capable
+/// vaults merges both, `alias/`-prefixed.
+#[test]
+fn ls_deleted_unions_capable_vaults_with_alias_prefix() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:GONE_WORK", "--value", "v1"]);
+    env.ok(&["set", "stage:GONE_STAGE", "--value", "v2"]);
+    env.ok(&["delete", "work:GONE_WORK", "--force"]);
+    env.ok(&["delete", "stage:GONE_STAGE", "--force"]);
+
+    let out = env.ok(&["ls", "--deleted", "--format", "table"]);
+    assert!(out.contains("work/GONE_WORK"), "{out}");
+    assert!(out.contains("stage/GONE_STAGE"), "{out}");
+}
+
+/// Bugbot review MEDIUM: `ls --deleted` in a >=2-entry workspace used to
+/// rewrite names to `alias/name` BEFORE `--filter` glob matching, while the
+/// live union `ls` path filters bare names per vault first — so an
+/// anchored glob like `PROD_*` matched live rows but missed deleted ones
+/// (`"work/PROD_X"` no longer starts with `"PROD_"`). This pins that
+/// `ls --deleted --filter 'PROD_*'` matches the same base names a live
+/// `ls --filter 'PROD_*'` would (captured on equivalent, not-yet-deleted
+/// secrets), while still showing the `alias/` prefix per
+/// `ls_deleted_unions_capable_vaults_with_alias_prefix` above.
+///
+/// Note: this local-backend e2e harness can't independently DISCRIMINATE
+/// the fix from the bug — local's `Unrestricted` charset means `name` ==
+/// `original_name` always, so `glob_matches_either_name`'s OR fallback via
+/// the untouched `name` field masks the ordering bug here regardless. The
+/// unit test `deleted_union_filter_must_run_on_bare_names_before_alias_prefix`
+/// (`src/cli/secret_ops.rs`) constructs the diverging-name case (as on a
+/// restricted-charset backend) that actually proves the ordering; this
+/// e2e test instead pins the end-to-end feature contract itself.
+#[test]
+fn ls_deleted_filter_matches_bare_names_before_alias_prefix() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    env.ok(&["set", "work:PROD_ALPHA", "--value", "v1"]);
+    env.ok(&["set", "work:DEV_ALPHA", "--value", "v2"]);
+    env.ok(&["set", "stage:PROD_BETA", "--value", "v3"]);
+    env.ok(&["set", "stage:DEV_BETA", "--value", "v4"]);
+
+    // Capture what a LIVE union `ls --filter 'PROD_*'` matches, before
+    // deleting anything — the set this test's deleted-list filter must
+    // mirror for the same base names.
+    let live_filtered = env.ok(&["ls", "--format", "table", "--filter", "PROD_*"]);
+    assert!(live_filtered.contains("PROD_ALPHA"), "{live_filtered}");
+    assert!(live_filtered.contains("PROD_BETA"), "{live_filtered}");
+    assert!(!live_filtered.contains("DEV_ALPHA"), "{live_filtered}");
+    assert!(!live_filtered.contains("DEV_BETA"), "{live_filtered}");
+
+    env.ok(&["delete", "work:PROD_ALPHA", "--force"]);
+    env.ok(&["delete", "work:DEV_ALPHA", "--force"]);
+    env.ok(&["delete", "stage:PROD_BETA", "--force"]);
+    env.ok(&["delete", "stage:DEV_BETA", "--force"]);
+
+    let deleted_filtered = env.ok(&["ls", "--deleted", "--format", "table", "--filter", "PROD_*"]);
+    // Same base names the live filter matched — now alias-prefixed
+    // (>=2 attached vaults).
+    assert!(
+        deleted_filtered.contains("work/PROD_ALPHA"),
+        "{deleted_filtered}"
+    );
+    assert!(
+        deleted_filtered.contains("stage/PROD_BETA"),
+        "{deleted_filtered}"
+    );
+    // The DEV_* secrets must still be excluded by the filter, not merely
+    // reformatted.
+    assert!(
+        !deleted_filtered.contains("DEV_ALPHA"),
+        "{deleted_filtered}"
+    );
+    assert!(!deleted_filtered.contains("DEV_BETA"), "{deleted_filtered}");
 }

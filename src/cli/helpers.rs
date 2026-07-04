@@ -102,13 +102,35 @@ pub(crate) async fn resolve_vault_for_trait(
     Ok("default".to_string())
 }
 
-/// Resolve `(backend, vault_name, path)` for a raw CLI secret-name argument,
-/// honoring an active multi-vault workspace when one exists.
+/// Resolve `(backend, backend_name, vault_name, path)` for a raw CLI
+/// secret-name argument, honoring an active multi-vault workspace when one
+/// exists.
+///
+/// `backend_name` is the ONE identifier every `CacheKey::SecretsList`
+/// producer and consumer in the codebase must converge on: the backend's
+/// REGISTRY/config name (e.g. a workspace entry's `backend` field such as
+/// `"local-a"`, or — with no workspace — `config.effective_backend_name()`).
+/// It is never `Backend::name()` (the hardcoded backend *kind*, e.g.
+/// `"local"`), and never `registry.active().name()` either — both return
+/// the kind, which collapses distinct named backends of the same kind onto
+/// one cache path and diverges from the config name whenever a NAMED
+/// backend is active (`config.backend = "local-a"`) (Bugbot review, round
+/// 2). Union `ls` keys its per-vault cache entries by `entry.backend` (the
+/// registry name); the no-workspace `ls`/`ls --deleted` read path keys by
+/// `config.effective_backend_name()` (`trait_secret_cache_key(..)` in
+/// `src/cli/secret_ops.rs`) — every write-side invalidation, including this
+/// function's degenerate branch, must match whichever of those two the
+/// active read path actually uses, or a write silently invalidates a cache
+/// entry nothing ever reads from while the stale one lingers.
 ///
 /// **No workspace ⇒ byte-identical**: returns `(registry.active_arc(),
-/// resolve_vault_for_trait(...), raw.to_string())` — exactly what every
-/// `get`/`set` call site did before workspaces existed. A workspace is only
-/// consulted (and only then does resolution behave any differently) when
+/// config.effective_backend_name(), resolve_vault_for_trait(...),
+/// raw.to_string())` — the backend/vault/path are exactly what every
+/// `get`/`set` call site returned before workspaces existed, and
+/// `config.effective_backend_name()` is the exact string the no-workspace
+/// `ls`/`ls --deleted` read path already keys its cache entries by, so
+/// hit/invalidate stay paired there too. A workspace is only consulted (and
+/// only then does resolution behave any differently) when
 /// [`crate::workspace::resolve_workspace`] returns `Some`.
 ///
 /// With a workspace: builds a lazy multi-backend registry scoped to just
@@ -121,17 +143,24 @@ pub(crate) async fn resolve_workspace_or_default(
     config: &Config,
     registry: &BackendRegistry,
     mode: crate::workspace::TargetMode,
-) -> Result<(Arc<dyn Backend>, String, String)> {
+) -> Result<(Arc<dyn Backend>, String, String, String)> {
     if let Some(ws) = crate::workspace::resolve_workspace(config).await? {
         let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
         let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
             .map_err(|e| CrosstacheError::config(e.to_string()))?;
         let (target, path) =
             crate::workspace::resolve_secret_target(raw, &ws, &ws_registry, mode).await?;
-        Ok((target.backend, target.entry.vault, path))
+        let backend_name = target.entry.backend.clone();
+        Ok((target.backend, backend_name, target.entry.vault, path))
     } else {
         let vault_name = resolve_vault_for_trait(config, Some(registry)).await?;
-        Ok((registry.active_arc(), vault_name, raw.to_string()))
+        let backend_name = config.effective_backend_name().to_string();
+        Ok((
+            registry.active_arc(),
+            backend_name,
+            vault_name,
+            raw.to_string(),
+        ))
     }
 }
 

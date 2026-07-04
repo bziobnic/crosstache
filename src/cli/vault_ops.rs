@@ -243,9 +243,16 @@ pub(crate) async fn execute_vault_command(
                 registry,
             )
             .await?;
-            // Invalidate the secrets list for the target vault (secrets were written)
-            vault_cache_manager
-                .invalidate(&crate::cache::CacheKey::SecretsList { vault_name: name });
+            // Invalidate the secrets list for the target vault (secrets were
+            // written). Import is an Azure-legacy-only path (see
+            // `use_vault_trait_path`'s doc comment above), so
+            // `effective_backend_name()` is guaranteed "azure" here — used
+            // rather than a hardcoded literal to keep every
+            // `CacheKey::SecretsList` producer on one convention.
+            vault_cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+                backend: config.effective_backend_name().to_string(),
+                vault_name: name,
+            });
         }
         VaultCommands::Update {
             name,
@@ -1063,10 +1070,15 @@ async fn execute_vault_import(
         output::success(&summary);
     }
 
-    // Invalidate the secrets list cache for the target vault
+    // Invalidate the secrets list cache for the target vault. Import is an
+    // Azure-legacy-only path (see `use_vault_trait_path`'s doc comment at
+    // the top of this file), so `effective_backend_name()` is guaranteed
+    // "azure" here — used rather than a hardcoded literal to keep every
+    // `CacheKey::SecretsList` producer on one convention.
     if imported_count > 0 {
         let cache_manager = crate::cache::CacheManager::from_config(config);
         cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            backend: config.effective_backend_name().to_string(),
             vault_name: name.to_string(),
         });
     }
