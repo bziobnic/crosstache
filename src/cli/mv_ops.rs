@@ -30,6 +30,14 @@ pub(crate) enum MvPlan {
         src_prefix: String,
         dest_prefix: Option<String>,
     },
+    /// Bulk-move every secret whose name matches a glob into a destination
+    /// folder (2026-07-03 mv-filter design). Matched secrets keep their
+    /// names; only the `folder` metadata is rewritten — a rename is
+    /// impossible for a multi-secret move.
+    Filter {
+        pattern: String,
+        dest_prefix: Option<String>,
+    },
 }
 
 /// Parse the `xv mv` operands into a move plan. See the module doc for the
@@ -57,22 +65,7 @@ pub(crate) fn parse_mv(source: &str, dest: &str) -> Result<MvPlan> {
                 "invalid source folder '{source}'"
             )));
         }
-        let dest_prefix = if dest == "/" {
-            None
-        } else if let Some(stripped) = dest.strip_suffix('/') {
-            let p = stripped.trim_start_matches('/');
-            if p.is_empty() || p.split('/').any(str::is_empty) {
-                return Err(CrosstacheError::invalid_argument(format!(
-                    "invalid destination folder '{dest}'"
-                )));
-            }
-            Some(p.to_string())
-        } else {
-            return Err(CrosstacheError::invalid_argument(format!(
-                "folder moves require a folder destination ending in / (got '{dest}'); \
-                 did you mean '{dest}/'?"
-            )));
-        };
+        let dest_prefix = parse_folder_dest(dest)?;
         return Ok(MvPlan::Folder {
             src_prefix: src_prefix.to_string(),
             dest_prefix,
@@ -99,6 +92,53 @@ pub(crate) fn parse_mv(source: &str, dest: &str) -> Result<MvPlan> {
         src_name,
         dest_folder,
         dest_name,
+    })
+}
+
+/// Parse a folder-only destination (`folder/` or `/`) — shared by folder
+/// moves and `--filter` moves, since a rename is impossible for a
+/// multi-secret move. Same error shape as the original inline folder-move
+/// check: "folder moves require a folder destination ending in / (got
+/// '...'); did you mean '.../'?".
+fn parse_folder_dest(dest: &str) -> Result<Option<String>> {
+    if dest == "/" {
+        return Ok(None);
+    }
+    if let Some(stripped) = dest.strip_suffix('/') {
+        let p = stripped.trim_start_matches('/');
+        if p.is_empty() || p.split('/').any(str::is_empty) {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "invalid destination folder '{dest}'"
+            )));
+        }
+        return Ok(Some(p.to_string()));
+    }
+    Err(CrosstacheError::invalid_argument(format!(
+        "folder moves require a folder destination ending in / (got '{dest}'); \
+         did you mean '{dest}/'?"
+    )))
+}
+
+/// Parse `xv mv --filter <GLOB> DEST`. Validates the glob compiles (fails
+/// loud with `invalid_argument`, matching `ls`/`find --filter`, before any
+/// backend call) and that `DEST` is a folder destination.
+pub(crate) fn parse_mv_filter(pattern: &str, dest: &str) -> Result<MvPlan> {
+    let pattern = pattern.trim();
+    let dest = dest.trim();
+    if pattern.is_empty() {
+        return Err(CrosstacheError::invalid_argument(
+            "--filter requires a non-empty glob pattern",
+        ));
+    }
+    if dest.is_empty() {
+        return Err(CrosstacheError::invalid_argument("mv requires a DEST"));
+    }
+    // Validate the glob compiles before any backend call.
+    crate::utils::helpers::compile_name_glob(pattern)?;
+    let dest_prefix = parse_folder_dest(dest)?;
+    Ok(MvPlan::Filter {
+        pattern: pattern.to_string(),
+        dest_prefix,
     })
 }
 
@@ -136,8 +176,9 @@ fn dest_collides(secrets: &[SecretSummary], dest_name: &str) -> bool {
 }
 
 pub(crate) async fn execute_mv(
-    source: String,
-    dest: String,
+    source: Option<String>,
+    dest: Option<String>,
+    filter: Option<String>,
     dry_run: bool,
     yes: bool,
     config: Config,
@@ -148,7 +189,29 @@ pub(crate) async fn execute_mv(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         ));
     }
-    let plan = parse_mv(&source, &dest)?;
+
+    // DEST is `Option<String>` in the arg parser only so clap accepts a
+    // non-required SOURCE positional (clap forbids optional-then-required);
+    // it is always required in practice.
+    let dest = dest.ok_or_else(|| CrosstacheError::invalid_argument("mv requires a DEST"))?;
+
+    // Exactly one of SOURCE / --filter — checked, and (for --filter) the
+    // glob compiled and validated, before any backend call below.
+    let filter_plan = match (&source, &filter) {
+        (Some(_), Some(_)) => {
+            return Err(CrosstacheError::invalid_argument(
+                "mv accepts either SOURCE or --filter <GLOB>, not both",
+            ));
+        }
+        (None, None) => {
+            return Err(CrosstacheError::invalid_argument(
+                "mv requires either a SOURCE argument or --filter <GLOB>",
+            ));
+        }
+        (None, Some(pattern)) => Some(parse_mv_filter(pattern, &dest)?),
+        (Some(_), None) => None,
+    };
+
     let reg = registry.expect("use_trait_path guarantees Some");
     let vault_name = resolve_vault_for_trait(&config, registry).await?;
     let secrets = reg
@@ -156,6 +219,27 @@ pub(crate) async fn execute_mv(
         .secrets()
         .list_secrets(&vault_name, None)
         .await?;
+
+    if let Some(MvPlan::Filter {
+        pattern,
+        dest_prefix,
+    }) = filter_plan
+    {
+        return execute_filter_mv(
+            reg,
+            &config,
+            &vault_name,
+            secrets,
+            pattern,
+            dest_prefix,
+            dry_run,
+            yes,
+        )
+        .await;
+    }
+
+    let source = source.expect("checked above: exactly one of SOURCE/--filter is Some");
+    let plan = parse_mv(&source, &dest)?;
 
     match plan {
         MvPlan::Secret {
@@ -195,6 +279,7 @@ pub(crate) async fn execute_mv(
             )
             .await
         }
+        MvPlan::Filter { .. } => unreachable!("parse_mv never returns MvPlan::Filter"),
     }
 }
 
@@ -442,6 +527,197 @@ async fn execute_folder_mv(
     Ok(())
 }
 
+/// True if `moving` (secrets about to be re-foldered into `dest_prefix`)
+/// would collide with a secret that already resides in `dest_prefix` and is
+/// NOT itself one of the moving secrets — either by display name or by
+/// backend (sanitized) name, mirroring `dest_collides` (#302). A filter
+/// move only rewrites the `folder` tag (names never change), so the only
+/// place a collision can arise is inside the destination folder itself.
+/// Returns the colliding display name for the error message.
+fn dest_folder_collision<'a>(
+    secrets: &'a [SecretSummary],
+    moving: &[&'a SecretSummary],
+    dest_prefix: Option<&str>,
+) -> Option<&'a str> {
+    let dest_norm = norm_folder(dest_prefix);
+    let moving_backend_names: std::collections::HashSet<&str> =
+        moving.iter().map(|s| s.name.as_str()).collect();
+
+    for occupant in secrets {
+        if moving_backend_names.contains(occupant.name.as_str()) {
+            continue; // this secret is itself moving, not a foreign occupant
+        }
+        if norm_folder(occupant.folder.as_deref()) != dest_norm {
+            continue;
+        }
+        let occupant_display = display_name(occupant);
+        for m in moving {
+            if display_name(m) == occupant_display || m.name == occupant.name {
+                return Some(occupant_display);
+            }
+        }
+    }
+    None
+}
+
+/// Execute an `xv mv --filter <GLOB> DEST` bulk folder move (2026-07-03
+/// mv-filter design). Mirrors `execute_folder_mv`'s bulk machinery — count +
+/// sample plan confirmation, `--yes` bypass, non-TTY refusal, `--dry-run`
+/// preview, collision pre-check before any move, attempt-all /
+/// report-failure-count partial-failure behavior — but the candidate set is
+/// every secret in the vault matching `pattern` (either display or backend
+/// name, same predicate as `ls`/`find --filter`) instead of a folder subtree.
+#[allow(clippy::too_many_arguments)]
+async fn execute_filter_mv(
+    reg: &BackendRegistry,
+    config: &Config,
+    vault_name: &str,
+    secrets: Vec<SecretSummary>,
+    pattern: String,
+    dest_prefix: Option<String>,
+    dry_run: bool,
+    yes: bool,
+) -> Result<()> {
+    use crate::cli::helpers::confirm_proceed;
+    use crate::utils::helpers::{compile_name_glob, glob_matches_either_name};
+
+    let matcher = compile_name_glob(&pattern)?;
+
+    let matched: Vec<&SecretSummary> = secrets
+        .iter()
+        .filter(|s| glob_matches_either_name(&matcher, &s.name, &s.original_name))
+        .collect();
+
+    if matched.is_empty() {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "no secrets matched --filter '{pattern}'"
+        )));
+    }
+
+    let dest_norm = norm_folder(dest_prefix.as_deref());
+    let mut moving: Vec<&SecretSummary> = Vec::new();
+    let mut skipped = 0usize;
+    for s in &matched {
+        let folder = s.folder.as_deref().unwrap_or("");
+        if norm_folder(Some(folder)) == dest_norm {
+            skipped += 1;
+        } else {
+            moving.push(s);
+        }
+    }
+
+    let dest_label = dest_prefix
+        .as_deref()
+        .map_or("/".to_string(), |d| format!("{d}/"));
+
+    // Collision pre-check — before any mutation, and before --dry-run even
+    // returns, mirroring the ordering in `execute_secret_mv`.
+    if let Some(occupant) = dest_folder_collision(&secrets, &moving, dest_prefix.as_deref()) {
+        return Err(CrosstacheError::conflict(format!(
+            "secret '{occupant}' already exists in '{dest_label}' — delete it first or pick another destination"
+        )));
+    }
+
+    if moving.is_empty() {
+        output::info(&format!(
+            "{skipped} secret(s) already in '{dest_label}'; nothing to move"
+        ));
+        return Ok(());
+    }
+
+    // (old qualified path, new qualified path, name to call the API with)
+    let moves: Vec<(String, String, String)> = moving
+        .iter()
+        .map(|s| {
+            let folder = s.folder.as_deref().unwrap_or("");
+            let name = display_name(s).to_string();
+            let old_path = if folder.is_empty() {
+                name.clone()
+            } else {
+                format!("{folder}/{name}")
+            };
+            let new_path = match &dest_prefix {
+                Some(f) => format!("{f}/{name}"),
+                None => name.clone(),
+            };
+            (old_path, new_path, name)
+        })
+        .collect();
+
+    if dry_run {
+        for (old, new, _) in &moves {
+            println!("{old} -> {new}");
+        }
+        if skipped > 0 {
+            output::info(&format!(
+                "{skipped} secret(s) already in '{dest_label}' (skipped)"
+            ));
+        }
+        output::info(&format!("{} secrets would move (dry run)", moves.len()));
+        return Ok(());
+    }
+
+    eprintln!(
+        "Moving {} secrets matching --filter '{pattern}' to '{dest_label}':",
+        moves.len()
+    );
+    for (old, new, _) in moves.iter().take(10) {
+        eprintln!("  {old} -> {new}");
+    }
+    if moves.len() > 10 {
+        eprintln!("  ... ({} more; --dry-run to list all)", moves.len() - 10);
+    }
+    if skipped > 0 {
+        eprintln!("  ({skipped} secret(s) already in '{dest_label}', skipped)");
+    }
+    if !confirm_proceed(yes, &format!("Move {} secrets?", moves.len()), "--yes")? {
+        output::info("Aborted; nothing moved.");
+        return Ok(());
+    }
+
+    let mut failures = 0usize;
+    for (old, new, name) in &moves {
+        let request = SecretUpdateRequest {
+            name: name.clone(),
+            value: None,
+            content_type: None,
+            enabled: None,
+            expires_on: FieldUpdate::Unchanged,
+            not_before: FieldUpdate::Unchanged,
+            tags: None,
+            groups: None,
+            note: FieldUpdate::Unchanged,
+            folder: match &dest_prefix {
+                Some(f) => FieldUpdate::Set(f.clone()),
+                None => FieldUpdate::Clear,
+            },
+            replace_tags: false,
+            replace_groups: false,
+        };
+        if let Err(e) = reg
+            .active()
+            .secrets()
+            .update_secret(vault_name, name, request)
+            .await
+        {
+            failures += 1;
+            output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
+        }
+    }
+    invalidate_trait_secret_cache(config, vault_name);
+    let moved = moves.len() - failures;
+    if failures > 0 {
+        return Err(CrosstacheError::unknown(format!(
+            "moved {moved} of {} secrets; {failures} failed (see warnings above)",
+            moves.len()
+        )));
+    }
+    output::success(&format!(
+        "Moved {moved} secrets matching --filter '{pattern}' to '{dest_label}'"
+    ));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +838,68 @@ mod tests {
     fn dest_collides_no_match() {
         let secrets = vec![summary("sanitized-name", "pretty-name")];
         assert!(!dest_collides(&secrets, "unrelated-name"));
+    }
+
+    // -----------------------------------------------------------------
+    // dest_folder_collision — `--filter` move collision pre-check.
+    //
+    // A filter move only rewrites the `folder` tag: matched secrets keep
+    // their names, so a collision can only arise when a *different* secret
+    // already resident in the destination folder shares a moving secret's
+    // display or backend name. The local backend never diverges name from
+    // original_name (see the comment above `mv_sanitized_name_rename_with_space`
+    // in `tests/e2e_local_backend.rs`), so — same escape hatch as #326's
+    // either-name matching — this is exercised at the unit level with
+    // synthetic summaries whose name and original_name differ.
+    // -----------------------------------------------------------------
+
+    fn summary_full(name: &str, original_name: &str, folder: Option<&str>) -> SecretSummary {
+        SecretSummary {
+            name: name.to_string(),
+            original_name: original_name.to_string(),
+            note: None,
+            folder: folder.map(String::from),
+            groups: None,
+            updated_on: String::new(),
+            enabled: true,
+            content_type: String::new(),
+            tags: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn dest_folder_collision_matches_display_name_of_dest_occupant() {
+        // Already in 'archive/': backend name "raw-o", displays as "test-x".
+        let occupant = summary_full("raw-o", "test-x", Some("archive"));
+        // Moving in from elsewhere: backend name "raw-m", also displays as
+        // "test-x" — a different secret that would collide in 'archive/'.
+        let moving_secret = summary_full("raw-m", "test-x", Some("other"));
+        let secrets = vec![occupant, moving_secret.clone()];
+        let moving = vec![&secrets[1]];
+
+        let collision = dest_folder_collision(&secrets, &moving, Some("archive"));
+        assert_eq!(collision, Some("test-x"));
+    }
+
+    #[test]
+    fn dest_folder_collision_ignores_secrets_outside_dest_folder() {
+        let elsewhere = summary_full("raw-o", "test-x", Some("not-dest"));
+        let moving_secret = summary_full("raw-m", "test-x", Some("other"));
+        let secrets = vec![elsewhere, moving_secret.clone()];
+        let moving = vec![&secrets[1]];
+
+        assert!(dest_folder_collision(&secrets, &moving, Some("archive")).is_none());
+    }
+
+    #[test]
+    fn dest_folder_collision_ignores_the_moving_secret_itself() {
+        // The secret already sitting in the destination IS one of the
+        // moving secrets (already-in-dest case) — not a foreign occupant.
+        let moving_secret = summary_full("raw-m", "test-x", Some("archive"));
+        let secrets = vec![moving_secret.clone()];
+        let moving = vec![&secrets[0]];
+
+        assert!(dest_folder_collision(&secrets, &moving, Some("archive")).is_none());
     }
 
     // -----------------------------------------------------------------
