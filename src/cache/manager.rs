@@ -233,10 +233,17 @@ impl CacheManager {
     /// `remove_dir_all`-ing the depth-1 path in that situation would nuke
     /// every unrelated vault's cache under that backend, not just the one
     /// vault named `vault_name`. [`looks_like_v3_backend_dir`] detects this
-    /// (any immediate child directory contains `secrets-list-v3.json`) and
-    /// skips the depth-1 removal entirely rather than collaterally
-    /// destroying it; the depth-2 walk below still correctly removes this
-    /// vault's OWN entries from every backend directory (including, as a
+    /// (any immediate child directory contains `secrets-list-v3.json`) and,
+    /// instead of removing the whole directory, selectively removes only
+    /// the depth-1 `FileList` entries that actually belong to
+    /// `vault_name` (`files-list.json`/`files-list-recursive.json` and
+    /// their lock files — the only `CacheKey` variants that ever write at
+    /// depth 1) — leaving the child directories that form the v3 backend
+    /// layout untouched (Bugbot review LOW: an earlier version of this
+    /// guard skipped the depth-1 cleanup entirely, leaving stale
+    /// `FileList` entries behind forever in the collision case). The
+    /// depth-2 walk below still correctly removes this vault's OWN
+    /// `SecretsList` entries from every backend directory (including, as a
     /// harmless edge case, one nested under itself).
     pub fn invalidate_vault(&self, vault_name: &str) {
         if let Err(reason) = validate_cache_vault_name(vault_name) {
@@ -249,12 +256,22 @@ impl CacheManager {
             if looks_like_v3_backend_dir(&vault_dir) {
                 debug!(
                     "invalidate_vault({vault_name}): {} looks like a v3 backend directory \
-                     (contains a child with {}) — skipping the depth-1 removal to avoid \
-                     deleting other vaults' cached entries; the depth-2 walk below still \
-                     removes this vault's own entries",
+                     (contains a child with {}) — skipping the whole-directory removal to \
+                     avoid deleting other vaults' cached entries; removing only this \
+                     vault's depth-1 FileList entries instead",
                     vault_dir.display(),
                     crate::cache::models::SECRETS_LIST_FILENAME
                 );
+                for recursive in [false, true] {
+                    let file_key = CacheKey::FileList {
+                        vault_name: vault_name.to_string(),
+                        recursive,
+                    };
+                    let path = file_key.to_path(&self.cache_dir);
+                    remove_file_if_exists(&path, "invalidate_vault depth-1 FileList entry");
+                    let lock_path = path.with_extension("lock");
+                    remove_file_if_exists(&lock_path, "invalidate_vault depth-1 FileList lock");
+                }
             } else if let Err(e) = std::fs::remove_dir_all(&vault_dir) {
                 debug!("invalidate_vault({vault_name}): {e}");
             } else {
@@ -725,6 +742,71 @@ mod tests {
         assert!(
             mgr.get::<Vec<String>>(&other_vault_key).is_some(),
             "unrelated vault's cache must survive a same-named-as-backend invalidate_vault call"
+        );
+        // The vault's OWN depth-1 FileList entry must still be cleared
+        // (Bugbot review LOW follow-up: the collision guard must not leave
+        // this vault's own file-list cache stale just because it skips the
+        // whole-directory removal).
+        assert!(
+            mgr.get::<Vec<String>>(&colliding_file_key).is_none(),
+            "the colliding vault's own FileList entry must still be invalidated"
+        );
+    }
+
+    /// Bugbot review LOW: the collision guard above must not leave THIS
+    /// vault's own depth-1 `FileList` entries stale — only the
+    /// whole-directory `remove_dir_all` is skipped (to protect other
+    /// vaults' `SecretsList` entries); the vault's own `files-list.json`
+    /// must still be removed via the selective cleanup.
+    #[test]
+    fn test_invalidate_vault_clears_own_file_list_entries_under_collision_guard() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path(), true, 300);
+
+        // A vault named "local-a" also doubles as a v3 backend directory:
+        // cache_dir/local-a/default/secrets-list-v3.json (backend
+        // "local-a", vault "default").
+        let nested_secrets_key = CacheKey::SecretsList {
+            backend: "local-a".to_string(),
+            vault_name: "default".to_string(),
+        };
+        mgr.set(&nested_secrets_key, &vec!["s1".to_string()]);
+
+        // The vault literally named "local-a" has its OWN FileList entries
+        // at the same depth-1 path: cache_dir/local-a/files-list.json and
+        // files-list-recursive.json.
+        let file_key = CacheKey::FileList {
+            vault_name: "local-a".to_string(),
+            recursive: false,
+        };
+        let file_key_recursive = CacheKey::FileList {
+            vault_name: "local-a".to_string(),
+            recursive: true,
+        };
+        mgr.set(&file_key, &vec!["f1".to_string()]);
+        mgr.set(&file_key_recursive, &vec!["f2".to_string()]);
+
+        assert!(mgr.get::<Vec<String>>(&nested_secrets_key).is_some());
+        assert!(mgr.get::<Vec<String>>(&file_key).is_some());
+        assert!(mgr.get::<Vec<String>>(&file_key_recursive).is_some());
+
+        mgr.invalidate_vault("local-a");
+
+        // The nested v3 SecretsList entry (a DIFFERENT vault, "default",
+        // under backend "local-a") must survive.
+        assert!(
+            mgr.get::<Vec<String>>(&nested_secrets_key).is_some(),
+            "nested secrets-list-v3.json for a different vault must survive"
+        );
+        // But "local-a"'s own FileList entries (both recursive and not)
+        // must be gone — no longer left stale forever.
+        assert!(
+            mgr.get::<Vec<String>>(&file_key).is_none(),
+            "the colliding vault's own files-list.json must be removed"
+        );
+        assert!(
+            mgr.get::<Vec<String>>(&file_key_recursive).is_none(),
+            "the colliding vault's own files-list-recursive.json must be removed"
         );
     }
 
