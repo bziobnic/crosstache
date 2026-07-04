@@ -1116,9 +1116,13 @@ async fn execute_group_list(
     let reg = registry.expect("use_trait_path guarantees Some");
     let vault_name = resolve_vault_for_trait(&config, registry).await?;
 
-    // Same fetch-or-cache flow as `xv ls` (shared CacheKey::SecretsList dataset).
+    // Same fetch-or-cache flow as `xv ls` (shared CacheKey::SecretsList
+    // dataset). Cache key uses `config.effective_backend_name()` (the
+    // registry/config name), NOT `reg.active().name()` (the backend kind) —
+    // see `resolve_workspace_or_default`'s doc comment for why the two
+    // diverge whenever a named backend is active.
     let cache_manager = CacheManager::from_config(&config);
-    let cache_key = trait_secret_cache_key(reg.active().name(), &vault_name);
+    let cache_key = trait_secret_cache_key(config.effective_backend_name(), &vault_name);
     let use_cache = cache_manager.is_enabled() && !no_cache;
     let cached = if use_cache {
         cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
@@ -2444,7 +2448,9 @@ pub(crate) async fn execute_secret_list_direct(
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
         let cache_manager = CacheManager::from_config(&config);
-        let cache_key = trait_secret_cache_key(reg.active().name(), &vault_name);
+        // `config.effective_backend_name()`, not `reg.active().name()` (the
+        // backend kind) — see `resolve_workspace_or_default`'s doc comment.
+        let cache_key = trait_secret_cache_key(config.effective_backend_name(), &vault_name);
         let use_cache = cache_manager.is_enabled() && !no_cache;
 
         // Try cache (skip for expiry filters — they need per-secret API calls)
@@ -2873,10 +2879,12 @@ async fn execute_secret_rollback_legacy(
         let cache_manager = crate::cache::CacheManager::from_config(&config);
         // `execute_secret_rollback_legacy` only ever runs for an Azure
         // target (dispatched when the resolved backend is Azure, or as the
-        // no-registry fallback, which is Azure-only) — backend is always
-        // "azure" here.
+        // no-registry fallback, which is Azure-only) — `effective_backend_name()`
+        // is guaranteed "azure" here (no named backend can resolve to the
+        // Azure kind), but using it rather than a hardcoded literal keeps
+        // every `CacheKey::SecretsList` producer on one convention.
         cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-            backend: "azure".to_string(),
+            backend: config.effective_backend_name().to_string(),
             vault_name,
         });
     }
@@ -4177,9 +4185,10 @@ async fn execute_secret_purge_legacy(
     };
     if let Some(vault_name) = vault_name {
         let cache_manager = crate::cache::CacheManager::from_config(&config);
-        // Azure-legacy-only path — backend is always "azure" here.
+        // Azure-legacy-only path (`effective_backend_name()` is guaranteed
+        // "azure" here) — same one-convention rule as every other producer.
         cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-            backend: "azure".to_string(),
+            backend: config.effective_backend_name().to_string(),
             vault_name,
         });
     }
@@ -4243,9 +4252,10 @@ pub(crate) async fn execute_secret_restore_direct(
     // Invalidate the secrets list cache for the resolved vault
     if let Ok(vault_name) = config.resolve_vault_name(None).await {
         let cache_manager = crate::cache::CacheManager::from_config(&config);
-        // Azure-legacy-only path — backend is always "azure" here.
+        // Azure-legacy-only path (`effective_backend_name()` is guaranteed
+        // "azure" here) — same one-convention rule as every other producer.
         cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-            backend: "azure".to_string(),
+            backend: config.effective_backend_name().to_string(),
             vault_name,
         });
     }
@@ -4420,11 +4430,11 @@ pub(crate) async fn execute_secret_copy_direct(
     .await?;
 
     // Invalidate the secrets list cache for both source and destination
-    // vaults. `execute_secret_copy` (above) itself branches on
-    // `use_trait_path(registry)`, so the backend that actually served the
-    // copy is `registry`'s active one when present, else the Azure legacy
-    // path — mirror that here rather than hard-coding "azure".
-    let backend_name = registry.map(|r| r.active().name()).unwrap_or("azure");
+    // vaults. Keyed by `config.effective_backend_name()` (the registry/
+    // config name), matching every other cache producer/consumer — not
+    // `registry.active().name()`/`Backend::name()` (the backend kind),
+    // which diverges whenever a named backend is active.
+    let backend_name = config.effective_backend_name();
     let cache_manager = crate::cache::CacheManager::from_config(&config);
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
         backend: backend_name.to_string(),
@@ -4465,9 +4475,9 @@ pub(crate) async fn execute_secret_move_direct(
     .await?;
 
     // Invalidate the secrets list cache for both source and destination
-    // vaults — same reasoning as `execute_secret_copy_direct` above:
-    // `execute_secret_move` branches on `use_trait_path(registry)` too.
-    let backend_name = registry.map(|r| r.active().name()).unwrap_or("azure");
+    // vaults — same reasoning as `execute_secret_copy_direct` above: keyed
+    // by `config.effective_backend_name()`, not the backend kind.
+    let backend_name = config.effective_backend_name();
     let cache_manager = crate::cache::CacheManager::from_config(&config);
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
         backend: backend_name.to_string(),
@@ -6498,7 +6508,7 @@ async fn execute_secret_copy(
         let secret_request = rename_request_from_properties(target_name, &source_secret)?;
 
         let copied_secret = backend.set_secret(to_vault, secret_request).await?;
-        invalidate_trait_secret_cache(config, reg.active().name(), to_vault);
+        invalidate_trait_secret_cache(config, config.effective_backend_name(), to_vault);
 
         output::success(&format!(
             "Successfully copied secret '{}' to vault '{}'",
@@ -6666,7 +6676,7 @@ async fn execute_secret_move(
             .secrets()
             .delete_secret(from_vault, name)
             .await?;
-        invalidate_trait_secret_cache(config, reg.active().name(), from_vault);
+        invalidate_trait_secret_cache(config, config.effective_backend_name(), from_vault);
     } else {
         secret_manager
             .delete_secret_safe(from_vault, name, true)

@@ -153,6 +153,38 @@ default_vault = "default"
         self.xv().args(args).output().expect("execute xv binary")
     }
 
+    /// Like `xv()`, but with the top-level active backend overridden to
+    /// `backend_name` via `XV_BACKEND` (clap env-populates `config.backend`
+    /// from it) — for tests that need a NAMED backend (e.g. `"local-a"`)
+    /// active with NO workspace attached, reusing this environment's
+    /// existing `[named_backends.local-a]`/`[named_backends.local-b]`
+    /// entries (Bugbot review round 3: no-workspace cache keys must
+    /// converge on `config.effective_backend_name()`, which is exactly what
+    /// this override exercises).
+    fn xv_with_backend(&self, backend_name: &str) -> Command {
+        let mut cmd = self.xv();
+        cmd.env("XV_BACKEND", backend_name);
+        cmd
+    }
+
+    fn run_with_backend(&self, backend_name: &str, args: &[&str]) -> std::process::Output {
+        self.xv_with_backend(backend_name)
+            .args(args)
+            .output()
+            .expect("execute xv binary")
+    }
+
+    fn ok_with_backend(&self, backend_name: &str, args: &[&str]) -> String {
+        let out = self.run_with_backend(backend_name, args);
+        assert!(
+            out.status.success(),
+            "command {args:?} (backend {backend_name}) failed.\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
     /// Like `xv()`, but overrides the working directory — for tests that
     /// need a project subdirectory (with its own `.xv.toml`) while keeping
     /// the SAME global context store (`XDG_CONFIG_HOME` is unchanged).
@@ -2046,7 +2078,7 @@ fn ls_then_qualified_delete_then_ls_reflects_write_with_cache_enabled() {
 
 /// Guard: the plain no-workspace path must ALSO pair correctly with caching
 /// enabled — the read side (`ls`) keys its cache entry by
-/// `registry.active().name()`, and `resolve_workspace_or_default`'s
+/// `config.effective_backend_name()`, and `resolve_workspace_or_default`'s
 /// degenerate (no-workspace) branch returns that exact same string, so a
 /// write must still invalidate what `ls` actually reads from.
 #[test]
@@ -2070,6 +2102,122 @@ fn no_workspace_ls_then_set_then_ls_reflects_write_with_cache_enabled() {
     assert!(
         !after_delete.contains("PLAIN_EXISTING"),
         "no-workspace ls must not still show a deleted secret from a stale cached listing: {after_delete}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bugbot review round 2 (HIGH): no-workspace cache keys must converge on
+// `config.effective_backend_name()` (the registry/config name), not
+// `Backend::name()`/`registry.active().name()` (the backend kind) — the
+// same class of bug as round 1's workspace-vs-kind mismatch, but for the
+// NO-WORKSPACE path: a NAMED backend active with no workspace attached
+// (`config.backend = "local-a"`) was sharing one cache file with the
+// built-in `local` backend for the same vault name, and a workspace write
+// (keyed by `entry.backend`, e.g. "local-a") could invalidate a path a
+// LATER no-workspace `ls` (active = "local-a") never reads from (it read
+// the kind-keyed "local" path instead). All three tests below use
+// `xv_with_backend("local-a", ..)` to make a NAMED backend the top-level
+// active one with NO workspace attached, reusing this environment's
+// existing `[named_backends.local-a]` entry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn named_backend_active_no_workspace_cache_pairs() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+
+    env.ok_with_backend("local-a", &["set", "NAMED_EXISTING", "--value", "v0"]);
+    let before = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(before.contains("NAMED_EXISTING"), "{before}");
+    assert!(!before.contains("NAMED_NEW"), "{before}");
+
+    // If the write and read cache keys diverged (write keyed by the kind
+    // "local", read keyed by the config name "local-a", or vice versa),
+    // this second `ls` would still serve the stale `before` listing.
+    env.ok_with_backend("local-a", &["set", "NAMED_NEW", "--value", "v1"]);
+    let after = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(
+        after.contains("NAMED_NEW"),
+        "named-backend-active (no workspace) ls must reflect the write within the \
+         cache TTL — read/write cache keys must not diverge: {after}"
+    );
+    assert!(after.contains("NAMED_EXISTING"), "{after}");
+}
+
+#[test]
+fn named_backend_does_not_share_cache_with_builtin_kind() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+
+    // Populate the cache while the BUILT-IN "local" backend is active
+    // (vault "default", store_default).
+    env.ok(&["set", "BUILTIN_LOCAL_SECRET", "--value", "v0"]);
+    let builtin_listing = env.ok(&["ls", "--format", "table"]);
+    assert!(
+        builtin_listing.contains("BUILTIN_LOCAL_SECRET"),
+        "{builtin_listing}"
+    );
+
+    // Switch the active backend to the NAMED "local-a" entry — same vault
+    // NAME ("default"), but a completely different on-disk store with
+    // nothing set in it yet. If the two shared one cache file (both keyed
+    // by the kind "local"), this `ls` would incorrectly show the builtin
+    // backend's secret.
+    let named_listing = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(
+        !named_listing.contains("BUILTIN_LOCAL_SECRET"),
+        "named backend 'local-a' must not see the built-in 'local' backend's cached \
+         listing just because they share a vault name: {named_listing}"
+    );
+}
+
+/// A read/write key MISMATCH manifests as a stale HIT, not a miss — a
+/// mismatched write invalidates a path nothing reads from, leaving
+/// whatever the read path's own (different) key already cached untouched.
+/// So this test must first populate a cache entry at the NO-WORKSPACE read
+/// key (a plain miss would silently "work" regardless of any mismatch),
+/// THEN write through the workspace path and confirm that entry — not some
+/// entry nothing ever reads — got invalidated.
+#[test]
+fn workspace_write_invalidates_entry_seen_by_no_workspace_ls() {
+    let env = WorkspaceEnv::with_cache_enabled(300);
+
+    // Step 1: populate the cache at the NO-WORKSPACE read key (active
+    // backend = "local-a", no workspace attached yet).
+    env.ok_with_backend("local-a", &["set", "OLD_SECRET", "--value", "v0"]);
+    let seed_listing = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(seed_listing.contains("OLD_SECRET"), "{seed_listing}");
+
+    // Step 2: attach a workspace over the SAME backend/vault and write a
+    // NEW secret through it — the qualified write is keyed by the
+    // workspace entry's registry name (`entry.backend` = "local-a").
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:NEW_SECRET", "--value", "v1"]);
+
+    // Step 3: remove the workspace (its only entry — this restores
+    // single-vault behavior) and read again via the NO-WORKSPACE path with
+    // the SAME active backend. If the workspace write's invalidation key
+    // ("local-a") diverged from what step 1's read populated
+    // (`config.effective_backend_name()`, also "local-a" when they're the
+    // same backend), this read would still serve the STALE `seed_listing`
+    // from step 1, missing NEW_SECRET entirely.
+    env.ok(&["cx", "rm", "work"]);
+    let no_workspace_listing = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
+    assert!(
+        no_workspace_listing.contains("NEW_SECRET"),
+        "no-workspace ls (active=local-a) must see the write made through the \
+         workspace, not serve the stale pre-workspace cached listing — read/write \
+         cache key shape must match across modes: {no_workspace_listing}"
+    );
+    assert!(
+        no_workspace_listing.contains("OLD_SECRET"),
+        "{no_workspace_listing}"
     );
 }
 

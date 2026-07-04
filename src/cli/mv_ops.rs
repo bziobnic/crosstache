@@ -380,7 +380,7 @@ async fn execute_secret_mv(
             .secrets()
             .update_secret(vault_name, &src_name, request)
             .await?;
-        invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
+        invalidate_trait_secret_cache(config, config.effective_backend_name(), vault_name);
         folder_updated = true;
     }
 
@@ -392,7 +392,7 @@ async fn execute_secret_mv(
             .await;
         // Rename may mutate state even when it errors (e.g. RenameIncomplete),
         // so invalidate unconditionally before inspecting the result.
-        invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
+        invalidate_trait_secret_cache(config, config.effective_backend_name(), vault_name);
         if let Err(e) = rename_result {
             if folder_updated {
                 let msg = if matches!(
@@ -523,7 +523,7 @@ async fn execute_folder_mv(
             output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
         }
     }
-    invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
+    invalidate_trait_secret_cache(config, config.effective_backend_name(), vault_name);
     let moved = moves.len() - failures;
     if failures > 0 {
         return Err(CrosstacheError::unknown(format!(
@@ -731,7 +731,7 @@ async fn execute_filter_mv(
             output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
         }
     }
-    invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
+    invalidate_trait_secret_cache(config, config.effective_backend_name(), vault_name);
     let moved = moves.len() - failures;
     if failures > 0 {
         return Err(CrosstacheError::unknown(format!(

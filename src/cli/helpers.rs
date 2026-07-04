@@ -106,28 +106,32 @@ pub(crate) async fn resolve_vault_for_trait(
 /// secret-name argument, honoring an active multi-vault workspace when one
 /// exists.
 ///
-/// `backend_name` is the string cache-invalidation callers MUST use for
-/// `invalidate_trait_secret_cache`/`CacheKey::SecretsList` — it is the
-/// REGISTRY/config name (e.g. a workspace entry's `backend` field, such as
-/// `"local-a"`), never `Backend::name()` (the hardcoded backend *kind*,
-/// e.g. `"local"`). Union `ls` keys its per-vault cache entries by
-/// `entry.backend` (the registry name), so any write-side invalidation
-/// using `backend.name()` instead would silently invalidate the wrong
-/// `(backend, vault)` cache path whenever a workspace entry's registry name
-/// differs from its kind (any named backend) — this was a real bug (Bugbot
-/// review): `xv ls` -> `xv set work:X` -> `xv ls` within the cache TTL kept
-/// showing the stale pre-write listing.
+/// `backend_name` is the ONE identifier every `CacheKey::SecretsList`
+/// producer and consumer in the codebase must converge on: the backend's
+/// REGISTRY/config name (e.g. a workspace entry's `backend` field such as
+/// `"local-a"`, or — with no workspace — `config.effective_backend_name()`).
+/// It is never `Backend::name()` (the hardcoded backend *kind*, e.g.
+/// `"local"`), and never `registry.active().name()` either — both return
+/// the kind, which collapses distinct named backends of the same kind onto
+/// one cache path and diverges from the config name whenever a NAMED
+/// backend is active (`config.backend = "local-a"`) (Bugbot review, round
+/// 2). Union `ls` keys its per-vault cache entries by `entry.backend` (the
+/// registry name); the no-workspace `ls`/`ls --deleted` read path keys by
+/// `config.effective_backend_name()` (`trait_secret_cache_key(..)` in
+/// `src/cli/secret_ops.rs`) — every write-side invalidation, including this
+/// function's degenerate branch, must match whichever of those two the
+/// active read path actually uses, or a write silently invalidates a cache
+/// entry nothing ever reads from while the stale one lingers.
 ///
 /// **No workspace ⇒ byte-identical**: returns `(registry.active_arc(),
-/// registry.active().name(), resolve_vault_for_trait(...), raw.to_string())`
-/// — the backend/vault/path are exactly what every `get`/`set` call site
-/// returned before workspaces existed, and `registry.active().name()` is
-/// the exact string the no-workspace `ls`/`ls --deleted` read path already
-/// keys its cache entries by (`trait_secret_cache_key(reg.active().name(),
-/// ..)` in `src/cli/secret_ops.rs`), so hit/invalidate stay paired there
-/// too. A workspace is only consulted (and only then does resolution
-/// behave any differently) when [`crate::workspace::resolve_workspace`]
-/// returns `Some`.
+/// config.effective_backend_name(), resolve_vault_for_trait(...),
+/// raw.to_string())` — the backend/vault/path are exactly what every
+/// `get`/`set` call site returned before workspaces existed, and
+/// `config.effective_backend_name()` is the exact string the no-workspace
+/// `ls`/`ls --deleted` read path already keys its cache entries by, so
+/// hit/invalidate stay paired there too. A workspace is only consulted (and
+/// only then does resolution behave any differently) when
+/// [`crate::workspace::resolve_workspace`] returns `Some`.
 ///
 /// With a workspace: builds a lazy multi-backend registry scoped to just
 /// this workspace's attached backends (so a command touching one backend
@@ -150,7 +154,7 @@ pub(crate) async fn resolve_workspace_or_default(
         Ok((target.backend, backend_name, target.entry.vault, path))
     } else {
         let vault_name = resolve_vault_for_trait(config, Some(registry)).await?;
-        let backend_name = registry.active().name().to_string();
+        let backend_name = config.effective_backend_name().to_string();
         Ok((
             registry.active_arc(),
             backend_name,

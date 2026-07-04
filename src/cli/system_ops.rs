@@ -1024,7 +1024,7 @@ async fn save_generated_secret(
             .await?;
         crate::cli::secret_ops::invalidate_trait_secret_cache(
             config,
-            reg.active().name(),
+            config.effective_backend_name(),
             &vault_name,
         );
         return Ok(());
