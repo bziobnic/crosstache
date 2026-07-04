@@ -261,15 +261,51 @@ fn ls_filter_invalid_glob_errors_before_listing() {
 // `xv find --filter`
 // ===========================================================================
 
+/// Placement matters, not just presence: a filter applied *after* fuzzy
+/// scoring can produce the exact same `--names-only` output as a correct
+/// pre-filter whenever `--min-score`'s relative cutoff happens to land in
+/// the same place either way (e.g. with the default 0.3 and no excluded
+/// candidate scoring anywhere near the top). To make the placement itself
+/// observable, this test includes a filtered-OUT candidate ("alpha", bare)
+/// that is the single highest fuzzy scorer for the pattern "alpha" — higher
+/// even than "test-alpha", which the glob *does* admit — and pairs it with
+/// an explicit `--min-score` tuned so the two placements disagree on
+/// whether a third, low (but real) scorer survives:
+///
+/// Scores against pattern "alpha" (verified via `--format json`): bare
+/// "alpha" = 140, "latest-alpha" = "test-alpha" = 128, "test-a1l2p3h4a" = 84
+/// (gapped match), "test-zzz" = no match at all (dropped unconditionally).
+///
+/// - Correct (pre-filter): candidate set is glob-restricted to
+///   {test-alpha, test-a1l2p3h4a, test-zzz} *before* scoring, so the top
+///   score used for the relative cutoff is test-alpha's 128. At
+///   `--min-score 0.62`, cutoff = ceil(128 * 0.62) = 80, and 84 >= 80, so
+///   test-a1l2p3h4a survives.
+/// - Buggy (post-scoring filter): the cutoff is computed against the full,
+///   unfiltered candidate set, so bare "alpha" (140) sets the top score
+///   instead. cutoff = ceil(140 * 0.62) = 87, and 84 < 87 — test-a1l2p3h4a
+///   is dropped before the glob filter even gets a chance to run, even
+///   though it belongs in the answer. (Empirically confirmed against a
+///   temporarily bug-simulated build during development of this test: the
+///   post-scoring placement returns only `test-alpha`, missing
+///   `test-a1l2p3h4a`.)
+///
+/// So this test fails under a post-scoring filter placement but passes
+/// under the correct pre-filter placement — the earlier bare "excludes
+/// latest-alpha" assertion alone could not tell the two apart.
 #[test]
 fn find_filter_prefilters_before_fuzzy_scoring() {
     let (mut cmd, temp) = common::xv_isolated_local();
+    set_secret(temp.path(), "alpha", "v0"); // excluded by filter; top fuzzy scorer
     set_secret(temp.path(), "test-alpha", "v1");
     set_secret(temp.path(), "test-beta", "v2");
     set_secret(temp.path(), "latest-alpha", "v3");
+    set_secret(temp.path(), "test-a1l2p3h4a", "v4"); // included; low (gapped) score
+    set_secret(temp.path(), "test-zzz", "v5"); // included; no fuzzy match at all
 
-    // "alpha" fuzzy-matches both test-alpha and latest-alpha, but --filter
-    // 'test-*' hard-excludes latest-alpha before scoring even starts.
+    // "alpha" fuzzy-matches "alpha", "latest-alpha", and "test-alpha", but
+    // --filter 'test-*' hard-excludes "alpha" and "latest-alpha" before
+    // scoring even starts.
     let out = cmd
         .args(["find", "alpha", "--filter", "test-*", "--names-only"])
         .output()
@@ -284,6 +320,52 @@ fn find_filter_prefilters_before_fuzzy_scoring() {
     assert!(
         !stdout.contains("test-beta"),
         "'test-beta' does not fuzzy-match 'alpha': {stdout}"
+    );
+
+    // The placement-sensitive case: --min-score's cutoff must be computed
+    // relative to the top score *within the glob-filtered set* (128, from
+    // test-alpha), not the unfiltered set (140, from the excluded "alpha").
+    let out2 = xv_same_env(temp.path())
+        .args([
+            "find",
+            "alpha",
+            "--filter",
+            "test-*",
+            "--min-score",
+            "0.62",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("execute xv find --format json");
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&common::stdout_str(&out2)).expect("find --format json output");
+    let names: Vec<&str> = json
+        .as_array()
+        .expect("json array")
+        .iter()
+        .map(|v| v["name"].as_str().expect("name field"))
+        .collect();
+    assert!(
+        names.contains(&"test-alpha"),
+        "top-of-filtered-set survivor should always pass: {names:?}"
+    );
+    assert!(
+        names.contains(&"test-a1l2p3h4a"),
+        "test-a1l2p3h4a (score 84) must survive a cutoff computed from the \
+         filtered set's top score (128 * 0.62 = 80) — a post-scoring filter \
+         would instead compute the cutoff from the excluded 'alpha' (140 * \
+         0.62 = 87) and wrongly drop it: {names:?}"
+    );
+    assert_eq!(
+        names.len(),
+        2,
+        "only the two glob-admitted, score-surviving secrets should appear: {names:?}"
     );
 }
 
