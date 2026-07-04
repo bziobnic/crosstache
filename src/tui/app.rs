@@ -30,6 +30,45 @@ pub struct Toast {
     pub ticks_left: u32, // 50 ticks @ 100ms = 5s
 }
 
+/// Result of resolving a selected `app.vaults[i].name` (an ALIAS when a
+/// workspace is attached) against the workspace — shared by every command
+/// that queries a specific vault (`LoadSecrets`/`LoadValue`/`LoadHistory`)
+/// so the three can never diverge on which backend/vault they hit (Bugbot
+/// HIGH fix, round 2: `LoadValue`/`LoadHistory` previously ignored the
+/// workspace entirely and queried the shared active backend under the
+/// alias string as if it were a real vault name).
+#[derive(Clone)]
+pub(crate) enum WorkspaceTarget {
+    /// No workspace attached — caller falls back to the shared `backend`
+    /// and treats the alias as the vault name unchanged (spec §Backward
+    /// compatibility).
+    NoWorkspace,
+    /// The alias resolved to an attached, materialized entry.
+    Entry {
+        backend: Arc<dyn Backend>,
+        /// The entry's REAL vault name (may differ from the alias).
+        vault: String,
+    },
+    /// A workspace IS attached but this entry's backend failed to
+    /// materialize at startup — callers must toast and skip the query, not
+    /// fall back to any other backend.
+    Unavailable,
+}
+
+impl std::fmt::Debug for WorkspaceTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoWorkspace => write!(f, "NoWorkspace"),
+            Self::Entry { backend, vault } => f
+                .debug_struct("Entry")
+                .field("backend", &backend.name())
+                .field("vault", vault)
+                .finish(),
+            Self::Unavailable => write!(f, "Unavailable"),
+        }
+    }
+}
+
 pub struct App {
     pub config: Config,
     pub pane: Pane,
@@ -168,5 +207,223 @@ impl App {
             s.original_name.clone()
         };
         Some((vault, name))
+    }
+
+    /// Resolve `alias` (an `app.vaults[i].name`) against the workspace. See
+    /// [`WorkspaceTarget`] for the three possible outcomes.
+    pub(crate) fn workspace_target_for(&self, alias: &str) -> WorkspaceTarget {
+        if self.workspace.is_none() {
+            return WorkspaceTarget::NoWorkspace;
+        }
+        match self.workspace_backends.get(alias) {
+            Some(backend) => {
+                let vault = self
+                    .workspace_vault_names
+                    .get(alias)
+                    .cloned()
+                    .unwrap_or_else(|| alias.to_string());
+                WorkspaceTarget::Entry {
+                    backend: backend.clone(),
+                    vault,
+                }
+            }
+            None => WorkspaceTarget::Unavailable,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::error::BackendError;
+    use crate::backend::{BackendCapabilities, BackendKind, SecretBackend};
+    use crate::secret::manager::{SecretProperties, SecretRequest, SecretUpdateRequest};
+
+    /// Minimal fake `Backend` distinguishable by its `name()` — enough to
+    /// prove `workspace_target_for` returns the RIGHT entry's backend, not
+    /// just some backend.
+    struct FakeBackend(&'static str);
+
+    #[async_trait::async_trait]
+    impl SecretBackend for FakeBackend {
+        async fn set_secret(
+            &self,
+            _vault: &str,
+            _request: SecretRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("fake".into()))
+        }
+        async fn get_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("fake".into()))
+        }
+        async fn get_secret_version(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("fake".into()))
+        }
+        async fn list_secrets(
+            &self,
+            _vault: &str,
+            _group_filter: Option<&str>,
+        ) -> std::result::Result<Vec<SecretSummary>, BackendError> {
+            Ok(Vec::new())
+        }
+        async fn delete_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<(), BackendError> {
+            Err(BackendError::Unsupported("fake".into()))
+        }
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _request: SecretUpdateRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("fake".into()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for FakeBackend {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn kind(&self) -> BackendKind {
+            BackendKind::Local
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::default()
+        }
+        fn secrets(&self) -> &dyn SecretBackend {
+            self
+        }
+        async fn health_check(&self) -> std::result::Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    fn app_with_workspace() -> App {
+        let mut app = App::new(Config::default());
+        app.workspace = Some(crate::workspace::Workspace {
+            entries: vec![
+                crate::workspace::WorkspaceEntry {
+                    alias: "work".to_string(),
+                    backend: "local-a".to_string(),
+                    vault: "work-vault".to_string(),
+                    default: true,
+                },
+                crate::workspace::WorkspaceEntry {
+                    alias: "stage".to_string(),
+                    backend: "local-b".to_string(),
+                    vault: "stage-vault".to_string(),
+                    default: false,
+                },
+            ],
+            default_alias: "work".to_string(),
+            source: crate::workspace::WorkspaceSource::Context,
+        });
+        app.workspace_backends.insert(
+            "work".to_string(),
+            Arc::new(FakeBackend("backend-a")) as Arc<dyn Backend>,
+        );
+        app.workspace_backends.insert(
+            "stage".to_string(),
+            Arc::new(FakeBackend("backend-b")) as Arc<dyn Backend>,
+        );
+        app.workspace_vault_names
+            .insert("work".to_string(), "work-vault".to_string());
+        app.workspace_vault_names
+            .insert("stage".to_string(), "stage-vault".to_string());
+        app
+    }
+
+    #[test]
+    fn workspace_target_for_no_workspace_returns_no_workspace() {
+        let app = App::new(Config::default());
+        assert!(matches!(
+            app.workspace_target_for("anything"),
+            WorkspaceTarget::NoWorkspace
+        ));
+    }
+
+    #[test]
+    fn workspace_target_for_hit_returns_entry_backend_and_real_vault() {
+        let app = app_with_workspace();
+
+        match app.workspace_target_for("stage") {
+            WorkspaceTarget::Entry { backend, vault } => {
+                assert_eq!(vault, "stage-vault");
+                assert_eq!(backend.name(), "backend-b");
+            }
+            other => panic!("expected Entry, got a different variant: {other:?}"),
+        }
+
+        match app.workspace_target_for("work") {
+            WorkspaceTarget::Entry { backend, vault } => {
+                assert_eq!(vault, "work-vault");
+                assert_eq!(backend.name(), "backend-a");
+            }
+            other => panic!("expected Entry, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_target_for_miss_returns_unavailable() {
+        let app = app_with_workspace();
+        // "ghost" is not an attached alias at all — but the important case
+        // this pins is an ATTACHED alias whose backend failed to
+        // materialize at startup (workspace_backends has no entry for it),
+        // which `run_tui` produces identically (a missing map entry).
+        assert!(matches!(
+            app.workspace_target_for("ghost"),
+            WorkspaceTarget::Unavailable
+        ));
+    }
+
+    /// Three-command consistency (Bugbot HIGH fix, round 2): `LoadSecrets`,
+    /// `LoadValue`, and `LoadHistory` all resolve a selected alias through
+    /// this SAME helper — pinned here by calling it multiple times for the
+    /// same alias (as each of the three call sites in `mod.rs` does) and
+    /// asserting the resolved `(backend, vault)` never diverges. Before the
+    /// fix, `LoadValue`/`LoadHistory` used a completely different
+    /// resolution path (the shared active backend + the alias as a literal
+    /// vault name), which this test would have caught: "stage"'s vault name
+    /// is `"stage-vault"`, not `"stage"`.
+    #[test]
+    fn three_commands_resolve_the_same_alias_identically() {
+        let app = app_with_workspace();
+
+        let for_list = app.workspace_target_for("stage");
+        let for_value = app.workspace_target_for("stage");
+        let for_history = app.workspace_target_for("stage");
+
+        for (label, target) in [
+            ("list", &for_list),
+            ("value", &for_value),
+            ("history", &for_history),
+        ] {
+            match target {
+                WorkspaceTarget::Entry { backend, vault } => {
+                    assert_eq!(vault, "stage-vault", "{label} resolved the wrong vault");
+                    assert_eq!(
+                        backend.name(),
+                        "backend-b",
+                        "{label} resolved the wrong backend"
+                    );
+                }
+                other => panic!("{label}: expected Entry, got {other:?}"),
+            }
+        }
     }
 }

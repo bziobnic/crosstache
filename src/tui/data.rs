@@ -107,9 +107,15 @@ pub fn spawn_load_secrets(
     })
 }
 
+/// `vault` is the actual name queried against the backend; `key` is what the
+/// resulting `Message::ValueLoaded` is tagged with (mirrors
+/// `spawn_load_secrets`'s vault/key split — Bugbot HIGH fix, round 2: this
+/// used to have no such split at all, so a workspace entry's value was
+/// queried against the ALIAS as if it were the real vault name).
 pub fn spawn_load_value(
     config: Config,
     vault: String,
+    key: String,
     name: String,
     tx: Sender<Message>,
     backend: Option<Arc<dyn Backend>>,
@@ -127,7 +133,7 @@ pub fn spawn_load_value(
                     let content_type = props.content_type.clone();
                     match props.value {
                         Some(v) => Message::ValueLoaded {
-                            vault,
+                            vault: key,
                             name,
                             value: zeroize::Zeroizing::new(v.as_str().to_string()),
                             content_type,
@@ -160,7 +166,7 @@ pub fn spawn_load_value(
                     let content_type = props.content_type.clone();
                     match props.value {
                         Some(v) => Message::ValueLoaded {
-                            vault,
+                            vault: key,
                             name,
                             value: zeroize::Zeroizing::new(v.as_str().to_string()),
                             content_type,
@@ -177,9 +183,13 @@ pub fn spawn_load_value(
     })
 }
 
+/// `vault` is the actual name queried against the backend; `key` is what the
+/// resulting `Message::HistoryLoaded` is tagged with (same split as
+/// `spawn_load_value`/`spawn_load_secrets` — Bugbot HIGH fix, round 2).
 pub fn spawn_load_history(
     config: Config,
     vault: String,
+    key: String,
     name: String,
     tx: Sender<Message>,
     backend: Option<Arc<dyn Backend>>,
@@ -194,7 +204,7 @@ pub fn spawn_load_history(
                 .map_err(CrosstacheError::from);
             let msg = match result {
                 Ok(versions) => Message::HistoryLoaded {
-                    vault,
+                    vault: key,
                     name,
                     versions,
                 },
@@ -218,7 +228,7 @@ pub fn spawn_load_history(
             .await;
             let msg = match result {
                 Ok(versions) => Message::HistoryLoaded {
-                    vault,
+                    vault: key,
                     name,
                     versions,
                 },

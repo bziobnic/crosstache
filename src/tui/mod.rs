@@ -13,7 +13,7 @@ pub mod view;
 use crate::backend::Backend;
 use crate::config::Config;
 use crate::error::Result;
-use app::App;
+use app::{App, WorkspaceTarget};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -198,44 +198,34 @@ async fn handle_command(
         }
         Command::LoadSecrets { vault } => {
             // Workspace-aware: `vault` is the selected `app.vaults[i].name`,
-            // which is the ALIAS in workspace mode — resolve it to that
-            // entry's own materialized backend and REAL vault name rather
-            // than the single shared `backend`/raw alias string (spec
-            // §Backward compatibility: `app.workspace` is `None` outside a
+            // which is the ALIAS in workspace mode — resolve it (via the
+            // shared `App::workspace_target_for` helper) to that entry's
+            // own materialized backend and REAL vault name rather than the
+            // single shared `backend`/raw alias string (spec §Backward
+            // compatibility: `app.workspace` is `None` outside a
             // workspace, so this is unchanged there). The alias itself
-            // stays the `Message::SecretsLoaded` key (`key` param) so
+            // stays the `Message::SecretsLoaded` key so
             // `secrets_by_vault`/`selected_vault()` keep matching, even
             // though two aliases can share the same real vault name.
             //
-            // Bugbot NIT fix: if this entry's backend failed to
-            // materialize at startup, `workspace_backends` has no entry
-            // for it — silently falling back to the single shared
-            // `backend` would query the WRONG backend/vault under the
-            // alias's name. Surface a visible toast instead (the same
-            // `Message::Error` path every other TUI failure uses) and
-            // never issue a query for that entry.
-            let (real_vault, entry_backend) = match &app.workspace {
-                Some(_) => {
-                    let Some(entry_backend) = app.workspace_backends.get(&vault).cloned() else {
-                        let _ = tx
-                            .send(Message::Error(crate::error::CrosstacheError::config(
-                                format!(
-                                    "workspace entry '{vault}' unavailable: its backend failed \
-                                     to initialize; secrets were not loaded"
-                                ),
-                            )))
-                            .await;
-                        return;
-                    };
-                    (
-                        app.workspace_vault_names
-                            .get(&vault)
-                            .cloned()
-                            .unwrap_or_else(|| vault.clone()),
-                        Some(entry_backend),
-                    )
+            // If this entry's backend failed to materialize at startup,
+            // `workspace_target_for` returns `Unavailable` — surface a
+            // visible toast (the same `Message::Error` path every other
+            // TUI failure uses) and never issue a query for that entry.
+            let (real_vault, entry_backend) = match app.workspace_target_for(&vault) {
+                WorkspaceTarget::Entry { backend, vault } => (vault, Some(backend)),
+                WorkspaceTarget::NoWorkspace => (vault.clone(), backend.clone()),
+                WorkspaceTarget::Unavailable => {
+                    let _ = tx
+                        .send(Message::Error(crate::error::CrosstacheError::config(
+                            format!(
+                                "workspace entry '{vault}' unavailable: its backend failed \
+                                 to initialize; secrets were not loaded"
+                            ),
+                        )))
+                        .await;
+                    return;
                 }
-                None => (vault.clone(), backend.clone()),
             };
             drop(data::spawn_load_secrets(
                 app.config.clone(),
@@ -246,21 +236,66 @@ async fn handle_command(
             ));
         }
         Command::LoadValue { vault, name } => {
+            // Bugbot HIGH fix (round 2): must resolve through the SAME
+            // `workspace_target_for` helper `LoadSecrets` uses — this used
+            // to pass the shared `backend` and the alias-as-vault-name
+            // unconditionally, so revealing a value (or its record Fields
+            // section) queried the wrong backend/vault (or the legacy
+            // Azure path) while the secrets list looked correct.
+            let (real_vault, entry_backend) = match app.workspace_target_for(&vault) {
+                WorkspaceTarget::Entry {
+                    backend,
+                    vault: real_vault,
+                } => (real_vault, Some(backend)),
+                WorkspaceTarget::NoWorkspace => (vault.clone(), backend.clone()),
+                WorkspaceTarget::Unavailable => {
+                    let _ = tx
+                        .send(Message::Error(crate::error::CrosstacheError::config(
+                            format!(
+                                "workspace entry '{vault}' unavailable: its backend failed \
+                                 to initialize; value was not loaded"
+                            ),
+                        )))
+                        .await;
+                    return;
+                }
+            };
             drop(data::spawn_load_value(
                 app.config.clone(),
+                real_vault,
                 vault,
                 name,
                 tx.clone(),
-                backend.clone(),
+                entry_backend,
             ));
         }
         Command::LoadHistory { vault, name } => {
+            // Bugbot HIGH fix (round 2): same helper as LoadSecrets/LoadValue.
+            let (real_vault, entry_backend) = match app.workspace_target_for(&vault) {
+                WorkspaceTarget::Entry {
+                    backend,
+                    vault: real_vault,
+                } => (real_vault, Some(backend)),
+                WorkspaceTarget::NoWorkspace => (vault.clone(), backend.clone()),
+                WorkspaceTarget::Unavailable => {
+                    let _ = tx
+                        .send(Message::Error(crate::error::CrosstacheError::config(
+                            format!(
+                                "workspace entry '{vault}' unavailable: its backend failed \
+                                 to initialize; history was not loaded"
+                            ),
+                        )))
+                        .await;
+                    return;
+                }
+            };
             drop(data::spawn_load_history(
                 app.config.clone(),
+                real_vault,
                 vault,
                 name,
                 tx.clone(),
-                backend.clone(),
+                entry_backend,
             ));
         }
         Command::LoadAudit { vault, name } => {
