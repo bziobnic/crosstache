@@ -100,7 +100,8 @@ fn route_fields(
         if let Some(def) = record_type.field(name) {
             if def.primary {
                 return Err(CrosstacheError::invalid_argument(format!(
-                    "field '{name}' is the primary field of type '{}'; set it via --value/--stdin, not --field",
+                    "field '{name}' is the primary field of type '{}'; set it via 'xv update <name> \
+                     <value>', 'xv update <name> --stdin', or 'xv rotate <name>', not --field",
                     record_type.name
                 )));
             }
@@ -121,7 +122,8 @@ fn route_fields(
         if let Some(def) = record_type.field(name) {
             if def.primary {
                 return Err(CrosstacheError::invalid_argument(format!(
-                    "field '{name}' is the primary field of type '{}'; set it via --value/--stdin, not --field-secret",
+                    "field '{name}' is the primary field of type '{}'; set it via 'xv update <name> \
+                     <value>', 'xv update <name> --stdin', or 'xv rotate <name>', not --field-secret",
                     record_type.name
                 )));
             }
@@ -2457,61 +2459,98 @@ async fn execute_record_field_update(
         }
     }
 
+    let props = apply_record_field_changes(
+        name,
+        &secret,
+        &metadata_updates,
+        &secret_updates,
+        vault_name,
+        config,
+        reg,
+    )
+    .await?;
+    output::success(&format!(
+        "Successfully updated field(s) on record '{}'",
+        props.original_name
+    ));
+    Ok(())
+}
+
+/// Shared record write-back machinery: given a `secret` already known to be
+/// a record, applies `metadata_updates`
+/// (tag-only, no new version) and/or `secret_updates` (rewrites the
+/// envelope, writes a new version), re-running the same tag-budget check
+/// `xv set --type` uses. Used by `--field`/`--field-secret` edits
+/// (`execute_record_field_update`) and by bare-value writes against a
+/// record's primary field — `xv update <name> <value>`/`--stdin` and
+/// `xv rotate <name>` (`execute_record_primary_update`) — so all three
+/// paths share one write-back implementation instead of drifting apart
+/// (record-types plan; fixes #330).
+///
+/// Tags + content type + replace_tags/replace_groups + groups/note/
+/// folder. Two distinct write shapes:
+///
+/// - Secret-field edit (`secret_updates` non-empty): this forces the
+///   full-PUT path on Azure's `update_secret` (it only takes the lighter
+///   attributes-only PATCH when `request.value.is_none()` — see
+///   `AzureSecretBackendCompat::update_secret`, src/backend/azure/secrets.rs
+///   ~L214-265). The full-PUT branch writes `content_type`/`tags` from the
+///   request EXACTLY as given — `None` there does not mean "leave
+///   unchanged" the way it does on the attributes-only PATCH; it means
+///   "no content type" / "rebuild tags from empty" respectively. Relying
+///   on backend merge-on-`None` semantics here silently destroyed the
+///   record's content-type marker and dropped xv-type/f.*/groups/etc.
+///   (Bugbot review, round 1). So whenever a secret-field edit is in
+///   play we build the COMPLETE desired tag map ourselves (existing tags
+///   + the metadata overlay) and set `replace_tags: true`, exactly like
+///     `execute_record_type_conversion`/`execute_record_untype` already do
+///     — never a partial delta.
+///
+///   That full-PUT path ALSO does not treat `groups: None` as
+///   "unchanged": Azure's `prepare_secret_request` (src/secret/manager.rs)
+///   only re-adds the `groups` tag when `SecretRequest.groups` is `Some`,
+///   so sending `None` after stripping the denormalized `groups` key out
+///   of the tags map above silently ERASED group membership on Azure —
+///   `note`/`folder` happened to survive only because they ride
+///   `FieldUpdate::Unchanged`, which Azure's translation layer explicitly
+///   re-fetches and carries forward before reaching `prepare_secret_
+///   request`; `groups` has no such tri-state fallback (Bugbot review,
+///   round 3). Fix: use the tuple `split_denormalized_tags` returns —
+///   `groups` goes into the request's dedicated field as `Some(vec)`
+///   with `replace_groups: true` (exact carry-forward, mirrors
+///   `rename_request_from_properties`'s use of the same tuple); `note`/
+///   `folder` switch from `Unchanged` to `Set`-when-known so they no
+///   longer rely on any backend's "Unchanged re-fetches current"
+///   behavior specifically — they're asserted directly from the same
+///   `secret` this function already fetched.
+/// - Metadata-only edit (`secret_updates` empty): stays on Azure's
+///   attributes-only PATCH, which already merges a partial tag delta
+///   against the current tags itself (`build_patched_tags`) and already
+///   correctly leaves groups/note/folder alone when their request fields
+///   are None/Unchanged — untouched, still correct.
+async fn apply_record_field_changes(
+    name: &str,
+    secret: &crate::secret::manager::SecretProperties,
+    metadata_updates: &BTreeMap<String, String>,
+    secret_updates: &BTreeMap<String, String>,
+    vault_name: &str,
+    config: &Config,
+    reg: &BackendRegistry,
+) -> Result<crate::secret::manager::SecretProperties> {
     let mut new_value: Option<Zeroizing<String>> = None;
     if !secret_updates.is_empty() {
         let raw = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
         let mut envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw)?;
-        for (k, v) in &secret_updates {
+        for (k, v) in secret_updates {
             envelope.insert(k.clone(), v.clone());
         }
         new_value = Some(Zeroizing::new(encode_envelope(&envelope)?));
     }
 
-    // Tags + content type + replace_tags/replace_groups + groups/note/
-    // folder. Two distinct write shapes:
-    //
-    // - Secret-field edit (`new_value.is_some()`): this forces the full-PUT
-    //   path on Azure's `update_secret` (it only takes the lighter
-    //   attributes-only PATCH when `request.value.is_none()` — see
-    //   `AzureSecretBackendCompat::update_secret`, src/backend/azure/secrets.rs
-    //   ~L214-265). The full-PUT branch writes `content_type`/`tags` from the
-    //   request EXACTLY as given — `None` there does not mean "leave
-    //   unchanged" the way it does on the attributes-only PATCH; it means
-    //   "no content type" / "rebuild tags from empty" respectively. Relying
-    //   on backend merge-on-`None` semantics here silently destroyed the
-    //   record's content-type marker and dropped xv-type/f.*/groups/etc.
-    //   (Bugbot review, round 1). So whenever a secret-field edit is in
-    //   play we build the COMPLETE desired tag map ourselves (existing tags
-    //   + the metadata overlay) and set `replace_tags: true`, exactly like
-    //   `execute_record_type_conversion`/`execute_record_untype` already do
-    //   — never a partial delta.
-    //
-    //   That full-PUT path ALSO does not treat `groups: None` as
-    //   "unchanged": Azure's `prepare_secret_request` (src/secret/manager.rs)
-    //   only re-adds the `groups` tag when `SecretRequest.groups` is `Some`,
-    //   so sending `None` after stripping the denormalized `groups` key out
-    //   of the tags map above silently ERASED group membership on Azure —
-    //   `note`/`folder` happened to survive only because they ride
-    //   `FieldUpdate::Unchanged`, which Azure's translation layer explicitly
-    //   re-fetches and carries forward before reaching `prepare_secret_
-    //   request`; `groups` has no such tri-state fallback (Bugbot review,
-    //   round 3). Fix: use the tuple `split_denormalized_tags` returns —
-    //   `groups` goes into the request's dedicated field as `Some(vec)`
-    //   with `replace_groups: true` (exact carry-forward, mirrors
-    //   `rename_request_from_properties`'s use of the same tuple); `note`/
-    //   `folder` switch from `Unchanged` to `Set`-when-known so they no
-    //   longer rely on any backend's "Unchanged re-fetches current"
-    //   behavior specifically — they're asserted directly from the same
-    //   `secret` this function already fetched.
-    // - Metadata-only edit (`new_value.is_none()`): stays on Azure's
-    //   attributes-only PATCH, which already merges a partial tag delta
-    //   against the current tags itself (`build_patched_tags`) and already
-    //   correctly leaves groups/note/folder alone when their request fields
-    //   are None/Unchanged — untouched, still correct.
     let (new_tags, content_type, replace_tags, groups, note, folder, replace_groups) =
         if !secret_updates.is_empty() {
             let mut full = secret.tags.clone();
-            for (k, v) in &metadata_updates {
+            for (k, v) in metadata_updates {
                 full.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
             }
             // `secret.tags` is DENORMALIZED for display (groups/note/folder
@@ -2535,7 +2574,7 @@ async fn execute_record_field_update(
             )
         } else if !metadata_updates.is_empty() {
             let mut t = std::collections::HashMap::new();
-            for (k, v) in &metadata_updates {
+            for (k, v) in metadata_updates {
                 t.insert(format!("{FIELD_TAG_PREFIX}{k}"), v.clone());
             }
             (
@@ -2571,7 +2610,7 @@ async fn execute_record_field_update(
                 .map(|f| (f.to_string(), v.clone()))
         })
         .collect();
-    for (k, v) in &metadata_updates {
+    for (k, v) in metadata_updates {
         projected_field_tags.insert(k.clone(), v.clone());
     }
     let user_tags = user_tags_of(&secret.tags);
@@ -2609,12 +2648,68 @@ async fn execute_record_field_update(
         .secrets()
         .update_secret(vault_name, name, request)
         .await?;
-    output::success(&format!(
-        "Successfully updated field(s) on record '{}'",
-        props.original_name
-    ));
     invalidate_trait_secret_cache(config, vault_name);
-    Ok(())
+    Ok(props)
+}
+
+/// Resolves the record's declared primary field, erroring with guidance
+/// when the type can't be resolved — the primary field name is unknowable
+/// in that case, so a bare-value write can't safely target it (record-types
+/// plan; fixes #330).
+fn resolve_primary_field<'a>(
+    name: &str,
+    secret: &crate::secret::manager::SecretProperties,
+    types: &'a [RecordType],
+) -> Result<&'a RecordType> {
+    let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
+    find_type(types, &type_name).ok_or_else(|| {
+        CrosstacheError::config(format!(
+            "secret '{name}' has type '{type_name}', which has no resolvable type definition \
+             (check your [types.*] config); its primary field can't be determined, so a bare-value \
+             write can't set it safely. Use 'xv get {name} --record' to inspect its raw fields, or \
+             fix the type definition, then retry."
+        ))
+    })
+}
+
+/// `xv update <name> <value>` / `xv update <name> --stdin` against a typed
+/// record: sets the primary field inside the envelope instead of
+/// overwriting the whole secret value (which would corrupt the envelope —
+/// see #330). Also used by `xv rotate <name>` on a record, so the generated
+/// value becomes the new primary the same way. Reuses
+/// `apply_record_field_changes`, so tags/groups/note/folder and every other
+/// envelope field are preserved exactly like a `--field`/`--field-secret`
+/// edit.
+async fn execute_record_primary_update(
+    name: &str,
+    new_primary_value: &str,
+    secret: &crate::secret::manager::SecretProperties,
+    vault_name: &str,
+    config: &Config,
+    reg: &BackendRegistry,
+) -> Result<crate::secret::manager::SecretProperties> {
+    let types = config.resolve_record_types().await?;
+    let record_type = resolve_primary_field(name, secret, &types)?;
+    let primary_name = record_type.primary().name.clone();
+    if new_primary_value.trim().is_empty() {
+        return Err(CrosstacheError::config(format!(
+            "the primary field '{primary_name}' of type '{}' is required and cannot be set to an \
+             empty value",
+            record_type.name
+        )));
+    }
+    let mut secret_updates = BTreeMap::new();
+    secret_updates.insert(primary_name, new_primary_value.to_string());
+    apply_record_field_changes(
+        name,
+        secret,
+        &BTreeMap::new(),
+        &secret_updates,
+        vault_name,
+        config,
+        reg,
+    )
+    .await
 }
 
 /// `xv update <name> --type <type>` (record-types plan Task 9): explicit
@@ -2894,6 +2989,45 @@ pub(crate) async fn execute_secret_update_direct(
                     reg,
                 )
                 .await;
+            }
+
+            // Bare-value write (`xv update <name> <value>` / `--stdin`)
+            // against a typed record: set the primary field inside the
+            // envelope instead of overwriting the whole secret value, which
+            // would leave `content_type` claiming a record while the value
+            // is a bare string (#330). Untyped secrets fall through
+            // untouched to the classic path below.
+            if value.is_some() || stdin {
+                let existing = reg
+                    .active()
+                    .secrets()
+                    .get_secret(&vault_name, name, true)
+                    .await?;
+                if crate::records::is_record(&existing.content_type) {
+                    let resolved_value = if stdin {
+                        let stdin_value = read_secret_value_from_stdin(trim)?;
+                        if stdin_value.is_empty() {
+                            return Err(CrosstacheError::config("Secret value cannot be empty"));
+                        }
+                        stdin_value
+                    } else {
+                        value.clone().unwrap_or_default()
+                    };
+                    let props = execute_record_primary_update(
+                        name,
+                        &resolved_value,
+                        &existing,
+                        &vault_name,
+                        &config,
+                        reg,
+                    )
+                    .await?;
+                    output::success(&format!(
+                        "Successfully updated secret '{}'",
+                        props.original_name
+                    ));
+                    return Ok(());
+                }
             }
         }
 
@@ -4062,38 +4196,59 @@ async fn execute_secret_rotate(
     // Generate the new value
     let new_value = generate_random_value(length, charset, custom_generator)?;
 
-    // Preserve existing secret metadata
-    let set_request = SecretRequest {
-        name: name.to_string(),
-        value: new_value.clone(),
-        content_type: if existing_secret.content_type.is_empty() {
-            None
-        } else {
-            Some(existing_secret.content_type)
-        },
-        enabled: Some(true),
-        expires_on: existing_secret.expires_on,
-        not_before: existing_secret.not_before,
-        tags: if existing_secret.tags.is_empty() {
-            None
-        } else {
-            Some(existing_secret.tags)
-        },
-        groups: None, // Groups are managed via tags
-        note: None,
-        folder: None,
+    // A typed record's generated value becomes the new primary field inside
+    // the envelope, via the same write-back path as `xv update <name>
+    // <value>`/`--stdin` (record-types plan; fixes #330). The naive
+    // `set_secret` overwrite below is only correct for untyped secrets: on
+    // a record it would leave `content_type` claiming a record while the
+    // value becomes the bare generated string, corrupting it identically
+    // to the bare-value `update` bug.
+    let new_version = if crate::records::is_record(&existing_secret.content_type) {
+        let props = execute_record_primary_update(
+            name,
+            new_value.as_str(),
+            &existing_secret,
+            &vault_name,
+            config,
+            reg,
+        )
+        .await?;
+        props.version
+    } else {
+        // Preserve existing secret metadata
+        let set_request = SecretRequest {
+            name: name.to_string(),
+            value: new_value.clone(),
+            content_type: if existing_secret.content_type.is_empty() {
+                None
+            } else {
+                Some(existing_secret.content_type)
+            },
+            enabled: Some(true),
+            expires_on: existing_secret.expires_on,
+            not_before: existing_secret.not_before,
+            tags: if existing_secret.tags.is_empty() {
+                None
+            } else {
+                Some(existing_secret.tags)
+            },
+            groups: None, // Groups are managed via tags
+            note: None,
+            folder: None,
+        };
+
+        // Set the rotated secret
+        let result = reg
+            .active()
+            .secrets()
+            .set_secret(&vault_name, set_request)
+            .await
+            .map_err(CrosstacheError::from)?;
+        result.version
     };
 
-    // Set the rotated secret
-    let result = reg
-        .active()
-        .secrets()
-        .set_secret(&vault_name, set_request)
-        .await
-        .map_err(CrosstacheError::from)?;
-
     output::success(&format!("Successfully rotated secret '{}'", name));
-    println!("New version: {}", result.version);
+    println!("New version: {}", new_version);
 
     if show_value {
         println!("Generated value: {}", new_value.as_str());
@@ -6786,6 +6941,32 @@ mod tests {
         let missing = missing_required_fields(&t, &BTreeMap::new(), &BTreeMap::new());
         let names: Vec<&str> = missing.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["username"]);
+    }
+
+    // ── #330: primary-field resolution for bare-value update/rotate ────
+
+    #[test]
+    fn resolve_primary_field_finds_declared_primary() {
+        let mut secret = fake_secret_properties("cred");
+        secret
+            .tags
+            .insert(TYPE_TAG.to_string(), "login".to_string());
+        let types = crate::records::builtin_types();
+        let record_type = resolve_primary_field("cred", &secret, &types).unwrap();
+        assert_eq!(record_type.primary().name, "password");
+    }
+
+    #[test]
+    fn resolve_primary_field_errors_on_unknown_type() {
+        let mut secret = fake_secret_properties("cred");
+        secret
+            .tags
+            .insert(TYPE_TAG.to_string(), "nosuch".to_string());
+        let types = crate::records::builtin_types();
+        let err = resolve_primary_field("cred", &secret, &types).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cred"), "{msg}");
+        assert!(msg.contains("nosuch"), "{msg}");
     }
 
     // ── Empty required fields (Bugbot round 3 follow-up) ────────────────

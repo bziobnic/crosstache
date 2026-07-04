@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Bare-value `xv update <record> <value>`/`--stdin` and `xv rotate <record>` no longer corrupt typed records (#330).** Both wrote the raw string over the record's whole JSON envelope while leaving `content_type` at `application/vnd.xv.record`, so every subsequent read (`get`, `get --field`, `get --record`) failed with `xv-config-invalid` and every non-primary field was lost from the latest version (recoverable only via `xv rollback`). Both now set the record's declared **primary field** inside the envelope instead — the same write-back path `--field`/`--field-secret` edits already use — preserving every other envelope field, metadata field, and tag/group/note/folder. A corrupt envelope or an unresolvable `xv-type` now fails loud before any write, rather than guessing. `--field-secret <primary>=…` (still rejected, since the primary only ever arrives via a bare-value write) now points at the real paths: `xv update <name> <value>`, `--stdin`, or `xv rotate <name>`. Untyped secrets are unaffected on all three paths.
+
 ## v0.19.2 — Bulk folder moves with mv --filter (2026-07-04)
 
 ### Added

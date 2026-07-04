@@ -2269,3 +2269,504 @@ fn run_and_inject_typed_record_fails_under_broken_types_config() {
         "output file must NOT be created when type resolution fails"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #330: bare-value `update`/`--stdin`/`rotate` set a record's primary field
+// instead of corrupting the envelope.
+// ---------------------------------------------------------------------------
+
+/// `xv update <record> <value>` (positional) on a typed record: the primary
+/// field changes inside the envelope, every other envelope field and every
+/// metadata field/tag/groups/note/folder stays intact, and `get --record`
+/// still parses. On unpatched code this instead overwrote the whole value
+/// with the bare string while `content_type` stayed
+/// `application/vnd.xv.record`, so `get --record` failed
+/// `xv-config-invalid` afterwards — this test fails on that code.
+#[test]
+fn update_positional_value_on_record_sets_primary_field() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "prod-db",
+            "--type",
+            "database",
+            "--field",
+            "host=h",
+            "--field",
+            "username=u",
+            "--value",
+            "pw1",
+            "--group",
+            "prod",
+            "--note",
+            "primary db",
+            "--folder",
+            "app/db",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "prod-db");
+    let version_before = before["version"].clone();
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "prod-db", "pw2"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "prod-db");
+    assert_ne!(after["version"], version_before);
+    assert_eq!(after["content_type"], "application/vnd.xv.record");
+    assert_eq!(after["tags"]["xv-type"], "database");
+    assert_eq!(after["tags"]["f.host"], "h");
+    assert_eq!(after["tags"]["f.username"], "u");
+    assert_eq!(after["groups"], serde_json::json!(["prod"]));
+    assert_eq!(after["note"], "primary db");
+    assert_eq!(after["folder"], "app/db");
+
+    // Plain `get --raw` returns the new primary.
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "prod-db", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "pw2");
+
+    // `get --record` still parses and shows the non-primary fields intact.
+    let out4 = xv_same_env(temp.path())
+        .args(["get", "prod-db", "--record", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out4.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out4)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&common::stdout_str(&out4)).expect("valid json");
+    assert_eq!(parsed["fields"]["password"], "pw2");
+    assert_eq!(parsed["fields"]["host"], "h");
+    assert_eq!(parsed["fields"]["username"], "u");
+}
+
+/// Same as `update_positional_value_on_record_sets_primary_field` but via
+/// `--stdin`.
+#[test]
+fn update_stdin_value_on_record_sets_primary_field() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "prod-db",
+            "--type",
+            "database",
+            "--field",
+            "host=h",
+            "--field",
+            "username=u",
+            "--value",
+            "pw1",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "prod-db");
+    let version_before = before["version"].clone();
+
+    let mut child = xv_same_env(temp.path())
+        .args(["update", "prod-db", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"pw2-stdin").unwrap();
+    let out2 = child.wait_with_output().unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "prod-db");
+    assert_ne!(after["version"], version_before);
+    assert_eq!(after["content_type"], "application/vnd.xv.record");
+    assert_eq!(after["tags"]["f.host"], "h");
+    assert_eq!(after["tags"]["f.username"], "u");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "prod-db", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "pw2-stdin");
+}
+
+/// `xv rotate <record>`: the generated value becomes the new primary,
+/// non-primary fields/tags stay intact, and `--show-value` prints the
+/// generated value. On unpatched code `rotate` called `set_secret` with the
+/// bare generated string as the value while leaving `content_type` as
+/// `application/vnd.xv.record` — the same corruption as bare `update`.
+#[test]
+fn rotate_on_record_sets_primary_field() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "prod-db",
+            "--type",
+            "database",
+            "--field",
+            "host=h",
+            "--field",
+            "username=u",
+            "--value",
+            "pw1",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let before = read_local_meta(temp.path(), "default", "prod-db");
+    let version_before = before["version"].clone();
+
+    let out2 = xv_same_env(temp.path())
+        .args(["rotate", "prod-db", "--force", "--show-value"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    let generated = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("Generated value: "))
+        .expect("printed generated value")
+        .trim()
+        .to_string();
+    assert_ne!(generated, "pw1");
+
+    let after = read_local_meta(temp.path(), "default", "prod-db");
+    assert_ne!(after["version"], version_before);
+    assert_eq!(after["content_type"], "application/vnd.xv.record");
+    assert_eq!(after["tags"]["xv-type"], "database");
+    assert_eq!(after["tags"]["f.host"], "h");
+    assert_eq!(after["tags"]["f.username"], "u");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "prod-db", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), generated);
+}
+
+/// A corrupt-envelope record + bare-value `update`: must fail loud (same
+/// error as plain `get`) and write nothing — the corrupt value is not
+/// silently replaced, and the envelope is not touched.
+#[test]
+fn update_positional_value_on_corrupt_envelope_fails_loud_without_writing() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let store_path = temp.path().join("store");
+    let key_file = temp.path().join("key.txt");
+    let local_config = crosstache::config::settings::LocalConfig {
+        store_path: Some(store_path.to_string_lossy().to_string()),
+        key_file: Some(key_file.to_string_lossy().to_string()),
+        default_vault: Some("default".to_string()),
+        encrypt_metadata: None,
+        opaque_filenames: None,
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        use crosstache::backend::local::LocalBackend;
+        use crosstache::backend::Backend;
+        use crosstache::secret::manager::SecretRequest;
+
+        let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
+        let existing = backend
+            .secrets()
+            .get_secret("default", "cred", false)
+            .await
+            .expect("get existing record");
+
+        let request = SecretRequest {
+            name: "cred".to_string(),
+            value: zeroize::Zeroizing::new("not-json".to_string()),
+            content_type: Some("application/vnd.xv.record".to_string()),
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: Some(existing.tags.clone()),
+            groups: None,
+            note: None,
+            folder: None,
+        };
+        backend
+            .secrets()
+            .set_secret("default", request)
+            .await
+            .expect("overwrite with corrupt envelope");
+    });
+    let before = read_local_meta(temp.path(), "default", "cred");
+    let version_before = before["version"].clone();
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "pw2"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("cred"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("application/vnd.xv.record"),
+        "stderr: {stderr}"
+    );
+
+    // Nothing was written: version and raw value are untouched.
+    let after = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(after["version"], version_before);
+}
+
+/// A record with an unknown `xv-type` + bare-value `update`: the primary is
+/// unknowable, so this must error with guidance rather than guess or
+/// silently corrupt the envelope by writing the bare value under a field
+/// name that might not even exist.
+#[test]
+fn update_positional_value_on_unknown_type_record_errors_without_writing() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let store_path = temp.path().join("store");
+    let key_file = temp.path().join("key.txt");
+    let local_config = crosstache::config::settings::LocalConfig {
+        store_path: Some(store_path.to_string_lossy().to_string()),
+        key_file: Some(key_file.to_string_lossy().to_string()),
+        default_vault: Some("default".to_string()),
+        encrypt_metadata: None,
+        opaque_filenames: None,
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        use crosstache::backend::local::LocalBackend;
+        use crosstache::backend::Backend;
+        use crosstache::secret::manager::SecretRequest;
+
+        let backend = LocalBackend::new(Some(&local_config)).expect("open local backend");
+        let existing = backend
+            .secrets()
+            .get_secret("default", "cred", true)
+            .await
+            .expect("get existing record");
+        let mut tags = existing.tags.clone();
+        tags.insert("xv-type".to_string(), "nosuch".to_string());
+
+        let request = SecretRequest {
+            name: "cred".to_string(),
+            value: existing.value.clone().unwrap(),
+            content_type: Some("application/vnd.xv.record".to_string()),
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: Some(tags),
+            groups: None,
+            note: None,
+            folder: None,
+        };
+        backend
+            .secrets()
+            .set_secret("default", request)
+            .await
+            .expect("rewrite with unknown type");
+    });
+    let before = read_local_meta(temp.path(), "default", "cred");
+    let version_before = before["version"].clone();
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "cred", "pw2"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stderr = common::stderr_str(&out2);
+    assert!(stderr.contains("cred"), "stderr: {stderr}");
+    assert!(stderr.contains("nosuch"), "stderr: {stderr}");
+
+    let after = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(after["version"], version_before);
+}
+
+/// Guard: positional-value `update` on an untyped secret is unaffected —
+/// byte-identical to pre-#330 behavior (plain overwrite, no envelope
+/// machinery involved).
+#[test]
+fn update_positional_value_on_untyped_secret_unchanged() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "v1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["update", "plain", "v2"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let after = read_local_meta(temp.path(), "default", "plain");
+    assert!(after["content_type"].is_null() || after["content_type"] == "");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "plain", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "v2");
+}
+
+/// Guard: `--stdin` update on an untyped secret is unaffected.
+#[test]
+fn update_stdin_value_on_untyped_secret_unchanged() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "v1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let mut child = xv_same_env(temp.path())
+        .args(["update", "plain", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"v2-stdin").unwrap();
+    let out2 = child.wait_with_output().unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "plain", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "v2-stdin");
+}
+
+/// Guard: `rotate` on an untyped secret is unaffected — still the classic
+/// `set_secret` overwrite path.
+#[test]
+fn rotate_on_untyped_secret_unchanged() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "v1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let out2 = xv_same_env(temp.path())
+        .args(["rotate", "plain", "--force", "--show-value"])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let stdout = common::stdout_str(&out2);
+    let generated = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("Generated value: "))
+        .expect("printed generated value")
+        .trim()
+        .to_string();
+    assert_ne!(generated, "v1");
+
+    let after = read_local_meta(temp.path(), "default", "plain");
+    assert!(after["content_type"].is_null() || after["content_type"] == "");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "plain", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), generated);
+}
