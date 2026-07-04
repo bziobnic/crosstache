@@ -22,6 +22,7 @@ mod secret;
 mod tui;
 mod utils;
 mod vault;
+mod workspace;
 
 use crate::cli::Cli;
 use crate::error::{CrosstacheError, Result};

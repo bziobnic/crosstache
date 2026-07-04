@@ -18,6 +18,7 @@ pub mod secret;
 pub mod tui;
 pub mod utils;
 pub mod vault;
+pub mod workspace;
 
 // Re-export commonly used types
 pub use error::{CrosstacheError, Result};

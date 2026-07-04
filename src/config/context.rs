@@ -104,6 +104,11 @@ pub struct ContextManager {
     /// Whether this is a local context (directory-specific)
     #[serde(skip)]
     pub is_local: bool,
+    /// Multi-vault workspace state (`xv cx add/rm/default`), if any.
+    /// `#[serde(default)]` so pre-workspace context files (missing this
+    /// field entirely) still load without error.
+    #[serde(default)]
+    pub workspace: Option<crate::workspace::WorkspaceState>,
 }
 
 impl ContextManager {
@@ -538,5 +543,26 @@ mod tests {
             "context dir must be owner-only (0700), got {:03o}",
             dir_mode & 0o777
         );
+    }
+
+    /// A pre-workspace context JSON file (no `workspace` key at all) must
+    /// still load cleanly — `#[serde(default)]` on the new field.
+    #[test]
+    fn legacy_context_json_without_workspace_field_loads() {
+        let legacy = r#"{
+            "current": {
+                "vault_name": "myvault",
+                "resource_group": null,
+                "subscription_id": null,
+                "storage_container": null,
+                "last_used": "2024-01-01T00:00:00Z",
+                "usage_count": 1
+            },
+            "recent": []
+        }"#;
+        let manager: ContextManager =
+            serde_json::from_str(legacy).expect("legacy context JSON must still deserialize");
+        assert_eq!(manager.current_vault(), Some("myvault"));
+        assert!(manager.workspace.is_none());
     }
 }

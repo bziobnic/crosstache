@@ -1324,6 +1324,7 @@ async fn execute_context_init(
             group: None,
             folder: None,
             backend: profile_backend.map(String::from),
+            vaults: Vec::new(),
         },
     );
 
@@ -1625,6 +1626,7 @@ async fn execute_env_create(
         backend: backend.map(String::from),
         group: group.map(String::from),
         folder: folder.map(String::from),
+        vaults: Vec::new(),
     };
 
     cfg.envs.insert(name.to_string(), profile);
