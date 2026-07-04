@@ -30,7 +30,7 @@ xv scan install                        # block secret leaks before commit
 - [Secret injection — `xv run`](#secret-injection--xv-run)
 - [Template rendering — `xv inject`](#template-rendering--xv-inject)
 - [Project env profiles — `.xv.toml`](#project-env-profiles--xvtoml)
-- [Multi-vault workspaces (preview)](#multi-vault-workspaces-preview)
+- [Multi-vault workspaces](#multi-vault-workspaces)
 - [Vault management](#vault-management)
 - [Cross-vault operations — diff, copy, move](#cross-vault-operations--diff-copy-move)
 - [Files (blob storage)](#files-blob-storage)
@@ -971,14 +971,12 @@ See [`docs/env-profiles.md`](docs/env-profiles.md) for the full reference.
 
 ---
 
-## Multi-vault workspaces (preview)
+## Multi-vault workspaces
 
-> Phases A+B of the multi-vault workspaces design
+> Full multi-vault workspaces design, all three phases
 > (`docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md`).
-> Alias support in `xv://` URIs/templates/`mv`/`copy`, and the TUI workspace
-> pane are not shipped yet (Phase C). `xv file`/blob storage is out of scope
-> for the whole workspaces feature (per the design) and stays single-vault
-> regardless of phase.
+> `xv file`/blob storage is out of scope for the whole workspaces feature
+> (per the design) and stays single-vault regardless.
 
 Attach several vaults — potentially on different backends — so they behave like one workspace instead of juggling `--vault`/`--backend` flags:
 
@@ -1021,6 +1019,62 @@ xv find db-password      # union candidate set, rows prefixed alias/ (e.g. "work
 - **No partial unions.** If any attached vault errors while listing (auth, network, an unreachable backend), the whole command fails, naming the vault and backend that failed — never silently dropping a vault's results.
 - **Capability gating, never silent.** `xv ls --deleted` in a union workspace applies per vault; a vault whose backend doesn't support soft-delete is skipped with a stderr note naming it (`note: 'personal' (local) has no soft-delete; --deleted skipped for it`) rather than failing the whole view or silently omitting it.
 - **Cache keys are per `(backend, vault)`.** Each attached vault's listing caches independently, so two workspace entries that happen to share a vault name on different backends (e.g. two `"default"` vaults) never collide.
+
+### Aliases in `xv://` URIs and templates (Phase C)
+
+The vault slot of an `xv://` URI — used by `xv run`'s environment-variable
+scan and `xv inject`'s templates alike — checks workspace aliases FIRST,
+falling back to today's raw-vault-name meaning when nothing matches:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+export DB_REF="xv://work/DB_PASSWORD"
+xv run --inherit-env -- printenv DB_REF        # resolves via the "work" alias
+
+# in a template:
+echo 'password: xv://work/DB_PASSWORD' | xv inject
+```
+
+- **Explicit backend prefix bypasses aliases entirely.** `xv://azure:work/NAME` names the `azure` *backend kind* directly — even if `work` also happens to be an attached alias, this form never consults the workspace; it addresses a literal vault named `work` on the `azure` backend, exactly as it did before any workspace existed.
+- **No match, no workspace: unchanged.** A vault segment that isn't an attached alias (or is used with no workspace attached at all) keeps resolving as a plain vault name on the active backend — byte-identical to pre-workspace behavior.
+- **`#field` fragments compose.** `xv://work/CREDS#username` resolves the `work` alias first, then extracts the `username` field from the typed record, same as the non-aliased form.
+
+### Cross-vault `mv`/`copy` via aliases (Phase C)
+
+`xv mv` and `xv copy`/`xv move --from/--to` accept aliases wherever they'd otherwise take a vault name, so moving/copying a secret between workspace entries — including across backends — is one command:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+xv cx add staging-store --backend local --as stage
+
+xv mv work:API_KEY stage:/              # cross-backend move: azure -> local
+xv mv work:API_KEY stage:archive/       # ...into a folder on the destination
+xv copy DB_PASSWORD --from work --to stage --new-name DB_PASSWORD_BACKUP
+```
+
+- **Both sides must be attached aliases for the cross-vault `mv` form.** `xv mv work:secret stage:/` only routes across vaults when BOTH `work` and `stage` resolve to attached workspace entries; a single alias-qualified side (or none) falls straight through to the existing same-vault rename/re-folder logic, unchanged.
+- **Metadata rides along.** Groups, notes, folders, tags, and typed-record envelopes move/copy intact (the same `rename_request_from_properties` path `xv copy`/`xv move` have always used).
+- **Destination tag budget checked before any write.** If the destination backend's tag cap (e.g. Azure's 15 tags) can't hold the secret's tags, the command fails up front — nothing is written to either side.
+- **`--force` overwrite semantics are unchanged** — a name collision at the destination still requires `--force` (or, for `mv`, an explicit rename) to overwrite.
+
+### TUI workspace pane (Phase C)
+
+`xv tui`'s vault pane lists workspace entries as `alias (backend)` when a workspace is attached, and selecting one scopes the secrets pane to that entry's own vault on its own backend — even when entries span multiple backends:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+xv cx add staging-store --backend local --as stage
+xv tui
+```
+
+```
+┌Vaults────────────┐
+│work (azure)      │
+│stage (local)     │
+└──────────────────┘
+```
+
+With no workspace attached, the vault pane lists plain vault names exactly as before.
 
 ---
 
