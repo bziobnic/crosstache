@@ -125,7 +125,7 @@ async fn run(cli: Cli) -> Result<()> {
                 if let Ok(Some((path, proj_cfg))) =
                     crate::config::project::find_project_config(&cwd).await
                 {
-                    if let Ok((name, profile)) =
+                    if let Ok(Some((name, profile))) =
                         crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
                     {
                         if let Some(ref b) = profile.backend {

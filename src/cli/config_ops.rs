@@ -332,12 +332,15 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
     // than showing nothing.
     let (project_path, active_env_name, active_profile, env_resolve_err) = match &project_hit {
         Some((path, cfg)) => match project::resolve_env(cfg, config.env_flag.as_deref()) {
-            Ok((name, profile)) => (
+            Ok(Some((name, profile))) => (
                 Some(path.clone()),
                 Some(name.to_string()),
                 Some(profile.clone()),
                 None,
             ),
+            // File defines zero environments (types-only project file,
+            // #331) — no active profile, but not an error either.
+            Ok(None) => (Some(path.clone()), None, None, None),
             Err(e) => (Some(path.clone()), None, None, Some(format!("{e}"))),
         },
         None => (None, None, None, None),
@@ -1008,7 +1011,7 @@ async fn execute_context_show(config: &Config) -> Result<()> {
     let cwd = std::env::current_dir()?;
     if let Ok(Some((path, cfg))) = crate::config::project::find_project_config(&cwd).await {
         match crate::config::project::resolve_env(&cfg, config.env_flag.as_deref()) {
-            Ok((name, profile)) => {
+            Ok(Some((name, profile))) => {
                 println!();
                 println!("active env: {name} (from {})", path.display());
                 if let Some(v) = &profile.vault {
@@ -1025,6 +1028,13 @@ async fn execute_context_show(config: &Config) -> Result<()> {
                 }
                 println!(
                     "  hint: env profiles override context/global defaults when a field is set; missing env fields fall back to the vault context, then global config."
+                );
+            }
+            Ok(None) => {
+                println!();
+                println!(
+                    "project config: {} (defines no environments; types-only project file)",
+                    path.display()
                 );
             }
             Err(e) => {
@@ -1400,6 +1410,7 @@ async fn execute_env_list(config: &Config) -> Result<()> {
 
     let active = project::resolve_env(&cfg, config.env_flag.as_deref())
         .ok()
+        .flatten()
         .map(|(name, _)| name.to_string());
 
     use crate::config::project::resolve_effective_backend;
@@ -1702,7 +1713,13 @@ async fn execute_env_show(config: &Config) -> Result<()> {
         return Ok(());
     };
 
-    let (name, profile) = project::resolve_env(&cfg, config.env_flag.as_deref())?;
+    let Some((name, profile)) = project::resolve_env(&cfg, config.env_flag.as_deref())? else {
+        output::info(&format!(
+            "{} defines no environments (types-only project file). Nothing to show — see `xv env list`.",
+            path.display()
+        ));
+        return Ok(());
+    };
 
     println!("Active env: {name} (from {})", path.display());
     if let Some(b) = &profile.backend {
