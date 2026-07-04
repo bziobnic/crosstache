@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["crosstache Team"]
 description = "A comprehensive tool for managing secrets across Azure Key Vault, AWS Secrets Manager, and local age-encrypted storage"
 license = "MIT"
-repository = "https://github.com/crosstache/crosstache-rust"
+repository = "https://github.com/bziobnic/crosstache"
 keywords = ["secrets", "cli", "azure", "aws", "keyvault"]
 categories = ["command-line-utilities", "authentication"]
 
