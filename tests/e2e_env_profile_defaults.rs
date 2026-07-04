@@ -497,3 +497,132 @@ fn run_fail_loud_error_attributes_profile_group_default() {
         "fail-loud error should attribute the unmatched group to the profile default: {stderr}"
     );
 }
+
+// ===========================================================================
+// #331: a `.xv.toml` with only a `[types.*]` block — zero `[env.*]` tables,
+// no `default_env` — must not break env-dependent resolution. `xv list`
+// already worked pre-fix; `xv set`/`xv run`/`xv get` did not, because the
+// #320 write-default resolvers (`resolve_group`/`resolve_folder` in
+// `src/config/settings.rs`) propagated `resolve_env`'s error even for the
+// "this file defines no envs at all" case. A file that DOES define envs
+// must keep erroring exactly as before on an unknown/explicit named `--env`.
+// ===========================================================================
+
+/// Types-only project file: no `[env.*]`, no `default_env`, just a custom
+/// record type. This is a legitimate shape since record types (#321).
+const TYPES_ONLY_TOML: &str = r#"[types.smtp]
+fields = [
+  { name = "host" },
+  { name = "username", required = true },
+  { name = "password", kind = "secret", primary = true },
+]
+"#;
+
+#[test]
+fn types_only_xv_toml_allows_set_list_get_run() {
+    let env = ProfileEnv::new(TYPES_ONLY_TOML);
+
+    // `xv set` (untyped) — this is the exact repro from #331.
+    env.set_secret("mailer_untyped", "pw1");
+
+    // `xv set --type <custom>` — the project's own custom type must be
+    // usable too (not just built-ins), proving type resolution and
+    // env-default resolution both work together on a types-only file.
+    env.xv_ok(&[
+        "set",
+        "mailer",
+        "--type",
+        "smtp",
+        "--field",
+        "username=m@x.com",
+        "--value",
+        "pw2",
+    ]);
+
+    // `xv list` (already worked pre-fix, kept as a control).
+    let json = env.xv_ok(&["list", "--format", "json"]);
+    assert!(json.contains("mailer_untyped"), "list output: {json}");
+    assert!(json.contains("mailer"), "list output: {json}");
+
+    // `xv get` for both the untyped and the typed secret.
+    let out = env.xv_ok(&["get", "mailer_untyped", "--raw"]);
+    assert_eq!(out.trim(), "pw1");
+    let out = env.xv_ok(&["get", "mailer", "--raw"]);
+    assert_eq!(out.trim(), "pw2");
+
+    // `xv run` — exercises the `resolve_group` write-default path too.
+    let out_file = env.tmp_path().join("types_only_run_env.txt");
+    let status = env
+        .xv()
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("env | sort > '{}'", out_file.display()),
+        ])
+        .status()
+        .expect("execute xv run");
+    assert!(
+        status.success(),
+        "xv run should succeed on a types-only project file"
+    );
+    let contents = std::fs::read_to_string(&out_file).expect("read child env dump");
+    assert!(
+        contents.contains("MAILER_UNTYPED") || contents.contains("mailer_untyped"),
+        "types-only project file should not block secret injection: {contents}"
+    );
+}
+
+#[test]
+fn types_only_xv_toml_unknown_env_still_errors_when_file_has_envs() {
+    // Guard: a `.xv.toml` that DOES define envs must keep erroring exactly
+    // as before on an unknown/explicit `--env` — only the "zero envs at
+    // all" case is allowed to pass silently.
+    let env = ProfileEnv::new(PROFILE_TOML); // defines [env.dev] only
+    let (_stdout, stderr) = env.xv_fail(&["--env", "staging", "set", "mailer", "--value", "pw"]);
+    assert!(
+        stderr.contains("staging"),
+        "error should mention the requested env name: {stderr}"
+    );
+    assert!(
+        stderr.contains("dev"),
+        "error should list the available envs: {stderr}"
+    );
+
+    let output = env
+        .xv()
+        .args(["--env", "staging", "set", "mailer", "--value", "pw"])
+        .output()
+        .expect("execute xv binary");
+    assert_eq!(output.status.code(), Some(3), "unknown --env must exit 3");
+}
+
+#[test]
+fn types_only_xv_toml_explicit_env_flag_errors_with_no_environments_message() {
+    // An explicit `--env` against a file that defines *zero* environments
+    // must still error (the user asked for a specific env by name) — but
+    // with a message that says the file defines no environments, not a
+    // rough "not defined; available: " with an empty list.
+    let env = ProfileEnv::new(TYPES_ONLY_TOML);
+    let (_stdout, stderr) = env.xv_fail(&["--env", "staging", "set", "mailer", "--value", "pw"]);
+    assert!(
+        stderr.contains("no environments") || stderr.contains("no [env"),
+        "error should explain the file defines no environments: {stderr}"
+    );
+    assert!(
+        !stderr.contains("available: \""),
+        "error should not print a rough empty-quoted available list: {stderr}"
+    );
+
+    let output = env
+        .xv()
+        .args(["--env", "staging", "set", "mailer", "--value", "pw"])
+        .output()
+        .expect("execute xv binary");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "explicit --env against a no-envs file must still exit 3"
+    );
+}

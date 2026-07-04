@@ -744,7 +744,8 @@ pub(crate) async fn execute_whoami_command(
 
     let cwd = std::env::current_dir()?;
     if let Ok(Some((path, cfg))) = crate::config::project::find_project_config(&cwd).await {
-        if let Ok((name, _)) = crate::config::project::resolve_env(&cfg, config.env_flag.as_deref())
+        if let Ok(Some((name, _))) =
+            crate::config::project::resolve_env(&cfg, config.env_flag.as_deref())
         {
             println!();
             println!("   Active env: {name} (from {})", path.display());

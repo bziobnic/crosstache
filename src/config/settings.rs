@@ -446,21 +446,24 @@ impl Config {
         if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
             // resolve_env returns Err on unknown-env — propagate so the
             // user sees the helpful EnvNotDefined message with the list
-            // of available envs.
-            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
-            // Emit the cross-boundary notice if the .xv.toml lives
-            // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
-            // walk-up wouldn't have reached the ancestor anyway —
-            // but keep this branch defensive.
-            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
-                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
-                    eprintln!("{line}");
+            // of available envs. Ok(None) means the file defines zero
+            // environments at all (types-only project file, #331) — no
+            // profile to apply, so fall through to context/config below.
+            if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
+                // Emit the cross-boundary notice if the .xv.toml lives
+                // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
+                // walk-up wouldn't have reached the ancestor anyway —
+                // but keep this branch defensive.
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                        eprintln!("{line}");
+                    }
                 }
+                if let Some(v) = profile.vault.as_deref() {
+                    return Ok(v.to_string());
+                }
+                // Profile defines no vault — fall through to context/config.
             }
-            if let Some(v) = profile.vault.as_deref() {
-                return Ok(v.to_string());
-            }
-            // Profile defines no vault — fall through to context/config.
         }
 
         // 3. Check local/global context
@@ -493,18 +496,21 @@ impl Config {
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
         if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
-            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
-            // Emit the cross-boundary notice if the .xv.toml lives
-            // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
-            // walk-up wouldn't have reached the ancestor anyway —
-            // but keep this branch defensive.
-            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
-                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
-                    eprintln!("{line}");
+            // Ok(None): file defines zero environments — no profile to
+            // apply, fall through to context/config below (#331).
+            if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
+                // Emit the cross-boundary notice if the .xv.toml lives
+                // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
+                // walk-up wouldn't have reached the ancestor anyway —
+                // but keep this branch defensive.
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                        eprintln!("{line}");
+                    }
                 }
-            }
-            if let Some(rg) = profile.resource_group.as_deref() {
-                return Ok(rg.to_string());
+                if let Some(rg) = profile.resource_group.as_deref() {
+                    return Ok(rg.to_string());
+                }
             }
         }
 
@@ -541,22 +547,25 @@ impl Config {
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
         if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
-            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
-            // Emit the cross-boundary notice if the .xv.toml lives above cwd.
-            // `capture_cross_boundary_notice` is idempotent per-process, so
-            // this is safe even when `resolve_vault_name` already emitted it
-            // earlier in the same command.
-            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
-                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
-                    eprintln!("{line}");
+            // Ok(None): file defines zero environments — no profile to
+            // apply, so there's simply no group default here (#331).
+            if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
+                // Emit the cross-boundary notice if the .xv.toml lives above cwd.
+                // `capture_cross_boundary_notice` is idempotent per-process, so
+                // this is safe even when `resolve_vault_name` already emitted it
+                // earlier in the same command.
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                        eprintln!("{line}");
+                    }
                 }
-            }
-            // Treat a blank `group = ""` as "no default set", not a real
-            // (empty, unfilterable) group — an empty filter would silently
-            // match nothing and trip `xv run`'s fail-loud empty-selection
-            // check with a group the user never typed.
-            if let Some(g) = profile.group.as_deref().filter(|s| !s.trim().is_empty()) {
-                return Ok(Some(g.to_string()));
+                // Treat a blank `group = ""` as "no default set", not a real
+                // (empty, unfilterable) group — an empty filter would silently
+                // match nothing and trip `xv run`'s fail-loud empty-selection
+                // check with a group the user never typed.
+                if let Some(g) = profile.group.as_deref().filter(|s| !s.trim().is_empty()) {
+                    return Ok(Some(g.to_string()));
+                }
             }
         }
 
@@ -581,15 +590,18 @@ impl Config {
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
         if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
-            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
-            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
-                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
-                    eprintln!("{line}");
+            // Ok(None): file defines zero environments — no profile to
+            // apply, so there's simply no folder default here (#331).
+            if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                        eprintln!("{line}");
+                    }
                 }
-            }
-            // Same blank-is-absent treatment as `resolve_group`.
-            if let Some(f) = profile.folder.as_deref().filter(|s| !s.trim().is_empty()) {
-                return Ok(Some(f.to_string()));
+                // Same blank-is-absent treatment as `resolve_group`.
+                if let Some(f) = profile.folder.as_deref().filter(|s| !s.trim().is_empty()) {
+                    return Ok(Some(f.to_string()));
+                }
             }
         }
 

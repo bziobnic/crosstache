@@ -1,5 +1,23 @@
 use thiserror::Error;
 
+/// Render the `EnvNotDefined` message. When `available` is empty the
+/// `.xv.toml` in question defines zero `[env.*]` blocks at all (a
+/// types-only project file, see #331) rather than simply lacking the
+/// requested name, so the message says so instead of printing a
+/// confusing empty "available: " list.
+fn format_env_not_defined(name: &str, available: &[String]) -> String {
+    if available.is_empty() {
+        format!(
+            "Environment '{name}' requested, but .xv.toml defines no environments (no [env.*] blocks)"
+        )
+    } else {
+        format!(
+            "Environment '{name}' not defined in .xv.toml; available: {}",
+            available.join(", ")
+        )
+    }
+}
+
 /// Main error type for crosstache operations
 #[derive(Debug, Error)]
 pub enum CrosstacheError {
@@ -39,7 +57,7 @@ pub enum CrosstacheError {
     #[error("Invalid secret name: {name}")]
     InvalidSecretName { name: String },
 
-    #[error("Environment '{name}' not defined in .xv.toml; available: {}", available.join(", "))]
+    #[error("{}", format_env_not_defined(name, available))]
     EnvNotDefined {
         name: String,
         available: Vec<String>,
@@ -245,6 +263,19 @@ impl CrosstacheError {
         Self::EnvNotDefined {
             name: name.into(),
             available,
+        }
+    }
+
+    /// Build the `EnvNotDefined` variant for a `.xv.toml` that defines zero
+    /// `[env.*]` blocks at all, reached when an explicit `--env`/`XV_ENV`
+    /// selection is made against such a file (issue #331). The implicit
+    /// "no envs defined, no selection" case never reaches this — see
+    /// `crate::config::project::resolve_env`, which treats that as "no
+    /// active profile" rather than an error.
+    pub fn env_not_defined_no_envs<S: Into<String>>(name: S) -> Self {
+        Self::EnvNotDefined {
+            name: name.into(),
+            available: Vec::new(),
         }
     }
 
