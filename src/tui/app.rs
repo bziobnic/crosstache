@@ -1,8 +1,10 @@
+use crate::backend::Backend;
 use crate::config::Config;
 use crate::secret::manager::{SecretProperties, SecretSummary};
 use crate::vault::models::VaultSummary;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +65,22 @@ pub struct App {
     pub toast: Option<Toast>,
     pub clipboard_countdown: Option<u32>,
     pub quit: bool,
+
+    /// The active multi-vault workspace, if any (Phase C Task 13). `None` ⇒
+    /// every field below is unused and the vault pane / secrets loading
+    /// behave exactly as they did before workspaces existed (spec
+    /// §Backward compatibility). Populated once at startup by `run_tui`.
+    pub workspace: Option<crate::workspace::Workspace>,
+    /// Workspace alias -> materialized backend for that entry. Constructing
+    /// a backend doesn't perform auth (resolved lazily at first actual
+    /// secret operation — see `crate::workspace::resolve` test comments),
+    /// so populating every attached entry's backend up front is safe and
+    /// keeps `Command::LoadSecrets` a simple lookup.
+    pub workspace_backends: HashMap<String, Arc<dyn Backend>>,
+    /// Workspace alias -> the REAL vault name on that entry's backend
+    /// (`app.vaults[i].name` holds the ALIAS for display/selection
+    /// purposes, which may differ from the actual vault name).
+    pub workspace_vault_names: HashMap<String, String>,
 }
 
 impl App {
@@ -89,6 +107,9 @@ impl App {
             toast: None,
             clipboard_countdown: None,
             quit: false,
+            workspace: None,
+            workspace_backends: HashMap::new(),
+            workspace_vault_names: HashMap::new(),
         }
     }
 

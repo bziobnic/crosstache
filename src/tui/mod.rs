@@ -40,6 +40,30 @@ pub async fn run_tui(
         }
     });
 
+    // Workspace-aware vault pane (Phase C Task 13): resolved once at
+    // startup. `None` when no workspace is attached ⇒ the vault pane and
+    // secrets loading below behave exactly as before (spec §Backward
+    // compatibility). Any resolution error is swallowed to `None` rather
+    // than failing `xv tui` outright — the single-vault degenerate path
+    // must always remain available.
+    let workspace = crate::workspace::resolve_workspace(&config)
+        .await
+        .ok()
+        .flatten();
+    let mut workspace_backends: std::collections::HashMap<String, Arc<dyn Backend>> =
+        std::collections::HashMap::new();
+    if let Some(ws) = &workspace {
+        let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+        if let Ok(ws_registry) = crate::backend::BackendRegistry::with_lazy(&config, &backend_names)
+        {
+            for entry in &ws.entries {
+                if let Ok(b) = ws_registry.materialize(&entry.backend) {
+                    workspace_backends.insert(entry.alias.clone(), b);
+                }
+            }
+        }
+    }
+
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         reset_terminal_sync();
@@ -47,7 +71,14 @@ pub async fn run_tui(
     }));
 
     let mut terminal = setup_terminal()?;
-    let result = run_loop(&mut terminal, config, backend).await;
+    let result = run_loop(
+        &mut terminal,
+        config,
+        backend,
+        workspace,
+        workspace_backends,
+    )
+    .await;
     teardown_terminal(&mut terminal)?;
     result
 }
@@ -84,6 +115,8 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     config: Config,
     backend: Option<Arc<dyn Backend>>,
+    workspace: Option<crate::workspace::Workspace>,
+    workspace_backends: std::collections::HashMap<String, Arc<dyn Backend>>,
 ) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut app = App::new(config.clone());
@@ -95,7 +128,41 @@ async fn run_loop(
 
     let _evt = event::spawn_event_reader(tx.clone(), shutdown.clone());
     let _tick = event::spawn_tick_timer(tx.clone());
-    let _initial = data::spawn_load_vaults(config, tx.clone(), backend.clone());
+
+    match &workspace {
+        // Workspace attached: the vault pane is populated directly from
+        // attached entries (no network call — this is config, not a vault
+        // listing) instead of spawning `spawn_load_vaults` against a single
+        // active backend, which can't represent a multi-backend workspace.
+        Some(ws) => {
+            app.vaults = ws
+                .entries
+                .iter()
+                .map(|e| crate::vault::models::VaultSummary {
+                    name: e.alias.clone(),
+                    location: String::new(),
+                    resource_group: String::new(),
+                    status: "Attached".to_string(),
+                    created_at: String::new(),
+                })
+                .collect();
+            app.workspace_vault_names = ws
+                .entries
+                .iter()
+                .map(|e| (e.alias.clone(), e.vault.clone()))
+                .collect();
+            app.vaults_loading = false;
+        }
+        None => {
+            drop(data::spawn_load_vaults(
+                config.clone(),
+                tx.clone(),
+                backend.clone(),
+            ));
+        }
+    }
+    app.workspace = workspace;
+    app.workspace_backends = workspace_backends;
 
     while !app.quit {
         terminal
@@ -130,11 +197,34 @@ async fn handle_command(
             ));
         }
         Command::LoadSecrets { vault } => {
+            // Workspace-aware: `vault` is the selected `app.vaults[i].name`,
+            // which is the ALIAS in workspace mode — resolve it to that
+            // entry's own materialized backend and REAL vault name rather
+            // than the single shared `backend`/raw alias string (spec
+            // §Backward compatibility: `app.workspace` is `None` outside a
+            // workspace, so this is unchanged there). The alias itself
+            // stays the `Message::SecretsLoaded` key (`key` param) so
+            // `secrets_by_vault`/`selected_vault()` keep matching, even
+            // though two aliases can share the same real vault name.
+            let (real_vault, entry_backend) = match &app.workspace {
+                Some(_) => (
+                    app.workspace_vault_names
+                        .get(&vault)
+                        .cloned()
+                        .unwrap_or_else(|| vault.clone()),
+                    app.workspace_backends
+                        .get(&vault)
+                        .cloned()
+                        .or(backend.clone()),
+                ),
+                None => (vault.clone(), backend.clone()),
+            };
             drop(data::spawn_load_secrets(
                 app.config.clone(),
+                real_vault,
                 vault,
                 tx.clone(),
-                backend.clone(),
+                entry_backend,
             ));
         }
         Command::LoadValue { vault, name } => {
