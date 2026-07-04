@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.19.2 — Bulk folder moves with mv --filter (2026-07-04)
 
 ### Added
 
