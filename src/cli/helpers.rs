@@ -164,6 +164,29 @@ pub(crate) async fn resolve_workspace_or_default(
     }
 }
 
+/// Resolve the active workspace (if any) plus a lazy [`BackendRegistry`]
+/// scoped to just its attached backends, for callers that need to resolve
+/// several independent references against the SAME workspace/registry pair
+/// (e.g. `xv run`/`xv inject` resolving many `xv://` URIs in one template —
+/// unlike [`resolve_workspace_or_default`], which targets a single raw CLI
+/// argument).
+///
+/// Returns `(None, None)` when no workspace is attached — callers must treat
+/// that as "fall through to today's raw-vault-name / backend-kind behavior,
+/// byte-identical" (spec §Backward compatibility).
+pub(crate) async fn resolve_workspace_and_registry(
+    config: &Config,
+) -> Result<(Option<crate::workspace::Workspace>, Option<BackendRegistry>)> {
+    if let Some(ws) = crate::workspace::resolve_workspace(config).await? {
+        let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+        let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
+            .map_err(|e| CrosstacheError::config(e.to_string()))?;
+        Ok((Some(ws), Some(ws_registry)))
+    } else {
+        Ok((None, None))
+    }
+}
+
 /// Decide whether a destructive operation may proceed, prompting when possible.
 ///
 /// Behaviour, matching the Azure legacy delete/purge paths so confirmation is

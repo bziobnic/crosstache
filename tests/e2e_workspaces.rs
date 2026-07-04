@@ -2487,3 +2487,192 @@ fn ls_deleted_filter_matches_bare_names_before_alias_prefix() {
     );
     assert!(!deleted_filtered.contains("DEV_BETA"), "{deleted_filtered}");
 }
+
+// ===========================================================================
+// Phase C, Task 11: workspace aliases in `xv://` URIs (inject/run)
+// ===========================================================================
+
+#[test]
+fn inject_alias_uri_resolves() {
+    let env = WorkspaceEnv::new();
+    // Alias "default" deliberately shares its NAME with the top-level active
+    // backend's own default vault ("default"/store_default) — proving alias
+    // resolution and the raw-vault-name fallback are genuinely distinct
+    // code paths, not accidentally the same one.
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "default",
+    ]);
+    env.ok(&["set", "default:RAW_SECRET", "--value", "aliased-value"]);
+
+    let template_path = env.home.join("tpl_alias.txt");
+    std::fs::write(&template_path, "value: xv://default/RAW_SECRET\n").expect("write template");
+    let out_path = env.home.join("out_alias.txt");
+    env.ok(&[
+        "inject",
+        "--template",
+        template_path.to_str().unwrap(),
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    let rendered = std::fs::read_to_string(&out_path).expect("read output");
+    assert!(rendered.contains("aliased-value"), "{rendered}");
+}
+
+#[test]
+fn inject_raw_vault_name_still_works_when_no_alias_matches() {
+    let env = WorkspaceEnv::new();
+    // Seed the top-level active backend's OWN "default" vault before any
+    // workspace exists (unqualified `set` -> config's default local backend
+    // and vault).
+    env.ok(&["set", "RAW_ONLY", "--value", "raw-active-value"]);
+    // Workspace attached, but neither alias is named "default" — the URI's
+    // vault segment must fall through to raw-vault-name meaning unchanged.
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    let template_path = env.home.join("tpl_raw.txt");
+    std::fs::write(&template_path, "value: xv://default/RAW_ONLY\n").expect("write template");
+    let out_path = env.home.join("out_raw.txt");
+    env.ok(&[
+        "inject",
+        "--template",
+        template_path.to_str().unwrap(),
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    let rendered = std::fs::read_to_string(&out_path).expect("read output");
+    assert!(rendered.contains("raw-active-value"), "{rendered}");
+}
+
+#[test]
+fn inject_backend_qualified_uri_bypasses_alias() {
+    let env = WorkspaceEnv::new();
+    // Top-level active backend's own "default" vault gets one value...
+    env.ok(&["set", "RAW_SECRET", "--value", "raw-active-value"]);
+    // ...while the ATTACHED ALIAS "default" (same string!) points somewhere
+    // else entirely (local-a's "default" vault) with a DIFFERENT value.
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "default",
+    ]);
+    env.ok(&["set", "default:RAW_SECRET", "--value", "aliased-value"]);
+
+    // Explicit backend prefix ("local") must bypass alias resolution
+    // entirely and resolve against the active backend's raw vault name, even
+    // though "default" is a live attached alias.
+    let template_path = env.home.join("tpl_bypass.txt");
+    std::fs::write(&template_path, "value: xv://local:default/RAW_SECRET\n")
+        .expect("write template");
+    let out_path = env.home.join("out_bypass.txt");
+    env.ok(&[
+        "inject",
+        "--template",
+        template_path.to_str().unwrap(),
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    let rendered = std::fs::read_to_string(&out_path).expect("read output");
+    assert!(rendered.contains("raw-active-value"), "{rendered}");
+    assert!(!rendered.contains("aliased-value"), "{rendered}");
+}
+
+#[test]
+fn run_env_alias_uri_resolves() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:TOKEN", "--value", "work-value"]);
+
+    let out = env
+        .xv()
+        .env("MY_REF", "xv://work/TOKEN")
+        .args([
+            "run",
+            "--inherit-env",
+            "--no-masking",
+            "--",
+            "printenv",
+            "MY_REF",
+        ])
+        .output()
+        .expect("execute xv run");
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("work-value"), "{stdout}");
+}
+
+#[test]
+fn inject_alias_with_field_fragment() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "set",
+        "work:CREDS",
+        "--type",
+        "login",
+        "--field",
+        "username=alice",
+        "--value",
+        "hunter2",
+    ]);
+
+    let template_path = env.home.join("tpl_field.txt");
+    std::fs::write(&template_path, "user: xv://work/CREDS#username\n").expect("write template");
+    let out_path = env.home.join("out_field.txt");
+    env.ok(&[
+        "inject",
+        "--template",
+        template_path.to_str().unwrap(),
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    let rendered = std::fs::read_to_string(&out_path).expect("read output");
+    assert!(rendered.contains("alice"), "{rendered}");
+}

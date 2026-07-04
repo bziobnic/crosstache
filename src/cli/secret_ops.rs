@@ -5409,6 +5409,59 @@ async fn execute_secret_rotate(
     Ok(())
 }
 
+/// Resolve a single `xv://` reference's vault segment against workspace
+/// aliases first, falling back to [`resolve_uri_secret`]'s raw-vault-name /
+/// backend-kind behavior unchanged (spec §Addressing, Phase C Task 11).
+///
+/// - `xv://backend:vault/name` (an explicit backend prefix, i.e.
+///   `backend_ref.backend.is_some()`) bypasses alias resolution entirely —
+///   checked first, before consulting the workspace at all.
+/// - Otherwise, when a workspace is attached and `backend_ref.vault` matches
+///   an attached alias, resolves directly to that entry's `(backend, vault)`
+///   via the lazy workspace registry — no `active_kind`/`cross_backends`
+///   involvement, since a workspace entry may be a *named* backend that
+///   isn't a bare [`BackendKind`].
+/// - No workspace, or no alias match: falls straight through to
+///   [`resolve_uri_secret`], today's raw-vault-name meaning, byte-identical.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_uri_secret_workspace_aware(
+    backend_ref: &BackendRef,
+    secret_name: &str,
+    active_secrets: &dyn crate::backend::SecretBackend,
+    config: &Config,
+    active_kind: BackendKind,
+    cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
+    ws: Option<&crate::workspace::Workspace>,
+    ws_registry: Option<&BackendRegistry>,
+) -> Result<crate::secret::manager::SecretProperties> {
+    if backend_ref.backend.is_none() {
+        if let (Some(ws), Some(ws_registry)) = (ws, ws_registry) {
+            if let Some(entry) = ws.entry(&backend_ref.vault) {
+                let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
+                    CrosstacheError::config(format!(
+                        "workspace vault '{}' (backend '{}') is unavailable: {e}",
+                        entry.alias, entry.backend
+                    ))
+                })?;
+                return backend
+                    .secrets()
+                    .get_secret(&entry.vault, secret_name, true)
+                    .await
+                    .map_err(CrosstacheError::from);
+            }
+        }
+    }
+    resolve_uri_secret(
+        backend_ref,
+        secret_name,
+        active_secrets,
+        config,
+        active_kind,
+        cross_backends,
+    )
+    .await
+}
+
 /// Resolve a single `xv://` URI reference to its secret, dispatching to the
 /// active backend or a cross-backend instance as needed.
 ///
@@ -5493,6 +5546,11 @@ async fn execute_secret_run(
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
+
+    // Workspace-aware URI vault-alias resolution (Phase C Task 11): `None`s
+    // when no workspace is attached, so the URI resolution below is
+    // byte-identical to pre-workspace behavior in that case.
+    let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
 
     // Parse current environment for xv:// URI references (supports optional backend prefix).
     // Only done when the parent environment is inherited: in clean-env mode
@@ -5686,13 +5744,15 @@ async fn execute_secret_run(
                 }
             };
 
-            let fetch_result = resolve_uri_secret(
+            let fetch_result = resolve_uri_secret_workspace_aware(
                 backend_ref,
                 &secret_name,
                 reg.active().secrets(),
                 config,
                 active_kind,
                 &mut cross_backends,
+                ws.as_ref(),
+                ws_registry.as_ref(),
             )
             .await;
 
@@ -6001,6 +6061,11 @@ async fn execute_secret_inject(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
+    // Workspace-aware URI vault-alias resolution (Phase C Task 11): `None`s
+    // when no workspace is attached, so the URI resolution below is
+    // byte-identical to pre-workspace behavior in that case.
+    let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
+
     // Read template content
     let template_content = match template_file {
         Some(path) => fs::read_to_string(&path).map_err(|e| {
@@ -6281,13 +6346,15 @@ async fn execute_secret_inject(
                 }
             };
 
-            let fetch_result = resolve_uri_secret(
+            let fetch_result = resolve_uri_secret_workspace_aware(
                 backend_ref,
                 &secret_name,
                 reg.active().secrets(),
                 config,
                 active_kind,
                 &mut cross_backends,
+                ws.as_ref(),
+                ws_registry.as_ref(),
             )
             .await;
 
