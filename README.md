@@ -973,13 +973,12 @@ See [`docs/env-profiles.md`](docs/env-profiles.md) for the full reference.
 
 ## Multi-vault workspaces (preview)
 
-> Phase A of the multi-vault workspaces design
+> Phases A+B of the multi-vault workspaces design
 > (`docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md`).
-> Union `ls`/`find` (a single merged listing across attached vaults, with
-> per-vault capability gating), alias support in `xv://` URIs/templates/
-> `mv`/`copy`, and the TUI workspace pane are not shipped yet. `xv file`/blob
-> storage is out of scope for the whole workspaces feature (per the design)
-> and stays single-vault regardless of phase.
+> Alias support in `xv://` URIs/templates/`mv`/`copy`, and the TUI workspace
+> pane are not shipped yet (Phase C). `xv file`/blob storage is out of scope
+> for the whole workspaces feature (per the design) and stays single-vault
+> regardless of phase.
 
 Attach several vaults — potentially on different backends — so they behave like one workspace instead of juggling `--vault`/`--backend` flags:
 
@@ -1005,6 +1004,23 @@ xv cx ls
   Because that overlay replaces the context workspace entirely, `xv cx add`/`rm`/`default` **error** (exit `3`, naming the `.xv.toml` path and env) when run in a directory governed by one — a context-store mutation there would silently have no effect on what secret commands actually use. There is no override flag in v1: edit `.xv.toml` directly, or run the command outside the project directory. `xv cx ls` stays read-only and always shows the *effective* workspace (with its source column) regardless.
 
 Manage the workspace with `xv cx add/rm/default/ls` (`cx` is a visible alias of `context`); `xv context use` errors pointing at `xv cx default` while a workspace is attached, since the two write-target models don't mix. Note: `xv context ls`/`xv cx ls` now lists the attached workspace, not recent vault contexts — use the unabbreviated `xv context list` for those.
+
+### Union `ls` and `find` (Phase B)
+
+With a workspace attached, `xv ls` and `xv find` span every attached vault as one merged view instead of just the default:
+
+```bash
+xv ls                    # union of every attached vault
+xv ls --filter 'PROD_*'  # --filter/--type/--group/folder scoping apply per vault, then merge
+xv find db-password      # union candidate set, rows prefixed alias/ (e.g. "work/DB_PASSWORD")
+```
+
+- **VAULT column, only with ≥2 attached vaults.** `xv ls`'s table/long views gain a `Vault` column naming the alias each row came from; the grid (default) view instead prefixes `alias/` onto the name, mirroring `find`'s existing convention. A single-entry workspace (or no workspace at all) renders with no VAULT column — byte-identical to the pre-workspace output, pinned by test.
+- **Merge order: alias, then name.** Results from every attached vault are combined and sorted by alias first, then name — pagination (`--page`/`--page-size`) applies to that merged set, not per vault.
+- **`find --all-vaults` keeps its existing meaning** — every vault the active backend can list, a strict superset of "every vault attached to the workspace" — and takes priority even when a workspace is attached.
+- **No partial unions.** If any attached vault errors while listing (auth, network, an unreachable backend), the whole command fails, naming the vault and backend that failed — never silently dropping a vault's results.
+- **Capability gating, never silent.** `xv ls --deleted` in a union workspace applies per vault; a vault whose backend doesn't support soft-delete is skipped with a stderr note naming it (`note: 'personal' (local) has no soft-delete; --deleted skipped for it`) rather than failing the whole view or silently omitting it.
+- **Cache keys are per `(backend, vault)`.** Each attached vault's listing caches independently, so two workspace entries that happen to share a vault name on different backends (e.g. two `"default"` vaults) never collide.
 
 ---
 
