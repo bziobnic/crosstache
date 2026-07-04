@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`--filter <GLOB>` on `xv mv`**, bulk-moving every secret whose name matches the glob into a destination folder in one plan/confirm step, instead of a shell loop (`xv find --filter 'test-*' --names-only | while read -r n; do xv mv "$n" archive/; done`). Matching is identical to `ls`/`find --filter` (#326): case-sensitive, whole-name, either the display or backend (sanitized) name, whole-vault scope. `SOURCE` and `--filter` are mutually exclusive (exactly one is required); with `--filter`, `DEST` must be a folder destination (`folder/` or `/`) since a rename is impossible for a multi-secret move. Matched secrets keep their names — only the `folder` metadata is rewritten, the same metadata-only update `xv mv`'s bulk folder moves already use. Reuses the existing bulk-move machinery: count + sample plan confirmation, `--yes` bypass, non-TTY refusal without `--yes`, `--dry-run` preview, a collision pre-check before any move, and attempt-all/report-failure-count partial-failure behavior. Secrets already in the destination are skipped and noted (not counted as moves, not an error); zero matches fails loud; an invalid glob fails with `invalid_argument` before any backend call.
+
 ## v0.19.1 — Name-glob filtering on ls and find (2026-07-03)
 
 ### Added

@@ -443,6 +443,7 @@ xv mv db/pass app/pw        # move to folder 'app' and rename to 'pw'
 xv mv db/pass newname       # rename to 'newname' at root
 xv mv app/pass /            # move to root (clears the folder tag)
 xv mv app/ svc/             # bulk: re-folder every secret under 'app/' to 'svc/'
+xv mv --filter 'test-*' archive/   # bulk: re-folder every secret matching a glob
 ```
 
 A trailing `/` marks a folder path (source or destination); `/` alone means
@@ -456,6 +457,17 @@ within-vault only — for moving a secret between vaults see `xv move` under
 name-changing `mv` of a *disabled* secret can partially apply: the folder
 update succeeds but the rename fails with 403 because the value can't be
 read — the same limitation as `xv update --rename` on disabled secrets.
+
+`--filter <GLOB>` bulk-moves every secret whose name matches the glob (either
+its displayed name or its backend/sanitized name — the same either-name rule
+`ls`/`find --filter` use) into a destination folder, in one plan/confirm
+step instead of a shell loop like
+`xv find --filter 'test-*' --names-only | while read -r n; do xv mv "$n" archive/; done`.
+`SOURCE` and `--filter` are mutually exclusive — exactly one is required —
+and with `--filter`, `DEST` must be a folder destination (`folder/` or `/`):
+a rename is impossible for a multi-secret move. Matched secrets already in
+the destination are skipped (noted, not counted as moves); zero matches
+fails loud. Composes with `--yes` and `--dry-run` like a folder move.
 
 ### Delete and recover
 

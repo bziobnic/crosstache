@@ -806,12 +806,25 @@ pub enum Commands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
-    /// Move or rename a secret, or re-folder a whole folder (trailing / = folder)
+    /// Move or rename a secret, re-folder a whole folder (trailing / = folder),
+    /// or bulk-move every secret matching a glob (--filter) into a folder
+    #[command(
+        override_usage = "xv mv [OPTIONS] <SOURCE> <DEST>\n       xv mv [OPTIONS] --filter <GLOB> <DEST>"
+    )]
     Mv {
-        /// Source: 'folder/name', 'name', or a folder prefix ending in '/'
-        source: String,
-        /// Destination: 'folder/' (keep name), 'folder/newname', 'newname' (root), or '/'
-        dest: String,
+        /// SOURCE DEST, e.g. 'db/pass app/' or 'app/ svc/'; with --filter,
+        /// provide DEST only (omit SOURCE) — DEST must then be a folder
+        /// destination ('folder/' or '/'), since a rename is impossible for
+        /// a multi-secret move. SOURCE: 'folder/name', 'name', or a folder
+        /// prefix ending in '/'. DEST: 'folder/' (keep name),
+        /// 'folder/newname', 'newname' (root), or '/'.
+        #[arg(value_names = ["SOURCE", "DEST"], num_args = 0..=2)]
+        operands: Vec<String>,
+        /// Bulk-move every secret whose name matches GLOB into DEST (either
+        /// the display name or the backend name, same as `ls`/`find
+        /// --filter`); exactly one of SOURCE or --filter is required
+        #[arg(long)]
+        filter: Option<String>,
         /// Print the full move plan without changing anything
         #[arg(long)]
         dry_run: bool,
@@ -1894,11 +1907,32 @@ impl Cli {
                 .await
             }
             Commands::Mv {
-                source,
-                dest,
+                operands,
+                filter,
                 dry_run,
                 yes,
-            } => crate::cli::mv_ops::execute_mv(source, dest, dry_run, yes, config, registry).await,
+            } => {
+                // Two positionals normally map to (SOURCE, DEST); with
+                // --filter, SOURCE is omitted so a single leftover operand is
+                // DEST. Any other count is left for `execute_mv`'s runtime
+                // "exactly one of SOURCE/--filter" / "requires a DEST" checks
+                // to report with a clear message instead of a generic clap error.
+                let (source, dest) = if filter.is_some() {
+                    match operands.as_slice() {
+                        [] => (None, None),
+                        [dest] => (None, Some(dest.clone())),
+                        [source, dest, ..] => (Some(source.clone()), Some(dest.clone())),
+                    }
+                } else {
+                    match operands.as_slice() {
+                        [] => (None, None),
+                        [source] => (Some(source.clone()), None),
+                        [source, dest, ..] => (Some(source.clone()), Some(dest.clone())),
+                    }
+                };
+                crate::cli::mv_ops::execute_mv(source, dest, filter, dry_run, yes, config, registry)
+                    .await
+            }
             Commands::Diff {
                 vault1,
                 vault2,
@@ -2736,19 +2770,44 @@ mod tests {
             Cli::try_parse_from(["xv", "mv", "db/pass", "app/", "--dry-run", "--yes"]).unwrap();
         match cli.command {
             Commands::Mv {
-                source,
-                dest,
+                operands,
+                filter,
                 dry_run,
                 yes,
             } => {
-                assert_eq!(source, "db/pass");
-                assert_eq!(dest, "app/");
+                assert_eq!(operands, vec!["db/pass".to_string(), "app/".to_string()]);
+                assert_eq!(filter, None);
                 assert!(dry_run);
                 assert!(yes);
             }
             _ => panic!("expected mv command"),
         }
-        // Both operands are required.
-        assert!(Cli::try_parse_from(["xv", "mv", "onlyone"]).is_err());
+        // A single leftover positional and no --filter parses fine at the
+        // clap level (`operands` is just a positional collector) — DEST
+        // missing is enforced as a runtime error by `execute_mv`, exercised
+        // by `mv_ops::tests`.
+        match Cli::try_parse_from(["xv", "mv", "onlyone"])
+            .unwrap()
+            .command
+        {
+            Commands::Mv { operands, .. } => {
+                assert_eq!(operands, vec!["onlyone".to_string()]);
+            }
+            _ => panic!("expected mv command"),
+        }
+    }
+
+    #[test]
+    fn test_mv_filter_parse() {
+        let cli = Cli::try_parse_from(["xv", "mv", "--filter", "test-*", "archive/"]).unwrap();
+        match cli.command {
+            Commands::Mv {
+                operands, filter, ..
+            } => {
+                assert_eq!(operands, vec!["archive/".to_string()]);
+                assert_eq!(filter, Some("test-*".to_string()));
+            }
+            _ => panic!("expected mv command"),
+        }
     }
 }
