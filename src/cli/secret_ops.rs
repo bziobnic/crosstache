@@ -1218,6 +1218,39 @@ fn filter_secrets_by_type(
     secrets
 }
 
+/// Filters `secrets` down to those whose name (either the user-facing
+/// `original_name` or the backend `name`) matches `filter`'s glob pattern.
+/// Used by `xv ls --filter` and, on the pre-scoring candidate set, by
+/// `xv find --filter`. `filter` must already have been validated by
+/// [`crate::utils::helpers::compile_name_glob`] before any backend call;
+/// this recompiles the (now-known-valid) pattern to apply it.
+fn filter_secrets_by_glob(
+    mut secrets: Vec<crate::secret::manager::SecretSummary>,
+    filter: Option<&str>,
+) -> Result<Vec<crate::secret::manager::SecretSummary>> {
+    if let Some(pattern) = filter {
+        let matcher = crate::utils::helpers::compile_name_glob(pattern)?;
+        secrets.retain(|s| {
+            crate::utils::helpers::glob_matches_either_name(&matcher, &s.name, &s.original_name)
+        });
+    }
+    Ok(secrets)
+}
+
+/// Same as [`filter_secrets_by_glob`] but for `xv ls --deleted` summaries.
+fn filter_deleted_secrets_by_glob(
+    mut items: Vec<crate::secret::manager::DeletedSecretSummary>,
+    filter: Option<&str>,
+) -> Result<Vec<crate::secret::manager::DeletedSecretSummary>> {
+    if let Some(pattern) = filter {
+        let matcher = crate::utils::helpers::compile_name_glob(pattern)?;
+        items.retain(|s| {
+            crate::utils::helpers::glob_matches_either_name(&matcher, &s.name, &s.original_name)
+        });
+    }
+    Ok(items)
+}
+
 /// Lifts a `SecretSummary`'s `f.*` tags into a `fields` map and its
 /// `xv-type` tag into `record_type`, for `ls --format json` (record-types
 /// plan Task 10). Other keys match `SecretSummary`'s existing JSON shape
@@ -1329,6 +1362,7 @@ pub(crate) fn display_cached_secret_list(
     config: &Config,
     names_only: bool,
     type_filter: Option<&str>,
+    filter: Option<&str>,
 ) -> Result<()> {
     use crate::cli::ls_view::{self, LsEntry};
     use crate::utils::format::TableFormatter;
@@ -1337,6 +1371,7 @@ pub(crate) fn display_cached_secret_list(
 
     let filtered = filter_secret_summaries_for_display(secrets, group.as_deref(), all);
     let filtered = filter_secrets_by_type(filtered, type_filter);
+    let filtered = filter_secrets_by_glob(filtered, filter)?;
     let mut scoped = ls_view::scope_secrets(filtered, path);
     if sort == crate::cli::commands::LsSort::Updated {
         ls_view::sort_secrets_by_updated_desc(&mut scoped.secrets);
@@ -1599,12 +1634,14 @@ fn deleted_list_rows(
 /// `xv ls --deleted`: list soft-deleted secrets awaiting restore/purge.
 /// Always bypasses the secrets-list cache (which only holds live secrets)
 /// and requires the backend to advertise `has_soft_delete`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_deleted_secret_list(
     pagination: Pagination,
     pager: bool,
     names_only: bool,
     long: bool,
     sort: crate::cli::commands::LsSort,
+    filter: Option<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
@@ -1613,6 +1650,11 @@ pub(crate) async fn execute_deleted_secret_list(
     use crate::utils::format::TableFormatter;
     use crate::utils::pagination::{paginate_slice, pagination_footer_text};
     use std::fmt::Write as _;
+
+    // Validate the glob before any backend call.
+    if let Some(pattern) = filter.as_deref() {
+        crate::utils::helpers::compile_name_glob(pattern)?;
+    }
 
     if !use_trait_path(registry) {
         return Err(CrosstacheError::config(
@@ -1635,7 +1677,7 @@ pub(crate) async fn execute_deleted_secret_list(
     let vault_name = resolve_vault_for_trait(&config, registry).await?;
     // Always live — the SecretsList cache holds live secrets only, and trash
     // freshness matters right after a delete.
-    let mut items = match reg
+    let items = match reg
         .active()
         .secrets()
         .list_deleted_secrets(&vault_name)
@@ -1645,6 +1687,8 @@ pub(crate) async fn execute_deleted_secret_list(
         Err(crate::backend::BackendError::Unsupported(_)) => return Err(unsupported()),
         Err(e) => return Err(e.into()),
     };
+
+    let mut items = filter_deleted_secrets_by_glob(items, filter.as_deref())?;
 
     match sort {
         LsSort::Name => items.sort_by(|a, b| deleted_display_name(a).cmp(deleted_display_name(b))),
@@ -1788,9 +1832,15 @@ pub(crate) async fn execute_secret_list_direct(
     recursive: bool,
     sort: crate::cli::commands::LsSort,
     type_filter: Option<String>,
+    filter: Option<String>,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Validate the glob before any backend call.
+    if let Some(pattern) = filter.as_deref() {
+        crate::utils::helpers::compile_name_glob(pattern)?;
+    }
+
     // ── Trait-based path (all backends) ───────────────────────────────
     if use_trait_path(registry) {
         use crate::cache::CacheManager;
@@ -1820,6 +1870,7 @@ pub(crate) async fn execute_secret_list_direct(
                     &config,
                     names_only,
                     type_filter.as_deref(),
+                    filter.as_deref(),
                 );
             }
         }
@@ -1906,6 +1957,7 @@ pub(crate) async fn execute_secret_list_direct(
             &config,
             names_only,
             type_filter.as_deref(),
+            filter.as_deref(),
         );
     }
 
@@ -3474,9 +3526,16 @@ pub(crate) async fn execute_secret_find_direct(
     all_vaults: bool,
     names_only: bool,
     format: crate::utils::format::OutputFormat,
+    filter: Option<String>,
     config: Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
+    // Validate the glob before any backend call — the hard pre-filter is
+    // applied on the candidate set before fuzzy scoring (see below).
+    if let Some(pattern) = filter.as_deref() {
+        crate::utils::helpers::compile_name_glob(pattern)?;
+    }
+
     // Normalize --folder: trim trailing '/', validate, treat empty as absent.
     let folder_scope: Option<String> = match folder {
         Some(raw) => {
@@ -3525,6 +3584,7 @@ pub(crate) async fn execute_secret_find_direct(
                 for v in &vaults {
                     match reg.active().secrets().list_secrets(&v.name, None).await {
                         Ok(secrets) => {
+                            let secrets = filter_secrets_by_glob(secrets, filter.as_deref())?;
                             for s in &secrets {
                                 let mut item = CandidateItem::from_secret_summary(s);
                                 item.name = format!("{}/{}", v.name, item.name);
@@ -3546,6 +3606,7 @@ pub(crate) async fn execute_secret_find_direct(
                 .secrets()
                 .list_secrets(&vault_name, None)
                 .await?;
+            let all_secrets = filter_secrets_by_glob(all_secrets, filter.as_deref())?;
             all_secrets
                 .iter()
                 .map(CandidateItem::from_secret_summary)
@@ -3604,6 +3665,7 @@ pub(crate) async fn execute_secret_find_direct(
         all_vaults,
         names_only,
         format,
+        filter.as_deref(),
         &config,
     )
     .await
@@ -3620,6 +3682,7 @@ async fn execute_secret_find(
     all_vaults: bool,
     names_only: bool,
     format: crate::utils::format::OutputFormat,
+    filter: Option<&str>,
     config: &Config,
 ) -> Result<()> {
     use crate::config::ContextManager;
@@ -3695,6 +3758,7 @@ async fn execute_secret_find(
                 .await
             {
                 Ok(secrets) => {
+                    let secrets = filter_secrets_by_glob(secrets, filter)?;
                     for s in &secrets {
                         let mut item = CandidateItem::from_secret_summary(s);
                         // Prefix the vault name into the displayed name so
@@ -3722,6 +3786,7 @@ async fn execute_secret_find(
             .await;
         progress.finish_clear();
         let all_secrets = all_secrets?;
+        let all_secrets = filter_secrets_by_glob(all_secrets, filter)?;
         all_secrets
             .iter()
             .map(CandidateItem::from_secret_summary)

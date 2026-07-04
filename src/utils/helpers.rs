@@ -244,6 +244,29 @@ pub fn safe_join(base: &Path, untrusted: &str) -> Result<PathBuf> {
     Ok(base.join(untrusted_path))
 }
 
+/// Compile `pattern` into a whole-name, case-sensitive glob matcher, exactly
+/// as `xv migrate --filter` does. Used by `xv ls --filter` and `xv find
+/// --filter` (shared helper). Returns `invalid_argument` on a bad pattern —
+/// callers must invoke this before any backend call so a typo'd glob fails
+/// fast.
+pub fn compile_name_glob(pattern: &str) -> Result<globset::GlobMatcher> {
+    Ok(globset::Glob::new(pattern)
+        .map_err(|e| CrosstacheError::invalid_argument(format!("Invalid glob pattern: {e}")))?
+        .compile_matcher())
+}
+
+/// True when `matcher` matches either `name` (the backend/sanitized name) or
+/// `original_name` (the user-facing display name, when set) — the
+/// either-name convention shared with `xv mv` and `xv run --include`/
+/// `--exclude`.
+pub fn glob_matches_either_name(
+    matcher: &globset::GlobMatcher,
+    name: &str,
+    original_name: &str,
+) -> bool {
+    matcher.is_match(name) || (!original_name.is_empty() && matcher.is_match(original_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +359,52 @@ mod tests {
 
         let result = safe_join(base, "docs/readme.md").unwrap();
         assert_eq!(result, std::path::Path::new("/tmp/base/docs/readme.md"));
+    }
+
+    #[test]
+    fn test_compile_name_glob_rejects_invalid_pattern() {
+        let err = compile_name_glob("test-[").unwrap_err();
+        assert!(err.to_string().contains("Invalid glob pattern"));
+    }
+
+    #[test]
+    fn test_compile_name_glob_prefix_anchoring() {
+        let matcher = compile_name_glob("test-*").unwrap();
+        assert!(matcher.is_match("test-db"));
+        assert!(!matcher.is_match("latest-db"));
+    }
+
+    #[test]
+    fn test_compile_name_glob_specials() {
+        let q = compile_name_glob("ab?").unwrap();
+        assert!(q.is_match("abc"));
+        assert!(!q.is_match("ab"));
+        assert!(!q.is_match("abcd"));
+
+        let bracket = compile_name_glob("f[ab]o").unwrap();
+        assert!(bracket.is_match("fao"));
+        assert!(bracket.is_match("fbo"));
+        assert!(!bracket.is_match("fco"));
+    }
+
+    #[test]
+    fn test_glob_matches_either_name() {
+        let matcher = compile_name_glob("display-*").unwrap();
+        // Matches on original_name (display), not on backend name.
+        assert!(glob_matches_either_name(
+            &matcher,
+            "sanitized-name",
+            "display-thing"
+        ));
+        // Matches on backend name when original_name is empty.
+        let matcher2 = compile_name_glob("backend-*").unwrap();
+        assert!(glob_matches_either_name(&matcher2, "backend-thing", ""));
+        // Neither matches.
+        assert!(!glob_matches_either_name(
+            &matcher2,
+            "other",
+            "other-display"
+        ));
     }
 
     #[test]
