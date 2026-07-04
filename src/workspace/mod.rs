@@ -228,11 +228,21 @@ pub const BUILTIN_BACKEND_NAMES: [&str; 3] = ["azure", "local", "aws"];
 /// any context workspace entirely (no merging); with neither present,
 /// returns `Ok(None)` — the degenerate, byte-identical-with-today case.
 pub async fn resolve_workspace(config: &Config) -> Result<Option<Workspace>> {
-    let cwd = std::env::current_dir().ok();
+    // Audit finding (Bugbot round-4): `.ok()` here would swallow a
+    // `current_dir()` failure by treating it as "no cwd", which skips the
+    // `.xv.toml` project-overlay lookup entirely and falls through
+    // straight to the personal context workspace — the same class of
+    // unsafe silent fallback as the `resolve_env` bug this round fixes.
+    // `Config::resolve_vault_name` (src/config/settings.rs) propagates
+    // `current_dir()` with `?`; this does the same for consistency. The
+    // `Option<&Path>` parameter on `resolve_workspace_from` stays (only
+    // ever `None` in tests, which can't safely touch the process-global
+    // cwd) — production always supplies `Some` here or fails loud.
+    let cwd = std::env::current_dir()?;
     let context_manager = crate::config::ContextManager::load()
         .await
         .unwrap_or_default();
-    resolve_workspace_from(config, cwd.as_deref(), &context_manager).await
+    resolve_workspace_from(config, Some(&cwd), &context_manager).await
 }
 
 /// Core of [`resolve_workspace`], parameterized over `cwd` and the loaded
@@ -258,11 +268,27 @@ async fn resolve_workspace_from(
     let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
 
     // 1. `.xv.toml` project overlay — replaces context entirely.
+    //
+    // `find_project_config`'s own error (a found `.xv.toml` that fails to
+    // parse) is swallowed here, matching the existing precedent in
+    // `Config::resolve_vault_name` (src/config/settings.rs) — every other
+    // resolver in the codebase treats a parse failure the same way.
+    //
+    // `resolve_env`'s error is NOT swallowed (Bugbot round-4 fix): post-#334
+    // it returns `Ok(None)` only when the project file genuinely defines no
+    // `[env.*]` blocks at all (a types-only file, #331) — that case falls
+    // through to the context workspace below, correctly. A real `Err` means
+    // the file DOES define environments but none was selected, or an
+    // explicit `--env`/`XV_ENV` names one that doesn't exist — the same
+    // "fail closed" case `resolve_vault_name` and every other resolver
+    // already propagates. Silently falling through to the personal context
+    // workspace here would let a secret command target personal vaults
+    // inside a project directory that clearly intends project-scoped ones.
     if let Some(cwd) = cwd {
         if let Ok(Some((_path, proj_cfg))) = crate::config::project::find_project_config(cwd).await
         {
-            if let Ok(Some((_name, profile))) =
-                crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
+            if let Some((_name, profile)) =
+                crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())?
             {
                 if !profile.vaults.is_empty() {
                     let ws = build_workspace(

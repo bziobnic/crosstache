@@ -397,6 +397,115 @@ vaults = [
     .expect("write .xv.toml");
 }
 
+/// A `.xv.toml` that DEFINES `[env.*]` blocks but selects none (no
+/// `default_env`, and the test never passes `--env`/`XV_ENV`) — the
+/// fail-closed case `Config::resolve_vault_name` already handles via
+/// `resolve_env`'s `Err`, which `resolve_workspace_from` must now
+/// propagate too (Bugbot round-4 fix) instead of silently falling through
+/// to the personal context workspace.
+fn write_unselected_envs_toml(project_dir: &std::path::Path) {
+    std::fs::create_dir_all(project_dir).expect("create project dir");
+    std::fs::write(
+        project_dir.join(".xv.toml"),
+        r#"
+[env.dev]
+vault = "proj-vault"
+resource_group = "rg"
+"#,
+    )
+    .expect("write .xv.toml");
+}
+
+/// A `.xv.toml` that defines ZERO `[env.*]` blocks at all — the post-#331
+/// "types-only project file" shape. `resolve_env` returns `Ok(None)` for
+/// this (not an `Err`), so workspace resolution must still fall through to
+/// the context workspace normally.
+fn write_no_envs_toml(project_dir: &std::path::Path) {
+    std::fs::create_dir_all(project_dir).expect("create project dir");
+    std::fs::write(
+        project_dir.join(".xv.toml"),
+        "# types-only project file (post-#331 shape): zero [env.*] blocks\n",
+    )
+    .expect("write .xv.toml");
+}
+
+/// Bugbot round-4 MEDIUM fix: a project `.xv.toml` that defines `[env.*]`
+/// blocks but has none selected must fail closed (`EnvNotDefined`, exit 3)
+/// for EVERY secret command — not just `Config::resolve_vault_name`'s
+/// existing consumers, but workspace resolution too. Before the fix,
+/// `resolve_workspace_from` treated `resolve_env`'s error as "no project
+/// overlay" and silently fell through to the personal context workspace.
+#[test]
+fn workspace_resolution_fails_closed_when_project_envs_unselected() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    // Prove the personal workspace is real and reachable outside the
+    // project directory, so a later "did it silently use this?" check
+    // means something.
+    env.ok(&["set", "work:SHARED_NAME", "--value", "personal-value"]);
+
+    let project_dir = env.home.join("project-unselected");
+    write_unselected_envs_toml(&project_dir);
+
+    // No default_env, no --env, no XV_ENV: `.xv.toml` defines "dev" but
+    // selects nothing.
+    let out = env.run_in(&project_dir, &["get", "SHARED_NAME"]);
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert_eq!(out.status.code(), Some(3), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(
+        msg.contains("dev"),
+        "error should name the available env(s): {msg}"
+    );
+    // Must NOT be any workspace-shaped outcome (not-found=10, ambiguous=13,
+    // or a silent success returning the personal vault's value) — it must
+    // be the config-family EnvNotDefined failure, before workspace
+    // resolution ever gets to search or target the personal context.
+    assert_ne!(out.status.code(), Some(10));
+    assert_ne!(out.status.code(), Some(13));
+
+    // Explicit `--env missing` (a name that isn't defined) must fail the
+    // same way.
+    let out2 = env.run_in(&project_dir, &["--env", "missing", "get", "SHARED_NAME"]);
+    assert!(!out2.status.success(), "{}", combined(&out2));
+    assert_eq!(out2.status.code(), Some(3), "{}", combined(&out2));
+}
+
+/// Guard: a `.xv.toml` with zero `[env.*]` blocks (post-#331 types-only
+/// shape) must NOT trip the new fail-closed guard — `resolve_env` returns
+/// `Ok(None)` for this case, so workspace resolution correctly falls
+/// through to the context workspace, same as with no `.xv.toml` at all.
+#[test]
+fn types_or_no_envs_toml_still_falls_through_to_context_workspace() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+
+    let project_dir = env.home.join("project-no-envs");
+    write_no_envs_toml(&project_dir);
+
+    let set_out = env.run_in(&project_dir, &["set", "work:HELLO", "--value", "v"]);
+    assert!(set_out.status.success(), "{}", combined(&set_out));
+    let get_out = env.run_in(&project_dir, &["get", "work:HELLO", "--raw"]);
+    assert!(get_out.status.success(), "{}", combined(&get_out));
+    assert_eq!(stdout_str(&get_out), "v");
+}
+
 #[test]
 fn cx_add_errors_under_project_vaults_overlay() {
     let env = WorkspaceEnv::new();
