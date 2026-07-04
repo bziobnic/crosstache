@@ -493,7 +493,19 @@ pub(crate) async fn execute_secret_set_direct(
 
         if args.len() == 1 && !args[0].contains('=') && type_name.is_some() {
             // Typed record single-secret set.
-            let name = &args[0];
+            //
+            // Workspace-aware resolution: no workspace attached ⇒ this
+            // returns exactly (reg.active_arc(), vault_name, args[0]) —
+            // byte-identical to the pre-workspace behavior. Writes never
+            // search: an unqualified name always targets the default entry.
+            let (backend, vault_name, name) = crate::cli::helpers::resolve_workspace_or_default(
+                &args[0],
+                &config,
+                reg,
+                crate::workspace::TargetMode::Write,
+            )
+            .await?;
+            let name = &name;
             let request = build_record_set_request(
                 name,
                 value.clone(),
@@ -504,15 +516,11 @@ pub(crate) async fn execute_secret_set_direct(
                 &secret_fields,
                 &meta,
                 &config,
-                reg.active().capabilities(),
-                reg.active().kind(),
+                backend.capabilities(),
+                backend.kind(),
             )
             .await?;
-            let props = reg
-                .active()
-                .secrets()
-                .set_secret(&vault_name, request)
-                .await?;
+            let props = backend.secrets().set_secret(&vault_name, request).await?;
             output::success(&format!(
                 "Successfully set record '{}' (type: {})",
                 props.original_name,
@@ -521,9 +529,18 @@ pub(crate) async fn execute_secret_set_direct(
             println!("   Vault: {vault_name}");
             println!("   Version: {}", props.version);
             output::hint(&format!("Verify with 'xv get {}'", props.original_name));
+            invalidate_trait_secret_cache(&config, &vault_name);
+            return Ok(());
         } else if args.len() == 1 && !args[0].contains('=') {
-            // Single secret set
-            let name = &args[0];
+            // Single secret set. Same workspace-aware resolution as above.
+            let (backend, vault_name, name) = crate::cli::helpers::resolve_workspace_or_default(
+                &args[0],
+                &config,
+                reg,
+                crate::workspace::TargetMode::Write,
+            )
+            .await?;
+            let name = &name;
             let secret_value = if let Some(v) = value.clone() {
                 v
             } else if stdin {
@@ -537,11 +554,7 @@ pub(crate) async fn execute_secret_set_direct(
             // Build the request via the shared helper so `set` and `gen --save`
             // construct identical requests from the same metadata flags.
             let request = meta.to_secret_request(name, Zeroizing::new(secret_value))?;
-            let props = reg
-                .active()
-                .secrets()
-                .set_secret(&vault_name, request)
-                .await?;
+            let props = backend.secrets().set_secret(&vault_name, request).await?;
             output::success(&format!(
                 "Successfully set secret '{}'",
                 props.original_name
@@ -549,6 +562,8 @@ pub(crate) async fn execute_secret_set_direct(
             println!("   Vault: {vault_name}");
             println!("   Version: {}", props.version);
             output::hint(&format!("Verify with 'xv get {}'", props.original_name));
+            invalidate_trait_secret_cache(&config, &vault_name);
+            return Ok(());
         } else {
             // Bulk set
             if stdin {
@@ -804,18 +819,25 @@ pub(crate) async fn execute_secret_get_direct(
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let vault_name = resolve_vault_for_trait(&config, registry).await?;
+        // Workspace-aware resolution: no workspace attached ⇒ this returns
+        // exactly (reg.active_arc(), resolve_vault_for_trait(...), name) —
+        // byte-identical to the pre-workspace behavior.
+        let (backend, vault_name, name) = crate::cli::helpers::resolve_workspace_or_default(
+            name,
+            &config,
+            reg,
+            crate::workspace::TargetMode::Read,
+        )
+        .await?;
+        let name = name.as_str();
 
         let secret = if let Some(ref ver) = version {
-            reg.active()
+            backend
                 .secrets()
                 .get_secret_version(&vault_name, name, ver, true)
                 .await?
         } else {
-            reg.active()
-                .secrets()
-                .get_secret(&vault_name, name, true)
-                .await?
+            backend.secrets().get_secret(&vault_name, name, true).await?
         };
 
         let is_rec = crate::records::is_record(&secret.content_type);

@@ -14,6 +14,7 @@ releases — they are part of the scripting contract.
 | `10`  | Secret not found      | `xv get` on a missing secret                    |
 | `11`  | Vault not found       | `xv vault info` on a missing vault              |
 | `12`  | Invalid secret name   | name fails sanitization rules                   |
+| `13`  | Ambiguous secret      | unqualified `get` matched the same name in ≥2 attached workspace vaults (`xv-ambiguous-secret`); qualify with `alias:name` |
 | `20`  | Authentication failed | bad token, expired credential, no Azure login   |
 | `21`  | Permission denied     | RBAC check failed                               |
 | `30`  | Network error         | generic transport failure                       |

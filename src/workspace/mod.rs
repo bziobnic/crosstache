@@ -9,8 +9,10 @@
 //! consulted when [`resolve_workspace`] returns `Some`.
 
 pub mod address;
+pub mod resolve;
 
-pub use address::{parse_address, ResolvedTarget, SecretAddress};
+pub use address::parse_address;
+pub use resolve::{resolve_secret_target, TargetMode};
 
 use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};

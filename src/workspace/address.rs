@@ -9,7 +9,7 @@
 //! so a path may itself contain further colons (e.g. `work:a:b` → alias
 //! `work`, path `a:b`).
 
-use super::{is_valid_alias_charset, WorkspaceEntry};
+use super::is_valid_alias_charset;
 
 /// A parsed `alias:path` (or bare `path`) secret address.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,21 +41,6 @@ pub fn parse_address(raw: &str) -> SecretAddress {
         alias: None,
         path: raw.to_string(),
     }
-}
-
-/// The outcome of resolving a [`SecretAddress`] against a workspace.
-///
-/// The exact-match probe itself (checking whether the FULL raw string is a
-/// literal secret name in scope, which must win before alias
-/// interpretation) requires backend access and lives in the CLI layer
-/// (`resolve_secret_target`, Task 4) — this type only carries the parse
-/// result through to that resolution step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedTarget {
-    /// Resolved to a specific workspace entry + path.
-    Entry(WorkspaceEntry, String),
-    /// No workspace attached; `path` is the raw name to resolve as today.
-    NoWorkspace(String),
 }
 
 #[cfg(test)]
