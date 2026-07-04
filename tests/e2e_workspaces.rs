@@ -171,8 +171,24 @@ fn combined(out: &std::process::Output) -> String {
 fn cx_add_ls_rm_roundtrip() {
     let env = WorkspaceEnv::new();
 
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
 
     let ls = env.ok(&["cx", "ls"]);
     assert!(ls.contains("work"), "{ls}");
@@ -189,7 +205,15 @@ fn cx_add_ls_rm_roundtrip() {
 #[test]
 fn cx_first_add_becomes_default() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
     let ls = env.ok(&["cx", "ls"]);
     // Single entry in this workspace, so the default marker ("*") appearing
     // anywhere in the output must be "work"'s.
@@ -200,8 +224,24 @@ fn cx_first_add_becomes_default() {
 #[test]
 fn cx_add_duplicate_alias_errors() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    let out = env.err(&["cx", "add", "default", "--backend", "local-b", "--as", "work"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    let out = env.err(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "work",
+    ]);
     let msg = combined(&out);
     assert!(msg.contains("work"), "{msg}");
 }
@@ -209,7 +249,15 @@ fn cx_add_duplicate_alias_errors() {
 #[test]
 fn cx_add_alias_colliding_with_backend_name_errors() {
     let env = WorkspaceEnv::new();
-    let out = env.err(&["cx", "add", "default", "--backend", "local-a", "--as", "azure"]);
+    let out = env.err(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "azure",
+    ]);
     let msg = combined(&out);
     assert!(msg.contains("azure") || msg.contains("collid"), "{msg}");
 }
@@ -217,8 +265,24 @@ fn cx_add_alias_colliding_with_backend_name_errors() {
 #[test]
 fn cx_rm_default_requires_replacement() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
     // "work" is the default (first-add); removing it while "stage" also
     // exists must error rather than silently reassigning the default.
     let out = env.err(&["cx", "rm", "work"]);
@@ -235,7 +299,15 @@ fn cx_rm_default_requires_replacement() {
 #[test]
 fn cx_rm_last_entry_restores_single_vault_behavior() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
     env.ok(&["cx", "rm", "work"]);
     let ls_out = env.run(&["cx", "ls"]);
     assert!(ls_out.status.success());
@@ -249,7 +321,15 @@ fn cx_rm_last_entry_restores_single_vault_behavior() {
 #[test]
 fn context_use_with_workspace_errors_pointing_at_cx_default() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
     let out = env.err(&["context", "use", "some-vault"]);
     let msg = combined(&out);
     assert!(msg.contains("cx default"), "{msg}");
@@ -265,7 +345,14 @@ fn cx_add_probes_vault_exists_unless_force() {
     // pre-exist"). This mainly asserts --force is accepted and doesn't
     // itself break a normal add.
     env.ok(&[
-        "cx", "add", "default", "--backend", "local-a", "--as", "work", "--force",
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+        "--force",
     ]);
     let ls = env.ok(&["cx", "ls"]);
     assert!(ls.contains("work"), "{ls}");
@@ -278,8 +365,24 @@ fn cx_add_probes_vault_exists_unless_force() {
 #[test]
 fn cx_workspace_get_unqualified_unique_match() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
 
     env.ok(&["set", "stage:ONLY_IN_STAGE", "--value", "v1"]);
     let value = env.ok(&["get", "ONLY_IN_STAGE", "--raw"]);
@@ -289,8 +392,24 @@ fn cx_workspace_get_unqualified_unique_match() {
 #[test]
 fn get_ambiguous_errors_exit_13_lists_qualified_forms() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
 
     env.ok(&["set", "work:DUP_NAME", "--value", "work-value"]);
     env.ok(&["set", "stage:DUP_NAME", "--value", "stage-value"]);
@@ -305,8 +424,24 @@ fn get_ambiguous_errors_exit_13_lists_qualified_forms() {
 #[test]
 fn get_qualified_reads_named_vault() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
 
     env.ok(&["set", "stage:API_KEY", "--value", "stage-secret"]);
     let value = env.ok(&["get", "stage:API_KEY", "--raw"]);
@@ -316,8 +451,24 @@ fn get_qualified_reads_named_vault() {
 #[test]
 fn get_unknown_alias_lists_attached() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
 
     let out = env.err(&["get", "nope:SOMETHING"]);
     let msg = combined(&out);
@@ -328,8 +479,24 @@ fn get_unknown_alias_lists_attached() {
 #[test]
 fn set_unqualified_writes_default_only() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
     // "work" is the default (first add).
 
     env.ok(&["set", "SHARED_NAME", "--value", "unqualified-value"]);
@@ -346,8 +513,24 @@ fn set_unqualified_writes_default_only() {
 #[test]
 fn set_qualified_writes_named_vault() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
 
     env.ok(&["set", "stage:QUALIFIED_WRITE", "--value", "stage-only"]);
     let value = env.ok(&["get", "stage:QUALIFIED_WRITE", "--raw"]);
@@ -361,8 +544,24 @@ fn set_qualified_writes_named_vault() {
 #[test]
 fn exact_name_with_colon_wins_over_alias() {
     let env = WorkspaceEnv::new();
-    env.ok(&["cx", "add", "default", "--backend", "local-a", "--as", "work"]);
-    env.ok(&["cx", "add", "default", "--backend", "local-b", "--as", "stage"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
 
     // A secret literally named "work:x" (colon included) written via a
     // qualified write targets the "work" vault's stored name "work:x"

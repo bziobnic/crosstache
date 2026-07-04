@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Multi-vault workspaces (preview) — Phase A: workspace core (`xv cx add`, colon addressing, default-vault writes).** Attach several vaults, potentially on different backends, so they behave like one workspace: `xv cx add <vault> [--backend] [--as alias] [--default] [--local] [--force]` attaches a vault (alias defaults to the vault name, backend to the active one, the first attach becomes the default, a vault-exists probe runs unless `--force`); `xv cx rm <alias>` detaches one (errors removing the default unless it's the last entry, in which case the workspace is deleted and single-vault behavior resumes); `xv cx default <alias>` changes the write target; `xv cx ls` lists attached vaults (alias, backend, vault, default marker, source). `cx` is now a visible alias of `context`. Colon addressing (`alias:path`, e.g. `xv get work:DB_PASSWORD`) qualifies a secret with its vault; an exact secret name always wins over alias interpretation. `xv get` on an unqualified name searches every attached vault — a unique match resolves, no match is `xv-secret-not-found`, and two or more matches error with the new `xv-ambiguous-secret` code (exit `13`), listing every qualified `alias:name` form. `xv set` (and every other unqualified write) never searches — it always targets the workspace's default vault; write elsewhere with `alias:name`. A `.xv.toml` `[env.<name>] vaults = [...]` block, when present, REPLACES the context-store workspace entirely for that project (no merging). **No workspace attached ⇒ every command is byte-identical to today** — the feature is entirely opt-in via `xv cx add`. Backend construction is lazy: a command that only touches one attached backend never authenticates the others. Later phases (not yet shipped) add union `ls`/`find` across the workspace, read resolution for `history`/`rollback`, alias support in `xv://` URIs/templates/`mv`/`copy`, and a TUI workspace pane.
+
 ## v0.19.3 — Record write-path integrity and types-only .xv.toml fixes (2026-07-04)
 
 ### Fixed

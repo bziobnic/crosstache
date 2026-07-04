@@ -30,6 +30,7 @@ xv scan install                        # block secret leaks before commit
 - [Secret injection — `xv run`](#secret-injection--xv-run)
 - [Template rendering — `xv inject`](#template-rendering--xv-inject)
 - [Project env profiles — `.xv.toml`](#project-env-profiles--xvtoml)
+- [Multi-vault workspaces (preview)](#multi-vault-workspaces-preview)
 - [Vault management](#vault-management)
 - [Cross-vault operations — diff, copy, move](#cross-vault-operations--diff-copy-move)
 - [Files (blob storage)](#files-blob-storage)
@@ -967,6 +968,38 @@ touch /code/monorepo/services/checkout/.xv.boundary
 To **disable walk-up entirely**, set `XV_NO_PARENT_CONFIG=1`.
 
 See [`docs/env-profiles.md`](docs/env-profiles.md) for the full reference.
+
+---
+
+## Multi-vault workspaces (preview)
+
+> Phase A of the multi-vault workspaces design
+> (`docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md`).
+> Union `ls`/`find`, alias support in `xv://` URIs/templates/`mv`/`copy`,
+> and the TUI workspace pane are not shipped yet.
+
+Attach several vaults — potentially on different backends — so they behave like one workspace instead of juggling `--vault`/`--backend` flags:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+xv cx add personal-store --backend local --as personal
+xv cx ls
+```
+
+- **Colon addressing.** `alias:path` qualifies a secret with its vault (`work:app/db/pass`); a literal secret name always wins over alias interpretation.
+- **Reads search, writes don't.** `xv get DB_PASSWORD` searches every attached vault — a unique match resolves, no match is the normal not-found error, and two or more matches error with `xv-ambiguous-secret` (exit `13`), listing every qualified form (`work:DB_PASSWORD` or `personal:DB_PASSWORD`). `xv set API_KEY` (and every other unqualified write) always targets the workspace's **default** vault — it never searches. Write elsewhere with `xv set personal:API_KEY`.
+- **No workspace attached ⇒ nothing changes.** The feature is entirely opt-in via `xv cx add`; every command behaves exactly as it did before if you never attach a vault.
+- **`.xv.toml` overlay.** An env profile may declare `vaults = [...]`, which REPLACES the context-store workspace for that project (no merging):
+
+  ```toml
+  [env.dev]
+  vaults = [
+    { vault = "myproj-dev-kv", backend = "azure", alias = "dev", default = true },
+    { vault = "shared-staging", backend = "aws-east", alias = "stage" },
+  ]
+  ```
+
+Manage the workspace with `xv cx add/rm/default/ls` (`cx` is a visible alias of `context`); `xv context use` errors pointing at `xv cx default` while a workspace is attached, since the two write-target models don't mix.
 
 ---
 

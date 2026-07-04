@@ -1273,8 +1273,9 @@ async fn workspace_touching_only_aws_never_builds_azure() {
         ..Default::default()
     };
 
-    let registry = BackendRegistry::with_lazy(&config, &["azure".to_string(), "aws-mock".to_string()])
-        .expect("registering azure + aws-mock must not construct either eagerly");
+    let registry =
+        BackendRegistry::with_lazy(&config, &["azure".to_string(), "aws-mock".to_string()])
+            .expect("registering azure + aws-mock must not construct either eagerly");
 
     let materialized = registry.materialize("aws-mock");
     assert!(

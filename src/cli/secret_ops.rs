@@ -837,7 +837,10 @@ pub(crate) async fn execute_secret_get_direct(
                 .get_secret_version(&vault_name, name, ver, true)
                 .await?
         } else {
-            backend.secrets().get_secret(&vault_name, name, true).await?
+            backend
+                .secrets()
+                .get_secret(&vault_name, name, true)
+                .await?
         };
 
         let is_rec = crate::records::is_record(&secret.content_type);

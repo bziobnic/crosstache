@@ -66,7 +66,10 @@ pub async fn resolve_secret_target(
     match mode {
         TargetMode::Write => {
             let entry = match &addr.alias {
-                Some(alias) => ws.entry(alias).cloned().ok_or_else(|| unknown_alias_error(ws, alias))?,
+                Some(alias) => ws
+                    .entry(alias)
+                    .cloned()
+                    .ok_or_else(|| unknown_alias_error(ws, alias))?,
                 None => ws.default_entry().clone(),
             };
             let backend = materialize(registry, &entry)?;
@@ -112,12 +115,12 @@ pub async fn resolve_secret_target(
 }
 
 fn materialize(registry: &BackendRegistry, entry: &WorkspaceEntry) -> Result<Arc<dyn Backend>> {
-    registry
-        .materialize(&entry.backend)
-        .map_err(|e| CrosstacheError::config(format!(
+    registry.materialize(&entry.backend).map_err(|e| {
+        CrosstacheError::config(format!(
             "workspace vault '{}' (backend '{}') is unavailable: {e}",
             entry.alias, entry.backend
-        )))
+        ))
+    })
 }
 
 fn unknown_alias_error(ws: &Workspace, alias: &str) -> CrosstacheError {
@@ -144,7 +147,10 @@ async fn exact_name_match(
         1 => Ok(Some(matches.into_iter().next().unwrap())),
         _ => {
             let candidates: Vec<String> = matches.iter().map(|e| e.alias.clone()).collect();
-            Err(CrosstacheError::ambiguous_secret(raw.to_string(), candidates))
+            Err(CrosstacheError::ambiguous_secret(
+                raw.to_string(),
+                candidates,
+            ))
         }
     }
 }
@@ -269,9 +275,10 @@ mod tests {
             .await
             .unwrap();
 
-        let (target, path) = resolve_secret_target("ONLY_IN_STAGE", &ws, &registry, TargetMode::Read)
-            .await
-            .expect("must resolve");
+        let (target, path) =
+            resolve_secret_target("ONLY_IN_STAGE", &ws, &registry, TargetMode::Read)
+                .await
+                .expect("must resolve");
         assert_eq!(target.entry.alias, "stage");
         assert_eq!(path, "ONLY_IN_STAGE");
     }
@@ -312,9 +319,10 @@ mod tests {
             .await
             .unwrap();
 
-        let (target, path) = resolve_secret_target("stage:API_KEY", &ws, &registry, TargetMode::Read)
-            .await
-            .expect("qualified read must resolve directly, no search needed");
+        let (target, path) =
+            resolve_secret_target("stage:API_KEY", &ws, &registry, TargetMode::Read)
+                .await
+                .expect("qualified read must resolve directly, no search needed");
         assert_eq!(target.entry.alias, "stage");
         assert_eq!(path, "API_KEY");
     }
@@ -348,9 +356,10 @@ mod tests {
             .await
             .unwrap();
 
-        let (target, path) = resolve_secret_target("SHARED_NAME", &ws, &registry, TargetMode::Write)
-            .await
-            .expect("write must resolve to default");
+        let (target, path) =
+            resolve_secret_target("SHARED_NAME", &ws, &registry, TargetMode::Write)
+                .await
+                .expect("write must resolve to default");
         assert_eq!(target.entry.alias, "work");
         assert_eq!(path, "SHARED_NAME");
 
@@ -367,7 +376,10 @@ mod tests {
             .get_secret("default", "SHARED_NAME", true)
             .await
             .expect("must be written to work");
-        assert_eq!(written.value.as_deref().map(|s| s.as_str()), Some("work-value"));
+        assert_eq!(
+            written.value.as_deref().map(|s| s.as_str()),
+            Some("work-value")
+        );
 
         // The stage copy must be untouched.
         let stage_copy = stage_backend
@@ -375,7 +387,10 @@ mod tests {
             .get_secret("default", "SHARED_NAME", true)
             .await
             .expect("stage copy untouched");
-        assert_eq!(stage_copy.value.as_deref().map(|s| s.as_str()), Some("stage-original"));
+        assert_eq!(
+            stage_copy.value.as_deref().map(|s| s.as_str()),
+            Some("stage-original")
+        );
     }
 
     #[tokio::test]

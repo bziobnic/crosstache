@@ -634,7 +634,10 @@ mod tests {
             ),
             (CrosstacheError::unknown("x"), "xv-unknown"),
             (
-                CrosstacheError::ambiguous_secret("DB_PASSWORD", vec!["work".into(), "stage".into()]),
+                CrosstacheError::ambiguous_secret(
+                    "DB_PASSWORD",
+                    vec!["work".into(), "stage".into()],
+                ),
                 "xv-ambiguous-secret",
             ),
             (
@@ -709,7 +712,8 @@ mod tests {
 
     #[test]
     fn ambiguous_secret_message_lists_qualified_forms() {
-        let err = CrosstacheError::ambiguous_secret("DB_PASSWORD", vec!["work".into(), "stage".into()]);
+        let err =
+            CrosstacheError::ambiguous_secret("DB_PASSWORD", vec!["work".into(), "stage".into()]);
         let msg = err.to_string();
         assert!(msg.contains("DB_PASSWORD exists in work, stage"), "{msg}");
         assert!(msg.contains("work:DB_PASSWORD"), "{msg}");

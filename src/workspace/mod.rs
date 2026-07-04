@@ -224,7 +224,9 @@ pub const BUILTIN_BACKEND_NAMES: [&str; 3] = ["azure", "local", "aws"];
 /// returns `Ok(None)` — the degenerate, byte-identical-with-today case.
 pub async fn resolve_workspace(config: &Config) -> Result<Option<Workspace>> {
     let cwd = std::env::current_dir().ok();
-    let context_manager = crate::config::ContextManager::load().await.unwrap_or_default();
+    let context_manager = crate::config::ContextManager::load()
+        .await
+        .unwrap_or_default();
     resolve_workspace_from(config, cwd.as_deref(), &context_manager).await
 }
 
@@ -239,7 +241,10 @@ async fn resolve_workspace_from(
 ) -> Result<Option<Workspace>> {
     let active_backend = config.effective_backend_name().to_string();
 
-    let mut backend_names: Vec<String> = BUILTIN_BACKEND_NAMES.iter().map(|s| s.to_string()).collect();
+    let mut backend_names: Vec<String> = BUILTIN_BACKEND_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     for k in config.named_backends.keys() {
         if !backend_names.iter().any(|n| n == k) {
             backend_names.push(k.clone());
@@ -358,8 +363,13 @@ mod tests {
             alias: Some("work".to_string()),
             default: false,
         }];
-        let built = build_workspace(&configs, "azure", WorkspaceSource::Context, &["azure", "local", "aws"])
-            .expect("single entry must build with implicit default");
+        let built = build_workspace(
+            &configs,
+            "azure",
+            WorkspaceSource::Context,
+            &["azure", "local", "aws"],
+        )
+        .expect("single entry must build with implicit default");
         assert_eq!(built.default_alias, "work");
         assert!(built.entries[0].default);
     }
@@ -397,8 +407,13 @@ mod tests {
                 default: false,
             },
         ];
-        let err = build_workspace(&configs, "azure", WorkspaceSource::Context, &["azure", "local", "aws"])
-            .unwrap_err();
+        let err = build_workspace(
+            &configs,
+            "azure",
+            WorkspaceSource::Context,
+            &["azure", "local", "aws"],
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("no default"), "{err}");
     }
 
@@ -418,8 +433,13 @@ mod tests {
                 default: false,
             },
         ];
-        let built = build_workspace(&configs, "azure", WorkspaceSource::Context, &["azure", "local", "aws"])
-            .expect("must build");
+        let built = build_workspace(
+            &configs,
+            "azure",
+            WorkspaceSource::Context,
+            &["azure", "local", "aws"],
+        )
+        .expect("must build");
         assert_eq!(built.default_entry().alias, "work");
         assert_eq!(built.entry("stage").unwrap().vault, "stage-sm");
         assert!(built.entry("nope").is_none());
@@ -450,18 +470,22 @@ vaults = [
 "#;
         std::fs::write(temp.path().join(".xv.toml"), toml).unwrap();
 
-        let mut config = Config::default();
-        config.backend = Some("azure".to_string());
+        let config = Config {
+            backend: Some("azure".to_string()),
+            ..Default::default()
+        };
 
-        let mut context_manager = crate::config::ContextManager::default();
-        context_manager.workspace = Some(WorkspaceState {
-            entries: vec![WorkspaceEntryConfig {
-                vault: "context-vault".to_string(),
-                backend: Some("local".to_string()),
-                alias: Some("ctx".to_string()),
-                default: true,
-            }],
-        });
+        let context_manager = crate::config::ContextManager {
+            workspace: Some(WorkspaceState {
+                entries: vec![WorkspaceEntryConfig {
+                    vault: "context-vault".to_string(),
+                    backend: Some("local".to_string()),
+                    alias: Some("ctx".to_string()),
+                    default: true,
+                }],
+            }),
+            ..Default::default()
+        };
 
         let resolved = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
             .await
@@ -482,15 +506,17 @@ vaults = [
         let temp = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let mut context_manager = crate::config::ContextManager::default();
-        context_manager.workspace = Some(WorkspaceState {
-            entries: vec![WorkspaceEntryConfig {
-                vault: "context-vault".to_string(),
-                backend: Some("local".to_string()),
-                alias: Some("ctx".to_string()),
-                default: true,
-            }],
-        });
+        let context_manager = crate::config::ContextManager {
+            workspace: Some(WorkspaceState {
+                entries: vec![WorkspaceEntryConfig {
+                    vault: "context-vault".to_string(),
+                    backend: Some("local".to_string()),
+                    alias: Some("ctx".to_string()),
+                    default: true,
+                }],
+            }),
+            ..Default::default()
+        };
 
         let resolved = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
             .await

@@ -2822,7 +2822,15 @@ mod tests {
     #[test]
     fn cx_add_accepts_backend_as_default_and_force_flags() {
         let result = Cli::try_parse_from([
-            "xv", "cx", "add", "stage-sm", "--backend", "aws-east", "--as", "stage", "--default",
+            "xv",
+            "cx",
+            "add",
+            "stage-sm",
+            "--backend",
+            "aws-east",
+            "--as",
+            "stage",
+            "--default",
             "--force",
         ]);
         assert!(result.is_ok(), "{:?}", result.err());

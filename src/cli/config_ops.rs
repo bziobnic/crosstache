@@ -1432,22 +1432,24 @@ async fn execute_cx_add(
     // Probe the vault exists unless --force (offline setup).
     if !force {
         let probe_registry =
-            crate::backend::BackendRegistry::with_lazy(config, &[backend_name.clone()])
+            crate::backend::BackendRegistry::with_lazy(config, std::slice::from_ref(&backend_name))
                 .map_err(|e| CrosstacheError::config(e.to_string()))?;
-        let probe_backend = probe_registry
-            .materialize(&backend_name)
-            .map_err(|e| CrosstacheError::config(format!(
+        let probe_backend = probe_registry.materialize(&backend_name).map_err(|e| {
+            CrosstacheError::config(format!(
                 "cannot reach backend '{backend_name}' to verify vault '{vault}' exists: {e}. \
                  Pass --force to skip this check for offline setup."
-            )))?;
+            ))
+        })?;
         probe_backend
             .secrets()
             .list_secrets(vault, None)
             .await
-            .map_err(|e| CrosstacheError::config(format!(
-                "vault '{vault}' on backend '{backend_name}' is not reachable: {e}. \
+            .map_err(|e| {
+                CrosstacheError::config(format!(
+                    "vault '{vault}' on backend '{backend_name}' is not reachable: {e}. \
                  Pass --force to skip this check for offline setup."
-            )))?;
+                ))
+            })?;
     }
 
     // First attached vault becomes the default implicitly; `--default`
@@ -1491,7 +1493,11 @@ async fn execute_cx_add(
 
     output::success(&format!(
         "Attached vault '{vault}' as '{alias}' (backend: {backend_name}){}",
-        if default || is_first { " [default]" } else { "" }
+        if default || is_first {
+            " [default]"
+        } else {
+            ""
+        }
     ));
     Ok(())
 }
@@ -1608,7 +1614,11 @@ async fn execute_cx_ls(config: &Config) -> Result<()> {
             alias: e.alias.clone(),
             backend: e.backend.clone(),
             vault: e.vault.clone(),
-            default: if e.default { "*".to_string() } else { String::new() },
+            default: if e.default {
+                "*".to_string()
+            } else {
+                String::new()
+            },
             source: source.to_string(),
         })
         .collect();

@@ -435,11 +435,9 @@ mod tests {
     fn materialize_constructs_once() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = two_local_backends_config(&tmp);
-        let registry = BackendRegistry::with_lazy(
-            &config,
-            &["local-a".to_string(), "local-b".to_string()],
-        )
-        .expect("registration must not error");
+        let registry =
+            BackendRegistry::with_lazy(&config, &["local-a".to_string(), "local-b".to_string()])
+                .expect("registration must not error");
 
         let first = registry
             .materialize("local-a")
@@ -472,11 +470,9 @@ mod tests {
         // setup at all) would be a reasonable place for that to blow up.
         // It doesn't, because `with_lazy` never calls `construct_named`.
         let config = two_local_backends_config(&tmp);
-        let registry = BackendRegistry::with_lazy(
-            &config,
-            &["azure".to_string(), "local-b".to_string()],
-        )
-        .expect("registering azure + local-b must not construct either eagerly");
+        let registry =
+            BackendRegistry::with_lazy(&config, &["azure".to_string(), "local-b".to_string()])
+                .expect("registering azure + local-b must not construct either eagerly");
 
         // Touching only "local-b" must succeed and must not require ever
         // calling materialize("azure") — the command-level guarantee this
