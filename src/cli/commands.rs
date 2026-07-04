@@ -923,8 +923,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Vault context management (alias: cx)
-    #[command(alias = "cx")]
+    /// Vault context and multi-vault workspace management (alias: cx)
+    #[command(visible_alias = "cx")]
     Context {
         #[command(subcommand)]
         command: ContextCommands,
@@ -1446,8 +1446,9 @@ pub enum ContextCommands {
         #[arg(long)]
         local: bool,
     },
-    /// List recent vault contexts (alias: ls)
-    #[command(alias = "ls")]
+    /// List recent vault contexts. NOTE: `ls` is the alias for `xv cx ls`
+    /// (the multi-vault workspace listing) — recent contexts are available
+    /// under the unabbreviated `xv context list` only.
     List,
     /// Clear current context
     Clear {
@@ -1477,6 +1478,45 @@ pub enum ContextCommands {
         #[arg(long)]
         force: bool,
     },
+    /// Attach a vault to the multi-vault workspace
+    Add {
+        /// Vault name to attach
+        vault: String,
+        /// Backend the vault lives on (defaults to the active backend)
+        #[arg(long)]
+        backend: Option<String>,
+        /// Alias for this entry (defaults to the vault name)
+        #[arg(long = "as")]
+        r#as: Option<String>,
+        /// Make this the workspace's default (write target) vault
+        #[arg(long)]
+        default: bool,
+        /// Store in the local (per-directory) context instead of global
+        #[arg(long)]
+        local: bool,
+        /// Skip the vault-exists probe (for offline setup)
+        #[arg(long)]
+        force: bool,
+    },
+    /// Detach a vault from the multi-vault workspace
+    Rm {
+        /// Alias of the entry to remove
+        alias: String,
+        /// Operate on the local (per-directory) context instead of global
+        #[arg(long)]
+        local: bool,
+    },
+    /// Change the workspace's default (write target) vault
+    Default {
+        /// Alias to make the new default
+        alias: String,
+        /// Operate on the local (per-directory) context instead of global
+        #[arg(long)]
+        local: bool,
+    },
+    /// List the workspace's attached vaults: alias, backend, vault, default
+    /// marker, source (context vs `.xv.toml`)
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -2762,6 +2802,30 @@ mod tests {
     #[cfg(feature = "file-ops")]
     fn test_ls_alias_on_file_list() {
         assert!(Cli::try_parse_from(["xv", "file", "ls"]).is_ok());
+    }
+
+    #[test]
+    fn cx_is_a_visible_alias_of_context() {
+        // `cx` must parse identically to `context` for the workspace verbs.
+        for args in [
+            vec!["xv", "cx", "add", "myvault"],
+            vec!["xv", "context", "add", "myvault"],
+            vec!["xv", "cx", "rm", "work"],
+            vec!["xv", "cx", "default", "work"],
+            vec!["xv", "cx", "ls"],
+        ] {
+            let result = Cli::try_parse_from(&args);
+            assert!(result.is_ok(), "{args:?} should parse: {:?}", result.err());
+        }
+    }
+
+    #[test]
+    fn cx_add_accepts_backend_as_default_and_force_flags() {
+        let result = Cli::try_parse_from([
+            "xv", "cx", "add", "stage-sm", "--backend", "aws-east", "--as", "stage", "--default",
+            "--force",
+        ]);
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 
     #[test]

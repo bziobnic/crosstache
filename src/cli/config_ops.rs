@@ -972,6 +972,25 @@ pub(crate) async fn execute_context_command(
             )
             .await?;
         }
+        ContextCommands::Add {
+            vault,
+            backend,
+            r#as,
+            default,
+            local,
+            force,
+        } => {
+            execute_cx_add(&vault, backend, r#as, default, local, force, &config).await?;
+        }
+        ContextCommands::Rm { alias, local } => {
+            execute_cx_rm(&alias, local).await?;
+        }
+        ContextCommands::Default { alias, local } => {
+            execute_cx_default(&alias, local).await?;
+        }
+        ContextCommands::Ls => {
+            execute_cx_ls(&config).await?;
+        }
     }
     Ok(())
 }
@@ -1055,6 +1074,18 @@ async fn execute_context_use(
     config: &Config,
 ) -> Result<()> {
     use crate::config::{ContextManager, VaultContext};
+
+    // Multi-vault workspaces and the single-vault `context use` model are
+    // mutually exclusive (spec §Workspace management): mixing them would be
+    // confusing (which one wins?), so a workspace being present errors,
+    // pointing at the workspace-native way to change the write target.
+    if crate::workspace::resolve_workspace(config).await?.is_some() {
+        return Err(CrosstacheError::config(
+            "a multi-vault workspace is attached; 'context use' does not apply. \
+             Use `xv cx default <alias>` to change the workspace's default vault, \
+             or `xv cx rm <alias>` to detach vaults back to single-vault mode.",
+        ));
+    }
 
     // P0.1: If the name matches a .xv.toml env profile, reject with a targeted hint.
     let cwd = std::env::current_dir()?;
@@ -1347,6 +1378,248 @@ async fn execute_context_init(
         ".xv.toml written to {} (env: {env_name})",
         path.display()
     ));
+    Ok(())
+}
+
+// ── Workspace (`xv cx add/rm/default/ls`) ───────────────────────────────────
+
+/// Load the context store `cx` operates on: local when `--local`, otherwise
+/// whatever `ContextManager::load()` resolves (local-dir-first, else global)
+/// — matching `execute_context_use`'s existing local/global selection.
+async fn load_cx_context(local: bool) -> Result<crate::config::ContextManager> {
+    use crate::config::ContextManager;
+    if local {
+        ContextManager::new_local()
+    } else {
+        ContextManager::load()
+            .await
+            .or_else(|_| ContextManager::new_global())
+    }
+}
+
+async fn execute_cx_add(
+    vault: &str,
+    backend: Option<String>,
+    r#as: Option<String>,
+    default: bool,
+    local: bool,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::workspace::{build_workspace, WorkspaceEntryConfig, WorkspaceSource};
+
+    let mut context_manager = load_cx_context(local).await?;
+    let mut entries = context_manager
+        .workspace
+        .clone()
+        .unwrap_or_default()
+        .entries;
+
+    let alias = r#as.unwrap_or_else(|| vault.to_string());
+    let backend_name = backend.unwrap_or_else(|| config.effective_backend_name().to_string());
+
+    if entries.iter().any(|e| e.resolved_alias() == alias) {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "workspace alias '{alias}' is already attached (vault '{}')",
+            entries
+                .iter()
+                .find(|e| e.resolved_alias() == alias)
+                .map(|e| e.vault.as_str())
+                .unwrap_or("?")
+        )));
+    }
+
+    // Probe the vault exists unless --force (offline setup).
+    if !force {
+        let probe_registry =
+            crate::backend::BackendRegistry::with_lazy(config, &[backend_name.clone()])
+                .map_err(|e| CrosstacheError::config(e.to_string()))?;
+        let probe_backend = probe_registry
+            .materialize(&backend_name)
+            .map_err(|e| CrosstacheError::config(format!(
+                "cannot reach backend '{backend_name}' to verify vault '{vault}' exists: {e}. \
+                 Pass --force to skip this check for offline setup."
+            )))?;
+        probe_backend
+            .secrets()
+            .list_secrets(vault, None)
+            .await
+            .map_err(|e| CrosstacheError::config(format!(
+                "vault '{vault}' on backend '{backend_name}' is not reachable: {e}. \
+                 Pass --force to skip this check for offline setup."
+            )))?;
+    }
+
+    // First attached vault becomes the default implicitly; `--default`
+    // explicitly reassigns (clearing any prior default).
+    let is_first = entries.is_empty();
+    if default || is_first {
+        for e in entries.iter_mut() {
+            e.default = false;
+        }
+    }
+
+    entries.push(WorkspaceEntryConfig {
+        vault: vault.to_string(),
+        backend: Some(backend_name.clone()),
+        alias: Some(alias.clone()),
+        default: default || is_first,
+    });
+
+    // Validate before persisting (fail-closed): duplicate aliases,
+    // charset, backend-name collisions, exactly-one-default.
+    let active_backend = config.effective_backend_name().to_string();
+    let mut backend_names: Vec<String> = crate::workspace::BUILTIN_BACKEND_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for k in config.named_backends.keys() {
+        if !backend_names.iter().any(|n| n == k) {
+            backend_names.push(k.clone());
+        }
+    }
+    let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
+    build_workspace(
+        &entries,
+        &active_backend,
+        WorkspaceSource::Context,
+        &backend_name_refs,
+    )?;
+
+    context_manager.workspace = Some(crate::workspace::WorkspaceState { entries });
+    context_manager.save().await?;
+
+    output::success(&format!(
+        "Attached vault '{vault}' as '{alias}' (backend: {backend_name}){}",
+        if default || is_first { " [default]" } else { "" }
+    ));
+    Ok(())
+}
+
+async fn execute_cx_rm(alias: &str, local: bool) -> Result<()> {
+    let mut context_manager = load_cx_context(local).await?;
+    let mut ws_state = context_manager.workspace.clone().unwrap_or_default();
+
+    if ws_state.entries.is_empty() {
+        return Err(CrosstacheError::config("no workspace is attached"));
+    }
+
+    let idx = ws_state
+        .entries
+        .iter()
+        .position(|e| e.resolved_alias() == alias)
+        .ok_or_else(|| {
+            let attached: Vec<String> = ws_state
+                .entries
+                .iter()
+                .map(|e| e.resolved_alias())
+                .collect();
+            CrosstacheError::invalid_argument(format!(
+                "unknown workspace alias '{alias}'; attached aliases: {}",
+                attached.join(", ")
+            ))
+        })?;
+
+    let removing_default = ws_state.entries[idx].default;
+    let is_last_entry = ws_state.entries.len() == 1;
+
+    if removing_default && !is_last_entry {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "'{alias}' is the workspace default; run `xv cx default <other-alias>` first, \
+             then `xv cx rm {alias}`"
+        )));
+    }
+
+    ws_state.entries.remove(idx);
+
+    if ws_state.entries.is_empty() {
+        context_manager.workspace = None;
+        context_manager.save().await?;
+        output::success(&format!(
+            "Removed '{alias}' — workspace is now empty; back to single-vault behavior"
+        ));
+    } else {
+        context_manager.workspace = Some(ws_state);
+        context_manager.save().await?;
+        output::success(&format!("Removed '{alias}' from the workspace"));
+    }
+    Ok(())
+}
+
+async fn execute_cx_default(alias: &str, local: bool) -> Result<()> {
+    let mut context_manager = load_cx_context(local).await?;
+    let mut ws_state = context_manager.workspace.clone().unwrap_or_default();
+
+    if !ws_state.entries.iter().any(|e| e.resolved_alias() == alias) {
+        let attached: Vec<String> = ws_state
+            .entries
+            .iter()
+            .map(|e| e.resolved_alias())
+            .collect();
+        return Err(CrosstacheError::invalid_argument(format!(
+            "unknown workspace alias '{alias}'; attached aliases: {}",
+            attached.join(", ")
+        )));
+    }
+
+    for e in ws_state.entries.iter_mut() {
+        e.default = e.resolved_alias() == alias;
+    }
+
+    context_manager.workspace = Some(ws_state);
+    context_manager.save().await?;
+    output::success(&format!("'{alias}' is now the workspace default"));
+    Ok(())
+}
+
+async fn execute_cx_ls(config: &Config) -> Result<()> {
+    use tabled::Tabled;
+
+    #[derive(Tabled, serde::Serialize)]
+    struct WorkspaceRow {
+        #[tabled(rename = "Alias")]
+        alias: String,
+        #[tabled(rename = "Backend")]
+        backend: String,
+        #[tabled(rename = "Vault")]
+        vault: String,
+        #[tabled(rename = "Default")]
+        default: String,
+        #[tabled(rename = "Source")]
+        source: String,
+    }
+
+    let resolved = crate::workspace::resolve_workspace(config).await?;
+    let Some(ws) = resolved else {
+        output::info("No workspace attached (single-vault mode)");
+        output::hint("Use 'xv cx add <vault>' to attach vaults into a workspace");
+        return Ok(());
+    };
+
+    let source = match ws.source {
+        crate::workspace::WorkspaceSource::Context => "context",
+        crate::workspace::WorkspaceSource::ProjectToml => ".xv.toml",
+    };
+
+    let rows: Vec<WorkspaceRow> = ws
+        .entries
+        .iter()
+        .map(|e| WorkspaceRow {
+            alias: e.alias.clone(),
+            backend: e.backend.clone(),
+            vault: e.vault.clone(),
+            default: if e.default { "*".to_string() } else { String::new() },
+            source: source.to_string(),
+        })
+        .collect();
+
+    let formatter = crate::utils::format::TableFormatter::new(
+        config.runtime_output_format,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+    println!("{}", formatter.format_table(&rows)?);
     Ok(())
 }
 
