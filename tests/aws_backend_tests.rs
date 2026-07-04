@@ -1238,3 +1238,51 @@ async fn native_rotate_without_lambda_explains_how_to_configure_one() {
         "hint should mention the rotation Lambda flag: {msg}"
     );
 }
+
+// --- multi-vault workspaces: lazy multi-backend construction (Phase A, Task 2) ---
+
+/// A workspace command touching only an AWS-backed vault must never
+/// construct/authenticate the Azure backend. `BackendRegistry::with_lazy`
+/// only records backend names; `materialize` builds on first use. This
+/// config has no `[azure]` credential setup at all — if registration (or
+/// materializing the AWS entry) accidentally dispatched into Azure
+/// construction, it would surface here.
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_touching_only_aws_never_builds_azure() {
+    use crosstache::backend::BackendRegistry;
+    use crosstache::config::settings::{AwsConfig, Config, NamedBackendEntry};
+    use std::collections::HashMap;
+
+    let mut named_backends = HashMap::new();
+    named_backends.insert(
+        "aws-mock".to_string(),
+        NamedBackendEntry::Aws(AwsConfig {
+            region: Some("us-east-1".to_string()),
+            profile: None,
+            // No real AWS calls are made in this test — endpoint_url only
+            // needs to be syntactically present so client construction
+            // doesn't reach for real credentials at build time.
+            endpoint_url: Some("http://127.0.0.1:1".to_string()),
+            default_vault: Some("default".into()),
+            s3_bucket: None,
+        }),
+    );
+
+    let config = Config {
+        named_backends,
+        ..Default::default()
+    };
+
+    let registry = BackendRegistry::with_lazy(&config, &["azure".to_string(), "aws-mock".to_string()])
+        .expect("registering azure + aws-mock must not construct either eagerly");
+
+    let materialized = registry.materialize("aws-mock");
+    assert!(
+        materialized.is_ok(),
+        "aws-mock must materialize without touching azure: {:?}",
+        materialized.err()
+    );
+    // "azure" was registered but never materialized above — the whole
+    // point of lazy construction is that the two steps are decoupled, so
+    // Azure auth is never attempted for an AWS-only workspace command.
+}
