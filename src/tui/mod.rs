@@ -206,17 +206,35 @@ async fn handle_command(
             // stays the `Message::SecretsLoaded` key (`key` param) so
             // `secrets_by_vault`/`selected_vault()` keep matching, even
             // though two aliases can share the same real vault name.
+            //
+            // Bugbot NIT fix: if this entry's backend failed to
+            // materialize at startup, `workspace_backends` has no entry
+            // for it — silently falling back to the single shared
+            // `backend` would query the WRONG backend/vault under the
+            // alias's name. Surface a visible toast instead (the same
+            // `Message::Error` path every other TUI failure uses) and
+            // never issue a query for that entry.
             let (real_vault, entry_backend) = match &app.workspace {
-                Some(_) => (
-                    app.workspace_vault_names
-                        .get(&vault)
-                        .cloned()
-                        .unwrap_or_else(|| vault.clone()),
-                    app.workspace_backends
-                        .get(&vault)
-                        .cloned()
-                        .or(backend.clone()),
-                ),
+                Some(_) => {
+                    let Some(entry_backend) = app.workspace_backends.get(&vault).cloned() else {
+                        let _ = tx
+                            .send(Message::Error(crate::error::CrosstacheError::config(
+                                format!(
+                                    "workspace entry '{vault}' unavailable: its backend failed \
+                                     to initialize; secrets were not loaded"
+                                ),
+                            )))
+                            .await;
+                        return;
+                    };
+                    (
+                        app.workspace_vault_names
+                            .get(&vault)
+                            .cloned()
+                            .unwrap_or_else(|| vault.clone()),
+                        Some(entry_backend),
+                    )
+                }
                 None => (vault.clone(), backend.clone()),
             };
             drop(data::spawn_load_secrets(

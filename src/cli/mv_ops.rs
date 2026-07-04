@@ -224,51 +224,135 @@ pub(crate) async fn execute_mv(
 
     let reg = registry.expect("use_trait_path guarantees Some");
 
-    // Cross-vault alias routing (Phase C Task 12, spec §Write semantics):
-    // `mv work:secret stage:/` (and `stage:folder/`) — when BOTH the source
-    // AND destination carry an alias prefix that resolves to an ATTACHED
-    // workspace entry, route to the cross-vault copy+delete machinery with
-    // the resolved (backend, vault) pairs instead of the same-vault
-    // rename/re-folder path below. Deliberately conservative: a single
-    // alias-qualified side, or no workspace at all, falls straight through
-    // to the unchanged same-vault logic — this task only adds the
-    // explicitly-qualified alias-to-alias form, leaving unqualified `mv`'s
-    // vault resolution exactly as it was before workspaces existed.
-    if let Some(src) = &source {
-        if filter.is_none() {
-            if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
-                let src_addr = crate::workspace::parse_address(src);
-                let dst_addr = crate::workspace::parse_address(&dest);
-                if let (Some(src_alias), Some(dst_alias)) = (&src_addr.alias, &dst_addr.alias) {
-                    if let (Some(src_entry), Some(dst_entry)) =
-                        (ws.entry(src_alias), ws.entry(dst_alias))
-                    {
-                        if src_entry.backend != dst_entry.backend
-                            || src_entry.vault != dst_entry.vault
-                        {
-                            let backend_names: Vec<String> =
-                                ws.entries.iter().map(|e| e.backend.clone()).collect();
-                            let ws_registry =
-                                BackendRegistry::with_lazy(&config, &backend_names)
-                                    .map_err(|e| CrosstacheError::config(e.to_string()))?;
-                            return execute_cross_vault_alias_mv(
-                                &ws_registry,
-                                &config,
-                                src_entry,
-                                dst_entry,
-                                &src_addr.path,
-                                &dst_addr.path,
-                                dry_run,
-                            )
-                            .await;
-                        }
+    // Workspace-aware vault resolution (Bugbot BLOCKER/MAJOR fix, Phase C
+    // follow-up): a single-secret `mv` (no `--filter`) resolves BOTH
+    // operands through the exact same `resolve_secret_target` rule
+    // `get`/`set`/`update`/etc. already use — exact-name-first (scoped to
+    // the workspace default vault), `alias:path` -> that entry, unqualified
+    // -> the default entry. This fixes three bugs the previous
+    // both-sides-must-be-aliased gate had:
+    //   - dest-only alias (`mv SECRET work:new`) used to fall through to
+    //     `parse_mv`, which only splits on `/`, silently renaming to a
+    //     LITERAL name containing a colon in the wrong vault.
+    //   - source-only alias (`mv work:SECRET archive/`) used to treat
+    //     `work:SECRET` as a literal name and fail not-found.
+    //   - unqualified `mv a b` under a workspace resolved
+    //     `resolve_vault_for_trait`'s config-level vault instead of the
+    //     workspace's default entry, diverging from `get`/`set`.
+    // Exactly one alias / no alias / both aliases are all handled
+    // uniformly: whichever (backend, vault) pair each side resolves to,
+    // compare them — identical pairs degenerate to the ordinary same-vault
+    // rename/re-folder path (just resolved against the workspace's chosen
+    // vault instead of the config-level one); different pairs route to the
+    // cross-vault copy+delete machinery. `--filter` and no-workspace-at-all
+    // are unaffected: they fall straight through to the pre-workspace path
+    // below, byte-identical.
+    if filter.is_none() {
+        if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+            let src_raw = source
+                .as_deref()
+                .expect("checked above: exactly one of SOURCE/--filter is Some");
+            let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+            let ws_registry = BackendRegistry::with_lazy(&config, &backend_names)
+                .map_err(|e| CrosstacheError::config(e.to_string()))?;
+
+            let (src_target, src_path) = crate::workspace::resolve_secret_target(
+                src_raw,
+                &ws,
+                &ws_registry,
+                crate::workspace::TargetMode::Write,
+            )
+            .await?;
+            let (dst_target, dst_path) = crate::workspace::resolve_secret_target(
+                &dest,
+                &ws,
+                &ws_registry,
+                crate::workspace::TargetMode::Write,
+            )
+            .await?;
+
+            if src_target.entry.backend == dst_target.entry.backend
+                && src_target.entry.vault == dst_target.entry.vault
+            {
+                // Degenerate case: both operands resolved to the SAME
+                // (backend, vault) — e.g. an unqualified `mv` under a
+                // workspace (both sides -> the default entry), or an
+                // explicit alias on one/both sides naming that same entry.
+                // Run the ordinary same-vault rename/re-folder machinery
+                // against the RESOLVED vault, using the ORIGINAL raw
+                // strings (not the alias-stripped paths) for user-facing
+                // messages so they echo exactly what was typed.
+                let vault_name = src_target.entry.vault.clone();
+                let backend_name = src_target.entry.backend.clone();
+                let backend = src_target.backend.clone();
+                let secrets = backend.secrets().list_secrets(&vault_name, None).await?;
+                let plan = parse_mv(&src_path, &dst_path)?;
+                return match plan {
+                    MvPlan::Secret {
+                        src_folder,
+                        src_name,
+                        dest_folder,
+                        dest_name,
+                    } => {
+                        execute_secret_mv(
+                            &backend,
+                            &backend_name,
+                            &config,
+                            &vault_name,
+                            secrets,
+                            src_raw,
+                            &dest,
+                            src_folder,
+                            src_name,
+                            dest_folder,
+                            dest_name,
+                            dry_run,
+                        )
+                        .await
                     }
-                }
+                    MvPlan::Folder {
+                        src_prefix,
+                        dest_prefix,
+                    } => {
+                        execute_folder_mv(
+                            &backend,
+                            &backend_name,
+                            &config,
+                            &vault_name,
+                            secrets,
+                            src_prefix,
+                            dest_prefix,
+                            dry_run,
+                            yes,
+                        )
+                        .await
+                    }
+                    MvPlan::Filter { .. } => unreachable!("parse_mv never returns MvPlan::Filter"),
+                };
             }
+
+            // Genuine cross-vault move: only a single secret is supported
+            // today (folder/`--filter` moves across vaults are out of
+            // scope, same restriction `execute_cross_vault_alias_mv`
+            // already enforces internally).
+            return execute_cross_vault_alias_mv(
+                &ws_registry,
+                &config,
+                &src_target.entry,
+                &dst_target.entry,
+                &src_path,
+                &dst_path,
+                dry_run,
+            )
+            .await;
         }
     }
 
+    // No workspace attached (or `--filter`): pre-workspace behavior,
+    // unchanged — byte-identical to before workspaces existed.
     let vault_name = resolve_vault_for_trait(&config, registry).await?;
+    let backend_name = config.effective_backend_name().to_string();
+    let backend = reg.active_arc();
     let secrets = reg
         .active()
         .secrets()
@@ -281,7 +365,8 @@ pub(crate) async fn execute_mv(
     }) = filter_plan
     {
         return execute_filter_mv(
-            reg,
+            &backend,
+            &backend_name,
             &config,
             &vault_name,
             secrets,
@@ -304,7 +389,8 @@ pub(crate) async fn execute_mv(
             dest_name,
         } => {
             execute_secret_mv(
-                reg,
+                &backend,
+                &backend_name,
                 &config,
                 &vault_name,
                 secrets,
@@ -323,7 +409,8 @@ pub(crate) async fn execute_mv(
             dest_prefix,
         } => {
             execute_folder_mv(
-                reg,
+                &backend,
+                &backend_name,
                 &config,
                 &vault_name,
                 secrets,
@@ -408,15 +495,20 @@ async fn execute_cross_vault_alias_mv(
     };
 
     // Destination collision pre-check — before any mutation, mirroring
-    // `execute_secret_mv`'s same-vault ordering.
+    // `execute_secret_mv`'s same-vault ordering. `xv mv` has no `--force`
+    // anywhere (same-vault renames refuse collisions too), so cross-vault
+    // alias `mv` never overwrites either — that's consistent, not a gap.
+    // The message points at the one command that DOES overwrite:
+    // `xv move --from/--to --force` (Bugbot MINOR fix).
     let dst_secrets = dst_backend
         .secrets()
         .list_secrets(&dst_entry.vault, None)
         .await?;
     if dest_collides(&dst_secrets, &dest_name) {
         return Err(CrosstacheError::conflict(format!(
-            "secret '{dest_name}' already exists in workspace vault '{}' — delete it first or pick another name",
-            dst_entry.alias
+            "secret '{dest_name}' already exists in workspace vault '{}' — delete it first, pick another name, \
+             or use 'xv move --from {} --to {} --force' to overwrite",
+            dst_entry.alias, src_entry.alias, dst_entry.alias
         )));
     }
 
@@ -471,9 +563,17 @@ async fn execute_cross_vault_alias_mv(
 /// find source → no-op check → collision pre-check → folder update →
 /// rename. The collision pre-check happens before the folder update so a
 /// doomed rename never leaves a half-applied folder change behind.
+///
+/// Takes an explicit `backend`/`backend_name` (rather than a
+/// `BackendRegistry`) so callers can pass either `reg.active_arc()` (no
+/// workspace) or a workspace entry's own resolved backend (Bugbot
+/// BLOCKER/MAJOR fix, Phase C follow-up): every `mv` form must resolve the
+/// SAME way `get`/`set`/etc. already do, never a separate config-level
+/// vault when a workspace is attached.
 #[allow(clippy::too_many_arguments)]
 async fn execute_secret_mv(
-    reg: &BackendRegistry,
+    backend: &std::sync::Arc<dyn crate::backend::Backend>,
+    backend_name: &str,
     config: &Config,
     vault_name: &str,
     secrets: Vec<SecretSummary>,
@@ -550,23 +650,22 @@ async fn execute_secret_mv(
             replace_tags: false,
             replace_groups: false,
         };
-        reg.active()
+        backend
             .secrets()
             .update_secret(vault_name, &src_name, request)
             .await?;
-        invalidate_trait_secret_cache(config, config.effective_backend_name(), vault_name);
+        invalidate_trait_secret_cache(config, backend_name, vault_name);
         folder_updated = true;
     }
 
     if dest_name != src_name {
-        let rename_result = reg
-            .active()
+        let rename_result = backend
             .secrets()
             .rename_secret(vault_name, &src_name, &dest_name)
             .await;
         // Rename may mutate state even when it errors (e.g. RenameIncomplete),
         // so invalidate unconditionally before inspecting the result.
-        invalidate_trait_secret_cache(config, config.effective_backend_name(), vault_name);
+        invalidate_trait_secret_cache(config, backend_name, vault_name);
         if let Err(e) = rename_result {
             if folder_updated {
                 let msg = if matches!(
@@ -593,7 +692,8 @@ async fn execute_secret_mv(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_folder_mv(
-    reg: &BackendRegistry,
+    backend: &std::sync::Arc<dyn crate::backend::Backend>,
+    backend_name: &str,
     config: &Config,
     vault_name: &str,
     secrets: Vec<SecretSummary>,
@@ -687,8 +787,7 @@ async fn execute_folder_mv(
             replace_tags: false,
             replace_groups: false,
         };
-        if let Err(e) = reg
-            .active()
+        if let Err(e) = backend
             .secrets()
             .update_secret(vault_name, name, request)
             .await
@@ -697,7 +796,7 @@ async fn execute_folder_mv(
             output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
         }
     }
-    invalidate_trait_secret_cache(config, config.effective_backend_name(), vault_name);
+    invalidate_trait_secret_cache(config, backend_name, vault_name);
     let moved = moves.len() - failures;
     if failures > 0 {
         return Err(CrosstacheError::unknown(format!(
@@ -770,7 +869,8 @@ fn dest_folder_collision<'a>(
 /// name, same predicate as `ls`/`find --filter`) instead of a folder subtree.
 #[allow(clippy::too_many_arguments)]
 async fn execute_filter_mv(
-    reg: &BackendRegistry,
+    backend: &std::sync::Arc<dyn crate::backend::Backend>,
+    backend_name: &str,
     config: &Config,
     vault_name: &str,
     secrets: Vec<SecretSummary>,
@@ -895,8 +995,7 @@ async fn execute_filter_mv(
             replace_tags: false,
             replace_groups: false,
         };
-        if let Err(e) = reg
-            .active()
+        if let Err(e) = backend
             .secrets()
             .update_secret(vault_name, name, request)
             .await
@@ -905,7 +1004,7 @@ async fn execute_filter_mv(
             output::warn(&format!("failed to move '{old}' to '{new}': {e}"));
         }
     }
-    invalidate_trait_secret_cache(config, config.effective_backend_name(), vault_name);
+    invalidate_trait_secret_cache(config, backend_name, vault_name);
     let moved = moves.len() - failures;
     if failures > 0 {
         return Err(CrosstacheError::unknown(format!(
@@ -1301,7 +1400,7 @@ mod tests {
     #[tokio::test]
     async fn execute_folder_mv_partial_failure_reports_count_and_attempts_all() {
         let backend = Arc::new(PartialFailBackend::new("b"));
-        let registry = BackendRegistry::new(backend.clone());
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
         let config = Config::default();
 
         let secrets = vec![
@@ -1311,7 +1410,8 @@ mod tests {
         ];
 
         let result = execute_folder_mv(
-            &registry,
+            &backend_dyn,
+            "local",
             &config,
             "test-vault",
             secrets,
@@ -1477,5 +1577,47 @@ mod tests {
         let request = secret_request_with_tags(5);
         crate::cli::secret_ops::check_dest_tag_budget(&dest, &request)
             .expect("must allow a request within the destination's tag budget");
+    }
+
+    /// A request with folder+note+groups+user tags landing EXACTLY at the
+    /// destination's `max_tags` (Bugbot MINOR fix): pins the reserved-count
+    /// math (`ALWAYS_WRITTEN_TAGS.len()` + groups/note/folder presence)
+    /// against double-counting with `rename_request_from_properties`'s
+    /// structured fields — folder/note/groups are counted ONCE each here,
+    /// not once as a structured field AND again as a raw tag.
+    fn secret_request_with_full_metadata(
+        user_tag_count: usize,
+    ) -> crate::secret::manager::SecretRequest {
+        let tags: std::collections::HashMap<String, String> = (0..user_tag_count)
+            .map(|i| (format!("tag{i}"), format!("v{i}")))
+            .collect();
+        crate::secret::manager::SecretRequest {
+            name: "CREDS".to_string(),
+            value: zeroize::Zeroizing::new("hunter2".to_string()),
+            content_type: None,
+            enabled: None,
+            expires_on: None,
+            not_before: None,
+            tags: Some(tags),
+            groups: Some(vec!["team-a".to_string()]),
+            note: Some("important".to_string()),
+            folder: Some("app".to_string()),
+        }
+    }
+
+    #[test]
+    fn mv_alias_dest_tag_budget_boundary_exact_cap_passes_one_over_fails() {
+        let dest = AzureCapsBackend;
+        // reserved = 2 always-written + groups(1) + note(1) + folder(1) = 5;
+        // 10 user tags -> total 15 == Azure's cap: must be ALLOWED.
+        let at_cap = secret_request_with_full_metadata(10);
+        crate::cli::secret_ops::check_dest_tag_budget(&dest, &at_cap)
+            .expect("exactly at the destination's tag cap must be allowed");
+
+        // 11 user tags -> total 16 > cap: must be REJECTED before any write.
+        let over_cap = secret_request_with_full_metadata(11);
+        let err = crate::cli::secret_ops::check_dest_tag_budget(&dest, &over_cap)
+            .expect_err("one over the destination's tag cap must be rejected before any write");
+        assert!(err.to_string().contains("15"), "{err}");
     }
 }

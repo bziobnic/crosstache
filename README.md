@@ -1052,10 +1052,10 @@ xv mv work:API_KEY stage:archive/       # ...into a folder on the destination
 xv copy DB_PASSWORD --from work --to stage --new-name DB_PASSWORD_BACKUP
 ```
 
-- **Both sides must be attached aliases for the cross-vault `mv` form.** `xv mv work:secret stage:/` only routes across vaults when BOTH `work` and `stage` resolve to attached workspace entries; a single alias-qualified side (or none) falls straight through to the existing same-vault rename/re-folder logic, unchanged.
+- **Every `mv` form resolves through the workspace, the same way `get`/`set` do.** Source and destination are each resolved independently — exact-name-first (a literal colon-containing name in the default vault always wins), then `alias:path`, then unqualified falling back to the workspace's **default** entry. That means all of these work: both sides aliased (`xv mv work:API_KEY stage:/`), only the source (`xv mv work:API_KEY archive/` — destination lands in the *default* vault), only the destination (`xv mv API_KEY stage:new-name` — source comes from the *default* vault), and fully unqualified (`xv mv a b`, which now renames within the workspace's default vault, matching `get`/`set` — not a separate config-level vault). Whenever both sides resolve to the *same* `(backend, vault)`, `mv` degenerates to the ordinary same-vault rename/re-folder logic; only a genuine cross-vault pair uses the copy+delete path below.
 - **Metadata rides along.** Groups, notes, folders, tags, and typed-record envelopes move/copy intact (the same `rename_request_from_properties` path `xv copy`/`xv move` have always used).
 - **Destination tag budget checked before any write.** If the destination backend's tag cap (e.g. Azure's 15 tags) can't hold the secret's tags, the command fails up front — nothing is written to either side.
-- **`--force` overwrite semantics are unchanged** — a name collision at the destination still requires `--force` (or, for `mv`, an explicit rename) to overwrite.
+- **Cross-vault alias `mv` never overwrites.** `xv mv` has no `--force` flag anywhere — same-vault renames refuse a name collision at the destination too, so this is consistent, not a gap. `xv move --from <alias> --to <alias> --force` (below) is the overwrite path; the collision error names it directly.
 
 ### TUI workspace pane (Phase C)
 

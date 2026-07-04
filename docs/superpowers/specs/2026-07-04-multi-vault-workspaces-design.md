@@ -173,11 +173,14 @@ vaults = [
 - Qualified writes (`set personal:API_KEY`) go where addressed.
 - Cross-vault within the workspace: `mv work:secret stage:/` (and
   `stage:folder/`) performs copy+delete via the existing `move`
-  machinery, including `--force` overwrite semantics and metadata
-  preservation (the #315 `rename_request_from_properties` path). `copy`
-  gains the same alias support. Record envelopes ride along untouched
-  (the value + tags move as-is; cross-backend tag-budget checks apply at
-  the destination's caps before any write).
+  machinery, reusing its metadata preservation (the #315
+  `rename_request_from_properties` path). `xv mv` has no `--force` flag
+  anywhere — same-vault renames refuse a destination name collision too —
+  so cross-vault alias `mv` never overwrites either; `xv move --from/--to
+  --force` is the dedicated overwrite path, and `copy`/`move --from/--to`
+  gain the same alias support as `mv`. Record envelopes ride along
+  untouched (the value + tags move as-is; cross-backend tag-budget checks
+  apply at the destination's caps before any write).
 
 ## Capability differences in a mixed workspace
 

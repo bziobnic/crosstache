@@ -2795,3 +2795,279 @@ fn copy_accepts_aliases_in_from_to() {
     let src_value = env.ok(&["get", "work:SHARED", "--raw"]);
     assert_eq!(src_value.trim(), "copy-me");
 }
+
+// ===========================================================================
+// Code review follow-up (Phase C): every mv form must resolve through the
+// workspace — dest-only alias, source-only alias, fully unqualified, and
+// the degenerate same-vault case — not just the both-sides-aliased form.
+// ===========================================================================
+
+#[test]
+fn mv_unqualified_targets_workspace_default_not_config_vault() {
+    let env = WorkspaceEnv::new();
+    // Seed the SAME secret name in BOTH the plain (pre-workspace) default
+    // vault and, after attaching, the workspace default entry — with
+    // DIFFERENT values, so a wrong-vault mv is observable either way.
+    env.ok(&["set", "SAME_NAME", "--value", "config-vault-value"]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+        "--default",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&[
+        "set",
+        "work:SAME_NAME",
+        "--value",
+        "workspace-default-value",
+    ]);
+
+    // Fully unqualified mv, no alias on either side.
+    env.ok(&["mv", "SAME_NAME", "RENAMED"]);
+
+    // The workspace default (work/local-a) was renamed.
+    let renamed = env.ok(&["get", "work:RENAMED", "--raw"]);
+    assert_eq!(renamed.trim(), "workspace-default-value");
+    let missing = env.err(&["get", "work:SAME_NAME"]);
+    assert!(!missing.status.success());
+
+    // The plain config-level default vault (store_default, pre-workspace)
+    // must be UNTOUCHED — proving unqualified mv resolved against the
+    // WORKSPACE default, not `resolve_vault_for_trait`'s config-level
+    // vault. Probed via an explicit backend-qualified xv:// URI, which
+    // bypasses the workspace entirely (Task 11), rather than `get`, which
+    // would search the ATTACHED vaults only and miss this vault either way.
+    let template_path = env.home.join("check_raw.txt");
+    std::fs::write(&template_path, "v: xv://local:default/SAME_NAME\n").expect("write template");
+    let out_path = env.home.join("check_raw_out.txt");
+    env.ok(&[
+        "inject",
+        "--template",
+        template_path.to_str().unwrap(),
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    let rendered = std::fs::read_to_string(&out_path).expect("read output");
+    assert!(rendered.contains("config-vault-value"), "{rendered}");
+}
+
+#[test]
+fn mv_source_only_alias_moves_from_named_vault_to_default() {
+    let env = WorkspaceEnv::new();
+    // "stage" is default; "work" is NOT.
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+        "--default",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:SRC_ONLY", "--value", "src-only-value"]);
+
+    // Dest is unqualified ("archive/") -> resolves to the DEFAULT ("stage").
+    // Before the fix, this treated "work:SRC_ONLY" as a literal name and
+    // failed not-found instead of moving it cross-vault.
+    env.ok(&["mv", "work:SRC_ONLY", "archive/"]);
+
+    let value = env.ok(&["get", "stage:SRC_ONLY", "--raw"]);
+    assert_eq!(value.trim(), "src-only-value");
+    let listing = env.ok(&["ls", "--format", "json"]);
+    assert!(listing.contains("archive"), "{listing}");
+    let gone = env.err(&["get", "work:SRC_ONLY"]);
+    assert!(!gone.status.success());
+}
+
+#[test]
+fn mv_dest_only_alias_moves_to_named_vault_with_new_name() {
+    let env = WorkspaceEnv::new();
+    // "stage" is default; "work" is NOT.
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+        "--default",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "stage:DST_ONLY", "--value", "dst-only-value"]);
+
+    // Source unqualified -> resolves to the DEFAULT ("stage"); dest
+    // alias-qualified -> "work". Before the fix, this fell through to
+    // `parse_mv`'s `/`-only grammar and silently renamed the secret to a
+    // LITERAL name `work:renamed-dst` in the SAME (default) vault.
+    env.ok(&["mv", "DST_ONLY", "work:renamed-dst"]);
+
+    let value = env.ok(&["get", "work:renamed-dst", "--raw"]);
+    assert_eq!(value.trim(), "dst-only-value");
+    let gone = env.err(&["get", "stage:DST_ONLY"]);
+    assert!(!gone.status.success());
+    // Regression guard: no literal secret named `work:renamed-dst` exists
+    // in the default ("stage") vault — the historical silent-wrong-target bug.
+    let no_literal = env.err(&["get", "stage:work:renamed-dst"]);
+    assert!(!no_literal.status.success());
+}
+
+#[test]
+fn mv_alias_qualified_source_matching_default_degenerates_to_same_vault_rename() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+        "--default",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:DEGEN_SRC", "--value", "degen-value"]);
+
+    // "work" IS the default here — source and dest both resolve to the
+    // SAME (backend, vault), so this must degenerate to the ordinary
+    // same-vault rename path (execute_secret_mv), not a cross-vault
+    // copy+delete, and must still succeed correctly.
+    env.ok(&["mv", "work:DEGEN_SRC", "DEGEN_DST"]);
+
+    let value = env.ok(&["get", "work:DEGEN_DST", "--raw"]);
+    assert_eq!(value.trim(), "degen-value");
+    let gone = env.err(&["get", "work:DEGEN_SRC"]);
+    assert!(!gone.status.success());
+}
+
+#[test]
+fn mv_source_exact_name_with_colon_wins_over_alias_when_default_differs() {
+    let env = WorkspaceEnv::new();
+    // Default is "stage" (NOT "work") — so alias interpretation of the
+    // "work:" prefix and the exact-name-first literal probe (scoped to the
+    // default vault, "stage" per the Phase A write rule) diverge observably.
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+        "--default",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+
+    // A secret LITERALLY named "work:x" sitting in the DEFAULT vault (stage).
+    env.ok(&["set", "stage:work:x", "--value", "literal-value"]);
+
+    env.ok(&["mv", "work:x", "moved-literal"]);
+
+    // Must have renamed the LITERAL "work:x" in "stage" (the default), not
+    // treated "work" as an alias pointing at the "work" backend/vault.
+    let value = env.ok(&["get", "stage:moved-literal", "--raw"]);
+    assert_eq!(value.trim(), "literal-value");
+    // The "work" alias's vault must be untouched (nothing was ever set there).
+    let missing = env.err(&["get", "work:x"]);
+    assert!(!missing.status.success());
+}
+
+// ===========================================================================
+// Code review follow-up: xv:// URI alias-vs-raw-vault-name precedence, both
+// directions in one test.
+// ===========================================================================
+
+#[test]
+fn uri_alias_precedence_over_raw_vault_of_same_name() {
+    let env = WorkspaceEnv::new();
+    // Raw vault "default" on the ACTIVE (top-level "local") backend, BEFORE
+    // any workspace exists.
+    env.ok(&["set", "RAW_SECRET", "--value", "raw-active-value"]);
+    // Alias "default" attached on a DIFFERENT backend (local-a), same NAME
+    // as the raw vault above.
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "default",
+    ]);
+    env.ok(&["set", "default:RAW_SECRET", "--value", "aliased-value"]);
+
+    let template_path = env.home.join("tpl_precedence.txt");
+    std::fs::write(
+        &template_path,
+        "unqualified: xv://default/RAW_SECRET\nqualified: xv://local:default/RAW_SECRET\n",
+    )
+    .expect("write template");
+    let out_path = env.home.join("out_precedence.txt");
+    env.ok(&[
+        "inject",
+        "--template",
+        template_path.to_str().unwrap(),
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    let rendered = std::fs::read_to_string(&out_path).expect("read output");
+    // Unqualified xv://default/... resolves via the ALIAS — wins over the
+    // raw vault of the same name.
+    assert!(
+        rendered.contains("unqualified: aliased-value"),
+        "{rendered}"
+    );
+    // Explicit backend-qualified xv://local:default/... bypasses the alias
+    // and reaches the raw vault.
+    assert!(
+        rendered.contains("qualified: raw-active-value"),
+        "{rendered}"
+    );
+}
