@@ -983,10 +983,10 @@ pub(crate) async fn execute_context_command(
             execute_cx_add(&vault, backend, r#as, default, local, force, &config).await?;
         }
         ContextCommands::Rm { alias, local } => {
-            execute_cx_rm(&alias, local).await?;
+            execute_cx_rm(&alias, local, &config).await?;
         }
         ContextCommands::Default { alias, local } => {
-            execute_cx_default(&alias, local).await?;
+            execute_cx_default(&alias, local, &config).await?;
         }
         ContextCommands::Ls => {
             execute_cx_ls(&config).await?;
@@ -1397,6 +1397,36 @@ async fn load_cx_context(local: bool) -> Result<crate::config::ContextManager> {
     }
 }
 
+/// Fail-loud guard (Bugbot MEDIUM fix): `cx add`/`rm`/`default` mutate the
+/// CONTEXT STORE, but `resolve_workspace`'s overlay rule means a `.xv.toml`
+/// `[env.<name>].vaults` block active for cwd REPLACES the context
+/// workspace entirely (spec §Workspace management — no merging, one
+/// source of truth per location). Without this guard, a context mutation
+/// would persist and report success while every secret command kept using
+/// the project overlay instead — the same "silently ineffective" class as
+/// the write/read verb bugs fixed earlier in this PR. There is no override
+/// flag in v1: editing `.xv.toml` directly is the explicit, deliberate
+/// path (same reasoning as `context use`'s guard just above).
+async fn guard_against_project_vaults_overlay(config: &Config) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    if let Ok(Some((path, proj_cfg))) = crate::config::project::find_project_config(&cwd).await {
+        if let Ok(Some((env_name, profile))) =
+            crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
+        {
+            if !profile.vaults.is_empty() {
+                return Err(CrosstacheError::config(format!(
+                    "this directory's workspace is defined by .xv.toml ([env.{env_name}].vaults \
+                     in {}) — edit the project file, or run the command outside the project. \
+                     There is no override flag: the project file is the explicit source of truth \
+                     for this directory's workspace.",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn execute_cx_add(
     vault: &str,
     backend: Option<String>,
@@ -1407,6 +1437,8 @@ async fn execute_cx_add(
     config: &Config,
 ) -> Result<()> {
     use crate::workspace::{build_workspace, WorkspaceEntryConfig, WorkspaceSource};
+
+    guard_against_project_vaults_overlay(config).await?;
 
     let mut context_manager = load_cx_context(local).await?;
     let mut entries = context_manager
@@ -1502,7 +1534,9 @@ async fn execute_cx_add(
     Ok(())
 }
 
-async fn execute_cx_rm(alias: &str, local: bool) -> Result<()> {
+async fn execute_cx_rm(alias: &str, local: bool, config: &Config) -> Result<()> {
+    guard_against_project_vaults_overlay(config).await?;
+
     let mut context_manager = load_cx_context(local).await?;
     let mut ws_state = context_manager.workspace.clone().unwrap_or_default();
 
@@ -1552,7 +1586,9 @@ async fn execute_cx_rm(alias: &str, local: bool) -> Result<()> {
     Ok(())
 }
 
-async fn execute_cx_default(alias: &str, local: bool) -> Result<()> {
+async fn execute_cx_default(alias: &str, local: bool, config: &Config) -> Result<()> {
+    guard_against_project_vaults_overlay(config).await?;
+
     let mut context_manager = load_cx_context(local).await?;
     let mut ws_state = context_manager.workspace.clone().unwrap_or_default();
 

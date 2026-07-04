@@ -1002,6 +1002,8 @@ xv cx ls
   ]
   ```
 
+  Because that overlay replaces the context workspace entirely, `xv cx add`/`rm`/`default` **error** (exit `3`, naming the `.xv.toml` path and env) when run in a directory governed by one — a context-store mutation there would silently have no effect on what secret commands actually use. There is no override flag in v1: edit `.xv.toml` directly, or run the command outside the project directory. `xv cx ls` stays read-only and always shows the *effective* workspace (with its source column) regardless.
+
 Manage the workspace with `xv cx add/rm/default/ls` (`cx` is a visible alias of `context`); `xv context use` errors pointing at `xv cx default` while a workspace is attached, since the two write-target models don't mix. Note: `xv context ls`/`xv cx ls` now lists the attached workspace, not recent vault contexts — use the unabbreviated `xv context list` for those.
 
 ---

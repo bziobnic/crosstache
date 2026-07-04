@@ -118,6 +118,34 @@ default_vault = "default"
         self.xv().args(args).output().expect("execute xv binary")
     }
 
+    /// Like `xv()`, but overrides the working directory — for tests that
+    /// need a project subdirectory (with its own `.xv.toml`) while keeping
+    /// the SAME global context store (`XDG_CONFIG_HOME` is unchanged).
+    fn xv_in(&self, cwd: &std::path::Path) -> Command {
+        let mut cmd = self.xv();
+        cmd.current_dir(cwd);
+        cmd
+    }
+
+    fn run_in(&self, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
+        self.xv_in(cwd)
+            .args(args)
+            .output()
+            .expect("execute xv binary")
+    }
+
+    /// Path to the global context store file this environment's `cx`
+    /// commands read/write (`ContextManager::global_context_path()`).
+    fn context_file_path(&self) -> PathBuf {
+        self.config_dir.join("xv").join("context")
+    }
+
+    /// Raw bytes of the context store file, for byte-identity assertions
+    /// (empty `Vec` if the file doesn't exist yet).
+    fn context_file_bytes(&self) -> Vec<u8> {
+        std::fs::read(self.context_file_path()).unwrap_or_default()
+    }
+
     fn ok(&self, args: &[&str]) -> String {
         let out = self.run(args);
         assert!(
@@ -334,6 +362,156 @@ fn context_use_with_workspace_errors_pointing_at_cx_default() {
     let out = env.err(&["context", "use", "some-vault"]);
     let msg = combined(&out);
     assert!(msg.contains("cx default"), "{msg}");
+}
+
+/// Bugbot MEDIUM fix: `cx add`/`rm`/`default` must ERROR (not silently
+/// no-op) when the cwd's active `.xv.toml` env profile declares a `vaults`
+/// overlay — that overlay REPLACES the context workspace entirely per
+/// `resolve_workspace`'s precedence, so a context-store mutation here
+/// would persist and report success while every secret command kept using
+/// the project overlay instead.
+fn write_vaults_overlay(project_dir: &std::path::Path) {
+    std::fs::create_dir_all(project_dir).expect("create project dir");
+    std::fs::write(
+        project_dir.join(".xv.toml"),
+        r#"
+default_env = "dev"
+
+[env.dev]
+vault = "ignored"
+vaults = [
+  { vault = "proj-vault", backend = "local-b", alias = "proj", default = true },
+]
+"#,
+    )
+    .expect("write .xv.toml");
+}
+
+#[test]
+fn cx_add_errors_under_project_vaults_overlay() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    let context_before = env.context_file_bytes();
+
+    let project_dir = env.home.join("project");
+    write_vaults_overlay(&project_dir);
+
+    let out = env.run_in(
+        &project_dir,
+        &[
+            "cx",
+            "add",
+            "default",
+            "--backend",
+            "local-b",
+            "--as",
+            "extra",
+        ],
+    );
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert_eq!(out.status.code(), Some(3), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(msg.contains(".xv.toml"), "{msg}");
+    assert!(msg.contains("dev"), "{msg}");
+
+    // The context store must be entirely UNCHANGED — the attempted
+    // mutation must never reach disk.
+    assert_eq!(env.context_file_bytes(), context_before);
+}
+
+#[test]
+fn cx_rm_errors_under_project_vaults_overlay() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    let context_before = env.context_file_bytes();
+
+    let project_dir = env.home.join("project");
+    write_vaults_overlay(&project_dir);
+
+    let out = env.run_in(&project_dir, &["cx", "rm", "work"]);
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert_eq!(out.status.code(), Some(3), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(msg.contains(".xv.toml"), "{msg}");
+
+    assert_eq!(env.context_file_bytes(), context_before);
+}
+
+#[test]
+fn cx_default_errors_under_project_vaults_overlay() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    let context_before = env.context_file_bytes();
+
+    let project_dir = env.home.join("project");
+    write_vaults_overlay(&project_dir);
+
+    let out = env.run_in(&project_dir, &["cx", "default", "stage"]);
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert_eq!(out.status.code(), Some(3), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(msg.contains(".xv.toml"), "{msg}");
+
+    assert_eq!(env.context_file_bytes(), context_before);
+}
+
+/// Guard test: the same context store, from a cwd WITHOUT the overlay in
+/// effect, must be entirely unaffected by the new guard — `cx add` (and by
+/// extension rm/default) keeps working exactly as before outside the
+/// project directory.
+#[test]
+fn cx_add_outside_project_still_works() {
+    let env = WorkspaceEnv::new();
+    // A project dir with a real vaults overlay exists on disk, but cwd
+    // (env.home, the default for `env.ok`) is NOT it and has no ancestor
+    // .xv.toml (XV_NO_PARENT_CONFIG=1 blocks walk-up regardless).
+    let project_dir = env.home.join("project");
+    write_vaults_overlay(&project_dir);
+
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    let ls = env.ok(&["cx", "ls"]);
+    assert!(ls.contains("work"), "{ls}");
 }
 
 #[test]
