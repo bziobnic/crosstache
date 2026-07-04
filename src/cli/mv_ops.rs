@@ -223,6 +223,51 @@ pub(crate) async fn execute_mv(
     };
 
     let reg = registry.expect("use_trait_path guarantees Some");
+
+    // Cross-vault alias routing (Phase C Task 12, spec §Write semantics):
+    // `mv work:secret stage:/` (and `stage:folder/`) — when BOTH the source
+    // AND destination carry an alias prefix that resolves to an ATTACHED
+    // workspace entry, route to the cross-vault copy+delete machinery with
+    // the resolved (backend, vault) pairs instead of the same-vault
+    // rename/re-folder path below. Deliberately conservative: a single
+    // alias-qualified side, or no workspace at all, falls straight through
+    // to the unchanged same-vault logic — this task only adds the
+    // explicitly-qualified alias-to-alias form, leaving unqualified `mv`'s
+    // vault resolution exactly as it was before workspaces existed.
+    if let Some(src) = &source {
+        if filter.is_none() {
+            if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+                let src_addr = crate::workspace::parse_address(src);
+                let dst_addr = crate::workspace::parse_address(&dest);
+                if let (Some(src_alias), Some(dst_alias)) = (&src_addr.alias, &dst_addr.alias) {
+                    if let (Some(src_entry), Some(dst_entry)) =
+                        (ws.entry(src_alias), ws.entry(dst_alias))
+                    {
+                        if src_entry.backend != dst_entry.backend
+                            || src_entry.vault != dst_entry.vault
+                        {
+                            let backend_names: Vec<String> =
+                                ws.entries.iter().map(|e| e.backend.clone()).collect();
+                            let ws_registry =
+                                BackendRegistry::with_lazy(&config, &backend_names)
+                                    .map_err(|e| CrosstacheError::config(e.to_string()))?;
+                            return execute_cross_vault_alias_mv(
+                                &ws_registry,
+                                &config,
+                                src_entry,
+                                dst_entry,
+                                &src_addr.path,
+                                &dst_addr.path,
+                                dry_run,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let vault_name = resolve_vault_for_trait(&config, registry).await?;
     let secrets = reg
         .active()
@@ -291,6 +336,135 @@ pub(crate) async fn execute_mv(
         }
         MvPlan::Filter { .. } => unreachable!("parse_mv never returns MvPlan::Filter"),
     }
+}
+
+/// Cross-vault `mv` via workspace aliases (Phase C Task 12): moves a single
+/// secret between two ATTACHED workspace entries — potentially on different
+/// backends — using copy(+tag-budget check)+delete, exactly mirroring the
+/// existing `xv copy`/`xv move --from/--to` cross-vault machinery
+/// (`rename_request_from_properties`, the #315 metadata-preservation path,
+/// and `check_dest_tag_budget`'s destination-caps pre-check) rather than the
+/// same-vault rename/re-folder logic above. Only a single secret is
+/// supported today — folder/`--filter` moves across vaults are out of scope
+/// for this task.
+#[allow(clippy::too_many_arguments)]
+async fn execute_cross_vault_alias_mv(
+    ws_registry: &BackendRegistry,
+    config: &Config,
+    src_entry: &crate::workspace::WorkspaceEntry,
+    dst_entry: &crate::workspace::WorkspaceEntry,
+    src_path: &str,
+    dst_path: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let plan = parse_mv(src_path, dst_path)?;
+    let (src_folder, src_name, dest_folder, dest_name) = match plan {
+        MvPlan::Secret {
+            src_folder,
+            src_name,
+            dest_folder,
+            dest_name,
+        } => (src_folder, src_name, dest_folder, dest_name),
+        MvPlan::Folder { .. } | MvPlan::Filter { .. } => {
+            return Err(CrosstacheError::invalid_argument(
+                "cross-vault mv via workspace aliases only supports a single secret today; \
+                 folder and --filter moves across vaults are not yet supported",
+            ));
+        }
+    };
+
+    let src_backend = ws_registry.materialize(&src_entry.backend).map_err(|e| {
+        CrosstacheError::config(format!(
+            "workspace vault '{}' (backend '{}') is unavailable: {e}",
+            src_entry.alias, src_entry.backend
+        ))
+    })?;
+    let dst_backend = ws_registry.materialize(&dst_entry.backend).map_err(|e| {
+        CrosstacheError::config(format!(
+            "workspace vault '{}' (backend '{}') is unavailable: {e}",
+            dst_entry.alias, dst_entry.backend
+        ))
+    })?;
+
+    // Find the source secret by its qualified (folder, display-name) path —
+    // same lookup `execute_secret_mv` uses for the same-vault case.
+    let src_secrets = src_backend
+        .secrets()
+        .list_secrets(&src_entry.vault, None)
+        .await?;
+    let src_folder_norm = norm_folder(src_folder.as_deref());
+    let found = src_secrets.iter().find(|s| {
+        display_name(s) == src_name && norm_folder(s.folder.as_deref()) == src_folder_norm
+    });
+    let Some(found) = found else {
+        let qualified_src = match &src_folder {
+            Some(f) => format!("{f}/{src_name}"),
+            None => src_name.clone(),
+        };
+        return Err(CrosstacheError::secret_not_found(format!(
+            "{qualified_src} (in workspace vault '{}')",
+            src_entry.alias
+        )));
+    };
+
+    // Destination collision pre-check — before any mutation, mirroring
+    // `execute_secret_mv`'s same-vault ordering.
+    let dst_secrets = dst_backend
+        .secrets()
+        .list_secrets(&dst_entry.vault, None)
+        .await?;
+    if dest_collides(&dst_secrets, &dest_name) {
+        return Err(CrosstacheError::conflict(format!(
+            "secret '{dest_name}' already exists in workspace vault '{}' — delete it first or pick another name",
+            dst_entry.alias
+        )));
+    }
+
+    let qualified_src = match &src_folder {
+        Some(f) => format!("{}:{f}/{src_name}", src_entry.alias),
+        None => format!("{}:{src_name}", src_entry.alias),
+    };
+    let qualified_dst = match &dest_folder {
+        Some(f) if !f.is_empty() => format!("{}:{f}/{dest_name}", dst_entry.alias),
+        _ => format!("{}:{dest_name}", dst_entry.alias),
+    };
+
+    if dry_run {
+        println!("{qualified_src} -> {qualified_dst}");
+        output::info("1 secret would move across vaults (dry run)");
+        return Ok(());
+    }
+
+    let source_secret = src_backend
+        .secrets()
+        .get_secret(&src_entry.vault, &found.name, true)
+        .await?;
+
+    // #315 metadata preservation: reuse the same envelope-preserving request
+    // builder the single-vault `xv copy`/`xv move --from/--to` path uses —
+    // groups/note/tags/record envelopes ride along as-is; the folder is
+    // overridden to the mv grammar's resolved destination folder.
+    let mut secret_request =
+        crate::backend::secret::rename_request_from_properties(&dest_name, &source_secret)?;
+    secret_request.folder = dest_folder.clone();
+
+    // Destination tag-budget check BEFORE any write.
+    crate::cli::secret_ops::check_dest_tag_budget(dst_backend.as_ref(), &secret_request)?;
+
+    dst_backend
+        .secrets()
+        .set_secret(&dst_entry.vault, secret_request)
+        .await?;
+    invalidate_trait_secret_cache(config, &dst_entry.backend, &dst_entry.vault);
+
+    src_backend
+        .secrets()
+        .delete_secret(&src_entry.vault, &found.name)
+        .await?;
+    invalidate_trait_secret_cache(config, &src_entry.backend, &src_entry.vault);
+
+    output::success(&format!("Moved '{qualified_src}' to '{qualified_dst}'"));
+    Ok(())
 }
 
 /// Move/rename a single secret. Ordering is binding (spec 2026-07-02-fs-verbs):
@@ -1169,5 +1343,139 @@ mod tests {
             called,
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase C Task 12: cross-vault mv/copy destination tag-budget check
+    // -----------------------------------------------------------------
+
+    /// A fake backend exposing Azure's real tag cap (`max_tags: Some(15)`)
+    /// without needing real Azure credentials/network — mirrors
+    /// `PartialFailBackend` above but only `capabilities()` matters here.
+    struct AzureCapsBackend;
+
+    #[async_trait::async_trait]
+    impl SecretBackend for AzureCapsBackend {
+        async fn set_secret(
+            &self,
+            _vault: &str,
+            _request: crate::secret::manager::SecretRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            panic!("set_secret must never be called: the tag-budget check must reject BEFORE any write");
+        }
+        async fn get_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+        async fn get_secret_version(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+        async fn list_secrets(
+            &self,
+            _vault: &str,
+            _group_filter: Option<&str>,
+        ) -> std::result::Result<Vec<SecretSummary>, BackendError> {
+            Ok(Vec::new())
+        }
+        async fn delete_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<(), BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _request: SecretUpdateRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            Err(BackendError::Unsupported("test backend".into()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for AzureCapsBackend {
+        fn name(&self) -> &'static str {
+            "azure"
+        }
+        fn kind(&self) -> BackendKind {
+            BackendKind::Azure
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                has_vaults: true,
+                has_file_storage: true,
+                has_rbac: true,
+                has_audit: true,
+                has_versioning: true,
+                has_soft_delete: true,
+                has_secret_rotation: false,
+                has_groups: true,
+                has_folders: true,
+                has_notes: true,
+                has_expiry: true,
+                max_secret_size: None,
+                max_name_length: None,
+                name_charset: NameCharset::Unrestricted,
+                max_tags: Some(15),
+                max_tag_value_len: None,
+            }
+        }
+        fn secrets(&self) -> &dyn SecretBackend {
+            self
+        }
+        async fn health_check(&self) -> std::result::Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    fn secret_request_with_tags(n: usize) -> crate::secret::manager::SecretRequest {
+        let tags: std::collections::HashMap<String, String> = (0..n)
+            .map(|i| (format!("tag{i}"), format!("v{i}")))
+            .collect();
+        crate::secret::manager::SecretRequest {
+            name: "CREDS".to_string(),
+            value: zeroize::Zeroizing::new("hunter2".to_string()),
+            content_type: None,
+            enabled: None,
+            expires_on: None,
+            not_before: None,
+            tags: Some(tags),
+            groups: None,
+            note: None,
+            folder: None,
+        }
+    }
+
+    #[test]
+    fn mv_alias_dest_tag_budget_checked_at_destination() {
+        let dest = AzureCapsBackend;
+        // 14 user tags + crosstache's 2 always-written metadata tags
+        // (original_name/created_by) = 16 > Azure's 15-tag cap.
+        let request = secret_request_with_tags(14);
+        let err = crate::cli::secret_ops::check_dest_tag_budget(&dest, &request)
+            .expect_err("must reject before any write when over the destination's tag budget");
+        let msg = err.to_string();
+        assert!(msg.contains("15"), "{msg}");
+    }
+
+    #[test]
+    fn mv_alias_dest_tag_budget_allows_request_within_cap() {
+        let dest = AzureCapsBackend;
+        // 5 user tags + 2 reserved = 7, well within Azure's 15-tag cap.
+        let request = secret_request_with_tags(5);
+        crate::cli::secret_ops::check_dest_tag_budget(&dest, &request)
+            .expect("must allow a request within the destination's tag budget");
     }
 }

@@ -2676,3 +2676,122 @@ fn inject_alias_with_field_fragment() {
     let rendered = std::fs::read_to_string(&out_path).expect("read output");
     assert!(rendered.contains("alice"), "{rendered}");
 }
+
+// ===========================================================================
+// Phase C, Task 12: cross-vault mv/copy via workspace aliases
+// ===========================================================================
+
+#[test]
+fn mv_alias_to_alias_moves_across_stores() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:MOVE_ME", "--value", "moved-value"]);
+
+    env.ok(&["mv", "work:MOVE_ME", "stage:/"]);
+
+    let dest_value = env.ok(&["get", "stage:MOVE_ME", "--raw"]);
+    assert_eq!(dest_value.trim(), "moved-value");
+
+    // Source must be gone: it was a MOVE, not a copy.
+    let err = env.err(&["get", "work:MOVE_ME"]);
+    assert_eq!(
+        err.status.code(),
+        Some(10),
+        "expected xv-secret-not-found exit code"
+    );
+}
+
+#[test]
+fn mv_alias_preserves_record_envelope_and_metadata() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&[
+        "set",
+        "work:CREDS",
+        "--type",
+        "login",
+        "--field",
+        "username=alice",
+        "--value",
+        "hunter2",
+        "--group",
+        "team-a",
+        "--note",
+        "important",
+    ]);
+
+    env.ok(&["mv", "work:CREDS", "stage:/"]);
+
+    // The typed record's metadata field survives the cross-vault move.
+    let field = env.ok(&["get", "stage:CREDS", "--field", "username", "--raw"]);
+    assert!(field.contains("alice"), "{field}");
+    // The primary secret field survives too.
+    let record = env.ok(&["get", "stage:CREDS", "--record", "--format", "json"]);
+    assert!(record.contains("hunter2"), "{record}");
+}
+
+#[test]
+fn copy_accepts_aliases_in_from_to() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:SHARED", "--value", "copy-me"]);
+
+    env.ok(&["copy", "SHARED", "--from", "work", "--to", "stage"]);
+
+    let dest_value = env.ok(&["get", "stage:SHARED", "--raw"]);
+    assert_eq!(dest_value.trim(), "copy-me");
+    // Source must still exist — this is a copy, not a move.
+    let src_value = env.ok(&["get", "work:SHARED", "--raw"]);
+    assert_eq!(src_value.trim(), "copy-me");
+}
