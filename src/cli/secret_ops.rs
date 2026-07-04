@@ -2464,6 +2464,7 @@ async fn execute_record_field_update(
         &secret,
         &metadata_updates,
         &secret_updates,
+        None,
         vault_name,
         config,
         reg,
@@ -2528,11 +2529,21 @@ async fn execute_record_field_update(
 ///   against the current tags itself (`build_patched_tags`) and already
 ///   correctly leaves groups/note/folder alone when their request fields
 ///   are None/Unchanged — untouched, still correct.
+///
+/// `enabled_override` is threaded straight into the request's `enabled`
+/// field: `None` leaves the current enabled state alone (the right default
+/// for `--field`/`--field-secret` edits and for bare-value `update`, which
+/// don't force re-enabling on untyped secrets either); `xv rotate` passes
+/// `Some(true)` so a record's rotate re-enables it exactly like the classic
+/// (untyped) rotate path already does — see the call site in
+/// `execute_secret_rotate` for the asymmetry this closes (Bugbot review).
+#[allow(clippy::too_many_arguments)]
 async fn apply_record_field_changes(
     name: &str,
     secret: &crate::secret::manager::SecretProperties,
     metadata_updates: &BTreeMap<String, String>,
     secret_updates: &BTreeMap<String, String>,
+    enabled_override: Option<bool>,
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
@@ -2633,7 +2644,7 @@ async fn apply_record_field_changes(
         name: name.to_string(),
         value: new_value,
         content_type,
-        enabled: None,
+        enabled: enabled_override,
         expires_on: crate::secret::manager::FieldUpdate::Unchanged,
         not_before: crate::secret::manager::FieldUpdate::Unchanged,
         tags: new_tags,
@@ -2684,6 +2695,7 @@ async fn execute_record_primary_update(
     name: &str,
     new_primary_value: &str,
     secret: &crate::secret::manager::SecretProperties,
+    enabled_override: Option<bool>,
     vault_name: &str,
     config: &Config,
     reg: &BackendRegistry,
@@ -2705,6 +2717,7 @@ async fn execute_record_primary_update(
         secret,
         &BTreeMap::new(),
         &secret_updates,
+        enabled_override,
         vault_name,
         config,
         reg,
@@ -2933,6 +2946,78 @@ async fn execute_record_untype(
     Ok(())
 }
 
+/// Every classic (non-record) `xv update` metadata flag that was actually
+/// supplied, in CLI-flag form, for the "combining a bare value with a
+/// classic flag on a record" rejection below (Bugbot review MAJOR: this
+/// combination used to silently drop every one of these instead of
+/// applying or rejecting them). Mirrors the flag set clap's
+/// `conflicts_with_all` already rejects on `--field`/`--field-secret`/
+/// `--type`/`--untype` — a bare-value record write is the same kind of
+/// standalone operation, just not clap-expressible (clap can't make a
+/// positional/`--stdin` value conflict with itself).
+#[allow(clippy::too_many_arguments)]
+fn classic_flags_present(
+    tags: &[(String, String)],
+    groups: &[String],
+    rename: &Option<String>,
+    note: &Option<String>,
+    folder: &Option<String>,
+    replace_tags: bool,
+    replace_groups: bool,
+    expires: &Option<String>,
+    not_before: &Option<String>,
+    clear_expires: bool,
+    clear_not_before: bool,
+    clear_note: bool,
+    clear_folder: bool,
+    enabled: Option<bool>,
+) -> Vec<&'static str> {
+    let mut present = Vec::new();
+    if !tags.is_empty() {
+        present.push("--tags");
+    }
+    if !groups.is_empty() {
+        present.push("--group");
+    }
+    if rename.is_some() {
+        present.push("--rename");
+    }
+    if note.is_some() {
+        present.push("--note");
+    }
+    if folder.is_some() {
+        present.push("--folder");
+    }
+    if replace_tags {
+        present.push("--replace-tags");
+    }
+    if replace_groups {
+        present.push("--replace-groups");
+    }
+    if expires.is_some() {
+        present.push("--expires");
+    }
+    if not_before.is_some() {
+        present.push("--not-before");
+    }
+    if clear_expires {
+        present.push("--clear-expires");
+    }
+    if clear_not_before {
+        present.push("--clear-not-before");
+    }
+    if clear_note {
+        present.push("--clear-note");
+    }
+    if clear_folder {
+        present.push("--clear-folder");
+    }
+    if enabled.is_some() {
+        present.push("--enabled");
+    }
+    present
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_update_direct(
     name: &str,
@@ -2998,12 +3083,56 @@ pub(crate) async fn execute_secret_update_direct(
             // is a bare string (#330). Untyped secrets fall through
             // untouched to the classic path below.
             if value.is_some() || stdin {
-                let existing = reg
+                // Metadata-only probe (Bugbot review MINOR): checking
+                // `is_record` never needs the plaintext value, so the
+                // (common, untyped) case that falls through to the classic
+                // path below never pays for a decrypt/fetch of a value it
+                // then discards. Only a confirmed record pays for the
+                // second, value-including fetch below.
+                let probe = reg
                     .active()
                     .secrets()
-                    .get_secret(&vault_name, name, true)
+                    .get_secret(&vault_name, name, false)
                     .await?;
-                if crate::records::is_record(&existing.content_type) {
+                if crate::records::is_record(&probe.content_type) {
+                    // Bugbot review MAJOR: this branch used to apply the
+                    // primary-field write and `return Ok(())` unconditionally,
+                    // silently discarding every classic metadata flag
+                    // (--note/--group/--tags/--rename/--expires/--not-before/
+                    // --enabled/--folder/--clear-*) supplied alongside the
+                    // bare value — reproduced against --note/--group/--rename.
+                    // A record's primary-field write is a standalone
+                    // operation in v1 (matching --field/--field-secret's own
+                    // `conflicts_with_all`, which clap can't extend to a
+                    // positional/--stdin value), so reject loud instead,
+                    // naming every flag actually present.
+                    let extra_flags = classic_flags_present(
+                        &tags,
+                        &groups,
+                        &rename,
+                        &note,
+                        &folder,
+                        replace_tags,
+                        replace_groups,
+                        &expires,
+                        &not_before,
+                        clear_expires,
+                        clear_not_before,
+                        clear_note,
+                        clear_folder,
+                        enabled,
+                    );
+                    if !extra_flags.is_empty() {
+                        return Err(CrosstacheError::invalid_argument(format!(
+                            "secret '{name}' is a typed record; a bare-value update/--stdin can't be \
+                             combined with {} in v1 — a record's primary-field write is a standalone \
+                             operation (same rule as --field/--field-secret). Run 'xv update {name} \
+                             <value>' (or --stdin) and a separate 'xv update {name} ...' for the \
+                             metadata instead.",
+                            extra_flags.join(", ")
+                        )));
+                    }
+
                     let resolved_value = if stdin {
                         let stdin_value = read_secret_value_from_stdin(trim)?;
                         if stdin_value.is_empty() {
@@ -3013,10 +3142,16 @@ pub(crate) async fn execute_secret_update_direct(
                     } else {
                         value.clone().unwrap_or_default()
                     };
+                    let existing = reg
+                        .active()
+                        .secrets()
+                        .get_secret(&vault_name, name, true)
+                        .await?;
                     let props = execute_record_primary_update(
                         name,
                         &resolved_value,
                         &existing,
+                        None,
                         &vault_name,
                         &config,
                         reg,
@@ -4203,11 +4338,19 @@ async fn execute_secret_rotate(
     // a record it would leave `content_type` claiming a record while the
     // value becomes the bare generated string, corrupting it identically
     // to the bare-value `update` bug.
+    //
+    // `enabled: Some(true)` mirrors the untyped branch below, which always
+    // forces the rotated secret back to enabled — without this a record
+    // rotate would leave a previously-disabled record disabled (Bugbot
+    // review NIT): the untyped path's `SecretRequest.enabled: Some(true)`
+    // and this `SecretUpdateRequest.enabled` override are the same
+    // deliberate choice, made consistent across both code shapes.
     let new_version = if crate::records::is_record(&existing_secret.content_type) {
         let props = execute_record_primary_update(
             name,
             new_value.as_str(),
             &existing_secret,
+            Some(true),
             &vault_name,
             config,
             reg,
