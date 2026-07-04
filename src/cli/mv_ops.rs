@@ -539,10 +539,19 @@ async fn execute_folder_mv(
 
 /// True if `moving` (secrets about to be re-foldered into `dest_prefix`)
 /// would collide with a secret that already resides in `dest_prefix` and is
-/// NOT itself one of the moving secrets — by display name, mirroring
-/// `dest_collides` (#302). A filter move only rewrites the `folder` tag
-/// (names never change), so the only place a collision can arise is inside
-/// the destination folder itself.
+/// NOT itself one of the moving secrets. A filter move only rewrites the
+/// `folder` tag (names never change), so the only place a collision can
+/// arise is inside the destination folder itself — but a moving secret's
+/// *display* name can still equal an unrelated occupant's *backend*
+/// (sanitized) name, or vice versa, so the comparison mirrors
+/// `dest_collides` (#302) exactly: for each moving secret, its display name
+/// is checked against both the occupant's display name AND its backend
+/// name (`display_name(occupant) == moving_display || occupant.name ==
+/// moving_display`), not display-vs-display alone. Missing the
+/// backend-name leg would let a mismatched-name pair (e.g. moving secret
+/// displays as "x", occupant's raw backend name is "x") slip past this
+/// pre-check and have downstream name resolution against the destination
+/// folder resolve the wrong secret.
 ///
 /// Note: `execute_folder_mv` (whole-folder moves) has no equivalent guard
 /// today — this asymmetry is accepted for now as a candidate for future
@@ -566,13 +575,11 @@ fn dest_folder_collision<'a>(
             continue;
         }
         let occupant_display = display_name(occupant);
-        // Backend names are globally unique per vault, and any occupant
-        // sharing a moving secret's backend name would already have been
-        // filtered out above as "itself moving" — so only a display-name
-        // match can indicate a genuine collision between two distinct
-        // secrets here.
         for m in moving {
-            if display_name(m) == occupant_display {
+            let moving_display = display_name(m);
+            // Same predicate as `dest_collides`: match on either the
+            // occupant's display name or its backend (sanitized) name.
+            if occupant_display == moving_display || occupant.name == moving_display {
                 return Some(occupant_display);
             }
         }
@@ -899,6 +906,34 @@ mod tests {
 
         let collision = dest_folder_collision(&secrets, &moving, Some("archive"));
         assert_eq!(collision, Some("test-x"));
+    }
+
+    #[test]
+    fn dest_folder_collision_matches_moving_display_against_occupant_backend_name() {
+        // Already in 'archive/': backend name "test-x" (the raw, sanitized
+        // name), displays as an unrelated "pretty-occupant".
+        let occupant = summary_full("test-x", "pretty-occupant", Some("archive"));
+        // Moving in from elsewhere: displays as "test-x" — matches the
+        // occupant's *backend* name, not its display name. This is the
+        // Bugbot-flagged gap: a display-vs-display-only check would miss
+        // this and let the bulk pre-check pass.
+        let moving_secret = summary_full("raw-m", "test-x", Some("other"));
+        let secrets = vec![occupant, moving_secret.clone()];
+        let moving = vec![&secrets[1]];
+
+        let collision = dest_folder_collision(&secrets, &moving, Some("archive"));
+        assert_eq!(collision, Some("pretty-occupant"));
+    }
+
+    #[test]
+    fn dest_folder_collision_no_overlap_passes() {
+        // Same destination folder, but no name overlap on either side.
+        let occupant = summary_full("raw-o", "test-x", Some("archive"));
+        let moving_secret = summary_full("raw-m", "test-y", Some("other"));
+        let secrets = vec![occupant, moving_secret.clone()];
+        let moving = vec![&secrets[1]];
+
+        assert!(dest_folder_collision(&secrets, &moving, Some("archive")).is_none());
     }
 
     #[test]
