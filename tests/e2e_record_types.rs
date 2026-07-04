@@ -1758,3 +1758,514 @@ fn get_field_on_untyped_errors() {
         common::stderr_str(&out3)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 12: `inject` field syntax + `xv run` primary-field guard
+// ---------------------------------------------------------------------------
+
+/// Creates a `login` record named `cred` (username `bob`, primary/password
+/// `hunter2`) in the isolated store rooted at `temp`.
+fn set_cred_login_record(temp: &std::path::Path) {
+    let out = xv_same_env(temp)
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+}
+
+#[test]
+fn inject_field_syntax_renders() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    set_cred_login_record(temp.path());
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(&template_path, "user: {{ secret:cred.username }}\n").unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    let out = xv_same_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let rendered = std::fs::read_to_string(&out_path).unwrap();
+    assert!(rendered.contains("bob"), "rendered: {rendered}");
+    assert!(!rendered.contains("{{ secret:"), "rendered: {rendered}");
+}
+
+#[test]
+fn inject_bare_name_renders_primary() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    set_cred_login_record(temp.path());
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(&template_path, "pw: {{ secret:cred }}\n").unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    let out = xv_same_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let rendered = std::fs::read_to_string(&out_path).unwrap();
+    assert!(rendered.contains("hunter2"), "rendered: {rendered}");
+    // Never the raw JSON envelope.
+    assert!(!rendered.contains("\"password\""), "rendered: {rendered}");
+}
+
+/// An untyped secret literally named `a.b` must resolve as itself via the
+/// exact-name-first match rule, never as field `b` of a record named `a`
+/// (record-types spec/plan Task 12 disambiguation requirement).
+#[test]
+fn inject_dot_name_exact_match_wins() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "a.b", "--value", "plain-dotted-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(&template_path, "v: {{ secret:a.b }}\n").unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    let out2 = xv_same_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let rendered = std::fs::read_to_string(&out_path).unwrap();
+    assert!(
+        rendered.contains("plain-dotted-value"),
+        "rendered: {rendered}"
+    );
+}
+
+#[test]
+fn inject_unknown_field_aborts() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    set_cred_login_record(temp.path());
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(&template_path, "v: {{ secret:cred.nosuchfield }}\n").unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    let out = xv_same_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out)
+    );
+    // Distinguish from a plain "secret not found" (the pre-Task-12 failure
+    // mode for any dotted name): the message must come from field
+    // resolution, naming the record's actual known fields.
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("username"), "stderr: {stderr}");
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when a field reference fails to resolve"
+    );
+}
+
+#[test]
+fn inject_field_on_untyped_secret_aborts() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args(["set", "plain", "--value", "just-a-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(&template_path, "v: {{ secret:plain.somefield }}\n").unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    let out2 = xv_same_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    assert!(!out_path.exists());
+}
+
+#[test]
+fn inject_uri_fragment_field() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    set_cred_login_record(temp.path());
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(&template_path, "v: xv://default/cred#username\n").unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    let out = xv_same_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let rendered = std::fs::read_to_string(&out_path).unwrap();
+    assert!(rendered.contains("bob"), "rendered: {rendered}");
+    assert!(!rendered.contains("xv://"), "rendered: {rendered}");
+}
+
+/// Bugbot review (round on #321 Phase C): a bare `xv://vault/name` is a
+/// strict prefix of its own `xv://vault/name#field` form. Substituting via
+/// `HashMap` iteration order (nondeterministic) could rewrite part of the
+/// longer `#field` reference before it was ever matched whole, mangling the
+/// output. Referencing a record's primary *and* one of its fields in the
+/// same template is exactly the workflow this feature invites, so both
+/// forms must always resolve correctly regardless of iteration order — run
+/// several times to guard against order-dependent flakiness.
+#[test]
+fn inject_bare_and_fragment_uri_for_same_secret_both_resolve() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    set_cred_login_record(temp.path());
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(
+        &template_path,
+        "primary: xv://default/cred\nusername: xv://default/cred#username\n",
+    )
+    .unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    for _ in 0..10 {
+        let out = xv_same_env(temp.path())
+            .args([
+                "inject",
+                "--template",
+                template_path.to_str().unwrap(),
+                "--out",
+                out_path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+        let rendered = std::fs::read_to_string(&out_path).unwrap();
+        assert!(
+            rendered.contains("primary: hunter2"),
+            "rendered: {rendered}"
+        );
+        assert!(rendered.contains("username: bob"), "rendered: {rendered}");
+        assert!(!rendered.contains('#'), "rendered: {rendered}");
+        assert!(!rendered.contains("xv://"), "rendered: {rendered}");
+    }
+}
+
+#[test]
+fn inject_field_best_effort_renders_with_warning() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    set_cred_login_record(temp.path());
+
+    let template_path = temp.path().join("template.txt");
+    std::fs::write(&template_path, "v: {{ secret:cred.nosuchfield }}\n").unwrap();
+    let out_path = temp.path().join("out.txt");
+
+    let out = xv_same_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+            "--best-effort",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+    let stderr = common::stderr_str(&out);
+    assert!(stderr.contains("nosuchfield"), "stderr: {stderr}");
+
+    // The unresolved placeholder is left in the output verbatim, matching
+    // the pre-existing --best-effort contract for other unresolved
+    // references (#319).
+    let rendered = std::fs::read_to_string(&out_path).unwrap();
+    assert!(
+        rendered.contains("{{ secret:cred.nosuchfield }}"),
+        "rendered: {rendered}"
+    );
+}
+
+/// Guard test (spec §9: `xv run` gets no per-field expansion in v1) proving
+/// `xv run` on a typed record injects the *primary* field value under the
+/// record's name — not the raw JSON envelope — exactly like plain `get`.
+#[test]
+fn run_typed_record_injects_primary() {
+    let (_cmd, temp) = common::xv_isolated_local();
+    set_cred_login_record(temp.path());
+
+    let marker = temp.path().join("run_primary_marker.txt");
+    let out = xv_same_env(temp.path())
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("printf '%s' \"$CRED\" > '{}'", marker.display()),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let injected = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(injected, "hunter2", "stderr: {}", common::stderr_str(&out));
+}
+
+// ---------------------------------------------------------------------------
+// Bugbot round 2 on #321 Phase C: `xv run`/`xv inject` must resolve record
+// types LAZILY (only when a fetched secret is actually a record), not
+// eagerly before fetching anything. An all-untyped selection must succeed
+// even with a broken `[types.*]` config block that no referenced secret
+// actually uses; a typed record under the same broken config must still
+// surface the resolution error, since resolving types is fail-closed for
+// the whole config (Task 13 docs).
+// ---------------------------------------------------------------------------
+
+/// A `.xv.toml` with a `[types.*]` block with two primaries — invalid per
+/// `RecordType::validate()` (exactly one `primary` per type) — so any
+/// command that actually needs to resolve types under this config fails.
+/// Carries a minimal `default_env` pointing at the same "default" vault the
+/// global `xv.conf` already uses, purely so vault resolution doesn't itself
+/// error on "no env selected" now that the file has env profiles at all —
+/// unrelated to the type-resolution behavior under test.
+const BROKEN_TYPES_TOML: &str = r#"
+default_env = "default"
+
+[env.default]
+vault = "default"
+
+[types.bad]
+fields = [
+  { name = "a", kind = "secret", primary = true },
+  { name = "b", kind = "secret", primary = true },
+]
+"#;
+
+/// An `xv` command using ONLY the global (valid, no custom types) config
+/// written by `xv_isolated_local_with_profile` — cwd is the temp root,
+/// outside the `project/` subdirectory that holds the broken `.xv.toml`, so
+/// project-config discovery finds nothing and only built-in record types
+/// resolve. Used to create a typed record before switching to the
+/// broken-config project directory to exercise `run`/`inject` against it.
+fn xv_temp_root_env(temp: &std::path::Path) -> std::process::Command {
+    let mut cmd = common::xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp)
+        .env("XDG_CONFIG_HOME", temp.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(temp);
+    cmd
+}
+
+/// The same isolated store as `xv_isolated_local_with_profile`'s harness,
+/// but a fresh `Command` with cwd in the `project/` subdirectory so the
+/// (deliberately broken) `.xv.toml` written there is discovered.
+fn xv_project_env(temp: &std::path::Path) -> std::process::Command {
+    let mut cmd = common::xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp)
+        .env("XDG_CONFIG_HOME", temp.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(temp.join("project"));
+    cmd
+}
+
+#[test]
+fn run_untyped_secrets_unaffected_by_broken_types_config() {
+    let (_cmd, temp) = common::xv_isolated_local_with_profile(BROKEN_TYPES_TOML);
+
+    // Created from the temp root (no project config in scope), so this
+    // plain `set` never touches record-type resolution at all.
+    let out = xv_temp_root_env(temp.path())
+        .args(["set", "plain-secret", "--value", "plain-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    // Run from the project directory, where the broken `[types.bad]` block
+    // IS in scope. The only secret in the vault is untyped, so `xv run`
+    // must succeed exactly as it would without the record-types feature.
+    let marker = temp.path().join("run_untyped_marker.txt");
+    let out2 = xv_project_env(temp.path())
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("printf '%s' \"$PLAIN_SECRET\" > '{}'", marker.display()),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "plain-value");
+}
+
+#[test]
+fn inject_untyped_template_unaffected_by_broken_types_config() {
+    let (_cmd, temp) = common::xv_isolated_local_with_profile(BROKEN_TYPES_TOML);
+
+    let out = xv_temp_root_env(temp.path())
+        .args(["set", "plain-secret", "--value", "plain-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let project_dir = temp.path().join("project");
+    let template_path = project_dir.join("template.txt");
+    std::fs::write(&template_path, "v: {{ secret:plain-secret }}\n").unwrap();
+    let out_path = project_dir.join("out.txt");
+
+    let out2 = xv_project_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let rendered = std::fs::read_to_string(&out_path).unwrap();
+    assert!(rendered.contains("plain-value"), "rendered: {rendered}");
+}
+
+#[test]
+fn run_and_inject_typed_record_fails_under_broken_types_config() {
+    let (_cmd, temp) = common::xv_isolated_local_with_profile(BROKEN_TYPES_TOML);
+
+    // Created from the temp root: only built-in types are in scope there,
+    // so creating a `login` record succeeds even though the project's
+    // `.xv.toml` (not in scope here) has a broken custom type.
+    let out = xv_temp_root_env(temp.path())
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    // From the project directory the broken `[types.bad]` block IS in
+    // scope. `cred` is a record, so both `run` and `inject` must now
+    // actually attempt type resolution and fail — resolving types is
+    // fail-closed for the whole config, so the broken custom block breaks
+    // resolution even though `cred`'s own type (`login`) is a valid
+    // built-in.
+    let out2 = xv_project_env(temp.path())
+        .args(["run", "--", "sh", "-c", "true"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let project_dir = temp.path().join("project");
+    let template_path = project_dir.join("template.txt");
+    std::fs::write(&template_path, "v: {{ secret:cred }}\n").unwrap();
+    let out_path = project_dir.join("out.txt");
+    let out3 = xv_project_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out3.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when type resolution fails"
+    );
+}

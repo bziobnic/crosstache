@@ -693,6 +693,101 @@ fn field_clipboard_outcome(
     }
 }
 
+/// Resolves the value `xv` should hand back for a secret reference: an
+/// explicit field's value when `field` is `Some`, or the record's primary
+/// field (mirroring plain `get`'s compatibility contract) when `field` is
+/// `None` and the secret is a typed record. An untyped secret with
+/// `field: None` returns its value unchanged; an untyped secret with an
+/// explicit field is an error.
+///
+/// Shared by `get`'s plain/`--field` read paths and `xv inject`'s
+/// `{{ secret:name.field }}` / `xv://vault/name#field` grammar (record-types
+/// plan Task 12) so field-read semantics can't drift between the two
+/// commands.
+fn record_field_value(
+    name: &str,
+    secret: &crate::secret::manager::SecretProperties,
+    field: Option<&str>,
+    types: &[RecordType],
+) -> Result<Zeroizing<String>> {
+    let is_rec = crate::records::is_record(&secret.content_type);
+    let raw_value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+
+    if let Some(field_name) = field {
+        if !is_rec {
+            return Err(CrosstacheError::config(format!(
+                "secret '{name}' is not a typed record (value is not marked {}); field access \
+                 ('.{field_name}') only applies to typed records.",
+                crate::records::RECORD_CONTENT_TYPE
+            )));
+        }
+        let envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw_value)?;
+        let Some(v) = lookup_record_field(field_name, &envelope, &secret.tags) else {
+            let known = record_field_names(&envelope, &secret.tags);
+            return Err(CrosstacheError::config(format!(
+                "secret '{name}' has no field '{field_name}'. Known fields: {}",
+                known.join(", ")
+            )));
+        };
+        return Ok(Zeroizing::new(v.to_string()));
+    }
+
+    if !is_rec {
+        return match &secret.value {
+            Some(v) => Ok(v.clone()),
+            None => Err(CrosstacheError::config(format!(
+                "secret '{name}' resolved but has no value"
+            ))),
+        };
+    }
+
+    let envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw_value)?;
+    let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
+    let Some(record_type) = find_type(types, &type_name) else {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' has type '{type_name}', which has no resolvable type definition \
+             (check your [types.*] config). Its primary field can't be determined; reference a \
+             specific field, e.g. via 'xv get {name} --field <name>' or 'xv get {name} --record', \
+             to access this record's raw fields."
+        )));
+    };
+    let primary_name = &record_type.primary().name;
+    let Some(primary_value) = envelope.get(primary_name) else {
+        return Err(CrosstacheError::config(format!(
+            "secret '{name}' is missing its primary field '{primary_name}' in the record envelope"
+        )));
+    };
+    Ok(Zeroizing::new(primary_value.clone()))
+}
+
+/// Resolves record types on first need, caching the outcome (success or
+/// failure) so it happens at most once per command. `xv run`/`xv inject`
+/// iterate a whole selection of secrets that may be entirely untyped, so
+/// type resolution must be lazy: an all-untyped selection must succeed
+/// exactly as before the record-types feature, never failing because of an
+/// unrelated broken `[types.*]` config block that no referenced secret
+/// actually uses. Callers should only invoke this when a fetched secret is
+/// actually a record (`crate::records::is_record`); an untyped secret
+/// should never trigger it at all. `CrosstacheError` isn't `Clone`, so the
+/// error path is cached as a `String` and re-wrapped on each cached lookup.
+async fn resolve_types_lazily(
+    cache: &mut Option<std::result::Result<Vec<RecordType>, String>>,
+    config: &Config,
+) -> Result<Vec<RecordType>> {
+    if cache.is_none() {
+        *cache = Some(
+            config
+                .resolve_record_types()
+                .await
+                .map_err(|e| e.to_string()),
+        );
+    }
+    match cache.as_ref().expect("just populated above") {
+        Ok(types) => Ok(types.clone()),
+        Err(msg) => Err(CrosstacheError::config(msg.clone())),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_get_direct(
     name: &str,
@@ -722,6 +817,14 @@ pub(crate) async fn execute_secret_get_direct(
         };
 
         let is_rec = crate::records::is_record(&secret.content_type);
+        // Only resolved when the secret is actually a record: an untyped
+        // secret's `get` must never fail because of an unrelated broken
+        // `[types.*]` config block (byte-identical-everywhere guarantee).
+        let types = if is_rec {
+            config.resolve_record_types().await?
+        } else {
+            Vec::new()
+        };
 
         // ── `--record`: full record view, all fields, requested format ──
         if record {
@@ -781,25 +884,21 @@ pub(crate) async fn execute_secret_get_direct(
                     crate::records::RECORD_CONTENT_TYPE
                 )));
             }
-            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
-            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
-            let Some(field_value) = lookup_record_field(&field_name, &envelope, &secret.tags)
-            else {
-                let known = record_field_names(&envelope, &secret.tags);
-                return Err(CrosstacheError::config(format!(
-                    "secret '{name}' has no field '{field_name}'. Known fields: {}",
-                    known.join(", ")
-                )));
-            };
+            let field_value = record_field_value(name, &secret, Some(&field_name), &types)?;
             // A field found in the envelope is secret-kind; one found only
             // via the f.<name> tag is metadata-kind (listable without
-            // fetching the secret in the first place).
+            // fetching the secret in the first place). `record_field_value`
+            // already validated the field exists, so re-parsing the
+            // envelope here is purely for this classification, not for the
+            // lookup/error-message logic (which lives in one place now).
+            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
+            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
             let is_secret_field = envelope.contains_key(&field_name);
 
             if raw {
-                print!("{field_value}");
+                print!("{}", field_value.as_str());
             } else {
-                match copy_to_clipboard(field_value) {
+                match copy_to_clipboard(&field_value) {
                     Ok(()) => {
                         let (message, schedule_clear) = field_clipboard_outcome(
                             name,
@@ -824,27 +923,11 @@ pub(crate) async fn execute_secret_get_direct(
         }
 
         // ── Plain `get`: primary field for records, untouched for untyped ──
+        // Routed through `record_field_value` for the record case so the
+        // primary/field extraction logic lives in exactly one place, shared
+        // with `--field` above and `xv inject`'s record grammar.
         let effective_value: Option<Zeroizing<String>> = if is_rec {
-            let value = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
-            let envelope = parse_record_envelope_or_fail(name, &secret.content_type, value)?;
-
-            let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
-            let types = config.resolve_record_types().await?;
-            let Some(record_type) = crate::records::find_type(&types, &type_name) else {
-                return Err(CrosstacheError::config(format!(
-                    "secret '{name}' has type '{type_name}', which has no resolvable type \
-                     definition (check your [types.*] config). Its primary field can't be \
-                     determined; use --field or --record to access this record's raw fields."
-                )));
-            };
-            let primary_name = &record_type.primary().name;
-            let Some(primary_value) = envelope.get(primary_name) else {
-                return Err(CrosstacheError::config(format!(
-                    "secret '{name}' is missing its primary field '{primary_name}' in the record \
-                     envelope"
-                )));
-            };
-            Some(Zeroizing::new(primary_value.clone()))
+            Some(record_field_value(name, &secret, None, &types)?)
         } else {
             secret.value
         };
@@ -4159,6 +4242,14 @@ async fn execute_secret_run(
     // the old warn-and-continue behavior.
     let mut fetch_failures: Vec<String> = Vec::new();
 
+    // Record types: resolved lazily, at most once, only when a fetched
+    // secret is actually a record — so a typed record injects its primary
+    // field value under its name (`xv run` never expands other fields,
+    // spec §9 out of scope) without leaking the raw JSON envelope, while an
+    // all-untyped selection never pays for (or fails on) type resolution at
+    // all (Bugbot round 2 on #321 Phase C).
+    let mut record_types_cache: Option<std::result::Result<Vec<RecordType>, String>> = None;
+
     // Fetch secrets from current vault (group-filtered)
     for secret in filtered_secrets {
         // Get the secret value
@@ -4169,18 +4260,30 @@ async fn execute_secret_run(
             .await
         {
             Ok(secret_props) => {
-                if let Some(value) = secret_props.value {
-                    let env_name = to_env_var_name(&secret.name);
-                    env_vars.insert(env_name, value.clone());
-
-                    // Store for masking (if enabled)
-                    if !no_masking && !value.is_empty() {
-                        secret_values.push(value.clone());
-                    }
+                let resolved = if crate::records::is_record(&secret_props.content_type) {
+                    resolve_types_lazily(&mut record_types_cache, config)
+                        .await
+                        .and_then(|types| {
+                            record_field_value(&secret.name, &secret_props, None, &types)
+                        })
                 } else {
-                    let msg = format!("Secret '{}' resolved but has no value", secret.name);
-                    output::warn(&msg);
-                    fetch_failures.push(msg);
+                    record_field_value(&secret.name, &secret_props, None, &[])
+                };
+                match resolved {
+                    Ok(value) => {
+                        let env_name = to_env_var_name(&secret.name);
+                        env_vars.insert(env_name, value.clone());
+
+                        // Store for masking (if enabled)
+                        if !no_masking && !value.is_empty() {
+                            secret_values.push(value.clone());
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to resolve secret '{}': {}", secret.name, e);
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
+                    }
                 }
             }
             Err(e) => {
@@ -4227,15 +4330,27 @@ async fn execute_secret_run(
 
             match fetch_result {
                 Ok(secret_props) => {
-                    if let Some(value) = secret_props.value {
-                        uri_values.insert(uri.clone(), value.clone());
-                        if !no_masking && !value.is_empty() {
-                            secret_values.push(value);
-                        }
+                    let resolved = if crate::records::is_record(&secret_props.content_type) {
+                        resolve_types_lazily(&mut record_types_cache, config)
+                            .await
+                            .and_then(|types| {
+                                record_field_value(&secret_name, &secret_props, None, &types)
+                            })
                     } else {
-                        let msg = format!("URI '{uri}' resolved but has no value");
-                        output::warn(&msg);
-                        fetch_failures.push(msg);
+                        record_field_value(&secret_name, &secret_props, None, &[])
+                    };
+                    match resolved {
+                        Ok(value) => {
+                            uri_values.insert(uri.clone(), value.clone());
+                            if !no_masking && !value.is_empty() {
+                                secret_values.push(value);
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to resolve URI '{uri}': {e}");
+                            output::warn(&msg);
+                            fetch_failures.push(msg);
+                        }
                     }
                 }
                 Err(e) => {
@@ -4534,12 +4649,19 @@ async fn execute_secret_inject(
     };
 
     // Parse template for secret references
-    // Supports: {{ secret:name }} and xv://[backend:]vault/secret
+    // Supports: {{ secret:name }}, {{ secret:name.field }}, and
+    // xv://[backend:]vault/secret[#field]. The `.field` split (on the LAST
+    // dot) is resolved later, after the vault's secrets are loaded: an exact
+    // name match always wins first, so an untyped secret literally named
+    // `a.b` keeps resolving as itself (record-types plan Task 12). The `#`
+    // fragment is unambiguous up front since `#` is invalid in secret names
+    // on every backend.
     let secret_regex = Regex::new(r"\{\{\s*secret:([^}\s]+)\s*\}\}").unwrap();
-    let uri_regex = Regex::new(r"xv://([^/\s]+)/([^/\s]+)").unwrap();
+    let uri_regex = Regex::new(r"xv://([^/\s]+)/([^/\s#]+)(?:#([A-Za-z0-9._-]+))?").unwrap();
 
     let mut required_secrets: Vec<String> = Vec::new();
-    let mut cross_vault_refs: Vec<(String, BackendRef)> = Vec::new(); // (original_uri, parsed_ref)
+    // (original_uri, parsed_ref, optional #field)
+    let mut cross_vault_refs: Vec<(String, BackendRef, Option<String>)> = Vec::new();
 
     // Failures collected across template parsing and secret fetching. By
     // default any failure aborts rendering (and the output write) before it
@@ -4565,16 +4687,20 @@ async fn execute_secret_inject(
         }
     }
 
-    // Find xv://[backend:]vault/secret URI references
+    // Find xv://[backend:]vault/secret[#field] URI references
     for captures in uri_regex.captures_iter(&template_content) {
         let vault_part = captures.get(1).map_or("", |m| m.as_str());
         let secret_part = captures.get(2).map_or("", |m| m.as_str());
-        let uri_key = format!("xv://{vault_part}/{secret_part}");
-        if cross_vault_refs.iter().any(|(uri, _)| uri == &uri_key) {
+        let field_part = captures.get(3).map(|m| m.as_str().to_string());
+        let uri_key = match &field_part {
+            Some(f) => format!("xv://{vault_part}/{secret_part}#{f}"),
+            None => format!("xv://{vault_part}/{secret_part}"),
+        };
+        if cross_vault_refs.iter().any(|(uri, _, _)| uri == &uri_key) {
             continue;
         }
         match BackendRef::parse(&format!("{vault_part}/{secret_part}")) {
-            Ok(r) => cross_vault_refs.push((uri_key, r)),
+            Ok(r) => cross_vault_refs.push((uri_key, r, field_part)),
             Err(e) => {
                 let msg = format!("Invalid URI '{uri_key}': {e}");
                 output::warn(&msg);
@@ -4660,11 +4786,21 @@ async fn execute_secret_inject(
     let mut secret_values: HashMap<String, Zeroizing<String>> = HashMap::new();
     let mut cross_vault_values: HashMap<String, Zeroizing<String>> = HashMap::new(); // URI -> value
 
-    // Fetch secrets from current vault
-    for secret_name in &required_secrets {
-        // Check if the secret exists in the available secrets
-        if let Some(secret_summary) = available_secrets.iter().find(|s| s.name == *secret_name) {
-            // Get the secret value
+    // Record types: resolved lazily, at most once, only when a fetched
+    // secret is actually a record — an all-untyped template must render
+    // successfully even with a broken `[types.*]` config block that no
+    // referenced secret actually uses (Bugbot round 2 on #321 Phase C).
+    let mut record_types_cache: Option<std::result::Result<Vec<RecordType>, String>> = None;
+
+    // Fetch secrets from current vault. `ref_token` is the raw text captured
+    // from `{{ secret:TOKEN }}`: either a bare name (record primary or a
+    // plain value) or a `name.field` reference. Exact-name match is tried
+    // FIRST so an existing secret literally named `a.b` always resolves as
+    // itself; only when there is no exact match do we fall back to
+    // splitting on the LAST dot and treating the suffix as a field
+    // reference on the base record (record-types plan Task 12).
+    for ref_token in &required_secrets {
+        if let Some(secret_summary) = available_secrets.iter().find(|s| s.name == *ref_token) {
             match reg
                 .active()
                 .secrets()
@@ -4672,25 +4808,85 @@ async fn execute_secret_inject(
                 .await
             {
                 Ok(secret_props) => {
-                    if let Some(value) = secret_props.value {
-                        secret_values.insert(secret_name.clone(), value);
+                    let resolved = if crate::records::is_record(&secret_props.content_type) {
+                        resolve_types_lazily(&mut record_types_cache, config)
+                            .await
+                            .and_then(|types| {
+                                record_field_value(ref_token, &secret_props, None, &types)
+                            })
                     } else {
-                        let msg = format!("Secret '{secret_name}' resolved but has no value");
-                        output::warn(&msg);
-                        fetch_failures.push(msg);
+                        record_field_value(ref_token, &secret_props, None, &[])
+                    };
+                    match resolved {
+                        Ok(value) => {
+                            secret_values.insert(ref_token.clone(), value);
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to resolve '{ref_token}': {e}");
+                            output::warn(&msg);
+                            fetch_failures.push(msg);
+                        }
                     }
                 }
                 Err(e) => {
                     let msg = format!(
                         "Failed to get value for secret '{}' from vault '{}': {}",
-                        secret_name, vault_name, e
+                        ref_token, vault_name, e
                     );
                     output::warn(&msg);
                     fetch_failures.push(msg);
                 }
             }
-        } else {
-            let msg = format!("Secret '{secret_name}' not found in vault '{vault_name}'");
+            continue;
+        }
+
+        let mut resolved = false;
+        if let Some(dot) = ref_token.rfind('.') {
+            let base = &ref_token[..dot];
+            let field = &ref_token[dot + 1..];
+            if let Some(secret_summary) = available_secrets.iter().find(|s| s.name == base) {
+                resolved = true;
+                match reg
+                    .active()
+                    .secrets()
+                    .get_secret(&vault_name, &secret_summary.name, true)
+                    .await
+                {
+                    Ok(secret_props) => {
+                        let resolved = if crate::records::is_record(&secret_props.content_type) {
+                            resolve_types_lazily(&mut record_types_cache, config)
+                                .await
+                                .and_then(|types| {
+                                    record_field_value(base, &secret_props, Some(field), &types)
+                                })
+                        } else {
+                            record_field_value(base, &secret_props, Some(field), &[])
+                        };
+                        match resolved {
+                            Ok(value) => {
+                                secret_values.insert(ref_token.clone(), value);
+                            }
+                            Err(e) => {
+                                let msg = format!("Failed to resolve '{ref_token}': {e}");
+                                output::warn(&msg);
+                                fetch_failures.push(msg);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!(
+                            "Failed to get value for secret '{}' from vault '{}': {}",
+                            base, vault_name, e
+                        );
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
+                    }
+                }
+            }
+        }
+
+        if !resolved {
+            let msg = format!("Secret '{ref_token}' not found in vault '{vault_name}'");
             output::warn(&msg);
             fetch_failures.push(msg);
         }
@@ -4706,7 +4902,7 @@ async fn execute_secret_inject(
             Arc<dyn crate::backend::Backend>,
         > = std::collections::HashMap::new();
 
-        for (uri, backend_ref) in &cross_vault_refs {
+        for (uri, backend_ref, field_opt) in &cross_vault_refs {
             let secret_name = match &backend_ref.secret {
                 Some(s) => s.clone(),
                 None => {
@@ -4729,12 +4925,29 @@ async fn execute_secret_inject(
 
             match fetch_result {
                 Ok(secret_props) => {
-                    if let Some(value) = secret_props.value {
-                        cross_vault_values.insert(uri.clone(), value);
+                    let resolved = if crate::records::is_record(&secret_props.content_type) {
+                        resolve_types_lazily(&mut record_types_cache, config)
+                            .await
+                            .and_then(|types| {
+                                record_field_value(
+                                    &secret_name,
+                                    &secret_props,
+                                    field_opt.as_deref(),
+                                    &types,
+                                )
+                            })
                     } else {
-                        let msg = format!("URI '{uri}' resolved but has no value");
-                        output::warn(&msg);
-                        fetch_failures.push(msg);
+                        record_field_value(&secret_name, &secret_props, field_opt.as_deref(), &[])
+                    };
+                    match resolved {
+                        Ok(value) => {
+                            cross_vault_values.insert(uri.clone(), value);
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to resolve URI '{uri}': {e}");
+                            output::warn(&msg);
+                            fetch_failures.push(msg);
+                        }
                     }
                 }
                 Err(e) => {
@@ -4782,8 +4995,19 @@ async fn execute_secret_inject(
             .to_string();
     }
 
-    // Replace xv://vault/secret URI references
-    for (uri, secret_value) in &cross_vault_values {
+    // Replace xv://vault/secret URI references. Longest-key-first: a bare
+    // `xv://vault/name` is a strict prefix of its own `#field` form (and,
+    // more generally, of any other URI key that happens to extend it), so
+    // substituting in `HashMap` iteration order (nondeterministic) can
+    // rewrite part of a longer reference before it's ever matched whole —
+    // e.g. `xv://vault/name` replacing inside `xv://vault/name#username`
+    // and leaving a mangled `<value>#username` behind. Sorting by
+    // descending key length guarantees every longer (more specific) URI is
+    // substituted before any of its prefixes.
+    let mut cross_vault_entries: Vec<(&String, &Zeroizing<String>)> =
+        cross_vault_values.iter().collect();
+    cross_vault_entries.sort_by_key(|(uri, _)| std::cmp::Reverse(uri.len()));
+    for (uri, secret_value) in cross_vault_entries {
         *result_content = result_content.replace(uri, secret_value.as_str());
     }
 

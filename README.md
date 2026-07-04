@@ -22,6 +22,7 @@ xv scan install                        # block secret leaks before commit
 - [Installation](#installation)
 - [Common workflows](#common-workflows) — end-to-end recipes
 - [Secrets — CRUD](#secrets--crud)
+- [Record types — structured secrets](#record-types--structured-secrets)
 - [Reading secrets — clipboard, stdout, JSON](#reading-secrets--clipboard-stdout-json)
 - [Search & filter](#search--filter) — `xv find`, `xv ls --names-only`, fzf integration
 - [Secret injection — `xv run`](#secret-injection--xv-run)
@@ -491,6 +492,123 @@ xv rotate API_KEY --show-value               # echo the new value to stdout (oth
 
 ---
 
+## Record types — structured secrets
+
+A **record** is a secret carrying structured fields — a username and URL
+alongside a password, or host/port/database alongside connection details —
+instead of one opaque value. Every field is either `metadata` (a tag,
+listable without fetching the secret) or `secret` (encrypted inside the
+value); every type declares exactly one `primary` secret field, so plain
+`xv get`/`xv run` on a record behave exactly like on any other secret —
+they return/inject the primary value, byte-identical to today's behavior.
+Untyped secrets are completely unaffected: no envelope, no new tags, on
+every code path.
+
+### Built-in types
+
+| Type | Metadata fields | Secret fields |
+|---|---|---|
+| `login` | `username` (required), `url` | **`password`** (primary) |
+| `api-key` | `url`, `account` | **`key`** (primary) |
+| `database` | `host`, `port`, `database`, `username` | **`password`** (primary), `connection-string` (optional) |
+
+```bash
+xv type list                             # resolved types + source (built-in/global/project)
+xv type list --format json
+xv type show login                       # field table for one type
+```
+
+### Custom types
+
+Declare `[types.<name>]` blocks in global `xv.conf` or a project's
+`.xv.toml` (same config hierarchy as everything else). A project type
+shadows a global type of the same name; shadowing a built-in works but
+warns.
+
+```toml
+# xv.conf (global) or .xv.toml (project override)
+[types.smtp]
+fields = [
+  { name = "host" },                          # metadata by default
+  { name = "port" },
+  { name = "username", required = true },
+  { name = "password", kind = "secret", primary = true },
+]
+```
+
+**One invalid `[types.*]` block fails type resolution globally** (missing
+or duplicate `primary`, a non-secret/non-required `primary`, a field name
+that isn't kebab-case) — by design, fail-closed: a single broken custom
+type definition never lets some types silently resolve while others
+silently vanish.
+
+### Create, read, and update
+
+```bash
+xv set mail-cred --type login --field username=bob --value hunter2
+xv set other-cred --type login --field username=bob --field url=https://mail.example.com \
+  --field-secret backup-code=1234 --value hunter2   # --field-secret: ad-hoc field, stored in the envelope
+
+xv get mail-cred                          # primary field (password), unchanged `get` contract
+xv get mail-cred --field username          # one field, either kind
+xv get mail-cred --record --format json    # every field, requested format
+
+xv update mail-cred --field username=alice           # metadata edit — tag-only, no new version
+xv update other-cred --field-secret backup-code=5678 # secret-field edit — rewrites the envelope, new version
+
+xv set legacy-cred --value some-existing-value  # a bare (untyped) secret
+xv update legacy-cred --type login               # explicit conversion: its value becomes the primary field
+xv update legacy-cred --untype                   # flatten back to a bare secret holding the primary value (--yes
+                                                  # skips the prompt when non-primary secret fields would be dropped)
+
+xv ls --type login                        # filter listing by record type
+xv ls --format json                       # includes "record_type" and a "fields" map for typed records
+```
+
+`--field`/`--field-secret`/`--type`/`--untype` on `xv update` are mutually
+exclusive with each other and with every classic update flag
+(`--value`/`--stdin`/`--note`/`--tags`/…) — a record field edit or
+conversion is a standalone operation in v1.
+
+### Inject field syntax
+
+`xv inject` templates can select one field of a record with a dot, and
+`xv://` URIs use a `#` fragment (invalid in secret names on every backend,
+so unambiguous):
+
+```bash
+# template.yml:
+#   smtp_user: "{{ secret:mail-cred.username }}"
+#   smtp_pass: "{{ secret:mail-cred }}"                     # bare name — primary field
+#   smtp_pass_uri: "xv://other-vault/mail-cred#password"
+
+xv inject --template template.yml --out app.config
+```
+
+An **exact secret name always wins first**: an existing untyped secret
+literally named `a.b` resolves as itself, never as field `b` of a record
+named `a`. Only when there is no exact match does `xv inject` try a
+`name.field` split (on the last dot), and only when the base name is a
+record with a matching field. Unknown fields, or a field reference on a
+non-record, abort injection (exit 3) before anything is written — the same
+fail-fast contract as any other unresolved reference — unless
+`--best-effort`. `xv run` does not expand fields at all: a typed record's
+name injects its primary value as the env var, same as `xv get`.
+
+### External consumers and compatibility
+
+Typed records store their secret fields as a JSON envelope
+(`{"password": "..."}`, content type `application/vnd.xv.record`) with
+metadata fields riding tags (`f.username`, `f.url`, …) and the type name in
+a reserved `xv-type` tag. A consumer reading the secret outside `xv` — the
+Azure portal, a raw SDK call, an older `xv` binary — sees that JSON
+envelope as the value, not the bare password. **Conversion is always
+explicit**: `xv set --type` or `xv update --type`/`--untype` are the only
+ways a secret's shape changes. Nothing implicitly promotes a plain secret
+into a record or vice versa.
+
+---
+
 ## Reading secrets — clipboard, stdout, JSON
 
 ### Default — clipboard with auto-clear
@@ -686,6 +804,10 @@ stdout) if any `{{ secret:name }}` or `xv://` reference fails to resolve
 failure is printed, and no partially-rendered output is ever written. Pass
 `--best-effort` to restore the previous behavior: warn on each failure and
 render anyway, leaving unresolved references in the output.
+
+For a typed [record](#record-types--structured-secrets), `{{ secret:name.field }}`
+/ `xv://vault/name#field` select one field; bare `{{ secret:name }}` still
+renders the primary field.
 
 ---
 
