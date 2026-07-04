@@ -1,7 +1,7 @@
 # Record Types: Structured Secrets with Typed Fields
 
 **Date:** 2026-07-03
-**Status:** Approved design, not yet implemented
+**Status:** Shipped in v0.19.0 (PRs #322, #323, #324)
 **Depends on:** metadata-preserving copy/move (PR #315, merged); profile write defaults (PR #320, merged)
 
 ## Motivation
