@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`--filter <GLOB>` on `xv ls`/`list` and `xv find`**, consistent with the existing `xv migrate --filter`. The glob matches either the secret's user-facing (`original_name`) or backend (sanitized) name — the same either-name convention `xv mv` and `xv run --include`/`--exclude` use — case-sensitive and whole-name (`test-*` matches `test-db`, never `latest-db`). On `ls` it's applied client-side before pagination/rendering and composes with the folder positional, `--type`, `--deleted`, and every output format. On `find` it's a hard pre-filter on the candidate set applied before fuzzy scoring, so `PATTERN` ranks only within the filtered set; `--filter` with no `PATTERN` yields an unranked filtered list — `xv find --filter 'test-*' --names-only` is the canonical "names starting with test-" one-liner. An invalid glob pattern fails fast with `invalid_argument`, before any backend call.
+
 ## v0.19.0 — Record types, fail-fast run/inject, and backend-resolution fixes (2026-07-03)
 
 ### Added

@@ -501,6 +501,12 @@ pub enum Commands {
         /// JSON when stdout is not a TTY.
         #[arg(long)]
         names_only: bool,
+
+        /// Hard-filter the candidate set by glob pattern on the name (e.g.,
+        /// "test-*", "api-*") before PATTERN is scored. With no PATTERN,
+        /// yields an unranked filtered list.
+        #[arg(long, value_name = "GLOB")]
+        filter: Option<String>,
     },
     /// List secrets in the current vault context (alias: ls). Use --format table for the classic table view
     #[command(alias = "ls")]
@@ -560,6 +566,9 @@ pub enum Commands {
         /// tags on any backend, so there's no `xv-type` to filter on.
         #[arg(long = "type")]
         type_filter: Option<String>,
+        /// Filter secrets by glob pattern on the name (e.g., "test-*", "api-*")
+        #[arg(long, value_name = "GLOB")]
+        filter: Option<String>,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -1672,6 +1681,7 @@ impl Cli {
                 folder,
                 all_vaults,
                 names_only,
+                filter,
             } => {
                 crate::cli::secret_ops::execute_secret_find_direct(
                     pattern,
@@ -1682,6 +1692,7 @@ impl Cli {
                     all_vaults,
                     names_only,
                     self.format,
+                    filter,
                     config,
                     registry,
                 )
@@ -1703,12 +1714,13 @@ impl Cli {
                 sort,
                 deleted,
                 type_filter,
+                filter,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
                 if deleted {
                     crate::cli::secret_ops::execute_deleted_secret_list(
-                        pagination, pager, names_only, long, sort, config, registry,
+                        pagination, pager, names_only, long, sort, filter, config, registry,
                     )
                     .await
                 } else {
@@ -1736,6 +1748,7 @@ impl Cli {
                         recursive,
                         sort,
                         type_filter,
+                        filter,
                         config,
                         registry,
                     )

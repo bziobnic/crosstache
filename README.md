@@ -705,9 +705,16 @@ Next page: xv list --page 3 --page-size 50
 xv ls --names-only                       # one name per line, no headers, no ANSI
 xv ls --names-only | wc -l               # count secrets
 xv ls --names-only --group production    # filter still applies
+xv ls --filter 'test-*' --names-only     # glob filter on the name, applied before rendering
 ```
 
 `--names-only` overrides `--format` and writes to stdout regardless of TTY status. Designed for scripts and pipes.
+
+`--filter <GLOB>` matches a glob pattern against the secret's name (either its
+displayed name or its backend/sanitized name), the same rule `xv migrate
+--filter` and `xv mv`/`xv run --include` use. Matching is case-sensitive and
+whole-name (`test-*` matches `test-db`, never `latest-db`). Composes with the
+folder positional, `--type`, `--deleted`, and every output format.
 
 ### Fuzzy — `xv find`
 
@@ -725,6 +732,8 @@ xv find db --all-vaults                  # search every vault you can list
 xv find db --names-only                  # pipe-friendly
 xv find db --format json                 # [{name, score, folder, groups}] — score is a "NN.00" string
 xv find db --format csv                  # Name,Score,Folder,Groups
+xv find db --filter 'test-*'             # hard pre-filter by glob before PATTERN is ranked
+xv find --filter 'test-*' --names-only   # canonical prefix search: names starting with "test-"
 ```
 
 ### Pipe into fzf — interactive picker
