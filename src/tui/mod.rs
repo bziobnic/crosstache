@@ -129,40 +129,42 @@ async fn run_loop(
     let _evt = event::spawn_event_reader(tx.clone(), shutdown.clone());
     let _tick = event::spawn_tick_timer(tx.clone());
 
-    match &workspace {
+    app.workspace = workspace;
+    app.workspace_backends = workspace_backends;
+
+    if app.workspace.is_some() {
         // Workspace attached: the vault pane is populated directly from
         // attached entries (no network call — this is config, not a vault
         // listing) instead of spawning `spawn_load_vaults` against a single
         // active backend, which can't represent a multi-backend workspace.
-        Some(ws) => {
-            app.vaults = ws
-                .entries
-                .iter()
-                .map(|e| crate::vault::models::VaultSummary {
-                    name: e.alias.clone(),
-                    location: String::new(),
-                    resource_group: String::new(),
-                    status: "Attached".to_string(),
-                    created_at: String::new(),
-                })
-                .collect();
-            app.workspace_vault_names = ws
-                .entries
-                .iter()
-                .map(|e| (e.alias.clone(), e.vault.clone()))
-                .collect();
-            app.vaults_loading = false;
+        // Shares the exact population logic the `R`-refresh in workspace
+        // mode uses (`App::repopulate_vaults_from_workspace`), so the two
+        // can never diverge — the default entry is ordered first.
+        app.repopulate_vaults_from_workspace();
+        app.vaults_loading = false;
+
+        // Bugbot MEDIUM fix, round 3: the non-workspace path relies on
+        // `Message::VaultsLoaded` to select index 0 and issue the initial
+        // `LoadSecrets` — the workspace path never sends that message (it
+        // populates synchronously above), so without this the secrets pane
+        // stayed empty until the user moved. Select the default entry
+        // (index 0, per the ordering above) and issue the same initial
+        // load, reusing `handle_command`'s workspace-aware resolution
+        // rather than duplicating it.
+        if !app.vaults.is_empty() {
+            app.vault_state.select(Some(0));
         }
-        None => {
-            drop(data::spawn_load_vaults(
-                config.clone(),
-                tx.clone(),
-                backend.clone(),
-            ));
+        if let Some(name) = app.selected_vault().map(String::from) {
+            app.secrets_loading = true;
+            handle_command(&app, &tx, Command::LoadSecrets { vault: name }, &backend).await;
         }
+    } else {
+        drop(data::spawn_load_vaults(
+            config.clone(),
+            tx.clone(),
+            backend.clone(),
+        ));
     }
-    app.workspace = workspace;
-    app.workspace_backends = workspace_backends;
 
     while !app.quit {
         terminal

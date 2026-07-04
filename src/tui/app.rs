@@ -230,6 +230,44 @@ impl App {
             None => WorkspaceTarget::Unavailable,
         }
     }
+
+    /// Populate `self.vaults`/`self.workspace_vault_names` directly from
+    /// `self.workspace`'s attached entries, with the DEFAULT entry ordered
+    /// FIRST (Bugbot HIGH/MEDIUM fix, round 3) — a caller that then selects
+    /// index 0 lands on the default entry, matching the Phase A convention
+    /// that an unqualified target is the workspace default. No-op (leaves
+    /// `self.vaults` untouched) when no workspace is attached.
+    ///
+    /// Shared by the initial TUI startup population (`run_tui`) and the
+    /// `R`-refresh in workspace mode (`update::handle_key`), so the two can
+    /// never diverge — refreshing must re-derive the SAME alias-labeled
+    /// pane, never fall back to a raw single-backend vault listing.
+    pub(crate) fn repopulate_vaults_from_workspace(&mut self) {
+        let Some(ws) = self.workspace.clone() else {
+            return;
+        };
+        let mut entries: Vec<&crate::workspace::WorkspaceEntry> = ws.entries.iter().collect();
+        // Stable sort: `false < true`, so the default entry (comparing
+        // `!= ws.default_alias` -> `false`) sorts before every other entry,
+        // while entries that are equally non-default keep their original
+        // relative order.
+        entries.sort_by_key(|e| e.alias != ws.default_alias);
+        self.vaults = entries
+            .iter()
+            .map(|e| VaultSummary {
+                name: e.alias.clone(),
+                location: String::new(),
+                resource_group: String::new(),
+                status: "Attached".to_string(),
+                created_at: String::new(),
+            })
+            .collect();
+        self.workspace_vault_names = ws
+            .entries
+            .iter()
+            .map(|e| (e.alias.clone(), e.vault.clone()))
+            .collect();
+    }
 }
 
 #[cfg(test)]
