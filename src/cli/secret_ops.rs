@@ -1571,8 +1571,14 @@ pub(crate) fn display_cached_secret_list(
 
     // Pipe-friendly modes: flat recursive subtree, unchanged schema.
     // Qualification is opt-in via -r (the bare --names-only shape is shipped).
-    // Union listings (show_vault) prefix `alias/` so piped output stays
-    // disambiguated across vaults, mirroring `find`'s vault-prefix style.
+    // Union listings prefix `alias/` so piped output stays disambiguated
+    // across vaults, mirroring `find`'s vault-prefix style — but ONLY when
+    // `show_vault` is true (workspace has >=2 entries), exactly the same
+    // gate the VAULT column/grid-prefix paths honor below. A single-entry
+    // workspace (or no workspace) must be byte-identical to the
+    // no-workspace path in EVERY output form, including --names-only
+    // (Bugbot review MEDIUM: this branch used to prefix whenever the
+    // synthetic alias tag was present, ignoring `show_vault` entirely).
     if names_only {
         for s in &scoped.subtree {
             let label = if recursive {
@@ -1580,7 +1586,7 @@ pub(crate) fn display_cached_secret_list(
             } else {
                 ls_view::display_name(s).to_string()
             };
-            match workspace_alias_of(s) {
+            match workspace_alias_of(s).filter(|_| show_vault) {
                 Some(alias) => println!("{alias}/{label}"),
                 None => println!("{label}"),
             }
@@ -2125,6 +2131,21 @@ fn deleted_list_capability_skip_note(alias: &str, backend_name: &str) -> String 
     format!("note: '{alias}' ({backend_name}) has no soft-delete; --deleted skipped for it")
 }
 
+/// **Shared ordering convention** with `execute_secret_list_workspace`
+/// (union `ls`), so the two union paths can't drift apart again (Bugbot
+/// review MEDIUM): name-based filtering (`--filter` glob, and any future
+/// name-based filter) ALWAYS runs against bare per-vault names BEFORE the
+/// `alias/` display prefix is applied. The live union `ls` path gets this
+/// for free — the alias travels as a synthetic tag (`WORKSPACE_ALIAS_TAG`)
+/// separate from `name`/`original_name` until the final render step, well
+/// after `filter_secrets_by_glob` runs on the merged (still bare-named)
+/// set. `DeletedSecretSummary` has no such synthetic-tag slot — the alias
+/// can only be baked into `original_name` — so this function must apply
+/// `filter_deleted_secrets_by_glob` per vault BEFORE that bake-in,
+/// mirroring the live path's effective ordering explicitly instead of
+/// getting it for free. Filtering after prefixing (the pre-fix behavior)
+/// silently broke `--filter 'PROD_*'`-style anchored globs against
+/// `"alias/PROD_X"`, which no longer starts with `PROD_`.
 #[allow(clippy::too_many_arguments)]
 async fn execute_deleted_secret_list_workspace(
     ws: crate::workspace::Workspace,
@@ -2160,7 +2181,7 @@ async fn execute_deleted_secret_list_workspace(
             continue;
         }
 
-        let mut fetched = match backend.secrets().list_deleted_secrets(&entry.vault).await {
+        let fetched = match backend.secrets().list_deleted_secrets(&entry.vault).await {
             Ok(items) => items,
             Err(crate::backend::BackendError::Unsupported(_)) => {
                 eprintln!(
@@ -2177,6 +2198,11 @@ async fn execute_deleted_secret_list_workspace(
             }
         };
 
+        // Filter on BARE per-vault names first (see this function's doc
+        // comment: shared ordering convention with the live union `ls`
+        // path) — only AFTER that does the `alias/` display prefix apply.
+        let mut fetched = filter_deleted_secrets_by_glob(fetched, filter.as_deref())?;
+
         if show_vault {
             for s in &mut fetched {
                 let label = deleted_display_name(s).to_string();
@@ -2186,7 +2212,9 @@ async fn execute_deleted_secret_list_workspace(
         items.extend(fetched);
     }
 
-    let mut items = filter_deleted_secrets_by_glob(items, filter.as_deref())?;
+    // Filtering already happened per vault (on bare names) above — no
+    // second glob pass here, which would otherwise re-filter against
+    // already-`alias/`-prefixed names for a >=2-entry workspace.
 
     match sort {
         LsSort::Name => items.sort_by(|a, b| deleted_display_name(a).cmp(deleted_display_name(b))),
@@ -8227,6 +8255,62 @@ mod tests {
         assert!(
             msg.starts_with("note:"),
             "must be a non-fatal 'note:' prefix, not an error: {msg}"
+        );
+    }
+
+    /// Bugbot review MEDIUM: `execute_deleted_secret_list_workspace` must
+    /// filter BARE per-vault names before applying the `alias/` display
+    /// prefix, mirroring the live union `ls` path's ordering. This is
+    /// deliberately a unit test on the composed
+    /// `filter_deleted_secrets_by_glob` + prefix steps rather than an e2e
+    /// test against the local backend: the local backend's `Unrestricted`
+    /// name charset means `name` and `original_name` are always identical
+    /// there (no sanitization ever runs), so `glob_matches_either_name`'s
+    /// OR fallback via the untouched `name` field masks the bug entirely
+    /// in any local-only e2e harness — the divergence only bites on a
+    /// backend with a restricted charset (e.g. Azure Key Vault, which
+    /// disallows underscores), where the SANITIZED `name` differs from
+    /// the user-facing `original_name` and only the latter is
+    /// glob-matchable. This test constructs that divergence directly.
+    #[test]
+    fn deleted_union_filter_must_run_on_bare_names_before_alias_prefix() {
+        use crate::secret::manager::DeletedSecretSummary;
+
+        let make = || DeletedSecretSummary {
+            name: "prod-alpha-a1b2c3".to_string(), // sanitized: doesn't match "PROD_*"
+            original_name: "PROD_ALPHA".to_string(), // user-facing: matches "PROD_*"
+            deleted_on: None,
+            scheduled_purge_on: None,
+        };
+
+        // CORRECT order (this function's fix): filter bare names first,
+        // THEN apply the alias prefix.
+        let mut correct = filter_deleted_secrets_by_glob(vec![make()], Some("PROD_*")).unwrap();
+        assert_eq!(
+            correct.len(),
+            1,
+            "must match via the bare original_name before any prefix is applied"
+        );
+        for s in &mut correct {
+            let label = deleted_display_name(s).to_string();
+            s.original_name = format!("work/{label}");
+        }
+        assert_eq!(correct[0].original_name, "work/PROD_ALPHA");
+
+        // BUGGY order (what this test guards against): prefix first, THEN
+        // filter — the filter now sees "work/PROD_ALPHA" (fails to match
+        // "PROD_*", which requires a "PROD_" prefix) and the untouched
+        // sanitized `name` "prod-alpha-a1b2c3" (also doesn't match),
+        // silently losing the row.
+        let mut buggy = vec![make()];
+        for s in &mut buggy {
+            let label = deleted_display_name(s).to_string();
+            s.original_name = format!("work/{label}");
+        }
+        let buggy = filter_deleted_secrets_by_glob(buggy, Some("PROD_*")).unwrap();
+        assert!(
+            buggy.is_empty(),
+            "demonstrates the pre-fix bug: filtering after alias-prefixing loses the match"
         );
     }
 }

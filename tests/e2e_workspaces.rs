@@ -1869,6 +1869,42 @@ fn ls_single_vault_output_unchanged() {
     );
 }
 
+/// Same byte-golden pin as `ls_single_vault_output_unchanged`, extended to
+/// `--names-only` (Bugbot review MEDIUM): that branch used to prefix
+/// `alias/` whenever the synthetic alias tag was present at all, ignoring
+/// the `show_vault` (>=2 entries) gate every other render path honors — a
+/// single-entry workspace must be byte-identical to no-workspace in EVERY
+/// output form, not just `--format table`.
+#[test]
+fn ls_single_vault_names_only_output_unchanged() {
+    let env = WorkspaceEnv::new();
+
+    env.ok(&["set", "PINNED_SECRET", "--value", "v1"]);
+    let before = env.ok(&["ls", "--names-only"]);
+    assert!(
+        !before.contains('/'),
+        "sanity: no alias prefix pre-workspace: {before}"
+    );
+
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:PINNED_SECRET", "--value", "v1"]);
+    let after = env.ok(&["ls", "--names-only"]);
+
+    assert_eq!(
+        before, after,
+        "single-entry workspace ls --names-only output must be byte-identical to the \
+         no-workspace path — no alias/ prefix with only one attached vault"
+    );
+}
+
 #[test]
 fn ls_union_composes_with_filter_and_type() {
     let env = WorkspaceEnv::new();
@@ -2371,4 +2407,83 @@ fn ls_deleted_unions_capable_vaults_with_alias_prefix() {
     let out = env.ok(&["ls", "--deleted", "--format", "table"]);
     assert!(out.contains("work/GONE_WORK"), "{out}");
     assert!(out.contains("stage/GONE_STAGE"), "{out}");
+}
+
+/// Bugbot review MEDIUM: `ls --deleted` in a >=2-entry workspace used to
+/// rewrite names to `alias/name` BEFORE `--filter` glob matching, while the
+/// live union `ls` path filters bare names per vault first — so an
+/// anchored glob like `PROD_*` matched live rows but missed deleted ones
+/// (`"work/PROD_X"` no longer starts with `"PROD_"`). This pins that
+/// `ls --deleted --filter 'PROD_*'` matches the same base names a live
+/// `ls --filter 'PROD_*'` would (captured on equivalent, not-yet-deleted
+/// secrets), while still showing the `alias/` prefix per
+/// `ls_deleted_unions_capable_vaults_with_alias_prefix` above.
+///
+/// Note: this local-backend e2e harness can't independently DISCRIMINATE
+/// the fix from the bug — local's `Unrestricted` charset means `name` ==
+/// `original_name` always, so `glob_matches_either_name`'s OR fallback via
+/// the untouched `name` field masks the ordering bug here regardless. The
+/// unit test `deleted_union_filter_must_run_on_bare_names_before_alias_prefix`
+/// (`src/cli/secret_ops.rs`) constructs the diverging-name case (as on a
+/// restricted-charset backend) that actually proves the ordering; this
+/// e2e test instead pins the end-to-end feature contract itself.
+#[test]
+fn ls_deleted_filter_matches_bare_names_before_alias_prefix() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    env.ok(&["set", "work:PROD_ALPHA", "--value", "v1"]);
+    env.ok(&["set", "work:DEV_ALPHA", "--value", "v2"]);
+    env.ok(&["set", "stage:PROD_BETA", "--value", "v3"]);
+    env.ok(&["set", "stage:DEV_BETA", "--value", "v4"]);
+
+    // Capture what a LIVE union `ls --filter 'PROD_*'` matches, before
+    // deleting anything — the set this test's deleted-list filter must
+    // mirror for the same base names.
+    let live_filtered = env.ok(&["ls", "--format", "table", "--filter", "PROD_*"]);
+    assert!(live_filtered.contains("PROD_ALPHA"), "{live_filtered}");
+    assert!(live_filtered.contains("PROD_BETA"), "{live_filtered}");
+    assert!(!live_filtered.contains("DEV_ALPHA"), "{live_filtered}");
+    assert!(!live_filtered.contains("DEV_BETA"), "{live_filtered}");
+
+    env.ok(&["delete", "work:PROD_ALPHA", "--force"]);
+    env.ok(&["delete", "work:DEV_ALPHA", "--force"]);
+    env.ok(&["delete", "stage:PROD_BETA", "--force"]);
+    env.ok(&["delete", "stage:DEV_BETA", "--force"]);
+
+    let deleted_filtered = env.ok(&["ls", "--deleted", "--format", "table", "--filter", "PROD_*"]);
+    // Same base names the live filter matched — now alias-prefixed
+    // (>=2 attached vaults).
+    assert!(
+        deleted_filtered.contains("work/PROD_ALPHA"),
+        "{deleted_filtered}"
+    );
+    assert!(
+        deleted_filtered.contains("stage/PROD_BETA"),
+        "{deleted_filtered}"
+    );
+    // The DEV_* secrets must still be excluded by the filter, not merely
+    // reformatted.
+    assert!(
+        !deleted_filtered.contains("DEV_ALPHA"),
+        "{deleted_filtered}"
+    );
+    assert!(!deleted_filtered.contains("DEV_BETA"), "{deleted_filtered}");
 }
