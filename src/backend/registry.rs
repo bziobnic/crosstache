@@ -25,6 +25,18 @@ pub struct BackendRegistry {
     /// migration period. Will be removed once all handlers use the
     /// backend trait layer exclusively.
     azure_auth: Option<Arc<dyn crate::auth::provider::AzureAuthProvider>>,
+    /// Config snapshot used for on-demand (lazy) construction of backends
+    /// registered via [`with_lazy`](Self::with_lazy) but not yet built.
+    /// `None` for registries built the eager way (`from_config`/`new`).
+    lazy_config: Option<Config>,
+    /// Names registered for lazy construction — a superset of what's been
+    /// materialized so far. Registering a name here does NOT build it;
+    /// [`materialize`](Self::materialize) builds (and caches) on first use.
+    lazy_names: Vec<String>,
+    /// Cache of backends materialized on demand, keyed by the *config*
+    /// name (e.g. a `named_backends` key like `"local-a"`), which may
+    /// differ from `Backend::name()` (the backend *kind*).
+    lazy_cache: std::sync::Mutex<HashMap<String, Arc<dyn Backend>>>,
 }
 
 impl std::fmt::Debug for BackendRegistry {
@@ -142,6 +154,116 @@ impl BackendRegistry {
             backends,
             default: name,
             azure_auth: None,
+            lazy_config: None,
+            lazy_names: Vec::new(),
+            lazy_cache: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register backend names for on-demand (lazy) construction, without
+    /// building any of them.
+    ///
+    /// Used for multi-vault workspaces: a workspace may attach vaults on
+    /// several backends (e.g. `azure` + a named `aws-east` entry), but a
+    /// command that only touches one of them must never authenticate the
+    /// others. `names` may be built-in kind names (`"azure"`, `"local"`,
+    /// `"aws"`) or `named_backends` keys — [`materialize`](Self::materialize)
+    /// resolves either. This never fails: registration is pure bookkeeping;
+    /// construction errors surface only when a name is actually
+    /// materialized.
+    pub fn with_lazy(config: &Config, names: &[String]) -> Result<Self, BackendError> {
+        Ok(Self {
+            backends: HashMap::new(),
+            default: "",
+            azure_auth: None,
+            lazy_config: Some(config.clone()),
+            lazy_names: names.to_vec(),
+            lazy_cache: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Get-or-construct a backend by name. The first call to materialize a
+    /// given `name` builds it (and any auth it requires); later calls
+    /// return the same cached `Arc`. Errors name the backend that failed.
+    ///
+    /// `name` must be one registered via [`with_lazy`](Self::with_lazy) (or
+    /// already present as this registry's eagerly-built backend) —
+    /// otherwise this returns `Err` without attempting construction.
+    pub fn materialize(&self, name: &str) -> Result<Arc<dyn Backend>, BackendError> {
+        // Fast path: already an eagerly-built backend (the degenerate,
+        // single-backend registry case).
+        if let Some(b) = self.backends.get(name) {
+            return Ok(b.clone());
+        }
+
+        if !self.lazy_names.iter().any(|n| n == name) {
+            return Err(BackendError::Internal(format!(
+                "backend '{name}' is not attached to this workspace"
+            )));
+        }
+
+        let mut cache = self
+            .lazy_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(b) = cache.get(name) {
+            return Ok(b.clone());
+        }
+
+        let config = self.lazy_config.as_ref().ok_or_else(|| {
+            BackendError::Internal(
+                "lazy registry has no config snapshot to construct backends from".into(),
+            )
+        })?;
+
+        let backend = Self::construct_named(name, config)?;
+        cache.insert(name.to_string(), backend.clone());
+        Ok(backend)
+    }
+
+    /// Construct a single backend instance by its registry name (either a
+    /// `named_backends` key or a built-in kind name), used by
+    /// [`materialize`](Self::materialize).
+    fn construct_named(name: &str, config: &Config) -> Result<Arc<dyn Backend>, BackendError> {
+        if let Some(entry) = config.named_backends.get(name) {
+            return match Self::from_named_entry(name, entry) {
+                Ok(registry) => Ok(registry.backends[registry.default].clone()),
+                Err(e) => Err(e),
+            };
+        }
+
+        let kind: BackendKind = name
+            .parse()
+            .map_err(|e: String| BackendError::Internal(e))?;
+
+        match kind {
+            BackendKind::Azure => {
+                let auth = Self::create_azure_auth_provider(config)?;
+                let backend = super::azure::AzureBackend::new(config, auth)?;
+                Ok(Arc::new(backend))
+            }
+            BackendKind::Local => {
+                let backend = super::local::LocalBackend::new(config.local.as_ref())?;
+                Ok(Arc::new(backend))
+            }
+            #[cfg(feature = "aws")]
+            BackendKind::Aws => {
+                let aws_cfg = config.aws.as_ref().ok_or_else(|| {
+                    BackendError::Internal(
+                        "[aws] config block missing — set backend = \"aws\" with [aws] block"
+                            .into(),
+                    )
+                })?;
+                let backend = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))
+                })?;
+                Ok(Arc::new(backend))
+            }
+            #[cfg(not(feature = "aws"))]
+            BackendKind::Aws => Err(BackendError::Internal(
+                "AWS backend not compiled in: rebuild with --features aws".into(),
+            )),
         }
     }
 
@@ -275,5 +397,122 @@ mod tests {
             err_str.contains("[aws]") || err_str.contains("aws"),
             "got: {err_str}"
         );
+    }
+
+    fn two_local_backends_config(tmp: &tempfile::TempDir) -> Config {
+        use crate::config::settings::{LocalConfig, NamedBackendEntry};
+        use std::collections::HashMap;
+
+        let mut named_backends = HashMap::new();
+        named_backends.insert(
+            "local-a".to_string(),
+            NamedBackendEntry::Local(LocalConfig {
+                store_path: Some(tmp.path().join("store-a").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key-a.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+        );
+        named_backends.insert(
+            "local-b".to_string(),
+            NamedBackendEntry::Local(LocalConfig {
+                store_path: Some(tmp.path().join("store-b").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key-b.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+        );
+
+        Config {
+            named_backends,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn materialize_constructs_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = two_local_backends_config(&tmp);
+        let registry =
+            BackendRegistry::with_lazy(&config, &["local-a".to_string(), "local-b".to_string()])
+                .expect("registration must not error");
+
+        let first = registry
+            .materialize("local-a")
+            .expect("first materialize must succeed");
+        let second = registry
+            .materialize("local-a")
+            .expect("second materialize must succeed");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "materialize must return the same cached Arc on repeated calls"
+        );
+    }
+
+    #[test]
+    fn materialize_unknown_name_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = two_local_backends_config(&tmp);
+        let registry =
+            BackendRegistry::with_lazy(&config, &["local-a".to_string()]).expect("must register");
+        let result = registry.materialize("does-not-exist");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lazy_never_constructs_unreferenced_backend() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // `with_lazy` only records names — it must never dispatch into
+        // backend construction at registration time. If it did, this
+        // config (named_backends only; no top-level `[azure]`/credential
+        // setup at all) would be a reasonable place for that to blow up.
+        // It doesn't, because `with_lazy` never calls `construct_named`.
+        let config = two_local_backends_config(&tmp);
+        let registry =
+            BackendRegistry::with_lazy(&config, &["azure".to_string(), "local-b".to_string()])
+                .expect("registering azure + local-b must not construct either eagerly");
+
+        // Touching only "local-b" must succeed and must not require ever
+        // calling materialize("azure") — the command-level guarantee this
+        // registry API exists to provide (a command touching only AWS/local
+        // vaults in a workspace must never authenticate Azure).
+        let local_b = registry.materialize("local-b");
+        assert!(
+            local_b.is_ok(),
+            "local-b must materialize: {:?}",
+            local_b.err()
+        );
+
+        // The "azure" name is registered but was never referenced above,
+        // and nothing in this test touched Azure auth/config — the whole
+        // point of lazy construction is that "registered" and "built" are
+        // separate steps, so it is never even attempted here.
+    }
+
+    #[test]
+    fn materialize_falls_back_to_eager_backend_map() {
+        // A registry built the eager way (`new`/`from_config`) should still
+        // answer `materialize` for its single active backend name, since
+        // callers of the workspace resolver shouldn't need to special-case
+        // "eager vs lazy" registries.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            backend: Some("local".to_string()),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+            ..Default::default()
+        };
+        let registry = BackendRegistry::from_config(&config).expect("must build");
+        let materialized = registry
+            .materialize("local")
+            .expect("eager backend must be materializable by name");
+        assert_eq!(materialized.name(), "local");
     }
 }

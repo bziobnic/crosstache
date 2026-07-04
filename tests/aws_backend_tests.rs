@@ -1238,3 +1238,73 @@ async fn native_rotate_without_lambda_explains_how_to_configure_one() {
         "hint should mention the rotation Lambda flag: {msg}"
     );
 }
+
+// --- multi-vault workspaces: lazy multi-backend construction (Phase A, Task 2) ---
+
+/// A workspace command touching only an AWS-backed vault must never
+/// construct/authenticate the Azure backend. `BackendRegistry::with_lazy`
+/// only records backend names; `materialize` builds on first use. This
+/// config has no `[azure]` credential setup at all — if registration (or
+/// materializing the AWS entry) accidentally dispatched into Azure
+/// construction, it would surface here.
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_touching_only_aws_never_builds_azure() {
+    use crosstache::backend::BackendRegistry;
+    use crosstache::config::settings::{AwsConfig, Config, NamedBackendEntry};
+    use std::collections::HashMap;
+
+    let mut named_backends = HashMap::new();
+    named_backends.insert(
+        "aws-mock".to_string(),
+        NamedBackendEntry::Aws(AwsConfig {
+            region: Some("us-east-1".to_string()),
+            profile: None,
+            // No real AWS calls are made in this test — endpoint_url only
+            // needs to be syntactically present so client construction
+            // doesn't reach for real credentials at build time.
+            endpoint_url: Some("http://127.0.0.1:1".to_string()),
+            default_vault: Some("default".into()),
+            s3_bucket: None,
+        }),
+    );
+
+    let config = Config {
+        named_backends,
+        // Deliberately invalid vault name (Azure Key Vault names forbid
+        // underscores/`!`): `AzureBackend::new` validates it eagerly and
+        // errors before ever touching auth. "Materialize succeeded" vs.
+        // "no real credentials were present" are indistinguishable on their
+        // own (the Azure SDK resolves credentials lazily — a prior probe in
+        // this file confirmed a credential-less config still constructs
+        // successfully), but "this vault name is invalid" is deterministic
+        // and construction-time-only, which is what lets the assertion
+        // below actually prove something.
+        default_vault: "not_a_valid_vault_name!".to_string(),
+        ..Default::default()
+    };
+
+    let registry =
+        BackendRegistry::with_lazy(&config, &["azure".to_string(), "aws-mock".to_string()])
+            .expect("registering azure + aws-mock must not construct either eagerly");
+
+    let materialized = registry.materialize("aws-mock");
+    assert!(
+        materialized.is_ok(),
+        "aws-mock must materialize without touching azure: {:?}",
+        materialized.err()
+    );
+    // "azure" was registered but never materialized above — the whole
+    // point of lazy construction is that the two steps are decoupled, so
+    // Azure auth is never attempted for an AWS-only workspace command.
+    //
+    // Pin that decoupling from both directions: explicitly materializing
+    // "azure" on this config DOES fail (proving construction is real and
+    // reachable, not silently skipped/cached-as-ok), independently of the
+    // successful aws-mock materialize just performed above.
+    let azure_result = registry.materialize("azure");
+    assert!(
+        azure_result.is_err(),
+        "azure should fail to construct against an invalid vault name, proving construction \
+         is real (not a no-op) and decoupled from the successful aws-mock materialize above"
+    );
+}

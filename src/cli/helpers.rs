@@ -1,9 +1,10 @@
 //! Shared CLI helper functions (clipboard, token parsing, random generation, formatting).
 
-use crate::backend::{BackendKind, BackendRegistry};
+use crate::backend::{Backend, BackendKind, BackendRegistry};
 use crate::cli::commands::CharsetType;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Returns `true` if a backend registry is available.
@@ -99,6 +100,39 @@ pub(crate) async fn resolve_vault_for_trait(
     }
 
     Ok("default".to_string())
+}
+
+/// Resolve `(backend, vault_name, path)` for a raw CLI secret-name argument,
+/// honoring an active multi-vault workspace when one exists.
+///
+/// **No workspace ⇒ byte-identical**: returns `(registry.active_arc(),
+/// resolve_vault_for_trait(...), raw.to_string())` — exactly what every
+/// `get`/`set` call site did before workspaces existed. A workspace is only
+/// consulted (and only then does resolution behave any differently) when
+/// [`crate::workspace::resolve_workspace`] returns `Some`.
+///
+/// With a workspace: builds a lazy multi-backend registry scoped to just
+/// this workspace's attached backends (so a command touching one backend
+/// never constructs another) and delegates to
+/// [`crate::workspace::resolve_secret_target`] for the mode-specific
+/// (`Read` searches, `Write` never searches) resolution.
+pub(crate) async fn resolve_workspace_or_default(
+    raw: &str,
+    config: &Config,
+    registry: &BackendRegistry,
+    mode: crate::workspace::TargetMode,
+) -> Result<(Arc<dyn Backend>, String, String)> {
+    if let Some(ws) = crate::workspace::resolve_workspace(config).await? {
+        let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+        let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
+            .map_err(|e| CrosstacheError::config(e.to_string()))?;
+        let (target, path) =
+            crate::workspace::resolve_secret_target(raw, &ws, &ws_registry, mode).await?;
+        Ok((target.backend, target.entry.vault, path))
+    } else {
+        let vault_name = resolve_vault_for_trait(config, Some(registry)).await?;
+        Ok((registry.active_arc(), vault_name, raw.to_string()))
+    }
 }
 
 /// Decide whether a destructive operation may proceed, prompting when possible.

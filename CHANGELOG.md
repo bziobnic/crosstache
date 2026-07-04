@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Multi-vault workspaces (preview) — Phase A: workspace core (`xv cx add`, colon addressing, default-vault writes).** Attach several vaults, potentially on different backends, so they behave like one workspace: `xv cx add <vault> [--backend] [--as alias] [--default] [--local] [--force]` attaches a vault (alias defaults to the vault name, backend to the active one, the first attach becomes the default, a vault-exists probe runs unless `--force`); `xv cx rm <alias>` detaches one (errors removing the default unless it's the last entry, in which case the workspace is deleted and single-vault behavior resumes); `xv cx default <alias>` changes the write target; `xv cx ls` lists attached vaults (alias, backend, vault, default marker, source). `cx` is now a visible alias of `context`. Colon addressing (`alias:path`, e.g. `xv get work:DB_PASSWORD`) qualifies a secret with its vault; an exact secret name always wins over alias interpretation.
+  - **Reads search, writes don't, on every secret verb.** `xv get`/`xv history`/`xv rollback` on an unqualified name search every attached vault — a unique match resolves, no match is the normal not-found error, and two or more matches error with the new `xv-ambiguous-secret` code (exit `13`), listing every qualified `alias:name` form. `xv set`, `xv update`, `xv rotate` (including `--native`), `xv delete` (including `--group`), `xv restore`, and `xv purge` never search on an unqualified name — every one of them always targets the workspace's default vault; qualify with `alias:name` to reach another attached vault. Bulk `set` (`xv set KEY=val KEY2=val2`) resolves each `KEY=value` pair independently, so a mix of unqualified (→ default vault) and `alias:KEY=value` (→ that vault) pairs works in one command.
+  - A `.xv.toml` `[env.<name>] vaults = [...]` block, when present, REPLACES the context-store workspace entirely for that project (no merging); because of that replacement, `xv cx add`/`rm`/`default` now ERROR (exit `3`, naming the `.xv.toml` path and env) instead of silently mutating a context-store workspace the project overlay would just override — there is no override flag in v1, editing `.xv.toml` directly is the explicit path. **No workspace attached ⇒ every command above is byte-identical to today** (pinned by a byte-golden test comparing full stdout/stderr) — the feature is entirely opt-in via `xv cx add`. Backend construction is lazy: a command that only touches one attached backend never authenticates the others.
+  - **Not yet workspace-aware in Phase A** (tracked for later phases): `ls`/`find` (union view across attached vaults, plus per-vault capability gating), alias support in `xv://` URIs/templates/`mv`/`copy`, and the TUI vault pane. `xv file`/blob storage is single-vault as today and stays out of scope for the whole workspaces feature per the design (workspaces only span secrets).
+
+### Changed
+
+- **`xv context ls` / `xv cx ls` now lists the attached multi-vault workspace** (alias, backend, vault, default marker, source), not recent vault contexts. Recent contexts are still available, unabbreviated, via `xv context list`. This follows the approved multi-vault workspaces spec, which specifies `xv cx ls` for the workspace listing — `cx` and `context` share one subcommand tree, so the `ls` alias could only mean one or the other.
+
 ## v0.19.3 — Record write-path integrity and types-only .xv.toml fixes (2026-07-04)
 
 ### Fixed

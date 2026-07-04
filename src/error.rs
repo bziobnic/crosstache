@@ -18,6 +18,18 @@ fn format_env_not_defined(name: &str, available: &[String]) -> String {
     }
 }
 
+/// Render the `AmbiguousSecret` message: names every workspace alias the
+/// secret was found in and gives the qualified `alias:name` form for each,
+/// per spec §Read semantics.
+fn format_ambiguous_secret(name: &str, candidates: &[String]) -> String {
+    let qualified: Vec<String> = candidates.iter().map(|a| format!("{a}:{name}")).collect();
+    format!(
+        "{name} exists in {} — qualify as {}",
+        candidates.join(", "),
+        qualified.join(" or ")
+    )
+}
+
 /// Main error type for crosstache operations
 #[derive(Debug, Error)]
 pub enum CrosstacheError {
@@ -126,6 +138,14 @@ pub enum CrosstacheError {
         cause: Box<CrosstacheError>,
     },
 
+    #[error("{}", format_ambiguous_secret(name, candidates))]
+    AmbiguousSecret {
+        name: String,
+        /// Workspace aliases where `name` was found, in a stable order
+        /// (matches the workspace's entry order).
+        candidates: Vec<String>,
+    },
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -164,6 +184,7 @@ impl CrosstacheError {
             Self::Upgrade(_) => "xv-upgrade",
             Self::ScanLeakDetected { .. } => "xv-scan-leak-detected",
             Self::RenameIncomplete { .. } => "xv-rename-incomplete",
+            Self::AmbiguousSecret { .. } => "xv-ambiguous-secret",
             Self::Unknown(_) => "xv-unknown",
         }
     }
@@ -194,6 +215,10 @@ impl CrosstacheError {
             Self::Conflict(_) => 41,
             Self::RateLimited(_) => 42,
             Self::RenameIncomplete { .. } => 43,
+
+            // 10–19 — secret-family errors (workspace ambiguity is a
+            // read-resolution failure, same family as "secret not found").
+            Self::AmbiguousSecret { .. } => 13,
 
             // 50–59 — policy/scan findings
             Self::ScanLeakDetected { .. } => 50,
@@ -281,6 +306,16 @@ impl CrosstacheError {
 
     pub fn scan_leak_detected(count: usize) -> Self {
         Self::ScanLeakDetected { count }
+    }
+
+    /// Build the `AmbiguousSecret` variant (exit 13, `xv-ambiguous-secret`):
+    /// an unqualified read matched `name` in two or more attached workspace
+    /// vaults. `candidates` are the aliases it was found in.
+    pub fn ambiguous_secret<S: Into<String>>(name: S, candidates: Vec<String>) -> Self {
+        Self::AmbiguousSecret {
+            name: name.into(),
+            candidates,
+        }
     }
 
     pub fn permission_denied<S: Into<String>>(msg: S) -> Self {
@@ -599,6 +634,13 @@ mod tests {
             ),
             (CrosstacheError::unknown("x"), "xv-unknown"),
             (
+                CrosstacheError::ambiguous_secret(
+                    "DB_PASSWORD",
+                    vec!["work".into(), "stage".into()],
+                ),
+                "xv-ambiguous-secret",
+            ),
+            (
                 CrosstacheError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, "x")),
                 "xv-io",
             ),
@@ -633,6 +675,10 @@ mod tests {
         // 10–19 — not-found family
         assert_eq!(CrosstacheError::secret_not_found("x").exit_code(), 10);
         assert_eq!(CrosstacheError::vault_not_found("x").exit_code(), 11);
+        assert_eq!(
+            CrosstacheError::ambiguous_secret("x", vec!["a".into(), "b".into()]).exit_code(),
+            13
+        );
 
         // 20–29 — auth/permission
         assert_eq!(CrosstacheError::authentication("x").exit_code(), 20);
@@ -662,6 +708,18 @@ mod tests {
 
         // 1 — unknown / catch-all
         assert_eq!(CrosstacheError::unknown("x").exit_code(), 1);
+    }
+
+    #[test]
+    fn ambiguous_secret_message_lists_qualified_forms() {
+        let err =
+            CrosstacheError::ambiguous_secret("DB_PASSWORD", vec!["work".into(), "stage".into()]);
+        let msg = err.to_string();
+        assert!(msg.contains("DB_PASSWORD exists in work, stage"), "{msg}");
+        assert!(msg.contains("work:DB_PASSWORD"), "{msg}");
+        assert!(msg.contains("stage:DB_PASSWORD"), "{msg}");
+        assert_eq!(err.code(), "xv-ambiguous-secret");
+        assert_eq!(err.exit_code(), 13);
     }
 
     #[test]
@@ -951,6 +1009,12 @@ mod tests {
                 category: "error variant",
                 name: "RenameIncomplete",
                 fields: &["source", "destination", "vault", "cause"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "AmbiguousSecret",
+                fields: &["name", "candidates"],
                 allowed_value_like_fields: &[],
             },
             SecuritySurface {

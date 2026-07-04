@@ -30,6 +30,7 @@ xv scan install                        # block secret leaks before commit
 - [Secret injection — `xv run`](#secret-injection--xv-run)
 - [Template rendering — `xv inject`](#template-rendering--xv-inject)
 - [Project env profiles — `.xv.toml`](#project-env-profiles--xvtoml)
+- [Multi-vault workspaces (preview)](#multi-vault-workspaces-preview)
 - [Vault management](#vault-management)
 - [Cross-vault operations — diff, copy, move](#cross-vault-operations--diff-copy-move)
 - [Files (blob storage)](#files-blob-storage)
@@ -967,6 +968,43 @@ touch /code/monorepo/services/checkout/.xv.boundary
 To **disable walk-up entirely**, set `XV_NO_PARENT_CONFIG=1`.
 
 See [`docs/env-profiles.md`](docs/env-profiles.md) for the full reference.
+
+---
+
+## Multi-vault workspaces (preview)
+
+> Phase A of the multi-vault workspaces design
+> (`docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md`).
+> Union `ls`/`find` (a single merged listing across attached vaults, with
+> per-vault capability gating), alias support in `xv://` URIs/templates/
+> `mv`/`copy`, and the TUI workspace pane are not shipped yet. `xv file`/blob
+> storage is out of scope for the whole workspaces feature (per the design)
+> and stays single-vault regardless of phase.
+
+Attach several vaults — potentially on different backends — so they behave like one workspace instead of juggling `--vault`/`--backend` flags:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+xv cx add personal-store --backend local --as personal
+xv cx ls
+```
+
+- **Colon addressing.** `alias:path` qualifies a secret with its vault (`work:app/db/pass`); a literal secret name always wins over alias interpretation — on both reads (checked across every attached vault) and writes (checked in the default vault only, since writes never search elsewhere). This asymmetry has one consequence worth knowing: there's no way to *create* a new literal name like `work:x` via `xv set` once the `work` alias is attached — a qualified write always wins on a fresh secret, so `xv set work:x` targets `work`'s `x`, not a literal `work:x` in the default vault. The exact-name-first rule exists for **pre-existing** secrets (created before the workspace existed, or on the local backend's unrestricted charset), not new ones.
+- **Reads search, writes don't — on every secret verb, not just `get`/`set`.** `xv get`/`xv history`/`xv rollback DB_PASSWORD` search every attached vault on an unqualified name — a unique match resolves, no match is the normal not-found error, and two or more matches error with `xv-ambiguous-secret` (exit `13`), listing every qualified form (`work:DB_PASSWORD` or `personal:DB_PASSWORD`). `xv set`, `xv update`, `xv rotate`, `xv delete` (including `--group`), `xv restore`, and `xv purge` never search — an unqualified name on any of them always targets the workspace's **default** vault. Qualify with `alias:name` to reach another attached vault (e.g. `xv set personal:API_KEY`, `xv delete personal:OLD_KEY --force`). Bulk `set` (`xv set KEY=val KEY2=val2`) resolves each pair independently, so `xv set KEY=val personal:KEY2=val2` writes `KEY` to the default vault and `KEY2` to `personal` in one command.
+- **No workspace attached ⇒ nothing changes.** The feature is entirely opt-in via `xv cx add`; every command above behaves exactly as it did before if you never attach a vault (pinned by a byte-for-byte golden test on `set`/`get`'s full stdout and stderr).
+- **`.xv.toml` overlay.** An env profile may declare `vaults = [...]`, which REPLACES the context-store workspace for that project (no merging):
+
+  ```toml
+  [env.dev]
+  vaults = [
+    { vault = "myproj-dev-kv", backend = "azure", alias = "dev", default = true },
+    { vault = "shared-staging", backend = "aws-east", alias = "stage" },
+  ]
+  ```
+
+  Because that overlay replaces the context workspace entirely, `xv cx add`/`rm`/`default` **error** (exit `3`, naming the `.xv.toml` path and env) when run in a directory governed by one — a context-store mutation there would silently have no effect on what secret commands actually use. There is no override flag in v1: edit `.xv.toml` directly, or run the command outside the project directory. `xv cx ls` stays read-only and always shows the *effective* workspace (with its source column) regardless.
+
+Manage the workspace with `xv cx add/rm/default/ls` (`cx` is a visible alias of `context`); `xv context use` errors pointing at `xv cx default` while a workspace is attached, since the two write-target models don't mix. Note: `xv context ls`/`xv cx ls` now lists the attached workspace, not recent vault contexts — use the unabbreviated `xv context list` for those.
 
 ---
 

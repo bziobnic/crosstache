@@ -59,6 +59,11 @@ pub struct EnvProfile {
     /// Overrides the global config `backend` key but loses to `--backend` CLI flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Multi-vault workspace overlay (spec: multi-vault-workspaces). When
+    /// non-empty, this list REPLACES any context-store workspace for
+    /// commands run under this env — no merging, one source of truth.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vaults: Vec<crate::workspace::WorkspaceEntryConfig>,
 }
 
 /// Validate that a backend value from an env profile is a known backend.
@@ -876,6 +881,39 @@ resource_group = "rg"
     #[test]
     fn resolve_effective_backend_falls_back_to_azure() {
         assert_eq!(resolve_effective_backend(None, None, None), "azure");
+    }
+
+    #[test]
+    fn project_vaults_block_parses() {
+        let toml = r#"
+[env.dev]
+vault = "myproj-dev-kv"
+vaults = [
+  { vault = "myproj-dev-kv", backend = "azure", alias = "dev", default = true },
+  { vault = "shared-staging", backend = "aws-east", alias = "stage" },
+]
+"#;
+        let cfg = parse_str(toml).expect("must parse");
+        let dev = cfg.envs.get("dev").unwrap();
+        assert_eq!(dev.vaults.len(), 2);
+        assert_eq!(dev.vaults[0].vault, "myproj-dev-kv");
+        assert_eq!(dev.vaults[0].backend.as_deref(), Some("azure"));
+        assert_eq!(dev.vaults[0].alias.as_deref(), Some("dev"));
+        assert!(dev.vaults[0].default);
+        assert_eq!(dev.vaults[1].vault, "shared-staging");
+        assert_eq!(dev.vaults[1].backend.as_deref(), Some("aws-east"));
+        assert!(!dev.vaults[1].default);
+    }
+
+    #[test]
+    fn env_profile_vaults_defaults_to_empty() {
+        let toml = r#"
+[env.dev]
+vault = "v"
+resource_group = "rg"
+"#;
+        let cfg = parse_str(toml).expect("must parse");
+        assert!(cfg.envs.get("dev").unwrap().vaults.is_empty());
     }
 
     #[test]
