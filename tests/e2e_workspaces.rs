@@ -1668,3 +1668,342 @@ fn no_workspace_write_and_read_verbs_unchanged() {
     env.ok(&["delete", "GUARD_ME", "--force"]);
     env.ok(&["purge", "GUARD_ME", "--force"]);
 }
+
+// ---------------------------------------------------------------------------
+// Union `ls` (Phase B, Task 7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ls_union_shows_vault_column_when_multi() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:WORK_SECRET", "--value", "v1"]);
+    env.ok(&["set", "stage:STAGE_SECRET", "--value", "v2"]);
+
+    let out = env.ok(&["ls", "--format", "table"]);
+    assert!(out.contains("Vault"), "expected a Vault column: {out}");
+    assert!(out.contains("WORK_SECRET") && out.contains("work"), "{out}");
+    assert!(
+        out.contains("STAGE_SECRET") && out.contains("stage"),
+        "{out}"
+    );
+}
+
+/// Byte-golden pin (spec §Backward compatibility): a single-entry workspace
+/// must render EXACTLY like the no-workspace path against the same vault —
+/// no VAULT column, identical header/footer text. Reuses the SAME env: the
+/// bare (pre-`cx add`) local backend and `local-a` (post-`cx add`, aliased
+/// "work") both use vault name "default", so their `ls --format table`
+/// output for an identical secret is directly comparable byte-for-byte.
+#[test]
+fn ls_single_vault_output_unchanged() {
+    let env = WorkspaceEnv::new();
+
+    env.ok(&["set", "PINNED_SECRET", "--value", "v1"]);
+    let before = env.ok(&["ls", "--format", "table"]);
+    assert!(
+        !before.contains("Vault") || before.contains("Vault:"),
+        "sanity: no VAULT *column* pre-workspace: {before}"
+    );
+
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:PINNED_SECRET", "--value", "v1"]);
+    let after = env.ok(&["ls", "--format", "table"]);
+
+    assert_eq!(
+        before, after,
+        "single-entry workspace ls output must be byte-identical to the no-workspace path"
+    );
+}
+
+#[test]
+fn ls_union_composes_with_filter_and_type() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:PROD_DB", "--value", "v1"]);
+    env.ok(&["set", "work:DEV_DB", "--value", "v2"]);
+    env.ok(&["set", "stage:PROD_API", "--value", "v3"]);
+    env.ok(&["set", "stage:DEV_API", "--value", "v4"]);
+
+    let out = env.ok(&["ls", "--format", "table", "--filter", "PROD_*"]);
+    assert!(out.contains("PROD_DB"), "{out}");
+    assert!(out.contains("PROD_API"), "{out}");
+    assert!(!out.contains("DEV_DB"), "{out}");
+    assert!(!out.contains("DEV_API"), "{out}");
+}
+
+#[test]
+fn ls_union_pagination_over_merged_set() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:AAA", "--value", "v1"]);
+    env.ok(&["set", "work:BBB", "--value", "v2"]);
+    env.ok(&["set", "stage:CCC", "--value", "v3"]);
+    env.ok(&["set", "stage:DDD", "--value", "v4"]);
+
+    // Merged set (alias-then-name sorted, "stage" < "work" alphabetically):
+    // stage/CCC, stage/DDD, work/AAA, work/BBB. Page 1 of size 2 must be
+    // exactly the first two — pagination over the MERGED set, not per-vault
+    // (which would instead yield the first page from EACH vault, 4 rows
+    // total).
+    let page1 = env.ok(&["ls", "--format", "table", "--page", "1", "--page-size", "2"]);
+    assert!(page1.contains("CCC"), "{page1}");
+    assert!(page1.contains("DDD"), "{page1}");
+    assert!(!page1.contains("AAA"), "{page1}");
+    assert!(!page1.contains("BBB"), "{page1}");
+
+    let page2 = env.ok(&["ls", "--format", "table", "--page", "2", "--page-size", "2"]);
+    assert!(!page2.contains("CCC"), "{page2}");
+    assert!(!page2.contains("DDD"), "{page2}");
+    assert!(page2.contains("AAA"), "{page2}");
+    assert!(page2.contains("BBB"), "{page2}");
+}
+
+/// Any attached vault erroring during a union read must fail the WHOLE
+/// command, naming the vault — no partial unions (spec §Read semantics).
+/// `--force` skips `cx add`'s vault-exists probe, attaching an entry whose
+/// backend name ("ghost-backend") is neither a built-in kind nor a
+/// `named_backends` entry — `materialize` fails the first (and only) time
+/// it's touched.
+#[test]
+fn ls_union_fails_loud_when_vault_unreachable() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "ghost-vault",
+        "--backend",
+        "ghost-backend",
+        "--as",
+        "ghost",
+        "--force",
+    ]);
+    env.ok(&["set", "work:REAL_SECRET", "--value", "v1"]);
+
+    let out = env.err(&["ls", "--format", "table"]);
+    let msg = combined(&out);
+    assert!(
+        msg.contains("ghost"),
+        "must name the unreachable vault/alias: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Union `find` (Phase B, Task 8)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn find_unions_workspace() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:DATABASE_PASSWORD", "--value", "v1"]);
+    env.ok(&["set", "stage:DATABASE_TOKEN", "--value", "v2"]);
+
+    let out = env.ok(&["find", "database"]);
+    assert!(out.contains("work/DATABASE_PASSWORD"), "{out}");
+    assert!(out.contains("stage/DATABASE_TOKEN"), "{out}");
+}
+
+/// `--all-vaults` keeps its existing, documented meaning (every vault the
+/// active backend can list) — a strict superset of the workspace's
+/// attached vaults — and takes priority even with a workspace present.
+/// Here the active backend is the top-level `local` store (a THIRD vault,
+/// not attached to the workspace at all): `--all-vaults` must reach it,
+/// which the union-workspace path alone never would.
+#[test]
+fn find_all_vaults_still_superset() {
+    let env = WorkspaceEnv::new();
+    // Written to the top-level active ("local") backend directly, BEFORE
+    // any workspace is attached — once a workspace exists, an unqualified
+    // write always targets the workspace's default entry instead (spec
+    // §Write semantics: unqualified writes never search, never fall back to
+    // "the top-level active backend"), so this ordering is required to land
+    // the secret in the unattached top-level vault at all.
+    env.ok(&["set", "TOPLEVEL_ONLY", "--value", "v2"]);
+
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&["set", "work:WORKSPACE_ONLY", "--value", "v1"]);
+
+    let workspace_only = env.ok(&["find", "only"]);
+    assert!(
+        workspace_only.contains("WORKSPACE_ONLY"),
+        "{workspace_only}"
+    );
+    assert!(
+        !workspace_only.contains("TOPLEVEL_ONLY"),
+        "workspace union must not see the unattached top-level vault: {workspace_only}"
+    );
+
+    let all_vaults = env.ok(&["find", "only", "--all-vaults"]);
+    assert!(
+        all_vaults.contains("TOPLEVEL_ONLY"),
+        "--all-vaults must reach the top-level vault even with a workspace attached: {all_vaults}"
+    );
+}
+
+#[test]
+fn find_filter_composes_in_union() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:PROD_KEY", "--value", "v1"]);
+    env.ok(&["set", "work:DEV_KEY", "--value", "v2"]);
+    env.ok(&["set", "stage:PROD_TOKEN", "--value", "v3"]);
+
+    let out = env.ok(&["find", "", "--filter", "PROD_*"]);
+    assert!(out.contains("work/PROD_KEY"), "{out}");
+    assert!(out.contains("stage/PROD_TOKEN"), "{out}");
+    assert!(!out.contains("DEV_KEY"), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// `ls --deleted` capability gating in a union workspace (Phase B, Task 9
+// remaining scope)
+// ---------------------------------------------------------------------------
+
+/// Every shipped backend (Azure/local/AWS) supports soft-delete today, so
+/// the actual "skip an incapable vault" branch isn't e2e-drivable (the same
+/// class of limitation documented on `src/workspace/resolve.rs`'s
+/// capability tests; `deleted_list_capability_skip_note` in
+/// `src/cli/secret_ops.rs` unit-tests the note's wording directly). This
+/// instead pins the POSITIVE union path: `--deleted` across two capable
+/// vaults merges both, `alias/`-prefixed.
+#[test]
+fn ls_deleted_unions_capable_vaults_with_alias_prefix() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+    env.ok(&["set", "work:GONE_WORK", "--value", "v1"]);
+    env.ok(&["set", "stage:GONE_STAGE", "--value", "v2"]);
+    env.ok(&["delete", "work:GONE_WORK", "--force"]);
+    env.ok(&["delete", "stage:GONE_STAGE", "--force"]);
+
+    let out = env.ok(&["ls", "--deleted", "--format", "table"]);
+    assert!(out.contains("work/GONE_WORK"), "{out}");
+    assert!(out.contains("stage/GONE_STAGE"), "{out}");
+}

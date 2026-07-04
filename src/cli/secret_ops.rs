@@ -528,7 +528,7 @@ pub(crate) async fn execute_secret_set_direct(
             println!("   Vault: {vault_name}");
             println!("   Version: {}", props.version);
             output::hint(&format!("Verify with 'xv get {}'", props.original_name));
-            invalidate_trait_secret_cache(&config, &vault_name);
+            invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
             return Ok(());
         } else if args.len() == 1 && !args[0].contains('=') {
             // Single secret set. Same workspace-aware resolution as above.
@@ -561,7 +561,7 @@ pub(crate) async fn execute_secret_set_direct(
             println!("   Vault: {vault_name}");
             println!("   Version: {}", props.version);
             output::hint(&format!("Verify with 'xv get {}'", props.original_name));
-            invalidate_trait_secret_cache(&config, &vault_name);
+            invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
             return Ok(());
         } else {
             // Bulk set
@@ -579,12 +579,17 @@ pub(crate) async fn execute_secret_set_direct(
             output::step(&format!("Setting {} secret(s)...", pairs.len()));
             let mut success_count = 0usize;
             let mut error_count = 0usize;
-            // Vaults actually written to, for cache invalidation below — a
-            // bulk set can span more than one workspace entry when
-            // individual keys are alias-qualified (`work:KEY=value`), so a
-            // single `vault_name` from the top of this branch is no longer
-            // sufficient once a workspace is attached.
-            let mut touched_vaults: std::collections::HashSet<String> =
+            // (backend, vault) pairs actually written to, for cache
+            // invalidation below — a bulk set can span more than one
+            // workspace entry when individual keys are alias-qualified
+            // (`work:KEY=value`), so a single `vault_name` from the top of
+            // this branch is no longer sufficient once a workspace is
+            // attached. The backend name travels alongside the vault name
+            // (not just `config.effective_backend_name()`) since two
+            // workspace entries can share a vault NAME on different
+            // backends — invalidating by vault name alone would target the
+            // wrong `(backend, vault)` cache directory.
+            let mut touched_vaults: std::collections::HashSet<(String, String)> =
                 std::collections::HashSet::new();
             for (key, value) in pairs {
                 // Workspace-aware resolution per key (BLOCKER fix): each
@@ -615,11 +620,12 @@ pub(crate) async fn execute_secret_set_direct(
                 // as the single-secret path. (--expires/--not-before are rejected
                 // for bulk above, so they're always None here.)
                 let request = meta.to_secret_request(&resolved_key, Zeroizing::new(value))?;
+                let backend_name = backend.name().to_string();
                 match backend.secrets().set_secret(&key_vault_name, request).await {
                     Ok(props) => {
                         output::success(&format!("  ✓ {}", props.original_name));
                         success_count += 1;
-                        touched_vaults.insert(key_vault_name);
+                        touched_vaults.insert((backend_name, key_vault_name));
                     }
                     Err(e) => {
                         output::warn(&format!("  ✗ {key}: {e}"));
@@ -627,8 +633,8 @@ pub(crate) async fn execute_secret_set_direct(
                     }
                 }
             }
-            for v in &touched_vaults {
-                invalidate_trait_secret_cache(&config, v);
+            for (backend_name, v) in &touched_vaults {
+                invalidate_trait_secret_cache(&config, backend_name, v);
             }
             if error_count > 0 {
                 output::warn(&format!(
@@ -1023,15 +1029,24 @@ fn secret_summary_matches_group(
         .unwrap_or(false)
 }
 
-fn trait_secret_cache_key(vault_name: &str) -> crate::cache::CacheKey {
+fn trait_secret_cache_key(backend_name: &str, vault_name: &str) -> crate::cache::CacheKey {
     crate::cache::CacheKey::SecretsList {
+        backend: backend_name.to_string(),
         vault_name: vault_name.to_string(),
     }
 }
 
-pub(crate) fn invalidate_trait_secret_cache(config: &Config, vault_name: &str) {
+/// Invalidate the secrets-list cache entry for `(backend_name, vault_name)`.
+///
+/// `backend_name` must be the REGISTRY name of the backend actually written
+/// to — the resolved `Backend::name()` (or, with an attached workspace, the
+/// entry's `backend` field) — not necessarily `config.effective_backend_name()`,
+/// which can differ once a workspace write targets a non-default entry. A
+/// mismatch here would invalidate the wrong `(backend, vault)` cache
+/// directory, leaving a stale cached list behind after a write.
+pub(crate) fn invalidate_trait_secret_cache(config: &Config, backend_name: &str, vault_name: &str) {
     let cache_manager = crate::cache::CacheManager::from_config(config);
-    cache_manager.invalidate(&trait_secret_cache_key(vault_name));
+    cache_manager.invalidate(&trait_secret_cache_key(backend_name, vault_name));
 }
 
 fn filter_secret_summaries_for_display(
@@ -1101,7 +1116,7 @@ async fn execute_group_list(
 
     // Same fetch-or-cache flow as `xv ls` (shared CacheKey::SecretsList dataset).
     let cache_manager = CacheManager::from_config(&config);
-    let cache_key = trait_secret_cache_key(&vault_name);
+    let cache_key = trait_secret_cache_key(reg.active().name(), &vault_name);
     let use_cache = cache_manager.is_enabled() && !no_cache;
     let cached = if use_cache {
         cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
@@ -1163,6 +1178,23 @@ async fn execute_group_list(
 }
 
 const SECRET_LIST_NOTE_WRAP_WIDTH: usize = 40;
+
+/// Synthetic, in-memory-only tag key used to carry a workspace entry's alias
+/// through the existing `ls_view::scope_secrets`/sort/render pipeline for
+/// union `ls` (multi-vault workspaces plan, Phase B Task 7). Never written
+/// to a backend and never surfaced under this name in output — every
+/// display path below reads it via [`workspace_alias_of`] and either renders
+/// a VAULT column (table/long views, JSON) or strips it before prefixing
+/// (grid view, `--names-only`). Reusing `SecretSummary.tags` (rather than a
+/// parallel `Vec<(String, SecretSummary)>`) lets union `ls` share every
+/// existing folder-scoping/sort/render helper unchanged.
+const WORKSPACE_ALIAS_TAG: &str = "__xv_workspace_alias";
+
+/// Read back a [`WORKSPACE_ALIAS_TAG`] value stashed by the union `ls` path.
+/// `None` for ordinary (non-workspace or single-vault) listings.
+fn workspace_alias_of(s: &crate::secret::manager::SecretSummary) -> Option<&str> {
+    s.tags.get(WORKSPACE_ALIAS_TAG).map(String::as_str)
+}
 
 #[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
 struct SecretListDisplayRow {
@@ -1234,6 +1266,90 @@ fn format_secret_list_rows_for_human_typed(
         .iter()
         .map(|secret| SecretListDisplayRowTyped {
             name: secret.name.clone(),
+            record_type: secret.tags.get(TYPE_TAG).cloned().unwrap_or_default(),
+            note: secret
+                .note
+                .as_deref()
+                .map(|note| wrap_text_to_width(note, SECRET_LIST_NOTE_WRAP_WIDTH))
+                .unwrap_or_default(),
+            folder: secret.folder.clone().unwrap_or_default(),
+            groups: secret.groups.clone().unwrap_or_default(),
+            updated_on: crate::cli::ls_view::date_portion_for_display(&secret.updated_on),
+        })
+        .collect()
+}
+
+/// Table row shape for union `ls` (workspace with ≥2 attached vaults) —
+/// adds a `Vault` column naming the alias each row came from. Kept as its
+/// own struct (rather than always adding the column to
+/// `SecretListDisplayRow`) so single-vault/no-workspace table output stays
+/// byte-identical (spec §Read semantics: "VAULT column ONLY when the
+/// workspace has ≥2 entries").
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct SecretListDisplayRowVault {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Vault")]
+    vault: String,
+    #[tabled(rename = "Note")]
+    note: String,
+    #[tabled(rename = "Folder")]
+    folder: String,
+    #[tabled(rename = "Groups")]
+    groups: String,
+    #[tabled(rename = "Updated")]
+    updated_on: String,
+}
+
+/// Union `ls` variant of `SecretListDisplayRowTyped`: both the `Vault` and
+/// `Type` columns together, used when a multi-entry workspace's merged
+/// listing contains at least one typed record.
+#[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
+struct SecretListDisplayRowVaultTyped {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Vault")]
+    vault: String,
+    #[tabled(rename = "Type")]
+    record_type: String,
+    #[tabled(rename = "Note")]
+    note: String,
+    #[tabled(rename = "Folder")]
+    folder: String,
+    #[tabled(rename = "Groups")]
+    groups: String,
+    #[tabled(rename = "Updated")]
+    updated_on: String,
+}
+
+fn format_secret_list_rows_for_human_vault(
+    secrets: &[crate::secret::manager::SecretSummary],
+) -> Vec<SecretListDisplayRowVault> {
+    secrets
+        .iter()
+        .map(|secret| SecretListDisplayRowVault {
+            name: secret.name.clone(),
+            vault: workspace_alias_of(secret).unwrap_or_default().to_string(),
+            note: secret
+                .note
+                .as_deref()
+                .map(|note| wrap_text_to_width(note, SECRET_LIST_NOTE_WRAP_WIDTH))
+                .unwrap_or_default(),
+            folder: secret.folder.clone().unwrap_or_default(),
+            groups: secret.groups.clone().unwrap_or_default(),
+            updated_on: crate::cli::ls_view::date_portion_for_display(&secret.updated_on),
+        })
+        .collect()
+}
+
+fn format_secret_list_rows_for_human_vault_typed(
+    secrets: &[crate::secret::manager::SecretSummary],
+) -> Vec<SecretListDisplayRowVaultTyped> {
+    secrets
+        .iter()
+        .map(|secret| SecretListDisplayRowVaultTyped {
+            name: secret.name.clone(),
+            vault: workspace_alias_of(secret).unwrap_or_default().to_string(),
             record_type: secret.tags.get(TYPE_TAG).cloned().unwrap_or_default(),
             note: secret
                 .note
@@ -1410,6 +1526,7 @@ pub(crate) fn display_cached_secret_list(
     names_only: bool,
     type_filter: Option<&str>,
     filter: Option<&str>,
+    show_vault: bool,
 ) -> Result<()> {
     use crate::cli::ls_view::{self, LsEntry};
     use crate::utils::format::TableFormatter;
@@ -1423,16 +1540,38 @@ pub(crate) fn display_cached_secret_list(
     if sort == crate::cli::commands::LsSort::Updated {
         ls_view::sort_secrets_by_updated_desc(&mut scoped.secrets);
         ls_view::sort_secrets_by_updated_desc(&mut scoped.subtree);
+    } else if show_vault {
+        // Union `ls` (spec §Read semantics): "results merge (stable sort:
+        // alias, then name)" — `scope_secrets` already sorted `secrets`/
+        // `subtree` by name alone; re-sort with alias as the primary key
+        // (Rust's slice sort is stable, so ties within the same alias keep
+        // their existing name order).
+        let by_alias_then_name =
+            |a: &crate::secret::manager::SecretSummary,
+             b: &crate::secret::manager::SecretSummary| {
+                workspace_alias_of(a)
+                    .unwrap_or("")
+                    .cmp(workspace_alias_of(b).unwrap_or(""))
+                    .then_with(|| ls_view::display_name(a).cmp(ls_view::display_name(b)))
+            };
+        scoped.secrets.sort_by(by_alias_then_name);
+        scoped.subtree.sort_by(by_alias_then_name);
     }
 
     // Pipe-friendly modes: flat recursive subtree, unchanged schema.
     // Qualification is opt-in via -r (the bare --names-only shape is shipped).
+    // Union listings (show_vault) prefix `alias/` so piped output stays
+    // disambiguated across vaults, mirroring `find`'s vault-prefix style.
     if names_only {
         for s in &scoped.subtree {
-            if recursive {
-                println!("{}", ls_view::qualified_display_name(s, path));
+            let label = if recursive {
+                ls_view::qualified_display_name(s, path)
             } else {
-                println!("{}", ls_view::display_name(s));
+                ls_view::display_name(s).to_string()
+            };
+            match workspace_alias_of(s) {
+                Some(alias) => println!("{alias}/{label}"),
+                None => println!("{label}"),
             }
         }
         return Ok(());
@@ -1452,10 +1591,24 @@ pub(crate) fn display_cached_secret_list(
         if fmt == OutputFormat::Json {
             // JSON output lifts `f.*` tags into a `fields` map and
             // `xv-type` into `record_type` (record-types plan Task 10).
+            // Union listings also carry a `vault` key with the alias.
             let body: Vec<serde_json::Value> = page
                 .items
                 .iter()
-                .map(secret_summary_to_json_with_fields)
+                .map(|s| {
+                    let mut v = secret_summary_to_json_with_fields(s);
+                    if show_vault {
+                        if let serde_json::Value::Object(ref mut map) = v {
+                            map.insert(
+                                "vault".to_string(),
+                                serde_json::Value::String(
+                                    workspace_alias_of(s).unwrap_or_default().to_string(),
+                                ),
+                            );
+                        }
+                    }
+                    v
+                })
                 .collect();
             let output = serde_json::to_string_pretty(&body).map_err(|e| {
                 CrosstacheError::serialization(format!("JSON serialization failed: {e}"))
@@ -1487,7 +1640,11 @@ pub(crate) fn display_cached_secret_list(
             config.template.clone(),
             config.runtime_columns.clone(),
         );
-        formatter.validate_columns::<SecretListDisplayRow>()?;
+        if show_vault {
+            formatter.validate_columns::<SecretListDisplayRowVault>()?;
+        } else {
+            formatter.validate_columns::<SecretListDisplayRow>()?;
+        }
     }
 
     if scoped.subtree.is_empty() {
@@ -1500,7 +1657,11 @@ pub(crate) fn display_cached_secret_list(
                 config.template.clone(),
                 config.runtime_columns.clone(),
             );
-            formatter.validate_columns::<SecretListDisplayRow>()?;
+            if show_vault {
+                formatter.validate_columns::<SecretListDisplayRowVault>()?;
+            } else {
+                formatter.validate_columns::<SecretListDisplayRow>()?;
+            }
         }
         let scope_desc = if !path.is_empty() {
             format!("folder '{path}'")
@@ -1545,13 +1706,25 @@ pub(crate) fn display_cached_secret_list(
         );
         // TYPE column only when at least one listed secret is typed, so an
         // untyped-only listing's table output stays byte-identical to
-        // pre-Task-10 behavior (record-types plan Task 10).
-        if any_secret_typed(&page.items) {
-            let display_rows = format_secret_list_rows_for_human_typed(&page.items);
-            output.push_str(&formatter.format_table(&display_rows)?);
-        } else {
-            let display_rows = format_secret_list_rows_for_human(&page.items);
-            output.push_str(&formatter.format_table(&display_rows)?);
+        // pre-Task-10 behavior (record-types plan Task 10). VAULT column
+        // (this function's own `show_vault`) composes independently.
+        match (show_vault, any_secret_typed(&page.items)) {
+            (true, true) => {
+                let display_rows = format_secret_list_rows_for_human_vault_typed(&page.items);
+                output.push_str(&formatter.format_table(&display_rows)?);
+            }
+            (true, false) => {
+                let display_rows = format_secret_list_rows_for_human_vault(&page.items);
+                output.push_str(&formatter.format_table(&display_rows)?);
+            }
+            (false, true) => {
+                let display_rows = format_secret_list_rows_for_human_typed(&page.items);
+                output.push_str(&formatter.format_table(&display_rows)?);
+            }
+            (false, false) => {
+                let display_rows = format_secret_list_rows_for_human(&page.items);
+                output.push_str(&formatter.format_table(&display_rows)?);
+            }
         }
         output.push('\n');
         let _ = writeln!(
@@ -1592,6 +1765,27 @@ pub(crate) fn display_cached_secret_list(
         .collect()
     } else {
         ls_view::entries_for_display(&scoped)
+    };
+    // Grid/long ls-style views have no tabular column to add a VAULT slot
+    // to — union listings instead prefix `alias/` onto the displayed name,
+    // mirroring `find`'s existing vault-prefix convention (folder entries
+    // are virtual groupings that can span vaults, so they stay unprefixed).
+    let entries: Vec<LsEntry> = if show_vault {
+        entries
+            .into_iter()
+            .map(|e| match e {
+                LsEntry::Secret(mut s) => {
+                    if let Some(alias) = workspace_alias_of(&s) {
+                        let label = ls_view::display_name(&s).to_string();
+                        s.original_name = format!("{alias}/{label}");
+                    }
+                    LsEntry::Secret(s)
+                }
+                other => other,
+            })
+            .collect()
+    } else {
+        entries
     };
     let folder_count = if recursive { 0 } else { scoped.folders.len() };
     let secret_count = entries.len() - folder_count;
@@ -1693,14 +1887,19 @@ pub(crate) async fn execute_deleted_secret_list(
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     use crate::cli::commands::LsSort;
-    use crate::cli::ls_view;
-    use crate::utils::format::TableFormatter;
-    use crate::utils::pagination::{paginate_slice, pagination_footer_text};
-    use std::fmt::Write as _;
 
     // Validate the glob before any backend call.
     if let Some(pattern) = filter.as_deref() {
         crate::utils::helpers::compile_name_glob(pattern)?;
+    }
+
+    // Workspace union path (multi-vault workspaces plan, Phase B Task 9
+    // remaining scope): consulted ONLY when a workspace is attached.
+    if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+        return execute_deleted_secret_list_workspace(
+            ws, pagination, pager, names_only, long, sort, filter, config,
+        )
+        .await;
     }
 
     if !use_trait_path(registry) {
@@ -1746,6 +1945,37 @@ pub(crate) async fn execute_deleted_secret_list(
                 .then_with(|| deleted_display_name(a).cmp(deleted_display_name(b)))
         }),
     }
+
+    display_deleted_secret_list(
+        items,
+        pagination,
+        pager,
+        names_only,
+        long,
+        &vault_name,
+        &config,
+    )
+}
+
+/// Rendering tail of `xv ls --deleted`, shared by the single-vault path
+/// above and the workspace-union path below (multi-vault workspaces plan,
+/// Phase B Task 9) — everything after the candidate `items` are fetched,
+/// glob-filtered, and sorted is identical regardless of how many vaults
+/// they came from.
+#[allow(clippy::too_many_arguments)]
+fn display_deleted_secret_list(
+    items: Vec<crate::secret::manager::DeletedSecretSummary>,
+    pagination: Pagination,
+    pager: bool,
+    names_only: bool,
+    long: bool,
+    vault_name: &str,
+    config: &Config,
+) -> Result<()> {
+    use crate::cli::ls_view;
+    use crate::utils::format::TableFormatter;
+    use crate::utils::pagination::{paginate_slice, pagination_footer_text};
+    use std::fmt::Write as _;
 
     if names_only {
         for s in &items {
@@ -1864,6 +2094,291 @@ pub(crate) async fn execute_deleted_secret_list(
     Ok(())
 }
 
+/// `xv ls --deleted` over every vault attached to a workspace (multi-vault
+/// workspaces plan, Phase B Task 9 remaining scope): per-vault capability
+/// gating, never silent, never a hard failure of the whole view. A vault
+/// whose backend lacks `has_soft_delete` (checked up front via
+/// `capabilities()`, and defensively again via the `Unsupported` error a
+/// backend might still return) is skipped with a stderr note naming
+/// vault+backend; every capable vault's results merge, `alias/`-prefixed
+/// (mirroring `find`'s convention) when the workspace has ≥2 entries.
+/// Stderr note printed when a union `ls --deleted` skips an attached vault
+/// whose backend lacks soft-delete support (spec §Capability differences:
+/// "never silent, never fatal"). Pulled out as its own pure function so the
+/// exact wording is unit-testable without constructing a real backend
+/// lacking `has_soft_delete` — no shipped backend (Azure/local/AWS) lacks
+/// it today, so the skip branch itself isn't e2e-drivable (same class of
+/// limitation documented on the capability tests in
+/// `src/workspace/resolve.rs`).
+fn deleted_list_capability_skip_note(alias: &str, backend_name: &str) -> String {
+    format!("note: '{alias}' ({backend_name}) has no soft-delete; --deleted skipped for it")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_deleted_secret_list_workspace(
+    ws: crate::workspace::Workspace,
+    pagination: Pagination,
+    pager: bool,
+    names_only: bool,
+    long: bool,
+    sort: crate::cli::commands::LsSort,
+    filter: Option<String>,
+    config: Config,
+) -> Result<()> {
+    use crate::cli::commands::LsSort;
+
+    let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+    let ws_registry = BackendRegistry::with_lazy(&config, &backend_names)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+
+    let show_vault = ws.entries.len() >= 2;
+    let mut items: Vec<crate::secret::manager::DeletedSecretSummary> = Vec::new();
+    for entry in &ws.entries {
+        let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
+            CrosstacheError::config(format!(
+                "workspace vault '{}' (backend '{}') is unavailable: {e}",
+                entry.alias, entry.backend
+            ))
+        })?;
+
+        if !backend.capabilities().has_soft_delete {
+            eprintln!(
+                "{}",
+                deleted_list_capability_skip_note(&entry.alias, &entry.backend)
+            );
+            continue;
+        }
+
+        let mut fetched = match backend.secrets().list_deleted_secrets(&entry.vault).await {
+            Ok(items) => items,
+            Err(crate::backend::BackendError::Unsupported(_)) => {
+                eprintln!(
+                    "{}",
+                    deleted_list_capability_skip_note(&entry.alias, &entry.backend)
+                );
+                continue;
+            }
+            Err(e) => {
+                return Err(CrosstacheError::config(format!(
+                    "workspace vault '{}' (backend '{}') failed to list deleted secrets: {e}",
+                    entry.alias, entry.backend
+                )));
+            }
+        };
+
+        if show_vault {
+            for s in &mut fetched {
+                let label = deleted_display_name(s).to_string();
+                s.original_name = format!("{}/{}", entry.alias, label);
+            }
+        }
+        items.extend(fetched);
+    }
+
+    let mut items = filter_deleted_secrets_by_glob(items, filter.as_deref())?;
+
+    match sort {
+        LsSort::Name => items.sort_by(|a, b| deleted_display_name(a).cmp(deleted_display_name(b))),
+        LsSort::Updated => items.sort_by(|a, b| {
+            b.deleted_on
+                .cmp(&a.deleted_on)
+                .then_with(|| deleted_display_name(a).cmp(deleted_display_name(b)))
+        }),
+    }
+
+    let vault_label = if show_vault {
+        format!("workspace ({} vaults attached)", ws.entries.len())
+    } else {
+        ws.entries
+            .first()
+            .map(|e| e.vault.clone())
+            .unwrap_or_default()
+    };
+
+    display_deleted_secret_list(
+        items,
+        pagination,
+        pager,
+        names_only,
+        long,
+        &vault_label,
+        &config,
+    )
+}
+
+/// Union `ls` over every vault attached to a workspace (multi-vault
+/// workspaces plan, Phase B Task 7). Only reached when
+/// [`crate::workspace::resolve_workspace`] returns `Some` — the no-workspace
+/// path in `execute_secret_list_direct` is untouched.
+///
+/// Per vault: materialize its backend (fail loud naming vault+backend on
+/// any error — spec §Read semantics, "no partial unions"), fetch via the
+/// same per-`(backend, vault)` cache key `xv ls` uses in the single-vault
+/// case, apply the same expiry-filter detail-fetch logic, then tag each
+/// `SecretSummary` with its originating alias (`WORKSPACE_ALIAS_TAG`) before
+/// merging into one list. `display_cached_secret_list` handles the rest
+/// (folder scoping, filters, sort, pagination, VAULT column) identically to
+/// the single-vault path, since it doesn't care whether its input came from
+/// one vault or several.
+#[allow(clippy::too_many_arguments)]
+async fn execute_secret_list_workspace(
+    ws: crate::workspace::Workspace,
+    path: String,
+    group: Option<String>,
+    all: bool,
+    expiring: Option<String>,
+    expired: bool,
+    no_cache: bool,
+    pagination: Pagination,
+    pager: bool,
+    names_only: bool,
+    long: bool,
+    recursive: bool,
+    sort: crate::cli::commands::LsSort,
+    type_filter: Option<String>,
+    filter: Option<String>,
+    config: Config,
+) -> Result<()> {
+    use crate::cache::CacheManager;
+
+    let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+    let ws_registry = BackendRegistry::with_lazy(&config, &backend_names)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+
+    let cache_manager = CacheManager::from_config(&config);
+    let use_cache = cache_manager.is_enabled() && !no_cache && expiring.is_none() && !expired;
+
+    let mut merged: Vec<crate::secret::manager::SecretSummary> = Vec::new();
+    for entry in &ws.entries {
+        let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
+            CrosstacheError::config(format!(
+                "workspace vault '{}' (backend '{}') is unavailable: {e}",
+                entry.alias, entry.backend
+            ))
+        })?;
+
+        let cache_key = crate::cache::CacheKey::SecretsList {
+            backend: entry.backend.clone(),
+            vault_name: entry.vault.clone(),
+        };
+
+        let cached = if use_cache {
+            cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
+        } else {
+            None
+        };
+
+        let mut secrets = match cached {
+            Some(secrets) => secrets,
+            None => {
+                let fetched = backend
+                    .secrets()
+                    .list_secrets(&entry.vault, None)
+                    .await
+                    .map_err(|e| {
+                        CrosstacheError::config(format!(
+                            "workspace vault '{}' (backend '{}') failed to list secrets: {e}",
+                            entry.alias, entry.backend
+                        ))
+                    })?;
+                if cache_manager.is_enabled() && !no_cache {
+                    cache_manager.set(&cache_key, &fetched);
+                }
+                fetched
+            }
+        };
+
+        // Expiry filtering: same per-secret detail-fetch logic as the
+        // single-vault path (`execute_secret_list_direct`), scoped to this
+        // entry's own backend/vault. A per-secret fetch failure here is a
+        // warning (matching the single-vault behavior), not a whole-union
+        // failure — only the initial `list_secrets`/`materialize` calls
+        // above are fail-loud per spec §Read semantics.
+        if expired || expiring.is_some() {
+            use crate::utils::datetime::{is_expired, is_expiring_within};
+
+            let display_candidates =
+                filter_secret_summaries_for_display(secrets, group.as_deref(), all);
+            let mut filtered_secrets = Vec::new();
+            for secret_summary in display_candidates {
+                match backend
+                    .secrets()
+                    .get_secret(&entry.vault, &secret_summary.name, false)
+                    .await
+                {
+                    Ok(secret_props) => {
+                        let should_include = if expired {
+                            is_expired(secret_props.expires_on)
+                        } else if let Some(ref duration) = expiring {
+                            match is_expiring_within(secret_props.expires_on, duration) {
+                                Ok(is_exp) => is_exp,
+                                Err(e) => {
+                                    eprintln!("Warning: Invalid duration '{}': {}", duration, e);
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        };
+                        if should_include {
+                            filtered_secrets.push(secret_summary);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to get details for secret '{}': {}",
+                            secret_summary.name, e
+                        );
+                    }
+                }
+            }
+            secrets = filtered_secrets;
+        }
+
+        for s in &mut secrets {
+            s.tags
+                .insert(WORKSPACE_ALIAS_TAG.to_string(), entry.alias.clone());
+        }
+        merged.extend(secrets);
+    }
+
+    let show_vault = ws.entries.len() >= 2;
+    let vault_label = if show_vault {
+        format!("workspace ({} vaults attached)", ws.entries.len())
+    } else {
+        // Single-entry workspace: no VAULT column, and the header/footer
+        // "vault '<name>'" line matches what a no-workspace `ls` against
+        // that same vault would show.
+        ws.entries[0].vault.clone()
+    };
+
+    display_cached_secret_list(
+        merged,
+        if expired || expiring.is_some() {
+            None
+        } else {
+            group
+        },
+        if expired || expiring.is_some() {
+            true
+        } else {
+            all
+        },
+        &path,
+        long,
+        recursive,
+        sort,
+        pagination,
+        pager,
+        &vault_label,
+        &config,
+        names_only,
+        type_filter.as_deref(),
+        filter.as_deref(),
+        show_vault,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_list_direct(
     path: String,
@@ -1888,6 +2403,33 @@ pub(crate) async fn execute_secret_list_direct(
         crate::utils::helpers::compile_name_glob(pattern)?;
     }
 
+    // Workspace union path (multi-vault workspaces plan, Phase B Task 7):
+    // consulted ONLY when a workspace is attached — `resolve_workspace`
+    // returns `None` for the degenerate (no-workspace) case, which falls
+    // straight through to the untouched trait-path code below, keeping it
+    // byte-identical to pre-workspace `ls` output.
+    if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+        return execute_secret_list_workspace(
+            ws,
+            path,
+            group,
+            all,
+            expiring,
+            expired,
+            no_cache,
+            pagination,
+            pager,
+            names_only,
+            long,
+            recursive,
+            sort,
+            type_filter,
+            filter,
+            config,
+        )
+        .await;
+    }
+
     // ── Trait-based path (all backends) ───────────────────────────────
     if use_trait_path(registry) {
         use crate::cache::CacheManager;
@@ -1895,7 +2437,7 @@ pub(crate) async fn execute_secret_list_direct(
         let reg = registry.expect("use_trait_path guarantees Some");
         let vault_name = resolve_vault_for_trait(&config, registry).await?;
         let cache_manager = CacheManager::from_config(&config);
-        let cache_key = trait_secret_cache_key(&vault_name);
+        let cache_key = trait_secret_cache_key(reg.active().name(), &vault_name);
         let use_cache = cache_manager.is_enabled() && !no_cache;
 
         // Try cache (skip for expiry filters — they need per-secret API calls)
@@ -1918,6 +2460,7 @@ pub(crate) async fn execute_secret_list_direct(
                     names_only,
                     type_filter.as_deref(),
                     filter.as_deref(),
+                    false,
                 );
             }
         }
@@ -2005,6 +2548,7 @@ pub(crate) async fn execute_secret_list_direct(
             names_only,
             type_filter.as_deref(),
             filter.as_deref(),
+            false,
         );
     }
 
@@ -2063,7 +2607,7 @@ pub(crate) async fn execute_secret_delete_direct(
                     .await?;
                 output::success(&format!("Deleted '{}'", s.name));
             }
-            invalidate_trait_secret_cache(&config, &vault_name);
+            invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
         } else if let Some(secret_name) = name {
             // Workspace-aware resolution (unqualified → default vault, never
             // searched; `alias:name` targets that vault directly). No
@@ -2085,7 +2629,7 @@ pub(crate) async fn execute_secret_delete_direct(
                 .delete_secret(&vault_name, &resolved_name)
                 .await?;
             output::success(&format!("Successfully deleted secret '{resolved_name}'"));
-            invalidate_trait_secret_cache(&config, &vault_name);
+            invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
         } else {
             return Err(CrosstacheError::invalid_argument(
                 "Either secret name or --group must be specified",
@@ -2273,7 +2817,7 @@ pub(crate) async fn execute_secret_rollback_direct(
             props.original_name
         ));
         // Invalidate the secrets list cache for the resolved vault
-        invalidate_trait_secret_cache(&config, &vault_name);
+        invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
         return Ok(());
     }
 
@@ -2319,7 +2863,14 @@ async fn execute_secret_rollback_legacy(
     };
     if let Some(vault_name) = vault_name {
         let cache_manager = crate::cache::CacheManager::from_config(&config);
-        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+        // `execute_secret_rollback_legacy` only ever runs for an Azure
+        // target (dispatched when the resolved backend is Azure, or as the
+        // no-registry fallback, which is Azure-only) — backend is always
+        // "azure" here.
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name,
+        });
     }
 
     Ok(())
@@ -2377,7 +2928,10 @@ pub(crate) async fn execute_secret_rotate_direct(
 
     // Invalidate the secrets list cache for the resolved vault
     let cache_manager = crate::cache::CacheManager::from_config(&config);
-    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+    cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        backend: local_registry.active().name().to_string(),
+        vault_name,
+    });
 
     Ok(())
 }
@@ -2473,7 +3027,7 @@ async fn execute_secret_rotate_native(
     ));
 
     // Invalidate the secrets list cache for the resolved vault
-    invalidate_trait_secret_cache(&config, &vault_name);
+    invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
 
     Ok(())
 }
@@ -2824,7 +3378,7 @@ async fn apply_record_field_changes(
         .secrets()
         .update_secret(vault_name, name, request)
         .await?;
-    invalidate_trait_secret_cache(config, vault_name);
+    invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
     Ok(props)
 }
 
@@ -2999,7 +3553,7 @@ async fn execute_record_type_conversion(
         "Successfully converted '{}' to type '{}'",
         props.original_name, record_type.name
     ));
-    invalidate_trait_secret_cache(config, vault_name);
+    invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
     Ok(())
 }
 
@@ -3107,7 +3661,7 @@ async fn execute_record_untype(
         "Successfully untyped '{}' (was type '{type_name}')",
         props.original_name
     ));
-    invalidate_trait_secret_cache(config, vault_name);
+    invalidate_trait_secret_cache(config, reg.active().name(), vault_name);
     Ok(())
 }
 
@@ -3436,7 +3990,7 @@ pub(crate) async fn execute_secret_update_direct(
             // The in-place update just mutated state (value/tags/groups/etc.);
             // invalidate immediately so a rename-phase failure below can't
             // leave a stale cached list behind.
-            invalidate_trait_secret_cache(&config, &vault_name);
+            invalidate_trait_secret_cache(&config, reg.active().name(), &vault_name);
         }
 
         if let Some(ref new_name) = rename {
@@ -3448,7 +4002,7 @@ pub(crate) async fn execute_secret_update_direct(
             // Rename may mutate state even when it errors (e.g. RenameIncomplete:
             // the new name was created but deleting the old one failed), so
             // invalidate unconditionally before inspecting the result.
-            invalidate_trait_secret_cache(&config, &vault_name);
+            invalidate_trait_secret_cache(&config, reg.active().name(), &vault_name);
             match rename_result {
                 Ok(props) => {
                     output::success(&format!(
@@ -3549,7 +4103,7 @@ pub(crate) async fn execute_secret_purge_direct(
         backend.secrets().purge_secret(&vault_name, name).await?;
         output::success(&format!("Successfully purged secret '{name}'"));
         // Invalidate the secrets list cache for the resolved vault
-        invalidate_trait_secret_cache(&config, &vault_name);
+        invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
         return Ok(());
     }
 
@@ -3589,7 +4143,11 @@ async fn execute_secret_purge_legacy(
     };
     if let Some(vault_name) = vault_name {
         let cache_manager = crate::cache::CacheManager::from_config(&config);
-        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+        // Azure-legacy-only path — backend is always "azure" here.
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name,
+        });
     }
 
     Ok(())
@@ -3636,7 +4194,7 @@ pub(crate) async fn execute_secret_restore_direct(
             props.original_name
         ));
         // Invalidate the secrets list cache for the resolved vault
-        invalidate_trait_secret_cache(&config, &vault_name);
+        invalidate_trait_secret_cache(&config, backend.name(), &vault_name);
         return Ok(());
     }
 
@@ -3651,7 +4209,11 @@ pub(crate) async fn execute_secret_restore_direct(
     // Invalidate the secrets list cache for the resolved vault
     if let Ok(vault_name) = config.resolve_vault_name(None).await {
         let cache_manager = crate::cache::CacheManager::from_config(&config);
-        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
+        // Azure-legacy-only path — backend is always "azure" here.
+        cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name,
+        });
     }
 
     Ok(())
@@ -3823,12 +4385,19 @@ pub(crate) async fn execute_secret_copy_direct(
     )
     .await?;
 
-    // Invalidate the secrets list cache for both source and destination vaults
+    // Invalidate the secrets list cache for both source and destination
+    // vaults. `execute_secret_copy` (above) itself branches on
+    // `use_trait_path(registry)`, so the backend that actually served the
+    // copy is `registry`'s active one when present, else the Azure legacy
+    // path — mirror that here rather than hard-coding "azure".
+    let backend_name = registry.map(|r| r.active().name()).unwrap_or("azure");
     let cache_manager = crate::cache::CacheManager::from_config(&config);
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        backend: backend_name.to_string(),
         vault_name: from_vault.to_string(),
     });
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        backend: backend_name.to_string(),
         vault_name: to_vault.to_string(),
     });
 
@@ -3861,12 +4430,17 @@ pub(crate) async fn execute_secret_move_direct(
     )
     .await?;
 
-    // Invalidate the secrets list cache for both source and destination vaults
+    // Invalidate the secrets list cache for both source and destination
+    // vaults — same reasoning as `execute_secret_copy_direct` above:
+    // `execute_secret_move` branches on `use_trait_path(registry)` too.
+    let backend_name = registry.map(|r| r.active().name()).unwrap_or("azure");
     let cache_manager = crate::cache::CacheManager::from_config(&config);
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        backend: backend_name.to_string(),
         vault_name: from_vault.to_string(),
     });
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
+        backend: backend_name.to_string(),
         vault_name: to_vault.to_string(),
     });
 
@@ -4055,6 +4629,122 @@ pub(crate) async fn execute_secret_find_direct(
         }
         None => None,
     };
+
+    // Workspace union `find` (multi-vault workspaces plan, Phase B Task 8):
+    // consulted ONLY when a workspace is attached AND `--all-vaults` was NOT
+    // requested. `--all-vaults` keeps its existing, documented meaning
+    // ("every vault the active backend can list") — a strict superset of
+    // "every ATTACHED vault" — so it takes priority and falls through to
+    // its own unchanged branch below even with a workspace present.
+    if !all_vaults {
+        if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+            use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
+
+            let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
+            for raw in &in_fields {
+                let parsed = match raw.to_ascii_lowercase().as_str() {
+                    "name" => FuzzyField::Name,
+                    "folder" => FuzzyField::Folder,
+                    "groups" => FuzzyField::Groups,
+                    "note" => FuzzyField::Note,
+                    "tags" => FuzzyField::Tags,
+                    other => {
+                        return Err(CrosstacheError::invalid_argument(format!(
+                        "unknown --in field: '{other}' (allowed: name, folder, groups, note, tags)"
+                    )));
+                    }
+                };
+                if !fields.contains(&parsed) {
+                    fields.push(parsed);
+                }
+            }
+
+            let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+            let ws_registry = crate::backend::BackendRegistry::with_lazy(&config, &backend_names)
+                .map_err(|e| CrosstacheError::config(e.to_string()))?;
+
+            // Candidate set = union of every ATTACHED vault (spec §Read
+            // semantics for `find`): fail loud naming vault+backend on any
+            // error, mirroring union `ls` — no partial unions, no silently
+            // dropped vault. Rows are prefixed `alias/`, mirroring today's
+            // `--all-vaults` vault-prefix style.
+            let mut items: Vec<CandidateItem> = Vec::new();
+            for entry in &ws.entries {
+                let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
+                    CrosstacheError::config(format!(
+                        "workspace vault '{}' (backend '{}') is unavailable: {e}",
+                        entry.alias, entry.backend
+                    ))
+                })?;
+                let secrets = backend
+                    .secrets()
+                    .list_secrets(&entry.vault, None)
+                    .await
+                    .map_err(|e| {
+                        CrosstacheError::config(format!(
+                            "workspace vault '{}' (backend '{}') failed to list secrets: {e}",
+                            entry.alias, entry.backend
+                        ))
+                    })?;
+                let secrets = filter_secrets_by_glob(secrets, filter.as_deref())?;
+                for s in &secrets {
+                    let mut item = CandidateItem::from_secret_summary(s);
+                    item.name = format!("{}/{}", entry.alias, item.name);
+                    items.push(item);
+                }
+            }
+
+            let items: Vec<CandidateItem> = match folder_scope.as_deref() {
+                Some(path) => items
+                    .into_iter()
+                    .filter(|i| {
+                        crate::cli::ls_view::folder_in_scope(
+                            i.folder.as_deref().unwrap_or(""),
+                            path,
+                        )
+                    })
+                    .collect(),
+                None => items,
+            };
+
+            let pattern_str = pattern.as_deref().unwrap_or("");
+            let mut matches = score_matches(pattern_str, &items, &fields);
+            if !pattern_str.is_empty() && !matches.is_empty() {
+                let top = matches[0].score as f32;
+                if top > 0.0 {
+                    let cutoff = (top * min_score).ceil() as u32;
+                    matches.retain(|m| m.score >= cutoff);
+                }
+            }
+            matches.truncate(limit);
+
+            if names_only {
+                for m in &matches {
+                    println!("{}", m.item.name);
+                }
+                return Ok(());
+            }
+
+            let empty_msg = match (pattern.as_deref(), folder_scope.as_deref()) {
+                (Some(p), Some(f)) => {
+                    format!("No secrets match '{p}' in folder '{f}' across the attached workspace vaults.")
+                }
+                (Some(p), None) => {
+                    format!("No secrets match '{p}' across the attached workspace vaults.")
+                }
+                (None, Some(f)) => {
+                    format!(
+                        "No secrets found in folder '{f}' across the attached workspace vaults."
+                    )
+                }
+                (None, None) => {
+                    "No secrets found across the attached workspace vaults.".to_string()
+                }
+            };
+            render_find_matches(&matches, format, &empty_msg, &config)?;
+            return Ok(());
+        }
+    }
 
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
@@ -4351,6 +5041,7 @@ pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
         return Ok(());
     }
     let cache_key = CacheKey::SecretsList {
+        backend: config.effective_backend_name().to_string(),
         vault_name: vault_name.clone(),
     };
     if let Some(cached) =
@@ -4400,7 +5091,10 @@ pub(crate) async fn execute_complete_folders(config: Config) -> Result<()> {
     if !cache_manager.is_enabled() {
         return Ok(());
     }
-    let cache_key = CacheKey::SecretsList { vault_name };
+    let cache_key = CacheKey::SecretsList {
+        backend: config.effective_backend_name().to_string(),
+        vault_name,
+    };
     if let Some(cached) =
         cache_manager.get::<Vec<crate::secret::manager::SecretSummary>>(&cache_key)
     {
@@ -5768,7 +6462,7 @@ async fn execute_secret_copy(
         let secret_request = rename_request_from_properties(target_name, &source_secret)?;
 
         let copied_secret = backend.set_secret(to_vault, secret_request).await?;
-        invalidate_trait_secret_cache(config, to_vault);
+        invalidate_trait_secret_cache(config, reg.active().name(), to_vault);
 
         output::success(&format!(
             "Successfully copied secret '{}' to vault '{}'",
@@ -5936,7 +6630,7 @@ async fn execute_secret_move(
             .secrets()
             .delete_secret(from_vault, name)
             .await?;
-        invalidate_trait_secret_cache(config, from_vault);
+        invalidate_trait_secret_cache(config, reg.active().name(), from_vault);
     } else {
         secret_manager
             .delete_secret_safe(from_vault, name, true)
@@ -6677,8 +7371,8 @@ mod tests {
 
     #[test]
     fn trait_secret_cache_key_and_invalidation_use_same_resolved_vault_name() {
-        let key = trait_secret_cache_key("local-vault");
-        assert_eq!(key.to_string(), "secrets:local-vault");
+        let key = trait_secret_cache_key("local", "local-vault");
+        assert_eq!(key.to_string(), "secrets:local:local-vault");
     }
 
     #[test]
@@ -7168,7 +7862,7 @@ mod tests {
         };
 
         let cache_manager = crate::cache::CacheManager::from_config(&config);
-        let cache_key = trait_secret_cache_key(&vault_name);
+        let cache_key = trait_secret_cache_key("local", &vault_name);
 
         // Seed a stale cache entry, as a prior `xv ls` would have left behind.
         let stale: Vec<crate::secret::manager::SecretSummary> =
@@ -7426,5 +8120,67 @@ mod tests {
             "metadata-kind fields must not schedule a clear"
         );
         assert!(!message.contains("auto-clears"), "{message}");
+    }
+
+    // ── Multi-vault workspaces plan (Phase B) union `ls`/`ls --deleted` ──
+
+    fn workspace_secret(name: &str, alias: &str) -> crate::secret::manager::SecretSummary {
+        let mut s = crate::secret::manager::SecretSummary {
+            name: name.to_string(),
+            original_name: name.to_string(),
+            note: None,
+            folder: None,
+            groups: None,
+            updated_on: "2026-07-01 00:00:00 UTC".to_string(),
+            enabled: true,
+            content_type: String::new(),
+            tags: std::collections::HashMap::new(),
+        };
+        s.tags
+            .insert(WORKSPACE_ALIAS_TAG.to_string(), alias.to_string());
+        s
+    }
+
+    #[test]
+    fn workspace_alias_of_reads_the_synthetic_tag() {
+        let s = workspace_secret("SECRET", "work");
+        assert_eq!(workspace_alias_of(&s), Some("work"));
+    }
+
+    #[test]
+    fn workspace_alias_of_none_for_ordinary_secret() {
+        let s = crate::secret::manager::SecretSummary {
+            name: "SECRET".to_string(),
+            original_name: "SECRET".to_string(),
+            note: None,
+            folder: None,
+            groups: None,
+            updated_on: String::new(),
+            enabled: true,
+            content_type: String::new(),
+            tags: std::collections::HashMap::new(),
+        };
+        assert_eq!(workspace_alias_of(&s), None);
+    }
+
+    #[test]
+    fn format_secret_list_rows_for_human_vault_reads_alias_into_vault_column() {
+        let secrets = vec![workspace_secret("DB_PASSWORD", "stage")];
+        let rows = format_secret_list_rows_for_human_vault(&secrets);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "DB_PASSWORD");
+        assert_eq!(rows[0].vault, "stage");
+    }
+
+    #[test]
+    fn deleted_list_capability_skip_note_names_alias_and_backend() {
+        let msg = deleted_list_capability_skip_note("personal", "local-b");
+        assert!(msg.contains("personal"), "{msg}");
+        assert!(msg.contains("local-b"), "{msg}");
+        assert!(msg.contains("soft-delete"), "{msg}");
+        assert!(
+            msg.starts_with("note:"),
+            "must be a non-fatal 'note:' prefix, not an error: {msg}"
+        );
     }
 }

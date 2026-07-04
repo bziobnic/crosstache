@@ -214,18 +214,24 @@ impl CacheManager {
         remove_file_if_exists(&lock_path, "invalidate lock file");
     }
 
-    /// Delete the entire vault-scoped cache directory.
+    /// Delete every cache entry scoped to `vault_name`, across both on-disk
+    /// layouts:
+    /// - depth-1 (`cache_dir/<vault>/...`) — `FileList` entries, unaffected
+    ///   by the Phase B `(backend, vault)` cache-key change.
+    /// - depth-2 (`cache_dir/<backend>/<vault>/...`) — `SecretsList` v3
+    ///   entries, nested one level deeper under a `backend` directory since
+    ///   two workspace entries can share a vault NAME on different
+    ///   backends. Every backend directory is walked so `xv cache clear
+    ///   <vault>` still finds and removes the entry regardless of which
+    ///   backend it belongs to.
     pub fn invalidate_vault(&self, vault_name: &str) {
         if let Err(reason) = validate_cache_vault_name(vault_name) {
             debug!("invalidate_vault({vault_name}): rejected — {reason}");
             return;
         }
+
         let vault_dir = self.cache_dir.join(vault_name);
-        if !vault_dir.starts_with(&self.cache_dir) {
-            debug!("invalidate_vault({vault_name}): path escapes cache dir — skipped");
-            return;
-        }
-        if vault_dir.exists() {
+        if vault_dir.starts_with(&self.cache_dir) && vault_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&vault_dir) {
                 debug!("invalidate_vault({vault_name}): {e}");
             } else {
@@ -233,6 +239,26 @@ impl CacheManager {
                     "invalidate_vault({vault_name}): removed {}",
                     vault_dir.display()
                 );
+            }
+        }
+
+        if let Ok(read_dir) = std::fs::read_dir(&self.cache_dir) {
+            for entry in read_dir.flatten() {
+                let backend_dir = entry.path();
+                if !backend_dir.is_dir() {
+                    continue;
+                }
+                let nested = backend_dir.join(vault_name);
+                if nested.starts_with(&self.cache_dir) && nested.is_dir() {
+                    if let Err(e) = std::fs::remove_dir_all(&nested) {
+                        debug!("invalidate_vault({vault_name}): {e}");
+                    } else {
+                        debug!(
+                            "invalidate_vault({vault_name}): removed {}",
+                            nested.display()
+                        );
+                    }
+                }
             }
         }
     }
@@ -457,6 +483,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mgr = make_manager(dir.path(), true, 300);
         let key = CacheKey::SecretsList {
+            backend: "azure".to_string(),
             vault_name: "myvault".to_string(),
         };
 
@@ -491,8 +518,55 @@ mod tests {
             "set() must not overwrite/consume the legacy file"
         );
         assert!(
-            key.to_path(dir.path()).ends_with("secrets-list-v2.json"),
-            "current schema must resolve to the v2 filename"
+            key.to_path(dir.path()).ends_with("secrets-list-v3.json"),
+            "current schema must resolve to the v3 filename"
+        );
+    }
+
+    /// Multi-vault workspaces plan (Phase B, Task 7): `CacheKey::SecretsList`
+    /// gained a `backend` field so the on-disk path nests under a `backend`
+    /// directory (`cache_dir/<backend>/<vault>/secrets-list-v3.json`)
+    /// instead of `cache_dir/<vault>/secrets-list-v2.json`. A pre-existing
+    /// v2-era entry (written before this change, one directory level
+    /// shallower) must miss cleanly rather than being read as if it were the
+    /// new schema — mirrors `test_get_misses_legacy_pre_v2_secrets_list_cache_file`
+    /// above for the v2 -> v3 bump.
+    #[test]
+    fn test_get_misses_legacy_pre_v3_secrets_list_cache_file() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path(), true, 300);
+        let key = CacheKey::SecretsList {
+            backend: "azure".to_string(),
+            vault_name: "myvault".to_string(),
+        };
+
+        // Simulate a v2-era entry: `cache_dir/myvault/secrets-list-v2.json`
+        // — no `backend` directory component at all.
+        let legacy_dir = dir.path().join("myvault");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_path = legacy_dir.join("secrets-list-v2.json");
+        let legacy_json = serde_json::json!({
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "ttl_secs": 300,
+            "vault_name": "myvault",
+            "entry_type": "SecretsList",
+            "data": [{"name": "cred", "note": null, "folder": null, "groups": null, "updated_on": "", "original_name": "cred", "enabled": true, "content_type": "", "tags": {}}]
+        });
+        std::fs::write(&legacy_path, legacy_json.to_string()).unwrap();
+
+        let result: Option<Vec<crate::secret::manager::SecretSummary>> = mgr.get(&key);
+        assert!(
+            result.is_none(),
+            "legacy pre-v3 cache entry must miss, not be read as the new (backend, vault) schema: {result:?}"
+        );
+
+        assert_eq!(
+            key.to_path(dir.path()),
+            dir.path()
+                .join("azure")
+                .join("myvault")
+                .join("secrets-list-v3.json"),
+            "v3 schema must nest under a backend directory"
         );
     }
 
@@ -529,6 +603,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mgr = make_manager(dir.path(), true, 300);
         let key = CacheKey::SecretsList {
+            backend: "azure".to_string(),
             vault_name: "my-vault".to_string(),
         };
 
@@ -545,6 +620,7 @@ mod tests {
         let mgr = make_manager(dir.path(), true, 300);
 
         let key1 = CacheKey::SecretsList {
+            backend: "azure".to_string(),
             vault_name: "my-vault".to_string(),
         };
         let key2 = CacheKey::FileList {
@@ -572,6 +648,7 @@ mod tests {
         mgr.set(&CacheKey::VaultList, &vec!["v1".to_string()]);
         mgr.set(
             &CacheKey::SecretsList {
+                backend: "azure".to_string(),
                 vault_name: "vlt".to_string(),
             },
             &vec!["s1".to_string()],
@@ -582,6 +659,7 @@ mod tests {
         assert!(mgr.get::<Vec<String>>(&CacheKey::VaultList).is_none());
         assert!(mgr
             .get::<Vec<String>>(&CacheKey::SecretsList {
+                backend: "azure".to_string(),
                 vault_name: "vlt".to_string()
             })
             .is_none());
@@ -595,12 +673,14 @@ mod tests {
         mgr.set(&CacheKey::VaultList, &vec!["v1".to_string()]);
         mgr.set(
             &CacheKey::SecretsList {
+                backend: "azure".to_string(),
                 vault_name: "target".to_string(),
             },
             &vec!["s1".to_string()],
         );
         mgr.set(
             &CacheKey::SecretsList {
+                backend: "azure".to_string(),
                 vault_name: "other".to_string(),
             },
             &vec!["s2".to_string()],
@@ -612,12 +692,14 @@ mod tests {
         assert!(mgr.get::<Vec<String>>(&CacheKey::VaultList).is_some());
         assert!(mgr
             .get::<Vec<String>>(&CacheKey::SecretsList {
+                backend: "azure".to_string(),
                 vault_name: "other".to_string()
             })
             .is_some());
         // "target" should be gone.
         assert!(mgr
             .get::<Vec<String>>(&CacheKey::SecretsList {
+                backend: "azure".to_string(),
                 vault_name: "target".to_string()
             })
             .is_none());
@@ -642,15 +724,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let mgr = make_manager(dir.path(), true, 300);
         let key = CacheKey::SecretsList {
+            backend: "azure".to_string(),
             vault_name: "brand-new-vault".to_string(),
         };
 
         // Parent directory does not exist yet.
-        assert!(!dir.path().join("brand-new-vault").exists());
+        assert!(!dir.path().join("azure").join("brand-new-vault").exists());
 
         mgr.set(&key, &vec!["s".to_string()]);
 
-        assert!(dir.path().join("brand-new-vault").exists());
+        assert!(dir.path().join("azure").join("brand-new-vault").exists());
         assert!(mgr.get::<Vec<String>>(&key).is_some());
     }
 
@@ -669,6 +752,7 @@ mod tests {
         mgr.set(&CacheKey::VaultList, &vec!["v1".to_string()]);
         mgr.set(
             &CacheKey::SecretsList {
+                backend: "azure".to_string(),
                 vault_name: "v1".to_string(),
             },
             &vec!["s1".to_string()],

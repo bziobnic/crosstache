@@ -844,9 +844,10 @@ async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
         .with_extension("lock");
 
     let result = match cache_key {
-        CacheKey::SecretsList { ref vault_name } => {
-            refresh_secrets_list(vault_name.clone(), config).await
-        }
+        CacheKey::SecretsList {
+            ref backend,
+            ref vault_name,
+        } => refresh_secrets_list(backend.clone(), vault_name.clone(), config).await,
         CacheKey::VaultList => refresh_vault_list(config).await,
         CacheKey::FileList {
             ref vault_name,
@@ -868,7 +869,18 @@ async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
     result
 }
 
-async fn refresh_secrets_list(vault_name: String, config: Config) -> Result<()> {
+/// Background cache refresh (`xv cache refresh <key>`, spawned by
+/// `cache::refresh::trigger_background_refresh` on stale-while-revalidate
+/// reads). This has only ever refreshed via the Azure legacy `SecretManager`
+/// path — a pre-existing limitation predating multi-vault workspaces, not a
+/// regression introduced by the `(backend, vault)` cache-key change — so a
+/// key for a non-Azure backend (`local`, a named local/AWS entry, ...)
+/// re-fetches from Azure and writes back under `backend`'s cache directory,
+/// which would silently populate the wrong backend's entry. `backend` is
+/// threaded through so at least the cache key it writes to matches the one
+/// that was refreshed; fixing background refresh to dispatch through the
+/// trait `BackendRegistry` for every backend is out of scope here.
+async fn refresh_secrets_list(backend: String, vault_name: String, config: Config) -> Result<()> {
     use crate::auth::provider::DefaultAzureCredentialProvider;
     use crate::cache::{CacheKey, CacheManager};
     use crate::secret::manager::SecretManager;
@@ -890,7 +902,10 @@ async fn refresh_secrets_list(vault_name: String, config: Config) -> Result<()> 
         .await?;
 
     let cache_manager = CacheManager::from_config(&config);
-    let cache_key = CacheKey::SecretsList { vault_name };
+    let cache_key = CacheKey::SecretsList {
+        backend,
+        vault_name,
+    };
     cache_manager.set(&cache_key, &secrets);
 
     Ok(())
