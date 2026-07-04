@@ -808,6 +808,9 @@ pub enum Commands {
     },
     /// Move or rename a secret, re-folder a whole folder (trailing / = folder),
     /// or bulk-move every secret matching a glob (--filter) into a folder
+    #[command(
+        override_usage = "xv mv [OPTIONS] <SOURCE> <DEST>\n       xv mv [OPTIONS] --filter <GLOB> <DEST>"
+    )]
     Mv {
         /// SOURCE DEST, e.g. 'db/pass app/' or 'app/ svc/'; with --filter,
         /// provide DEST only (omit SOURCE) — DEST must then be a folder

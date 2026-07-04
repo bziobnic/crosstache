@@ -193,7 +193,17 @@ pub(crate) async fn execute_mv(
     // DEST is `Option<String>` in the arg parser only so clap accepts a
     // non-required SOURCE positional (clap forbids optional-then-required);
     // it is always required in practice.
-    let dest = dest.ok_or_else(|| CrosstacheError::invalid_argument("mv requires a DEST"))?;
+    let dest = match dest {
+        Some(d) => d,
+        None if source.is_none() && filter.is_none() => {
+            // Neither SOURCE, --filter, nor DEST given — match parse_mv's own
+            // "both operands missing" wording rather than naming DEST alone.
+            return Err(CrosstacheError::invalid_argument(
+                "mv requires a SOURCE and a DEST",
+            ));
+        }
+        None => return Err(CrosstacheError::invalid_argument("mv requires a DEST")),
+    };
 
     // Exactly one of SOURCE / --filter — checked, and (for --filter) the
     // glob compiled and validated, before any backend call below.
@@ -529,10 +539,15 @@ async fn execute_folder_mv(
 
 /// True if `moving` (secrets about to be re-foldered into `dest_prefix`)
 /// would collide with a secret that already resides in `dest_prefix` and is
-/// NOT itself one of the moving secrets — either by display name or by
-/// backend (sanitized) name, mirroring `dest_collides` (#302). A filter
-/// move only rewrites the `folder` tag (names never change), so the only
-/// place a collision can arise is inside the destination folder itself.
+/// NOT itself one of the moving secrets — by display name, mirroring
+/// `dest_collides` (#302). A filter move only rewrites the `folder` tag
+/// (names never change), so the only place a collision can arise is inside
+/// the destination folder itself.
+///
+/// Note: `execute_folder_mv` (whole-folder moves) has no equivalent guard
+/// today — this asymmetry is accepted for now as a candidate for future
+/// alignment, not addressed here.
+///
 /// Returns the colliding display name for the error message.
 fn dest_folder_collision<'a>(
     secrets: &'a [SecretSummary],
@@ -551,8 +566,13 @@ fn dest_folder_collision<'a>(
             continue;
         }
         let occupant_display = display_name(occupant);
+        // Backend names are globally unique per vault, and any occupant
+        // sharing a moving secret's backend name would already have been
+        // filtered out above as "itself moving" — so only a display-name
+        // match can indicate a genuine collision between two distinct
+        // secrets here.
         for m in moving {
-            if display_name(m) == occupant_display || m.name == occupant.name {
+            if display_name(m) == occupant_display {
                 return Some(occupant_display);
             }
         }
