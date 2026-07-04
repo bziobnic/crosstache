@@ -2208,25 +2208,20 @@ pub(crate) async fn execute_secret_rollback_direct(
     // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        if reg.active().kind() == crate::backend::BackendKind::Azure {
-            // Pre-existing carve-out, unrelated to workspaces: Azure's
-            // legacy rollback path resolves friendly version numbers
-            // ("v6") to the underlying GUID (`resolve_version_to_guid`),
-            // which the trait path's `rollback` doesn't do. This check is
-            // based on the process's top-level active backend (exactly as
-            // before workspaces existed); a workspace whose default/target
-            // entry happens to be on the azure backend still lands here,
-            // not workspace-aware — a known, documented limitation, not a
-            // regression (Azure rollback has never gone through
-            // `BackendRegistry` at all).
-            return execute_secret_rollback_legacy(name, version, force, config, registry).await;
-        }
 
-        // Workspace-aware resolution: rollback is grouped with `get`/
-        // `history` as a *read-resolution* verb (searches attached vaults
-        // on an unqualified name; ambiguous → exit 13), even though it
-        // mutates state once the target secret is found — matching the
-        // plan's Task 9 grouping. No workspace attached ⇒ byte-identical.
+        // Workspace-aware resolution FIRST (Bugbot HIGH fix) — the
+        // Azure-vs-trait decision below must act on the RESOLVED target,
+        // not the process's top-level active backend, otherwise an
+        // attached workspace (and rollback's read-search/ambiguity, and
+        // `alias:name` addressing) is silently ignored whenever the
+        // top-level backend happens to be Azure. Rollback is grouped with
+        // `get`/`history` as a *read-resolution* verb (searches attached
+        // vaults on an unqualified name; ambiguous → exit 13), even though
+        // it mutates state once the target secret is found — matching the
+        // plan's Task 9 grouping. No workspace attached ⇒ byte-identical:
+        // this resolves to exactly (reg.active_arc(),
+        // resolve_vault_for_trait(...), name) — the same vault-resolution
+        // call the legacy path always made, just reached from here first.
         let (backend, vault_name, resolved_name) =
             crate::cli::helpers::resolve_workspace_or_default(
                 name,
@@ -2235,6 +2230,27 @@ pub(crate) async fn execute_secret_rollback_direct(
                 crate::workspace::TargetMode::Read,
             )
             .await?;
+
+        if backend.kind() == crate::backend::BackendKind::Azure {
+            // Azure's legacy rollback path resolves friendly version
+            // numbers ("v6") to the underlying GUID
+            // (`resolve_version_to_guid`), which the trait path's
+            // `rollback` doesn't do — so a target that resolves to Azure
+            // (whether via a workspace entry or the plain no-workspace
+            // active backend) still goes through
+            // `execute_secret_rollback_legacy`, but now fed the RESOLVED
+            // vault + name, never the raw CLI string.
+            return execute_secret_rollback_legacy(
+                &resolved_name,
+                Some(vault_name),
+                version,
+                force,
+                config,
+                registry,
+            )
+            .await;
+        }
+
         let name = resolved_name.as_str();
         if !confirm_destructive(
             force,
@@ -2256,12 +2272,19 @@ pub(crate) async fn execute_secret_rollback_direct(
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    execute_secret_rollback_legacy(name, version, force, config, registry).await
+    // ── Azure legacy path (registry entirely unavailable — can't resolve
+    // a workspace without one, so this stays the pre-workspace raw path) ──
+    execute_secret_rollback_legacy(name, None, version, force, config, registry).await
 }
 
+/// Vault-name override plumbing (Bugbot HIGH fix): `vault_override` carries
+/// a workspace-resolved vault name so the legacy Azure path never has to
+/// re-derive (and thus never risks ignoring) the caller's already-resolved
+/// target. `None` only when the registry was entirely unavailable and no
+/// resolution — workspace-aware or otherwise — could happen upstream.
 async fn execute_secret_rollback_legacy(
     name: &str,
+    vault_override: Option<String>,
     version: &str,
     force: bool,
     config: Config,
@@ -2272,10 +2295,24 @@ async fn execute_secret_rollback_legacy(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_rollback(&secret_manager, name, None, version, force, &config).await?;
+    execute_secret_rollback(
+        &secret_manager,
+        name,
+        vault_override.clone(),
+        version,
+        force,
+        &config,
+    )
+    .await?;
 
-    // Invalidate the secrets list cache for the resolved vault
-    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+    // Invalidate the secrets list cache for the resolved vault. Prefer the
+    // override directly (already resolved, workspace-aware or not) over
+    // re-deriving from scratch, which would silently ignore it.
+    let vault_name = match vault_override {
+        Some(v) => Some(v),
+        None => config.resolve_vault_name(None).await.ok(),
+    };
+    if let Some(vault_name) = vault_name {
         let cache_manager = crate::cache::CacheManager::from_config(&config);
         cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
     }
@@ -3460,15 +3497,16 @@ pub(crate) async fn execute_secret_purge_direct(
     // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        if reg.active().kind() == crate::backend::BackendKind::Azure {
-            // Pre-existing carve-out, unrelated to workspaces (mirrors
-            // rollback's) — not workspace-aware; a known, documented
-            // limitation rather than a regression.
-            return execute_secret_purge_legacy(name, force, config, registry).await;
-        }
-        // Workspace-aware resolution: purge is a write/destructive verb —
-        // unqualified names always target the default entry, never
-        // searched. No workspace attached ⇒ byte-identical.
+
+        // Workspace-aware resolution FIRST (Bugbot HIGH fix, mirrors
+        // rollback's) — the Azure-vs-trait decision below must act on the
+        // RESOLVED target, not the process's top-level active backend, or
+        // an attached workspace (and `alias:name` addressing) is silently
+        // ignored whenever the top-level backend happens to be Azure.
+        // Purge is a write/destructive verb — unqualified names always
+        // target the default entry, never searched. No workspace attached
+        // ⇒ byte-identical: resolves to exactly (reg.active_arc(),
+        // resolve_vault_for_trait(...), name).
         let (backend, vault_name, resolved_name) =
             crate::cli::helpers::resolve_workspace_or_default(
                 name,
@@ -3477,6 +3515,21 @@ pub(crate) async fn execute_secret_purge_direct(
                 crate::workspace::TargetMode::Write,
             )
             .await?;
+
+        if backend.kind() == crate::backend::BackendKind::Azure {
+            // A target that resolves to Azure (workspace entry or the
+            // plain no-workspace active backend) still goes through the
+            // legacy path, but now fed the RESOLVED vault + name.
+            return execute_secret_purge_legacy(
+                &resolved_name,
+                Some(vault_name),
+                force,
+                config,
+                registry,
+            )
+            .await;
+        }
+
         let name = resolved_name.as_str();
         if !confirm_destructive(
             force,
@@ -3492,12 +3545,16 @@ pub(crate) async fn execute_secret_purge_direct(
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    execute_secret_purge_legacy(name, force, config, registry).await
+    // ── Azure legacy path (registry entirely unavailable) ─────────────
+    execute_secret_purge_legacy(name, None, force, config, registry).await
 }
 
+/// See `execute_secret_rollback_legacy`'s doc comment: `vault_override`
+/// carries a workspace-resolved vault name (Bugbot HIGH fix) so this never
+/// has to re-derive, and thus never risks ignoring, the caller's resolution.
 async fn execute_secret_purge_legacy(
     name: &str,
+    vault_override: Option<String>,
     force: bool,
     config: Config,
     registry: Option<&BackendRegistry>,
@@ -3507,10 +3564,22 @@ async fn execute_secret_purge_legacy(
     // Create secret manager
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
-    execute_secret_purge(&secret_manager, name, None, force, &config).await?;
+    execute_secret_purge(
+        &secret_manager,
+        name,
+        vault_override.clone(),
+        force,
+        &config,
+    )
+    .await?;
 
-    // Invalidate the secrets list cache for the resolved vault
-    if let Ok(vault_name) = config.resolve_vault_name(None).await {
+    // Invalidate the secrets list cache for the resolved vault. Prefer the
+    // override directly over re-deriving from scratch.
+    let vault_name = match vault_override {
+        Some(v) => Some(v),
+        None => config.resolve_vault_name(None).await.ok(),
+    };
+    if let Some(vault_name) = vault_name {
         let cache_manager = crate::cache::CacheManager::from_config(&config);
         cache_manager.invalidate(&crate::cache::CacheKey::SecretsList { vault_name });
     }

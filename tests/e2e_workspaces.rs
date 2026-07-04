@@ -574,6 +574,70 @@ fn exact_name_with_colon_wins_over_alias() {
     assert_eq!(value, "literal-value");
 }
 
+/// Bugbot MEDIUM fix: write-mode verbs (`update`/`delete`) must also apply
+/// exact-name-first, scoped to the default vault — not just `set`.
+///
+/// How a literal `work:x` ends up in the default vault at all (since a
+/// *qualified write* always wins on the fresh-secret path — there is no way
+/// to `set` a literal `work:x` into the default vault once the `work`
+/// alias is attached, because `xv set work:x` would target the `work`
+/// vault's `x`, not create a literal in the default): this test creates
+/// the literal BEFORE any workspace is attached (single-vault mode, where
+/// "work:x" is just an ordinary — if colon-containing — name with no alias
+/// interpretation at all), then attaches a workspace afterward whose
+/// DEFAULT vault is that same pre-existing store under a different alias
+/// ("home") while a SEPARATE alias ("work") points elsewhere. This is the
+/// realistic scenario: pre-existing secrets predate the workspace; new
+/// ones go through qualified addressing from the start.
+#[test]
+fn update_and_delete_exact_name_with_colon_wins_over_alias_in_default() {
+    let env = WorkspaceEnv::new();
+
+    // Single-vault mode: "work:x" is an ordinary literal name in the
+    // top-level default store (the local backend's charset allows ':').
+    env.ok(&["set", "work:x", "--value", "original-value"]);
+
+    // Attach a workspace where "work" points elsewhere (local-a) but the
+    // DEFAULT ("home") is the top-level store that already holds "work:x".
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local",
+        "--as",
+        "home",
+        "--default",
+    ]);
+
+    // "work:x" must resolve the literal secret in the DEFAULT vault
+    // ("home"), not alias-interpret "work" (-> local-a, path "x", which
+    // doesn't exist there — `update_secret` on a nonexistent local-a
+    // target would fail, so this `update` succeeding at all is itself
+    // part of the proof).
+    env.ok(&["update", "work:x", "updated-value"]);
+    // Read back via "home:work:x": a QUALIFIED read ("home" is a real
+    // alias) always targets that vault directly with the remainder as the
+    // path, bypassing exact-name-first entirely — the cleanest way to
+    // confirm placement without depending on read's own exact-name-first
+    // (which would otherwise intercept a bare "work:x" query too, since
+    // read searches every vault for literal matches first).
+    assert_eq!(env.ok(&["get", "home:work:x", "--raw"]), "updated-value");
+
+    env.ok(&["delete", "work:x", "--force"]);
+    let deleted_lookup = env.err(&["get", "home:work:x"]);
+    assert!(!deleted_lookup.status.success());
+}
+
 // ---------------------------------------------------------------------------
 // No-workspace degenerate case: byte-identical to pre-workspace behavior.
 // ---------------------------------------------------------------------------
@@ -1111,6 +1175,52 @@ fn rollback_qualified_targets_named_vault() {
     env.ok(&["update", "stage:ROLL_ME", "v2val"]);
     env.ok(&["rollback", "stage:ROLL_ME", "--version", "v1", "--force"]);
     assert_eq!(env.ok(&["get", "stage:ROLL_ME", "--raw"]), "v1val");
+}
+
+#[test]
+fn purge_unqualified_targets_default_never_searches() {
+    let env = WorkspaceEnv::new();
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-b",
+        "--as",
+        "stage",
+    ]);
+
+    // Secret exists (soft-deleted) ONLY in "stage"; an unqualified purge
+    // must target "work" only, never "stage". The local backend's purge is
+    // idempotent on a name with nothing to purge (no trash entries — a
+    // no-op `Ok(())`, not a not-found error), so "unqualified purge
+    // succeeds" alone doesn't prove anything; the proof is that the stage
+    // copy is STILL RESTORABLE afterward (i.e. still in trash, not
+    // actually purged) — if the unqualified purge had wrongly searched and
+    // purged the stage copy, this restore would fail. This is the
+    // trait-path proof for the Bugbot HIGH fix: purge's legacy-vs-trait
+    // decision now runs on the RESOLVED target, and on this (local-backend)
+    // trait path that means default-only, never-searched addressing — same
+    // contract as delete/update/rotate.
+    env.ok(&["set", "stage:PURGE_ONLY_STAGE", "--value", "v"]);
+    env.ok(&["delete", "stage:PURGE_ONLY_STAGE", "--force"]);
+    env.ok(&["purge", "PURGE_ONLY_STAGE", "--force"]); // no-op against "work"
+
+    env.ok(&["restore", "stage:PURGE_ONLY_STAGE"]);
+    assert_eq!(env.ok(&["get", "stage:PURGE_ONLY_STAGE", "--raw"]), "v");
+
+    // The stage copy must still be purgeable directly (qualified), for real.
+    env.ok(&["delete", "stage:PURGE_ONLY_STAGE", "--force"]);
+    env.ok(&["purge", "stage:PURGE_ONLY_STAGE", "--force"]);
 }
 
 #[test]

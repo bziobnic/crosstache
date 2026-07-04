@@ -50,11 +50,22 @@ impl std::fmt::Debug for TargetVault {
 /// - **Write**: an unqualified name ALWAYS targets the default entry —
 ///   never searched. A qualified `alias:path` goes to that vault.
 ///
-/// **Exact-name-first** (Read only): before alias interpretation, the FULL
-/// raw string is probed as a literal secret name across attached vaults.
-/// A hit short-circuits alias parsing entirely — mirrors `inject`'s
-/// dot-split rule, protecting literal names that happen to contain `:`
-/// (realistic only on the local backend's unrestricted charset).
+/// **Exact-name-first** applies to both modes: before alias interpretation,
+/// the FULL raw string is probed as a literal secret name. A hit
+/// short-circuits alias parsing entirely — mirrors `inject`'s dot-split
+/// rule, protecting literal names that happen to contain `:` (realistic
+/// only on the local backend's unrestricted charset). The two modes differ
+/// only in *where* that probe looks: **Read** checks every attached vault
+/// (it's already searching); **Write** checks the default vault ONLY —
+/// writes never search beyond it, so the exact-name-first probe can't
+/// either. Consequently a pre-existing literal secret like `work:x` in the
+/// default vault is reachable by an unqualified write only if the
+/// workspace's default IS `work` (so `raw == "work:x"` probes the vault
+/// that actually holds it); there is no way to *create* such a literal
+/// name via `set` once the `work` alias is attached, because a qualified
+/// write always wins on the fresh-secret path — pre-existing literal names
+/// are the concern here, not new ones (documented in the README preview
+/// section too).
 pub async fn resolve_secret_target(
     raw: &str,
     ws: &Workspace,
@@ -65,12 +76,55 @@ pub async fn resolve_secret_target(
 
     match mode {
         TargetMode::Write => {
+            let default_entry = ws.default_entry()?.clone();
+
+            // Exact-name-first, scoped to the default vault only (a write
+            // never searches beyond it): only meaningful when the raw
+            // string parsed as `alias:path` at all — a bare name has no
+            // alias interpretation to win over in the first place.
+            if addr.alias.is_some() {
+                let default_backend = materialize(registry, &default_entry)?;
+                let exists = default_backend
+                    .secrets()
+                    .secret_exists(&default_entry.vault, raw)
+                    .await
+                    .map_err(|e| {
+                        CrosstacheError::config(format!(
+                            "workspace default vault '{}' (backend '{}') failed while checking \
+                             for a literal name: {e}",
+                            default_entry.alias, default_entry.backend
+                        ))
+                    })?;
+                if exists {
+                    return Ok((
+                        TargetVault {
+                            backend: default_backend,
+                            entry: default_entry,
+                        },
+                        raw.to_string(),
+                    ));
+                }
+            }
+
+            // `addr.alias == None` covers two distinct cases that both
+            // land here as "literal name in the default vault", by
+            // construction of `parse_address`: a genuinely bare name
+            // (`raw` has no `:` at all), and a `:`-containing name whose
+            // prefix isn't charset-valid as an alias (e.g. `"not
+            // valid!:rest"` — `parse_address` never splits it, so the
+            // whole string is already `addr.path` here). A charset-valid
+            // prefix that simply isn't an ATTACHED alias (`addr.alias ==
+            // Some(x)` but `ws.entry(x)` misses) still errors below,
+            // deliberately: a destructive write silently falling back to
+            // treating a typo'd alias as part of a literal name would be
+            // its own silent-wrong-target bug, worse than the one this
+            // exact-name-first probe exists to fix.
             let entry = match &addr.alias {
                 Some(alias) => ws
                     .entry(alias)
                     .cloned()
                     .ok_or_else(|| unknown_alias_error(ws, alias))?,
-                None => ws.default_entry()?.clone(),
+                None => default_entry,
             };
             let backend = materialize(registry, &entry)?;
             let path = addr.alias.map(|_| addr.path.clone()).unwrap_or(addr.path);
@@ -406,6 +460,82 @@ mod tests {
         assert_eq!(path, "NEW_SECRET");
     }
 
+    /// Bugbot MEDIUM fix: Write mode's exact-name-first probe, scoped to
+    /// the default vault only. Here the workspace's default is
+    /// deliberately NOT the alias the raw string's prefix names ("stage"
+    /// is default; the prefix is "work") — a pre-existing literal secret
+    /// named exactly `work:x` sitting in the DEFAULT vault must win over
+    /// interpreting "work" as an alias qualifier, for `update`/`delete`
+    /// just as much as `set`.
+    #[tokio::test]
+    async fn write_exact_name_with_colon_in_default_wins_over_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (registry, mut ws) = two_vault_workspace(&tmp);
+        // Flip the default to "stage" so "work" (the alias-shaped prefix
+        // in the raw string below) is NOT the vault the probe should hit.
+        for e in ws.entries.iter_mut() {
+            e.default = e.alias == "stage";
+        }
+        ws.default_alias = "stage".to_string();
+
+        let stage_backend = registry.materialize("local-b").unwrap();
+        stage_backend
+            .secrets()
+            .set_secret("default", req("work:x", "literal-in-default"))
+            .await
+            .unwrap();
+
+        let (target, path) = resolve_secret_target("work:x", &ws, &registry, TargetMode::Write)
+            .await
+            .expect("must resolve the literal name in the default vault");
+        assert_eq!(
+            target.entry.alias, "stage",
+            "must target the DEFAULT vault (stage), not the 'work' alias"
+        );
+        assert_eq!(path, "work:x");
+    }
+
+    /// When the alias-shaped prefix IS a real attached alias but no
+    /// literal secret by that full name exists in the default vault, the
+    /// probe misses and alias interpretation proceeds as before.
+    #[tokio::test]
+    async fn write_no_literal_match_falls_through_to_alias_interpretation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (registry, ws) = two_vault_workspace(&tmp);
+        // Default is "work" here; nothing named "work:NEW_THING" exists
+        // anywhere, so the exact-name-first probe (scoped to "work", the
+        // default) must miss and fall through to targeting "work" via
+        // alias interpretation with path "NEW_THING".
+        let (target, path) =
+            resolve_secret_target("work:NEW_THING", &ws, &registry, TargetMode::Write)
+                .await
+                .expect("must fall through to alias interpretation");
+        assert_eq!(target.entry.alias, "work");
+        assert_eq!(path, "NEW_THING");
+    }
+
+    /// A prefix that fails the alias charset check (`parse_address` never
+    /// splits it) is already a literal name targeting the default vault
+    /// with no probe needed — pinning this as the "current behavior" the
+    /// Bugbot MEDIUM writeup asked to verify, not a new fallback for a
+    /// charset-valid-but-unattached alias (that still errors, deliberately
+    /// — see the comment at the `ok_or_else(unknown_alias_error)` call
+    /// site in `resolve_secret_target`).
+    #[tokio::test]
+    async fn write_charset_invalid_prefix_is_literal_in_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (registry, ws) = two_vault_workspace(&tmp);
+
+        let (target, path) =
+            resolve_secret_target("not valid!:x", &ws, &registry, TargetMode::Write)
+                .await
+                .expect(
+                    "charset-invalid prefix must resolve as a literal name in the default vault",
+                );
+        assert_eq!(target.entry.alias, "work", "must target the default vault");
+        assert_eq!(path, "not valid!:x");
+    }
+
     #[tokio::test]
     async fn exact_name_with_colon_wins_over_alias_interpretation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -437,5 +567,79 @@ mod tests {
             .await
             .expect_err("must be not-found");
         assert_eq!(err.code(), "xv-secret-not-found");
+    }
+
+    /// Regression pin for the Bugbot HIGH fix (rollback/purge silently
+    /// skipping the workspace when the process's top-level active backend
+    /// is Azure): `rollback`/`purge` decide legacy-vs-trait via
+    /// `backend.kind() == BackendKind::Azure` on the value THIS function
+    /// returns. This test builds a workspace whose DEFAULT entry is on the
+    /// `azure` backend while a non-default entry is on a hermetic local
+    /// store, with no separate "top-level active backend" standing for
+    /// Azure at all (proving the kind check can't be reading some other,
+    /// caller-side backend) — an unqualified write must resolve to a
+    /// backend whose `.kind()` is `Azure`. No network call happens here:
+    /// constructing `AzureBackend` succeeds without real credentials
+    /// (auth is resolved lazily, only at first actual secret operation),
+    /// so this stays fully hermetic while still exercising real
+    /// `AzureBackend` construction through the same `materialize` path
+    /// `execute_secret_rollback_direct`/`execute_secret_purge_direct` use.
+    #[tokio::test]
+    async fn resolved_backend_kind_reflects_workspace_entry_not_a_separate_active_backend() {
+        use crate::backend::BackendKind;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut named_backends = HashMap::new();
+        named_backends.insert(
+            "local-a".to_string(),
+            NamedBackendEntry::Local(LocalConfig {
+                store_path: Some(tmp.path().join("store-a").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key-a.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+        );
+        // No top-level `backend`/`local`/`azure` config at all — this
+        // config's only backends are the workspace's own entries, so
+        // there is no separate "active backend" for the azure branch's
+        // decision to have accidentally read instead.
+        let config = Config {
+            named_backends,
+            ..Default::default()
+        };
+        let registry =
+            BackendRegistry::with_lazy(&config, &["azure".to_string(), "local-a".to_string()])
+                .expect("must register");
+
+        let ws = Workspace {
+            entries: vec![
+                WorkspaceEntry {
+                    alias: "az".to_string(),
+                    backend: "azure".to_string(),
+                    vault: "az-vault".to_string(),
+                    default: true,
+                },
+                WorkspaceEntry {
+                    alias: "loc".to_string(),
+                    backend: "local-a".to_string(),
+                    vault: "default".to_string(),
+                    default: false,
+                },
+            ],
+            default_alias: "az".to_string(),
+            source: WorkspaceSource::Context,
+        };
+
+        let (target, _path) =
+            resolve_secret_target("SOME_SECRET", &ws, &registry, TargetMode::Write)
+                .await
+                .expect("azure backend must construct hermetically (no credentials needed until an actual secret operation)");
+        assert_eq!(
+            target.backend.kind(),
+            BackendKind::Azure,
+            "unqualified write must resolve to the default entry's backend kind (azure) — \
+             this is the exact value rollback/purge's legacy-vs-trait check consumes"
+        );
     }
 }
