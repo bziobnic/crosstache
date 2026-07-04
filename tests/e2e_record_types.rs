@@ -2071,3 +2071,201 @@ fn run_typed_record_injects_primary() {
     let injected = std::fs::read_to_string(&marker).unwrap();
     assert_eq!(injected, "hunter2", "stderr: {}", common::stderr_str(&out));
 }
+
+// ---------------------------------------------------------------------------
+// Bugbot round 2 on #321 Phase C: `xv run`/`xv inject` must resolve record
+// types LAZILY (only when a fetched secret is actually a record), not
+// eagerly before fetching anything. An all-untyped selection must succeed
+// even with a broken `[types.*]` config block that no referenced secret
+// actually uses; a typed record under the same broken config must still
+// surface the resolution error, since resolving types is fail-closed for
+// the whole config (Task 13 docs).
+// ---------------------------------------------------------------------------
+
+/// A `.xv.toml` with a `[types.*]` block with two primaries — invalid per
+/// `RecordType::validate()` (exactly one `primary` per type) — so any
+/// command that actually needs to resolve types under this config fails.
+/// Carries a minimal `default_env` pointing at the same "default" vault the
+/// global `xv.conf` already uses, purely so vault resolution doesn't itself
+/// error on "no env selected" now that the file has env profiles at all —
+/// unrelated to the type-resolution behavior under test.
+const BROKEN_TYPES_TOML: &str = r#"
+default_env = "default"
+
+[env.default]
+vault = "default"
+
+[types.bad]
+fields = [
+  { name = "a", kind = "secret", primary = true },
+  { name = "b", kind = "secret", primary = true },
+]
+"#;
+
+/// An `xv` command using ONLY the global (valid, no custom types) config
+/// written by `xv_isolated_local_with_profile` — cwd is the temp root,
+/// outside the `project/` subdirectory that holds the broken `.xv.toml`, so
+/// project-config discovery finds nothing and only built-in record types
+/// resolve. Used to create a typed record before switching to the
+/// broken-config project directory to exercise `run`/`inject` against it.
+fn xv_temp_root_env(temp: &std::path::Path) -> std::process::Command {
+    let mut cmd = common::xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp)
+        .env("XDG_CONFIG_HOME", temp.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(temp);
+    cmd
+}
+
+/// The same isolated store as `xv_isolated_local_with_profile`'s harness,
+/// but a fresh `Command` with cwd in the `project/` subdirectory so the
+/// (deliberately broken) `.xv.toml` written there is discovered.
+fn xv_project_env(temp: &std::path::Path) -> std::process::Command {
+    let mut cmd = common::xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp)
+        .env("XDG_CONFIG_HOME", temp.join(".config"))
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(temp.join("project"));
+    cmd
+}
+
+#[test]
+fn run_untyped_secrets_unaffected_by_broken_types_config() {
+    let (_cmd, temp) = common::xv_isolated_local_with_profile(BROKEN_TYPES_TOML);
+
+    // Created from the temp root (no project config in scope), so this
+    // plain `set` never touches record-type resolution at all.
+    let out = xv_temp_root_env(temp.path())
+        .args(["set", "plain-secret", "--value", "plain-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    // Run from the project directory, where the broken `[types.bad]` block
+    // IS in scope. The only secret in the vault is untyped, so `xv run`
+    // must succeed exactly as it would without the record-types feature.
+    let marker = temp.path().join("run_untyped_marker.txt");
+    let out2 = xv_project_env(temp.path())
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("printf '%s' \"$PLAIN_SECRET\" > '{}'", marker.display()),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "plain-value");
+}
+
+#[test]
+fn inject_untyped_template_unaffected_by_broken_types_config() {
+    let (_cmd, temp) = common::xv_isolated_local_with_profile(BROKEN_TYPES_TOML);
+
+    let out = xv_temp_root_env(temp.path())
+        .args(["set", "plain-secret", "--value", "plain-value"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let project_dir = temp.path().join("project");
+    let template_path = project_dir.join("template.txt");
+    std::fs::write(&template_path, "v: {{ secret:plain-secret }}\n").unwrap();
+    let out_path = project_dir.join("out.txt");
+
+    let out2 = xv_project_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+    let rendered = std::fs::read_to_string(&out_path).unwrap();
+    assert!(rendered.contains("plain-value"), "rendered: {rendered}");
+}
+
+#[test]
+fn run_and_inject_typed_record_fails_under_broken_types_config() {
+    let (_cmd, temp) = common::xv_isolated_local_with_profile(BROKEN_TYPES_TOML);
+
+    // Created from the temp root: only built-in types are in scope there,
+    // so creating a `login` record succeeds even though the project's
+    // `.xv.toml` (not in scope here) has a broken custom type.
+    let out = xv_temp_root_env(temp.path())
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    // From the project directory the broken `[types.bad]` block IS in
+    // scope. `cred` is a record, so both `run` and `inject` must now
+    // actually attempt type resolution and fail — resolving types is
+    // fail-closed for the whole config, so the broken custom block breaks
+    // resolution even though `cred`'s own type (`login`) is a valid
+    // built-in.
+    let out2 = xv_project_env(temp.path())
+        .args(["run", "--", "sh", "-c", "true"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out2)
+    );
+
+    let project_dir = temp.path().join("project");
+    let template_path = project_dir.join("template.txt");
+    std::fs::write(&template_path, "v: {{ secret:cred }}\n").unwrap();
+    let out_path = project_dir.join("out.txt");
+    let out3 = xv_project_env(temp.path())
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out3.status.code(),
+        Some(3),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when type resolution fails"
+    );
+}

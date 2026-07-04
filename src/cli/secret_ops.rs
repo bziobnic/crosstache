@@ -760,6 +760,34 @@ fn record_field_value(
     Ok(Zeroizing::new(primary_value.clone()))
 }
 
+/// Resolves record types on first need, caching the outcome (success or
+/// failure) so it happens at most once per command. `xv run`/`xv inject`
+/// iterate a whole selection of secrets that may be entirely untyped, so
+/// type resolution must be lazy: an all-untyped selection must succeed
+/// exactly as before the record-types feature, never failing because of an
+/// unrelated broken `[types.*]` config block that no referenced secret
+/// actually uses. Callers should only invoke this when a fetched secret is
+/// actually a record (`crate::records::is_record`); an untyped secret
+/// should never trigger it at all. `CrosstacheError` isn't `Clone`, so the
+/// error path is cached as a `String` and re-wrapped on each cached lookup.
+async fn resolve_types_lazily(
+    cache: &mut Option<std::result::Result<Vec<RecordType>, String>>,
+    config: &Config,
+) -> Result<Vec<RecordType>> {
+    if cache.is_none() {
+        *cache = Some(
+            config
+                .resolve_record_types()
+                .await
+                .map_err(|e| e.to_string()),
+        );
+    }
+    match cache.as_ref().expect("just populated above") {
+        Ok(types) => Ok(types.clone()),
+        Err(msg) => Err(CrosstacheError::config(msg.clone())),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_secret_get_direct(
     name: &str,
@@ -4214,11 +4242,13 @@ async fn execute_secret_run(
     // the old warn-and-continue behavior.
     let mut fetch_failures: Vec<String> = Vec::new();
 
-    // Record types, resolved once, so a typed record injects its primary
-    // field value under its name — `xv run` never expands other fields
-    // (spec §9 out of scope), it just must not leak the raw JSON envelope
-    // in place of the primary value (record-types plan Task 12).
-    let types = config.resolve_record_types().await?;
+    // Record types: resolved lazily, at most once, only when a fetched
+    // secret is actually a record — so a typed record injects its primary
+    // field value under its name (`xv run` never expands other fields,
+    // spec §9 out of scope) without leaking the raw JSON envelope, while an
+    // all-untyped selection never pays for (or fails on) type resolution at
+    // all (Bugbot round 2 on #321 Phase C).
+    let mut record_types_cache: Option<std::result::Result<Vec<RecordType>, String>> = None;
 
     // Fetch secrets from current vault (group-filtered)
     for secret in filtered_secrets {
@@ -4229,23 +4259,33 @@ async fn execute_secret_run(
             .get_secret(&vault_name, &secret.name, true)
             .await
         {
-            Ok(secret_props) => match record_field_value(&secret.name, &secret_props, None, &types)
-            {
-                Ok(value) => {
-                    let env_name = to_env_var_name(&secret.name);
-                    env_vars.insert(env_name, value.clone());
+            Ok(secret_props) => {
+                let resolved = if crate::records::is_record(&secret_props.content_type) {
+                    resolve_types_lazily(&mut record_types_cache, config)
+                        .await
+                        .and_then(|types| {
+                            record_field_value(&secret.name, &secret_props, None, &types)
+                        })
+                } else {
+                    record_field_value(&secret.name, &secret_props, None, &[])
+                };
+                match resolved {
+                    Ok(value) => {
+                        let env_name = to_env_var_name(&secret.name);
+                        env_vars.insert(env_name, value.clone());
 
-                    // Store for masking (if enabled)
-                    if !no_masking && !value.is_empty() {
-                        secret_values.push(value.clone());
+                        // Store for masking (if enabled)
+                        if !no_masking && !value.is_empty() {
+                            secret_values.push(value.clone());
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to resolve secret '{}': {}", secret.name, e);
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
                     }
                 }
-                Err(e) => {
-                    let msg = format!("Failed to resolve secret '{}': {}", secret.name, e);
-                    output::warn(&msg);
-                    fetch_failures.push(msg);
-                }
-            },
+            }
             Err(e) => {
                 let msg = format!("Failed to get value for secret '{}': {}", secret.name, e);
                 output::warn(&msg);
@@ -4290,7 +4330,16 @@ async fn execute_secret_run(
 
             match fetch_result {
                 Ok(secret_props) => {
-                    match record_field_value(&secret_name, &secret_props, None, &types) {
+                    let resolved = if crate::records::is_record(&secret_props.content_type) {
+                        resolve_types_lazily(&mut record_types_cache, config)
+                            .await
+                            .and_then(|types| {
+                                record_field_value(&secret_name, &secret_props, None, &types)
+                            })
+                    } else {
+                        record_field_value(&secret_name, &secret_props, None, &[])
+                    };
+                    match resolved {
                         Ok(value) => {
                             uri_values.insert(uri.clone(), value.clone());
                             if !no_masking && !value.is_empty() {
@@ -4737,8 +4786,11 @@ async fn execute_secret_inject(
     let mut secret_values: HashMap<String, Zeroizing<String>> = HashMap::new();
     let mut cross_vault_values: HashMap<String, Zeroizing<String>> = HashMap::new(); // URI -> value
 
-    // Record types, resolved once, for primary/field resolution below.
-    let types = config.resolve_record_types().await?;
+    // Record types: resolved lazily, at most once, only when a fetched
+    // secret is actually a record — an all-untyped template must render
+    // successfully even with a broken `[types.*]` config block that no
+    // referenced secret actually uses (Bugbot round 2 on #321 Phase C).
+    let mut record_types_cache: Option<std::result::Result<Vec<RecordType>, String>> = None;
 
     // Fetch secrets from current vault. `ref_token` is the raw text captured
     // from `{{ secret:TOKEN }}`: either a bare name (record primary or a
@@ -4756,7 +4808,16 @@ async fn execute_secret_inject(
                 .await
             {
                 Ok(secret_props) => {
-                    match record_field_value(ref_token, &secret_props, None, &types) {
+                    let resolved = if crate::records::is_record(&secret_props.content_type) {
+                        resolve_types_lazily(&mut record_types_cache, config)
+                            .await
+                            .and_then(|types| {
+                                record_field_value(ref_token, &secret_props, None, &types)
+                            })
+                    } else {
+                        record_field_value(ref_token, &secret_props, None, &[])
+                    };
+                    match resolved {
                         Ok(value) => {
                             secret_values.insert(ref_token.clone(), value);
                         }
@@ -4792,7 +4853,16 @@ async fn execute_secret_inject(
                     .await
                 {
                     Ok(secret_props) => {
-                        match record_field_value(base, &secret_props, Some(field), &types) {
+                        let resolved = if crate::records::is_record(&secret_props.content_type) {
+                            resolve_types_lazily(&mut record_types_cache, config)
+                                .await
+                                .and_then(|types| {
+                                    record_field_value(base, &secret_props, Some(field), &types)
+                                })
+                        } else {
+                            record_field_value(base, &secret_props, Some(field), &[])
+                        };
+                        match resolved {
                             Ok(value) => {
                                 secret_values.insert(ref_token.clone(), value);
                             }
@@ -4855,12 +4925,21 @@ async fn execute_secret_inject(
 
             match fetch_result {
                 Ok(secret_props) => {
-                    match record_field_value(
-                        &secret_name,
-                        &secret_props,
-                        field_opt.as_deref(),
-                        &types,
-                    ) {
+                    let resolved = if crate::records::is_record(&secret_props.content_type) {
+                        resolve_types_lazily(&mut record_types_cache, config)
+                            .await
+                            .and_then(|types| {
+                                record_field_value(
+                                    &secret_name,
+                                    &secret_props,
+                                    field_opt.as_deref(),
+                                    &types,
+                                )
+                            })
+                    } else {
+                        record_field_value(&secret_name, &secret_props, field_opt.as_deref(), &[])
+                    };
+                    match resolved {
                         Ok(value) => {
                             cross_vault_values.insert(uri.clone(), value);
                         }
