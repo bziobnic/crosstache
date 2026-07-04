@@ -642,4 +642,139 @@ mod tests {
              this is the exact value rollback/purge's legacy-vs-trait check consumes"
         );
     }
+
+    /// Bugbot round-3 MEDIUM fix: capability gates (`history`, `rollback`,
+    /// `purge`, `restore`, `rotate --native`) must evaluate the RESOLVED
+    /// target's capabilities, not a separate "active backend" assumption.
+    /// `azure` and `local` genuinely differ on `has_rbac` (azure: true,
+    /// local: false — real backends only differ on `has_rbac` and
+    /// `has_secret_rotation`; the flags `history`/`rollback`/`purge`/
+    /// `restore` actually check — `has_versioning`/`has_soft_delete` — are
+    /// `true` on every backend, so `has_rbac` is the general, hermetic
+    /// stand-in this test uses to pin the *general* "resolved capabilities,
+    /// not a separate active backend's" seam every one of those call sites
+    /// now shares (each does `resolve_workspace_or_default(...)` then
+    /// `resolved.capabilities()`, identical in shape to this test). This is
+    /// the unit-level proof the round-3 writeup asks for since no two real
+    /// backends differ on the specific flags history/rollback/purge/restore
+    /// check, so an e2e mismatch isn't constructible for those verbs
+    /// (`rotate --native`'s `has_secret_rotation` mismatch IS e2e-drivable
+    /// and is covered in `tests/e2e_workspaces.rs`).
+    #[tokio::test]
+    async fn resolved_backend_capabilities_reflect_workspace_entry_not_a_separate_active_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut named_backends = HashMap::new();
+        named_backends.insert(
+            "local-a".to_string(),
+            NamedBackendEntry::Local(LocalConfig {
+                store_path: Some(tmp.path().join("store-a").to_string_lossy().to_string()),
+                key_file: Some(tmp.path().join("key-a.txt").to_string_lossy().to_string()),
+                default_vault: Some("default".into()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+        );
+        // No top-level `backend`/`local`/`azure` config at all — same
+        // reasoning as the sibling test above: no separate "active
+        // backend" exists here for a buggy gate to have accidentally read.
+        let config = Config {
+            named_backends,
+            ..Default::default()
+        };
+        let registry =
+            BackendRegistry::with_lazy(&config, &["azure".to_string(), "local-a".to_string()])
+                .expect("must register");
+
+        // "loc"/local-a is the DEFAULT here (not azure): Write mode's
+        // exact-name-first probe is scoped to the default vault only, and
+        // probing azure would require a real network round-trip (unlike
+        // constructing an AzureBackend, which is instant/credential-free)
+        // — a qualified write ("az:...") below must never touch it.
+        let ws = Workspace {
+            entries: vec![
+                WorkspaceEntry {
+                    alias: "loc".to_string(),
+                    backend: "local-a".to_string(),
+                    vault: "default".to_string(),
+                    default: true,
+                },
+                WorkspaceEntry {
+                    alias: "az".to_string(),
+                    backend: "azure".to_string(),
+                    vault: "az-vault".to_string(),
+                    default: false,
+                },
+            ],
+            default_alias: "loc".to_string(),
+            source: WorkspaceSource::Context,
+        };
+
+        // Unqualified (Write mode): resolves to the default ("loc"/local)
+        // — capabilities().has_rbac must be false (local's), proving a
+        // caller gating on `resolved.capabilities()` reads the entry that
+        // was actually picked.
+        let (default_target, _) =
+            resolve_secret_target("SOME_SECRET", &ws, &registry, TargetMode::Write)
+                .await
+                .expect("local backend must resolve");
+        assert!(
+            !default_target.backend.capabilities().has_rbac,
+            "resolved default (local) capabilities must be read"
+        );
+
+        // Qualified to "az" (azure): capabilities().has_rbac must now be
+        // true (azure's), even though the WORKSPACE DEFAULT (local) has no
+        // RBAC — proving the gate follows resolution per-call, not a
+        // cached/assumed value from the default or any other entry. The
+        // exact-name-first probe this triggers is scoped to the DEFAULT
+        // ("loc"/local, hermetic), never to azure, so this stays
+        // network-free even though the resolved target is azure.
+        let (named_target, _) =
+            resolve_secret_target("az:SOME_SECRET", &ws, &registry, TargetMode::Write)
+                .await
+                .expect("azure backend must construct hermetically");
+        assert!(
+            named_target.backend.capabilities().has_rbac,
+            "resolved named entry (azure) capabilities must be read, not local's (the default)"
+        );
+    }
+
+    /// `history`'s exact resolution mode (`TargetMode::Read`) exercises the
+    /// same `resolve_secret_target` → `.capabilities()` seam pinned above
+    /// for Write mode. A genuine capability VALUE mismatch isn't
+    /// constructible here with an azure entry present — Read mode always
+    /// searches every attached vault (including azure) for ANY name,
+    /// qualified or not, which needs real network, unlike Write's
+    /// default-only probe. This instead pins that Read mode resolves to
+    /// the correct ENTRY — proving `history`'s post-resolution capability
+    /// check (`backend.capabilities().has_versioning`, applied in
+    /// `execute_secret_history_direct` right after this same call) reads
+    /// whichever entry the search actually picked, not the workspace
+    /// default or any other assumption — using two hermetic local stores.
+    #[tokio::test]
+    async fn history_gates_on_resolved_backend_capabilities() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (registry, ws) = two_vault_workspace(&tmp);
+
+        let stage_backend = registry.materialize("local-b").unwrap();
+        stage_backend
+            .secrets()
+            .set_secret("default", req("HIST_ONLY_STAGE", "v"))
+            .await
+            .unwrap();
+
+        // Unqualified, but only present in "stage" (not the default,
+        // "work") — Read mode's search must resolve it there.
+        let (target, _path) =
+            resolve_secret_target("HIST_ONLY_STAGE", &ws, &registry, TargetMode::Read)
+                .await
+                .expect("must resolve via search");
+        assert_eq!(
+            target.entry.alias, "stage",
+            "must resolve to the vault that actually has the secret, not the workspace default"
+        );
+        // The capability value `history` gates on, read from the entry
+        // the search actually picked.
+        assert!(target.backend.capabilities().has_versioning);
+    }
 }

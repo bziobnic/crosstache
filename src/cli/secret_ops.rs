@@ -2105,17 +2105,6 @@ pub(crate) async fn execute_secret_history_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Capability check: history requires versioning support
-    if let Some(registry) = registry {
-        let caps = registry.active().capabilities();
-        if !caps.has_versioning {
-            return Err(CrosstacheError::InvalidArgument(format!(
-                "The {} backend does not support version history.",
-                registry.active().name()
-            )));
-        }
-    }
-
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
@@ -2131,6 +2120,21 @@ pub(crate) async fn execute_secret_history_direct(
             )
             .await?;
         let name = resolved_name.as_str();
+
+        // Capability check: history requires versioning support. Gated on
+        // the RESOLVED target's backend (Bugbot round-3 fix) — a workspace
+        // entry can differ in capabilities from the process's top-level
+        // active backend, so checking `registry.active()` here (as before)
+        // could reject a resolved vault that actually supports versioning,
+        // or approve one that doesn't. No workspace attached ⇒ resolved
+        // backend == active backend, so this check is unchanged there.
+        if !backend.capabilities().has_versioning {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support version history.",
+                backend.name()
+            )));
+        }
+
         let versions = backend.secrets().list_versions(&vault_name, name).await?;
         if versions.is_empty() {
             let fmt = config.runtime_output_format;
@@ -2194,17 +2198,6 @@ pub(crate) async fn execute_secret_rollback_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Capability check: rollback requires versioning support
-    if let Some(registry) = registry {
-        let caps = registry.active().capabilities();
-        if !caps.has_versioning {
-            return Err(CrosstacheError::InvalidArgument(format!(
-                "The {} backend does not support version rollback.",
-                registry.active().name()
-            )));
-        }
-    }
-
     // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
@@ -2230,6 +2223,18 @@ pub(crate) async fn execute_secret_rollback_direct(
                 crate::workspace::TargetMode::Read,
             )
             .await?;
+
+        // Capability check: rollback requires versioning support. Gated on
+        // the RESOLVED target's backend (Bugbot round-3 fix), not the
+        // process's top-level active backend — a workspace entry can
+        // differ in capabilities from it. No workspace attached ⇒ resolved
+        // backend == active backend, so this check is unchanged there.
+        if !backend.capabilities().has_versioning {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support version rollback.",
+                backend.name()
+            )));
+        }
 
         if backend.kind() == crate::backend::BackendKind::Azure {
             // Azure's legacy rollback path resolves friendly version
@@ -2418,12 +2423,6 @@ async fn execute_secret_rotate_native(
         ));
     };
 
-    // Capability check: native rotation requires backend support
-    let caps = reg.active().capabilities();
-    if !caps.has_secret_rotation {
-        return Err(rotate_native_unsupported_error(reg.active().name()));
-    }
-
     // Workspace-aware resolution: native rotate is a write/destructive verb
     // — unqualified names always target the default entry, never searched.
     // No workspace attached ⇒ byte-identical to the pre-workspace path.
@@ -2435,6 +2434,14 @@ async fn execute_secret_rotate_native(
     )
     .await?;
     let name = resolved_name.as_str();
+
+    // Capability check: native rotation requires backend support. Gated on
+    // the RESOLVED target's backend (Bugbot round-3 fix), not the
+    // process's top-level active backend. No workspace attached ⇒ resolved
+    // backend == active backend, so this check is unchanged there.
+    if !backend.capabilities().has_secret_rotation {
+        return Err(rotate_native_unsupported_error(backend.name()));
+    }
 
     // Confirm rotation unless force flag is used (mirrors the default path)
     if !force {
@@ -3483,17 +3490,6 @@ pub(crate) async fn execute_secret_purge_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Capability check: purge requires soft-delete support
-    if let Some(registry) = registry {
-        let caps = registry.active().capabilities();
-        if !caps.has_soft_delete {
-            return Err(CrosstacheError::InvalidArgument(format!(
-                "The {} backend does not support purge (soft-delete not available).",
-                registry.active().name()
-            )));
-        }
-    }
-
     // ── Trait-based path ───────────────────────────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
@@ -3515,6 +3511,18 @@ pub(crate) async fn execute_secret_purge_direct(
                 crate::workspace::TargetMode::Write,
             )
             .await?;
+
+        // Capability check: purge requires soft-delete support. Gated on
+        // the RESOLVED target's backend (Bugbot round-3 fix), not the
+        // process's top-level active backend. No workspace attached ⇒
+        // resolved backend == active backend, so this check is unchanged
+        // there.
+        if !backend.capabilities().has_soft_delete {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support purge (soft-delete not available).",
+                backend.name()
+            )));
+        }
 
         if backend.kind() == crate::backend::BackendKind::Azure {
             // A target that resolves to Azure (workspace entry or the
@@ -3592,17 +3600,6 @@ pub(crate) async fn execute_secret_restore_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Capability check: restore requires soft-delete support
-    if let Some(registry) = registry {
-        let caps = registry.active().capabilities();
-        if !caps.has_soft_delete {
-            return Err(CrosstacheError::InvalidArgument(format!(
-                "The {} backend does not support restore (soft-delete not available).",
-                registry.active().name()
-            )));
-        }
-    }
-
     // ── Trait-based path (non-Azure backends) ──────────────────────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
@@ -3617,6 +3614,19 @@ pub(crate) async fn execute_secret_restore_direct(
                 crate::workspace::TargetMode::Write,
             )
             .await?;
+
+        // Capability check: restore requires soft-delete support. Gated on
+        // the RESOLVED target's backend (Bugbot round-3 fix), not the
+        // process's top-level active backend. No workspace attached ⇒
+        // resolved backend == active backend, so this check is unchanged
+        // there.
+        if !backend.capabilities().has_soft_delete {
+            return Err(CrosstacheError::InvalidArgument(format!(
+                "The {} backend does not support restore (soft-delete not available).",
+                backend.name()
+            )));
+        }
+
         let props = backend
             .secrets()
             .restore_secret(&vault_name, &resolved_name)

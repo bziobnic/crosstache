@@ -81,6 +81,16 @@ type = "local"
 store_path = "{store_b}"
 key_file = "{key_b}"
 default_vault = "default"
+
+[named_backends.aws-mock]
+type = "aws"
+region = "us-east-1"
+# No real AWS calls are ever made against this entry in tests that don't
+# need one — endpoint_url only needs to be syntactically present so client
+# construction doesn't reach for real credentials at build time (mirrors
+# tests/aws_backend_tests.rs's workspace_touching_only_aws_never_builds_azure).
+endpoint_url = "http://127.0.0.1:1"
+default_vault = "default"
 "#,
             store_default = store_default.display(),
             key_default = key_default.display(),
@@ -1197,6 +1207,79 @@ fn rotate_qualified_targets_named_vault() {
     env.ok(&["rotate", "stage:ROT_ME", "--force"]);
     let rotated = env.ok(&["get", "stage:ROT_ME", "--raw"]);
     assert_ne!(rotated, "orig", "rotate must have generated a new value");
+}
+
+/// Bugbot round-3 MEDIUM fix: capability gates must evaluate the RESOLVED
+/// workspace target's backend, not the process's top-level active
+/// backend. `local` and `aws` genuinely differ on `has_secret_rotation`
+/// (local: false, aws: true — the only capability flag that differs
+/// across crosstache's backend kinds), so `rotate --native` is the one
+/// verb where a real, hermetic, e2e-drivable capability MISMATCH exists:
+/// the workspace's default is the `aws-mock` named backend (rotation
+/// CAPABLE), while a non-default entry is `local-a` (rotation
+/// INCAPABLE). Only the capability check itself needs to be hermetic —
+/// AWS SDK client construction never makes a network call, so asserting
+/// on which error comes back (capability-rejection vs. anything else) is
+/// safe without real credentials.
+#[test]
+#[cfg_attr(not(feature = "aws"), ignore = "requires the aws feature")]
+fn rotate_native_capability_gate_reflects_resolved_target_not_workspace_default() {
+    let env = WorkspaceEnv::new();
+    // aws-mock (rotation-capable) becomes the workspace default (first
+    // add). `--force` skips the vault-exists probe, which would otherwise
+    // need a real network round-trip against the fake endpoint.
+    env.ok(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "aws-mock",
+        "--as",
+        "cloud",
+        "--force",
+    ]);
+
+    // The process's top-level active backend (xv.conf's plain `backend =
+    // "local"`, a THIRD store distinct from every named backend here) has
+    // `has_secret_rotation: false` — the OLD, buggy gate (checking
+    // `registry.active().capabilities()`) would have rejected this
+    // unqualified rotate even though the workspace's actual default
+    // (aws-mock) supports it. This is a bare (colon-free) name, so Write
+    // mode's exact-name-first probe never fires (nothing to disambiguate
+    // for a bare name) — resolution only MATERIALIZES aws-mock (no network
+    // call; AWS SDK client construction is lazy about credentials) and
+    // then evaluates its capabilities, both hermetic. The actual
+    // `native_rotate` call after the gate DOES need real network and WILL
+    // fail — that's fine; the only thing asserted is that the failure is
+    // NOT the capability-rejection message, proving the gate itself
+    // resolved and read the correct (aws-mock) capabilities.
+    let out = env.run(&["rotate", "ANY_SECRET", "--native", "--force"]);
+    let msg = combined(&out);
+    assert!(
+        !msg.contains("does not support native rotation"),
+        "aws-mock (the resolved default) supports native rotation, so this must not be \
+         capability-rejected — a rejection here would mean the gate is still reading some \
+         other backend's (e.g. the top-level active local backend's) capabilities: {msg}"
+    );
+}
+
+/// Guard: the no-workspace capability-rejection error keeps its EXACT
+/// current message and exit code — the local backend has no native
+/// rotation support, and `rotate --native` without any workspace attached
+/// must reject with byte-identical text to the pre-refactor behavior
+/// (`resolved backend == active backend` in the no-workspace case, so
+/// moving the gate after resolution changes nothing here).
+#[test]
+fn rotate_native_capability_error_no_workspace_is_byte_stable() {
+    let env = WorkspaceEnv::new();
+    // No `cx add` at all.
+    let out = env.err(&["rotate", "SOME_SECRET", "--native", "--force"]);
+    assert_eq!(out.status.code(), Some(2), "{}", combined(&out));
+    let msg = combined(&out);
+    assert_eq!(
+        msg.trim(),
+        "error[xv-invalid-argument]: Invalid argument: The local backend does not support native rotation. Native rotation is currently available on the aws backend only; without --native, 'xv rotate' generates a new value client-side on any backend."
+    );
 }
 
 #[test]
