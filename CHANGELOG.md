@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.19.1 — Name-glob filtering on ls and find (2026-07-03)
 
 ### Added
 
