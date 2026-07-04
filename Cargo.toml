@@ -1,6 +1,6 @@
 [package]
 name = "crosstache"
-version = "0.19.0"
+version = "0.19.1"
 edition = "2021"
 authors = ["crosstache Team"]
 description = "A comprehensive tool for managing secrets across Azure Key Vault, AWS Secrets Manager, and local age-encrypted storage"
