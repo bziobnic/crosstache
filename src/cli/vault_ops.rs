@@ -1,25 +1,75 @@
 //! Vault command execution handlers.
 
-use crate::auth::provider::AzureAuthProvider;
-use crate::backend::BackendRegistry;
+use crate::backend::{Backend, BackendKind, BackendRegistry};
 use crate::cli::commands::{VaultCommands, VaultShareCommands};
-use crate::cli::helpers::{get_azure_auth_provider, share_unsupported_error, use_vault_trait_path};
+use crate::cli::helpers::{share_unsupported_error, use_vault_trait_path};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
-use crate::utils::format::OutputFormat;
 use crate::utils::output;
-use crate::vault::{VaultCreateRequest, VaultManager};
+use crate::vault::VaultCreateRequest;
 use std::sync::Arc;
 use zeroize::Zeroizing;
+
+/// Materialize the active (or, when the registry failed to build, the
+/// config-requested) backend as an `Arc<dyn Backend>`, so vault/secret
+/// operations can run through the trait layer whether or not startup
+/// managed to build the shared [`BackendRegistry`].
+///
+/// When `registry` is `None` (a non-fatal backend init failure at startup) it
+/// constructs the requested backend on demand, so the command fails with a
+/// clear construction error instead of silently dropping to a second code path.
+pub(crate) async fn active_or_construct_backend(
+    registry: Option<&BackendRegistry>,
+    config: &Config,
+) -> Result<Arc<dyn Backend>> {
+    if let Some(reg) = registry {
+        return Ok(reg.active_arc());
+    }
+    let kind = crate::cli::helpers::requested_backend_kind(config).unwrap_or(BackendKind::Azure);
+    BackendRegistry::create_for_kind(kind, config)
+        .await
+        .map_err(|e| CrosstacheError::config(e.to_string()))
+}
+
+/// Resolve the current vault name through the unified workspace seam (the
+/// degenerate workspace-of-one's default entry), replacing legacy
+/// `config.resolve_vault_name(None)` call sites. `resolve_workspace` never
+/// yields `None` (it synthesizes a degenerate workspace-of-one) and preserves
+/// the Azure no-vault hard error, so this returns the exact same vault the
+/// legacy resolver produced.
+pub(crate) async fn resolve_current_vault(config: &Config) -> Result<String> {
+    let ws = crate::workspace::resolve_workspace(config)
+        .await?
+        .ok_or_else(|| {
+            CrosstacheError::config(
+                "internal error: resolve_workspace returned None; the degenerate \
+                 workspace-of-one must always yield Some or Err",
+            )
+        })?;
+    Ok(ws.default_entry()?.vault.clone())
+}
+
+/// Borrow the vault sub-trait from a materialized backend, or produce the
+/// standard "backend does not support vault operations" error.
+fn vaults_of(backend: &dyn Backend) -> Result<&dyn crate::backend::vault::VaultBackend> {
+    backend.vaults().ok_or_else(|| {
+        CrosstacheError::InvalidArgument(format!(
+            "The {} backend does not support vault operations.",
+            backend.name()
+        ))
+    })
+}
 
 pub(crate) async fn execute_vault_command(
     command: VaultCommands,
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // ── Trait-based path (non-Azure backends only) ─────────────────────
-    // Azure vault operations are not yet ported to the trait layer — they use
-    // the legacy VaultManager path below.
+    // ── Non-Azure trait path ───────────────────────────────────────────
+    // Local/AWS resolve the core CRUD verbs (create/list/delete/info) here
+    // through `VaultBackend`; the section below covers Azure plus the verbs
+    // this branch doesn't implement (restore/purge/export/import/update/share,
+    // resource-group filtering) — also through the trait.
     if use_vault_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
 
@@ -36,13 +86,7 @@ pub(crate) async fn execute_vault_command(
             }
         }
 
-        // Phase 2 (legacy manager retirement): legacy active-backend dispatch
-        let vaults_backend = reg.active().vaults().ok_or_else(|| {
-            CrosstacheError::InvalidArgument(format!(
-                "The {} backend does not support vault operations.",
-                reg.active().name()
-            ))
-        })?;
+        let vaults_backend = vaults_of(reg.active())?;
 
         match command {
             VaultCommands::Create { name, .. } => {
@@ -75,7 +119,7 @@ pub(crate) async fn execute_vault_command(
                 let pager = pager
                     .map(crate::cli::commands::PagerWhen::wants_pager)
                     .unwrap_or(false);
-                let vaults = vaults_backend.list_vaults().await?;
+                let vaults = vaults_backend.list_vaults(None).await?;
                 let output_format = config.runtime_output_format;
                 let pagination = Pagination::from_args(page, page_size)?;
 
@@ -96,11 +140,11 @@ pub(crate) async fn execute_vault_command(
                     output::info("Aborted; vault not deleted.");
                     return Ok(());
                 }
-                vaults_backend.delete_vault(&name).await?;
+                vaults_backend.delete_vault(&name, None).await?;
                 output::success(&format!("Successfully deleted vault '{name}'"));
             }
             VaultCommands::Info { name, .. } => {
-                let vault = vaults_backend.get_vault(&name).await?;
+                let vault = vaults_backend.get_vault(&name, None).await?;
                 if config.output_json {
                     let json = serde_json::to_string_pretty(&vault).map_err(|e| {
                         CrosstacheError::serialization(format!(
@@ -133,17 +177,13 @@ pub(crate) async fn execute_vault_command(
         return Ok(());
     }
 
-    // ── Azure legacy path (unchanged) ─────────────────────────────────
-    // Create authentication provider — reuse from registry when available
-    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
-    let auth_provider: Arc<dyn AzureAuthProvider> = get_azure_auth_provider(registry, &config)?;
-
-    // Create vault manager
-    let vault_manager = VaultManager::new(
-        auth_provider.clone(),
-        config.subscription_id.clone(),
-        config.no_color,
-    )?;
+    // Materialize the active/requested backend once. Every vault verb now runs
+    // through the trait layer: create/restore/purge/list/delete/info/update via
+    // `VaultBackend`, export/import via `SecretBackend`, share via `VaultBackend`
+    // RBAC. Azure-specific inputs (resource-group override, safe-delete warnings,
+    // vault-property display) are threaded through the trait or reproduced
+    // CLI-side.
+    let backend = active_or_construct_backend(registry, &config).await?;
 
     let vault_cache_manager = crate::cache::CacheManager::from_config(&config);
 
@@ -153,7 +193,14 @@ pub(crate) async fn execute_vault_command(
             resource_group,
             location,
         } => {
-            execute_vault_create(&vault_manager, &name, resource_group, location, &config).await?;
+            execute_vault_create(
+                vaults_of(backend.as_ref())?,
+                &name,
+                resource_group,
+                location,
+                &config,
+            )
+            .await?;
             vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::List {
@@ -165,7 +212,7 @@ pub(crate) async fn execute_vault_command(
             pager,
         } => {
             execute_vault_list(
-                &vault_manager,
+                vaults_of(backend.as_ref())?,
                 resource_group,
                 names_only,
                 no_cache,
@@ -183,17 +230,25 @@ pub(crate) async fn execute_vault_command(
             resource_group,
             force,
         } => {
-            execute_vault_delete(&vault_manager, &name, resource_group, force, &config).await?;
+            execute_vault_delete(
+                vaults_of(backend.as_ref())?,
+                &name,
+                resource_group,
+                force,
+                &config,
+            )
+            .await?;
             vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Info {
             name,
             resource_group,
         } => {
-            execute_vault_info(&vault_manager, &name, resource_group, &config).await?;
+            execute_vault_info(vaults_of(backend.as_ref())?, &name, resource_group, &config)
+                .await?;
         }
         VaultCommands::Restore { name, location } => {
-            execute_vault_restore(&vault_manager, &name, &location, &config).await?;
+            execute_vault_restore(vaults_of(backend.as_ref())?, &name, &location, &config).await?;
             vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Purge {
@@ -201,7 +256,14 @@ pub(crate) async fn execute_vault_command(
             location,
             force,
         } => {
-            execute_vault_purge(&vault_manager, &name, &location, force, &config).await?;
+            execute_vault_purge(
+                vaults_of(backend.as_ref())?,
+                &name,
+                &location,
+                force,
+                &config,
+            )
+            .await?;
             vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Export {
@@ -213,7 +275,7 @@ pub(crate) async fn execute_vault_command(
             group,
         } => {
             execute_vault_export(
-                &vault_manager,
+                backend.as_ref(),
                 &name,
                 resource_group,
                 output,
@@ -221,7 +283,6 @@ pub(crate) async fn execute_vault_command(
                 include_values,
                 group,
                 &config,
-                registry,
             )
             .await?;
         }
@@ -234,7 +295,7 @@ pub(crate) async fn execute_vault_command(
             dry_run,
         } => {
             execute_vault_import(
-                &vault_manager,
+                backend.as_ref(),
                 &name,
                 resource_group,
                 input,
@@ -242,7 +303,6 @@ pub(crate) async fn execute_vault_command(
                 overwrite,
                 dry_run,
                 &config,
-                registry,
             )
             .await?;
             // Invalidate the secrets list for the target vault (secrets were
@@ -267,7 +327,7 @@ pub(crate) async fn execute_vault_command(
             retention_days,
         } => {
             execute_vault_update(
-                &vault_manager,
+                vaults_of(backend.as_ref())?,
                 &name,
                 resource_group,
                 tag,
@@ -282,36 +342,25 @@ pub(crate) async fn execute_vault_command(
             vault_cache_manager.invalidate(&crate::cache::CacheKey::VaultList);
         }
         VaultCommands::Share { command } => {
-            // Capability check: vault sharing requires RBAC support. With no
-            // registry (requested backend failed to initialize), resolve the
-            // requested backend from config so non-RBAC backends still get
-            // the capability hint instead of the legacy Azure path.
-            if let Some(registry) = registry {
-                let active = registry.active();
-                if !active.capabilities().has_rbac {
-                    return Err(share_unsupported_error(
-                        active.kind(),
-                        active.name(),
-                        "vault sharing",
-                    ));
-                }
-            } else if let Some(kind) = crate::cli::helpers::requested_backend_kind(&config) {
-                if kind != crate::backend::BackendKind::Azure {
-                    return Err(share_unsupported_error(
-                        kind,
-                        config.effective_backend_name(),
-                        "vault sharing",
-                    ));
-                }
+            // Capability gate: vault sharing requires RBAC support. The gate is
+            // `has_rbac` on the resolved backend (constructed from config above
+            // even when startup init failed); `kind` only selects the message
+            // text (e.g. AWS's IAM guidance) once the gate fails.
+            if !backend.capabilities().has_rbac {
+                return Err(share_unsupported_error(
+                    backend.kind(),
+                    backend.name(),
+                    "vault sharing",
+                ));
             }
-            execute_vault_share(&vault_manager, &auth_provider, command, &config).await?;
+            execute_vault_share(vaults_of(backend.as_ref())?, command, &config).await?;
         }
     }
     Ok(())
 }
 
 async fn execute_vault_create(
-    vault_manager: &VaultManager,
+    vaults_backend: &dyn crate::backend::vault::VaultBackend,
     name: &str,
     resource_group: Option<String>,
     location: Option<String>,
@@ -325,6 +374,9 @@ async fn execute_vault_create(
         "Creating vault '{name}' in resource group '{resource_group}' at location '{location}'..."
     );
 
+    // Config-derived request. The Azure adapter fills the current user as an
+    // admin access policy and applies purge-protection defaults inside
+    // `create_vault`; non-Azure backends ignore the Azure-only scalar fields.
     let create_request = VaultCreateRequest {
         name: name.to_string(),
         location: location.clone(),
@@ -335,7 +387,7 @@ async fn execute_vault_create(
         enabled_for_disk_encryption: Some(false),
         enabled_for_template_deployment: Some(false),
         soft_delete_retention_in_days: Some(90),
-        purge_protection: None, // Let the manager set safe defaults
+        purge_protection: None, // Let the backend set safe defaults
         tags: Some(std::collections::HashMap::from([
             ("created_by".to_string(), "crosstache".to_string()),
             (
@@ -343,12 +395,10 @@ async fn execute_vault_create(
                 chrono::Utc::now().format("%Y-%m-%d").to_string(),
             ),
         ])),
-        access_policies: None, // Will be set automatically by the manager
+        access_policies: None, // Will be set automatically by the backend
     };
 
-    let vault = vault_manager
-        .create_vault_with_setup(name, &location, &resource_group, Some(create_request))
-        .await?;
+    let vault = vaults_backend.create_vault(create_request).await?;
 
     output::success(&format!("Successfully created vault '{}'", vault.name));
     println!("   Resource Group: {}", vault.resource_group);
@@ -430,7 +480,7 @@ fn render_vault_list(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_vault_list(
-    vault_manager: &VaultManager,
+    vaults_backend: &dyn crate::backend::vault::VaultBackend,
     resource_group: Option<String>,
     names_only: bool,
     no_cache: bool,
@@ -462,8 +512,8 @@ async fn execute_vault_list(
         }
     }
 
-    let vaults = vault_manager
-        .list_vaults(Some(&config.subscription_id), resource_group.as_deref())
+    let vaults = vaults_backend
+        .list_vaults(resource_group.as_deref())
         .await?;
 
     if use_cache && resource_group.is_none() {
@@ -481,18 +531,45 @@ async fn execute_vault_list(
 }
 
 async fn execute_vault_delete(
-    vault_manager: &VaultManager,
+    vaults_backend: &dyn crate::backend::vault::VaultBackend,
     name: &str,
     resource_group: Option<String>,
     force: bool,
     config: &Config,
 ) -> Result<()> {
-    // Use provided resource group or fall back to config default
+    // Use provided resource group or fall back to config default (kept for the
+    // warning text; the trait `unwrap_or`s the same default internally).
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
-    vault_manager
-        .delete_vault_safe(name, &resource_group, force)
+    // Reproduce the retired `VaultManager::delete_vault_safe` UX (soft-delete
+    // warnings gated on the vault's purge-protection/retention) CLI-side, since
+    // that is presentation policy rather than a backend concern.
+    let vault = vaults_backend
+        .get_vault(name, Some(&resource_group))
         .await?;
+    if !force {
+        output::warn(&format!(
+            "This will soft-delete vault '{name}' in resource group '{resource_group}'"
+        ));
+        if vault.has_purge_protection() {
+            output::warn(
+                "This vault has purge protection enabled - it cannot be permanently deleted.",
+            );
+        } else {
+            output::warn(&format!(
+                "The vault will be recoverable for {} days after deletion.",
+                vault.get_retention_days()
+            ));
+        }
+    }
+
+    vaults_backend
+        .delete_vault(name, Some(&resource_group))
+        .await?;
+
+    output::success(&format!(
+        "Successfully deleted vault '{name}' (soft delete)"
+    ));
 
     Ok(())
 }
@@ -503,15 +580,11 @@ async fn execute_vault_delete(
 /// original error path.
 async fn attach_vault_suggestion(
     err: CrosstacheError,
-    vault_manager: &VaultManager,
+    vaults_backend: &dyn crate::backend::vault::VaultBackend,
     resource_group: &str,
 ) -> CrosstacheError {
     if let CrosstacheError::VaultNotFound { name: missing, .. } = err {
-        let suggestion = match vault_manager
-            .vault_ops()
-            .list_vaults(None, Some(resource_group))
-            .await
-        {
+        let suggestion = match vaults_backend.list_vaults(Some(resource_group)).await {
             Ok(summaries) => {
                 let candidates: Vec<String> = summaries.into_iter().map(|s| s.name).collect();
                 crate::utils::suggestions::closest_match(&missing, &candidates)
@@ -529,32 +602,117 @@ async fn attach_vault_suggestion(
 }
 
 async fn execute_vault_info(
-    vault_manager: &VaultManager,
+    vaults_backend: &dyn crate::backend::vault::VaultBackend,
     name: &str,
     resource_group: Option<String>,
     config: &Config,
 ) -> Result<()> {
-    // Use provided resource group or fall back to config default
+    // Use provided resource group or fall back to config default.
     let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
+    let vault = match vaults_backend.get_vault(name, Some(&resource_group)).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(attach_vault_suggestion(
+                CrosstacheError::from(e),
+                vaults_backend,
+                &resource_group,
+            )
+            .await)
+        }
+    };
+
     if config.output_json {
-        let vault = match vault_manager
-            .get_vault_properties(name, &resource_group)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => return Err(attach_vault_suggestion(e, vault_manager, &resource_group).await),
-        };
         let json_output = serde_json::to_string_pretty(&vault).map_err(|e| {
             CrosstacheError::serialization(format!("Failed to serialize vault info: {e}"))
         })?;
         println!("{json_output}");
     } else {
-        let _vault = match vault_manager.get_vault_info(name, &resource_group).await {
-            Ok(v) => v,
-            Err(e) => return Err(attach_vault_suggestion(e, vault_manager, &resource_group).await),
-        };
-        // Display will be handled by the vault manager
+        display_vault_details(&vault, config.no_color)?;
+    }
+
+    Ok(())
+}
+
+/// Human-readable vault-properties display, relocated CLI-side from the retired
+/// `VaultManager::display_vault_details` (presentation, not a backend concern).
+fn display_vault_details(
+    vault: &crate::vault::models::VaultProperties,
+    no_color: bool,
+) -> Result<()> {
+    use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
+
+    let du = DisplayUtils::new(no_color);
+    du.print_header(&format!("Vault: {}", vault.name))?;
+
+    let vault_uri = vault.get_vault_uri();
+    let retention_days = format!("{} days", vault.soft_delete_retention_in_days);
+
+    let details = vec![
+        ("Resource ID", vault.id.as_str()),
+        ("Location", vault.location.as_str()),
+        ("Resource Group", vault.resource_group.as_str()),
+        ("Subscription", vault.subscription_id.as_str()),
+        ("Vault URI", vault_uri.as_str()),
+        ("SKU", vault.sku.as_str()),
+        ("Soft Delete Retention", retention_days.as_str()),
+        (
+            "Purge Protection",
+            if vault.purge_protection {
+                "Enabled"
+            } else {
+                "Disabled"
+            },
+        ),
+        (
+            "Deployment Access",
+            if vault.enabled_for_deployment {
+                "Enabled"
+            } else {
+                "Disabled"
+            },
+        ),
+        (
+            "Disk Encryption Access",
+            if vault.enabled_for_disk_encryption {
+                "Enabled"
+            } else {
+                "Disabled"
+            },
+        ),
+        (
+            "Template Access",
+            if vault.enabled_for_template_deployment {
+                "Enabled"
+            } else {
+                "Disabled"
+            },
+        ),
+    ];
+
+    let formatted_details = du.format_key_value_pairs(&details);
+    println!("{formatted_details}");
+
+    if !vault.access_policies.is_empty() {
+        du.print_separator()?;
+        du.print_header("Access Policies")?;
+
+        let formatter = TableFormatter::new(OutputFormat::Table, no_color, None, None);
+        let table_output = formatter.format_table(&vault.access_policies)?;
+        println!("{table_output}");
+    }
+
+    if !vault.tags.is_empty() {
+        du.print_separator()?;
+        du.print_header("Tags")?;
+
+        let tag_pairs: Vec<(&str, &str)> = vault
+            .tags
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let formatted_tags = du.format_key_value_pairs(&tag_pairs);
+        println!("{formatted_tags}");
     }
 
     Ok(())
@@ -568,44 +726,49 @@ pub(crate) async fn execute_vault_info_from_root(
     config: &Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Create authentication provider — reuse from registry when available
-    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
-    let auth_provider = get_azure_auth_provider(registry, config)?;
-
-    // Create vault manager
-    let vault_manager = VaultManager::new(
-        auth_provider,
-        config.subscription_id.clone(),
-        config.no_color,
-    )?;
-
-    // Use provided resource group or fall back to config default
-    let resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
-
-    // Call the existing vault info function
-    execute_vault_info(&vault_manager, vault_name, Some(resource_group), config).await
+    let backend = active_or_construct_backend(registry, config).await?;
+    execute_vault_info(
+        vaults_of(backend.as_ref())?,
+        vault_name,
+        resource_group,
+        config,
+    )
+    .await
 }
 
 async fn execute_vault_restore(
-    vault_manager: &VaultManager,
+    vaults_backend: &dyn crate::backend::vault::VaultBackend,
     name: &str,
     location: &str,
     _config: &Config,
 ) -> Result<()> {
-    vault_manager.restore_vault(name, location).await?;
+    // The CLI `--location` (required for vault restore/purge) identifies the
+    // region the vault was soft-deleted in; thread it through so Azure targets
+    // the correct region instead of the config default.
+    output::info(&format!("Restoring soft-deleted vault '{name}'..."));
+    vaults_backend.restore_vault(name, Some(location)).await?;
+    output::success(&format!("Successfully restored vault '{name}'"));
     Ok(())
 }
 
 async fn execute_vault_purge(
-    vault_manager: &VaultManager,
+    vaults_backend: &dyn crate::backend::vault::VaultBackend,
     name: &str,
     location: &str,
     force: bool,
     _config: &Config,
 ) -> Result<()> {
-    vault_manager
-        .purge_vault_permanent(name, location, force)
-        .await?;
+    if !force {
+        output::warn(&format!(
+            "This will PERMANENTLY delete vault '{name}' and all its contents!"
+        ));
+        output::warn("This action cannot be undone.");
+    }
+    // Thread the CLI `--location` through (see restore above).
+    vaults_backend.purge_vault(name, Some(location)).await?;
+    output::success(&format!(
+        "Successfully purged vault '{name}' (permanent deletion)"
+    ));
     Ok(())
 }
 
@@ -629,7 +792,7 @@ fn format_env_line(key: &str, value: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_vault_export(
-    _vault_manager: &VaultManager,
+    backend: &dyn Backend,
     name: &str,
     resource_group: Option<String>,
     output: Option<String>,
@@ -637,27 +800,18 @@ async fn execute_vault_export(
     include_values: bool,
     group: Option<String>,
     config: &Config,
-    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    use crate::secret::manager::SecretManager;
-
     let _resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
-    // Create secret manager to get secrets from vault
-    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
-    let auth_provider = get_azure_auth_provider(registry, config)?;
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    let secrets_backend = backend.secrets();
 
-    // Get all secrets from vault (including disabled ones for export)
-    let secrets = secret_manager
-        .list_secrets_formatted(
-            name,
-            group.as_deref(),
-            OutputFormat::Json,
-            false,
-            true, // show_all = true for export
-        )
-        .await?;
+    // Get all secrets from vault (including disabled ones for export). The
+    // trait `list_secrets` returns the unfiltered list, matching the legacy
+    // `show_all = true` export behavior.
+    let secrets = secrets_backend
+        .list_secrets(name, group.as_deref())
+        .await
+        .map_err(CrosstacheError::from)?;
 
     // Prepare export data based on format
     let export_data = match format.to_lowercase().as_str() {
@@ -690,8 +844,8 @@ async fn execute_vault_export(
 
                 if include_values {
                     // Get actual secret value
-                    match secret_manager
-                        .get_secret_safe(name, &secret.original_name, true, true)
+                    match secrets_backend
+                        .get_secret(name, &secret.original_name, true)
                         .await
                     {
                         Ok(secret_props) => {
@@ -732,8 +886,8 @@ async fn execute_vault_export(
 
             for secret in &secrets {
                 if include_values {
-                    match secret_manager
-                        .get_secret_safe(name, &secret.original_name, true, true)
+                    match secrets_backend
+                        .get_secret(name, &secret.original_name, true)
                         .await
                     {
                         Ok(secret_props) => {
@@ -785,8 +939,8 @@ async fn execute_vault_export(
                 txt_lines.push(format!("  Updated: {}", secret.updated_on));
 
                 if include_values {
-                    match secret_manager
-                        .get_secret_safe(name, &secret.original_name, true, true)
+                    match secrets_backend
+                        .get_secret(name, &secret.original_name, true)
                         .await
                     {
                         Ok(secret_props) => {
@@ -840,7 +994,7 @@ async fn execute_vault_export(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_vault_import(
-    _vault_manager: &VaultManager,
+    backend: &dyn Backend,
     name: &str,
     resource_group: Option<String>,
     input: Option<String>,
@@ -848,9 +1002,8 @@ async fn execute_vault_import(
     overwrite: bool,
     dry_run: bool,
     config: &Config,
-    registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    use crate::secret::manager::{SecretManager, SecretRequest};
+    use crate::secret::manager::SecretRequest;
     use std::fs;
     use std::io::{self, Read};
 
@@ -1019,10 +1172,8 @@ async fn execute_vault_import(
         return Ok(());
     }
 
-    // Create secret manager to import secrets
-    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
-    let auth_provider = get_azure_auth_provider(registry, config)?;
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    // Import secrets through the active backend's secret trait.
+    let secrets_backend = backend.secrets();
 
     let mut imported_count = 0;
     let mut skipped_count = 0;
@@ -1030,29 +1181,26 @@ async fn execute_vault_import(
 
     for secret_request in secrets_to_import {
         let secret_name = secret_request.name.clone();
-        let secret_value = secret_request.value.clone();
 
         // Check if secret exists if not overwriting
         if !overwrite {
-            match secret_manager
-                .get_secret_safe(name, &secret_name, false, true)
-                .await
-            {
-                Ok(_) => {
+            match secrets_backend.secret_exists(name, &secret_name).await {
+                Ok(true) => {
                     output::hint(&format!("Skipping existing secret: {secret_name}"));
                     skipped_count += 1;
                     continue;
                 }
-                Err(_) => {
+                Ok(false) => {
                     // Secret doesn't exist, proceed with import
+                }
+                Err(_) => {
+                    // Existence probe failed; fall through and let the write
+                    // surface a definitive error below.
                 }
             }
         }
 
-        match secret_manager
-            .set_secret_safe(name, &secret_name, &secret_value, Some(secret_request))
-            .await
-        {
+        match secrets_backend.set_secret(name, secret_request).await {
             Ok(_) => {
                 output::success(&format!("Imported secret: {secret_name}"));
                 imported_count += 1;
@@ -1101,7 +1249,7 @@ async fn execute_vault_import(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_vault_update(
-    vault_manager: &VaultManager,
+    vaults_backend: &dyn crate::backend::vault::VaultBackend,
     name: &str,
     resource_group: Option<String>,
     tags: Vec<(String, String)>,
@@ -1134,8 +1282,8 @@ async fn execute_vault_update(
         access_policies: None, // Don't modify access policies in update
     };
 
-    let vault = vault_manager
-        .update_vault(name, &resource_group, &update_request)
+    let vault = vaults_backend
+        .update_vault(name, Some(&resource_group), update_request)
         .await?;
 
     println!("Successfully updated vault '{}'", vault.name);
@@ -1144,15 +1292,26 @@ async fn execute_vault_update(
 }
 
 /// Check that a vault is in RBAC authorization mode before performing share operations.
+/// Human display string for an access level, matching the retired
+/// `VaultManager` output (note `Admin` renders as "Administrator").
+fn access_level_display(level: &crate::vault::models::AccessLevel) -> &'static str {
+    use crate::vault::models::AccessLevel;
+    match level {
+        AccessLevel::Reader => "Reader",
+        AccessLevel::Contributor => "Contributor",
+        AccessLevel::Admin => "Administrator",
+    }
+}
+
 async fn check_vault_rbac_mode(
-    vault_manager: &VaultManager,
+    vault_backend: &dyn crate::backend::vault::VaultBackend,
     vault_name: &str,
-    resource_group: &str,
+    resource_group: Option<&str>,
 ) -> Result<()> {
-    let props = vault_manager
-        .get_vault_properties(vault_name, resource_group)
-        .await?;
-    if props.enable_rbac_authorization != Some(true) {
+    if !vault_backend
+        .vault_uses_rbac(vault_name, resource_group)
+        .await?
+    {
         return Err(CrosstacheError::invalid_argument(format!(
             "Vault '{vault_name}' uses access policy authorization mode. \
              Vault sharing (RBAC role assignments) requires RBAC authorization mode. \
@@ -1163,8 +1322,7 @@ async fn check_vault_rbac_mode(
 }
 
 async fn execute_vault_share(
-    vault_manager: &VaultManager,
-    auth_provider: &Arc<dyn AzureAuthProvider>,
+    vault_backend: &dyn crate::backend::vault::VaultBackend,
     command: VaultShareCommands,
     config: &Config,
 ) -> Result<()> {
@@ -1177,12 +1335,14 @@ async fn execute_vault_share(
             resource_group,
             level,
         } => {
-            let resource_group =
-                resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+            // `resource_group.as_deref()` overrides the backend's configured
+            // default when the user passed `--resource-group`; `None` lets the
+            // Azure impl fall back to the config default (behavior-preserving).
+            let resource_group = resource_group.as_deref();
 
-            check_vault_rbac_mode(vault_manager, &vault_name, &resource_group).await?;
+            check_vault_rbac_mode(vault_backend, &vault_name, resource_group).await?;
 
-            let object_id = auth_provider.resolve_user_to_object_id(&user).await?;
+            let object_id = vault_backend.resolve_principal(&user).await?;
             if object_id != user {
                 println!("Resolved '{}' to object ID '{}'", user, object_id);
             }
@@ -1198,34 +1358,42 @@ async fn execute_vault_share(
                 }
             };
 
-            vault_manager
-                .grant_vault_access(
-                    &vault_name,
-                    &resource_group,
-                    &object_id,
-                    access_level,
-                    Some(&user),
-                )
+            // Output parity with the retired `VaultManager::grant_vault_access`
+            // (which framed the trait call with these info/success lines).
+            let access_level_str = access_level_display(&access_level);
+            output::info(&format!(
+                "Granting {access_level_str} access to vault '{vault_name}' for user '{user}'..."
+            ));
+            vault_backend
+                .grant_access(&vault_name, resource_group, &object_id, access_level)
                 .await?;
+            output::success(&format!(
+                "Successfully granted {access_level_str} access to vault '{vault_name}' for user '{user}'"
+            ));
         }
         VaultShareCommands::Revoke {
             vault_name,
             user,
             resource_group,
         } => {
-            let resource_group =
-                resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+            let resource_group = resource_group.as_deref();
 
-            check_vault_rbac_mode(vault_manager, &vault_name, &resource_group).await?;
+            check_vault_rbac_mode(vault_backend, &vault_name, resource_group).await?;
 
-            let object_id = auth_provider.resolve_user_to_object_id(&user).await?;
+            let object_id = vault_backend.resolve_principal(&user).await?;
             if object_id != user {
                 println!("Resolved '{}' to object ID '{}'", user, object_id);
             }
 
-            vault_manager
-                .revoke_vault_access(&vault_name, &resource_group, &object_id, Some(&user))
+            output::info(&format!(
+                "Revoking access to vault '{vault_name}' for user '{user}'..."
+            ));
+            vault_backend
+                .revoke_access(&vault_name, resource_group, &object_id)
                 .await?;
+            output::success(&format!(
+                "Successfully revoked access to vault '{vault_name}' for user '{user}'"
+            ));
         }
         VaultShareCommands::List {
             vault_name,
@@ -1241,18 +1409,15 @@ async fn execute_vault_share(
             let pager = pager
                 .map(crate::cli::commands::PagerWhen::wants_pager)
                 .unwrap_or(false);
-            let resource_group =
-                resource_group.unwrap_or_else(|| config.default_resource_group.clone());
+            let resource_group = resource_group.as_deref();
 
-            check_vault_rbac_mode(vault_manager, &vault_name, &resource_group).await?;
+            check_vault_rbac_mode(vault_backend, &vault_name, resource_group).await?;
 
-            let mut roles = vault_manager
-                .list_vault_access_raw(&vault_name, &resource_group)
+            let mut roles = vault_backend
+                .list_access(&vault_name, resource_group)
                 .await?;
 
-            vault_manager
-                .resolve_and_filter_roles(&mut roles, all)
-                .await?;
+            crate::cli::helpers::enrich_and_filter_roles(vault_backend, &mut roles, all).await;
 
             let fmt = config.runtime_output_format;
             let human_table_like = matches!(

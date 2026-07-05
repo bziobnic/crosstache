@@ -47,14 +47,16 @@ allowlist; `cargo test`/`cargo clippy --all-targets` green; `CHANGELOG.md`
 lists every intentional break.
 
 ### P1 — Phase 2: full legacy manager retirement
-Delete `SecretManager`/`VaultManager`/`BlobManager` construction from CLI
-paths entirely, including Azure-only share/RBAC, audit, and vault-lifecycle
-operations, behind new `VaultBackend`/`AuditBackend` sub-traits on `Backend`.
-Implements the design doc's A4 `--vault` composition semantics for
-`run`/`inject`/`rotate`. Also closes the existing `has_audit` capability-flag
+✅ **Shipped 2026-07-05.** Deleted `SecretManager` entirely and reduced
+`VaultManager` to the interactive `xv init`/setup path only; all other CLI
+verbs, including Azure-only share/RBAC, audit, and vault-lifecycle operations,
+now route through `Backend` and its `VaultBackend`/`AuditBackend` sub-traits.
+Shipped the design doc's A4 `--vault` composition semantics for
+`run`/`inject`/`rotate`. Also closed the `has_audit` capability-flag
 inconsistency (see § Security hardening below) as a side effect of migrating
-Azure audit onto the trait.
-**Acceptance bar:** zero manager references from `src/cli/**`.
+Azure audit onto the trait. See `CHANGELOG.md` § Unreleased for the full
+user-visible change list.
+**Acceptance bar (met):** zero manager references from `src/cli/**`.
 
 ### P2 — Phase 3: default-entry file-ops routing
 Route `xv file`/blob operations through a `FileBackend` resolution against the
@@ -125,16 +127,12 @@ as history; current AWS capability state lives in `CHANGELOG.md`.
 | Native rotation   | ✅ `xv rotate --native` invokes Secrets Manager `RotateSecret` (Lambda) | v0.12.0 (#250) |
 | File storage (S3) | ✅ `xv file` on S3, vault-prefixed, streaming + containment | v0.12.0 (#251) |
 
-### P3 — `has_audit` capability flag is inconsistent across audit backends
-Surfaced during the v0.12.0 audit work (#249). AWS audit dispatches through
-the `AuditBackend` trait (`registry.active().audit()`), so AWS correctly sets
-`has_audit: true`. Azure audit still uses a **legacy Activity Log path** in
-`src/cli/system_ops.rs` that bypasses the capability system entirely, so
-`xv audit` works on Azure while the Azure backend reports `has_audit: false`.
-Harmless today (the CLI tries the trait first, then falls through to the Azure
-path), but the flag is a lie for Azure. Fix: either migrate Azure audit onto
-the trait and flip `has_audit: true`, or document the flag as "trait-dispatch
-only" so capability introspection isn't misleading.
+### ~~P3 — `has_audit` capability flag is inconsistent across audit backends~~ — closed
+✅ **Closed 2026-07-05** by the Multi-backend workspace convergence Phase 2
+manager retirement (see § above). Azure `xv audit`/`--resource-group` now
+dispatches through the `AuditBackend` trait exactly like AWS; the legacy
+Activity Log client is deleted, so `has_audit: true` for Azure is no longer a
+lie. Retained here for traceability; details in `CHANGELOG.md` § Unreleased.
 
 ### P3 — Additional backends
 Open ground from `2026-04-29-strategic-improvements-phase-1-design.md`:

@@ -30,6 +30,35 @@
     actually being read, instead of whichever backend happened to be active
     process-wide.
 
+- **Multi-backend workspace convergence, Phase 2: legacy manager retirement.**
+  Every CLI verb now routes through the `Backend` trait; `SecretManager` is
+  deleted entirely, and `VaultManager` is reduced to the interactive
+  `xv init`/setup path only (access-policy and storage-account provisioning
+  aren't trait surface). Secret-level and vault-level RBAC, principal
+  resolution, and vault lifecycle (create/list/delete/update/restore/purge)
+  are now `Backend`-trait surface, which is what makes future non-Azure
+  backends able to support `xv share`/`xv vault` without another manager.
+  - **New: `--vault` override on `xv run`/`xv inject`/`xv rotate`.** Explicit
+    `--vault <name-or-alias>` overrides the workspace's (or degenerate
+    workspace-of-one's) default entry for that invocation — an attached
+    workspace alias resolves to its entry, anything else is treated as a
+    literal vault name on the currently effective backend. No workspace is
+    required to use it.
+  - **Azure `xv audit --resource-group` now flows through the `AuditBackend`
+    trait** instead of a legacy Activity Log client, closing the long-standing
+    `has_audit` capability-flag inconsistency (`ROADMAP.md` § Backend
+    ecosystem) — Azure's `has_audit` capability flag is no longer a lie.
+  - **Azure-only UX changes:** `xv vault purge`/`restore`/`rollback` no longer
+    print the legacy manager's extra confirm/warning lines or the
+    resolved-version GUID line — output now matches the `local`/`aws`
+    backends' trait-path shape. `xv share grant`/`revoke`/`list` and
+    `xv vault share` output is unchanged. `xv share`/`xv vault share` against
+    a backend without RBAC support now fails with a clean capability-gated
+    error (exit `2`) instead of attempting the operation.
+  - **Edge case:** if backend initialization fails at startup, verbs that used
+    to silently retry a legacy Azure construction path now fail cleanly with
+    the initialization error instead.
+
 ## v0.20.1 — First cx add keeps the current vault attached (2026-07-05)
 
 ### Changed

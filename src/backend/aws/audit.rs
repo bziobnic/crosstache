@@ -127,8 +127,10 @@ impl AuditBackend for AwsAuditBackend {
     async fn get_vault_events(
         &self,
         vault: &str,
+        _resource_group: Option<&str>,
         days: u32,
     ) -> Result<Vec<AuditEvent>, BackendError> {
+        // CloudTrail is account-wide; resource groups don't apply on AWS.
         self.lookup(vault, None, days).await
     }
 
@@ -136,6 +138,7 @@ impl AuditBackend for AwsAuditBackend {
         &self,
         vault: &str,
         secret_name: &str,
+        _resource_group: Option<&str>,
         days: u32,
     ) -> Result<Vec<AuditEvent>, BackendError> {
         self.lookup(vault, Some(secret_name), days).await

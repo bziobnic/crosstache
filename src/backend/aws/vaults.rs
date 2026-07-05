@@ -96,7 +96,11 @@ impl VaultBackend for AwsVaultBackend {
         })
     }
 
-    async fn get_vault(&self, name: &str) -> Result<VaultProperties, BackendError> {
+    async fn get_vault(
+        &self,
+        name: &str,
+        _resource_group: Option<&str>,
+    ) -> Result<VaultProperties, BackendError> {
         use crate::backend::aws::encoding::marker_name;
         let marker = marker_name(name);
         let describe = self
@@ -154,7 +158,10 @@ impl VaultBackend for AwsVaultBackend {
         })
     }
 
-    async fn list_vaults(&self) -> Result<Vec<VaultSummary>, BackendError> {
+    async fn list_vaults(
+        &self,
+        _resource_group: Option<&str>,
+    ) -> Result<Vec<VaultSummary>, BackendError> {
         use crate::backend::aws::metadata::{TAG_TYPE, TAG_VALUE_VAULT_MARKER};
         use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
 
@@ -204,13 +211,18 @@ impl VaultBackend for AwsVaultBackend {
         Ok(summaries)
     }
 
-    async fn delete_vault(&self, name: &str) -> Result<(), BackendError> {
+    async fn delete_vault(
+        &self,
+        name: &str,
+        _resource_group: Option<&str>,
+    ) -> Result<(), BackendError> {
         self.delete_vault_internal(name, false).await
     }
 
     async fn update_vault(
         &self,
         name: &str,
+        _resource_group: Option<&str>,
         request: crate::vault::models::VaultUpdateRequest,
     ) -> Result<VaultProperties, BackendError> {
         use crate::backend::aws::encoding::marker_name;
@@ -236,7 +248,7 @@ impl VaultBackend for AwsVaultBackend {
         }
 
         // Fetch updated vault properties
-        self.get_vault(name).await
+        self.get_vault(name, None).await
     }
 }
 

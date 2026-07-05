@@ -156,7 +156,7 @@ async fn fetch_scan_secrets(
     let vault_names: Vec<String> = if all_vaults {
         match backend.vaults() {
             Some(vaults) => vaults
-                .list_vaults()
+                .list_vaults(None)
                 .await
                 .map_err(CrosstacheError::from)?
                 .into_iter()
@@ -171,8 +171,7 @@ async fn fetch_scan_secrets(
             }
         }
     } else {
-        // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
-        vec![config.resolve_vault_name(None).await?]
+        vec![crate::cli::vault_ops::resolve_current_vault(config).await?]
     };
 
     let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");

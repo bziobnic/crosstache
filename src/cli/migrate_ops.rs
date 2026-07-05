@@ -304,7 +304,7 @@ pub(crate) async fn execute_migrate(
     if !dry_run {
         if let Some(target_vaults) = target.vaults() {
             // Try to get the vault; if not found, create it
-            match target_vaults.get_vault(&target_vault).await {
+            match target_vaults.get_vault(&target_vault, None).await {
                 Ok(_) => {}
                 Err(crate::backend::BackendError::VaultNotFound { .. }) => {
                     output::step(&format!(

@@ -331,15 +331,15 @@ Rebuild with `cargo build --features aws` or install an AWS-enabled binary.",
     // Build the backend registry for commands that talk to a secrets backend.
     // For commands that *may* need the backend we attempt construction but
     // treat failure as non-fatal: the registry becomes `None` and individual
-    // command handlers will create their own auth provider on demand via
-    // `get_azure_auth_provider(None, config)`.
+    // command handlers reconstruct the backend on demand from config (the
+    // option-A rebuild) when they genuinely need it.
     let registry = if needs_backend {
         match backend::BackendRegistry::from_config(&config) {
             Ok(r) => Some(r),
             Err(e) => {
                 // Log but don't block — commands that genuinely need the
                 // backend will fail with their own clear error when they
-                // call `get_azure_auth_provider`.
+                // reconstruct it from config.
                 tracing::debug!(
                     "Backend '{}' init failed (non-fatal): {e}",
                     config.effective_backend_name()
