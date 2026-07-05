@@ -36,6 +36,7 @@ pub(crate) async fn execute_vault_command(
             }
         }
 
+        // Phase 2 (legacy manager retirement): legacy active-backend dispatch
         let vaults_backend = reg.active().vaults().ok_or_else(|| {
             CrosstacheError::InvalidArgument(format!(
                 "The {} backend does not support vault operations.",
@@ -134,6 +135,7 @@ pub(crate) async fn execute_vault_command(
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
     // Create authentication provider — reuse from registry when available
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider: Arc<dyn AzureAuthProvider> = get_azure_auth_provider(registry, &config)?;
 
     // Create vault manager
@@ -567,6 +569,7 @@ pub(crate) async fn execute_vault_info_from_root(
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
     // Create authentication provider — reuse from registry when available
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, config)?;
 
     // Create vault manager
@@ -641,6 +644,7 @@ async fn execute_vault_export(
     let _resource_group = resource_group.unwrap_or_else(|| config.default_resource_group.clone());
 
     // Create secret manager to get secrets from vault
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 
@@ -1016,6 +1020,7 @@ async fn execute_vault_import(
     }
 
     // Create secret manager to import secrets
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
 

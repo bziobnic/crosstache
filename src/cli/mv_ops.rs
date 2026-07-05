@@ -248,7 +248,11 @@ pub(crate) async fn execute_mv(
     // are unaffected: they fall straight through to the pre-workspace path
     // below, byte-identical.
     if filter.is_none() {
-        if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+        // Only a REAL (configured) workspace takes the alias-aware `mv` path;
+        // `resolve_configured_workspace` returns `None` with no configured
+        // workspace, so a degenerate single-vault `mv` falls through to the
+        // byte-identical pre-workspace path below.
+        if let Some(ws) = crate::workspace::resolve_configured_workspace(&config).await? {
             let src_raw = source
                 .as_deref()
                 .expect("checked above: exactly one of SOURCE/--filter is Some");
@@ -359,7 +363,9 @@ pub(crate) async fn execute_mv(
     // unchanged, byte-identical. Cross-vault `--filter` moves stay out of
     // scope — only the DEFAULT entry is ever chosen here.
     let workspace_for_filter = if filter.is_some() {
-        crate::workspace::resolve_workspace(&config).await?
+        // No configured workspace ⇒ `None`: bulk `mv --filter` stays
+        // byte-identical to the pre-workspace path.
+        crate::workspace::resolve_configured_workspace(&config).await?
     } else {
         None
     };

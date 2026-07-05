@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Multi-backend workspace convergence, Phase 1: unified secret resolution.**
+  Every `xv` secret-resolution call now flows through the single workspace
+  seam (`resolve_workspace` → `resolve_secret_target`); bare/no-workspace
+  usage resolves as a degenerate workspace-of-one
+  (`WorkspaceSource::Degenerate`) instead of a separate legacy code path. The
+  legacy no-workspace fallback branch inside `resolve_workspace_or_default`
+  is deleted. See
+  [`docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md`](./docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md)
+  for the full design and ADRs.
+  - **No intended user-visible breaks, with one cosmetic exception.** This
+    was an internal-resolution unification, not a behavior change: bare
+    `set`/`get`/`ls` output, exact (colon-containing) secret name matching,
+    `xv://` URI resolution in `run` and `inject`, the `context use` bootstrap
+    flow (setting a vault before any workspace exists), the Azure no-vault
+    hard error, and union rendering for real (non-degenerate) single-entry
+    workspaces are all unchanged. The cosmetic exception: the informational
+    stderr notice printed when a `.xv.toml` env profile's vault is used from
+    outside its project directory is no longer re-emitted during bare
+    secret resolution (the overlay pass already reported it).
+  - **One user-visible improvement:** `xv ls --deleted`'s soft-delete
+    capability gate now evaluates the capabilities of the *resolved* backend
+    for the target vault, rather than the globally active backend — in a
+    mixed-backend workspace, a skip/error now correctly names the backend
+    actually being read, instead of whichever backend happened to be active
+    process-wide.
+
 ## v0.20.1 — First cx add keeps the current vault attached (2026-07-05)
 
 ### Changed

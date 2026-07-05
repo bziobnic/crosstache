@@ -84,6 +84,7 @@ pub(crate) async fn resolve_vault_for_trait(
     config: &Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<String> {
+    // Phase 2 (legacy manager retirement): legacy vault resolution for verb legacy paths; not on the workspace seam.
     match config.resolve_vault_name(None).await {
         Ok(name) => return Ok(name),
         Err(e) if registry.is_some_and(|r| r.active().kind() == BackendKind::Azure) => {
@@ -123,45 +124,53 @@ pub(crate) async fn resolve_vault_for_trait(
 /// active read path actually uses, or a write silently invalidates a cache
 /// entry nothing ever reads from while the stale one lingers.
 ///
-/// **No workspace ⇒ byte-identical**: returns `(registry.active_arc(),
-/// config.effective_backend_name(), resolve_vault_for_trait(...),
-/// raw.to_string())` — the backend/vault/path are exactly what every
-/// `get`/`set` call site returned before workspaces existed, and
-/// `config.effective_backend_name()` is the exact string the no-workspace
-/// `ls`/`ls --deleted` read path already keys its cache entries by, so
-/// hit/invalidate stay paired there too. A workspace is only consulted (and
-/// only then does resolution behave any differently) when
-/// [`crate::workspace::resolve_workspace`] returns `Some`.
+/// **Cache-key identity holds for a bare name**: with no configured
+/// workspace, `resolve_workspace` synthesizes a degenerate workspace-of-one
+/// whose single entry has `backend == config.effective_backend_name()` and
+/// the same vault the legacy `resolve_vault_for_trait` chain produced, so the
+/// returned `(backend kind, backend_name, vault, raw)` — and every
+/// `CacheKey::SecretsList` it feeds — is exactly what `get`/`set` returned
+/// before workspaces existed, matching the string the no-workspace `ls`/`ls
+/// --deleted` read path keys its cache entries by.
 ///
-/// With a workspace: builds a lazy multi-backend registry scoped to just
-/// this workspace's attached backends (so a command touching one backend
-/// never constructs another) and delegates to
-/// [`crate::workspace::resolve_secret_target`] for the mode-specific
-/// (`Read` searches, `Write` never searches) resolution.
+/// Resolution always flows through [`crate::workspace::resolve_secret_target`]
+/// against a lazy multi-backend registry scoped to just the resolved
+/// workspace's attached backends (so a command touching one backend never
+/// constructs another). A degenerate workspace resolves the raw name
+/// literally against its sole entry (no alias parsing, no search); a
+/// configured workspace applies the mode-specific rules (`Read` searches,
+/// `Write` never searches).
 pub(crate) async fn resolve_workspace_or_default(
     raw: &str,
     config: &Config,
-    registry: &BackendRegistry,
+    _registry: &BackendRegistry,
     mode: crate::workspace::TargetMode,
 ) -> Result<(Arc<dyn Backend>, String, String, String)> {
-    if let Some(ws) = crate::workspace::resolve_workspace(config).await? {
-        let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
-        let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
-            .map_err(|e| CrosstacheError::config(e.to_string()))?;
-        let (target, path) =
-            crate::workspace::resolve_secret_target(raw, &ws, &ws_registry, mode).await?;
-        let backend_name = target.entry.backend.clone();
-        Ok((target.backend, backend_name, target.entry.vault, path))
-    } else {
-        let vault_name = resolve_vault_for_trait(config, Some(registry)).await?;
-        let backend_name = config.effective_backend_name().to_string();
-        Ok((
-            registry.active_arc(),
-            backend_name,
-            vault_name,
-            raw.to_string(),
-        ))
-    }
+    // Phase 1 (B5) — SINGLE resolution path. `resolve_workspace` never yields
+    // `None` (it synthesizes a degenerate workspace-of-one), so every CLI
+    // secret reference — real workspace or not — resolves through
+    // `resolve_secret_target`. The former no-workspace fallback (which returned
+    // the process active backend plus `resolve_vault_for_trait`) has been
+    // removed; the degenerate builder reproduces its resolved `(backend,
+    // vault)` exactly, keeping bare-name resolution byte-identical. `_registry`
+    // is kept only for signature stability (seam callers are unchanged) — the
+    // scoped `ws_registry` built from `config` is the single source of backends.
+    let ws = match crate::workspace::resolve_workspace(config).await? {
+        Some(ws) => ws,
+        None => {
+            return Err(CrosstacheError::config(
+                "internal error: resolve_workspace returned None; the degenerate \
+                 workspace-of-one must always yield Some or Err",
+            ))
+        }
+    };
+    let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+    let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+    let (target, path) =
+        crate::workspace::resolve_secret_target(raw, &ws, &ws_registry, mode).await?;
+    let backend_name = target.entry.backend.clone();
+    Ok((target.backend, backend_name, target.entry.vault, path))
 }
 
 /// Resolve the active workspace (if any) plus a lazy [`BackendRegistry`]
@@ -171,13 +180,23 @@ pub(crate) async fn resolve_workspace_or_default(
 /// unlike [`resolve_workspace_or_default`], which targets a single raw CLI
 /// argument).
 ///
-/// Returns `(None, None)` when no workspace is attached — callers must treat
-/// that as "fall through to today's raw-vault-name / backend-kind behavior,
-/// byte-identical" (spec §Backward compatibility).
+/// Returns `(Some(ws), Some(ws_registry))` when a CONFIGURED workspace is
+/// attached, else `(None, None)` — callers (`run`/`inject`) treat `None` as
+/// "fall through to today's raw-vault-name / backend-kind URI resolution,
+/// byte-identical".
+///
+/// This uses [`crate::workspace::resolve_configured_workspace`], NOT the
+/// converged [`resolve_workspace`], deliberately: `run`/`inject` only need a
+/// workspace for `xv://alias/...` resolution. Synthesizing the degenerate
+/// workspace-of-one here would add nothing (its sole alias equals its vault
+/// name, so a URI resolves identically to the raw path either way) while
+/// dragging in the degenerate builder's Azure-no-vault hard-error — which
+/// would wrongly break `xv run` over a template of explicit `xv://` URIs that
+/// never needs a default vault. So the degenerate case stays `(None, None)`.
 pub(crate) async fn resolve_workspace_and_registry(
     config: &Config,
 ) -> Result<(Option<crate::workspace::Workspace>, Option<BackendRegistry>)> {
-    if let Some(ws) = crate::workspace::resolve_workspace(config).await? {
+    if let Some(ws) = crate::workspace::resolve_configured_workspace(config).await? {
         let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
         let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
             .map_err(|e| CrosstacheError::config(e.to_string()))?;

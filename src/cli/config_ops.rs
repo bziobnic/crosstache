@@ -1092,9 +1092,16 @@ async fn execute_context_use(
 
     // Multi-vault workspaces and the single-vault `context use` model are
     // mutually exclusive (spec §Workspace management): mixing them would be
-    // confusing (which one wins?), so a workspace being present errors,
-    // pointing at the workspace-native way to change the write target.
-    if crate::workspace::resolve_workspace(config).await?.is_some() {
+    // confusing (which one wins?), so a REAL (configured) workspace being
+    // present errors, pointing at the workspace-native way to change the write
+    // target. `resolve_configured_workspace` (NOT the converged
+    // `resolve_workspace`) is used so this bootstrap command still works in an
+    // unconfigured Azure env — the degenerate builder's no-vault hard-error
+    // must not fire here, or you could never `xv context use` your first vault.
+    if crate::workspace::resolve_configured_workspace(config)
+        .await?
+        .is_some()
+    {
         return Err(CrosstacheError::config(
             "a multi-vault workspace is attached; 'context use' does not apply. \
              Use `xv cx default <alias>` to change the workspace's default vault, \
@@ -1542,6 +1549,7 @@ async fn execute_cx_add(
                         .to_string(),
                 );
             }
+            // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
             Some(current_backend) => match config.resolve_vault_name(None).await {
                 Ok(current_vault) => {
                     if current_vault != vault || current_backend != backend_name {
@@ -1764,16 +1772,23 @@ async fn execute_cx_ls(config: &Config) -> Result<()> {
         source: String,
     }
 
-    let resolved = crate::workspace::resolve_workspace(config).await?;
-    let Some(ws) = resolved else {
-        output::info("No workspace attached (single-vault mode)");
-        output::hint("Use 'xv cx add <vault>' to attach vaults into a workspace");
-        return Ok(());
+    // `xv cx ls` means "show the attached workspace" — a presence question, so
+    // it consults `resolve_configured_workspace` (never the degenerate builder):
+    // with no configured workspace it prints the "no workspace attached" line.
+    let ws = match crate::workspace::resolve_configured_workspace(config).await? {
+        Some(ws) => ws,
+        None => {
+            output::info("No workspace attached (single-vault mode)");
+            output::hint("Use 'xv cx add <vault>' to attach vaults into a workspace");
+            return Ok(());
+        }
     };
 
     let source = match ws.source {
         crate::workspace::WorkspaceSource::Context => "context",
         crate::workspace::WorkspaceSource::ProjectToml => ".xv.toml",
+        // Unreachable: `resolve_configured_workspace` never yields Degenerate.
+        crate::workspace::WorkspaceSource::Degenerate => "single-vault",
     };
 
     let rows: Vec<WorkspaceRow> = ws
@@ -2210,9 +2225,11 @@ async fn execute_env_pull(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
+    // Phase 2 (legacy manager retirement): legacy active-backend dispatch
     let secrets_backend = reg.active().secrets();
 
     // Determine vault name
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(None).await?;
 
     eprintln!("Pulling secrets from vault '{}'...", vault_name);
@@ -2360,9 +2377,11 @@ async fn execute_env_push(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
+    // Phase 2 (legacy manager retirement): legacy active-backend dispatch
     let secrets_backend = reg.active().secrets();
 
     // Determine vault name
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(None).await?;
 
     // Read .env content from file or stdin

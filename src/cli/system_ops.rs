@@ -334,6 +334,7 @@ pub(crate) async fn execute_audit_command(
 
     // Capability check: audit requires audit log support
     if let Some(registry) = registry {
+        // Phase 2 (legacy manager retirement): active-backend capability/kind read
         let caps = registry.active().capabilities();
         if !caps.has_audit {
             return Err(CrosstacheError::InvalidArgument(format!(
@@ -358,6 +359,7 @@ pub(crate) async fn execute_audit_command(
     }
 
     // Create authentication provider — reuse from registry when available
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider: Arc<dyn crate::auth::provider::AzureAuthProvider> =
         crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
 
@@ -381,6 +383,7 @@ pub(crate) async fn execute_audit_command(
         (vault_name, rg, sub)
     } else {
         // Use current vault context
+        // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
         let vault_name = config.resolve_vault_name(None).await?;
         let rg = resource_group_override.unwrap_or_else(|| config.default_resource_group.clone());
         let sub = config.subscription_id.clone();
@@ -457,6 +460,7 @@ async fn execute_backend_audit(
     operation: Option<String>,
     config: Config,
 ) -> Result<()> {
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(vault).await?;
 
     output::step(&format!("Fetching audit logs for {} days...", days));
@@ -588,6 +592,7 @@ async fn execute_secret_info_from_root(
     };
 
     // Create authentication provider
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
 
     // Create secret manager
@@ -651,6 +656,7 @@ pub(crate) async fn execute_whoami_command(
     output::step("Checking authentication and context...\n");
 
     // Create authentication provider — reuse from registry when available
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
 
     // Get access token to validate authentication
@@ -1034,8 +1040,10 @@ async fn save_generated_secret(
     // an auth provider on demand and use set_secret_safe with the metadata
     // options so groups/note/folder/expiry still apply.
     use crate::secret::manager::SecretManager;
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(vault).await?;
     secret_manager
         .set_secret_safe(&vault_name, name, value, Some(request))
