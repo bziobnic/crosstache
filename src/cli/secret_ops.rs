@@ -4440,15 +4440,15 @@ pub(crate) async fn execute_secret_share_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
-    // Capability gate: sharing requires RBAC support (gate on `has_rbac`).
-    // With a registry, check the active backend directly. Without one (startup
-    // init failed), a non-Azure requested backend still returns its capability
-    // hint from the requested kind WITHOUT constructing the backend — only
-    // Azure advertises `has_rbac`, so `kind != Azure` answers the gate there.
-    // `kind` only selects the message text (e.g. AWS's IAM guidance).
-    let backend = match registry {
+    // Fast capability pre-gate on the active/requested backend, answered
+    // WITHOUT resolving the workspace so a non-RBAC backend rejects immediately.
+    // With a registry, check the active backend; without one (startup init
+    // failed), answer a non-Azure requested backend from its kind WITHOUT
+    // constructing (e.g. AWS returns its IAM guidance instead of a build error).
+    // `kind` only selects the message text.
+    match registry {
         Some(reg) => {
-            let active = reg.active_arc();
+            let active = reg.active();
             if !active.capabilities().has_rbac {
                 return Err(share_unsupported_error(
                     active.kind(),
@@ -4456,7 +4456,6 @@ pub(crate) async fn execute_secret_share_direct(
                     "access sharing",
                 ));
             }
-            active
         }
         None => {
             if let Some(kind) = crate::cli::helpers::requested_backend_kind(&config) {
@@ -4468,16 +4467,15 @@ pub(crate) async fn execute_secret_share_direct(
                     ));
                 }
             }
-            crate::cli::vault_ops::active_or_construct_backend(None, &config).await?
         }
-    };
-    let vault_backend = backend
-        .vaults()
-        .ok_or_else(|| share_unsupported_error(backend.kind(), backend.name(), "access sharing"))?;
+    }
 
-    // Vault resolution on the workspace seam: the default entry's vault (the
-    // degenerate workspace-of-one reproduces the pre-workspace context/config
-    // default).
+    // The workspace default entry supplies BOTH the vault name AND the backend
+    // the RBAC calls run against — they MUST come from the SAME entry. In a
+    // multi-vault workspace the default entry's backend can differ from the
+    // process-active backend, so resolving the RBAC client from the active
+    // backend (while taking the vault name from the entry) would run
+    // grants/revokes/lists against the wrong Key Vault (Bugbot PR #346).
     let ws = crate::workspace::resolve_workspace(&config)
         .await?
         .ok_or_else(|| {
@@ -4486,7 +4484,40 @@ pub(crate) async fn execute_secret_share_direct(
                  workspace-of-one must always yield Some or Err",
             )
         })?;
-    let vault_name = ws.default_entry()?.vault.clone();
+    let entry = ws.default_entry()?;
+    let vault_name = entry.vault.clone();
+
+    // Materialize the default entry's backend, so the RBAC client is the one
+    // that owns the entry's vault. Reuse the process registry when it already
+    // holds that backend (the common degenerate / single-backend case);
+    // otherwise build it from config via a workspace-scoped lazy registry (a
+    // configured workspace whose default entry lives on a backend the process
+    // registry didn't materialize).
+    let backend = match registry.and_then(|reg| reg.materialize(&entry.backend).ok()) {
+        Some(b) => b,
+        None => {
+            let ws_registry =
+                BackendRegistry::with_lazy(&config, std::slice::from_ref(&entry.backend))
+                    .map_err(|e| CrosstacheError::config(e.to_string()))?;
+            ws_registry
+                .materialize(&entry.backend)
+                .map_err(|e| CrosstacheError::config(e.to_string()))?
+        }
+    };
+
+    // Second capability gate on the RESOLVED entry backend: a configured
+    // workspace's default entry can be a non-RBAC backend even when the active
+    // backend supports RBAC.
+    if !backend.capabilities().has_rbac {
+        return Err(share_unsupported_error(
+            backend.kind(),
+            backend.name(),
+            "access sharing",
+        ));
+    }
+    let vault_backend = backend
+        .vaults()
+        .ok_or_else(|| share_unsupported_error(backend.kind(), backend.name(), "access sharing"))?;
 
     execute_secret_share(vault_backend, &vault_name, command, &config).await
 }
