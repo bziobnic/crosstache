@@ -171,6 +171,7 @@ async fn fetch_scan_secrets(
             }
         }
     } else {
+        // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
         vec![config.resolve_vault_name(None).await?]
     };
 

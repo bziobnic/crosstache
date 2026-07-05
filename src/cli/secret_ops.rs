@@ -1911,8 +1911,12 @@ pub(crate) async fn execute_deleted_secret_list(
     }
 
     // Workspace union path (multi-vault workspaces plan, Phase B Task 9
-    // remaining scope): consulted ONLY when a workspace is attached.
-    if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+    // remaining scope): consulted ONLY when a REAL (configured) workspace is
+    // attached. `resolve_configured_workspace` returns `None` with no
+    // configured workspace, so the degenerate single-vault case falls straight
+    // through to the trait-path code below, byte-identical to pre-workspace
+    // `ls --deleted`.
+    if let Some(ws) = crate::workspace::resolve_configured_workspace(&config).await? {
         return execute_deleted_secret_list_workspace(
             ws, pagination, pager, names_only, long, sort, filter, config,
         )
@@ -1926,26 +1930,37 @@ pub(crate) async fn execute_deleted_secret_list(
     }
     let reg = registry.expect("use_trait_path guarantees Some");
 
+    // Resolve the backend + vault through the unified workspace path instead
+    // of `reg.active()`: `ls --deleted` lists the default vault's trash, so it
+    // resolves as a write target would — no secret name, no search
+    // (`TargetMode::Write` never searches). With no configured workspace the
+    // degenerate workspace-of-one resolves over `config.effective_backend_name()`
+    // and the default vault, so this stays byte-identical while the capability
+    // gate below targets the RESOLVED backend, matching purge/restore/rotate.
+    // The empty raw name only feeds the (discarded) resolved path.
+    let (backend, _backend_name, vault_name, _resolved_path) =
+        crate::cli::helpers::resolve_workspace_or_default(
+            "",
+            &config,
+            reg,
+            crate::workspace::TargetMode::Write,
+        )
+        .await?;
+
     // Capability gate — same shape as `xv restore`'s.
     let unsupported = || {
         CrosstacheError::InvalidArgument(format!(
             "The {} backend does not support listing deleted secrets (soft-delete not available).",
-            reg.active().name()
+            backend.name()
         ))
     };
-    if !reg.active().capabilities().has_soft_delete {
+    if !backend.capabilities().has_soft_delete {
         return Err(unsupported());
     }
 
-    let vault_name = resolve_vault_for_trait(&config, registry).await?;
     // Always live — the SecretsList cache holds live secrets only, and trash
     // freshness matters right after a delete.
-    let items = match reg
-        .active()
-        .secrets()
-        .list_deleted_secrets(&vault_name)
-        .await
-    {
+    let items = match backend.secrets().list_deleted_secrets(&vault_name).await {
         Ok(items) => items,
         Err(crate::backend::BackendError::Unsupported(_)) => return Err(unsupported()),
         Err(e) => return Err(e.into()),
@@ -2443,11 +2458,12 @@ pub(crate) async fn execute_secret_list_direct(
     }
 
     // Workspace union path (multi-vault workspaces plan, Phase B Task 7):
-    // consulted ONLY when a workspace is attached — `resolve_workspace`
-    // returns `None` for the degenerate (no-workspace) case, which falls
-    // straight through to the untouched trait-path code below, keeping it
-    // byte-identical to pre-workspace `ls` output.
-    if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+    // consulted ONLY when a REAL (configured) workspace is attached.
+    // `resolve_configured_workspace` returns `None` with no configured
+    // workspace, so the degenerate single-vault case falls straight through to
+    // the untouched trait-path code below, byte-identical to pre-workspace
+    // `ls` output.
+    if let Some(ws) = crate::workspace::resolve_configured_workspace(&config).await? {
         return execute_secret_list_workspace(
             ws,
             path,
@@ -2881,6 +2897,7 @@ async fn execute_secret_rollback_legacy(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -2901,6 +2918,7 @@ async fn execute_secret_rollback_legacy(
     // re-deriving from scratch, which would silently ignore it.
     let vault_name = match vault_override {
         Some(v) => Some(v),
+        // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
         None => config.resolve_vault_name(None).await.ok(),
     };
     if let Some(vault_name) = vault_name {
@@ -3399,6 +3417,7 @@ async fn apply_record_field_changes(
         projected_field_tags.insert(k.clone(), v.clone());
     }
     let user_tags = user_tags_of(&secret.tags);
+    // Phase 2 (legacy manager retirement): active-backend capability/kind read
     let reserved_count = crate::records::predicted_reserved_tag_count(
         reg.active().kind(),
         true,
@@ -3555,6 +3574,7 @@ async fn execute_record_type_conversion(
     // fields are added by a bare `--type` conversion (only the primary is
     // set, and the primary never gets an f.* tag).
     let user_tags = user_tags_of(&secret.tags);
+    // Phase 2 (legacy manager retirement): active-backend capability/kind read
     let reserved_count = crate::records::predicted_reserved_tag_count(
         reg.active().kind(),
         true,
@@ -4191,6 +4211,7 @@ async fn execute_secret_purge_legacy(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -4209,6 +4230,7 @@ async fn execute_secret_purge_legacy(
     // override directly over re-deriving from scratch.
     let vault_name = match vault_override {
         Some(v) => Some(v),
+        // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
         None => config.resolve_vault_name(None).await.ok(),
     };
     if let Some(vault_name) = vault_name {
@@ -4270,6 +4292,7 @@ pub(crate) async fn execute_secret_restore_direct(
     }
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -4278,6 +4301,7 @@ pub(crate) async fn execute_secret_restore_direct(
     execute_secret_restore(&secret_manager, name, None, &config).await?;
 
     // Invalidate the secrets list cache for the resolved vault
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     if let Ok(vault_name) = config.resolve_vault_name(None).await {
         let cache_manager = crate::cache::CacheManager::from_config(&config);
         // Azure-legacy-only path (`effective_backend_name()` is guaranteed
@@ -4301,6 +4325,7 @@ pub(crate) async fn execute_diff_command(
 ) -> Result<()> {
     use std::collections::BTreeSet;
 
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
@@ -4440,6 +4465,7 @@ pub(crate) async fn execute_secret_copy_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -4465,8 +4491,12 @@ pub(crate) async fn execute_secret_copy_direct(
     // touches (the "ONE identifier" convention: see
     // `resolve_workspace_or_default`'s doc comment). Falls back to
     // `config.effective_backend_name()` unchanged when no workspace is
-    // attached or the argument isn't an attached alias.
-    let ws = crate::workspace::resolve_workspace(&config).await?;
+    // attached or the argument isn't an attached alias. Only a REAL
+    // (configured) workspace participates in per-side alias resolution:
+    // `resolve_configured_workspace` returns `None` with no configured
+    // workspace, so the degenerate single-vault case keys the cache exactly as
+    // the no-workspace path did (`config.effective_backend_name()`).
+    let ws = crate::workspace::resolve_configured_workspace(&config).await?;
     let (from_backend_name, from_vault_resolved) =
         crate::cli::helpers::vault_ref_cache_identity(from_vault, ws.as_ref(), &config);
     let (to_backend_name, to_vault_resolved) =
@@ -4493,6 +4523,7 @@ pub(crate) async fn execute_secret_move_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -4514,7 +4545,10 @@ pub(crate) async fn execute_secret_move_direct(
     // vaults — same reasoning as `execute_secret_copy_direct` above: keyed
     // by `config.effective_backend_name()`, not the backend kind — same
     // per-side alias resolution as `execute_secret_copy_direct` above.
-    let ws = crate::workspace::resolve_workspace(&config).await?;
+    // `resolve_configured_workspace` returns `None` with no configured
+    // workspace, so the degenerate single-vault case keys cache identity
+    // byte-identically to the no-workspace path.
+    let ws = crate::workspace::resolve_configured_workspace(&config).await?;
     let (from_backend_name, from_vault_resolved) =
         crate::cli::helpers::vault_ref_cache_identity(from_vault, ws.as_ref(), &config);
     let (to_backend_name, to_vault_resolved) =
@@ -4538,6 +4572,7 @@ pub(crate) async fn execute_secret_parse_direct(
     config: Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<()> {
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = get_azure_auth_provider(registry, &config)?;
 
     // Create secret manager
@@ -4577,6 +4612,7 @@ pub(crate) async fn execute_secret_share_direct(
         }
     }
 
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider: Arc<dyn AzureAuthProvider> = get_azure_auth_provider(registry, &config)?;
 
     // Create vault manager for secret-level RBAC
@@ -4716,13 +4752,17 @@ pub(crate) async fn execute_secret_find_direct(
     };
 
     // Workspace union `find` (multi-vault workspaces plan, Phase B Task 8):
-    // consulted ONLY when a workspace is attached AND `--all-vaults` was NOT
-    // requested. `--all-vaults` keeps its existing, documented meaning
-    // ("every vault the active backend can list") — a strict superset of
-    // "every ATTACHED vault" — so it takes priority and falls through to
-    // its own unchanged branch below even with a workspace present.
+    // consulted ONLY when a REAL (configured) workspace is attached AND
+    // `--all-vaults` was NOT requested. `resolve_configured_workspace` returns
+    // `None` with no configured workspace, so the degenerate single-vault case
+    // falls through to the single-vault path below (which also performs the
+    // `--in` field validation), byte-identical. `--all-vaults` keeps its
+    // existing, documented meaning ("every vault the active backend can list")
+    // — a strict superset of "every ATTACHED vault" — so it takes priority and
+    // falls through to its own unchanged branch below even with a workspace
+    // present.
     if !all_vaults {
-        if let Some(ws) = crate::workspace::resolve_workspace(&config).await? {
+        if let Some(ws) = crate::workspace::resolve_configured_workspace(&config).await? {
             use crate::utils::fuzzy::{score_matches, CandidateItem, FuzzyField};
 
             let mut fields: Vec<FuzzyField> = vec![FuzzyField::Name];
@@ -4860,6 +4900,7 @@ pub(crate) async fn execute_secret_find_direct(
         let items: Vec<CandidateItem> = if all_vaults {
             // List all vaults and collect secrets
             let mut combined = Vec::new();
+            // Phase 2 (legacy manager retirement): legacy active-backend dispatch
             if let Some(vaults_backend) = reg.active().vaults() {
                 let vaults = vaults_backend.list_vaults().await?;
                 for v in &vaults {
@@ -4934,6 +4975,7 @@ pub(crate) async fn execute_secret_find_direct(
     }
 
     // ── Azure legacy path (unchanged) ─────────────────────────────────
+    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
     let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
     let secret_manager = SecretManager::new(auth_provider, config.no_color);
     execute_secret_find(
@@ -4995,6 +5037,7 @@ async fn execute_secret_find(
     let single_vault = if all_vaults {
         None
     } else {
+        // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
         let vn = config.resolve_vault_name(None).await?;
         let _ = context_manager.update_usage(&vn).await;
         Some(vn)
@@ -5116,6 +5159,7 @@ async fn execute_secret_find(
 pub(crate) async fn execute_complete_secrets(config: Config) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
 
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(None).await?;
 
     // Cache-only path. If cache is cold, exit silently — the user got
@@ -5168,6 +5212,7 @@ fn folder_completion_paths(secrets: &[crate::secret::manager::SecretSummary]) ->
 pub(crate) async fn execute_complete_folders(config: Config) -> Result<()> {
     use crate::cache::{CacheKey, CacheManager};
 
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(None).await?;
 
     // Cache-only path, mirroring execute_complete_secrets: a cold cache
@@ -5241,6 +5286,7 @@ async fn execute_secret_rollback(
     use crate::utils::interactive::InteractivePrompt;
 
     // Determine vault name using context resolution
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(vault).await?;
 
     // Update context usage tracking
@@ -5299,6 +5345,7 @@ async fn execute_secret_rotate(
     use crate::utils::interactive::InteractivePrompt;
 
     // Determine vault name using context resolution
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(vault).await?;
 
     // Update context usage tracking
@@ -5666,6 +5713,7 @@ async fn execute_secret_run(
     };
 
     // Determine vault name using context resolution
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(vault).await?;
 
     // Update context usage tracking
@@ -5705,6 +5753,7 @@ async fn execute_secret_run(
     // Get all secrets from the active backend (trait path — works for azure,
     // local, and aws alike).
     let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
+    // Phase 2 (legacy manager retirement): legacy active-backend dispatch
     let secrets = reg.active().secrets().list_secrets(&vault_name, None).await;
     progress.finish_clear();
     let secrets = secrets.map_err(CrosstacheError::from)?;
@@ -5852,6 +5901,7 @@ async fn execute_secret_run(
             uri_refs.len()
         ));
 
+        // Phase 2 (legacy manager retirement): active-backend capability/kind read
         let active_kind: BackendKind = reg.active().kind();
 
         // Cache backends by kind — avoids re-initialising the SDK per URI
@@ -6180,6 +6230,7 @@ async fn execute_secret_inject(
     use std::io::{self, Read};
 
     // Determine vault name using context resolution
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(vault).await?;
 
     // Update context usage tracking
@@ -6316,6 +6367,7 @@ async fn execute_secret_inject(
     // Get all secrets from the active backend (trait path — works for azure,
     // local, and aws alike).
     let progress = crate::utils::interactive::ProgressIndicator::new("Loading secrets...");
+    // Phase 2 (legacy manager retirement): legacy active-backend dispatch
     let secrets = reg.active().secrets().list_secrets(&vault_name, None).await;
     progress.finish_clear();
     let secrets = secrets.map_err(CrosstacheError::from)?;
@@ -6488,6 +6540,7 @@ async fn execute_secret_inject(
 
     // Fetch URI-referenced secrets (supports optional backend prefix)
     {
+        // Phase 2 (legacy manager retirement): active-backend capability/kind read
         let active_kind: BackendKind = reg.active().kind();
 
         // Cache backends by kind — avoids re-initialising the SDK per URI
@@ -6641,6 +6694,7 @@ async fn execute_secret_purge(
     use crate::config::ContextManager;
 
     // Determine vault name using context resolution
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(vault).await?;
 
     // Update context usage tracking
@@ -6678,6 +6732,7 @@ async fn execute_secret_restore(
     use crate::config::ContextManager;
 
     // Determine vault name using context resolution
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(vault).await?;
 
     // Update context usage tracking
@@ -7054,6 +7109,7 @@ async fn execute_secret_share(
     use crate::vault::models::AccessLevel;
 
     // Determine vault name using context resolution
+    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
     let vault_name = config.resolve_vault_name(None).await?;
     let resource_group = config.default_resource_group.clone();
 
@@ -7735,25 +7791,22 @@ mod tests {
         assert!(msg.contains("local"), "should name the backend: {msg}");
     }
 
-    #[tokio::test]
-    async fn rotate_native_accepted_on_backend_with_rotation_capability() {
-        // #342: isolate from the real global context — see the sibling
-        // "rejected" test above for why.
-        let _env_guard = context_dir_env_lock().lock().await;
-        let temp_context_dir = tempfile::tempdir().unwrap();
-        let _context_dir_guard = EnvVarGuard::set("XV_CONTEXT_DIR", temp_context_dir.path());
-
-        let registry = BackendRegistry::new(Arc::new(TestBackend::aws()));
-        let config = Config {
-            backend: Some("aws".to_string()),
-            default_vault: "test-vault".to_string(),
-            ..Default::default()
-        };
-
-        execute_secret_rotate_native("db-password", true, config, Some(&registry))
-            .await
-            .expect("capable backend should accept native rotation");
-    }
+    // Phase 1 (B5) note: the former
+    // `rotate_native_accepted_on_backend_with_rotation_capability` unit test
+    // injected a fake rotation-capable `TestBackend::aws()` registry. After
+    // resolution convergence the CLI resolves its backend from config through
+    // the workspace seam, so a fake backend can no longer be injected — and no
+    // HERMETIC backend advertises `has_secret_rotation` (only real AWS does),
+    // so a `rotate --native` ACCEPT path can't be exercised without the aws
+    // feature + network. Its intent — the `--native` capability gate reads the
+    // RESOLVED target's capabilities, not the process active backend's — is
+    // covered hermetically by
+    // `crate::workspace::resolve::tests::resolved_backend_capabilities_reflect_workspace_entry_not_a_separate_active_backend`
+    // and end-to-end by `tests/e2e_workspaces.rs::
+    // rotate_native_capability_gate_reflects_resolved_target_not_workspace_default`.
+    // The REJECT path stays covered by the sibling
+    // `rotate_native_rejected_on_backend_without_rotation_capability` (local,
+    // hermetic).
 
     #[test]
     fn expiry_filter_candidates_apply_group_and_enabled_filters_before_detail_fetches() {
@@ -8104,117 +8157,6 @@ mod tests {
         }
     }
 
-    /// Backend whose in-place update always succeeds but whose rename phase
-    /// always fails with a `Conflict` — the shape produced by `xv update src
-    /// --note x --rename existing-dst` when `dst` already exists.
-    struct RenameFailBackend;
-
-    #[async_trait::async_trait]
-    impl SecretBackend for RenameFailBackend {
-        async fn set_secret(
-            &self,
-            _vault: &str,
-            _request: crate::secret::manager::SecretRequest,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
-            Err(BackendError::Unsupported("test backend".into()))
-        }
-
-        async fn get_secret(
-            &self,
-            _vault: &str,
-            _name: &str,
-            _include_value: bool,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
-            Err(BackendError::Unsupported("test backend".into()))
-        }
-
-        async fn get_secret_version(
-            &self,
-            _vault: &str,
-            _name: &str,
-            _version: &str,
-            _include_value: bool,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
-            Err(BackendError::Unsupported("test backend".into()))
-        }
-
-        async fn list_secrets(
-            &self,
-            _vault: &str,
-            _group_filter: Option<&str>,
-        ) -> std::result::Result<Vec<crate::secret::manager::SecretSummary>, BackendError> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_secret(
-            &self,
-            _vault: &str,
-            _name: &str,
-        ) -> std::result::Result<(), BackendError> {
-            Err(BackendError::Unsupported("test backend".into()))
-        }
-
-        async fn update_secret(
-            &self,
-            _vault: &str,
-            name: &str,
-            _request: crate::secret::manager::SecretUpdateRequest,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
-            Ok(fake_secret_properties(name))
-        }
-
-        async fn rename_secret(
-            &self,
-            _vault: &str,
-            name: &str,
-            new_name: &str,
-        ) -> std::result::Result<crate::secret::manager::SecretProperties, BackendError> {
-            Err(BackendError::Conflict(format!(
-                "destination '{new_name}' already exists (renaming '{name}')"
-            )))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Backend for RenameFailBackend {
-        fn name(&self) -> &'static str {
-            "local"
-        }
-
-        fn kind(&self) -> BackendKind {
-            BackendKind::Local
-        }
-
-        fn capabilities(&self) -> BackendCapabilities {
-            BackendCapabilities {
-                has_vaults: true,
-                has_file_storage: false,
-                has_rbac: false,
-                has_audit: false,
-                has_versioning: true,
-                has_soft_delete: true,
-                has_secret_rotation: false,
-                has_groups: true,
-                has_folders: true,
-                has_notes: true,
-                has_expiry: true,
-                max_secret_size: None,
-                max_name_length: None,
-                name_charset: NameCharset::Unrestricted,
-                max_tags: None,
-                max_tag_value_len: None,
-            }
-        }
-
-        fn secrets(&self) -> &dyn SecretBackend {
-            self
-        }
-
-        async fn health_check(&self) -> std::result::Result<(), BackendError> {
-            Ok(())
-        }
-    }
-
     /// Regression test for fix-6 finding #1: when the in-place update phase
     /// of a combined `--rename` update succeeds but the rename phase fails,
     /// the secrets-list cache must still be invalidated. Before the fix, both
@@ -8222,58 +8164,73 @@ mod tests {
     /// early past the single trailing `invalidate_trait_secret_cache` call,
     /// leaving a stale cached `xv ls` for up to the cache TTL.
     ///
-    /// This is a unit-level test (not e2e) because every e2e harness in this
-    /// repo (see `tests/e2e_local_backend.rs`'s `TestEnv::new()`) sets
-    /// `cache_enabled = false` — there is no existing precedent for an e2e
-    /// test that exercises the on-disk cache, and adding one is out of scope
-    /// for this fix. Exercising `execute_secret_update_direct` directly with
-    /// a controllable backend lets us assert on the cache file without a
-    /// full CLI invocation.
+    /// Post-convergence (Phase 1) the CLI resolves its backend from `config`
+    /// through the workspace seam, so this can no longer inject a fake backend.
+    /// It drives a REAL hermetic local backend instead and forces the rename
+    /// to fail the natural way — renaming onto a name that already exists
+    /// yields `BackendError::Conflict` (see `SecretBackend::rename_secret`'s
+    /// destination-exists guard), exactly the "update applied, rename failed"
+    /// shape the fix guards. Still a unit-level test (not e2e) because every
+    /// e2e harness sets `cache_enabled = false`.
     #[tokio::test]
     async fn rename_failure_after_successful_update_invalidates_cache() {
-        let registry = BackendRegistry::new(Arc::new(RenameFailBackend));
-
-        // `execute_secret_update_direct` invalidates its cache internally via
-        // `invalidate_trait_secret_cache`, which builds its own `CacheManager`
-        // from `config` (`CacheManager::from_config`). To observe that
-        // invalidation from this test we need our own `CacheManager` to
-        // resolve to the *same* directory, so we point both at an isolated
-        // `tempfile::TempDir` via the `XV_CACHE_DIR` override rather than
-        // touching the real OS cache path. `XV_CACHE_DIR` is a process-global
-        // env var, so mutation is serialized with `cache_dir_env_lock()` to
-        // avoid racing other tests that also set it, and `EnvVarGuard`
-        // restores the previous value on drop — including on panic unwind,
-        // so a failing assertion below can never leak the override pointing
-        // at an already-deleted `TempDir` for the rest of the test binary.
-        let _env_guard = cache_dir_env_lock().lock().await;
+        // Serialize + isolate the two process-global env overrides this test
+        // relies on: `XV_CACHE_DIR` (so our `CacheManager` and the one
+        // `execute_secret_update_direct` builds internally share a temp dir)
+        // and `XV_CONTEXT_DIR` (so `resolve_workspace` -> `ContextManager::load`
+        // can't pick up a real workspace and redirect the target vault).
+        // `EnvVarGuard` restores both on drop, including on panic unwind.
+        let _cache_env_guard = cache_dir_env_lock().lock().await;
         let temp_cache_dir = tempfile::tempdir().unwrap();
         let _cache_dir_guard = EnvVarGuard::set("XV_CACHE_DIR", temp_cache_dir.path());
-
-        // #342: `execute_secret_update_direct` also resolves the workspace
-        // (`resolve_workspace_or_default` -> `resolve_workspace` ->
-        // `ContextManager::load`), which reads the REAL global context
-        // unless `XV_CONTEXT_DIR` is isolated — on a machine with a
-        // workspace attached, the target this test writes/renames would be
-        // silently redirected to that workspace's default vault instead of
-        // this test's own `RenameFailBackend`-backed "local" config.
         let _context_env_guard = context_dir_env_lock().lock().await;
         let temp_context_dir = tempfile::tempdir().unwrap();
         let _context_dir_guard = EnvVarGuard::set("XV_CONTEXT_DIR", temp_context_dir.path());
 
+        // Real hermetic local store the CLI will resolve to from `config`.
+        let store = tempfile::tempdir().unwrap();
         let vault_name = "xv-test-rename-cache".to_string();
         let config = Config {
             backend: Some("local".to_string()),
             cache_enabled: true,
             cache_ttl_secs: 300,
             local: Some(crate::config::settings::LocalConfig {
-                store_path: None,
-                key_file: None,
+                store_path: Some(store.path().join("store").to_string_lossy().to_string()),
+                key_file: Some(store.path().join("key.txt").to_string_lossy().to_string()),
                 default_vault: Some(vault_name.clone()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
             }),
             ..Default::default()
         };
+
+        // Seed the SAME store the CLI resolves to: "src" so the in-place update
+        // succeeds, and "existing-dst" so the subsequent rename collides
+        // (`rename_secret`'s destination-exists guard -> `Conflict`).
+        let registry = BackendRegistry::with_lazy(&config, &["local".to_string()])
+            .expect("register local backend");
+        let backend = registry.materialize("local").expect("build local backend");
+        for name in ["src", "existing-dst"] {
+            backend
+                .secrets()
+                .set_secret(
+                    &vault_name,
+                    crate::secret::manager::SecretRequest {
+                        name: name.to_string(),
+                        value: zeroize::Zeroizing::new("seed".to_string()),
+                        content_type: None,
+                        enabled: None,
+                        expires_on: None,
+                        not_before: None,
+                        tags: None,
+                        groups: None,
+                        note: None,
+                        folder: None,
+                    },
+                )
+                .await
+                .expect("seed secret");
+        }
 
         let cache_manager = crate::cache::CacheManager::from_config(&config);
         let cache_key = trait_secret_cache_key("local", &vault_name);

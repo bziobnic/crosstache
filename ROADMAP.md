@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-06-15 · **Latest released version:** `v0.15.0` · **Branch protection:** `main` (all changes via PR)
+> **Last reviewed:** 2026-07-05 · **Latest released version:** `v0.15.0` · **Branch protection:** `main` (all changes via PR)
 
 Single source of truth for **unimplemented** ideas, deferred work, and known
 limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).
@@ -19,6 +19,54 @@ Severity legend (mirrors the UX/code reviews):
 
 No active release-soak lane. Implemented work is tracked in
 [`CHANGELOG.md`](./CHANGELOG.md); this roadmap only tracks open work.
+
+---
+
+## Multi-backend workspace convergence
+
+Design: [`2026-07-05-multi-backend-workspace-convergence-design.md`](./docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md),
+targeting `v0.21.0`. Sequences the remaining multi-backend completion work
+(after Phases A–C of multi-vault workspaces shipped in v0.20.0/v0.20.1) into
+three ordered phases, converging the legacy no-workspace resolution path into
+a single workspace path (ADR-1: workspace-of-one convergence over dual-path
+hardening) and fully retiring the legacy Azure managers (ADR-2: full manager
+retirement over partial).
+
+### P1 — Phase 1: workspace-of-one resolution convergence
+Eliminate the legacy no-workspace secret-resolution path (`Config::resolve_vault_name`,
+`BackendRegistry::active()`/`active_arc()`, `get_azure_auth_provider`) from the
+CLI's secret-resolution seam; bare/no-workspace usage becomes a degenerate
+workspace-of-one (`WorkspaceSource::Degenerate`, `Workspace::is_configured()`),
+not a second code path.
+**Acceptance bar (seam-scoped, not repo-wide):** the no-workspace `else` at
+`resolve_workspace_or_default` (`src/cli/helpers.rs:155-164`) is deleted;
+`resolve_workspace` never returns `None`; every enumerated presence-gate uses
+`is_configured()`; every surviving legacy resolution call site carries a
+`// Phase 2`/`// Phase 3` annotation matching the design doc's survivor
+allowlist; `cargo test`/`cargo clippy --all-targets` green; `CHANGELOG.md`
+lists every intentional break.
+
+### P1 — Phase 2: full legacy manager retirement
+Delete `SecretManager`/`VaultManager`/`BlobManager` construction from CLI
+paths entirely, including Azure-only share/RBAC, audit, and vault-lifecycle
+operations, behind new `VaultBackend`/`AuditBackend` sub-traits on `Backend`.
+Implements the design doc's A4 `--vault` composition semantics for
+`run`/`inject`/`rotate`. Also closes the existing `has_audit` capability-flag
+inconsistency (see § Security hardening below) as a side effect of migrating
+Azure audit onto the trait.
+**Acceptance bar:** zero manager references from `src/cli/**`.
+
+### P2 — Phase 3: default-entry file-ops routing
+Route `xv file`/blob operations through a `FileBackend` resolution against the
+workspace's default entry only — no union file views, no alias-qualified file
+addressing.
+**Acceptance bar:** `xv file` resolves through the workspace default entry
+only; no union/aliased file addressing.
+
+**Deferred non-goals (all phases):** multi-instance same-kind backends
+(`NamedBackendEntry::Azure`), union file views, alias-qualified file
+addressing, cross-vault file operations, byte-for-byte legacy output/exit-code
+parity, new backends (tracked separately below).
 
 ---
 

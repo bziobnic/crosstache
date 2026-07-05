@@ -41,12 +41,13 @@ pub async fn run_tui(
     });
 
     // Workspace-aware vault pane (Phase C Task 13): resolved once at
-    // startup. `None` when no workspace is attached ⇒ the vault pane and
-    // secrets loading below behave exactly as before (spec §Backward
-    // compatibility). Any resolution error is swallowed to `None` rather
-    // than failing `xv tui` outright — the single-vault degenerate path
-    // must always remain available.
-    let workspace = crate::workspace::resolve_workspace(&config)
+    // startup. `None` when no REAL (configured) workspace is attached ⇒ the
+    // vault pane and secrets loading below behave exactly as before (spec
+    // §Backward compatibility). `resolve_configured_workspace` returns `None`
+    // with no configured workspace, so `xv tui` renders as the single-vault
+    // TUI, not a 1-entry workspace browser. Any resolution error is swallowed
+    // to `None` rather than failing `xv tui` outright.
+    let workspace = crate::workspace::resolve_configured_workspace(&config)
         .await
         .ok()
         .flatten();

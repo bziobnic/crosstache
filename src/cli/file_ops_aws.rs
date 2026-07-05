@@ -70,6 +70,7 @@ async fn create_aws_file_backend(config: &Config) -> Result<AwsFileBackend> {
 /// Resolve the vault whose file prefix is targeted: the usual chain
 /// (context, default_vault), then `[aws].default_vault`.
 async fn resolve_aws_file_vault(config: &Config) -> Result<String> {
+    // Phase 3 (file-ops routing): file ops route through the workspace default entry
     if let Ok(vault) = config.resolve_vault_name(None).await {
         return Ok(vault);
     }

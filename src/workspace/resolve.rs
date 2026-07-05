@@ -72,6 +72,22 @@ pub async fn resolve_secret_target(
     registry: &BackendRegistry,
     mode: TargetMode,
 ) -> Result<(TargetVault, String)> {
+    // Degenerate workspace-of-one: no user-configured aliases exist, so a name
+    // is ALWAYS a literal secret name — colon-address parsing must not apply.
+    // This keeps bare `xv get`/`set` byte-identical to pre-workspace
+    // resolution (a `:`-containing name is stored/read verbatim, no
+    // alias-qualifier split; guarded by
+    // `tests/e2e_workspaces.rs::no_workspace_byte_identical`). Resolve the raw
+    // name against the sole default entry directly — no `parse_address`, and
+    // no Read-mode search (there is only one vault to look in), so the resolved
+    // (backend, vault, path) and the call pattern match the old no-workspace
+    // path exactly. `mode` is irrelevant here for the same reason.
+    if !ws.is_configured() {
+        let entry = ws.default_entry()?.clone();
+        let backend = materialize(registry, &entry)?;
+        return Ok((TargetVault { backend, entry }, raw.to_string()));
+    }
+
     let addr = parse_address(raw);
 
     match mode {

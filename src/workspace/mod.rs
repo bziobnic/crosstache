@@ -14,6 +14,7 @@ pub mod resolve;
 pub use address::parse_address;
 pub use resolve::{resolve_secret_target, TargetMode};
 
+use crate::backend::BackendKind;
 use crate::config::settings::Config;
 use crate::error::{CrosstacheError, Result};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,14 @@ pub enum WorkspaceSource {
     /// Loaded from a `.xv.toml` `[env.<name>] vaults = [...]` overlay. When
     /// present this REPLACES any context workspace entirely — no merging.
     ProjectToml,
+    /// Synthesized workspace-of-one over the current/default vault when NO
+    /// `cx`/`.xv.toml` workspace is configured. This is the degenerate case
+    /// that lets every command resolve through the single workspace path
+    /// without the caller having attached a real workspace. Distinguished
+    /// from a user-configured workspace by [`Workspace::is_configured`] so
+    /// presence-gates (`xv context use`, union `ls`, mv/copy, TUI) that mean
+    /// "a REAL workspace is attached" keep working.
+    Degenerate,
 }
 
 /// One attached vault in a workspace.
@@ -57,6 +66,20 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// `true` when this workspace was explicitly configured by the user — a
+    /// personal context workspace ([`WorkspaceSource::Context`]) or a project
+    /// `.xv.toml` overlay ([`WorkspaceSource::ProjectToml`]). `false` for the
+    /// synthesized degenerate workspace-of-one
+    /// ([`WorkspaceSource::Degenerate`]).
+    ///
+    /// Presence-gates that used to test `resolve_workspace().is_some()` to
+    /// mean "a REAL workspace is attached" must test this instead, now that
+    /// [`resolve_workspace`] never returns `None` (it returns a degenerate
+    /// workspace rather than `None`).
+    pub fn is_configured(&self) -> bool {
+        !matches!(self.source, WorkspaceSource::Degenerate)
+    }
+
     /// Look up an attached entry by alias.
     pub fn entry(&self, alias: &str) -> Option<&WorkspaceEntry> {
         self.entries.iter().find(|e| e.alias == alias)
@@ -223,10 +246,58 @@ pub fn build_workspace(
 /// alias/backend-name collision check regardless of what's configured.
 pub const BUILTIN_BACKEND_NAMES: [&str; 3] = ["azure", "local", "aws"];
 
-/// Resolve the active workspace, if any, per the spec's overlay rule:
-/// a `.xv.toml` `vaults = [...]` block on the active env profile REPLACES
-/// any context workspace entirely (no merging); with neither present,
-/// returns `Ok(None)` — the degenerate, byte-identical-with-today case.
+/// The registry backend names (built-ins + configured `named_backends` keys)
+/// used for the alias/backend-name collision check.
+fn known_backend_names(config: &Config) -> Vec<String> {
+    let mut backend_names: Vec<String> = BUILTIN_BACKEND_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for k in config.named_backends.keys() {
+        if !backend_names.iter().any(|n| n == k) {
+            backend_names.push(k.clone());
+        }
+    }
+    backend_names
+}
+
+/// Resolve the CONFIGURED workspace, if any, per the spec's overlay rule: a
+/// `.xv.toml` `vaults = [...]` block on the active env profile REPLACES any
+/// context workspace entirely (no merging); a personal context workspace is
+/// used next; with neither present, returns `Ok(None)`.
+///
+/// This does **not** synthesize the degenerate workspace-of-one (and so never
+/// raises its Azure-no-vault hard-error). It is what PRESENCE-GATES ("is a
+/// REAL workspace attached?" — `xv context use`, union `ls`/`find`, mv/copy,
+/// TUI) and `run`/`inject` alias resolution consult: they only care whether a
+/// user-configured workspace exists, and must NOT fail merely because the
+/// degenerate builder can't resolve a default vault (e.g. `xv context use
+/// <vault>` in an unconfigured Azure env must succeed so the user can set that
+/// very vault). A real `.xv.toml`/validation error still propagates. The
+/// secret-resolution seam uses [`resolve_workspace`] instead.
+pub async fn resolve_configured_workspace(config: &Config) -> Result<Option<Workspace>> {
+    let cwd = std::env::current_dir()?;
+    let context_manager = crate::config::ContextManager::load()
+        .await
+        .unwrap_or_default();
+    resolve_configured_workspace_from(config, Some(&cwd), &context_manager).await
+}
+
+/// Resolve the effective workspace for SECRET RESOLUTION: the configured
+/// workspace when present, otherwise a synthesized **degenerate
+/// workspace-of-one** ([`WorkspaceSource::Degenerate`]) over the
+/// current/default vault.
+///
+/// **Never returns `None`.** It returns `Some(Workspace)` (configured or
+/// degenerate) or propagates `Err` — preserving the no-vault hard-error for
+/// an active Azure backend (the same error `resolve_vault_for_trait` /
+/// `Config::resolve_vault_name` raise today). The return type stays
+/// `Option<Workspace>` only so existing callers compile unchanged; the
+/// `None` case is unreachable. This is used ONLY by the resolver seam
+/// ([`crate::cli::helpers::resolve_workspace_or_default`]); presence-gates and
+/// `run`/`inject` use [`resolve_configured_workspace`]. Callers distinguish a
+/// configured workspace from the degenerate one with
+/// [`Workspace::is_configured`].
 pub async fn resolve_workspace(config: &Config) -> Result<Option<Workspace>> {
     // Audit finding (Bugbot round-4): `.ok()` here would swallow a
     // `current_dir()` failure by treating it as "no cwd", which skips the
@@ -245,26 +316,17 @@ pub async fn resolve_workspace(config: &Config) -> Result<Option<Workspace>> {
     resolve_workspace_from(config, Some(&cwd), &context_manager).await
 }
 
-/// Core of [`resolve_workspace`], parameterized over `cwd` and the loaded
-/// context so it's testable without touching the process-global working
+/// Core of [`resolve_configured_workspace`], parameterized over `cwd` and the
+/// loaded context so it's testable without touching the process-global working
 /// directory (which unit tests can't safely sandbox under parallel `cargo
-/// test`). Production code always goes through [`resolve_workspace`].
-async fn resolve_workspace_from(
+/// test`). Production code always goes through [`resolve_configured_workspace`].
+async fn resolve_configured_workspace_from(
     config: &Config,
     cwd: Option<&std::path::Path>,
     context_manager: &crate::config::ContextManager,
 ) -> Result<Option<Workspace>> {
     let active_backend = config.effective_backend_name().to_string();
-
-    let mut backend_names: Vec<String> = BUILTIN_BACKEND_NAMES
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    for k in config.named_backends.keys() {
-        if !backend_names.iter().any(|n| n == k) {
-            backend_names.push(k.clone());
-        }
-    }
+    let backend_names = known_backend_names(config);
     let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
 
     // 1. `.xv.toml` project overlay — replaces context entirely.
@@ -317,6 +379,148 @@ async fn resolve_workspace_from(
     }
 
     Ok(None)
+}
+
+/// Core of [`resolve_workspace`]: the configured workspace, or the degenerate
+/// workspace-of-one when none is configured. Parameterized over `cwd`/context
+/// for the same testability reason as [`resolve_configured_workspace_from`].
+async fn resolve_workspace_from(
+    config: &Config,
+    cwd: Option<&std::path::Path>,
+    context_manager: &crate::config::ContextManager,
+) -> Result<Option<Workspace>> {
+    if let Some(ws) = resolve_configured_workspace_from(config, cwd, context_manager).await? {
+        return Ok(Some(ws));
+    }
+
+    // No configured workspace: synthesize the degenerate workspace-of-one over
+    // the current/default vault. This is what makes `resolve_workspace` never
+    // return `None`. The vault is derived from the same chain
+    // `resolve_vault_for_trait` uses today (project `.xv.toml` env vault →
+    // context current vault → `default_vault` → local `default_vault` →
+    // `"default"`), preserving the Azure no-vault hard-error as `Err`.
+    let active_backend = config.effective_backend_name().to_string();
+    let backend_names = known_backend_names(config);
+    let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
+
+    let vault = degenerate_default_vault(config, cwd, context_manager).await?;
+    let alias = degenerate_alias(&vault, &backend_name_refs);
+    let degenerate_entry = WorkspaceEntryConfig {
+        vault,
+        backend: Some(active_backend.clone()),
+        alias: Some(alias),
+        default: true,
+    };
+    let ws = build_workspace(
+        std::slice::from_ref(&degenerate_entry),
+        &active_backend,
+        WorkspaceSource::Degenerate,
+        &backend_name_refs,
+    )?;
+    Ok(Some(ws))
+}
+
+/// Pick the degenerate workspace-of-one's single alias.
+///
+/// Prefers the vault name so natural `xv get <vault>:name` addressing works,
+/// but only when it is a charset-valid alias that does not collide with a
+/// registry backend name (a collision would make [`Workspace::validate`]
+/// reject the synthesized workspace and break the never-`None` invariant).
+/// Otherwise falls back to a synthetic that is guaranteed to satisfy both
+/// constraints. The alias never affects cache-key identity — that is keyed on
+/// the entry's `backend` (`config.effective_backend_name()`), not the alias.
+fn degenerate_alias(vault: &str, backend_names: &[&str]) -> String {
+    if is_valid_alias_charset(vault) && !backend_names.contains(&vault) {
+        return vault.to_string();
+    }
+    let mut candidate = "default".to_string();
+    let mut n = 0;
+    while backend_names.contains(&candidate.as_str()) {
+        n += 1;
+        candidate = format!("default-{n}");
+    }
+    candidate
+}
+
+/// `true` when the config's active (top-level) backend is Azure.
+///
+/// Mirrors `crate::cli::helpers::requested_backend_kind` without depending on
+/// the CLI layer: named backends are only ever AWS/Local, so the active
+/// backend is Azure exactly when the effective name is not a named-backend
+/// key and parses to [`BackendKind::Azure`] (which includes the
+/// default-when-unset case, `effective_backend_name() == "azure"`).
+fn active_kind_is_azure(config: &Config) -> bool {
+    let name = config.effective_backend_name();
+    if config.named_backends.contains_key(name) {
+        return false;
+    }
+    matches!(name.parse::<BackendKind>(), Ok(BackendKind::Azure))
+}
+
+/// Resolve the vault for the degenerate workspace-of-one, mirroring
+/// `Config::resolve_vault_name(None)` (src/config/settings.rs) then the
+/// Azure-hard-error / local-fallback rule of `resolve_vault_for_trait`
+/// (src/cli/helpers.rs).
+///
+/// The resolution chain is replicated here (rather than calling
+/// `Config::resolve_vault_name`) so it uses the injected `cwd` and
+/// `context_manager` — the same parameterization that keeps
+/// [`resolve_workspace_from`] hermetic under `cargo test`. The one behavioral
+/// difference from `resolve_vault_name` is that the cross-boundary `.xv.toml`
+/// notice (a stderr line) is not re-emitted here, since the workspace-overlay
+/// pass above already inspected the same project config.
+async fn degenerate_default_vault(
+    config: &Config,
+    cwd: Option<&std::path::Path>,
+    context_manager: &crate::config::ContextManager,
+) -> Result<String> {
+    let resolved: Result<String> = async {
+        // 1. Project `.xv.toml` env-profile vault (walk up from cwd).
+        if let Some(cwd) = cwd {
+            if let Ok(Some((_path, proj_cfg))) =
+                crate::config::project::find_project_config(cwd).await
+            {
+                if let Some((_name, profile)) =
+                    crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())?
+                {
+                    if let Some(v) = profile.vault.as_deref() {
+                        return Ok(v.to_string());
+                    }
+                }
+            }
+        }
+
+        // 2. Context current vault.
+        if let Some(v) = context_manager.current_vault() {
+            return Ok(v.to_string());
+        }
+
+        // 3. Config default vault.
+        if !config.default_vault.is_empty() {
+            return Ok(config.default_vault.clone());
+        }
+
+        Err(CrosstacheError::config(
+            "No vault specified. Use --vault, set context with 'xv context use', or configure default_vault",
+        ))
+    }
+    .await;
+
+    match resolved {
+        Ok(name) => Ok(name),
+        // Azure keeps the legacy hard-error: no implicit fallback.
+        Err(e) if active_kind_is_azure(config) => Err(e),
+        // Local / future offline backends fall back to their configured
+        // default vault, then the literal `"default"`.
+        Err(_) => {
+            if let Some(ref local) = config.local {
+                if let Some(ref v) = local.default_vault {
+                    return Ok(v.clone());
+                }
+            }
+            Ok("default".to_string())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -491,15 +695,143 @@ mod tests {
         assert!(err.to_string().contains("no-such-alias"), "{err}");
     }
 
+    /// A local backend with a configured default vault and NO cx/`.xv.toml`
+    /// workspace resolves to the degenerate workspace-of-one — never `None`.
     #[tokio::test]
-    async fn resolve_none_when_no_workspace_anywhere() {
+    async fn resolve_degenerate_for_local_only() {
+        use crate::config::settings::LocalConfig;
+
         let temp = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = Config {
+            backend: Some("local".to_string()),
+            local: Some(LocalConfig {
+                store_path: None,
+                key_file: None,
+                default_vault: Some("mystore".to_string()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+            ..Default::default()
+        };
         let context_manager = crate::config::ContextManager::default();
+
         let resolved = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
             .await
-            .expect("must not error");
-        assert!(resolved.is_none());
+            .expect("must not error")
+            .expect("degenerate workspace-of-one must be synthesized, never None");
+
+        assert_eq!(resolved.source, WorkspaceSource::Degenerate);
+        assert!(!resolved.is_configured());
+        assert_eq!(resolved.entries.len(), 1);
+        let entry = resolved.default_entry().unwrap();
+        assert!(entry.default);
+        assert_eq!(entry.vault, "mystore");
+        // Cache-key identity: the degenerate entry's backend MUST equal
+        // `config.effective_backend_name()` so writes invalidate the exact
+        // cache entry the no-workspace read path keys on.
+        assert_eq!(entry.backend, config.effective_backend_name());
+        assert_eq!(entry.backend, "local");
+        // Vault name is charset-valid and not a backend name, so it's used
+        // verbatim as the alias.
+        assert_eq!(entry.alias, "mystore");
+    }
+
+    /// A local backend with no vault configured anywhere falls back through
+    /// `local.default_vault` → `"default"` (never an error, never `None`).
+    #[tokio::test]
+    async fn resolve_degenerate_local_falls_back_to_default_literal() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            backend: Some("local".to_string()),
+            ..Default::default()
+        };
+        let context_manager = crate::config::ContextManager::default();
+
+        let resolved = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
+            .await
+            .expect("must not error")
+            .expect("degenerate workspace-of-one must be synthesized, never None");
+
+        assert_eq!(resolved.source, WorkspaceSource::Degenerate);
+        assert_eq!(resolved.default_entry().unwrap().vault, "default");
+    }
+
+    /// `resolve_workspace` never yields `Ok(None)`: an active Azure backend
+    /// with no vault configured surfaces the no-vault hard-error as `Err`,
+    /// not a silent `"default"` vault — preserving the legacy Azure UX.
+    #[tokio::test]
+    async fn resolve_degenerate_azure_no_vault_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        // `backend: None` ⇒ effective backend is "azure" (the default).
+        let config = Config::default();
+        let context_manager = crate::config::ContextManager::default();
+
+        let err = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
+            .await
+            .expect_err("Azure + no vault must be an Err, not Ok(None) or a 'default' vault");
+        assert!(err.to_string().contains("No vault specified"), "{err}");
+    }
+
+    /// `is_configured()` distinguishes the degenerate workspace from a real
+    /// context/project one.
+    #[tokio::test]
+    async fn is_configured_true_for_context_false_for_degenerate() {
+        // Degenerate.
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            backend: Some("local".to_string()),
+            ..Default::default()
+        };
+        let degenerate =
+            resolve_workspace_from(&config, Some(temp.path()), &crate::config::ContextManager::default())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(!degenerate.is_configured());
+
+        // Context.
+        let context_manager = crate::config::ContextManager {
+            workspace: Some(WorkspaceState {
+                entries: vec![WorkspaceEntryConfig {
+                    vault: "context-vault".to_string(),
+                    backend: Some("local".to_string()),
+                    alias: Some("ctx".to_string()),
+                    default: true,
+                }],
+            }),
+            ..Default::default()
+        };
+        let context_ws = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(context_ws.source, WorkspaceSource::Context);
+        assert!(context_ws.is_configured());
+    }
+
+    /// The degenerate alias avoids colliding with a registry backend name,
+    /// which would otherwise fail `Workspace::validate` and break the
+    /// never-`None` invariant. Here the resolved vault is literally `"local"`
+    /// (a backend name), so a synthetic non-colliding alias is chosen.
+    #[tokio::test]
+    async fn resolve_degenerate_alias_avoids_backend_name_collision() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            backend: Some("local".to_string()),
+            default_vault: "local".to_string(),
+            ..Default::default()
+        };
+        let context_manager = crate::config::ContextManager::default();
+
+        let resolved = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
+            .await
+            .expect("must not error")
+            .expect("must synthesize a valid degenerate workspace despite the vault name colliding");
+
+        let entry = resolved.default_entry().unwrap();
+        assert_eq!(entry.vault, "local");
+        assert_ne!(entry.alias, "local", "alias must not collide with a backend name");
+        assert_eq!(entry.alias, "default");
     }
 
     #[tokio::test]

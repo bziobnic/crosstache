@@ -112,6 +112,7 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             }
             // Invalidate the file list cache (both recursive and hierarchical) after any upload
             let cache_manager = crate::cache::CacheManager::from_config(&config);
+            // Phase 3 (file-ops routing): file ops route through the workspace default entry
             if let Ok(vault_name) = config.resolve_vault_name(None).await {
                 cache_manager.invalidate(&crate::cache::CacheKey::FileList {
                     vault_name: vault_name.clone(),
@@ -249,6 +250,7 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             }
             // Invalidate the file list cache (both recursive and hierarchical) after any delete
             let cache_manager = crate::cache::CacheManager::from_config(&config);
+            // Phase 3 (file-ops routing): file ops route through the workspace default entry
             if let Ok(vault_name) = config.resolve_vault_name(None).await {
                 cache_manager.invalidate(&crate::cache::CacheKey::FileList {
                     vault_name: vault_name.clone(),
@@ -679,6 +681,7 @@ async fn execute_file_list(
     let recursive = recursive || names_only;
 
     let cache_manager = CacheManager::from_config(config);
+    // Phase 3 (file-ops routing): file ops route through the workspace default entry
     let vault_name = config.resolve_vault_name(None).await.unwrap_or_default();
     let cache_key = CacheKey::FileList {
         vault_name,
@@ -2245,6 +2248,7 @@ async fn execute_file_sync(
 
     if mutated && !dry_run {
         let cache_manager = crate::cache::CacheManager::from_config(config);
+        // Phase 3 (file-ops routing): file ops route through the workspace default entry
         if let Ok(vault_name) = config.resolve_vault_name(None).await {
             cache_manager.invalidate(&crate::cache::CacheKey::FileList {
                 vault_name: vault_name.clone(),
