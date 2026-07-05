@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The first `xv cx add` now auto-attaches the currently-resolved vault as the workspace default (#341).** v0.20.0's first-add behavior attached only the requested vault, making it the workspace's sole (and therefore default) entry — so `xv ls` right after `cx add` stopped showing whatever vault was already current, silently hiding pre-existing secrets (reported by the maintainer immediately after v0.20.0 shipped). The first `cx add` now also attaches the vault you were already using (whatever `--vault`/context/`default_vault` resolves to) as the default, then attaches the requested vault alongside it — `xv ls` immediately shows both, and unqualified writes keep landing where they already were. Passing `--default` on that first add makes the newly-added vault the default instead (the prior vault stays attached, just not the write target). If the requested vault already resolves to the same `(backend, vault)` as the current one, or the current vault can't be resolved at all (no context, no `default_vault`), this degenerates to the original single-entry behavior (the latter case notes the fallback in the success message). An auto-attach candidate whose alias collides with the requested `--as` alias errors with the existing duplicate-alias message, before anything is written. Subsequent `cx add`s (a workspace already exists) are unchanged.
+
 ## v0.20.0 — Multi-vault workspaces (2026-07-04)
 
 ### Added

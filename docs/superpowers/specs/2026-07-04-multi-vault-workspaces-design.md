@@ -94,12 +94,39 @@ xv cx ls                    # alias, backend, vault, default marker, source (con
 ```
 
 - Alias defaults to the vault name; backend defaults to the currently
-  active backend; the first attached vault becomes the default.
+  active backend.
+- **First `cx add` auto-attaches the current vault too (#341).** When no
+  workspace exists yet, the plain "first attached vault becomes the
+  default" rule silently dropped whatever vault was previously current —
+  `xv ls` immediately after `cx add` would stop showing those secrets,
+  which violates the natural reading of "add" ("add another vault to what
+  I already have open"; reported immediately after v0.20.0 shipped the
+  single-entry version of this rule). So the first `cx add` now:
+  1. Auto-attaches the currently-resolved vault (the effective backend +
+     whatever `resolve_vault_name(None)` returns) as the workspace
+     **default**, aliased by its own vault name.
+  2. Attaches the requested vault alongside it (not default, unless
+     `--default` is passed — in which case the requested vault becomes
+     default and the auto-attached current vault is still attached, just
+     not the write target).
+  3. If the requested vault already resolves to the SAME `(backend,
+     vault)` as the current one, this degenerates to the original
+     single-entry behavior (nothing to auto-attach separately).
+  4. If the current vault can't be resolved at all (no context, no
+     `default_vault` configured), falls back to the original
+     single-entry behavior and notes the fallback in the success message.
+  5. An auto-attach candidate whose alias (the current vault's name)
+     collides with the requested `--as` alias errors with the same
+     duplicate-alias message, before anything is written.
+  Subsequent `cx add`s (a workspace already exists) are unchanged — they
+  just append an entry, with `--default` reassigning as before.
 - Alias rules: same charset as vault names, unique within the workspace,
   and may not collide with a *registry backend name* (would make
   `xv://alias/...` ambiguous with `xv://backend:vault/...` parsing).
-- `cx add` validates the vault exists (a list call) before writing state;
-  `--force` skips the probe for offline setup.
+- `cx add` validates the REQUESTED vault exists (a list call) before
+  writing state; `--force` skips that probe for offline setup — the
+  auto-attached current vault (if any) is never probed, since it was
+  already in use.
 - `cx rm` of the default errors unless another `--default` is named or
   only one entry remains. Removing the last entry deletes the workspace
   (back to single-vault behavior).
