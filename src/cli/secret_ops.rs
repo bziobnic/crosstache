@@ -5454,6 +5454,86 @@ pub(crate) fn check_dest_tag_budget(
     )
 }
 
+/// Resolve a `{{ secret:TOKEN }}` template reference whose `TOKEN` carries a
+/// colon prefix that parses as an attached workspace alias (Bugbot HIGH
+/// fix, round 4): `{{ secret:work:DB_PASSWORD }}`,
+/// `{{ secret:work:app/db/pass }}` (the slash slot stays folder-only —
+/// unaffected by this; only the alias slot before the FIRST colon is new),
+/// and `{{ secret:work:mail-cred.username }}` (record field access
+/// composes with alias resolution).
+///
+/// Exact-name-first (mirroring [`crate::workspace::resolve_secret_target`]'s
+/// Read-mode rule, applied inside it): the FULL raw `ref_token` — colon
+/// included — is probed as a literal secret name across every attached
+/// vault BEFORE alias interpretation, so a pre-existing secret literally
+/// named `work:x` still wins. Once resolved to a target vault, the
+/// alias-stripped path is tried as a literal name in THAT vault first (the
+/// same exact-name-before-dot-split order the bare-name path above uses);
+/// only on a miss does it split on the LAST dot for a record field
+/// reference. An unknown alias surfaces
+/// [`crate::workspace::resolve_secret_target`]'s own error (naming every
+/// attached alias), not a generic not-found.
+///
+/// Only called when `crate::workspace::parse_address(ref_token).alias` is
+/// `Some` (checked by the caller) — a bare `name`/`name.field` reference
+/// never reaches this function, so that path stays byte-identical.
+async fn resolve_workspace_template_ref(
+    ref_token: &str,
+    ws: &crate::workspace::Workspace,
+    ws_registry: &BackendRegistry,
+    config: &Config,
+    record_types_cache: &mut Option<std::result::Result<Vec<RecordType>, String>>,
+) -> Result<Zeroizing<String>> {
+    let (target, path) = crate::workspace::resolve_secret_target(
+        ref_token,
+        ws,
+        ws_registry,
+        crate::workspace::TargetMode::Read,
+    )
+    .await?;
+
+    let get_result = target
+        .backend
+        .secrets()
+        .get_secret(&target.entry.vault, &path, true)
+        .await
+        .map_err(CrosstacheError::from);
+
+    match get_result {
+        Ok(secret_props) => {
+            let types = if crate::records::is_record(&secret_props.content_type) {
+                resolve_types_lazily(record_types_cache, config).await?
+            } else {
+                Vec::new()
+            };
+            record_field_value(&path, &secret_props, None, &types)
+        }
+        Err(CrosstacheError::SecretNotFound { .. }) => {
+            let Some(dot) = path.rfind('.') else {
+                return Err(CrosstacheError::secret_not_found(format!(
+                    "{path} (in workspace vault '{}')",
+                    target.entry.alias
+                )));
+            };
+            let base = &path[..dot];
+            let field = &path[dot + 1..];
+            let secret_props = target
+                .backend
+                .secrets()
+                .get_secret(&target.entry.vault, base, true)
+                .await
+                .map_err(CrosstacheError::from)?;
+            let types = if crate::records::is_record(&secret_props.content_type) {
+                resolve_types_lazily(record_types_cache, config).await?
+            } else {
+                Vec::new()
+            };
+            record_field_value(base, &secret_props, Some(field), &types)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Resolve a single `xv://` reference's vault segment against workspace
 /// aliases first, falling back to [`resolve_uri_secret`]'s raw-vault-name /
 /// backend-kind behavior unchanged (spec §Addressing, Phase C Task 11).
@@ -6316,6 +6396,42 @@ async fn execute_secret_inject(
                 }
             }
             continue;
+        }
+
+        // Bugbot HIGH fix, round 4: a colon-shaped, charset-valid alias
+        // prefix (`{{ secret:work:DB_PASSWORD }}`) resolves against an
+        // attached workspace alias — see `resolve_workspace_template_ref`'s
+        // doc comment for the exact-name-first/field-composition rules. A
+        // colon-shaped token with no workspace attached, or whose prefix
+        // isn't charset-valid (`parse_address` returns `alias: None`),
+        // falls through UNCHANGED to the dot-split logic below — the slash
+        // form (`{{ secret:app/db/pass }}`) is a folder path, not touched
+        // by this at all, since it carries no colon.
+        if let Some(ws) = &ws {
+            if crate::workspace::parse_address(ref_token).alias.is_some() {
+                let ws_registry = ws_registry.as_ref().expect(
+                    "ws_registry is Some whenever ws is Some (resolve_workspace_and_registry)",
+                );
+                match resolve_workspace_template_ref(
+                    ref_token,
+                    ws,
+                    ws_registry,
+                    config,
+                    &mut record_types_cache,
+                )
+                .await
+                {
+                    Ok(value) => {
+                        secret_values.insert(ref_token.clone(), value);
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to resolve '{ref_token}': {e}");
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
+                    }
+                }
+                continue;
+            }
         }
 
         let mut resolved = false;

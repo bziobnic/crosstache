@@ -348,16 +348,44 @@ pub(crate) async fn execute_mv(
         }
     }
 
-    // No workspace attached (or `--filter`): pre-workspace behavior,
-    // unchanged — byte-identical to before workspaces existed.
-    let vault_name = resolve_vault_for_trait(&config, registry).await?;
-    let backend_name = config.effective_backend_name().to_string();
-    let backend = reg.active_arc();
-    let secrets = reg
-        .active()
-        .secrets()
-        .list_secrets(&vault_name, None)
-        .await?;
+    // At this point either `--filter` was given, or no workspace is
+    // attached at all (the single-secret workspace path above already
+    // returned). `--filter` bulk moves target the workspace DEFAULT entry
+    // when one is attached (Bugbot MEDIUM fix, round 4) — consistent with
+    // the single-secret path above, which already resolves an unqualified
+    // operand to the default; without this, `mv --filter` diverged onto
+    // `resolve_vault_for_trait`'s config-level vault while sibling
+    // single-secret `mv` targeted the workspace default. No workspace:
+    // unchanged, byte-identical. Cross-vault `--filter` moves stay out of
+    // scope — only the DEFAULT entry is ever chosen here.
+    let workspace_for_filter = if filter.is_some() {
+        crate::workspace::resolve_workspace(&config).await?
+    } else {
+        None
+    };
+    let (vault_name, backend_name, backend) = if let Some(ws) = workspace_for_filter {
+        let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+        let ws_registry = BackendRegistry::with_lazy(&config, &backend_names)
+            .map_err(|e| CrosstacheError::config(e.to_string()))?;
+        let default_entry = ws.default_entry()?.clone();
+        let backend = ws_registry
+            .materialize(&default_entry.backend)
+            .map_err(|e| {
+                CrosstacheError::config(format!(
+                    "workspace vault '{}' (backend '{}') is unavailable: {e}",
+                    default_entry.alias, default_entry.backend
+                ))
+            })?;
+        (default_entry.vault, default_entry.backend, backend)
+    } else {
+        let vault_name = resolve_vault_for_trait(&config, registry).await?;
+        (
+            vault_name,
+            config.effective_backend_name().to_string(),
+            reg.active_arc(),
+        )
+    };
+    let secrets = backend.secrets().list_secrets(&vault_name, None).await?;
 
     if let Some(MvPlan::Filter {
         pattern,

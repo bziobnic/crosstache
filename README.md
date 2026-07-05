@@ -1031,13 +1031,19 @@ xv cx add work-kv --backend azure --as work --default
 export DB_REF="xv://work/DB_PASSWORD"
 xv run --inherit-env -- printenv DB_REF        # resolves via the "work" alias
 
-# in a template:
+# in a template — xv:// form:
 echo 'password: xv://work/DB_PASSWORD' | xv inject
+
+# in a template — {{ secret:… }} form, the COLON slot is the alias:
+echo 'password: {{ secret:work:DB_PASSWORD }}' | xv inject
+echo 'user: {{ secret:work:mail-cred.username }}' | xv inject   # record field composes
 ```
 
 - **Explicit backend prefix bypasses aliases entirely.** `xv://azure:work/NAME` names the `azure` *backend kind* directly — even if `work` also happens to be an attached alias, this form never consults the workspace; it addresses a literal vault named `work` on the `azure` backend, exactly as it did before any workspace existed.
 - **No match, no workspace: unchanged.** A vault segment that isn't an attached alias (or is used with no workspace attached at all) keeps resolving as a plain vault name on the active backend — byte-identical to pre-workspace behavior.
 - **`#field` fragments compose.** `xv://work/CREDS#username` resolves the `work` alias first, then extracts the `username` field from the typed record, same as the non-aliased form.
+- **`{{ secret:… }}` templates alias on the COLON slot, not the slash slot.** `{{ secret:work:name }}` and `{{ secret:work:app/db/pass }}` (alias + today's folder-path grammar) resolve via the `work` alias; `{{ secret:app/db/pass }}` with no colon is a plain literal-name match, completely unaffected by aliasing (unchanged whether or not a workspace is attached) — the `/` slot has always meant "folders/literal name," never a vault.
+- **Exact-name-first still applies inside templates.** A secret literally named `work:x` (realistic on the local backend's unrestricted charset) wins over interpreting `work` as an alias, the same rule `get`/`set`/`mv` follow.
 
 ### Cross-vault `mv`/`copy` via aliases (Phase C)
 
