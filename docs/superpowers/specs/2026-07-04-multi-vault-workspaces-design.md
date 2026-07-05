@@ -134,10 +134,21 @@ vaults = [
 - **Exact-name-first:** if a secret literally named `work:x` exists in
   scope, it wins over alias interpretation (mirrors inject's dot-split
   rule; realistic only on the local backend's unrestricted charset).
-- Templates and URIs: the vault slot of `{{ secret:vault/name }}` and
-  `xv://vault/name` resolves against workspace aliases FIRST, then as a
-  raw vault name (today's meaning). `xv://backend:vault/name` (explicit
-  backend) bypasses aliases entirely. `#field` fragments compose.
+- Templates and URIs: `xv://vault/name`'s vault slot resolves against
+  workspace aliases FIRST, then as a raw vault name (today's meaning).
+  `xv://backend:vault/name` (explicit backend) bypasses aliases entirely.
+  `#field` fragments compose. `{{ secret:… }}` templates take the SAME
+  alias resolution via the **colon** form — `{{ secret:work:name }}` /
+  `{{ secret:work:app/db/pass }}` (alias `work` + today's path grammar) —
+  not the slash slot: `{{ secret:X/Y }}`'s `/` is a plain literal-name
+  match today (grammar decision #2 above — `/` stays folders-only, `:`
+  introduces the alias), so aliasing the slash slot instead would have
+  broken every existing folder-shaped template reference. (Corrected from
+  an earlier drafting error in this section that proposed aliasing the
+  slash slot.) Exact-name-first applies the same way here too: the FULL
+  raw token (colon included) is probed as a literal secret name across
+  every attached vault before alias interpretation. Record field dots
+  compose with the alias form: `{{ secret:work:mail-cred.username }}`.
 
 ## Read semantics
 
@@ -173,11 +184,14 @@ vaults = [
 - Qualified writes (`set personal:API_KEY`) go where addressed.
 - Cross-vault within the workspace: `mv work:secret stage:/` (and
   `stage:folder/`) performs copy+delete via the existing `move`
-  machinery, including `--force` overwrite semantics and metadata
-  preservation (the #315 `rename_request_from_properties` path). `copy`
-  gains the same alias support. Record envelopes ride along untouched
-  (the value + tags move as-is; cross-backend tag-budget checks apply at
-  the destination's caps before any write).
+  machinery, reusing its metadata preservation (the #315
+  `rename_request_from_properties` path). `xv mv` has no `--force` flag
+  anywhere — same-vault renames refuse a destination name collision too —
+  so cross-vault alias `mv` never overwrites either; `xv move --from/--to
+  --force` is the dedicated overwrite path, and `copy`/`move --from/--to`
+  gain the same alias support as `mv`. Record envelopes ride along
+  untouched (the value + tags move as-is; cross-backend tag-budget checks
+  apply at the destination's caps before any write).
 
 ## Capability differences in a mixed workspace
 
@@ -209,8 +223,10 @@ cleanly. Union reads populate per-vault entries; TTL semantics unchanged.
 
 - No workspace attached ⇒ every command byte-identical to today
   (pinned by tests, per the record-types precedent).
-- `xv://vault/name` and `{{ secret:vault/name }}` keep their raw-vault
-  meaning when the vault slot matches no alias.
+- `xv://vault/name` keeps its raw-vault meaning when the vault slot
+  matches no alias; `{{ secret:work:name }}` (the colon form) does the
+  same. `{{ secret:X/Y }}` (the slash form, no colon) is untouched by
+  aliasing entirely — it was, and remains, a plain literal-name match.
 - `find --all-vaults`, `--vault` flags, `migrate`, `diff`, and
   cross-vault `copy`/`move --from/--to` are unchanged; aliases are
   accepted anywhere a vault name is accepted once Phase C lands.

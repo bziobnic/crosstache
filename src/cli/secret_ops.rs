@@ -4458,19 +4458,27 @@ pub(crate) async fn execute_secret_copy_direct(
     .await?;
 
     // Invalidate the secrets list cache for both source and destination
-    // vaults. Keyed by `config.effective_backend_name()` (the registry/
-    // config name), matching every other cache producer/consumer — not
-    // `registry.active().name()`/`Backend::name()` (the backend kind),
-    // which diverges whenever a named backend is active.
-    let backend_name = config.effective_backend_name();
+    // vaults, each keyed by ITS OWN resolved backend name — a workspace
+    // alias may resolve `from_vault`/`to_vault` to DIFFERENT backends, so
+    // invalidating both under a single `config.effective_backend_name()`
+    // would silently miss the actual cache entries a cross-backend copy
+    // touches (the "ONE identifier" convention: see
+    // `resolve_workspace_or_default`'s doc comment). Falls back to
+    // `config.effective_backend_name()` unchanged when no workspace is
+    // attached or the argument isn't an attached alias.
+    let ws = crate::workspace::resolve_workspace(&config).await?;
+    let (from_backend_name, from_vault_resolved) =
+        crate::cli::helpers::vault_ref_cache_identity(from_vault, ws.as_ref(), &config);
+    let (to_backend_name, to_vault_resolved) =
+        crate::cli::helpers::vault_ref_cache_identity(to_vault, ws.as_ref(), &config);
     let cache_manager = crate::cache::CacheManager::from_config(&config);
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: backend_name.to_string(),
-        vault_name: from_vault.to_string(),
+        backend: from_backend_name,
+        vault_name: from_vault_resolved,
     });
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: backend_name.to_string(),
-        vault_name: to_vault.to_string(),
+        backend: to_backend_name,
+        vault_name: to_vault_resolved,
     });
 
     Ok(())
@@ -4504,16 +4512,21 @@ pub(crate) async fn execute_secret_move_direct(
 
     // Invalidate the secrets list cache for both source and destination
     // vaults — same reasoning as `execute_secret_copy_direct` above: keyed
-    // by `config.effective_backend_name()`, not the backend kind.
-    let backend_name = config.effective_backend_name();
+    // by `config.effective_backend_name()`, not the backend kind — same
+    // per-side alias resolution as `execute_secret_copy_direct` above.
+    let ws = crate::workspace::resolve_workspace(&config).await?;
+    let (from_backend_name, from_vault_resolved) =
+        crate::cli::helpers::vault_ref_cache_identity(from_vault, ws.as_ref(), &config);
+    let (to_backend_name, to_vault_resolved) =
+        crate::cli::helpers::vault_ref_cache_identity(to_vault, ws.as_ref(), &config);
     let cache_manager = crate::cache::CacheManager::from_config(&config);
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: backend_name.to_string(),
-        vault_name: from_vault.to_string(),
+        backend: from_backend_name,
+        vault_name: from_vault_resolved,
     });
     cache_manager.invalidate(&crate::cache::CacheKey::SecretsList {
-        backend: backend_name.to_string(),
-        vault_name: to_vault.to_string(),
+        backend: to_backend_name,
+        vault_name: to_vault_resolved,
     });
 
     Ok(())
@@ -5409,6 +5422,171 @@ async fn execute_secret_rotate(
     Ok(())
 }
 
+/// Reject a cross-vault copy/move BEFORE issuing any write when the
+/// destination backend's tag budget (`BackendCapabilities::max_tags`, e.g.
+/// Azure's 15) can't hold the request's tags — reuses
+/// [`crate::records::check_tag_budget`] (the same pre-check `xv set --type`
+/// already runs) rather than duplicating its counting logic, with the
+/// request's `groups`/`note`/`folder` presence added to the reserved count
+/// alongside crosstache's two always-written metadata tags
+/// (`original_name`/`created_by`) — every one of those, when present,
+/// consumes its own tag slot on write, exactly like a record's reserved tags
+/// (Phase C Task 12).
+pub(crate) fn check_dest_tag_budget(
+    dest: &dyn crate::backend::Backend,
+    request: &crate::secret::manager::SecretRequest,
+) -> Result<()> {
+    let reserved = crate::backend::ALWAYS_WRITTEN_TAGS.len()
+        + usize::from(request.groups.as_ref().is_some_and(|g| !g.is_empty()))
+        + usize::from(request.note.is_some())
+        + usize::from(request.folder.is_some());
+    let user_tags: std::collections::BTreeMap<String, String> = request
+        .tags
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    crate::records::check_tag_budget(
+        &dest.capabilities(),
+        reserved,
+        &std::collections::BTreeMap::new(),
+        &user_tags,
+    )
+}
+
+/// Resolve a `{{ secret:TOKEN }}` template reference whose `TOKEN` carries a
+/// colon prefix that parses as an attached workspace alias (Bugbot HIGH
+/// fix, round 4): `{{ secret:work:DB_PASSWORD }}`,
+/// `{{ secret:work:app/db/pass }}` (the slash slot stays folder-only —
+/// unaffected by this; only the alias slot before the FIRST colon is new),
+/// and `{{ secret:work:mail-cred.username }}` (record field access
+/// composes with alias resolution).
+///
+/// Exact-name-first (mirroring [`crate::workspace::resolve_secret_target`]'s
+/// Read-mode rule, applied inside it): the FULL raw `ref_token` — colon
+/// included — is probed as a literal secret name across every attached
+/// vault BEFORE alias interpretation, so a pre-existing secret literally
+/// named `work:x` still wins. Once resolved to a target vault, the
+/// alias-stripped path is tried as a literal name in THAT vault first (the
+/// same exact-name-before-dot-split order the bare-name path above uses);
+/// only on a miss does it split on the LAST dot for a record field
+/// reference. An unknown alias surfaces
+/// [`crate::workspace::resolve_secret_target`]'s own error (naming every
+/// attached alias), not a generic not-found.
+///
+/// Only called when `crate::workspace::parse_address(ref_token).alias` is
+/// `Some` (checked by the caller) — a bare `name`/`name.field` reference
+/// never reaches this function, so that path stays byte-identical.
+async fn resolve_workspace_template_ref(
+    ref_token: &str,
+    ws: &crate::workspace::Workspace,
+    ws_registry: &BackendRegistry,
+    config: &Config,
+    record_types_cache: &mut Option<std::result::Result<Vec<RecordType>, String>>,
+) -> Result<Zeroizing<String>> {
+    let (target, path) = crate::workspace::resolve_secret_target(
+        ref_token,
+        ws,
+        ws_registry,
+        crate::workspace::TargetMode::Read,
+    )
+    .await?;
+
+    let get_result = target
+        .backend
+        .secrets()
+        .get_secret(&target.entry.vault, &path, true)
+        .await
+        .map_err(CrosstacheError::from);
+
+    match get_result {
+        Ok(secret_props) => {
+            let types = if crate::records::is_record(&secret_props.content_type) {
+                resolve_types_lazily(record_types_cache, config).await?
+            } else {
+                Vec::new()
+            };
+            record_field_value(&path, &secret_props, None, &types)
+        }
+        Err(CrosstacheError::SecretNotFound { .. }) => {
+            let Some(dot) = path.rfind('.') else {
+                return Err(CrosstacheError::secret_not_found(format!(
+                    "{path} (in workspace vault '{}')",
+                    target.entry.alias
+                )));
+            };
+            let base = &path[..dot];
+            let field = &path[dot + 1..];
+            let secret_props = target
+                .backend
+                .secrets()
+                .get_secret(&target.entry.vault, base, true)
+                .await
+                .map_err(CrosstacheError::from)?;
+            let types = if crate::records::is_record(&secret_props.content_type) {
+                resolve_types_lazily(record_types_cache, config).await?
+            } else {
+                Vec::new()
+            };
+            record_field_value(base, &secret_props, Some(field), &types)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Resolve a single `xv://` reference's vault segment against workspace
+/// aliases first, falling back to [`resolve_uri_secret`]'s raw-vault-name /
+/// backend-kind behavior unchanged (spec §Addressing, Phase C Task 11).
+///
+/// - `xv://backend:vault/name` (an explicit backend prefix, i.e.
+///   `backend_ref.backend.is_some()`) bypasses alias resolution entirely —
+///   checked first, before consulting the workspace at all.
+/// - Otherwise, when a workspace is attached and `backend_ref.vault` matches
+///   an attached alias, resolves directly to that entry's `(backend, vault)`
+///   via the lazy workspace registry — no `active_kind`/`cross_backends`
+///   involvement, since a workspace entry may be a *named* backend that
+///   isn't a bare [`BackendKind`].
+/// - No workspace, or no alias match: falls straight through to
+///   [`resolve_uri_secret`], today's raw-vault-name meaning, byte-identical.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_uri_secret_workspace_aware(
+    backend_ref: &BackendRef,
+    secret_name: &str,
+    active_secrets: &dyn crate::backend::SecretBackend,
+    config: &Config,
+    active_kind: BackendKind,
+    cross_backends: &mut std::collections::HashMap<BackendKind, Arc<dyn crate::backend::Backend>>,
+    ws: Option<&crate::workspace::Workspace>,
+    ws_registry: Option<&BackendRegistry>,
+) -> Result<crate::secret::manager::SecretProperties> {
+    if backend_ref.backend.is_none() {
+        if let (Some(ws), Some(ws_registry)) = (ws, ws_registry) {
+            if let Some(entry) = ws.entry(&backend_ref.vault) {
+                let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
+                    CrosstacheError::config(format!(
+                        "workspace vault '{}' (backend '{}') is unavailable: {e}",
+                        entry.alias, entry.backend
+                    ))
+                })?;
+                return backend
+                    .secrets()
+                    .get_secret(&entry.vault, secret_name, true)
+                    .await
+                    .map_err(CrosstacheError::from);
+            }
+        }
+    }
+    resolve_uri_secret(
+        backend_ref,
+        secret_name,
+        active_secrets,
+        config,
+        active_kind,
+        cross_backends,
+    )
+    .await
+}
+
 /// Resolve a single `xv://` URI reference to its secret, dispatching to the
 /// active backend or a cross-backend instance as needed.
 ///
@@ -5493,6 +5671,11 @@ async fn execute_secret_run(
     // Update context usage tracking
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
+
+    // Workspace-aware URI vault-alias resolution (Phase C Task 11): `None`s
+    // when no workspace is attached, so the URI resolution below is
+    // byte-identical to pre-workspace behavior in that case.
+    let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
 
     // Parse current environment for xv:// URI references (supports optional backend prefix).
     // Only done when the parent environment is inherited: in clean-env mode
@@ -5686,13 +5869,15 @@ async fn execute_secret_run(
                 }
             };
 
-            let fetch_result = resolve_uri_secret(
+            let fetch_result = resolve_uri_secret_workspace_aware(
                 backend_ref,
                 &secret_name,
                 reg.active().secrets(),
                 config,
                 active_kind,
                 &mut cross_backends,
+                ws.as_ref(),
+                ws_registry.as_ref(),
             )
             .await;
 
@@ -6001,6 +6186,11 @@ async fn execute_secret_inject(
     let mut context_manager = ContextManager::load().await.unwrap_or_default();
     let _ = context_manager.update_usage(&vault_name).await;
 
+    // Workspace-aware URI vault-alias resolution (Phase C Task 11): `None`s
+    // when no workspace is attached, so the URI resolution below is
+    // byte-identical to pre-workspace behavior in that case.
+    let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
+
     // Read template content
     let template_content = match template_file {
         Some(path) => fs::read_to_string(&path).map_err(|e| {
@@ -6208,6 +6398,42 @@ async fn execute_secret_inject(
             continue;
         }
 
+        // Bugbot HIGH fix, round 4: a colon-shaped, charset-valid alias
+        // prefix (`{{ secret:work:DB_PASSWORD }}`) resolves against an
+        // attached workspace alias — see `resolve_workspace_template_ref`'s
+        // doc comment for the exact-name-first/field-composition rules. A
+        // colon-shaped token with no workspace attached, or whose prefix
+        // isn't charset-valid (`parse_address` returns `alias: None`),
+        // falls through UNCHANGED to the dot-split logic below — the slash
+        // form (`{{ secret:app/db/pass }}`) is a folder path, not touched
+        // by this at all, since it carries no colon.
+        if let Some(ws) = &ws {
+            if crate::workspace::parse_address(ref_token).alias.is_some() {
+                let ws_registry = ws_registry.as_ref().expect(
+                    "ws_registry is Some whenever ws is Some (resolve_workspace_and_registry)",
+                );
+                match resolve_workspace_template_ref(
+                    ref_token,
+                    ws,
+                    ws_registry,
+                    config,
+                    &mut record_types_cache,
+                )
+                .await
+                {
+                    Ok(value) => {
+                        secret_values.insert(ref_token.clone(), value);
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to resolve '{ref_token}': {e}");
+                        output::warn(&msg);
+                        fetch_failures.push(msg);
+                    }
+                }
+                continue;
+            }
+        }
+
         let mut resolved = false;
         if let Some(dot) = ref_token.rfind('.') {
             let base = &ref_token[..dot];
@@ -6281,13 +6507,15 @@ async fn execute_secret_inject(
                 }
             };
 
-            let fetch_result = resolve_uri_secret(
+            let fetch_result = resolve_uri_secret_workspace_aware(
                 backend_ref,
                 &secret_name,
                 reg.active().secrets(),
                 config,
                 active_kind,
                 &mut cross_backends,
+                ws.as_ref(),
+                ws_registry.as_ref(),
             )
             .await;
 
@@ -6506,12 +6734,41 @@ async fn execute_secret_copy(
     // ── Trait-based path (non-Azure backends, e.g. local/AWS) ──────────
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        let backend = reg.active().secrets();
 
-        let source_secret = backend.get_secret(from_vault, name, true).await?;
+        // Workspace-aware: `from_vault`/`to_vault` resolve against attached
+        // aliases FIRST, falling back to raw-vault-name meaning on the
+        // active backend unchanged (spec §Addressing, Phase C Task 12) — so
+        // `xv copy secret --from work --to stage` can span backends, while
+        // `xv copy secret --from vault-a --to vault-b` with no workspace (or
+        // no alias match) behaves exactly as before.
+        let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
+        let (from_backend, _from_backend_name, from_vault_resolved) =
+            crate::cli::helpers::resolve_vault_ref_with_workspace(
+                from_vault,
+                ws.as_ref(),
+                ws_registry.as_ref(),
+                reg,
+                config,
+            )
+            .await?;
+        let (to_backend, to_backend_name, to_vault_resolved) =
+            crate::cli::helpers::resolve_vault_ref_with_workspace(
+                to_vault,
+                ws.as_ref(),
+                ws_registry.as_ref(),
+                reg,
+                config,
+            )
+            .await?;
 
-        if backend
-            .get_secret(to_vault, target_name, false)
+        let source_secret = from_backend
+            .secrets()
+            .get_secret(&from_vault_resolved, name, true)
+            .await?;
+
+        if to_backend
+            .secrets()
+            .get_secret(&to_vault_resolved, target_name, false)
             .await
             .is_ok()
         {
@@ -6535,8 +6792,17 @@ async fn execute_secret_copy(
         // silently dropped group membership, folder, and note on copy/move.
         let secret_request = rename_request_from_properties(target_name, &source_secret)?;
 
-        let copied_secret = backend.set_secret(to_vault, secret_request).await?;
-        invalidate_trait_secret_cache(config, config.effective_backend_name(), to_vault);
+        // Destination tag-budget check BEFORE any write: a lower-capped
+        // destination (e.g. Azure's 15-tag limit) must reject an oversized
+        // cross-vault copy/move up front rather than letting the API reject
+        // it mid-flight, leaving nothing written but a confusing error.
+        check_dest_tag_budget(to_backend.as_ref(), &secret_request)?;
+
+        let copied_secret = to_backend
+            .secrets()
+            .set_secret(&to_vault_resolved, secret_request)
+            .await?;
+        invalidate_trait_secret_cache(config, &to_backend_name, &to_vault_resolved);
 
         output::success(&format!(
             "Successfully copied secret '{}' to vault '{}'",
@@ -6649,9 +6915,19 @@ async fn execute_secret_move(
     // "Overwriting existing secret" warning and performs the overwrite.
     let target_exists = if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        reg.active()
+        let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
+        let (to_backend, _to_backend_name, to_vault_resolved) =
+            crate::cli::helpers::resolve_vault_ref_with_workspace(
+                to_vault,
+                ws.as_ref(),
+                ws_registry.as_ref(),
+                reg,
+                config,
+            )
+            .await?;
+        to_backend
             .secrets()
-            .get_secret(to_vault, target_name, false)
+            .get_secret(&to_vault_resolved, target_name, false)
             .await
             .is_ok()
     } else {
@@ -6700,11 +6976,21 @@ async fn execute_secret_move(
     );
     if use_trait_path(registry) {
         let reg = registry.expect("use_trait_path guarantees Some");
-        reg.active()
-            .secrets()
-            .delete_secret(from_vault, name)
+        let (ws, ws_registry) = crate::cli::helpers::resolve_workspace_and_registry(config).await?;
+        let (from_backend, from_backend_name, from_vault_resolved) =
+            crate::cli::helpers::resolve_vault_ref_with_workspace(
+                from_vault,
+                ws.as_ref(),
+                ws_registry.as_ref(),
+                reg,
+                config,
+            )
             .await?;
-        invalidate_trait_secret_cache(config, config.effective_backend_name(), from_vault);
+        from_backend
+            .secrets()
+            .delete_secret(&from_vault_resolved, name)
+            .await?;
+        invalidate_trait_secret_cache(config, &from_backend_name, &from_vault_resolved);
     } else {
         secret_manager
             .delete_secret_safe(from_vault, name, true)

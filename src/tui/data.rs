@@ -51,9 +51,16 @@ pub fn spawn_load_vaults(
     })
 }
 
+/// `vault` is the actual name queried against the backend; `key` is what the
+/// resulting `Message::SecretsLoaded` is tagged with — normally the same
+/// string, but in a workspace they diverge: `key` is the workspace ALIAS
+/// (`app.vaults`/`secrets_by_vault` are keyed by alias, since two entries
+/// can share the same real vault name on different backends), while `vault`
+/// is that entry's real vault name on its own backend.
 pub fn spawn_load_secrets(
     config: Config,
     vault: String,
+    key: String,
     tx: Sender<Message>,
     backend: Option<Arc<dyn Backend>>,
 ) -> tokio::task::JoinHandle<()> {
@@ -66,7 +73,10 @@ pub fn spawn_load_secrets(
                 .await
                 .map_err(CrosstacheError::from);
             let msg = match result {
-                Ok(secrets) => Message::SecretsLoaded { vault, secrets },
+                Ok(secrets) => Message::SecretsLoaded {
+                    vault: key,
+                    secrets,
+                },
                 Err(e) => Message::Error(e),
             };
             let _ = tx.send(msg).await;
@@ -86,7 +96,10 @@ pub fn spawn_load_secrets(
             }
             .await;
             let msg = match result {
-                Ok(secrets) => Message::SecretsLoaded { vault, secrets },
+                Ok(secrets) => Message::SecretsLoaded {
+                    vault: key,
+                    secrets,
+                },
                 Err(e) => Message::Error(e),
             };
             let _ = tx.send(msg).await;
@@ -94,9 +107,15 @@ pub fn spawn_load_secrets(
     })
 }
 
+/// `vault` is the actual name queried against the backend; `key` is what the
+/// resulting `Message::ValueLoaded` is tagged with (mirrors
+/// `spawn_load_secrets`'s vault/key split — Bugbot HIGH fix, round 2: this
+/// used to have no such split at all, so a workspace entry's value was
+/// queried against the ALIAS as if it were the real vault name).
 pub fn spawn_load_value(
     config: Config,
     vault: String,
+    key: String,
     name: String,
     tx: Sender<Message>,
     backend: Option<Arc<dyn Backend>>,
@@ -114,7 +133,7 @@ pub fn spawn_load_value(
                     let content_type = props.content_type.clone();
                     match props.value {
                         Some(v) => Message::ValueLoaded {
-                            vault,
+                            vault: key,
                             name,
                             value: zeroize::Zeroizing::new(v.as_str().to_string()),
                             content_type,
@@ -147,7 +166,7 @@ pub fn spawn_load_value(
                     let content_type = props.content_type.clone();
                     match props.value {
                         Some(v) => Message::ValueLoaded {
-                            vault,
+                            vault: key,
                             name,
                             value: zeroize::Zeroizing::new(v.as_str().to_string()),
                             content_type,
@@ -164,9 +183,13 @@ pub fn spawn_load_value(
     })
 }
 
+/// `vault` is the actual name queried against the backend; `key` is what the
+/// resulting `Message::HistoryLoaded` is tagged with (same split as
+/// `spawn_load_value`/`spawn_load_secrets` — Bugbot HIGH fix, round 2).
 pub fn spawn_load_history(
     config: Config,
     vault: String,
+    key: String,
     name: String,
     tx: Sender<Message>,
     backend: Option<Arc<dyn Backend>>,
@@ -181,7 +204,7 @@ pub fn spawn_load_history(
                 .map_err(CrosstacheError::from);
             let msg = match result {
                 Ok(versions) => Message::HistoryLoaded {
-                    vault,
+                    vault: key,
                     name,
                     versions,
                 },
@@ -205,7 +228,7 @@ pub fn spawn_load_history(
             .await;
             let msg = match result {
                 Ok(versions) => Message::HistoryLoaded {
-                    vault,
+                    vault: key,
                     name,
                     versions,
                 },

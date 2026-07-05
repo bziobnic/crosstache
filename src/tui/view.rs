@@ -123,6 +123,14 @@ fn border_for(app: &App, pane: Pane) -> Style {
     }
 }
 
+/// Pure formatter for a workspace vault-pane entry (Phase C Task 13):
+/// `"alias (backend)"`. Called only when a workspace is attached — with no
+/// workspace, the pane keeps rendering the plain vault name unchanged (spec
+/// §Backward compatibility: no workspace ⇒ byte-identical).
+fn vault_pane_label(alias: &str, backend: &str) -> String {
+    format!("{alias} ({backend})")
+}
+
 fn render_vaults(app: &App, frame: &mut Frame, area: Rect) {
     let title = if app.vaults_loading {
         "Vaults (loading…)"
@@ -132,7 +140,12 @@ fn render_vaults(app: &App, frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = app
         .vaults
         .iter()
-        .map(|v| ListItem::new(v.name.as_str()))
+        .map(
+            |v| match app.workspace.as_ref().and_then(|w| w.entry(&v.name)) {
+                Some(entry) => ListItem::new(vault_pane_label(&entry.alias, &entry.backend)),
+                None => ListItem::new(v.name.as_str()),
+            },
+        )
         .collect();
     let list = List::new(items)
         .block(
@@ -297,6 +310,12 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn vault_pane_label_formats_alias_and_backend() {
+        assert_eq!(vault_pane_label("work", "azure"), "work (azure)");
+        assert_eq!(vault_pane_label("stage", "aws-east"), "stage (aws-east)");
     }
 
     #[test]

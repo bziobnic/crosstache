@@ -157,9 +157,36 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Command> {
         }
         KeyCode::Char('R') => match app.pane {
             Pane::Vaults => {
-                app.vaults.clear();
-                app.vaults_loading = true;
-                cmds.push(Command::LoadVaults);
+                if app.workspace.is_some() {
+                    // Bugbot HIGH fix, round 3: refreshing the vault pane
+                    // must NEVER call `LoadVaults` in workspace mode — that
+                    // spawns `spawn_load_vaults` against the single active
+                    // backend, replacing the alias entries with a raw
+                    // backend vault list and silently dropping workspace
+                    // scoping (later loads then target the wrong backend
+                    // or show unavailable). Instead, re-derive the pane
+                    // from the workspace entries (the SAME population path
+                    // `run_tui`'s startup uses) and re-issue `LoadSecrets`
+                    // for whichever alias was selected.
+                    let previously_selected = app.selected_vault().map(String::from);
+                    app.repopulate_vaults_from_workspace();
+                    app.vaults_loading = false;
+                    let idx = previously_selected
+                        .as_deref()
+                        .and_then(|prev| app.vaults.iter().position(|v| v.name == prev))
+                        .or(if app.vaults.is_empty() { None } else { Some(0) });
+                    app.vault_state.select(idx);
+                    if let Some(v) = app.selected_vault().map(String::from) {
+                        app.secrets_by_vault.remove(&v);
+                        app.values.retain(|(va, _), _| va != &v);
+                        app.secrets_loading = true;
+                        cmds.push(Command::LoadSecrets { vault: v });
+                    }
+                } else {
+                    app.vaults.clear();
+                    app.vaults_loading = true;
+                    cmds.push(Command::LoadVaults);
+                }
             }
             Pane::Secrets | Pane::Detail => {
                 if let Some(v) = app.selected_vault().map(String::from) {
@@ -301,4 +328,109 @@ fn tick_value_debounce(app: &mut App) -> Vec<Command> {
         }
     }
     cmds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A workspace-attached `App` fixture: two entries ("work" default,
+    /// "stage" not), populated via the same
+    /// `repopulate_vaults_from_workspace` the production code uses, with
+    /// the default entry selected (index 0, matching real startup).
+    /// `workspace_backends` is deliberately left empty — the `R`-refresh
+    /// decision under test (`handle_key`) never consults it; only
+    /// `handle_command` (in `mod.rs`) does.
+    fn workspace_app() -> App {
+        let mut app = App::new(Config::default());
+        app.workspace = Some(crate::workspace::Workspace {
+            entries: vec![
+                crate::workspace::WorkspaceEntry {
+                    alias: "stage".to_string(),
+                    backend: "local-b".to_string(),
+                    vault: "stage-vault".to_string(),
+                    default: false,
+                },
+                crate::workspace::WorkspaceEntry {
+                    alias: "work".to_string(),
+                    backend: "local-a".to_string(),
+                    vault: "work-vault".to_string(),
+                    default: true,
+                },
+            ],
+            default_alias: "work".to_string(),
+            source: crate::workspace::WorkspaceSource::Context,
+        });
+        app.repopulate_vaults_from_workspace();
+        app.vault_state.select(Some(0));
+        app.pane = Pane::Vaults;
+        app
+    }
+
+    /// Bugbot HIGH fix, round 3: refreshing the vault pane (`R`) while a
+    /// workspace is attached must re-derive the alias-labeled pane and
+    /// re-issue `LoadSecrets` — and must NEVER emit `LoadVaults` (which
+    /// would replace the alias entries with a raw single-backend vault
+    /// list, silently dropping workspace scoping).
+    #[test]
+    fn refresh_in_workspace_mode_repopulates_and_never_loads_vaults() {
+        let mut app = workspace_app();
+
+        let cmds = handle_key(&mut app, key(KeyCode::Char('R')));
+
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::LoadVaults)),
+            "workspace-mode refresh must never emit LoadVaults: {cmds:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::LoadSecrets { .. })),
+            "workspace-mode refresh must re-issue LoadSecrets: {cmds:?}"
+        );
+        // The pane still shows alias entries, default ("work") first.
+        assert_eq!(app.vaults.len(), 2);
+        assert_eq!(app.vaults[0].name, "work");
+        assert_eq!(app.vaults[1].name, "stage");
+    }
+
+    /// The refresh must re-issue `LoadSecrets` for whichever alias was
+    /// actually selected before the refresh, not silently reset to the
+    /// default — the pane is repopulated (and reordered) underneath the
+    /// selection, so this pins that the selection follows the alias, not
+    /// the index.
+    #[test]
+    fn refresh_in_workspace_mode_preserves_the_selected_alias() {
+        let mut app = workspace_app();
+        let stage_idx = app.vaults.iter().position(|v| v.name == "stage").unwrap();
+        app.vault_state.select(Some(stage_idx));
+
+        let cmds = handle_key(&mut app, key(KeyCode::Char('R')));
+
+        assert_eq!(app.selected_vault(), Some("stage"));
+        match cmds
+            .iter()
+            .find(|c| matches!(c, Command::LoadSecrets { .. }))
+        {
+            Some(Command::LoadSecrets { vault }) => assert_eq!(vault, "stage"),
+            other => panic!("expected a LoadSecrets command for 'stage', got {other:?}"),
+        }
+    }
+
+    /// No-workspace refresh is unchanged: still clears the pane and emits
+    /// `LoadVaults` exactly as before workspaces existed.
+    #[test]
+    fn refresh_without_workspace_still_calls_load_vaults() {
+        let mut app = App::new(Config::default());
+        app.pane = Pane::Vaults;
+
+        let cmds = handle_key(&mut app, key(KeyCode::Char('R')));
+
+        assert!(matches!(cmds.as_slice(), [Command::LoadVaults]));
+        assert!(app.vaults_loading);
+    }
 }

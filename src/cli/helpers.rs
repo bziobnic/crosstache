@@ -164,6 +164,83 @@ pub(crate) async fn resolve_workspace_or_default(
     }
 }
 
+/// Resolve the active workspace (if any) plus a lazy [`BackendRegistry`]
+/// scoped to just its attached backends, for callers that need to resolve
+/// several independent references against the SAME workspace/registry pair
+/// (e.g. `xv run`/`xv inject` resolving many `xv://` URIs in one template —
+/// unlike [`resolve_workspace_or_default`], which targets a single raw CLI
+/// argument).
+///
+/// Returns `(None, None)` when no workspace is attached — callers must treat
+/// that as "fall through to today's raw-vault-name / backend-kind behavior,
+/// byte-identical" (spec §Backward compatibility).
+pub(crate) async fn resolve_workspace_and_registry(
+    config: &Config,
+) -> Result<(Option<crate::workspace::Workspace>, Option<BackendRegistry>)> {
+    if let Some(ws) = crate::workspace::resolve_workspace(config).await? {
+        let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+        let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
+            .map_err(|e| CrosstacheError::config(e.to_string()))?;
+        Ok((Some(ws), Some(ws_registry)))
+    } else {
+        Ok((None, None))
+    }
+}
+
+/// Resolve a `--from`/`--to` vault argument (or an mv/copy alias-qualified
+/// vault segment) against workspace aliases, falling back to raw-vault-name
+/// meaning unchanged when no workspace is attached or `raw` matches no
+/// attached alias (spec §Addressing / backward compatibility, Phase C Task
+/// 12: cross-vault `mv`/`copy` via aliases).
+///
+/// Returns `(backend, backend_name, vault_name)`. `backend_name` is the ONE
+/// identifier cache invalidation must key on (see
+/// [`resolve_workspace_or_default`]'s doc comment) — the workspace entry's
+/// registry backend name, or `config.effective_backend_name()` when `raw`
+/// isn't an attached alias.
+pub(crate) async fn resolve_vault_ref_with_workspace(
+    raw: &str,
+    ws: Option<&crate::workspace::Workspace>,
+    ws_registry: Option<&BackendRegistry>,
+    registry: &BackendRegistry,
+    config: &Config,
+) -> Result<(Arc<dyn Backend>, String, String)> {
+    if let (Some(ws), Some(ws_registry)) = (ws, ws_registry) {
+        if let Some(entry) = ws.entry(raw) {
+            let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
+                CrosstacheError::config(format!(
+                    "workspace vault '{}' (backend '{}') is unavailable: {e}",
+                    entry.alias, entry.backend
+                ))
+            })?;
+            return Ok((backend, entry.backend.clone(), entry.vault.clone()));
+        }
+    }
+    Ok((
+        registry.active_arc(),
+        config.effective_backend_name().to_string(),
+        raw.to_string(),
+    ))
+}
+
+/// The `(backend_name, vault_name)` a `--from`/`--to` vault argument would
+/// resolve to, WITHOUT materializing a backend — for cache-invalidation call
+/// sites that only need the identifiers (see
+/// [`resolve_vault_ref_with_workspace`]'s doc comment for the "ONE
+/// identifier" convention this must match). Falls back to
+/// `(config.effective_backend_name(), raw)` unchanged when `raw` isn't an
+/// attached alias.
+pub(crate) fn vault_ref_cache_identity(
+    raw: &str,
+    ws: Option<&crate::workspace::Workspace>,
+    config: &Config,
+) -> (String, String) {
+    match ws.and_then(|w| w.entry(raw)) {
+        Some(entry) => (entry.backend.clone(), entry.vault.clone()),
+        None => (config.effective_backend_name().to_string(), raw.to_string()),
+    }
+}
+
 /// Decide whether a destructive operation may proceed, prompting when possible.
 ///
 /// Behaviour, matching the Azure legacy delete/purge paths so confirmation is
