@@ -310,8 +310,26 @@ impl ContextManager {
         self.recent.iter().find(|c| c.vault_name == vault_name)
     }
 
-    /// Get global context file path
+    /// Get global context file path.
+    ///
+    /// `XV_CONTEXT_DIR` (if set and non-empty) overrides the resolved
+    /// directory entirely — mirrors `CacheManager::resolve_cache_dir`'s
+    /// `XV_CACHE_DIR` precedent (#318). Intended for tests that need an
+    /// isolated context store (e.g. a `tempfile::TempDir`) without ever
+    /// touching the real `$XDG_CONFIG_HOME`/`$HOME/.config` context file — a
+    /// unit test that calls into `resolve_workspace`/`ContextManager::load`
+    /// without this override reads whatever workspace happens to be
+    /// attached on the machine running the test (#342). A relative
+    /// `XV_CONTEXT_DIR` is resolved against the process's current working
+    /// directory, which can shift under `cd`/`chdir` — an absolute path is
+    /// recommended.
     fn global_context_path() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("XV_CONTEXT_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir).join("context"));
+            }
+        }
+
         // Use XDG Base Directory specification on Linux and macOS
         // On Windows, use the platform-appropriate config directory
         #[cfg(any(target_os = "linux", target_os = "macos"))]

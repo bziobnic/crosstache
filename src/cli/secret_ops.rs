@@ -7264,6 +7264,22 @@ mod tests {
         LOCK.get_or_init(|| AsyncMutex::new(()))
     }
 
+    /// Serializes tests that mutate the process-global `XV_CONTEXT_DIR` env
+    /// var (#342), mirroring `cache_dir_env_lock` exactly. Any test whose
+    /// call path reaches `crate::workspace::resolve_workspace` or
+    /// `ContextManager::load`/`new_global` — directly, or transitively via
+    /// `Config::resolve_vault_name`/`resolve_vault_for_trait`/
+    /// `resolve_workspace_or_default` — reads the REAL global context file
+    /// (`$XDG_CONFIG_HOME/xv/context` or `$HOME/.config/xv/context`) unless
+    /// `XV_CONTEXT_DIR` is overridden: on a machine with a multi-vault
+    /// workspace attached (e.g. the maintainer's, per #341/#342), that
+    /// context leaks into the test process and silently changes which
+    /// vault/backend these tests resolve against.
+    fn context_dir_env_lock() -> &'static AsyncMutex<()> {
+        static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| AsyncMutex::new(()))
+    }
+
     /// RAII guard that sets an env var for its lifetime and restores the
     /// previous value (or removes it, if previously unset) on drop — including
     /// during a panic unwind, since `tokio::sync::Mutex` does not poison.
@@ -7501,6 +7517,15 @@ mod tests {
 
     #[tokio::test]
     async fn azure_trait_vault_resolution_does_not_fallback_to_default() {
+        // #342: `resolve_vault_for_trait` -> `Config::resolve_vault_name`
+        // reads the REAL global context via `ContextManager::load` unless
+        // `XV_CONTEXT_DIR` points somewhere isolated — on a machine with a
+        // vault/workspace already current, `resolve_vault_name` would
+        // return that instead of erroring, breaking this test's premise.
+        let _env_guard = context_dir_env_lock().lock().await;
+        let temp_context_dir = tempfile::tempdir().unwrap();
+        let _context_dir_guard = EnvVarGuard::set("XV_CONTEXT_DIR", temp_context_dir.path());
+
         let registry = BackendRegistry::new(Arc::new(TestBackend::azure()));
         let config = Config {
             backend: Some("azure".to_string()),
@@ -7516,6 +7541,12 @@ mod tests {
 
     #[tokio::test]
     async fn local_trait_vault_resolution_can_fallback_to_local_default() {
+        // #342: isolate from the real global context — see the sibling
+        // azure test above for why.
+        let _env_guard = context_dir_env_lock().lock().await;
+        let temp_context_dir = tempfile::tempdir().unwrap();
+        let _context_dir_guard = EnvVarGuard::set("XV_CONTEXT_DIR", temp_context_dir.path());
+
         let registry = BackendRegistry::new(Arc::new(TestBackend::local()));
         let config = Config {
             backend: Some("local".to_string()),
@@ -7658,6 +7689,18 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_native_rejected_on_backend_without_rotation_capability() {
+        // #342: `execute_secret_rotate_native` -> `resolve_workspace_or_default`
+        // -> `resolve_workspace` reads the REAL global context via
+        // `ContextManager::load` unless `XV_CONTEXT_DIR` points somewhere
+        // isolated. On a machine with a workspace attached (e.g. one whose
+        // default entry is on a DIFFERENT backend, such as azure), that
+        // workspace's default entry would hijack resolution instead of the
+        // "local" backend this test configures, changing which backend the
+        // capability check actually gates on.
+        let _env_guard = context_dir_env_lock().lock().await;
+        let temp_context_dir = tempfile::tempdir().unwrap();
+        let _context_dir_guard = EnvVarGuard::set("XV_CONTEXT_DIR", temp_context_dir.path());
+
         let registry = BackendRegistry::new(Arc::new(TestBackend::local()));
         let config = Config {
             backend: Some("local".to_string()),
@@ -7700,6 +7743,12 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_native_accepted_on_backend_with_rotation_capability() {
+        // #342: isolate from the real global context — see the sibling
+        // "rejected" test above for why.
+        let _env_guard = context_dir_env_lock().lock().await;
+        let temp_context_dir = tempfile::tempdir().unwrap();
+        let _context_dir_guard = EnvVarGuard::set("XV_CONTEXT_DIR", temp_context_dir.path());
+
         let registry = BackendRegistry::new(Arc::new(TestBackend::aws()));
         let config = Config {
             backend: Some("aws".to_string()),
@@ -8205,6 +8254,17 @@ mod tests {
         let _env_guard = cache_dir_env_lock().lock().await;
         let temp_cache_dir = tempfile::tempdir().unwrap();
         let _cache_dir_guard = EnvVarGuard::set("XV_CACHE_DIR", temp_cache_dir.path());
+
+        // #342: `execute_secret_update_direct` also resolves the workspace
+        // (`resolve_workspace_or_default` -> `resolve_workspace` ->
+        // `ContextManager::load`), which reads the REAL global context
+        // unless `XV_CONTEXT_DIR` is isolated — on a machine with a
+        // workspace attached, the target this test writes/renames would be
+        // silently redirected to that workspace's default vault instead of
+        // this test's own `RenameFailBackend`-backed "local" config.
+        let _context_env_guard = context_dir_env_lock().lock().await;
+        let temp_context_dir = tempfile::tempdir().unwrap();
+        let _context_dir_guard = EnvVarGuard::set("XV_CONTEXT_DIR", temp_context_dir.path());
 
         let vault_name = "xv-test-rename-cache".to_string();
         let config = Config {
