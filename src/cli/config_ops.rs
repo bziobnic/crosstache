@@ -7,7 +7,6 @@ use crate::cli::helpers::format_cache_size;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::output;
-use crate::vault::VaultManager;
 use zeroize::Zeroizing;
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -871,35 +870,23 @@ async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
 
 /// Background cache refresh (`xv cache refresh <key>`, spawned by
 /// `cache::refresh::trigger_background_refresh` on stale-while-revalidate
-/// reads). This has only ever refreshed via the Azure legacy `SecretManager`
-/// path — a pre-existing limitation predating multi-vault workspaces, not a
-/// regression introduced by the `(backend, vault)` cache-key change — so a
-/// key for a non-Azure backend (`local`, a named local/AWS entry, ...)
-/// re-fetches from Azure and writes back under `backend`'s cache directory,
-/// which would silently populate the wrong backend's entry. `backend` is
-/// threaded through so at least the cache key it writes to matches the one
-/// that was refreshed; fixing background refresh to dispatch through the
-/// trait `BackendRegistry` for every backend is out of scope here.
+/// reads). Materializes the backend named by the cache key and lists through
+/// its secret trait, so the refresh reads from — and writes back to — the same
+/// backend the cache entry belongs to (closing the old Azure-only limitation).
 async fn refresh_secrets_list(backend: String, vault_name: String, config: Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::backend::BackendRegistry;
     use crate::cache::{CacheKey, CacheManager};
-    use crate::secret::manager::SecretManager;
-    use std::sync::Arc;
 
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
-
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    let secrets = secret_manager
-        .secret_ops()
+    let registry = BackendRegistry::with_lazy(&config, std::slice::from_ref(&backend))
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+    let backend_impl = registry
+        .materialize(&backend)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+    let secrets = backend_impl
+        .secrets()
         .list_secrets(&vault_name, None)
-        .await?;
+        .await
+        .map_err(CrosstacheError::from)?;
 
     let cache_manager = CacheManager::from_config(&config);
     let cache_key = CacheKey::SecretsList {
@@ -912,31 +899,22 @@ async fn refresh_secrets_list(backend: String, vault_name: String, config: Confi
 }
 
 async fn refresh_vault_list(config: Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::backend::BackendRegistry;
     use crate::cache::{CacheKey, CacheManager};
-    use std::sync::Arc;
 
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
-
-    let vault_manager = VaultManager::new(
-        auth_provider,
-        config.subscription_id.clone(),
-        config.no_color,
-    )?;
+    let registry = BackendRegistry::from_config(&config)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
 
     // Fetch WITHOUT rendering: this runs as a cache refresh (often spawned by
-    // `xv cache refresh --key vaults`), so nothing may reach stdout.
-    let vaults = vault_manager
-        .vault_ops()
-        .list_vaults(Some(&config.subscription_id), None)
-        .await?;
+    // `xv cache refresh --key vaults`), so nothing may reach stdout. Backends
+    // that cannot enumerate vaults have nothing to refresh.
+    let Some(vaults_backend) = registry.active().vaults() else {
+        return Ok(());
+    };
+    let vaults = vaults_backend
+        .list_vaults(None)
+        .await
+        .map_err(CrosstacheError::from)?;
 
     let cache_manager = CacheManager::from_config(&config);
     cache_manager.set(&CacheKey::VaultList, &vaults);
@@ -1549,7 +1527,11 @@ async fn execute_cx_add(
                         .to_string(),
                 );
             }
-            // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
+            // `cx add` auto-attach bootstrap: resolve the CURRENT context vault
+            // to seed the first workspace entry. This is context bootstrapping,
+            // not secret-name resolution or a manager call — `resolve_vault_name`
+            // is the right primitive here (a workspace does not yet exist to
+            // resolve against).
             Some(current_backend) => match config.resolve_vault_name(None).await {
                 Ok(current_vault) => {
                     if current_vault != vault || current_backend != backend_name {
@@ -2225,12 +2207,13 @@ async fn execute_env_pull(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
-    // Phase 2 (legacy manager retirement): legacy active-backend dispatch
-    let secrets_backend = reg.active().secrets();
-
-    // Determine vault name
-    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
-    let vault_name = config.resolve_vault_name(None).await?;
+    // Resolve the current vault AND the backend that owns it together — the
+    // workspace default entry's backend can differ from the active backend, so
+    // reading/writing through `reg.active()` while taking the vault from the
+    // entry would hit the wrong backend (Bugbot PR #346).
+    let (backend, _backend_name, vault_name) =
+        crate::cli::vault_ops::resolve_current_vault(config, Some(reg)).await?;
+    let secrets_backend = backend.secrets();
 
     eprintln!("Pulling secrets from vault '{}'...", vault_name);
 
@@ -2377,12 +2360,13 @@ async fn execute_env_push(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
-    // Phase 2 (legacy manager retirement): legacy active-backend dispatch
-    let secrets_backend = reg.active().secrets();
-
-    // Determine vault name
-    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
-    let vault_name = config.resolve_vault_name(None).await?;
+    // Resolve the current vault AND the backend that owns it together — the
+    // workspace default entry's backend can differ from the active backend, so
+    // reading/writing through `reg.active()` while taking the vault from the
+    // entry would hit the wrong backend (Bugbot PR #346).
+    let (backend, _backend_name, vault_name) =
+        crate::cli::vault_ops::resolve_current_vault(config, Some(reg)).await?;
+    let secrets_backend = backend.secrets();
 
     // Read .env content from file or stdin
     let env_content = if let Some(file_path) = file {

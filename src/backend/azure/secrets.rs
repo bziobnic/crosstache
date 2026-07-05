@@ -61,6 +61,50 @@ impl AzureSecretBackend {
                 suggestion: None,
             })
     }
+
+    /// Resolve a user-friendly version identifier ("v6" / "6") to the Azure
+    /// Key Vault version GUID that `rollback_secret` needs. A value that isn't
+    /// a friendly number is assumed to already be a GUID and returned
+    /// unchanged — the accept-both contract local/aws honor (their rollback
+    /// takes the version identifier as-is). Ported verbatim from the CLI's
+    /// former `resolve_version_to_guid`, keeping the trait rollback path total
+    /// for Azure.
+    async fn resolve_version_guid(
+        &self,
+        vault: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<String, BackendError> {
+        let Ok(version_num) = version.trim_start_matches('v').parse::<u32>() else {
+            // Not a friendly number — assume it is already a GUID.
+            return Ok(version.to_string());
+        };
+        if version_num == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Version number must be 1 or greater (v1 is the oldest version)".to_string(),
+            ));
+        }
+        let versions = self
+            .inner
+            .get_secret_versions(vault, name)
+            .await
+            .map_err(map_error)?;
+        let max_version = versions
+            .iter()
+            .filter_map(|v| v.version_number)
+            .max()
+            .unwrap_or(0);
+        match versions
+            .into_iter()
+            .find(|v| v.version_number == Some(version_num))
+        {
+            Some(v) => Ok(v.version),
+            None => Err(BackendError::InvalidArgument(format!(
+                "Version v{version_num} not found for secret '{name}'. \
+                 Available versions: v1–v{max_version} (use 'xv history {name}' to list them)"
+            ))),
+        }
+    }
 }
 
 /// Build the full replacement tag map for an attributes-only `PATCH`:
@@ -381,8 +425,11 @@ impl SecretBackend for AzureSecretBackend {
         name: &str,
         version: &str,
     ) -> Result<SecretProperties, BackendError> {
+        // Azure's rollback API needs the underlying version GUID; resolve a
+        // friendly "v6"/"6" first (raw GUIDs pass through unchanged).
+        let resolved = self.resolve_version_guid(vault, name, version).await?;
         self.inner
-            .rollback_secret(vault, name, version)
+            .rollback_secret(vault, name, &resolved)
             .await
             .map_err(map_error)
     }
@@ -623,5 +670,185 @@ mod build_patched_tags_tests {
         // Other tags should be preserved
         assert_eq!(result.get("custom").map(String::as_str), Some("keep"));
         assert_eq!(result.get("groups").map(String::as_str), Some("team-a"));
+    }
+}
+
+#[cfg(test)]
+mod rollback_version_resolver_tests {
+    //! Behavior lock for the friendly-version→GUID resolver that moved into
+    //! `AzureSecretBackend::rollback` (`resolve_version_guid`) during Phase 2.
+    //! Exercised through the public `SecretBackend::rollback` against a hand
+    //! -rolled `SecretOperations` mock — no live Azure. The mock's
+    //! `rollback_secret` echoes the resolved version back as the returned
+    //! `SecretProperties.version`, so each test can assert exactly which
+    //! version string the resolver handed to Azure's rollback API.
+
+    use super::*;
+    use crate::error::Result;
+
+    fn sp(version_number: Option<u32>, version: &str) -> SecretProperties {
+        SecretProperties {
+            name: "s".into(),
+            original_name: "s".into(),
+            value: None,
+            version: version.into(),
+            version_number,
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags: HashMap::new(),
+            content_type: String::new(),
+            recovery_level: None,
+        }
+    }
+
+    struct VersionResolverMock {
+        versions: Vec<SecretProperties>,
+    }
+
+    #[async_trait]
+    impl SecretOperations for VersionResolverMock {
+        async fn get_secret_versions(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> Result<Vec<SecretProperties>> {
+            Ok(self.versions.clone())
+        }
+
+        async fn rollback_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            version: &str,
+        ) -> Result<SecretProperties> {
+            // Echo the resolved version GUID back so the caller can assert
+            // exactly what `resolve_version_guid` passed to the rollback API.
+            Ok(sp(None, version))
+        }
+
+        // ── Unused in these tests ──────────────────────────────────────
+        async fn set_secret(&self, _v: &str, _r: &SecretRequest) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn get_secret(&self, _v: &str, _n: &str, _i: bool) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn get_secret_version(
+            &self,
+            _v: &str,
+            _n: &str,
+            _ver: &str,
+            _i: bool,
+        ) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn list_secrets(&self, _v: &str, _g: Option<&str>) -> Result<Vec<SecretSummary>> {
+            unimplemented!()
+        }
+        async fn delete_secret(&self, _v: &str, _n: &str) -> Result<()> {
+            unimplemented!()
+        }
+        async fn update_secret(
+            &self,
+            _v: &str,
+            _n: &str,
+            _r: &SecretRequest,
+        ) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn restore_secret(&self, _v: &str, _n: &str) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn purge_secret(&self, _v: &str, _n: &str) -> Result<()> {
+            unimplemented!()
+        }
+        async fn list_deleted_secrets(&self, _v: &str) -> Result<Vec<DeletedSecretSummary>> {
+            unimplemented!()
+        }
+        async fn secret_exists(&self, _v: &str, _n: &str) -> Result<bool> {
+            unimplemented!()
+        }
+        async fn backup_secret(&self, _v: &str, _n: &str) -> Result<Vec<u8>> {
+            unimplemented!()
+        }
+        async fn restore_secret_from_backup(
+            &self,
+            _v: &str,
+            _b: &[u8],
+        ) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+    }
+
+    fn backend(versions: Vec<SecretProperties>) -> AzureSecretBackend {
+        AzureSecretBackend::new(Arc::new(VersionResolverMock { versions }))
+    }
+
+    /// v0 is rejected before any version lookup — v1 is the oldest version.
+    #[tokio::test]
+    async fn v0_is_rejected() {
+        let err = backend(vec![])
+            .rollback("vault", "s", "v0")
+            .await
+            .expect_err("v0 must be rejected");
+        assert!(
+            err.to_string()
+                .contains("Version number must be 1 or greater"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A friendly version above the available range errors with a message that
+    /// names the missing version and the available v1–vN range.
+    #[tokio::test]
+    async fn unknown_friendly_version_errors_with_available_range() {
+        let versions = vec![sp(Some(1), "guid-1"), sp(Some(2), "guid-2")];
+        let err = backend(versions)
+            .rollback("vault", "s", "v5")
+            .await
+            .expect_err("v5 must be not-found");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Version v5 not found"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("v1–v2"),
+            "should name the available range: {msg}"
+        );
+    }
+
+    /// A raw GUID (not a `vN`/`N` number) passes straight through to the
+    /// rollback API unchanged — no version lookup.
+    #[tokio::test]
+    async fn raw_guid_passes_through_unchanged() {
+        let props = backend(vec![])
+            .rollback("vault", "s", "abcd-1234-raw-guid")
+            .await
+            .expect("raw GUID must pass through");
+        assert_eq!(props.version, "abcd-1234-raw-guid");
+    }
+
+    /// A friendly `vN` (and bare `N`) resolves to that version's underlying
+    /// GUID, which is what gets handed to the rollback API.
+    #[tokio::test]
+    async fn friendly_version_resolves_to_guid() {
+        let versions = vec![sp(Some(1), "guid-1"), sp(Some(2), "guid-2")];
+        let props = backend(versions.clone())
+            .rollback("vault", "s", "v2")
+            .await
+            .expect("v2 must resolve");
+        assert_eq!(props.version, "guid-2");
+
+        // Bare "1" (no leading 'v') resolves the same way.
+        let props = backend(versions)
+            .rollback("vault", "s", "1")
+            .await
+            .expect("bare 1 must resolve");
+        assert_eq!(props.version, "guid-1");
     }
 }

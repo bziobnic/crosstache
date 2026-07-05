@@ -10,246 +10,8 @@ use crate::error::{CrosstacheError, Result};
 use crate::utils::output;
 use clap::CommandFactory;
 use clap_complete::Shell;
-use serde::{Deserialize, Serialize};
 
 use super::commands::{CharsetType, Cli, ResourceType};
-
-/// Azure Activity Log entry for audit purposes
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AuditLogEntry {
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub operation: String,
-    pub resource_name: String,
-    pub resource_type: String,
-    pub caller: String,
-    pub status: String,
-    pub correlation_id: String,
-    pub vault_name: Option<String>,
-    pub subscription_id: String,
-    pub resource_group: String,
-    pub properties: serde_json::Value,
-}
-
-impl std::fmt::Display for AuditLogEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} | {} | {} | {} | {}",
-            self.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
-            self.operation,
-            self.resource_name,
-            self.caller,
-            self.status
-        )
-    }
-}
-
-/// Azure Activity Log client for fetching audit data
-pub struct AzureActivityLogClient {
-    auth_provider: std::sync::Arc<dyn crate::auth::provider::AzureAuthProvider>,
-}
-
-impl AzureActivityLogClient {
-    pub fn new(
-        auth_provider: std::sync::Arc<dyn crate::auth::provider::AzureAuthProvider>,
-    ) -> Self {
-        Self { auth_provider }
-    }
-
-    /// Fetch audit logs for a specific vault
-    pub async fn get_vault_audit_logs(
-        &self,
-        subscription_id: &str,
-        resource_group: &str,
-        vault_name: &str,
-        days: u32,
-    ) -> Result<Vec<AuditLogEntry>> {
-        let end_time = chrono::Utc::now();
-        let start_time = end_time - chrono::Duration::days(days as i64);
-
-        let start_time_str = start_time.format("%Y-%m-%dT%H:%M:%S.%3fZ");
-        let end_time_str = end_time.format("%Y-%m-%dT%H:%M:%S.%3fZ");
-
-        // Build the Azure Activity Log API URL
-        let activity_url = format!(
-            "https://management.azure.com/subscriptions/{}/providers/microsoft.insights/eventtypes/management/values?api-version=2015-04-01&$filter=eventTimestamp ge '{}' and eventTimestamp le '{}' and resourceUri eq '/subscriptions/{}/resourceGroups/{}/providers/Microsoft.KeyVault/vaults/{}'",
-            subscription_id,
-            start_time_str,
-            end_time_str,
-            subscription_id,
-            resource_group,
-            vault_name
-        );
-
-        // Get access token from auth provider
-        let token = self
-            .auth_provider
-            .get_token(&["https://management.azure.com/.default"])
-            .await?;
-
-        // Make HTTP request
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&activity_url)
-            .header("Authorization", format!("Bearer {}", token.token.secret()))
-            .header("Content-Type", "application/json")
-            .send()
-            .await
-            .map_err(|e| {
-                CrosstacheError::network(format!("Failed to fetch activity logs: {}", e))
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(CrosstacheError::azure_api(format!(
-                "Activity Log API returned {}: {}",
-                status, error_text
-            )));
-        }
-
-        let activity_response: serde_json::Value = response.json().await.map_err(|e| {
-            CrosstacheError::serialization(format!("Failed to parse activity logs: {}", e))
-        })?;
-
-        // Parse the Azure Activity Log response
-        self.parse_activity_log_response(activity_response, vault_name)
-    }
-
-    /// Fetch audit logs for a specific secret
-    pub async fn get_secret_audit_logs(
-        &self,
-        subscription_id: &str,
-        resource_group: &str,
-        vault_name: &str,
-        secret_name: &str,
-        days: u32,
-    ) -> Result<Vec<AuditLogEntry>> {
-        // Get all vault logs and filter for the specific secret
-        let vault_logs = self
-            .get_vault_audit_logs(subscription_id, resource_group, vault_name, days)
-            .await?;
-
-        let secret_logs: Vec<AuditLogEntry> = vault_logs
-            .into_iter()
-            .filter(|log| {
-                log.resource_name.contains(secret_name)
-                    || log.properties.get("secretName").and_then(|v| v.as_str())
-                        == Some(secret_name)
-            })
-            .collect();
-
-        Ok(secret_logs)
-    }
-
-    /// Parse Azure Activity Log API response
-    fn parse_activity_log_response(
-        &self,
-        response: serde_json::Value,
-        vault_name: &str,
-    ) -> Result<Vec<AuditLogEntry>> {
-        let mut entries = Vec::new();
-
-        if let Some(value) = response.get("value").and_then(|v| v.as_array()) {
-            for event in value {
-                if let Ok(entry) = self.parse_activity_log_entry(event, vault_name) {
-                    entries.push(entry);
-                }
-            }
-        }
-
-        // Sort by timestamp (newest first)
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
-
-        Ok(entries)
-    }
-
-    /// Parse individual activity log entry
-    fn parse_activity_log_entry(
-        &self,
-        event: &serde_json::Value,
-        vault_name: &str,
-    ) -> Result<AuditLogEntry> {
-        let timestamp = event
-            .get("eventTimestamp")
-            .and_then(|v| v.as_str())
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .ok_or_else(|| CrosstacheError::serialization("Invalid timestamp in activity log"))?;
-
-        let operation = event
-            .get("operationName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let resource_name = event
-            .get("resourceId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let resource_type = event
-            .get("resourceType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Microsoft.KeyVault/vaults")
-            .to_string();
-
-        let caller = event
-            .get("caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let status = event
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or(
-                event
-                    .get("subStatus")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown"),
-            )
-            .to_string();
-
-        let correlation_id = event
-            .get("correlationId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let subscription_id = event
-            .get("subscriptionId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let resource_group = event
-            .get("resourceGroupName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let properties = event
-            .get("properties")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-
-        Ok(AuditLogEntry {
-            timestamp,
-            operation,
-            resource_name,
-            resource_type,
-            caller,
-            status,
-            correlation_id,
-            vault_name: Some(vault_name.to_string()),
-            subscription_id,
-            resource_group,
-            properties,
-        })
-    }
-}
 
 /// One audit event as rendered by every output format. Machine formats emit
 /// exactly these five fields (the pre-unification `--raw` per-entry documents
@@ -330,124 +92,50 @@ pub(crate) async fn execute_audit_command(
     config: Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use std::sync::Arc;
-
-    // Capability check: audit requires audit log support
-    if let Some(registry) = registry {
-        // Phase 2 (legacy manager retirement): active-backend capability/kind read
-        let caps = registry.active().capabilities();
-        if !caps.has_audit {
-            return Err(CrosstacheError::InvalidArgument(format!(
-                "The {} backend does not support audit logs.",
-                registry.active().name()
-            )));
+    // Resolve the backend + vault the audit targets, PAIRED. An explicit
+    // `--vault` uses the active/requested backend; otherwise the workspace
+    // default ENTRY supplies BOTH the vault and its backend (they can differ
+    // from the process-active backend in a multi-vault workspace, so the
+    // auditor must come from the same entry as the vault — Bugbot PR #346).
+    // Every backend — including Azure — surfaces its audit trail through the
+    // `AuditBackend` trait; the Azure adapter honors an explicit
+    // `--resource-group` override.
+    let (backend, vault_name) = match vault {
+        Some(v) => (
+            crate::cli::vault_ops::active_or_construct_backend(registry, &config).await?,
+            v,
+        ),
+        None => {
+            let (backend, _backend_name, vault) =
+                crate::cli::vault_ops::resolve_current_vault(&config, registry).await?;
+            (backend, vault)
         }
-        // Backends that implement the audit trait are dispatched generically.
-        // For Azure specifically, keep the legacy Activity Log path when the
-        // caller passes an explicit `--resource-group` override or when no
-        // default resource group is configured (the legacy path produces a
-        // clear ConfigError for that).  Non-Azure backends always use the
-        // trait path — `--resource-group` is an Azure-only concept.
-        let use_legacy_azure_path = registry.active().kind() == crate::backend::BackendKind::Azure
-            && (resource_group_override.is_some() || config.default_resource_group.is_empty());
-
-        if !use_legacy_azure_path {
-            if let Some(auditor) = registry.active().audit() {
-                return execute_backend_audit(auditor, name, vault, days, operation, config).await;
-            }
-        }
-    }
-
-    // Create authentication provider — reuse from registry when available
-    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
-    let auth_provider: Arc<dyn crate::auth::provider::AzureAuthProvider> =
-        crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
-
-    // Create audit log client
-    let audit_client = AzureActivityLogClient::new(auth_provider);
-
-    // Determine vault and context
-    let (vault_name, resource_group, subscription_id) = if let Some(vault_name) = vault {
-        // Use specified vault, need to get resource group and subscription
-        let rg = resource_group_override
-            .clone()
-            .unwrap_or_else(|| config.default_resource_group.clone());
-        let sub = config.subscription_id.clone();
-
-        if rg.is_empty() {
-            return Err(CrosstacheError::config(
-                "No resource group specified. Use --resource-group or 'xv init' to configure",
-            ));
-        }
-
-        (vault_name, rg, sub)
-    } else {
-        // Use current vault context
-        // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
-        let vault_name = config.resolve_vault_name(None).await?;
-        let rg = resource_group_override.unwrap_or_else(|| config.default_resource_group.clone());
-        let sub = config.subscription_id.clone();
-
-        if rg.is_empty() {
-            return Err(CrosstacheError::config(
-                "No resource group specified. Use --resource-group or 'xv init' to configure",
-            ));
-        }
-
-        (vault_name, rg, sub)
     };
 
-    output::step(&format!("Fetching audit logs for {} days...", days));
-
-    // Fetch audit logs
-    let mut logs = if let Some(secret_name) = name {
-        output::info(&format!("  Secret: {}", secret_name));
-        output::info(&format!("  Vault: {}", vault_name));
-        audit_client
-            .get_secret_audit_logs(
-                &subscription_id,
-                &resource_group,
-                &vault_name,
-                &secret_name,
-                days,
-            )
-            .await?
-    } else {
-        output::info(&format!("  Vault: {}", vault_name));
-        audit_client
-            .get_vault_audit_logs(&subscription_id, &resource_group, &vault_name, days)
-            .await?
-    };
-
-    // Filter by operation if specified
-    if let Some(op_filter) = operation {
-        logs.retain(|log| {
-            log.operation
-                .to_lowercase()
-                .contains(&op_filter.to_lowercase())
-        });
+    // Capability check on the RESOLVED backend.
+    if !backend.capabilities().has_audit {
+        return Err(CrosstacheError::InvalidArgument(format!(
+            "The {} backend does not support audit logs.",
+            backend.name()
+        )));
     }
+    let auditor = backend.audit().ok_or_else(|| {
+        CrosstacheError::InvalidArgument(format!(
+            "The {} backend does not support audit logs.",
+            backend.name()
+        ))
+    })?;
 
-    let rows: Vec<AuditRow> = logs
-        .iter()
-        .map(|log| {
-            // Resource name: keep the last path segment, as before.
-            let resource_display = log
-                .resource_name
-                .split('/')
-                .next_back()
-                .unwrap_or(&log.resource_name);
-            AuditRow {
-                timestamp: log.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
-                operation: log.operation.clone(),
-                resource: resource_display.to_string(),
-                caller: log.caller.clone(),
-                status: log.status.clone(),
-            }
-        })
-        .collect();
-
-    render_audit_rows(&rows, &config)
+    execute_backend_audit(
+        auditor,
+        name,
+        vault_name,
+        days,
+        operation,
+        resource_group_override.as_deref(),
+        &config,
+    )
+    .await
 }
 
 /// Render audit logs fetched through the backend-agnostic [`AuditBackend`]
@@ -455,25 +143,27 @@ pub(crate) async fn execute_audit_command(
 async fn execute_backend_audit(
     auditor: &dyn crate::backend::AuditBackend,
     name: Option<String>,
-    vault: Option<String>,
+    vault_name: String,
     days: u32,
     operation: Option<String>,
-    config: Config,
+    resource_group: Option<&str>,
+    config: &Config,
 ) -> Result<()> {
-    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
-    let vault_name = config.resolve_vault_name(vault).await?;
-
+    // `vault_name` and `auditor` are resolved together by the caller, so the
+    // audit query always runs against the backend that owns the vault.
     output::step(&format!("Fetching audit logs for {} days...", days));
 
     let mut events: Vec<crate::backend::AuditEvent> = if let Some(secret_name) = name {
         output::info(&format!("  Secret: {}", secret_name));
         output::info(&format!("  Vault: {}", vault_name));
         auditor
-            .get_secret_events(&vault_name, &secret_name, days)
+            .get_secret_events(&vault_name, &secret_name, resource_group, days)
             .await?
     } else {
         output::info(&format!("  Vault: {}", vault_name));
-        auditor.get_vault_events(&vault_name, days).await?
+        auditor
+            .get_vault_events(&vault_name, resource_group, days)
+            .await?
     };
 
     // Filter by operation if specified
@@ -497,7 +187,7 @@ async fn execute_backend_audit(
         })
         .collect();
 
-    render_audit_rows(&rows, &config)
+    render_audit_rows(&rows, config)
 }
 
 pub(crate) async fn execute_init_command(_config: Config) -> Result<()> {
@@ -580,28 +270,58 @@ async fn execute_secret_info_from_root(
     config: &Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    use crate::secret::manager::SecretManager;
+    use crate::secret::models::SecretInfo;
+    use chrono::{DateTime, Utc};
 
     // Check if we have a vault context
     let vault_name = if !config.default_vault.is_empty() {
-        &config.default_vault
+        config.default_vault.clone()
     } else {
         return Err(CrosstacheError::config(
             "No vault context set. Use 'xv context set <vault>' to set a default vault",
         ));
     };
 
-    // Create authentication provider
-    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
-    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
+    // Fetch through the active backend's secret trait and reconstruct the
+    // display record from the returned properties (the same tag-derived
+    // groups/folder/note extraction the legacy `get_secret_info` did).
+    let backend = crate::cli::vault_ops::active_or_construct_backend(registry, config).await?;
+    let props = backend
+        .secrets()
+        .get_secret(&vault_name, secret_name, false)
+        .await
+        .map_err(CrosstacheError::from)?;
 
-    // Create secret manager
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-
-    // Get secret info
-    let secret_info = secret_manager
-        .get_secret_info(vault_name, secret_name)
-        .await?;
+    let tags = props.tags.clone();
+    let parse_ts = |s: &str| -> Option<DateTime<Utc>> {
+        (!s.is_empty())
+            .then(|| {
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            })
+            .flatten()
+    };
+    let secret_info = SecretInfo {
+        name: props.name.clone(),
+        original_name: SecretInfo::extract_original_name(&tags)
+            .or_else(|| (!props.original_name.is_empty()).then(|| props.original_name.clone())),
+        id: format!("{}/secrets/{}/{}", vault_name, props.name, props.version),
+        version: (!props.version.is_empty()).then(|| props.version.clone()),
+        enabled: props.enabled,
+        created: parse_ts(&props.created_on),
+        updated: parse_ts(&props.updated_on),
+        expires: props.expires_on,
+        not_before: props.not_before,
+        recovery_level: props.recovery_level.clone(),
+        content_type: (!props.content_type.is_empty()).then(|| props.content_type.clone()),
+        groups: SecretInfo::extract_groups(&tags),
+        folder: SecretInfo::extract_folder(&tags),
+        note: SecretInfo::extract_note(&tags),
+        vault_uri: vault_name.clone(),
+        version_count: None,
+        tags,
+    };
 
     // Display based on output format
     if config.output_json {
@@ -655,9 +375,24 @@ pub(crate) async fn execute_whoami_command(
 
     output::step("Checking authentication and context...\n");
 
-    // Create authentication provider — reuse from registry when available
-    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
-    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, &config)?;
+    // `whoami` is an Azure-identity command: it validates auth by acquiring an
+    // Azure token and reading the JWT claims — a direct auth-provider use, not
+    // a legacy manager. Reuse the provider the registry built at startup when
+    // present, else build one from config with the same credential priority.
+    let auth_provider = match registry.and_then(|r| r.azure_auth_provider()) {
+        Some(provider) => provider,
+        None => {
+            use crate::auth::provider::DefaultAzureCredentialProvider;
+            std::sync::Arc::new(
+                DefaultAzureCredentialProvider::with_credential_priority(
+                    config.azure_credential_priority.clone(),
+                )
+                .map_err(|e| {
+                    CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
+                })?,
+            )
+        }
+    };
 
     // Get access token to validate authentication
     let token = match auth_provider
@@ -1036,18 +771,25 @@ async fn save_generated_secret(
         return Ok(());
     }
 
-    // Legacy Azure fallback (registry construction failed / skipped): create
-    // an auth provider on demand and use set_secret_safe with the metadata
-    // options so groups/note/folder/expiry still apply.
-    use crate::secret::manager::SecretManager;
-    // Phase 2 (legacy manager retirement): Azure auth provider for a legacy manager
-    let auth_provider = crate::cli::helpers::get_azure_auth_provider(registry, config)?;
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
-    let vault_name = config.resolve_vault_name(vault).await?;
-    secret_manager
-        .set_secret_safe(&vault_name, name, value, Some(request))
-        .await?;
+    // Fallback when the registry could not be built at startup: construct the
+    // requested backend on demand and write through the same secret trait, so
+    // the metadata (groups/note/folder/expiry) carried in `request` still
+    // applies. `resolve_vault_for_trait` keeps the Azure no-vault hard error.
+    let backend = crate::cli::vault_ops::active_or_construct_backend(registry, config).await?;
+    let vault_name = match vault {
+        Some(v) => v,
+        None => resolve_vault_for_trait(config, registry).await?,
+    };
+    backend
+        .secrets()
+        .set_secret(&vault_name, request)
+        .await
+        .map_err(CrosstacheError::from)?;
+    crate::cli::secret_ops::invalidate_trait_secret_cache(
+        config,
+        config.effective_backend_name(),
+        &vault_name,
+    );
     Ok(())
 }
 
@@ -1141,6 +883,7 @@ mod tests {
         async fn get_vault_events(
             &self,
             vault: &str,
+            _resource_group: Option<&str>,
             days: u32,
         ) -> std::result::Result<Vec<AuditEvent>, BackendError> {
             assert_eq!(vault, "test-vault");
@@ -1153,6 +896,7 @@ mod tests {
             &self,
             _vault: &str,
             _secret_name: &str,
+            _resource_group: Option<&str>,
             _days: u32,
         ) -> std::result::Result<Vec<AuditEvent>, BackendError> {
             self.calls.secret_events.fetch_add(1, Ordering::SeqCst);

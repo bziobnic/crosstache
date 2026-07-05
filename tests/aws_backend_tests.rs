@@ -920,7 +920,7 @@ async fn get_vault_returns_vault_not_found_when_marker_missing() {
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_vault_backend(client);
 
-    let err = backend.get_vault("missing-vault").await.unwrap_err();
+    let err = backend.get_vault("missing-vault", None).await.unwrap_err();
     assert!(
         matches!(err, BackendError::VaultNotFound { .. }),
         "got: {err:?}"
@@ -956,7 +956,7 @@ async fn get_vault_returns_vault_properties() {
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_vault_backend(client);
 
-    let vault = backend.get_vault("myproj-kv").await.unwrap();
+    let vault = backend.get_vault("myproj-kv", None).await.unwrap();
     assert_eq!(vault.name, "myproj-kv");
     assert_eq!(vault.id, "vault-myproj-kv");
 }
@@ -984,7 +984,7 @@ async fn list_vaults_finds_all_markers() {
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_vault_backend(client);
 
-    let vaults = backend.list_vaults().await.unwrap();
+    let vaults = backend.list_vaults(None).await.unwrap();
     let names: Vec<String> = vaults.iter().map(|v| v.name.clone()).collect();
     assert_eq!(names.len(), 2);
     assert!(names.contains(&"myproj-kv".to_string()));
@@ -1016,7 +1016,7 @@ async fn list_vaults_paginates() {
     );
     let backend = aws_vault_backend(client);
 
-    let vaults = backend.list_vaults().await.unwrap();
+    let vaults = backend.list_vaults(None).await.unwrap();
     let names: Vec<String> = vaults.iter().map(|v| v.name.clone()).collect();
     assert_eq!(names.len(), 2);
     assert!(names.contains(&"vault1".to_string()));
@@ -1047,7 +1047,7 @@ async fn delete_vault_refuses_when_secrets_exist() {
     let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
     let backend = aws_vault_backend(client);
 
-    let err = backend.delete_vault("myproj-kv").await.unwrap_err();
+    let err = backend.delete_vault("myproj-kv", None).await.unwrap_err();
     assert!(matches!(err, BackendError::Conflict(_)), "got: {err:?}");
 }
 
@@ -1077,7 +1077,7 @@ async fn delete_vault_succeeds_when_only_marker_exists() {
         &[&list, &delete]
     );
     let backend = aws_vault_backend(client);
-    backend.delete_vault("myproj-kv").await.unwrap();
+    backend.delete_vault("myproj-kv", None).await.unwrap();
 }
 
 #[tokio::test]
@@ -1143,7 +1143,10 @@ async fn update_vault_updates_tags() {
         access_policies: None,
     };
 
-    let result = backend.update_vault("myproj-kv", request).await.unwrap();
+    let result = backend
+        .update_vault("myproj-kv", None, request)
+        .await
+        .unwrap();
     assert_eq!(result.name, "myproj-kv");
     assert_eq!(result.id, "vault-myproj-kv");
 }

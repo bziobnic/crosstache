@@ -35,16 +35,6 @@ impl Default for AzureKeyVaultNameRules {
     }
 }
 
-/// Check if a name is valid for Azure Key Vault
-pub fn is_valid_keyvault_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > MAX_NAME_LENGTH {
-        return false;
-    }
-
-    let re = Regex::new(r"^[a-zA-Z0-9-]+$").unwrap();
-    re.is_match(name)
-}
-
 /// Sanitize a secret name for Azure Key Vault compatibility
 pub fn sanitize_secret_name(name: &str) -> Result<String> {
     if name.is_empty() {
@@ -111,96 +101,9 @@ pub fn generate_unique_secret_name(base_name: &str, existing_names: &[String]) -
     hash_secret_name(&format!("{base_name}-{timestamp}"))
 }
 
-/// Get detailed information about secret name sanitization
-pub fn get_secret_name_info(name: &str) -> Result<SecretNameInfo> {
-    let sanitized = sanitize_secret_name(name)?;
-
-    Ok(SecretNameInfo {
-        original_name: name.to_string(),
-        sanitized_name: sanitized.clone(),
-        original_length: name.len(),
-        sanitized_length: sanitized.len(),
-        was_modified: name != sanitized,
-        is_hashed: sanitized.starts_with("h-"),
-        is_valid_keyvault_name: is_valid_keyvault_name(&sanitized),
-    })
-}
-
-#[derive(Debug, Clone)]
-pub struct SecretNameInfo {
-    pub original_name: String,
-    pub sanitized_name: String,
-    #[allow(dead_code)]
-    pub original_length: usize,
-    #[allow(dead_code)]
-    pub sanitized_length: usize,
-    pub was_modified: bool,
-    pub is_hashed: bool,
-    #[allow(dead_code)]
-    pub is_valid_keyvault_name: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_valid_names() {
-        assert!(is_valid_keyvault_name("valid-name"));
-        assert!(is_valid_keyvault_name("ValidName123"));
-        assert!(is_valid_keyvault_name("123"));
-        assert!(is_valid_keyvault_name("a"));
-        assert!(is_valid_keyvault_name("A"));
-        assert!(is_valid_keyvault_name("0"));
-        assert!(is_valid_keyvault_name("a-b-c"));
-        assert!(is_valid_keyvault_name("Test123-Name"));
-        assert!(is_valid_keyvault_name(&"a".repeat(127))); // Max length
-    }
-
-    #[test]
-    fn test_invalid_names() {
-        // Empty string
-        assert!(!is_valid_keyvault_name(""));
-
-        // Invalid characters
-        assert!(!is_valid_keyvault_name("invalid@name"));
-        assert!(!is_valid_keyvault_name("name with spaces"));
-        assert!(!is_valid_keyvault_name("name.with.dots"));
-        assert!(!is_valid_keyvault_name("name_with_underscores"));
-        assert!(!is_valid_keyvault_name("name/with/slashes"));
-        assert!(!is_valid_keyvault_name("name\\with\\backslashes"));
-        assert!(!is_valid_keyvault_name("name:with:colons"));
-        assert!(!is_valid_keyvault_name("name;with;semicolons"));
-        assert!(!is_valid_keyvault_name("name+with+plus"));
-        assert!(!is_valid_keyvault_name("name=with=equals"));
-        assert!(!is_valid_keyvault_name("name!with!exclamation"));
-        assert!(!is_valid_keyvault_name("name?with?question"));
-        assert!(!is_valid_keyvault_name("name*with*asterisk"));
-        assert!(!is_valid_keyvault_name("name%with%percent"));
-        assert!(!is_valid_keyvault_name("name#with#hash"));
-        assert!(!is_valid_keyvault_name("name$with$dollar"));
-        assert!(!is_valid_keyvault_name("name&with&ampersand"));
-        assert!(!is_valid_keyvault_name("name(with)parentheses"));
-        assert!(!is_valid_keyvault_name("name[with]brackets"));
-        assert!(!is_valid_keyvault_name("name{with}braces"));
-        assert!(!is_valid_keyvault_name("name<with>angles"));
-        assert!(!is_valid_keyvault_name("name|with|pipes"));
-        assert!(!is_valid_keyvault_name("name\"with\"quotes"));
-        assert!(!is_valid_keyvault_name("name'with'apostrophes"));
-        assert!(!is_valid_keyvault_name("name`with`backticks"));
-        assert!(!is_valid_keyvault_name("name~with~tildes"));
-        assert!(!is_valid_keyvault_name("name^with^carets"));
-
-        // Unicode characters
-        assert!(!is_valid_keyvault_name("naméwithaccents"));
-        assert!(!is_valid_keyvault_name("名前"));
-        assert!(!is_valid_keyvault_name("имя"));
-        assert!(!is_valid_keyvault_name("🚀rocket"));
-
-        // Too long
-        assert!(!is_valid_keyvault_name(&"a".repeat(128)));
-        assert!(!is_valid_keyvault_name(&"a".repeat(200)));
-    }
 
     #[test]
     fn test_basic_sanitization() {
@@ -374,9 +277,10 @@ mod tests {
         assert!(hash2.starts_with("h-"));
         assert_eq!(hash2.len(), 34);
 
-        // Hash should only contain valid characters
-        assert!(is_valid_keyvault_name(&hash1));
-        assert!(is_valid_keyvault_name(&hash2));
+        // Hash should only contain Key Vault-valid characters ([a-zA-Z0-9-]).
+        let valid_charset = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        assert!(valid_charset(&hash1));
+        assert!(valid_charset(&hash2));
     }
 
     #[test]
@@ -413,40 +317,6 @@ mod tests {
 
         let result = generate_unique_secret_name("test", &many_existing);
         assert!(result.starts_with("h-")); // Should use hash when all numbers exhausted
-    }
-
-    #[test]
-    fn test_secret_name_info() {
-        // Test unmodified name
-        let info = get_secret_name_info("valid-name").unwrap();
-        assert_eq!(info.original_name, "valid-name");
-        assert_eq!(info.sanitized_name, "valid-name");
-        assert_eq!(info.original_length, 10);
-        assert_eq!(info.sanitized_length, 10);
-        assert!(!info.was_modified);
-        assert!(!info.is_hashed);
-        assert!(info.is_valid_keyvault_name);
-
-        // Test modified name
-        let info = get_secret_name_info("invalid@name").unwrap();
-        assert_eq!(info.original_name, "invalid@name");
-        assert_eq!(info.sanitized_name, "invalid-name");
-        assert_eq!(info.original_length, 12);
-        assert_eq!(info.sanitized_length, 12);
-        assert!(info.was_modified);
-        assert!(!info.is_hashed);
-        assert!(info.is_valid_keyvault_name);
-
-        // Test hashed name
-        let long_name = "a".repeat(200);
-        let info = get_secret_name_info(&long_name).unwrap();
-        assert_eq!(info.original_name, long_name);
-        assert!(info.sanitized_name.starts_with("h-"));
-        assert_eq!(info.original_length, 200);
-        assert_eq!(info.sanitized_length, 34);
-        assert!(info.was_modified);
-        assert!(info.is_hashed);
-        assert!(info.is_valid_keyvault_name);
     }
 
     #[test]
@@ -519,9 +389,14 @@ mod tests {
             let result2 = sanitize_secret_name(case).unwrap();
             assert_eq!(result1, result2, "Inconsistent result for input: {case}");
 
-            // Result should always be valid
+            // Result should always be a valid Key Vault name: non-empty,
+            // within the length cap, and only [a-zA-Z0-9-].
             assert!(
-                is_valid_keyvault_name(&result1),
+                !result1.is_empty()
+                    && result1.len() <= MAX_NAME_LENGTH
+                    && result1
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-'),
                 "Invalid result for input: {case}"
             );
         }

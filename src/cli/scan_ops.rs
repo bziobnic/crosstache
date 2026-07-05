@@ -151,29 +151,36 @@ async fn fetch_scan_secrets(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
-    let backend = reg.active_arc();
-
-    let vault_names: Vec<String> = if all_vaults {
-        match backend.vaults() {
-            Some(vaults) => vaults
-                .list_vaults()
-                .await
-                .map_err(CrosstacheError::from)?
-                .into_iter()
-                .map(|v| v.name)
-                .collect(),
-            None => {
-                return Err(CrosstacheError::invalid_argument(format!(
-                    "--all-vaults is not supported on the {} backend (it cannot enumerate \
-                     vaults). Scan a single vault instead.",
-                    backend.name()
-                )))
-            }
-        }
-    } else {
-        // Phase 2 (legacy manager retirement): legacy vault resolution, not yet on the workspace seam
-        vec![config.resolve_vault_name(None).await?]
-    };
+    let (backend, vault_names): (std::sync::Arc<dyn crate::backend::Backend>, Vec<String>) =
+        if all_vaults {
+            // `--all-vaults` enumerates and scans the ACTIVE backend's vaults —
+            // a deliberate active-backend read (like `find --all-vaults`).
+            let backend = reg.active_arc();
+            let vault_names = match backend.vaults() {
+                Some(vaults) => vaults
+                    .list_vaults(None)
+                    .await
+                    .map_err(CrosstacheError::from)?
+                    .into_iter()
+                    .map(|v| v.name)
+                    .collect(),
+                None => {
+                    return Err(CrosstacheError::invalid_argument(format!(
+                        "--all-vaults is not supported on the {} backend (it cannot enumerate \
+                         vaults). Scan a single vault instead.",
+                        backend.name()
+                    )))
+                }
+            };
+            (backend, vault_names)
+        } else {
+            // Single vault: read through the backend that OWNS the resolved
+            // vault (the workspace default entry), not `reg.active()` — they can
+            // differ in a multi-vault workspace (Bugbot PR #346).
+            let (backend, _backend_name, vault) =
+                crate::cli::vault_ops::resolve_current_vault(config, registry).await?;
+            (backend, vec![vault])
+        };
 
     let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");
     let secrets = fetch_secret_values(backend, &vault_names, 10).await?;

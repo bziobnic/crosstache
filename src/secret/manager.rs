@@ -16,12 +16,9 @@ use zeroize::Zeroizing;
 use crate::auth::provider::AzureAuthProvider;
 use crate::backend::azure::types::AzureVaultName;
 use crate::error::{CrosstacheError, Result};
-use crate::secret::models::SecretInfo;
-use crate::utils::format::{DisplayUtils, OutputFormat, TableFormatter};
 use crate::utils::helpers::{parse_connection_string, validate_folder_path};
 use crate::utils::network::{classify_network_error, create_http_client, NetworkConfig};
-use crate::utils::output;
-use crate::utils::sanitizer::{get_secret_name_info, sanitize_secret_name};
+use crate::utils::sanitizer::sanitize_secret_name;
 
 /// Secret properties and metadata
 #[derive(Debug, Clone, Serialize, Deserialize, Tabled)]
@@ -210,6 +207,38 @@ pub struct ConnectionComponent {
     pub value: String,
     #[tabled(rename = "Description")]
     pub description: String,
+}
+
+/// Human-readable description for a connection-string key. Pure string
+/// mapping — no manager/backend state required.
+pub fn connection_string_key_description(key: &str) -> String {
+    match key.to_lowercase().as_str() {
+        "server" | "hostname" => "Database server hostname or IP address".to_string(),
+        "database" | "initial catalog" => "Database name".to_string(),
+        "user id" | "uid" | "username" => "Username for authentication".to_string(),
+        "password" | "pwd" => "Password for authentication".to_string(),
+        "port" => "Port number for database connection".to_string(),
+        "encrypt" | "ssl" => "Enable SSL/TLS encryption".to_string(),
+        "trust server certificate" => "Trust server certificate without validation".to_string(),
+        "connection timeout" => "Connection timeout in seconds".to_string(),
+        "command timeout" => "Command execution timeout in seconds".to_string(),
+        "application name" => "Application name for connection".to_string(),
+        _ => "Connection parameter".to_string(),
+    }
+}
+
+/// Parse a connection string into described components, without needing a
+/// [`SecretManager`]. Wraps [`crate::utils::helpers::parse_connection_string`]
+/// (the raw key/value parser) and annotates each pair with a description.
+pub fn parse_connection_components(connection_string: &str) -> Vec<ConnectionComponent> {
+    parse_connection_string(connection_string)
+        .into_iter()
+        .map(|(key, value)| ConnectionComponent {
+            description: connection_string_key_description(&key),
+            key,
+            value,
+        })
+        .collect()
 }
 
 /// Trait for secret operations
@@ -1741,503 +1770,9 @@ impl SecretOperations for AzureSecretOperations {
     }
 }
 
-/// High-level secret manager with user-friendly operations
-pub struct SecretManager {
-    secret_ops: Arc<dyn SecretOperations>,
-    no_color: bool,
-}
-
-impl SecretManager {
-    /// Create a new secret manager
-    pub fn new(auth_provider: Arc<dyn AzureAuthProvider>, no_color: bool) -> Self {
-        let secret_ops = Arc::new(AzureSecretOperations::new(auth_provider));
-
-        Self {
-            secret_ops,
-            no_color,
-        }
-    }
-
-    /// Access to secret operations (for advanced use cases)
-    pub fn secret_ops(&self) -> &Arc<dyn SecretOperations> {
-        &self.secret_ops
-    }
-
-    /// Set a secret with name sanitization and validation
-    pub async fn set_secret_safe(
-        &self,
-        vault_name: &str,
-        name: &str,
-        value: &str,
-        options: Option<SecretRequest>,
-    ) -> Result<SecretProperties> {
-        // Validate secret name
-        self.validate_secret_name(name)?;
-
-        let mut request = options.unwrap_or_else(|| SecretRequest {
-            name: name.to_string(),
-            value: Zeroizing::new(value.to_string()),
-            content_type: None,
-            enabled: Some(true),
-            expires_on: None,
-            not_before: None,
-            tags: None,
-            groups: None,
-            note: None,
-            folder: None,
-        });
-
-        request.name = name.to_string();
-        request.value = Zeroizing::new(value.to_string());
-
-        // Show name sanitization info if needed
-        let name_info = get_secret_name_info(name)?;
-        if name_info.was_modified {
-            output::warn(&format!(
-                "Secret name '{}' will be sanitized to '{}'",
-                name_info.original_name, name_info.sanitized_name
-            ));
-
-            if name_info.is_hashed {
-                output::info("Long or complex name was hashed - original name preserved in tags");
-                output::hint(&format!(
-                    "Access by original name: xv get '{}'",
-                    name_info.original_name
-                ));
-            }
-        }
-
-        output::info(&format!("Setting secret '{name}'..."));
-
-        let secret = self.secret_ops.set_secret(vault_name, &request).await?;
-
-        output::success(&format!(
-            "Successfully set secret '{}'",
-            secret.original_name
-        ));
-
-        Ok(secret)
-    }
-
-    /// Get a secret with optional value display
-    pub async fn get_secret_safe(
-        &self,
-        vault_name: &str,
-        secret_name: &str,
-        show_value: bool,
-        raw_output: bool,
-    ) -> Result<SecretProperties> {
-        let mut secret = self
-            .secret_ops
-            .get_secret(vault_name, secret_name, show_value)
-            .await?;
-
-        if !raw_output {
-            self.display_secret_details(&secret, show_value)?;
-        }
-
-        // Clear sensitive data if not showing value
-        if !show_value {
-            secret.value = None;
-        }
-
-        Ok(secret)
-    }
-
-    /// Get detailed secret information without the secret value
-    pub async fn get_secret_info(&self, vault_name: &str, secret_name: &str) -> Result<SecretInfo> {
-        let validated_vault_name = AzureVaultName::try_from(vault_name)?;
-        // Use the existing get_secret method to fetch properties
-        let secret_props = self
-            .secret_ops
-            .get_secret(vault_name, secret_name, false)
-            .await?;
-
-        // Build the vault URI
-        let vault_uri = validated_vault_name
-            .key_vault_url()?
-            .as_str()
-            .trim_end_matches('/')
-            .to_string();
-
-        // Build the secret ID (simulated since we don't have it from SecretProperties)
-        let id = format!(
-            "{}/secrets/{}/{}",
-            vault_uri, secret_props.name, secret_props.version
-        );
-
-        // Extract metadata from tags
-        let tags = secret_props.tags.clone();
-        let groups = SecretInfo::extract_groups(&tags);
-        let folder = SecretInfo::extract_folder(&tags);
-        let note = SecretInfo::extract_note(&tags);
-        let original_name = SecretInfo::extract_original_name(&tags)
-            .or_else(|| Some(secret_props.original_name.clone()));
-
-        // Parse timestamps from the string formats
-        let created = if !secret_props.created_on.is_empty() {
-            DateTime::parse_from_rfc3339(&secret_props.created_on)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc))
-        } else {
-            None
-        };
-
-        let updated = if !secret_props.updated_on.is_empty() {
-            DateTime::parse_from_rfc3339(&secret_props.updated_on)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc))
-        } else {
-            None
-        };
-
-        // Build SecretInfo
-        let info = SecretInfo {
-            name: secret_props.name.clone(),
-            original_name,
-            id,
-            version: Some(secret_props.version.clone()),
-            enabled: secret_props.enabled,
-            created,
-            updated,
-            expires: secret_props.expires_on,
-            not_before: secret_props.not_before,
-            recovery_level: secret_props.recovery_level.clone(),
-            content_type: if secret_props.content_type.is_empty() {
-                None
-            } else {
-                Some(secret_props.content_type.clone())
-            },
-            tags,
-            groups,
-            folder,
-            note,
-            vault_uri,
-            version_count: self
-                .secret_ops
-                .get_secret_versions(vault_name, secret_name)
-                .await
-                .map(|versions| versions.len())
-                .ok(),
-        };
-
-        Ok(info)
-    }
-
-    /// List secrets with optional grouping and filtering
-    pub async fn list_secrets_formatted(
-        &self,
-        vault_name: &str,
-        group_filter: Option<&str>,
-        output_format: OutputFormat,
-        group_by: bool,
-        show_all: bool,
-    ) -> Result<Vec<SecretSummary>> {
-        let mut secrets = self
-            .secret_ops
-            .list_secrets(vault_name, group_filter)
-            .await?;
-
-        // Filter out disabled secrets by default
-        if !show_all {
-            secrets.retain(|secret| secret.enabled);
-        }
-
-        // Display vault name header for table output
-        if output_format == OutputFormat::Table {
-            self.display_vault_header(vault_name)?;
-        }
-
-        if secrets.is_empty() {
-            let message = if show_all {
-                "No secrets found in vault."
-            } else {
-                "No enabled secrets found in vault. Use --all to show disabled secrets."
-            };
-            output::info(message);
-            return Ok(secrets);
-        }
-
-        if group_by {
-            self.display_secrets_by_group(&secrets, output_format, vault_name)?;
-        } else {
-            self.display_secrets_table(&secrets, output_format)?;
-        }
-
-        Ok(secrets)
-    }
-
-    /// Delete a secret with confirmation
-    pub async fn delete_secret_safe(
-        &self,
-        vault_name: &str,
-        secret_name: &str,
-        force: bool,
-    ) -> Result<()> {
-        if !force {
-            output::warn(&format!(
-                "This will delete secret '{secret_name}' from vault '{vault_name}'"
-            ));
-            output::info("The secret will be recoverable for the vault's retention period.");
-        }
-
-        self.secret_ops
-            .delete_secret(vault_name, secret_name)
-            .await?;
-
-        output::success(&format!("Successfully deleted secret '{secret_name}'"));
-        output::hint(&format!(
-            "Undo with 'xv restore {secret_name}' (before purge retention expires)"
-        ));
-
-        Ok(())
-    }
-
-    /// Restore a deleted secret with user-friendly interface
-    pub async fn restore_secret_safe(
-        &self,
-        vault_name: &str,
-        secret_name: &str,
-    ) -> Result<SecretProperties> {
-        output::info(&format!(
-            "Restoring deleted secret '{secret_name}' from vault '{vault_name}'..."
-        ));
-
-        let restored_secret = self
-            .secret_ops
-            .restore_secret(vault_name, secret_name)
-            .await?;
-
-        output::success(&format!(
-            "Successfully restored secret '{}'",
-            restored_secret.original_name
-        ));
-
-        Ok(restored_secret)
-    }
-
-    /// Permanently purge a deleted secret with user-friendly interface
-    pub async fn purge_secret_safe(
-        &self,
-        vault_name: &str,
-        secret_name: &str,
-        force: bool,
-    ) -> Result<()> {
-        if !force {
-            output::warn(&format!(
-                "This will PERMANENTLY DELETE secret '{secret_name}' from vault '{vault_name}'"
-            ));
-            output::warn("This operation cannot be undone!");
-            output::info("The secret must be in a deleted state before it can be purged.");
-        }
-
-        output::info(&format!(
-            "Permanently purging deleted secret '{secret_name}' from vault '{vault_name}'..."
-        ));
-
-        self.secret_ops
-            .purge_secret(vault_name, secret_name)
-            .await?;
-
-        output::success(&format!("Successfully purged secret '{secret_name}'"));
-
-        Ok(())
-    }
-
-    /// Parse and display connection string components
-    pub async fn parse_connection_string(
-        &self,
-        connection_string: &str,
-    ) -> Result<Vec<ConnectionComponent>> {
-        let components = parse_connection_string(connection_string);
-        let mut result = Vec::new();
-
-        for (key, value) in &components {
-            let description = self.get_connection_string_description(key);
-            result.push(ConnectionComponent {
-                key: key.clone(),
-                value: value.clone(),
-                description,
-            });
-        }
-
-        Ok(result)
-    }
-
-    /// Validate secret name
-    fn validate_secret_name(&self, name: &str) -> Result<()> {
-        if name.is_empty() {
-            return Err(CrosstacheError::invalid_secret_name(
-                "Secret name cannot be empty",
-            ));
-        }
-
-        if name.len() > 127 {
-            return Err(CrosstacheError::invalid_secret_name(
-                "Secret name too long (max 127 characters)",
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Display secret details
-    fn display_secret_details(&self, secret: &SecretProperties, show_value: bool) -> Result<()> {
-        let du = DisplayUtils::new(self.no_color);
-        du.print_header(&format!("Secret: {}", secret.original_name))?;
-
-        let mut details = vec![
-            ("Name", secret.name.as_str()),
-            ("Original Name", secret.original_name.as_str()),
-            ("Version", secret.version.as_str()),
-            ("Content Type", secret.content_type.as_str()),
-            ("Enabled", if secret.enabled { "Yes" } else { "No" }),
-            ("Created", secret.created_on.as_str()),
-            ("Updated", secret.updated_on.as_str()),
-        ];
-
-        if show_value {
-            if let Some(value) = &secret.value {
-                details.push(("Value", value.as_str()));
-            }
-        }
-
-        let formatted_details = du.format_key_value_pairs(&details);
-        println!("{formatted_details}");
-
-        if !secret.tags.is_empty() {
-            du.print_separator()?;
-            du.print_header("Tags")?;
-
-            let tag_pairs: Vec<(&str, &str)> = secret
-                .tags
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            let formatted_tags = du.format_key_value_pairs(&tag_pairs);
-            println!("{formatted_tags}");
-        }
-
-        Ok(())
-    }
-
-    /// Display vault name header
-    fn display_vault_header(&self, vault_name: &str) -> Result<()> {
-        if self.no_color {
-            println!("Vault: {vault_name}");
-        } else {
-            println!("\x1b[1m\x1b[36mVault: {vault_name}\x1b[0m");
-        }
-        println!();
-        Ok(())
-    }
-
-    /// Display secrets in a table
-    fn display_secrets_table(
-        &self,
-        secrets: &[SecretSummary],
-        output_format: OutputFormat,
-    ) -> Result<()> {
-        let formatter = TableFormatter::new(output_format, self.no_color, None, None);
-        let table_output = formatter.format_table(secrets)?;
-        println!("{table_output}");
-        Ok(())
-    }
-
-    /// Display secrets grouped by group name
-    fn display_secrets_by_group(
-        &self,
-        secrets: &[SecretSummary],
-        output_format: OutputFormat,
-        vault_name: &str,
-    ) -> Result<()> {
-        let du = DisplayUtils::new(self.no_color);
-        // Display vault name header first
-        if output_format == OutputFormat::Table {
-            self.display_vault_header(vault_name)?;
-        }
-
-        let mut groups: HashMap<String, Vec<&SecretSummary>> = HashMap::new();
-
-        // Group secrets by each individual group (since groups can contain multiple comma-separated values)
-        for secret in secrets {
-            match &secret.groups {
-                Some(groups_str) => {
-                    // Split comma-separated groups and add secret to each group
-                    for group in groups_str.split(',') {
-                        let group_name = group.trim().to_string();
-                        if !group_name.is_empty() {
-                            groups.entry(group_name).or_default().push(secret);
-                        }
-                    }
-                }
-                None => {
-                    groups
-                        .entry("(No Groups)".to_string())
-                        .or_default()
-                        .push(secret);
-                }
-            }
-        }
-
-        // Display each group
-        for (group_name, group_secrets) in groups {
-            du.print_header(&format!(
-                "Group: {} ({} secrets)",
-                group_name,
-                group_secrets.len()
-            ))?;
-
-            let formatter = TableFormatter::new(output_format, self.no_color, None, None);
-            let table_output = formatter.format_table(&group_secrets)?;
-            println!("{table_output}");
-
-            du.print_separator()?;
-        }
-
-        Ok(())
-    }
-
-    /// Get description for connection string keys
-    fn get_connection_string_description(&self, key: &str) -> String {
-        match key.to_lowercase().as_str() {
-            "server" | "hostname" => "Database server hostname or IP address".to_string(),
-            "database" | "initial catalog" => "Database name".to_string(),
-            "user id" | "uid" | "username" => "Username for authentication".to_string(),
-            "password" | "pwd" => "Password for authentication".to_string(),
-            "port" => "Port number for database connection".to_string(),
-            "encrypt" | "ssl" => "Enable SSL/TLS encryption".to_string(),
-            "trust server certificate" => "Trust server certificate without validation".to_string(),
-            "connection timeout" => "Connection timeout in seconds".to_string(),
-            "command timeout" => "Command execution timeout in seconds".to_string(),
-            "application name" => "Application name for connection".to_string(),
-            _ => "Connection parameter".to_string(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_secret_name_validation() {
-        let manager = SecretManager::new(
-            Arc::new(crate::auth::provider::DefaultAzureCredentialProvider::new().unwrap()),
-            true,
-        );
-
-        // Valid names
-        assert!(manager.validate_secret_name("valid-secret").is_ok());
-        assert!(manager.validate_secret_name("secret123").is_ok());
-        assert!(manager
-            .validate_secret_name("app/database/connection")
-            .is_ok());
-
-        // Invalid names
-        assert!(manager.validate_secret_name("").is_err());
-        assert!(manager.validate_secret_name(&"a".repeat(128)).is_err());
-    }
 
     #[test]
     fn test_field_update_from_flags() {

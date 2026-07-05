@@ -34,12 +34,18 @@ pub struct AuditEvent {
 }
 
 /// Audit log operations for backends that support them.
+///
+/// `resource_group` is an optional Azure-only override: on Azure it selects
+/// the resource group whose Activity Log is queried (falling back to the
+/// backend's configured default when `None`); backends without the concept
+/// (e.g. AWS CloudTrail, which is account-wide) ignore it.
 #[async_trait]
 pub trait AuditBackend: Send + Sync {
     /// Fetch recent events for every secret in the vault, newest first.
     async fn get_vault_events(
         &self,
         vault: &str,
+        resource_group: Option<&str>,
         days: u32,
     ) -> Result<Vec<AuditEvent>, BackendError>;
 
@@ -48,6 +54,7 @@ pub trait AuditBackend: Send + Sync {
         &self,
         vault: &str,
         secret_name: &str,
+        resource_group: Option<&str>,
         days: u32,
     ) -> Result<Vec<AuditEvent>, BackendError>;
 }

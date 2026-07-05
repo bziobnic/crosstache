@@ -66,9 +66,6 @@ pub enum CrosstacheError {
         suggestion: Option<String>,
     },
 
-    #[error("Invalid secret name: {name}")]
-    InvalidSecretName { name: String },
-
     #[error("{}", format_env_not_defined(name, available))]
     EnvNotDefined {
         name: String,
@@ -164,7 +161,6 @@ impl CrosstacheError {
             Self::BackendUnavailable { .. } => "xv-backend-unavailable",
             Self::SecretNotFound { .. } => "xv-secret-not-found",
             Self::VaultNotFound { .. } => "xv-vault-not-found",
-            Self::InvalidSecretName { .. } => "xv-invalid-secret-name",
             Self::EnvNotDefined { .. } => "xv-env-not-defined",
             Self::PermissionDenied(_) => "xv-permission-denied",
             Self::NetworkError(_) => "xv-network",
@@ -199,7 +195,6 @@ impl CrosstacheError {
 
             Self::SecretNotFound { .. } => 10,
             Self::VaultNotFound { .. } => 11,
-            Self::InvalidSecretName { .. } => 12,
 
             Self::AuthenticationError(_) => 20,
             Self::PermissionDenied(_) => 21,
@@ -278,10 +273,6 @@ impl CrosstacheError {
             name: name.into(),
             suggestion: None,
         }
-    }
-
-    pub fn invalid_secret_name<S: Into<String>>(name: S) -> Self {
-        Self::InvalidSecretName { name: name.into() }
     }
 
     pub fn env_not_defined<S: Into<String>>(name: S, available: Vec<String>) -> Self {
@@ -449,15 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_secret_name_constructor() {
-        let err = CrosstacheError::invalid_secret_name("bad/name");
-        assert!(
-            matches!(err, CrosstacheError::InvalidSecretName { ref name } if name == "bad/name")
-        );
-        assert_eq!(err.to_string(), "Invalid secret name: bad/name");
-    }
-
-    #[test]
     fn test_permission_denied_constructor() {
         let err = CrosstacheError::permission_denied("read not allowed");
         assert!(matches!(err, CrosstacheError::PermissionDenied(ref s) if s == "read not allowed"));
@@ -597,10 +579,6 @@ mod tests {
                 "xv-secret-not-found",
             ),
             (CrosstacheError::vault_not_found("x"), "xv-vault-not-found"),
-            (
-                CrosstacheError::invalid_secret_name("x"),
-                "xv-invalid-secret-name",
-            ),
             (
                 CrosstacheError::permission_denied("x"),
                 "xv-permission-denied",
@@ -883,12 +861,6 @@ mod tests {
                 category: "error variant",
                 name: "VaultNotFound",
                 fields: &["name", "suggestion"],
-                allowed_value_like_fields: &[],
-            },
-            SecuritySurface {
-                category: "error variant",
-                name: "InvalidSecretName",
-                fields: &["name"],
                 allowed_value_like_fields: &[],
             },
             SecuritySurface {

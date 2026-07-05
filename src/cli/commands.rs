@@ -602,6 +602,11 @@ pub enum Commands {
     Rotate {
         /// Secret name
         name: String,
+        /// Target vault (overrides context/config default). Matches an
+        /// attached workspace alias when given; otherwise a literal vault on
+        /// the current backend.
+        #[arg(long)]
+        vault: Option<String>,
         /// Length of the generated value (default: 32)
         #[arg(long, default_value = "32")]
         length: usize,
@@ -648,6 +653,11 @@ pub enum Commands {
     },
     /// Run a command with secrets injected as environment variables
     Run {
+        /// Target vault (overrides context/config default). Matches an
+        /// attached workspace alias when given; otherwise a literal vault on
+        /// the current backend.
+        #[arg(long)]
+        vault: Option<String>,
         /// Filter secrets by group (can be specified multiple times)
         #[arg(short, long)]
         group: Vec<String>,
@@ -679,6 +689,11 @@ pub enum Commands {
     /// (or {{ secret:name.field }} / xv://vault/name#field for one field of
     /// a typed record)
     Inject {
+        /// Target vault (overrides context/config default). Matches an
+        /// attached workspace alias when given; otherwise a literal vault on
+        /// the current backend.
+        #[arg(long)]
+        vault: Option<String>,
         /// Template file path (reads from stdin if not specified)
         #[arg(short, long)]
         template: Option<String>,
@@ -1837,6 +1852,7 @@ impl Cli {
             }
             Commands::Rotate {
                 name,
+                vault,
                 length,
                 charset,
                 generator,
@@ -1845,7 +1861,8 @@ impl Cli {
                 force,
             } => {
                 crate::cli::secret_ops::execute_secret_rotate_direct(
-                    &name, length, charset, generator, native, show_value, force, config, registry,
+                    &name, vault, length, charset, generator, native, show_value, force, config,
+                    registry,
                 )
                 .await
             }
@@ -1863,6 +1880,7 @@ impl Cli {
                 .await
             }
             Commands::Run {
+                vault,
                 group,
                 include,
                 exclude,
@@ -1872,6 +1890,7 @@ impl Cli {
                 command,
             } => {
                 crate::cli::secret_ops::execute_secret_run_direct(
+                    vault,
                     group,
                     include,
                     exclude,
@@ -1885,12 +1904,14 @@ impl Cli {
                 .await
             }
             Commands::Inject {
+                vault,
                 template,
                 out,
                 group,
                 best_effort,
             } => {
                 crate::cli::secret_ops::execute_secret_inject_direct(
+                    vault,
                     template,
                     out,
                     group,

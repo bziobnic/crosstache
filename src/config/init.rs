@@ -993,11 +993,7 @@ impl ConfigInitializer {
             Arc::new(DefaultAzureCredentialProvider::new()?) as Arc<dyn AzureAuthProvider>;
 
         // Create vault manager
-        let vault_manager = VaultManager::new(
-            auth_provider,
-            subscription.id.clone(),
-            false, // no_color = false
-        )?;
+        let vault_manager = VaultManager::new(auth_provider, subscription.id.clone())?;
 
         // Create vault request
         let vault_request = VaultCreateRequest {

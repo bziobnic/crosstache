@@ -34,3 +34,36 @@ The `get_secret` method is the only NEW read-surface entry this plan introduces.
 - Audit-events read path — **placeholder in v0.7.0**; real integration deferred to v0.7.1.
 
 `get_secret_versions` is the only NEW read-surface entry this plan introduces. The audit-events read path is an open trait-design question for phase 2.
+
+## Phase 2 — legacy manager retirement (US-101 trait surface)
+
+Trait methods added so the CLI can retire `SecretManager`/`VaultManager`
+construction (see `2026-07-05-multi-backend-workspace-convergence-design.md`,
+Phase 2 + ADR-2). All are optional (default `Unsupported`/empty); only the
+Azure backend implements them — `LocalVaultBackend`/`AwsVaultBackend` inherit
+the defaults.
+
+- `VaultBackend::grant_secret_access(vault, secret, principal, level)` /
+  `revoke_secret_access(vault, secret, principal)` /
+  `list_secret_access(vault, secret)` — **new**. Secret-scoped RBAC; the Azure
+  impl delegates to `AzureVaultOperations` (`vault/operations.rs`), supplying
+  the resource group from config. Replaces the CLI's direct
+  `VaultManager`/`AzureVaultOperations` secret-RBAC calls.
+- `VaultBackend::resolve_principal(user) -> object_id` — **new**. Replaces the
+  CLI's direct `AzureAuthProvider::resolve_user_to_object_id`. Azure delegates
+  through a new default `VaultOperations::resolve_user_to_object_id`, keeping
+  the Graph API call inside the Azure layer.
+- `VaultBackend::resolve_principal_ids(ids) -> {id: (name, email)}` — **new**.
+  Enriches access listings with display names; replaces the resolution half of
+  `VaultManager::resolve_and_filter_roles` (the include-all FILTER stays
+  presentation-side in the CLI).
+- Already sufficient (no change needed): `VaultBackend::create_vault` takes a
+  `VaultCreateRequest` that already carries `location`/`resource_group`/`sku`/…
+  (so the CLI can create vaults without `VaultManager::create_vault_with_setup`
+  — config-derived defaults applied caller-side), and `VaultBackend::get_vault`
+  returns `VaultProperties.enable_rbac_authorization` (what
+  `check_vault_rbac_mode` needs). `list_vaults` sources subscription/RG from
+  config inside the Azure adapter.
+- Non-trait: `parse_connection_string`'s described-component builder moved off
+  `SecretManager` to the standalone `secret::manager::parse_connection_components`
+  (a pure parser + `connection_string_key_description`).

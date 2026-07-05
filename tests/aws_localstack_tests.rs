@@ -369,9 +369,9 @@ async fn localstack_vault_marker_create_list_delete() {
         .await
         .unwrap();
 
-    let listed = vaults.list_vaults().await.unwrap();
+    let listed = vaults.list_vaults(None).await.unwrap();
     let names: Vec<String> = listed.iter().map(|v| v.name.clone()).collect();
     assert!(names.contains(&vault));
 
-    vaults.delete_vault(&vault).await.unwrap();
+    vaults.delete_vault(&vault, None).await.unwrap();
 }

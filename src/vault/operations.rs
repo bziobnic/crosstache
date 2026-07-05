@@ -128,6 +128,16 @@ pub trait VaultOperations: Send + Sync {
     ) -> HashMap<String, (String, String)> {
         HashMap::new()
     }
+
+    /// Resolve a user identifier (email/UPN/object id) to a directory object
+    /// id, for use as the principal of a role assignment. Graph-backed on
+    /// Azure; the default is unsupported (only the Azure implementation has a
+    /// directory service to resolve against).
+    async fn resolve_user_to_object_id(&self, _user: &str) -> Result<String> {
+        Err(CrosstacheError::config(
+            "principal resolution is not supported by this backend",
+        ))
+    }
 }
 
 /// Azure vault operations implementation
@@ -1053,6 +1063,13 @@ impl VaultOperations for AzureVaultOperations {
         };
 
         self.execute_with_retry(operation).await
+    }
+
+    /// Resolve a user identifier to an AAD object id, delegating to the auth
+    /// provider's Graph-backed lookup (keeps the Graph API call inside the
+    /// Azure layer).
+    async fn resolve_user_to_object_id(&self, user: &str) -> Result<String> {
+        self.auth_provider.resolve_user_to_object_id(user).await
     }
 
     /// Resolve principal IDs to display names and emails using Microsoft Graph API.

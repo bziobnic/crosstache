@@ -7,5 +7,4 @@ pub mod manager;
 pub mod models;
 pub mod operations;
 
-pub use manager::*;
 pub use models::*;
