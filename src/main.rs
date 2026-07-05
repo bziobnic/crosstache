@@ -113,44 +113,25 @@ async fn run(cli: Cli) -> Result<()> {
         .take_while(|a| a != "--")
         .any(|a| a == "--backend" || a.to_string_lossy().starts_with("--backend="));
 
-    // Resolve env-profile backend (validate early; fail before touching Azure).
-    // Precedence: true `--backend` flag > .xv.toml env-profile backend >
-    // XV_BACKEND / global config-file backend > built-in "azure".
-    // Gated on `!cli_backend_was_arg` (not `cli.backend.is_none()`) so that
-    // `XV_BACKEND` — which clap folds into `cli.backend` indistinguishably
-    // from a real flag — does not suppress the profile lookup.
-    let profile_backend: Option<String> = if !cli_backend_was_arg {
+    // Look up the active `.xv.toml` env profile's `backend` (if any),
+    // WITHOUT validating it or printing the cross-boundary notice — both of
+    // those are side effects that must only fire when the profile actually
+    // wins the overall resolution below (`!cli_backend_was_arg`). This raw
+    // lookup itself is unconditional (independent of `cli_backend_was_arg`)
+    // because `pre_flag_backend` (below) needs the profile's backend even
+    // when THIS invocation's own `--backend` flag is present — the whole
+    // reason `pre_flag_backend` exists (#341 code review, MAJOR).
+    let raw_profile_backend: Option<(String, String, std::path::PathBuf)> =
         match std::env::current_dir() {
             Err(_) => None, // degenerate env — skip project-config walk
-            Ok(cwd) => {
+            Ok(ref cwd) => {
                 if let Ok(Some((path, proj_cfg))) =
-                    crate::config::project::find_project_config(&cwd).await
+                    crate::config::project::find_project_config(cwd).await
                 {
                     if let Ok(Some((name, profile))) =
                         crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
                     {
-                        if let Some(ref b) = profile.backend {
-                            crate::config::project::validate_env_profile_backend(b)?;
-                            // Emit a notice when the project file (especially an
-                            // ancestor directory's) overrides the backend — this
-                            // is the highest-impact override a .xv.toml can make.
-                            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
-                                if let Some(line) =
-                                    crate::config::project::capture_cross_boundary_notice(
-                                        &path, name,
-                                    )
-                                {
-                                    eprintln!("{line}");
-                                }
-                            }
-                            tracing::debug!(
-                                "backend '{b}' selected by env profile '{name}' in {}",
-                                path.display()
-                            );
-                            Some(b.clone())
-                        } else {
-                            None
-                        }
+                        profile.backend.clone().map(|b| (b, name.to_string(), path))
                     } else {
                         // Unknown env name — skip; command handler surfaces the error.
                         None
@@ -159,6 +140,36 @@ async fn run(cli: Cli) -> Result<()> {
                     None
                 }
             }
+        };
+
+    // Resolve env-profile backend (validate early; fail before touching Azure).
+    // Precedence: true `--backend` flag > .xv.toml env-profile backend >
+    // XV_BACKEND / global config-file backend > built-in "azure".
+    // Gated on `!cli_backend_was_arg` (not `cli.backend.is_none()`) so that
+    // `XV_BACKEND` — which clap folds into `cli.backend` indistinguishably
+    // from a real flag — does not suppress the profile lookup.
+    let profile_backend: Option<String> = if !cli_backend_was_arg {
+        if let Some((ref b, ref name, ref path)) = raw_profile_backend {
+            crate::config::project::validate_env_profile_backend(b)?;
+            // Emit a notice when the project file (especially an ancestor
+            // directory's) overrides the backend — this is the
+            // highest-impact override a .xv.toml can make.
+            if let Ok(cwd) = std::env::current_dir() {
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) =
+                        crate::config::project::capture_cross_boundary_notice(path, name)
+                    {
+                        eprintln!("{line}");
+                    }
+                }
+            }
+            tracing::debug!(
+                "backend '{b}' selected by env profile '{name}' in {}",
+                path.display()
+            );
+            Some(b.clone())
+        } else {
+            None
         }
     } else {
         None
@@ -172,6 +183,50 @@ async fn run(cli: Cli) -> Result<()> {
     config.disk_backend = config.backend.clone();
     config.cli_backend = cli.backend.clone();
     config.cli_backend_was_arg = cli_backend_was_arg;
+
+    // Snapshot the PROFILE-AWARE effective backend — what `effective_backend_name()`
+    // would resolve to if THIS invocation's own `--backend` flag were never
+    // considered at all, so a `.xv.toml` env profile's `backend` still
+    // outranks the config file / `XV_BACKEND` layer exactly as it would for
+    // any other command. Deliberately uses `raw_profile_backend` (the
+    // UNCONDITIONAL lookup above), not the gated `profile_backend` — the
+    // latter is `None` whenever `cli_backend_was_arg` is true, which is
+    // ALWAYS the case for `xv cx add <vault> --backend X` (its own
+    // subcommand-local `--backend` flag trips the same naive argv scan),
+    // exactly the invocation `pre_flag_backend` needs to see through.
+    // `disk_backend` alone under-counts this too: it only captures the
+    // config-file + `XV_BACKEND` layer, never the profile.
+    // `execute_cx_add`'s #341 auto-attach logic uses this (not
+    // `disk_backend`) as "the backend already in use" when its own
+    // `--backend` flag is explicit — see the doc comment on
+    // `Config::pre_flag_backend` (#341 code review, MAJOR).
+    //
+    // An invalid profile backend string is swallowed here (best-effort,
+    // logged at debug) rather than propagated with `?`: unlike the gated
+    // `profile_backend` above, this lookup now always runs, and a broken
+    // profile must not newly fail commands that explicitly pass `--backend`
+    // specifically to override it.
+    let pre_flag_profile_backend = raw_profile_backend.as_ref().and_then(|(b, name, path)| {
+        match crate::config::project::validate_env_profile_backend(b) {
+            Ok(()) => Some(b.clone()),
+            Err(e) => {
+                tracing::debug!(
+                    "env profile '{name}' in {} declares an invalid backend '{b}' \
+                     ({e}); ignoring for pre_flag_backend",
+                    path.display()
+                );
+                None
+            }
+        }
+    });
+    config.pre_flag_backend = Some(
+        crate::config::project::resolve_effective_backend(
+            None,
+            pre_flag_profile_backend.as_deref(),
+            config.disk_backend.as_deref(),
+        )
+        .to_string(),
+    );
 
     // Only feed the CLI slot when `--backend` was a real argument — when it
     // was merely populated from `XV_BACKEND`, that value already flows into

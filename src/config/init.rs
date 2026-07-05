@@ -243,6 +243,7 @@ impl ConfigInitializer {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            pre_flag_backend: None,
             types: std::collections::HashMap::new(),
         };
 
@@ -327,6 +328,7 @@ impl ConfigInitializer {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            pre_flag_backend: None,
             types: std::collections::HashMap::new(),
         };
 
@@ -1090,6 +1092,7 @@ impl ConfigInitializer {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            pre_flag_backend: None,
             types: std::collections::HashMap::new(),
         })
     }

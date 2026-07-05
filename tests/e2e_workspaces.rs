@@ -556,6 +556,155 @@ default_vault = "default"
     assert_eq!(rows[0]["default"], "*");
 }
 
+/// Code review (MAJOR) follow-up: a `.xv.toml` env profile's `backend`
+/// outranks the config-file/`XV_BACKEND` layer for the OVERALL active
+/// backend — so it must also outrank it for the #341 auto-attach's "current
+/// backend" signal. The bug this pins: with the top-level config backend set
+/// to `azure` but a project `.xv.toml` profile selecting `backend = "local"`
+/// (vault `profvault`), `cx add othervault --backend local-a --force`
+/// (itself carrying a real `--backend` flag, which — per the doc comment on
+/// `ContextCommands::Add::backend` — makes `config.effective_backend_name()`
+/// report `local-a` for the rest of that command too) must still auto-attach
+/// the CURRENT vault as `(backend: local, vault: profvault)`, not
+/// `(backend: azure, vault: profvault)` (`disk_backend`, which only sees the
+/// config-file layer and is blind to the profile, would get this wrong —
+/// reproduced by the reviewer: `ls` afterward failed with an azure auth
+/// error instead of showing the local secrets). This needs a config with
+/// `backend = "azure"` at the top level plus a project `.xv.toml` env
+/// profile, which `WorkspaceEnv`'s fixture (always `backend = "local"`, no
+/// project file) can't construct, so this test builds its own hermetic
+/// environment with a project directory inline.
+#[test]
+fn first_cx_add_uses_profile_backend_not_disk_backend_for_auto_attach() {
+    let tmp = TempDir::new().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = home.join(".config");
+    let xv_dir = config_dir.join("xv");
+    let project_dir = home.join("project");
+    let store_default = tmp.path().join("default").join("store");
+    let store_a = tmp.path().join("a").join("store");
+    let cache_dir = tmp.path().join("cache");
+    let key_default = tmp.path().join("default").join("key.txt");
+    let key_a = tmp.path().join("a").join("key.txt");
+    std::fs::create_dir_all(&xv_dir).expect("create config dir");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    std::fs::create_dir_all(&store_default).expect("create store dir");
+    std::fs::create_dir_all(&store_a).expect("create store dir");
+
+    // Top-level backend is "azure" — deliberately never reachable in this
+    // test (no credentials configured): if the auto-attach candidate ever
+    // records "azure" as its backend, the later `ls` will try to build an
+    // Azure auth provider and fail loud, proving the bug rather than
+    // silently passing for the wrong reason.
+    let config_content = format!(
+        r#"backend = "azure"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store_default}"
+key_file = "{key_default}"
+default_vault = "default"
+
+[named_backends.local-a]
+type = "local"
+store_path = "{store_a}"
+key_file = "{key_a}"
+default_vault = "default"
+"#,
+        store_default = store_default.display(),
+        key_default = key_default.display(),
+        store_a = store_a.display(),
+        key_a = key_a.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
+
+    // The project's "dev" env profile: backend = "local" (the [local] block
+    // above), vault = "profvault" — selected by default, no --env needed.
+    std::fs::write(
+        project_dir.join(".xv.toml"),
+        r#"
+default_env = "dev"
+
+[env.dev]
+backend = "local"
+vault = "profvault"
+"#,
+    )
+    .expect("write .xv.toml");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_xv"))
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("XV_NO_PARENT_CONFIG", "1")
+            .env("NO_COLOR", "1")
+            .env("XV_CACHE_DIR", &cache_dir)
+            .current_dir(&project_dir)
+            .args(args)
+            .output()
+            .expect("execute xv binary")
+    };
+    let ok = |args: &[&str]| -> String {
+        let out = run(args);
+        assert!(
+            out.status.success(),
+            "command {args:?} failed.\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // The profile's own vault ("profvault") isn't the [local] block's
+    // configured `default_vault` ("default"), so the local backend doesn't
+    // auto-create it — it must be created explicitly before anything can be
+    // written into it.
+    ok(&["vault", "create", "profvault"]);
+    ok(&["set", "EXISTING_SECRET", "--value", "v1"]);
+
+    // This carries its OWN `--backend` flag, tripping the clap arg-sharing
+    // quirk documented on `ContextCommands::Add::backend`. `--force` skips
+    // the vault-exists probe for "othervault" on "local-a".
+    let add_msg = {
+        let out = run(&[
+            "cx",
+            "add",
+            "othervault",
+            "--backend",
+            "local-a",
+            "--as",
+            "other",
+            "--force",
+        ]);
+        assert!(out.status.success(), "{}", combined(&out));
+        combined(&out)
+    };
+    assert!(
+        add_msg.contains("Attached current vault 'profvault' (backend: local)"),
+        "auto-attach must record the PROFILE's backend (local), not the \
+         config-file backend (azure): {add_msg}"
+    );
+
+    // Proves the fix end-to-end: `ls` must succeed and show BOTH vaults —
+    // if the auto-attached entry had wrongly recorded "azure", this would
+    // instead fail with an Azure auth error (the reviewer's exact repro).
+    let names = ok(&["ls", "--names-only"]);
+    assert!(names.contains("profvault/EXISTING_SECRET"), "{names}");
+}
+
 #[test]
 fn cx_add_duplicate_alias_errors() {
     let env = WorkspaceEnv::new();

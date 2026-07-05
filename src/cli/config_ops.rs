@@ -1502,13 +1502,16 @@ async fn execute_cx_add(
         // BOTH to the same value — passing `--backend X` here also makes
         // `config.effective_backend_name()` report `X` for the rest of
         // this command, which would make the auto-attach candidate always
-        // look like it's already on the requested backend. `disk_backend`
-        // (the config-file + `XV_BACKEND` layer, snapshotted in main.rs
+        // look like it's already on the requested backend. `pre_flag_backend`
+        // (the profile-aware effective backend, snapshotted in main.rs
         // BEFORE this command's own `--backend` flag is folded in) is the
-        // reliable "backend already in use" signal in that case.
+        // reliable "backend already in use" signal in that case — NOT
+        // `disk_backend`, which under-counts a `.xv.toml` env profile's
+        // `backend` (it outranks the config file / `XV_BACKEND` layer;
+        // #341 code review, MAJOR).
         let current_backend = if backend_was_explicit {
             config
-                .disk_backend
+                .pre_flag_backend
                 .clone()
                 .unwrap_or_else(|| "azure".to_string())
         } else {

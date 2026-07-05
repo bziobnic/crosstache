@@ -1544,7 +1544,7 @@ configuration error.
 | `XV_SCAN_DISABLE` | `1` / `true` skips `xv scan` entirely (stderr notice, exit 0) |
 | `CACHE_TTL` | Cache TTL in seconds |
 | `XV_CACHE_DIR` | Override the on-disk cache root directory (default: OS cache dir + `xv`) |
-| `XV_CONTEXT_DIR` | Override the directory holding the global vault context/workspace file (default: `$XDG_CONFIG_HOME/xv` or `$HOME/.config/xv`) — mainly for tests that need isolation from the real context |
+| `XV_CONTEXT_DIR` | Override the directory holding the vault context/workspace file (default: `$XDG_CONFIG_HOME/xv` or `$HOME/.config/xv`) — also skips the local `.xv/context` (cwd) check entirely, so this is "my context store lives here, full stop"; mainly for tests that need isolation from the real context |
 | `DEBUG` | `true` / `1` enables debug logging |
 | `NO_COLOR` | Disable colored output (any value; standard [NO_COLOR](https://no-color.org/) convention) |
 | `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_CONTAINER` | Blob storage destination |
