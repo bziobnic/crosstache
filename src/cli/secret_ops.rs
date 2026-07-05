@@ -7264,21 +7264,15 @@ mod tests {
         LOCK.get_or_init(|| AsyncMutex::new(()))
     }
 
-    /// Serializes tests that mutate the process-global `XV_CONTEXT_DIR` env
-    /// var (#342), mirroring `cache_dir_env_lock` exactly. Any test whose
-    /// call path reaches `crate::workspace::resolve_workspace` or
-    /// `ContextManager::load`/`new_global` — directly, or transitively via
-    /// `Config::resolve_vault_name`/`resolve_vault_for_trait`/
-    /// `resolve_workspace_or_default` — reads the REAL global context file
-    /// (`$XDG_CONFIG_HOME/xv/context` or `$HOME/.config/xv/context`) unless
-    /// `XV_CONTEXT_DIR` is overridden: on a machine with a multi-vault
-    /// workspace attached (e.g. the maintainer's, per #341/#342), that
-    /// context leaks into the test process and silently changes which
-    /// vault/backend these tests resolve against.
-    fn context_dir_env_lock() -> &'static AsyncMutex<()> {
-        static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| AsyncMutex::new(()))
-    }
+    // `context_dir_env_lock` is intentionally NOT redefined here — it lives
+    // once, crate-wide, in `crate::config::context::test_support` (imported
+    // below) and is shared with `crate::config::context::tests`. Two
+    // independently-defined per-module locks guarding the SAME process-global
+    // `XV_CONTEXT_DIR` env var would let a test here and a test in
+    // `config::context::tests` both believe they hold exclusive access while
+    // racing on the same var — cargo runs lib tests in parallel by default
+    // (Bugbot review, LOW, PR #343).
+    use crate::config::context::test_support::context_dir_env_lock;
 
     /// RAII guard that sets an env var for its lifetime and restores the
     /// previous value (or removes it, if previously unset) on drop — including

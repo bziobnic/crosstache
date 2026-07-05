@@ -423,8 +423,44 @@ impl ContextManager {
     }
 }
 
+/// Test-only helpers shared across `#[cfg(test)] mod tests` blocks in
+/// DIFFERENT modules of this crate (this module's own tests, plus
+/// `crate::cli::secret_ops::tests`) that need to mutate the process-global
+/// `XV_CONTEXT_DIR` env var.
+///
+/// `pub(crate)` (not nested inside a private `mod tests`) so it's visible
+/// crate-wide when compiled for test. A single shared lock is required, not
+/// one per module: two independently-defined mutexes guarding the SAME env
+/// var give each caller a false sense of exclusivity while a test in the
+/// other module can still be mutating that var concurrently — cargo runs
+/// lib tests in parallel threads by default, so two per-module locks race on
+/// `XV_CONTEXT_DIR` exactly like having no lock at all (Bugbot review, LOW,
+/// PR #343).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    /// Serializes tests that mutate the process-global `XV_CONTEXT_DIR` env
+    /// var (#342). Any test whose call path reaches
+    /// `crate::workspace::resolve_workspace` or
+    /// `ContextManager::load`/`load_from`/`new_global` — directly, or
+    /// transitively via `Config::resolve_vault_name`/`resolve_vault_for_trait`/
+    /// `resolve_workspace_or_default` — reads the REAL global context file
+    /// (`$XDG_CONFIG_HOME/xv/context` or `$HOME/.config/xv/context`) unless
+    /// `XV_CONTEXT_DIR` is overridden: on a machine with a multi-vault
+    /// workspace attached (e.g. the maintainer's, per #341/#342), that
+    /// context leaks into the test process and silently changes which
+    /// vault/backend these tests resolve against.
+    pub(crate) fn context_dir_env_lock() -> &'static AsyncMutex<()> {
+        static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| AsyncMutex::new(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::context_dir_env_lock;
     use super::*;
     use tempfile::TempDir;
     use tokio;
@@ -612,14 +648,6 @@ mod tests {
             serde_json::from_str(legacy).expect("legacy context JSON must still deserialize");
         assert_eq!(manager.current_vault(), Some("myvault"));
         assert!(manager.workspace.is_none());
-    }
-
-    /// Serializes tests that mutate the process-global `XV_CONTEXT_DIR` env
-    /// var, mirroring the `cache_dir_env_lock`/`context_dir_env_lock`
-    /// pattern in `src/cli/secret_ops.rs` (#318/#342 precedent).
-    fn context_dir_env_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
     /// RAII guard that sets an env var for its lifetime and restores the
