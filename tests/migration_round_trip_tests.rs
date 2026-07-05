@@ -58,7 +58,14 @@ async fn local_to_aws_round_trip() {
         endpoint_url: Some(std::env::var("AWS_ENDPOINT_URL").unwrap()),
         ..Default::default()
     };
-    let aws = AwsBackend::new(&aws_cfg, None, None).await.unwrap();
+    let aws = AwsBackend::new(
+        &aws_cfg,
+        None,
+        None,
+        crosstache::backend::aws::TransferConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let vault = format!("xv-rt-{}", uuid::Uuid::new_v4());
 

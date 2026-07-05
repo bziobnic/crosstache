@@ -86,9 +86,14 @@ async fn aws_backend() -> AwsBackend {
         region: Some(aws_region()),
         ..Default::default()
     };
-    AwsBackend::new(&cfg, None, None)
-        .await
-        .expect("failed to build AwsBackend — is the aws CLI authenticated?")
+    AwsBackend::new(
+        &cfg,
+        None,
+        None,
+        crosstache::backend::aws::TransferConfig::default(),
+    )
+    .await
+    .expect("failed to build AwsBackend — is the aws CLI authenticated?")
 }
 
 /// Unique vault prefix for one test run.

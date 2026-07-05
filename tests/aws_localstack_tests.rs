@@ -36,7 +36,14 @@ async fn build_backend() -> AwsBackend {
         endpoint_url: Some(std::env::var("AWS_ENDPOINT_URL").unwrap()),
         ..Default::default()
     };
-    AwsBackend::new(&cfg, None, None).await.unwrap()
+    AwsBackend::new(
+        &cfg,
+        None,
+        None,
+        crosstache::backend::aws::TransferConfig::default(),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

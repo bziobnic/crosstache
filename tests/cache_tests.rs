@@ -143,6 +143,7 @@ fn test_cache_invalidate_vault_removes_all_entries() {
     );
     mgr.set(
         &CacheKey::FileList {
+            backend: "azure".to_string(),
             vault_name: "v1".to_string(),
             recursive: false,
         },
@@ -154,6 +155,7 @@ fn test_cache_invalidate_vault_removes_all_entries() {
         vault_name: "v1".to_string(),
     });
     let f: Option<Vec<String>> = mgr.get(&CacheKey::FileList {
+        backend: "azure".to_string(),
         vault_name: "v1".to_string(),
         recursive: false,
     });

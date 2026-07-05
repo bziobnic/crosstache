@@ -59,6 +59,53 @@
     to silently retry a legacy Azure construction path now fail cleanly with
     the initialization error instead.
 
+- **Multi-backend workspace convergence, Phase 3: default-entry file-ops
+  routing.** `xv file` now resolves its backend and vault the same way secret
+  verbs do — through the workspace's default entry — and dispatches through
+  the `Backend` trait's file-storage surface uniformly across Azure, local,
+  and AWS. The separate AWS-only file-ops code path (`file_ops_aws.rs`) is
+  deleted; there is one dispatch path for every backend.
+  - **New: `xv file sync` now works on the local backend** (previously
+    Azure-only). AWS sync remains unsupported — same limitation as before,
+    now reported through a clearer capability-gated error instead of a
+    bespoke check.
+  - **New: a clearer error when file storage isn't configured.** Running any
+    `xv file` command against a backend with no file storage set up now fails
+    with an actionable message naming the backend and the missing setting
+    (e.g. `storage_account` for Azure, `s3_bucket` for AWS) instead of a
+    generic failure.
+  - **Behavior change: AWS file-op vault targeting now follows the workspace
+    default entry**, replacing the previous AWS-specific `[aws].default_vault`
+    resolution chain. If you relied on that chain resolving to a different
+    vault than your current workspace/context default, `xv file` on AWS may
+    now target a different vault — qualify with the usual vault-selection
+    flags if needed.
+  - **Behavior change: AWS file transfers are now buffered in memory instead
+    of streamed to/from disk.** The retired AWS-specific path streamed
+    uploads and downloads directly against the filesystem; the unified trait
+    path reads the whole file into memory on upload, and buffers a download
+    fully in memory before a single `fs::write` (bounded by the existing
+    5 GiB download-size guard). Very large files on AWS now cost more peak
+    memory than before. The old download path also wrote to a temp file and
+    renamed it into place atomically on success; that atomic rename is gone —
+    a crash mid-write can now leave a truncated file at the destination path
+    (a network failure still leaves nothing, since the write happens only
+    after the full download completes). Azure and local are unaffected
+    (Azure keeps its own streaming/multipart path; local was never
+    streamed). See ROADMAP.md § Backend ecosystem for the tracked follow-up.
+  - **Behavior-preserving (settings only):** the global `[blob]` chunk-size/
+    concurrency settings (`BLOB_CHUNK_SIZE_MB`, `BLOB_MAX_CONCURRENT_UPLOADS`)
+    are still honored on the top-level `[aws]` backend the same way they were
+    before; named AWS backend entries use the built-in defaults (4 MB chunks,
+    3 concurrent uploads) rather than the global setting, unchanged from
+    today. This is a statement about which settings apply, not about the
+    transfer mechanism itself — see the buffering change directly above.
+  - File-listing cache entries are now scoped per `(backend, vault)` instead
+    of `vault` alone (mirroring the Phase B secrets-list cache re-keying), so
+    two workspace entries sharing a vault *name* on different backends never
+    collide; pre-existing file-list cache entries simply miss once and
+    re-populate.
+
 ## v0.20.1 — First cx add keeps the current vault attached (2026-07-05)
 
 ### Changed

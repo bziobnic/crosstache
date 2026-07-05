@@ -58,9 +58,16 @@ pub(crate) const SECRETS_LIST_FILENAME: &str = "secrets-list-v3.json";
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 pub enum CacheKey {
-    SecretsList { backend: String, vault_name: String },
+    SecretsList {
+        backend: String,
+        vault_name: String,
+    },
     VaultList,
-    FileList { vault_name: String, recursive: bool },
+    FileList {
+        backend: String,
+        vault_name: String,
+        recursive: bool,
+    },
 }
 
 /// Validate that a vault name is a single safe filesystem component.
@@ -148,6 +155,7 @@ impl CacheKey {
             }
             CacheKey::VaultList => cache_dir.join("vaults-list.json"),
             CacheKey::FileList {
+                backend,
                 vault_name,
                 recursive,
             } => {
@@ -156,15 +164,25 @@ impl CacheKey {
                 } else {
                     "files-list.json"
                 };
+                // Nested under `backend` (like SecretsList) so two workspace
+                // entries sharing a vault NAME on different backends never
+                // collide on one cache file.
+                let backend_dir = match validate_cache_vault_name(backend) {
+                    Ok(()) => backend.clone(),
+                    Err(_) => safe_fallback_dir(backend),
+                };
                 let dir_name = match validate_cache_vault_name(vault_name) {
                     Ok(()) => vault_name.clone(),
                     Err(_) => safe_fallback_dir(vault_name),
                 };
-                let candidate = cache_dir.join(&dir_name).join(filename);
+                let candidate = cache_dir.join(&backend_dir).join(&dir_name).join(filename);
                 if ensure_cache_child_path(cache_dir, &candidate) {
                     candidate
                 } else {
-                    cache_dir.join(safe_fallback_dir(vault_name)).join(filename)
+                    cache_dir
+                        .join(safe_fallback_dir(backend))
+                        .join(safe_fallback_dir(vault_name))
+                        .join(filename)
                 }
             }
         }
@@ -199,17 +217,36 @@ impl fmt::Display for CacheKey {
             } => write!(f, "secrets:{backend}:{vault_name}"),
             CacheKey::VaultList => write!(f, "vaults"),
             CacheKey::FileList {
+                backend,
                 vault_name,
                 recursive,
             } => {
                 if *recursive {
-                    write!(f, "files-recursive:{vault_name}")
+                    write!(f, "files-recursive:{backend}:{vault_name}")
                 } else {
-                    write!(f, "files:{vault_name}")
+                    write!(f, "files:{backend}:{vault_name}")
                 }
             }
         }
     }
+}
+
+/// Parse the `<backend>:<vault>` tail of a `files:`/`files-recursive:` cache
+/// key, mirroring the `secrets:<backend>:<vault>` (v3) shape.
+fn parse_backend_vault(kind: &str, rest: &str) -> std::result::Result<(String, String), String> {
+    let (backend, vault_name) = rest.split_once(':').ok_or_else(|| {
+        format!("Invalid cache key: '{kind}:{rest}'. Expected '{kind}:<backend>:<vault>'")
+    })?;
+    if backend.is_empty() || vault_name.is_empty() {
+        return Err(format!(
+            "Invalid cache key: '{kind}:{rest}'. Expected '{kind}:<backend>:<vault>'"
+        ));
+    }
+    validate_cache_vault_name(backend)
+        .map_err(|reason| format!("Invalid backend name '{backend}' in cache key: {reason}"))?;
+    validate_cache_vault_name(vault_name)
+        .map_err(|reason| format!("Invalid vault name '{vault_name}' in cache key: {reason}"))?;
+    Ok((backend.to_string(), vault_name.to_string()))
 }
 
 impl std::str::FromStr for CacheKey {
@@ -246,32 +283,30 @@ impl std::str::FromStr for CacheKey {
                 vault_name: vault_name.to_string(),
             });
         }
-        if let Some(vault_name) = s.strip_prefix("files-recursive:") {
-            if vault_name.is_empty() {
-                return Err("Missing vault name after 'files-recursive:'".to_string());
+        if let Some(rest) = s.strip_prefix("files-recursive:") {
+            if rest.is_empty() {
+                return Err("Missing backend/vault after 'files-recursive:'".to_string());
             }
-            validate_cache_vault_name(vault_name).map_err(|reason| {
-                format!("Invalid vault name '{vault_name}' in cache key: {reason}")
-            })?;
+            let (backend, vault_name) = parse_backend_vault("files-recursive", rest)?;
             return Ok(CacheKey::FileList {
-                vault_name: vault_name.to_string(),
+                backend,
+                vault_name,
                 recursive: true,
             });
         }
-        if let Some(vault_name) = s.strip_prefix("files:") {
-            if vault_name.is_empty() {
-                return Err("Missing vault name after 'files:'".to_string());
+        if let Some(rest) = s.strip_prefix("files:") {
+            if rest.is_empty() {
+                return Err("Missing backend/vault after 'files:'".to_string());
             }
-            validate_cache_vault_name(vault_name).map_err(|reason| {
-                format!("Invalid vault name '{vault_name}' in cache key: {reason}")
-            })?;
+            let (backend, vault_name) = parse_backend_vault("files", rest)?;
             return Ok(CacheKey::FileList {
-                vault_name: vault_name.to_string(),
+                backend,
+                vault_name,
                 recursive: false,
             });
         }
         Err(format!(
-            "Invalid cache key: '{s}'. Expected 'secrets:<backend>:<vault>', 'vaults', 'files:<vault>', or 'files-recursive:<vault>'"
+            "Invalid cache key: '{s}'. Expected 'secrets:<backend>:<vault>', 'vaults', 'files:<backend>:<vault>', or 'files-recursive:<backend>:<vault>'"
         ))
     }
 }
@@ -315,19 +350,21 @@ mod tests {
         assert_eq!(CacheKey::VaultList.to_string(), "vaults");
         assert_eq!(
             CacheKey::FileList {
+                backend: "azure".to_string(),
                 vault_name: "myvault".to_string(),
                 recursive: false,
             }
             .to_string(),
-            "files:myvault"
+            "files:azure:myvault"
         );
         assert_eq!(
             CacheKey::FileList {
+                backend: "azure".to_string(),
                 vault_name: "myvault".to_string(),
                 recursive: true,
             }
             .to_string(),
-            "files-recursive:myvault"
+            "files-recursive:azure:myvault"
         );
     }
 
@@ -341,14 +378,14 @@ mod tests {
         let key: CacheKey = "vaults".parse().unwrap();
         assert!(matches!(key, CacheKey::VaultList));
 
-        let key: CacheKey = "files:myvault".parse().unwrap();
+        let key: CacheKey = "files:azure:myvault".parse().unwrap();
         assert!(
-            matches!(key, CacheKey::FileList { vault_name, recursive } if vault_name == "myvault" && !recursive)
+            matches!(key, CacheKey::FileList { backend, vault_name, recursive } if backend == "azure" && vault_name == "myvault" && !recursive)
         );
 
-        let key: CacheKey = "files-recursive:myvault".parse().unwrap();
+        let key: CacheKey = "files-recursive:azure:myvault".parse().unwrap();
         assert!(
-            matches!(key, CacheKey::FileList { vault_name, recursive } if vault_name == "myvault" && recursive)
+            matches!(key, CacheKey::FileList { backend, vault_name, recursive } if backend == "azure" && vault_name == "myvault" && recursive)
         );
     }
 
@@ -378,8 +415,10 @@ mod tests {
         // Path traversal
         assert!("secrets:../outside".parse::<CacheKey>().is_err());
         assert!("secrets:../../etc".parse::<CacheKey>().is_err());
-        assert!("files:../outside".parse::<CacheKey>().is_err());
-        assert!("files-recursive:../../etc".parse::<CacheKey>().is_err());
+        assert!("files:azure:../outside".parse::<CacheKey>().is_err());
+        assert!("files-recursive:azure:../../etc"
+            .parse::<CacheKey>()
+            .is_err());
 
         // Separators (in the vault segment, backend valid)
         assert!("secrets:azure:foo/bar".parse::<CacheKey>().is_err());
@@ -419,21 +458,23 @@ mod tests {
         assert_eq!(key.to_path(&base), PathBuf::from("/cache/vaults-list.json"));
 
         let key = CacheKey::FileList {
+            backend: "azure".to_string(),
             vault_name: "myvault".to_string(),
             recursive: false,
         };
         assert_eq!(
             key.to_path(&base),
-            PathBuf::from("/cache/myvault/files-list.json")
+            PathBuf::from("/cache/azure/myvault/files-list.json")
         );
 
         let key = CacheKey::FileList {
+            backend: "azure".to_string(),
             vault_name: "myvault".to_string(),
             recursive: true,
         };
         assert_eq!(
             key.to_path(&base),
-            PathBuf::from("/cache/myvault/files-list-recursive.json")
+            PathBuf::from("/cache/azure/myvault/files-list-recursive.json")
         );
     }
 
@@ -481,6 +522,7 @@ mod tests {
             );
 
             let key = CacheKey::FileList {
+                backend: "azure".to_string(),
                 vault_name: bad_name.to_string(),
                 recursive: true,
             };

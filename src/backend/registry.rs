@@ -11,6 +11,18 @@ use super::error::BackendError;
 use super::{Backend, BackendKind};
 use crate::config::settings::Config;
 
+/// Blob transfer settings for AWS S3 file storage, read from the global
+/// `[blob]` config so `xv file` on AWS honors the same chunk-size and
+/// concurrency knobs as Azure.
+#[cfg(feature = "aws")]
+fn aws_transfer_config(config: &Config) -> super::aws::TransferConfig {
+    let blob = config.get_blob_config();
+    super::aws::TransferConfig {
+        chunk_size_mb: blob.chunk_size_mb,
+        max_concurrent_uploads: blob.max_concurrent_uploads,
+    }
+}
+
 /// Maps backend names to live [`Backend`] instances.
 ///
 /// Created once at startup from the application config. The CLI and TUI
@@ -92,8 +104,12 @@ impl BackendRegistry {
                 // runtime (unlike Handle::block_on which panics if a runtime is
                 // already active on the current thread).
                 let backend = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))
+                    tokio::runtime::Handle::current().block_on(super::aws::AwsBackend::new(
+                        aws_cfg,
+                        None,
+                        None,
+                        aws_transfer_config(config),
+                    ))
                 })?;
                 Ok(Self::new(Arc::new(backend)))
             }
@@ -115,9 +131,15 @@ impl BackendRegistry {
         match entry {
             #[cfg(feature = "aws")]
             NBE::Aws(aws_cfg) => {
+                // Named AWS entries carry no global `[blob]` coupling; use
+                // the default transfer profile.
                 let backend = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))
+                    tokio::runtime::Handle::current().block_on(super::aws::AwsBackend::new(
+                        aws_cfg,
+                        None,
+                        None,
+                        super::aws::TransferConfig::default(),
+                    ))
                 })?;
                 Ok(Self::new(Arc::new(backend)))
             }
@@ -255,8 +277,12 @@ impl BackendRegistry {
                     )
                 })?;
                 let backend = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(super::aws::AwsBackend::new(aws_cfg, None, None))
+                    tokio::runtime::Handle::current().block_on(super::aws::AwsBackend::new(
+                        aws_cfg,
+                        None,
+                        None,
+                        aws_transfer_config(config),
+                    ))
                 })?;
                 Ok(Arc::new(backend))
             }
@@ -325,7 +351,9 @@ impl BackendRegistry {
                         "[aws] config block missing — add an [aws] section to your config".into(),
                     )
                 })?;
-                let backend = super::aws::AwsBackend::new(aws_cfg, None, None).await?;
+                let backend =
+                    super::aws::AwsBackend::new(aws_cfg, None, None, aws_transfer_config(config))
+                        .await?;
                 Ok(std::sync::Arc::new(backend))
             }
             #[cfg(not(feature = "aws"))]

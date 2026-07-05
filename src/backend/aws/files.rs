@@ -24,9 +24,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
-use crate::blob::manager::format_size;
 use crate::blob::models::{BlobListItem, FileInfo, FileListRequest, FileUploadRequest};
 use crate::config::settings::AwsConfig;
+use crate::utils::format::format_size;
 use crate::utils::progress::{NoopReporter, ProgressReporter};
 
 use super::errors;
@@ -971,6 +971,17 @@ impl FileBackend for AwsFileBackend {
             metadata,
             tags,
         })
+    }
+
+    async fn list_files_hierarchical(
+        &self,
+        vault: &str,
+        request: FileListRequest,
+    ) -> Result<Vec<BlobListItem>, BackendError> {
+        // Override the flat-derived default with S3's native delimited listing
+        // (`CommonPrefixes`) — see the inherent method for the folder-prefix
+        // and group-filter handling.
+        AwsFileBackend::list_files_hierarchical(self, vault, request).await
     }
 }
 

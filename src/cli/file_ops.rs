@@ -2,15 +2,133 @@
 //!
 //! Kept separate from [`crate::cli::commands`] so the command router stays thin.
 
-use crate::blob::manager::{create_blob_manager, BlobManager};
+use crate::backend::file::FileBackend;
+use crate::backend::BackendKind;
+use crate::blob::models::{
+    BlobListItem, FileDownloadRequest, FileInfo, FileListRequest, FileUploadRequest,
+};
 use crate::cli::file::{FileCommands, SyncDirection};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::format::OutputFormat;
 use crate::utils::output;
 use crate::utils::pagination::Pagination;
-use crate::utils::progress::{self, MultiProgressContext, NoopReporter};
+use crate::utils::progress::{self, MultiProgressContext, NoopReporter, ProgressReporter};
 use std::path::{Path, PathBuf};
+
+/// The resolved file backend PAIRED with the workspace default entry's vault:
+/// every call runs against `files` (the entry's `Backend::files()`) with
+/// `vault` (the entry's vault). This is the file-ops analogue of the secret
+/// seam's paired resolution — the vault and its backend never drift apart.
+/// It mirrors the vault-agnostic surface the handlers were written against,
+/// so routing through the trait needs no handler-body changes.
+pub(crate) struct FileOps<'a> {
+    files: &'a dyn FileBackend,
+    vault: &'a str,
+    /// Registry name of the backend that owns `vault` — the cache-key
+    /// identifier (`CacheKey::FileList { backend, .. }`).
+    backend_name: &'a str,
+    /// Resolved backend kind, for backend-aware user messaging and
+    /// Azure-only constraints (e.g. the blob 10-tag cap) in the shared handlers.
+    kind: BackendKind,
+}
+
+impl<'a> FileOps<'a> {
+    fn new(
+        files: &'a dyn FileBackend,
+        vault: &'a str,
+        backend_name: &'a str,
+        kind: BackendKind,
+    ) -> Self {
+        Self {
+            files,
+            vault,
+            backend_name,
+            kind,
+        }
+    }
+
+    async fn upload_file(
+        &self,
+        request: FileUploadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<FileInfo> {
+        self.files
+            .upload_file(self.vault, request, Some(reporter))
+            .await
+            .map_err(CrosstacheError::from)
+    }
+
+    async fn download_file(
+        &self,
+        request: FileDownloadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<Vec<u8>> {
+        self.files
+            .download_file(self.vault, &request.name, Some(reporter))
+            .await
+            .map_err(CrosstacheError::from)
+    }
+
+    async fn list_files(&self, request: FileListRequest) -> Result<Vec<FileInfo>> {
+        self.files
+            .list_files(self.vault, request)
+            .await
+            .map_err(CrosstacheError::from)
+    }
+
+    async fn list_files_hierarchical(&self, request: FileListRequest) -> Result<Vec<BlobListItem>> {
+        self.files
+            .list_files_hierarchical(self.vault, request)
+            .await
+            .map_err(CrosstacheError::from)
+    }
+
+    async fn delete_file(&self, name: &str) -> Result<()> {
+        self.files
+            .delete_file(self.vault, name)
+            .await
+            .map_err(CrosstacheError::from)
+    }
+
+    async fn get_file_info(&self, name: &str) -> Result<FileInfo> {
+        self.files
+            .get_file_info(self.vault, name)
+            .await
+            .map_err(CrosstacheError::from)
+    }
+}
+
+/// Resolve the file backend + vault the CLI file ops target — the workspace
+/// default entry's `Backend::files()` and vault, materialized together (the
+/// paired `resolve_current_vault` pattern). Errors with an actionable message
+/// naming the backend and the missing storage config when the resolved backend
+/// has no file storage. Returns `(backend_arc, backend_name, vault)`; the
+/// caller wraps `backend.files()` in a [`FileOps`].
+async fn resolve_file_backend(
+    config: &Config,
+) -> Result<(std::sync::Arc<dyn crate::backend::Backend>, String, String)> {
+    let (backend, backend_name, vault) =
+        crate::cli::vault_ops::resolve_current_vault(config, None).await?;
+    if backend.files().is_none() {
+        return Err(file_storage_unsupported_error(backend.as_ref()));
+    }
+    Ok((backend, backend_name, vault))
+}
+
+/// Actionable capability-gate error for a backend without file storage.
+fn file_storage_unsupported_error(backend: &dyn crate::backend::Backend) -> CrosstacheError {
+    use crate::backend::BackendKind;
+    let hint = match backend.kind() {
+        BackendKind::Azure => "set a storage account (AZURE_STORAGE_ACCOUNT or [azure].storage_account) and run 'xv init'",
+        BackendKind::Aws => "set an S3 bucket ([aws].s3_bucket)",
+        BackendKind::Local => "the local backend stores files per vault; this should not happen",
+    };
+    CrosstacheError::invalid_argument(format!(
+        "The {} backend has no file storage configured. To use 'xv file', {hint}.",
+        backend.name()
+    ))
+}
 
 pub(crate) fn progress_threshold_bytes(config: &Config) -> u64 {
     let blob_config = config.get_blob_config();
@@ -23,22 +141,14 @@ pub(crate) fn is_tty() -> bool {
 }
 
 pub(crate) async fn execute_file_command(command: FileCommands, config: Config) -> Result<()> {
-    // The AWS backend stores files in S3 — route to its own executor.
-    #[cfg(all(feature = "aws", feature = "file-ops"))]
-    if crate::cli::file_ops_aws::is_aws_backend_active(&config) {
-        return crate::cli::file_ops_aws::execute_file_command_aws(command, config).await;
-    }
-
-    // Create blob manager
-    let blob_manager = create_blob_manager(&config).map_err(|e| {
-        if e.to_string().contains("No storage account configured") {
-            CrosstacheError::config(
-                "No blob storage configured. Run 'xv init' to set up blob storage.",
-            )
-        } else {
-            e
-        }
-    })?;
+    // Resolve the workspace default entry's file backend PAIRED with its vault
+    // and dispatch every verb through the `FileBackend` trait — uniform across
+    // azure/local/aws (no is_aws fork).
+    let (backend, backend_name, vault) = resolve_file_backend(&config).await?;
+    let files = backend
+        .files()
+        .expect("resolve_file_backend guarantees files() is Some");
+    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
 
     match command {
         FileCommands::Upload {
@@ -112,15 +222,12 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             }
             // Invalidate the file list cache (both recursive and hierarchical) after any upload
             let cache_manager = crate::cache::CacheManager::from_config(&config);
-            // Phase 3 (file-ops routing): file ops route through the workspace default entry
-            if let Ok(vault_name) = config.resolve_vault_name(None).await {
+            // Keyed by the resolved (backend, vault) — the ONE-identifier convention.
+            for recursive in [true, false] {
                 cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                    vault_name: vault_name.clone(),
-                    recursive: true,
-                });
-                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                    vault_name,
-                    recursive: false,
+                    backend: backend_name.clone(),
+                    vault_name: vault.clone(),
+                    recursive,
                 });
             }
         }
@@ -250,15 +357,12 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             }
             // Invalidate the file list cache (both recursive and hierarchical) after any delete
             let cache_manager = crate::cache::CacheManager::from_config(&config);
-            // Phase 3 (file-ops routing): file ops route through the workspace default entry
-            if let Ok(vault_name) = config.resolve_vault_name(None).await {
+            // Keyed by the resolved (backend, vault) — the ONE-identifier convention.
+            for recursive in [true, false] {
                 cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                    vault_name: vault_name.clone(),
-                    recursive: true,
-                });
-                cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                    vault_name,
-                    recursive: false,
+                    backend: backend_name.clone(),
+                    vault_name: vault.clone(),
+                    recursive,
                 });
             }
         }
@@ -272,6 +376,15 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             dry_run,
             delete,
         } => {
+            // Sync is not yet recomposed over the file trait; block it on the
+            // resolved backend kind rather than probing a specific SDK.
+            if backend.kind() == crate::backend::BackendKind::Aws {
+                return Err(CrosstacheError::invalid_argument(
+                    "`xv file sync` is not yet supported on the AWS backend. \
+                     upload/download/list/delete/info are available; use \
+                     `xv file upload --recursive` / `xv file download --recursive` meanwhile.",
+                ));
+            }
             execute_file_sync(
                 &blob_manager,
                 &local_path,
@@ -290,40 +403,34 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
 
 /// `xv info` when resource type is file/blob.
 pub(crate) async fn execute_file_info_from_root(file_name: &str, config: &Config) -> Result<()> {
-    #[cfg(all(feature = "aws", feature = "file-ops"))]
-    if crate::cli::file_ops_aws::is_aws_backend_active(config) {
-        return crate::cli::file_ops_aws::execute_file_info_aws(file_name, config).await;
-    }
+    let (backend, backend_name, vault) = resolve_file_backend(config).await?;
+    let files = backend
+        .files()
+        .expect("resolve_file_backend guarantees file storage");
+    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
 
-    // Create blob manager
-    let blob_manager = create_blob_manager(config).map_err(|e| {
-        if e.to_string().contains("No storage account configured") {
-            CrosstacheError::config(
-                "No blob storage configured. Run 'xv init' to set up blob storage.",
-            )
-        } else {
-            e
-        }
-    })?;
-
-    // Call the existing file info function
     execute_file_info(&blob_manager, file_name, config).await
 }
 pub(crate) async fn refresh_file_list(
+    backend: String,
     vault_name: String,
     recursive: bool,
     config: Config,
 ) -> Result<()> {
+    use crate::backend::BackendRegistry;
     use crate::blob::models::{BlobListItem, FileListRequest};
     use crate::cache::{CacheKey, CacheManager};
 
-    #[cfg(all(feature = "aws", feature = "file-ops"))]
-    if crate::cli::file_ops_aws::is_aws_backend_active(&config) {
-        return crate::cli::file_ops_aws::refresh_file_list_aws(vault_name, recursive, config)
-            .await;
-    }
+    let registry = BackendRegistry::with_lazy(&config, std::slice::from_ref(&backend))
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+    let backend_impl = registry
+        .materialize(&backend)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+    // Backends without file storage have nothing to refresh.
+    let Some(files) = backend_impl.files() else {
+        return Ok(());
+    };
 
-    let blob_manager = create_blob_manager(&config)?;
     let list_request = FileListRequest {
         prefix: None,
         groups: None,
@@ -336,14 +443,21 @@ pub(crate) async fn refresh_file_list(
     };
 
     let items: Vec<BlobListItem> = if recursive {
-        let files = blob_manager.list_files(list_request).await?;
-        files.into_iter().map(BlobListItem::File).collect()
+        let flat = files
+            .list_files(&vault_name, list_request)
+            .await
+            .map_err(CrosstacheError::from)?;
+        flat.into_iter().map(BlobListItem::File).collect()
     } else {
-        blob_manager.list_files_hierarchical(list_request).await?
+        files
+            .list_files_hierarchical(&vault_name, list_request)
+            .await
+            .map_err(CrosstacheError::from)?
     };
 
     let cache_manager = CacheManager::from_config(&config);
     let cache_key = CacheKey::FileList {
+        backend,
         vault_name,
         recursive,
     };
@@ -353,7 +467,7 @@ pub(crate) async fn refresh_file_list(
 }
 #[allow(clippy::too_many_arguments)]
 async fn execute_file_upload(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     file_path: &str,
     name: Option<String>,
     groups: Vec<String>,
@@ -398,8 +512,9 @@ async fn execute_file_upload(
     let metadata_map: HashMap<String, String> = metadata.into_iter().collect();
     let tags_map: HashMap<String, String> = tags.into_iter().collect();
 
-    // Azure Blob Storage supports a maximum of 10 tags per blob
-    if tags_map.len() > 10 {
+    // The 10-tag cap is an Azure Blob index-tag constraint; only enforce it on
+    // Azure so local/aws aren't constrained by a foreign backend's limit.
+    if blob_manager.kind == BackendKind::Azure && tags_map.len() > 10 {
         return Err(CrosstacheError::invalid_argument(format!(
             "Too many tags ({}) — Azure Blob Storage allows a maximum of 10 tags per blob. Remove {} tag(s).",
             tags_map.len(),
@@ -440,7 +555,7 @@ async fn execute_file_upload(
 }
 
 async fn execute_file_download(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     name: &str,
     output: Option<String>,
     force: bool,
@@ -451,7 +566,7 @@ async fn execute_file_download(
 }
 
 async fn execute_file_download_to_path(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     name: &str,
     output_path: String,
     force: bool,
@@ -537,8 +652,8 @@ pub(crate) fn display_file_list_items(
     recursive: bool,
     config: &Config,
 ) -> Result<String> {
-    use crate::blob::manager::format_size;
     use crate::blob::models::BlobListItem;
+    use crate::utils::format::format_size;
     use crate::utils::format::TableFormatter;
     use serde::Serialize;
     use std::fmt::Write as _;
@@ -663,7 +778,7 @@ pub(crate) fn display_file_list_items(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_file_list(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     prefix: Option<String>,
     group: Option<String>,
     pagination: Pagination,
@@ -681,10 +796,9 @@ async fn execute_file_list(
     let recursive = recursive || names_only;
 
     let cache_manager = CacheManager::from_config(config);
-    // Phase 3 (file-ops routing): file ops route through the workspace default entry
-    let vault_name = config.resolve_vault_name(None).await.unwrap_or_default();
     let cache_key = CacheKey::FileList {
-        vault_name,
+        backend: blob_manager.backend_name.to_string(),
+        vault_name: blob_manager.vault.to_string(),
         recursive,
     };
     let use_cache = cache_manager.is_enabled() && !no_cache;
@@ -770,7 +884,7 @@ async fn execute_file_list(
 }
 
 async fn execute_file_delete(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     name: &str,
     force: bool,
     _config: &Config,
@@ -780,7 +894,7 @@ async fn execute_file_delete(
         use crate::utils::interactive::InteractivePrompt;
         let prompt = InteractivePrompt::new();
         if !prompt.confirm(
-            &format!("Are you sure you want to delete file '{name}' from blob storage?"),
+            &format!("Are you sure you want to delete file '{name}' from file storage?"),
             false,
         )? {
             println!("Delete operation cancelled.");
@@ -792,12 +906,25 @@ async fn execute_file_delete(
     println!("Deleting file '{name}'...");
     blob_manager.delete_file(name).await?;
     output::success(&format!("Successfully deleted file '{name}'"));
-    output::hint("Blob soft-delete may allow recovery depending on storage account settings.");
+    // Recovery hint depends on the backend's delete semantics.
+    match blob_manager.kind {
+        BackendKind::Azure => {
+            output::hint(
+                "Blob soft-delete may allow recovery depending on storage account settings.",
+            );
+        }
+        BackendKind::Aws => {
+            output::hint(
+                "Bucket versioning may allow recovery depending on your S3 configuration.",
+            );
+        }
+        BackendKind::Local => {}
+    }
 
     Ok(())
 }
 
-async fn execute_file_info(blob_manager: &BlobManager, name: &str, config: &Config) -> Result<()> {
+async fn execute_file_info(blob_manager: &FileOps<'_>, name: &str, config: &Config) -> Result<()> {
     // Get file info
     let file_info = blob_manager.get_file_info(name).await?;
     display_file_info(&file_info, config)
@@ -994,7 +1121,7 @@ pub(crate) fn collect_files_with_structure(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_file_upload_recursive(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     paths: Vec<String>,
     group: Vec<String>,
     metadata: Vec<(String, String)>,
@@ -1148,7 +1275,7 @@ async fn execute_file_upload_recursive(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_file_upload_multiple(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     files: Vec<String>,
     group: Vec<String>,
     metadata: Vec<(String, String)>,
@@ -1243,7 +1370,7 @@ pub(crate) fn resolve_multi_download_dir(output: Option<&str>) -> Result<PathBuf
 }
 
 async fn execute_file_download_multiple(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     files: Vec<String>,
     output: Option<String>,
     force: bool,
@@ -1328,7 +1455,7 @@ async fn execute_file_download_multiple(
 }
 
 async fn execute_file_download_recursive(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     prefixes: Vec<String>,
     output: Option<String>,
     force: bool,
@@ -1553,7 +1680,7 @@ async fn execute_file_download_recursive(
 }
 
 async fn execute_file_delete_multiple(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     files: Vec<String>,
     force: bool,
     continue_on_error: bool,
@@ -1664,7 +1791,7 @@ struct FileSyncSummary {
 
 #[allow(clippy::too_many_arguments)]
 async fn file_sync_delete_remote_not_local(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     direction: &SyncDirection,
     prefix_ref: Option<&str>,
     remote_map: &std::collections::HashMap<String, crate::blob::models::FileInfo>,
@@ -1766,7 +1893,7 @@ fn file_sync_ensure_parent_dirs(target: &std::path::Path) -> Result<()> {
 
 /// Read local file, upload blob, align local mtime to server `last_modified`.
 async fn file_sync_perform_upload(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     info: &FileUploadInfo,
     blob_name: &str,
     output_json: bool,
@@ -1797,7 +1924,7 @@ async fn file_sync_perform_upload(
 
 /// Download blob to local path (with traversal check, parents, mtime).
 async fn file_sync_perform_download(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     base_path: &std::path::Path,
     prefix_ref: Option<&str>,
     blob_name: &str,
@@ -1828,7 +1955,7 @@ async fn file_sync_perform_download(
 }
 
 async fn execute_file_sync(
-    blob_manager: &BlobManager,
+    blob_manager: &FileOps<'_>,
     local_path: &str,
     prefix: Option<String>,
     direction: &SyncDirection,
@@ -2248,15 +2375,11 @@ async fn execute_file_sync(
 
     if mutated && !dry_run {
         let cache_manager = crate::cache::CacheManager::from_config(config);
-        // Phase 3 (file-ops routing): file ops route through the workspace default entry
-        if let Ok(vault_name) = config.resolve_vault_name(None).await {
+        for recursive in [true, false] {
             cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                vault_name: vault_name.clone(),
-                recursive: true,
-            });
-            cache_manager.invalidate(&crate::cache::CacheKey::FileList {
-                vault_name,
-                recursive: false,
+                backend: blob_manager.backend_name.to_string(),
+                vault_name: blob_manager.vault.to_string(),
+                recursive,
             });
         }
     }
@@ -2316,24 +2439,11 @@ pub(crate) async fn execute_file_upload_quick(
     metadata: Vec<String>,
     config: &Config,
 ) -> Result<()> {
-    #[cfg(all(feature = "aws", feature = "file-ops"))]
-    if crate::cli::file_ops_aws::is_aws_backend_active(config) {
-        return crate::cli::file_ops_aws::execute_file_upload_quick_aws(
-            file_path, name, groups, metadata, config,
-        )
-        .await;
-    }
-
-    // Create blob manager
-    let blob_manager = create_blob_manager(config).map_err(|e| {
-        if e.to_string().contains("No storage account configured") {
-            CrosstacheError::config(
-                "No blob storage configured. Run 'xv init' to set up blob storage.",
-            )
-        } else {
-            e
-        }
-    })?;
+    let (backend, backend_name, vault) = resolve_file_backend(config).await?;
+    let files = backend
+        .files()
+        .expect("resolve_file_backend guarantees file storage");
+    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
 
     // Convert parameters to match FileCommands::Upload format
     let groups_vec = groups
@@ -2371,24 +2481,11 @@ pub(crate) async fn execute_file_download_quick(
     open: bool,
     config: &Config,
 ) -> Result<()> {
-    #[cfg(all(feature = "aws", feature = "file-ops"))]
-    if crate::cli::file_ops_aws::is_aws_backend_active(config) {
-        return crate::cli::file_ops_aws::execute_file_download_quick_aws(
-            name, output, open, config,
-        )
-        .await;
-    }
-
-    // Create blob manager
-    let blob_manager = create_blob_manager(config).map_err(|e| {
-        if e.to_string().contains("No storage account configured") {
-            CrosstacheError::config(
-                "No blob storage configured. Run 'xv init' to set up blob storage.",
-            )
-        } else {
-            e
-        }
-    })?;
+    let (backend, backend_name, vault) = resolve_file_backend(config).await?;
+    let files = backend
+        .files()
+        .expect("resolve_file_backend guarantees file storage");
+    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
 
     let final_output_path = resolve_single_download_path(name, output.as_deref())?;
     execute_file_download(

@@ -254,24 +254,18 @@ impl CacheManager {
         let vault_dir = self.cache_dir.join(vault_name);
         if vault_dir.starts_with(&self.cache_dir) && vault_dir.exists() {
             if looks_like_v3_backend_dir(&vault_dir) {
+                // `cache_dir/<vault_name>` is actually a v3 BACKEND directory
+                // (a backend happens to be named like this vault) — removing it
+                // whole would wipe other vaults' entries. Both SecretsList and
+                // (now) FileList are backend-nested (`cache_dir/<backend>/<vault>/…`),
+                // so the read_dir loop below removes this vault's real entries
+                // under every backend; nothing to do here but skip.
                 debug!(
                     "invalidate_vault({vault_name}): {} looks like a v3 backend directory \
-                     (contains a child with {}) — skipping the whole-directory removal to \
-                     avoid deleting other vaults' cached entries; removing only this \
-                     vault's depth-1 FileList entries instead",
+                     — skipping whole-directory removal; the per-backend loop below \
+                     removes this vault's nested entries",
                     vault_dir.display(),
-                    crate::cache::models::SECRETS_LIST_FILENAME
                 );
-                for recursive in [false, true] {
-                    let file_key = CacheKey::FileList {
-                        vault_name: vault_name.to_string(),
-                        recursive,
-                    };
-                    let path = file_key.to_path(&self.cache_dir);
-                    remove_file_if_exists(&path, "invalidate_vault depth-1 FileList entry");
-                    let lock_path = path.with_extension("lock");
-                    remove_file_if_exists(&lock_path, "invalidate_vault depth-1 FileList lock");
-                }
             } else if let Err(e) = std::fs::remove_dir_all(&vault_dir) {
                 debug!("invalidate_vault({vault_name}): {e}");
             } else {
@@ -685,6 +679,7 @@ mod tests {
             vault_name: "my-vault".to_string(),
         };
         let key2 = CacheKey::FileList {
+            backend: "azure".to_string(),
             vault_name: "my-vault".to_string(),
             recursive: false,
         };
@@ -722,10 +717,12 @@ mod tests {
         };
         mgr.set(&other_vault_key, &vec!["s1".to_string()]);
 
-        // A vault literally named "azure" — its FileList entry lands at the
-        // SAME depth-1 path (`cache_dir/azure/files-list.json`) that also
-        // hosts the backend directory above.
+        // A vault literally named "azure" (on backend "local") — its FileList
+        // entry lands at `cache_dir/local/azure/files-list.json`. Invalidating
+        // vault "azure" must clear it (via the per-backend loop) without
+        // touching the `cache_dir/azure/...` backend directory above.
         let colliding_file_key = CacheKey::FileList {
+            backend: "local".to_string(),
             vault_name: "azure".to_string(),
             recursive: false,
         };
@@ -772,14 +769,17 @@ mod tests {
         };
         mgr.set(&nested_secrets_key, &vec!["s1".to_string()]);
 
-        // The vault literally named "local-a" has its OWN FileList entries
-        // at the same depth-1 path: cache_dir/local-a/files-list.json and
-        // files-list-recursive.json.
+        // The vault literally named "local-a" (here on backend "azure") has its
+        // OWN FileList entries at cache_dir/azure/local-a/files-list.json and
+        // files-list-recursive.json — a different tree from the
+        // cache_dir/local-a/... backend directory above.
         let file_key = CacheKey::FileList {
+            backend: "azure".to_string(),
             vault_name: "local-a".to_string(),
             recursive: false,
         };
         let file_key_recursive = CacheKey::FileList {
+            backend: "azure".to_string(),
             vault_name: "local-a".to_string(),
             recursive: true,
         };
