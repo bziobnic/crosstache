@@ -9,8 +9,6 @@ pub(crate) mod config_ops;
 pub mod file;
 #[cfg(feature = "file-ops")]
 pub mod file_ops;
-#[cfg(all(feature = "aws", feature = "file-ops"))]
-pub(crate) mod file_ops_aws;
 pub(crate) mod helpers;
 pub(crate) mod local_ops;
 pub(crate) mod ls_view;

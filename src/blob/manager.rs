@@ -20,8 +20,10 @@ use tokio::io::AsyncWrite;
 
 use crate::utils::progress::ProgressReporter;
 
-/// Core blob storage manager
-pub struct BlobManager {
+/// Core blob storage manager. Crate-internal: the Azure backend
+/// (`AzureFileBackend`) wraps it behind the `FileBackend` trait; the CLI and
+/// other backends never touch it directly.
+pub(crate) struct BlobManager {
     storage_account: String,
     container_name: String,
     auth_provider: Arc<dyn AzureAuthProvider>,
@@ -809,8 +811,8 @@ fn validate_download_size(content_length: u64, max_bytes: u64) -> Result<()> {
     if content_length > max_bytes {
         return Err(CrosstacheError::invalid_argument(format!(
             "Blob size {} exceeds the maximum allowed download size of {}",
-            format_size(content_length),
-            format_size(max_bytes)
+            crate::utils::format::format_size(content_length),
+            crate::utils::format::format_size(max_bytes)
         )));
     }
     Ok(())
@@ -844,56 +846,6 @@ async fn read_chunk<R: tokio::io::AsyncRead + Unpin>(
     }
     chunk.truncate(bytes_read);
     Ok(chunk)
-}
-
-/// Format file size in human-readable format
-pub fn format_size(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-
-    let mut size = bytes as f64;
-    let mut unit_idx = 0;
-
-    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_idx += 1;
-    }
-
-    if unit_idx == 0 {
-        format!("{} {}", size as u64, UNITS[unit_idx])
-    } else {
-        format!("{:.2} {}", size, UNITS[unit_idx])
-    }
-}
-
-/// Helper function to create a BlobManager from configuration
-pub fn create_blob_manager(config: &crate::config::Config) -> Result<BlobManager> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
-
-    let blob_config = config.get_blob_config();
-
-    if blob_config.storage_account.is_empty() {
-        return Err(CrosstacheError::config(
-            "No blob storage configured. Run 'xv init' to set up blob storage.",
-        ));
-    }
-
-    let auth_provider = Arc::new(DefaultAzureCredentialProvider::with_credential_priority(
-        config.azure_credential_priority.clone(),
-    )?) as Arc<dyn AzureAuthProvider>;
-
-    Ok(BlobManager::new(
-        auth_provider,
-        blob_config.storage_account,
-        blob_config.container_name,
-    )?
-    .with_blob_config(
-        blob_config.chunk_size_mb,
-        blob_config.max_concurrent_uploads,
-    ))
 }
 
 #[cfg(test)]

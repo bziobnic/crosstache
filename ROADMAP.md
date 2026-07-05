@@ -24,13 +24,15 @@ No active release-soak lane. Implemented work is tracked in
 
 ## Multi-backend workspace convergence
 
+✅ **COMPLETE — all three phases shipped 2026-07-05.**
 Design: [`2026-07-05-multi-backend-workspace-convergence-design.md`](./docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md),
-targeting `v0.21.0`. Sequences the remaining multi-backend completion work
+targeting `v0.21.0`. Sequenced the remaining multi-backend completion work
 (after Phases A–C of multi-vault workspaces shipped in v0.20.0/v0.20.1) into
 three ordered phases, converging the legacy no-workspace resolution path into
 a single workspace path (ADR-1: workspace-of-one convergence over dual-path
 hardening) and fully retiring the legacy Azure managers (ADR-2: full manager
-retirement over partial).
+retirement over partial). Full user-visible change list in `CHANGELOG.md` §
+Unreleased.
 
 ### P1 — Phase 1: workspace-of-one resolution convergence
 Eliminate the legacy no-workspace secret-resolution path (`Config::resolve_vault_name`,
@@ -59,11 +61,14 @@ user-visible change list.
 **Acceptance bar (met):** zero manager references from `src/cli/**`.
 
 ### P2 — Phase 3: default-entry file-ops routing
-Route `xv file`/blob operations through a `FileBackend` resolution against the
-workspace's default entry only — no union file views, no alias-qualified file
-addressing.
-**Acceptance bar:** `xv file` resolves through the workspace default entry
-only; no union/aliased file addressing.
+✅ **Shipped 2026-07-05.** `xv file` now routes through a `FileBackend`
+resolution against the workspace's default entry, uniformly across
+Azure/local/AWS; the separate AWS-only file-ops code path is deleted. No
+union file views, no alias-qualified file addressing. `xv file sync` now also
+works on the local backend (previously Azure-only); AWS sync remains
+unsupported (see § Backend ecosystem below).
+**Acceptance bar (met):** `xv file` resolves through the workspace default
+entry only; no union/aliased file addressing.
 
 **Deferred non-goals (all phases):** multi-instance same-kind backends
 (`NamedBackendEntry::Azure`), union file views, alias-qualified file
@@ -126,6 +131,22 @@ as history; current AWS capability state lives in `CHANGELOG.md`.
 | `xv audit`        | ✅ Reads CloudTrail `LookupEvents`, mirrors Azure Activity Log UX | v0.12.0 (#249) |
 | Native rotation   | ✅ `xv rotate --native` invokes Secrets Manager `RotateSecret` (Lambda) | v0.12.0 (#250) |
 | File storage (S3) | ✅ `xv file` on S3, vault-prefixed, streaming + containment | v0.12.0 (#251) |
+
+### P3 — `xv file sync` unsupported on AWS (S3)
+Carried over from the Multi-backend workspace convergence Phase 3 (default-entry
+file-ops routing, shipped 2026-07-05): `xv file sync` now works on both Azure
+and local, but AWS S3 storage still has no sync support — a capability-gated
+error names the limitation. `xv file upload`/`download`/`list`/`delete`/`info`
+are unaffected and work on AWS today.
+
+### P3 — AWS file ops no longer stream to/from disk
+Also from Phase 3: routing `xv file` through the unified `Backend` trait
+moved AWS uploads/downloads off the old AWS-specific streaming path onto
+in-memory buffering (bounded by the existing 5 GiB download-size guard) — see
+`CHANGELOG.md` § Unreleased for the full behavior-change note, including the
+loss of the old download path's atomic temp-file rename. Candidate follow-up:
+give AWS a streaming upload/download path (mirroring Azure's) if large-file
+memory pressure or partial-write safety on AWS becomes a real-world problem.
 
 ### ~~P3 — `has_audit` capability flag is inconsistent across audit backends~~ — closed
 ✅ **Closed 2026-07-05** by the Multi-backend workspace convergence Phase 2

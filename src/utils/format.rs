@@ -23,6 +23,31 @@ use tabled::{
     Table, Tabled,
 };
 
+/// Format a byte count in human-readable units (B, KB, MB, GB, TB), using
+/// binary (1024) steps. Whole bytes render without decimals; larger units use
+/// two decimal places.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{} {}", size as u64, UNITS[unit_idx])
+    } else {
+        format!("{:.2} {}", size, UNITS[unit_idx])
+    }
+}
+
 /// Visibly escape control characters in untrusted display text so
 /// remote-supplied values (blob names, metadata, tags) cannot inject terminal
 /// escape sequences into TTY output. Covers C0 controls, DEL, and C1 controls

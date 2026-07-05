@@ -849,16 +849,23 @@ async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
         } => refresh_secrets_list(backend.clone(), vault_name.clone(), config).await,
         CacheKey::VaultList => refresh_vault_list(config).await,
         CacheKey::FileList {
+            ref backend,
             ref vault_name,
             recursive,
         } => {
             #[cfg(feature = "file-ops")]
             {
-                crate::cli::file_ops::refresh_file_list(vault_name.clone(), recursive, config).await
+                crate::cli::file_ops::refresh_file_list(
+                    backend.clone(),
+                    vault_name.clone(),
+                    recursive,
+                    config,
+                )
+                .await
             }
             #[cfg(not(feature = "file-ops"))]
             {
-                let _ = (vault_name, recursive);
+                let _ = (backend, vault_name, recursive);
                 Ok(())
             }
         }

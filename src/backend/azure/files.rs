@@ -25,8 +25,7 @@ pub struct AzureFileBackend {
 
 impl AzureFileBackend {
     /// Wrap an existing `BlobManager`.
-    #[allow(dead_code)]
-    pub fn new(inner: Arc<BlobManager>) -> Self {
+    pub(crate) fn new(inner: Arc<BlobManager>) -> Self {
         Self { inner }
     }
 }
@@ -80,5 +79,16 @@ impl FileBackend for AzureFileBackend {
 
     async fn get_file_info(&self, _vault: &str, name: &str) -> Result<FileInfo, BackendError> {
         self.inner.get_file_info(name).await.map_err(map_error)
+    }
+
+    async fn list_files_hierarchical(
+        &self,
+        _vault: &str,
+        request: FileListRequest,
+    ) -> Result<Vec<crate::blob::models::BlobListItem>, BackendError> {
+        self.inner
+            .list_files_hierarchical(request)
+            .await
+            .map_err(map_error)
     }
 }
