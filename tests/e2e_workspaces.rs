@@ -705,6 +705,126 @@ vault = "profvault"
     assert!(names.contains("profvault/EXISTING_SECRET"), "{names}");
 }
 
+/// Bugbot review (MEDIUM, PR #343) follow-up: when a `.xv.toml` env profile
+/// declares an INVALID `backend`, `pre_flag_backend` can't be faithfully
+/// computed — a fallback that fell back to `disk_backend` (an earlier
+/// version of this fix) would still leave `resolve_vault_name` honoring the
+/// profile's `vault`, pairing that vault with the WRONG backend and
+/// persisting the mismatch as the workspace's DEFAULT entry via auto-attach.
+/// The fix: `pre_flag_backend` becomes explicitly indeterminate (`None`) in
+/// this case, and `execute_cx_add` skips auto-attach entirely rather than
+/// guess — falling back to the pre-#341 single-entry behavior with an
+/// explanatory note. Needs a project `.xv.toml` with an invalid profile
+/// backend, which `WorkspaceEnv`'s fixture can't construct, so this test
+/// builds its own hermetic environment with a project directory inline.
+#[test]
+fn first_cx_add_skips_auto_attach_when_profile_backend_invalid() {
+    let tmp = TempDir::new().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = home.join(".config");
+    let xv_dir = config_dir.join("xv");
+    let project_dir = home.join("project");
+    let store_default = tmp.path().join("default").join("store");
+    let store_a = tmp.path().join("a").join("store");
+    let cache_dir = tmp.path().join("cache");
+    let key_default = tmp.path().join("default").join("key.txt");
+    let key_a = tmp.path().join("a").join("key.txt");
+    std::fs::create_dir_all(&xv_dir).expect("create config dir");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    std::fs::create_dir_all(&store_default).expect("create store dir");
+    std::fs::create_dir_all(&store_a).expect("create store dir");
+
+    // Top-level backend is "local" — a VALID backend, so this test isolates
+    // the "invalid PROFILE backend" case specifically.
+    let config_content = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store_default}"
+key_file = "{key_default}"
+default_vault = "default"
+
+[named_backends.local-a]
+type = "local"
+store_path = "{store_a}"
+key_file = "{key_a}"
+default_vault = "default"
+"#,
+        store_default = store_default.display(),
+        key_default = key_default.display(),
+        store_a = store_a.display(),
+        key_a = key_a.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
+
+    // The project's "dev" env profile declares an INVALID backend — not one
+    // of the recognized canonical names (azure/local/aws).
+    std::fs::write(
+        project_dir.join(".xv.toml"),
+        r#"
+default_env = "dev"
+
+[env.dev]
+backend = "nonexistent-backend"
+vault = "profvault"
+"#,
+    )
+    .expect("write .xv.toml");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_xv"))
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("XV_NO_PARENT_CONFIG", "1")
+            .env("NO_COLOR", "1")
+            .env("XV_CACHE_DIR", &cache_dir)
+            .current_dir(&project_dir)
+            .args(args)
+            .output()
+            .expect("execute xv binary")
+    };
+
+    // The user explicitly overrides the broken profile with `--backend` —
+    // this is the exact scenario the finding describes. `--force` skips the
+    // vault-exists probe for "othervault" on "local-a".
+    let out = run(&["cx", "add", "othervault", "--backend", "local-a", "--force"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(
+        msg.contains("could not auto-attach the current vault"),
+        "must note the fallback: {msg}"
+    );
+    assert!(
+        msg.contains("invalid backend in .xv.toml profile"),
+        "must explain WHY auto-attach was skipped: {msg}"
+    );
+
+    // The workspace must have ONLY the requested vault (single entry, no
+    // mismatched auto-attached entry) — every other command also needs its
+    // own `--backend` override, since the profile is still broken.
+    let ls_out = run(&["--backend", "local-a", "cx", "ls", "--format", "json"]);
+    assert!(ls_out.status.success(), "{}", combined(&ls_out));
+    let ls = String::from_utf8_lossy(&ls_out.stdout).to_string();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&ls).expect("valid json");
+    assert_eq!(rows.len(), 1, "{ls}");
+    assert_eq!(rows[0]["alias"], "othervault");
+    assert_eq!(rows[0]["default"], "*");
+}
+
 /// Bugbot review (MEDIUM, PR #343) follow-up: a `--backend` flag placed at
 /// the TOP LEVEL, BEFORE the subcommand (`xv --backend X cx add <vault>`),
 /// was flagged as a case where `ContextCommands::Add`'s own `backend` field

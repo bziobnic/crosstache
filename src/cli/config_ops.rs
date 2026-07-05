@@ -1520,31 +1520,46 @@ async fn execute_cx_add(
         // `effective_backend_name()`, so this is behavior-preserving there.
         // NOT `disk_backend` either, which under-counts a `.xv.toml` env
         // profile's `backend` (it outranks the config file / `XV_BACKEND`
-        // layer; #341 code review, MAJOR). `pre_flag_backend` is always
-        // `Some` by construction (main.rs sets it unconditionally on every
-        // invocation) — the fallback below only guards a hand-built
-        // `Config` bypassing that path (e.g. a future unit test).
-        let current_backend = config
-            .pre_flag_backend
-            .clone()
-            .unwrap_or_else(|| "azure".to_string());
-        match config.resolve_vault_name(None).await {
-            Ok(current_vault) => {
-                if current_vault != vault || current_backend != backend_name {
-                    let current_alias = current_vault.clone();
-                    // Alias collision must be caught BEFORE any probing or
-                    // writes (requirement: fail-closed, nothing persisted).
-                    if current_alias == alias {
-                        return Err(CrosstacheError::invalid_argument(format!(
-                            "workspace alias '{alias}' is already attached (vault '{current_vault}')"
-                        )));
+        // layer; #341 code review, MAJOR).
+        //
+        // `pre_flag_backend` is `None` when main.rs could not faithfully
+        // resolve it — specifically, an active `.xv.toml` env profile
+        // declaring an INVALID `backend` string. Guessing a fallback there
+        // (e.g. `disk_backend`) would be actively wrong: `resolve_vault_name`
+        // below still honors the profile's `vault`, so a guessed backend
+        // would pair that vault with the WRONG backend, and auto-attach
+        // would persist that mismatched pair as the workspace's DEFAULT
+        // entry — breaking every subsequent `ls`/write against it (Bugbot
+        // review, MEDIUM, PR #343). So when it's `None`, skip auto-attach
+        // entirely (same fall-back path as "current vault unresolvable"):
+        // no guessing, no auto-attach, just the pre-#341 single-entry
+        // behavior with an explanatory note.
+        match config.pre_flag_backend.clone() {
+            None => {
+                auto_attach_unavailable_reason = Some(
+                    "current backend could not be determined (invalid backend in .xv.toml \
+                     profile?)"
+                        .to_string(),
+                );
+            }
+            Some(current_backend) => match config.resolve_vault_name(None).await {
+                Ok(current_vault) => {
+                    if current_vault != vault || current_backend != backend_name {
+                        let current_alias = current_vault.clone();
+                        // Alias collision must be caught BEFORE any probing or
+                        // writes (requirement: fail-closed, nothing persisted).
+                        if current_alias == alias {
+                            return Err(CrosstacheError::invalid_argument(format!(
+                                "workspace alias '{alias}' is already attached (vault '{current_vault}')"
+                            )));
+                        }
+                        auto_attach = Some((current_vault, current_backend, current_alias));
                     }
-                    auto_attach = Some((current_vault, current_backend, current_alias));
                 }
-            }
-            Err(e) => {
-                auto_attach_unavailable_reason = Some(e.to_string());
-            }
+                Err(e) => {
+                    auto_attach_unavailable_reason = Some(e.to_string());
+                }
+            },
         }
     }
 

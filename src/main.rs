@@ -206,32 +206,49 @@ async fn run(cli: Cli) -> Result<()> {
     // see the doc comment there (#341 code review, MAJOR; Bugbot review,
     // MEDIUM, PR #343).
     //
-    // An invalid profile backend string is swallowed here (best-effort,
-    // logged at debug) rather than propagated with `?`: unlike the gated
-    // `profile_backend` above, this lookup now always runs, and a broken
-    // profile must not newly fail commands that explicitly pass `--backend`
-    // specifically to override it.
-    let pre_flag_profile_backend = raw_profile_backend.as_ref().and_then(|(b, name, path)| {
-        match crate::config::project::validate_env_profile_backend(b) {
-            Ok(()) => Some(b.clone()),
+    // An invalid profile backend string must NOT be silently swallowed and
+    // replaced with a best-effort guess (an earlier version of this fix did
+    // exactly that — falling back to `disk_backend` — which is itself wrong
+    // whenever a profile is active: `resolve_vault_name` still honors the
+    // profile's `vault`, so the guess would pair that vault with the WRONG
+    // backend, and `execute_cx_add`'s auto-attach would persist a
+    // vault/backend mismatch as the workspace's default entry. Instead,
+    // `pre_flag_backend` becomes explicitly `None` ("indeterminate") in this
+    // case — `execute_cx_add` treats that exactly like "current vault
+    // unresolvable" and skips auto-attach entirely, falling back to the
+    // pre-#341 single-entry behavior with an explanatory note (Bugbot
+    // review, MEDIUM, PR #343). This propagates no new error to unrelated
+    // commands: a broken profile still must not fail a command that
+    // explicitly passes `--backend` specifically to override it — it just
+    // can no longer feed a wrong guess into `pre_flag_backend`.
+    config.pre_flag_backend = match raw_profile_backend.as_ref() {
+        Some((b, name, path)) => match crate::config::project::validate_env_profile_backend(b) {
             Err(e) => {
                 tracing::debug!(
                     "env profile '{name}' in {} declares an invalid backend '{b}' \
-                     ({e}); ignoring for pre_flag_backend",
+                     ({e}); pre_flag_backend is indeterminate (None)",
                     path.display()
                 );
                 None
             }
-        }
-    });
-    config.pre_flag_backend = Some(
-        crate::config::project::resolve_effective_backend(
-            None,
-            pre_flag_profile_backend.as_deref(),
-            config.disk_backend.as_deref(),
-        )
-        .to_string(),
-    );
+            Ok(()) => Some(
+                crate::config::project::resolve_effective_backend(
+                    None,
+                    Some(b.as_str()),
+                    config.disk_backend.as_deref(),
+                )
+                .to_string(),
+            ),
+        },
+        None => Some(
+            crate::config::project::resolve_effective_backend(
+                None,
+                None,
+                config.disk_backend.as_deref(),
+            )
+            .to_string(),
+        ),
+    };
 
     // Only feed the CLI slot when `--backend` was a real argument — when it
     // was merely populated from `XV_BACKEND`, that value already flows into
