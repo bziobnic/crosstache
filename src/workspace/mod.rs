@@ -782,11 +782,14 @@ mod tests {
             backend: Some("local".to_string()),
             ..Default::default()
         };
-        let degenerate =
-            resolve_workspace_from(&config, Some(temp.path()), &crate::config::ContextManager::default())
-                .await
-                .unwrap()
-                .unwrap();
+        let degenerate = resolve_workspace_from(
+            &config,
+            Some(temp.path()),
+            &crate::config::ContextManager::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(!degenerate.is_configured());
 
         // Context.
@@ -826,11 +829,16 @@ mod tests {
         let resolved = resolve_workspace_from(&config, Some(temp.path()), &context_manager)
             .await
             .expect("must not error")
-            .expect("must synthesize a valid degenerate workspace despite the vault name colliding");
+            .expect(
+                "must synthesize a valid degenerate workspace despite the vault name colliding",
+            );
 
         let entry = resolved.default_entry().unwrap();
         assert_eq!(entry.vault, "local");
-        assert_ne!(entry.alias, "local", "alias must not collide with a backend name");
+        assert_ne!(
+            entry.alias, "local",
+            "alias must not collide with a backend name"
+        );
         assert_eq!(entry.alias, "default");
     }
 
