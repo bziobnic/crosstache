@@ -185,21 +185,26 @@ async fn run(cli: Cli) -> Result<()> {
     config.cli_backend_was_arg = cli_backend_was_arg;
 
     // Snapshot the PROFILE-AWARE effective backend — what `effective_backend_name()`
-    // would resolve to if THIS invocation's own `--backend` flag were never
+    // would resolve to if THIS invocation's `--backend` flag(s) were never
     // considered at all, so a `.xv.toml` env profile's `backend` still
     // outranks the config file / `XV_BACKEND` layer exactly as it would for
     // any other command. Deliberately uses `raw_profile_backend` (the
     // UNCONDITIONAL lookup above), not the gated `profile_backend` — the
     // latter is `None` whenever `cli_backend_was_arg` is true, which is
-    // ALWAYS the case for `xv cx add <vault> --backend X` (its own
-    // subcommand-local `--backend` flag trips the same naive argv scan),
-    // exactly the invocation `pre_flag_backend` needs to see through.
-    // `disk_backend` alone under-counts this too: it only captures the
-    // config-file + `XV_BACKEND` layer, never the profile.
+    // ALWAYS the case whenever a `--backend` flag appears anywhere in argv:
+    // both `xv cx add <vault> --backend X` (the subcommand's own
+    // `--backend` flag trips the same naive argv scan as the top-level
+    // one) AND `xv --backend X cx add <vault>` (the flag placed BEFORE the
+    // subcommand, leaving the subcommand's own `backend` field `None` while
+    // still setting `cli_backend_was_arg` and folding X into
+    // `effective_backend_name()`) — `pre_flag_backend` needs to see through
+    // both. `disk_backend` alone under-counts this too: it only captures
+    // the config-file + `XV_BACKEND` layer, never the profile.
     // `execute_cx_add`'s #341 auto-attach logic uses this (not
-    // `disk_backend`) as "the backend already in use" when its own
-    // `--backend` flag is explicit — see the doc comment on
-    // `Config::pre_flag_backend` (#341 code review, MAJOR).
+    // `disk_backend`, and unconditionally rather than gated on the
+    // subcommand's own `backend` field) as "the backend already in use" —
+    // see the doc comment there (#341 code review, MAJOR; Bugbot review,
+    // MEDIUM, PR #343).
     //
     // An invalid profile backend string is swallowed here (best-effort,
     // logged at debug) rather than propagated with `?`: unlike the gated

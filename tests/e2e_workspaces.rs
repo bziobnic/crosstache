@@ -705,6 +705,47 @@ vault = "profvault"
     assert!(names.contains("profvault/EXISTING_SECRET"), "{names}");
 }
 
+/// Bugbot review (MEDIUM, PR #343) follow-up: a `--backend` flag placed at
+/// the TOP LEVEL, BEFORE the subcommand (`xv --backend X cx add <vault>`),
+/// was flagged as a case where `ContextCommands::Add`'s own `backend` field
+/// stays `None` while `cli_backend_was_arg` and `effective_backend_name()`
+/// still reflect `X` — which would have made the (now-removed)
+/// `backend_was_explicit`-gated branch read `effective_backend_name()` (the
+/// just-REQUESTED backend) instead of `pre_flag_backend` (the backend
+/// actually in use) for this exact invocation shape. In practice, clap's
+/// `global = true` propagation means a global arg's value is copied into
+/// EVERY subcommand's own `ArgMatches` regardless of where in argv it was
+/// supplied, so `ContextCommands::Add::backend` ends up `Some("local-a")`
+/// here too either way — this test therefore does not discriminate the old
+/// branchy code from the fix (both pass it). It's kept anyway as positive
+/// regression coverage for the top-level-flag invocation shape, and because
+/// `current_backend` now unconditionally reads `pre_flag_backend` (dropping
+/// the `backend_was_explicit` branch entirely) rather than relying on that
+/// clap propagation detail to keep behaving this way.
+#[test]
+fn first_cx_add_top_level_backend_flag_does_not_poison_auto_attach() {
+    let env = WorkspaceEnv::new();
+    env.ok(&["set", "EXISTING_SECRET", "--value", "v1"]);
+    // "othervault" (unlike "default") isn't auto-created by the local
+    // backend, so it must exist before anything can be written into it.
+    env.ok_with_backend("local-a", &["vault", "create", "othervault"]);
+
+    // Top-level `--backend local-a` BEFORE the subcommand; the subcommand
+    // itself carries no `--backend` of its own. `--force` skips the
+    // vault-exists probe for "othervault" on "local-a".
+    let add_msg = env.ok_combined(&["--backend", "local-a", "cx", "add", "othervault", "--force"]);
+    assert!(
+        add_msg.contains("Attached current vault 'default' (backend: local)"),
+        "auto-attach must record the backend actually in use (local), not the \
+         top-level --backend flag's requested backend (local-a): {add_msg}"
+    );
+
+    env.ok(&["set", "othervault:NEW_SECRET", "--value", "v2"]);
+    let names = env.ok(&["ls", "--names-only"]);
+    assert!(names.contains("default/EXISTING_SECRET"), "{names}");
+    assert!(names.contains("othervault/NEW_SECRET"), "{names}");
+}
+
 #[test]
 fn cx_add_duplicate_alias_errors() {
     let env = WorkspaceEnv::new();

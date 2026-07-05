@@ -1463,7 +1463,6 @@ async fn execute_cx_add(
         .entries;
 
     let alias = r#as.unwrap_or_else(|| vault.to_string());
-    let backend_was_explicit = backend.is_some();
     let backend_name = backend.unwrap_or_else(|| config.effective_backend_name().to_string());
 
     if entries.iter().any(|e| e.resolved_alias() == alias) {
@@ -1496,27 +1495,39 @@ async fn execute_cx_add(
     let mut auto_attach: Option<(String, String, String)> = None; // (vault, backend, alias)
     let mut auto_attach_unavailable_reason: Option<String> = None;
     if is_first {
-        // This subcommand's own `--backend` flag shares its long name with
-        // the top-level `global = true` `--backend` flag on `Cli` (see the
-        // doc comment on `ContextCommands::Add::backend`), so clap folds
-        // BOTH to the same value — passing `--backend X` here also makes
-        // `config.effective_backend_name()` report `X` for the rest of
-        // this command, which would make the auto-attach candidate always
-        // look like it's already on the requested backend. `pre_flag_backend`
-        // (the profile-aware effective backend, snapshotted in main.rs
-        // BEFORE this command's own `--backend` flag is folded in) is the
-        // reliable "backend already in use" signal in that case — NOT
-        // `disk_backend`, which under-counts a `.xv.toml` env profile's
-        // `backend` (it outranks the config file / `XV_BACKEND` layer;
-        // #341 code review, MAJOR).
-        let current_backend = if backend_was_explicit {
-            config
-                .pre_flag_backend
-                .clone()
-                .unwrap_or_else(|| "azure".to_string())
-        } else {
-            config.effective_backend_name().to_string()
-        };
+        // "Current backend" must be `pre_flag_backend` UNCONDITIONALLY, not
+        // `effective_backend_name()` gated on whether THIS subcommand's own
+        // `backend` field is `Some`. Two ways a `--backend` flag can poison
+        // `effective_backend_name()` into reporting the just-REQUESTED
+        // backend instead of the one already in use:
+        //   1. `xv cx add <vault> --backend X` — the subcommand's own
+        //      `--backend` flag shares its long name with the top-level
+        //      `global = true` `--backend` flag on `Cli` (see the doc
+        //      comment on `ContextCommands::Add::backend`), so clap folds
+        //      BOTH to the same value X.
+        //   2. `xv --backend X cx add <vault>` — the TOP-LEVEL flag alone,
+        //      placed before the subcommand, with the subcommand's own
+        //      `backend` field left `None`. `cli_backend_was_arg` is still
+        //      true and X still wins in `effective_backend_name()`, so
+        //      gating on the subcommand field alone (`backend_was_explicit`)
+        //      missed this case entirely (Bugbot review, MEDIUM, PR #343).
+        // `pre_flag_backend` (the profile-aware effective backend,
+        // snapshotted in main.rs BEFORE ANY of this invocation's
+        // `--backend` flags — CLI or subcommand — are folded in) is
+        // unconditionally the right "backend already in use" signal for
+        // all three cases (no flag / subcommand flag / top-level flag): when
+        // no flag was passed at all, it's identical to
+        // `effective_backend_name()`, so this is behavior-preserving there.
+        // NOT `disk_backend` either, which under-counts a `.xv.toml` env
+        // profile's `backend` (it outranks the config file / `XV_BACKEND`
+        // layer; #341 code review, MAJOR). `pre_flag_backend` is always
+        // `Some` by construction (main.rs sets it unconditionally on every
+        // invocation) — the fallback below only guards a hand-built
+        // `Config` bypassing that path (e.g. a future unit test).
+        let current_backend = config
+            .pre_flag_backend
+            .clone()
+            .unwrap_or_else(|| "azure".to_string());
         match config.resolve_vault_name(None).await {
             Ok(current_vault) => {
                 if current_vault != vault || current_backend != backend_name {
