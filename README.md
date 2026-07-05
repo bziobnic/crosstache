@@ -986,6 +986,14 @@ xv cx add personal-store --backend local --as personal
 xv cx ls
 ```
 
+- **The first `xv cx add` also attaches your current vault.** Before any workspace exists, the vault you were already using (whatever `--vault`/context/`default_vault` currently resolves to) predates the workspace — the first `cx add` doesn't hide it. Running just `xv cx add work-kv --backend azure --as work` (no `--default`) prints:
+
+  ```
+  [ok] Attached current vault 'default' (backend: local) as default
+  [ok] Attached vault 'work-kv' as 'work' (backend: azure)
+  ```
+
+  Your prior vault stays the default (so unqualified writes keep landing where they already were) and `xv ls` immediately shows both. Passing `--default` on that first add flips it: the newly added vault becomes default instead, while your prior vault is still attached (just not the write target). If the requested vault is already the same `(backend, vault)` you were on, there's nothing extra to attach and this degenerates to a plain single-entry workspace, as in the two-command example above.
 - **Colon addressing.** `alias:path` qualifies a secret with its vault (`work:app/db/pass`); a literal secret name always wins over alias interpretation — on both reads (checked across every attached vault) and writes (checked in the default vault only, since writes never search elsewhere). This asymmetry has one consequence worth knowing: there's no way to *create* a new literal name like `work:x` via `xv set` once the `work` alias is attached — a qualified write always wins on a fresh secret, so `xv set work:x` targets `work`'s `x`, not a literal `work:x` in the default vault. The exact-name-first rule exists for **pre-existing** secrets (created before the workspace existed, or on the local backend's unrestricted charset), not new ones.
 - **Reads search, writes don't — on every secret verb, not just `get`/`set`.** `xv get`/`xv history`/`xv rollback DB_PASSWORD` search every attached vault on an unqualified name — a unique match resolves, no match is the normal not-found error, and two or more matches error with `xv-ambiguous-secret` (exit `13`), listing every qualified form (`work:DB_PASSWORD` or `personal:DB_PASSWORD`). `xv set`, `xv update`, `xv rotate`, `xv delete` (including `--group`), `xv restore`, and `xv purge` never search — an unqualified name on any of them always targets the workspace's **default** vault. Qualify with `alias:name` to reach another attached vault (e.g. `xv set personal:API_KEY`, `xv delete personal:OLD_KEY --force`). Bulk `set` (`xv set KEY=val KEY2=val2`) resolves each pair independently, so `xv set KEY=val personal:KEY2=val2` writes `KEY` to the default vault and `KEY2` to `personal` in one command.
 - **No workspace attached ⇒ nothing changes.** The feature is entirely opt-in via `xv cx add`; every command above behaves exactly as it did before if you never attach a vault (pinned by a byte-for-byte golden test on `set`/`get`'s full stdout and stderr).
@@ -1536,6 +1544,7 @@ configuration error.
 | `XV_SCAN_DISABLE` | `1` / `true` skips `xv scan` entirely (stderr notice, exit 0) |
 | `CACHE_TTL` | Cache TTL in seconds |
 | `XV_CACHE_DIR` | Override the on-disk cache root directory (default: OS cache dir + `xv`) |
+| `XV_CONTEXT_DIR` | Override the directory holding the vault context/workspace file (default: `$XDG_CONFIG_HOME/xv` or `$HOME/.config/xv`) — also skips the local `.xv/context` (cwd) check entirely, so this is "my context store lives here, full stop"; mainly for tests that need isolation from the real context |
 | `DEBUG` | `true` / `1` enables debug logging |
 | `NO_COLOR` | Disable colored output (any value; standard [NO_COLOR](https://no-color.org/) convention) |
 | `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_CONTAINER` | Blob storage destination |

@@ -284,6 +284,27 @@ pub struct Config {
     #[tabled(skip)]
     pub disk_backend: Option<String>,
 
+    /// The EFFECTIVE backend as it would resolve WITHOUT this invocation's own
+    /// `--backend` CLI flag — i.e. `resolve_effective_backend(None,
+    /// profile_backend, disk_backend)`, profile-aware (a `.xv.toml`
+    /// `[env.*].backend` outranks the config file / `XV_BACKEND` layer).
+    /// Set once in main.rs, before `--backend` is folded into `self.backend`.
+    ///
+    /// Unlike `disk_backend` (config-file + `XV_BACKEND` only), this reflects
+    /// what the ACTIVE backend genuinely was before the current command's own
+    /// `--backend` flag is considered — the correct "current backend" signal
+    /// for `execute_cx_add`'s #341 auto-attach when that flag is passed
+    /// explicitly (a subcommand-local `--backend` shares its clap arg id with
+    /// the top-level global flag, so `effective_backend_name()` alone would
+    /// just echo the just-requested backend back — see the doc comment on
+    /// `ContextCommands::Add::backend`). `disk_backend` under-counts here: a
+    /// `.xv.toml` env profile's `backend` outranks the config file, so using
+    /// `disk_backend` instead of this field would report the WRONG prior
+    /// backend whenever a profile is active (#341 code review, MAJOR).
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub pre_flag_backend: Option<String>,
+
     /// Custom record types declared as `[types.<name>]` blocks. Merged with
     /// built-in types and any `.xv.toml` project-level types via
     /// `records::resolve_types` (project overrides global overrides builtin).
@@ -333,6 +354,7 @@ impl Default for Config {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            pre_flag_backend: None,
             types: std::collections::HashMap::new(),
         }
     }

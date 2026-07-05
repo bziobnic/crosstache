@@ -1482,7 +1482,15 @@ pub enum ContextCommands {
     Add {
         /// Vault name to attach
         vault: String,
-        /// Backend the vault lives on (defaults to the active backend)
+        /// Backend the vault lives on (defaults to the active backend).
+        /// NOTE: this shares its long name with the top-level `global =
+        /// true` `--backend` flag on `Cli`, so clap resolves BOTH to the
+        /// same parsed value — passing `--backend X` here also makes
+        /// `config.effective_backend_name()` report `X` for the rest of
+        /// this command. `execute_cx_add`'s #341 auto-attach logic accounts
+        /// for this (uses `config.disk_backend` instead when this flag was
+        /// passed) rather than trusting `effective_backend_name()` to mean
+        /// "the backend already in use".
         #[arg(long)]
         backend: Option<String>,
         /// Alias for this entry (defaults to the vault name)

@@ -298,6 +298,16 @@ fn cx_add_ls_rm_roundtrip() {
     assert!(ls2.contains("work"), "{ls2}");
 }
 
+/// #341: this test's `cx add` requests vault "default" — the SAME vault name
+/// `resolve_vault_name(None)` resolves to from this env's top-level
+/// `default_vault = "default"` (no context set yet). Combined with the CLI's
+/// own `--backend` flag (declared both globally and on `cx add`) folding the
+/// requested backend into `config.effective_backend_name()` for the whole
+/// command, the (backend, vault) pair this add requests ends up IDENTICAL to
+/// the currently-resolved one — so per #341's "same vault" rule this
+/// degenerates to the pre-#341 single-entry behavior unchanged. Real
+/// auto-attach coverage (a requested vault that genuinely differs from the
+/// current one) lives in the `first_cx_add_*` tests below.
 #[test]
 fn cx_first_add_becomes_default() {
     let env = WorkspaceEnv::new();
@@ -315,6 +325,545 @@ fn cx_first_add_becomes_default() {
     // anywhere in the output must be "work"'s.
     assert!(ls.contains("work"), "{ls}");
     assert!(ls.contains('*'), "{ls}");
+}
+
+// ---------------------------------------------------------------------------
+// #341: the FIRST `cx add` must auto-attach the currently-resolved vault as
+// the workspace default, so `ls` immediately after still shows secrets that
+// predate the workspace — "add" must not silently hide what was already
+// open. See docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md
+// §Workspace management for the amended contract.
+// ---------------------------------------------------------------------------
+
+/// The exact issue #341 repro: `EXISTING_SECRET` (written pre-workspace, so
+/// it lives in the top-level config's default vault) must still be visible
+/// after the first `cx add` of a genuinely different vault. This test MUST
+/// fail on unpatched (pre-#341) code — the old first-add behavior attached
+/// ONLY the requested vault, making it the workspace's sole (and therefore
+/// default) entry, so `EXISTING_SECRET` would vanish from `ls` entirely.
+#[test]
+fn first_cx_add_auto_attaches_current_vault_as_default() {
+    let env = WorkspaceEnv::new();
+    env.ok(&["set", "EXISTING_SECRET", "--value", "v1"]);
+    let before = env.ok(&["ls", "--names-only"]);
+    assert_eq!(before.trim(), "EXISTING_SECRET");
+
+    // "othervault" (unlike "default") isn't auto-created by the local
+    // backend, so it must exist before anything can be written into it.
+    env.ok_with_backend("local-a", &["vault", "create", "othervault"]);
+
+    let add_msg = env.ok_combined(&[
+        "cx",
+        "add",
+        "othervault",
+        "--backend",
+        "local-a",
+        "--as",
+        "other",
+    ]);
+    assert!(
+        add_msg.contains("current vault"),
+        "success message must state both attachments: {add_msg}"
+    );
+
+    // EXISTING_SECRET must still be visible immediately after the add —
+    // the #341 repro itself.
+    let after = env.ok(&["ls", "--names-only"]);
+    assert!(after.contains("default/EXISTING_SECRET"), "{after}");
+
+    env.ok(&["set", "other:NEW_SECRET", "--value", "v2"]);
+    let after2 = env.ok(&["ls", "--names-only"]);
+    assert!(after2.contains("default/EXISTING_SECRET"), "{after2}");
+    assert!(after2.contains("other/NEW_SECRET"), "{after2}");
+
+    // Unqualified writes still land where they went before the add (the old
+    // current vault, now aliased "default") — the default is preserved.
+    env.ok(&["set", "STILL_UNQUALIFIED", "--value", "v3"]);
+    assert_eq!(env.ok(&["get", "default:STILL_UNQUALIFIED", "--raw"]), "v3");
+    let missing = env.err(&["get", "other:STILL_UNQUALIFIED"]);
+    assert!(!missing.status.success());
+}
+
+/// `--default` on the first `cx add` makes the ADDED vault the default
+/// instead — the auto-attached current vault is still attached, just not
+/// the default (write target) anymore.
+#[test]
+fn first_cx_add_with_default_flag_makes_added_vault_default() {
+    let env = WorkspaceEnv::new();
+    env.ok(&["set", "EXISTING_SECRET", "--value", "v1"]);
+    env.ok_with_backend("local-a", &["vault", "create", "othervault"]);
+
+    env.ok(&[
+        "cx",
+        "add",
+        "othervault",
+        "--backend",
+        "local-a",
+        "--as",
+        "other",
+        "--default",
+    ]);
+
+    // The added vault is now the default: an unqualified write lands there.
+    env.ok(&["set", "UNQUALIFIED_AFTER", "--value", "v2"]);
+    assert_eq!(env.ok(&["get", "other:UNQUALIFIED_AFTER", "--raw"]), "v2");
+
+    // The auto-attached current vault is still attached (not default) — the
+    // pre-existing secret is still reachable through the union.
+    let names = env.ok(&["ls", "--names-only"]);
+    assert!(names.contains("default/EXISTING_SECRET"), "{names}");
+    assert!(names.contains("other/UNQUALIFIED_AFTER"), "{names}");
+}
+
+/// If the requested vault resolves to the SAME (backend, vault) as the
+/// current one, the pre-#341 single-entry behavior is unchanged — no
+/// auto-attached second entry.
+#[test]
+fn first_cx_add_same_vault_stays_single_entry() {
+    let env = WorkspaceEnv::new();
+    env.ok(&["cx", "add", "default", "--backend", "local", "--as", "work"]);
+
+    let ls = env.ok(&["cx", "ls", "--format", "json"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&ls).expect("valid json");
+    assert_eq!(rows.len(), 1, "{ls}");
+    assert_eq!(rows[0]["alias"], "work");
+    assert_eq!(rows[0]["default"], "*");
+}
+
+/// Alias collision edge case: if the auto-attach candidate's alias (the
+/// current vault's name) equals the requested `--as` alias, `cx add` must
+/// error with the existing duplicate-alias message BEFORE writing anything
+/// — the context store must be byte-unchanged.
+#[test]
+fn first_cx_add_alias_collision_with_current_vault_name_errors_before_write() {
+    let env = WorkspaceEnv::new();
+    let context_before = env.context_file_bytes();
+
+    // The currently-resolved vault is "default" (this env's top-level
+    // `default_vault`) — requesting `--as default` collides with the
+    // auto-attach candidate's alias.
+    let out = env.err(&[
+        "cx",
+        "add",
+        "othervault",
+        "--backend",
+        "local-a",
+        "--as",
+        "default",
+    ]);
+    let msg = combined(&out);
+    assert!(msg.contains("default"), "{msg}");
+    assert!(msg.contains("already attached"), "{msg}");
+
+    assert_eq!(env.context_file_bytes(), context_before);
+}
+
+/// When the current vault can't be resolved at all (no context, no
+/// `default_vault` anywhere), `cx add` falls back to the pre-#341 behavior
+/// (the requested vault only, as the sole/default entry) instead of
+/// erroring, noting the fallback in the success message. This needs a
+/// config with an empty `default_vault` and no context — not constructible
+/// via `WorkspaceEnv` (whose fixture always sets `default_vault = "default"`
+/// so every other test has a resolvable current vault), so this test builds
+/// its own minimal hermetic environment inline.
+#[test]
+fn first_cx_add_no_resolvable_current_vault_falls_back() {
+    let tmp = TempDir::new().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = home.join(".config");
+    let xv_dir = config_dir.join("xv");
+    let store_default = tmp.path().join("default").join("store");
+    let store_a = tmp.path().join("a").join("store");
+    let cache_dir = tmp.path().join("cache");
+    let key_default = tmp.path().join("default").join("key.txt");
+    let key_a = tmp.path().join("a").join("key.txt");
+    std::fs::create_dir_all(&xv_dir).expect("create config dir");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    std::fs::create_dir_all(&store_default).expect("create store dir");
+    std::fs::create_dir_all(&store_a).expect("create store dir");
+
+    // No `default_vault` anywhere and no context — `resolve_vault_name(None)`
+    // must Err, exercising the fallback branch.
+    let config_content = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = ""
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store_default}"
+key_file = "{key_default}"
+
+[named_backends.local-a]
+type = "local"
+store_path = "{store_a}"
+key_file = "{key_a}"
+default_vault = "default"
+"#,
+        store_default = store_default.display(),
+        key_default = key_default.display(),
+        store_a = store_a.display(),
+        key_a = key_a.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_xv"))
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("XV_NO_PARENT_CONFIG", "1")
+            .env("XV_BACKEND", "local")
+            .env("NO_COLOR", "1")
+            .env("XV_CACHE_DIR", &cache_dir)
+            .current_dir(&home)
+            .args(args)
+            .output()
+            .expect("execute xv binary")
+    };
+
+    let out = run(&[
+        "cx",
+        "add",
+        "default",
+        "--backend",
+        "local-a",
+        "--as",
+        "work",
+    ]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(
+        msg.contains("could not auto-attach"),
+        "must note the fallback: {msg}"
+    );
+
+    let ls_out = run(&["cx", "ls", "--format", "json"]);
+    assert!(ls_out.status.success(), "{}", combined(&ls_out));
+    let ls = String::from_utf8_lossy(&ls_out.stdout).to_string();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&ls).expect("valid json");
+    assert_eq!(rows.len(), 1, "{ls}");
+    assert_eq!(rows[0]["alias"], "work");
+    assert_eq!(rows[0]["default"], "*");
+}
+
+/// Code review (MAJOR) follow-up: a `.xv.toml` env profile's `backend`
+/// outranks the config-file/`XV_BACKEND` layer for the OVERALL active
+/// backend — so it must also outrank it for the #341 auto-attach's "current
+/// backend" signal. The bug this pins: with the top-level config backend set
+/// to `azure` but a project `.xv.toml` profile selecting `backend = "local"`
+/// (vault `profvault`), `cx add othervault --backend local-a --force`
+/// (itself carrying a real `--backend` flag, which — per the doc comment on
+/// `ContextCommands::Add::backend` — makes `config.effective_backend_name()`
+/// report `local-a` for the rest of that command too) must still auto-attach
+/// the CURRENT vault as `(backend: local, vault: profvault)`, not
+/// `(backend: azure, vault: profvault)` (`disk_backend`, which only sees the
+/// config-file layer and is blind to the profile, would get this wrong —
+/// reproduced by the reviewer: `ls` afterward failed with an azure auth
+/// error instead of showing the local secrets). This needs a config with
+/// `backend = "azure"` at the top level plus a project `.xv.toml` env
+/// profile, which `WorkspaceEnv`'s fixture (always `backend = "local"`, no
+/// project file) can't construct, so this test builds its own hermetic
+/// environment with a project directory inline.
+#[test]
+fn first_cx_add_uses_profile_backend_not_disk_backend_for_auto_attach() {
+    let tmp = TempDir::new().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = home.join(".config");
+    let xv_dir = config_dir.join("xv");
+    let project_dir = home.join("project");
+    let store_default = tmp.path().join("default").join("store");
+    let store_a = tmp.path().join("a").join("store");
+    let cache_dir = tmp.path().join("cache");
+    let key_default = tmp.path().join("default").join("key.txt");
+    let key_a = tmp.path().join("a").join("key.txt");
+    std::fs::create_dir_all(&xv_dir).expect("create config dir");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    std::fs::create_dir_all(&store_default).expect("create store dir");
+    std::fs::create_dir_all(&store_a).expect("create store dir");
+
+    // Top-level backend is "azure" — deliberately never reachable in this
+    // test (no credentials configured): if the auto-attach candidate ever
+    // records "azure" as its backend, the later `ls` will try to build an
+    // Azure auth provider and fail loud, proving the bug rather than
+    // silently passing for the wrong reason.
+    let config_content = format!(
+        r#"backend = "azure"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store_default}"
+key_file = "{key_default}"
+default_vault = "default"
+
+[named_backends.local-a]
+type = "local"
+store_path = "{store_a}"
+key_file = "{key_a}"
+default_vault = "default"
+"#,
+        store_default = store_default.display(),
+        key_default = key_default.display(),
+        store_a = store_a.display(),
+        key_a = key_a.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
+
+    // The project's "dev" env profile: backend = "local" (the [local] block
+    // above), vault = "profvault" — selected by default, no --env needed.
+    std::fs::write(
+        project_dir.join(".xv.toml"),
+        r#"
+default_env = "dev"
+
+[env.dev]
+backend = "local"
+vault = "profvault"
+"#,
+    )
+    .expect("write .xv.toml");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_xv"))
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("XV_NO_PARENT_CONFIG", "1")
+            .env("NO_COLOR", "1")
+            .env("XV_CACHE_DIR", &cache_dir)
+            .current_dir(&project_dir)
+            .args(args)
+            .output()
+            .expect("execute xv binary")
+    };
+    let ok = |args: &[&str]| -> String {
+        let out = run(args);
+        assert!(
+            out.status.success(),
+            "command {args:?} failed.\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // The profile's own vault ("profvault") isn't the [local] block's
+    // configured `default_vault` ("default"), so the local backend doesn't
+    // auto-create it — it must be created explicitly before anything can be
+    // written into it.
+    ok(&["vault", "create", "profvault"]);
+    ok(&["set", "EXISTING_SECRET", "--value", "v1"]);
+
+    // This carries its OWN `--backend` flag, tripping the clap arg-sharing
+    // quirk documented on `ContextCommands::Add::backend`. `--force` skips
+    // the vault-exists probe for "othervault" on "local-a".
+    let add_msg = {
+        let out = run(&[
+            "cx",
+            "add",
+            "othervault",
+            "--backend",
+            "local-a",
+            "--as",
+            "other",
+            "--force",
+        ]);
+        assert!(out.status.success(), "{}", combined(&out));
+        combined(&out)
+    };
+    assert!(
+        add_msg.contains("Attached current vault 'profvault' (backend: local)"),
+        "auto-attach must record the PROFILE's backend (local), not the \
+         config-file backend (azure): {add_msg}"
+    );
+
+    // Proves the fix end-to-end: `ls` must succeed and show BOTH vaults —
+    // if the auto-attached entry had wrongly recorded "azure", this would
+    // instead fail with an Azure auth error (the reviewer's exact repro).
+    let names = ok(&["ls", "--names-only"]);
+    assert!(names.contains("profvault/EXISTING_SECRET"), "{names}");
+}
+
+/// Bugbot review (MEDIUM, PR #343) follow-up: when a `.xv.toml` env profile
+/// declares an INVALID `backend`, `pre_flag_backend` can't be faithfully
+/// computed — a fallback that fell back to `disk_backend` (an earlier
+/// version of this fix) would still leave `resolve_vault_name` honoring the
+/// profile's `vault`, pairing that vault with the WRONG backend and
+/// persisting the mismatch as the workspace's DEFAULT entry via auto-attach.
+/// The fix: `pre_flag_backend` becomes explicitly indeterminate (`None`) in
+/// this case, and `execute_cx_add` skips auto-attach entirely rather than
+/// guess — falling back to the pre-#341 single-entry behavior with an
+/// explanatory note. Needs a project `.xv.toml` with an invalid profile
+/// backend, which `WorkspaceEnv`'s fixture can't construct, so this test
+/// builds its own hermetic environment with a project directory inline.
+#[test]
+fn first_cx_add_skips_auto_attach_when_profile_backend_invalid() {
+    let tmp = TempDir::new().expect("tempdir");
+    let home = tmp.path().join("home");
+    let config_dir = home.join(".config");
+    let xv_dir = config_dir.join("xv");
+    let project_dir = home.join("project");
+    let store_default = tmp.path().join("default").join("store");
+    let store_a = tmp.path().join("a").join("store");
+    let cache_dir = tmp.path().join("cache");
+    let key_default = tmp.path().join("default").join("key.txt");
+    let key_a = tmp.path().join("a").join("key.txt");
+    std::fs::create_dir_all(&xv_dir).expect("create config dir");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    std::fs::create_dir_all(&store_default).expect("create store dir");
+    std::fs::create_dir_all(&store_a).expect("create store dir");
+
+    // Top-level backend is "local" — a VALID backend, so this test isolates
+    // the "invalid PROFILE backend" case specifically.
+    let config_content = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store_default}"
+key_file = "{key_default}"
+default_vault = "default"
+
+[named_backends.local-a]
+type = "local"
+store_path = "{store_a}"
+key_file = "{key_a}"
+default_vault = "default"
+"#,
+        store_default = store_default.display(),
+        key_default = key_default.display(),
+        store_a = store_a.display(),
+        key_a = key_a.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
+
+    // The project's "dev" env profile declares an INVALID backend — not one
+    // of the recognized canonical names (azure/local/aws).
+    std::fs::write(
+        project_dir.join(".xv.toml"),
+        r#"
+default_env = "dev"
+
+[env.dev]
+backend = "nonexistent-backend"
+vault = "profvault"
+"#,
+    )
+    .expect("write .xv.toml");
+
+    let run = |args: &[&str]| -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_xv"))
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("XV_NO_PARENT_CONFIG", "1")
+            .env("NO_COLOR", "1")
+            .env("XV_CACHE_DIR", &cache_dir)
+            .current_dir(&project_dir)
+            .args(args)
+            .output()
+            .expect("execute xv binary")
+    };
+
+    // The user explicitly overrides the broken profile with `--backend` —
+    // this is the exact scenario the finding describes. `--force` skips the
+    // vault-exists probe for "othervault" on "local-a".
+    let out = run(&["cx", "add", "othervault", "--backend", "local-a", "--force"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let msg = combined(&out);
+    assert!(
+        msg.contains("could not auto-attach the current vault"),
+        "must note the fallback: {msg}"
+    );
+    assert!(
+        msg.contains("invalid backend in .xv.toml profile"),
+        "must explain WHY auto-attach was skipped: {msg}"
+    );
+
+    // The workspace must have ONLY the requested vault (single entry, no
+    // mismatched auto-attached entry) — every other command also needs its
+    // own `--backend` override, since the profile is still broken.
+    let ls_out = run(&["--backend", "local-a", "cx", "ls", "--format", "json"]);
+    assert!(ls_out.status.success(), "{}", combined(&ls_out));
+    let ls = String::from_utf8_lossy(&ls_out.stdout).to_string();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&ls).expect("valid json");
+    assert_eq!(rows.len(), 1, "{ls}");
+    assert_eq!(rows[0]["alias"], "othervault");
+    assert_eq!(rows[0]["default"], "*");
+}
+
+/// Bugbot review (MEDIUM, PR #343) follow-up: a `--backend` flag placed at
+/// the TOP LEVEL, BEFORE the subcommand (`xv --backend X cx add <vault>`),
+/// was flagged as a case where `ContextCommands::Add`'s own `backend` field
+/// stays `None` while `cli_backend_was_arg` and `effective_backend_name()`
+/// still reflect `X` — which would have made the (now-removed)
+/// `backend_was_explicit`-gated branch read `effective_backend_name()` (the
+/// just-REQUESTED backend) instead of `pre_flag_backend` (the backend
+/// actually in use) for this exact invocation shape. In practice, clap's
+/// `global = true` propagation means a global arg's value is copied into
+/// EVERY subcommand's own `ArgMatches` regardless of where in argv it was
+/// supplied, so `ContextCommands::Add::backend` ends up `Some("local-a")`
+/// here too either way — this test therefore does not discriminate the old
+/// branchy code from the fix (both pass it). It's kept anyway as positive
+/// regression coverage for the top-level-flag invocation shape, and because
+/// `current_backend` now unconditionally reads `pre_flag_backend` (dropping
+/// the `backend_was_explicit` branch entirely) rather than relying on that
+/// clap propagation detail to keep behaving this way.
+#[test]
+fn first_cx_add_top_level_backend_flag_does_not_poison_auto_attach() {
+    let env = WorkspaceEnv::new();
+    env.ok(&["set", "EXISTING_SECRET", "--value", "v1"]);
+    // "othervault" (unlike "default") isn't auto-created by the local
+    // backend, so it must exist before anything can be written into it.
+    env.ok_with_backend("local-a", &["vault", "create", "othervault"]);
+
+    // Top-level `--backend local-a` BEFORE the subcommand; the subcommand
+    // itself carries no `--backend` of its own. `--force` skips the
+    // vault-exists probe for "othervault" on "local-a".
+    let add_msg = env.ok_combined(&["--backend", "local-a", "cx", "add", "othervault", "--force"]);
+    assert!(
+        add_msg.contains("Attached current vault 'default' (backend: local)"),
+        "auto-attach must record the backend actually in use (local), not the \
+         top-level --backend flag's requested backend (local-a): {add_msg}"
+    );
+
+    env.ok(&["set", "othervault:NEW_SECRET", "--value", "v2"]);
+    let names = env.ok(&["ls", "--names-only"]);
+    assert!(names.contains("default/EXISTING_SECRET"), "{names}");
+    assert!(names.contains("othervault/NEW_SECRET"), "{names}");
 }
 
 #[test]
@@ -361,6 +910,9 @@ fn cx_add_alias_colliding_with_backend_name_errors() {
 #[test]
 fn cx_rm_default_requires_replacement() {
     let env = WorkspaceEnv::new();
+    // #341: the first `cx add` now auto-attaches the current vault too, so
+    // "work" is no longer implicitly default just by being first — `--default`
+    // makes it explicit, preserving this test's intent.
     env.ok(&[
         "cx",
         "add",
@@ -369,6 +921,7 @@ fn cx_rm_default_requires_replacement() {
         "local-a",
         "--as",
         "work",
+        "--default",
     ]);
     env.ok(&[
         "cx",
@@ -379,7 +932,7 @@ fn cx_rm_default_requires_replacement() {
         "--as",
         "stage",
     ]);
-    // "work" is the default (first-add); removing it while "stage" also
+    // "work" is the default; removing it while "stage" also
     // exists must error rather than silently reassigning the default.
     let out = env.err(&["cx", "rm", "work"]);
     let msg = combined(&out);
@@ -395,15 +948,11 @@ fn cx_rm_default_requires_replacement() {
 #[test]
 fn cx_rm_last_entry_restores_single_vault_behavior() {
     let env = WorkspaceEnv::new();
-    env.ok(&[
-        "cx",
-        "add",
-        "default",
-        "--backend",
-        "local-a",
-        "--as",
-        "work",
-    ]);
+    // #341: requests the SAME (backend, vault) as the current one ("local",
+    // "default") so no second vault gets auto-attached — this test is
+    // specifically about a true single-entry workspace collapsing back to
+    // "no workspace" when its only entry is removed.
+    env.ok(&["cx", "add", "default", "--backend", "local", "--as", "work"]);
     env.ok(&["cx", "rm", "work"]);
     let ls_out = env.run(&["cx", "ls"]);
     assert!(ls_out.status.success());
@@ -834,6 +1383,9 @@ fn get_unknown_alias_lists_attached() {
 #[test]
 fn set_unqualified_writes_default_only() {
     let env = WorkspaceEnv::new();
+    // #341: `--default` makes "work" explicitly default (the first add now
+    // also auto-attaches the current vault, so "work" is no longer
+    // implicitly default just by being first).
     env.ok(&[
         "cx",
         "add",
@@ -842,6 +1394,7 @@ fn set_unqualified_writes_default_only() {
         "local-a",
         "--as",
         "work",
+        "--default",
     ]);
     env.ok(&[
         "cx",
@@ -852,7 +1405,7 @@ fn set_unqualified_writes_default_only() {
         "--as",
         "stage",
     ]);
-    // "work" is the default (first add).
+    // "work" is the default.
 
     env.ok(&["set", "SHARED_NAME", "--value", "unqualified-value"]);
 
@@ -1082,6 +1635,7 @@ fn no_workspace_colon_name_is_never_split() {
 #[test]
 fn bulk_set_unqualified_lands_in_workspace_default() {
     let env = WorkspaceEnv::new();
+    // #341: `--default` makes "work" explicitly default.
     env.ok(&[
         "cx",
         "add",
@@ -1090,6 +1644,7 @@ fn bulk_set_unqualified_lands_in_workspace_default() {
         "local-a",
         "--as",
         "work",
+        "--default",
     ]);
     env.ok(&[
         "cx",
@@ -1100,7 +1655,7 @@ fn bulk_set_unqualified_lands_in_workspace_default() {
         "--as",
         "stage",
     ]);
-    // "work" is the default (first add), which differs from the top-level
+    // "work" is the default, which differs from the top-level
     // active backend/vault a no-workspace command would have used.
 
     env.ok(&["set", "BULK_B=b", "BULK_C=c"]);
@@ -1228,6 +1783,7 @@ fn delete_qualified_targets_named_vault() {
 #[test]
 fn delete_group_unqualified_targets_default_only() {
     let env = WorkspaceEnv::new();
+    // #341: `--default` makes "work" explicitly default.
     env.ok(&[
         "cx",
         "add",
@@ -1236,6 +1792,7 @@ fn delete_group_unqualified_targets_default_only() {
         "local-a",
         "--as",
         "work",
+        "--default",
     ]);
     env.ok(&[
         "cx",
@@ -1391,9 +1948,11 @@ fn rotate_qualified_targets_named_vault() {
 #[cfg_attr(not(feature = "aws"), ignore = "requires the aws feature")]
 fn rotate_native_capability_gate_reflects_resolved_target_not_workspace_default() {
     let env = WorkspaceEnv::new();
-    // aws-mock (rotation-capable) becomes the workspace default (first
-    // add). `--force` skips the vault-exists probe, which would otherwise
-    // need a real network round-trip against the fake endpoint.
+    // aws-mock (rotation-capable) becomes the workspace default. `--force`
+    // skips the vault-exists probe, which would otherwise need a real
+    // network round-trip against the fake endpoint. #341: `--default` makes
+    // "cloud" explicitly default (the first add now also auto-attaches the
+    // current vault, which would otherwise become the implicit default).
     env.ok(&[
         "cx",
         "add",
@@ -1403,6 +1962,7 @@ fn rotate_native_capability_gate_reflects_resolved_target_not_workspace_default(
         "--as",
         "cloud",
         "--force",
+        "--default",
     ]);
 
     // The process's top-level active backend (xv.conf's plain `backend =
@@ -1653,6 +2213,7 @@ fn purge_unqualified_targets_default_never_searches() {
 #[test]
 fn restore_and_purge_unqualified_target_default() {
     let env = WorkspaceEnv::new();
+    // #341: `--default` makes "work" explicitly default.
     env.ok(&[
         "cx",
         "add",
@@ -1661,6 +2222,7 @@ fn restore_and_purge_unqualified_target_default() {
         "local-a",
         "--as",
         "work",
+        "--default",
     ]);
     env.ok(&[
         "cx",
@@ -1851,15 +2413,10 @@ fn ls_single_vault_output_unchanged() {
         "sanity: no VAULT *column* pre-workspace: {before}"
     );
 
-    env.ok(&[
-        "cx",
-        "add",
-        "default",
-        "--backend",
-        "local-a",
-        "--as",
-        "work",
-    ]);
+    // #341: request the SAME (backend, vault) as the current one ("local",
+    // "default") so no second vault gets auto-attached — this pin is
+    // specifically about a genuine single-entry workspace.
+    env.ok(&["cx", "add", "default", "--backend", "local", "--as", "work"]);
     env.ok(&["set", "work:PINNED_SECRET", "--value", "v1"]);
     let after = env.ok(&["ls", "--format", "table"]);
 
@@ -1886,15 +2443,10 @@ fn ls_single_vault_names_only_output_unchanged() {
         "sanity: no alias prefix pre-workspace: {before}"
     );
 
-    env.ok(&[
-        "cx",
-        "add",
-        "default",
-        "--backend",
-        "local-a",
-        "--as",
-        "work",
-    ]);
+    // #341: request the SAME (backend, vault) as the current one ("local",
+    // "default") so no second vault gets auto-attached — this pin is
+    // specifically about a genuine single-entry workspace.
+    env.ok(&["cx", "add", "default", "--backend", "local", "--as", "work"]);
     env.ok(&["set", "work:PINNED_SECRET", "--value", "v1"]);
     let after = env.ok(&["ls", "--names-only"]);
 
@@ -2236,14 +2788,16 @@ fn workspace_write_invalidates_entry_seen_by_no_workspace_ls() {
     ]);
     env.ok(&["set", "work:NEW_SECRET", "--value", "v1"]);
 
-    // Step 3: remove the workspace (its only entry — this restores
-    // single-vault behavior) and read again via the NO-WORKSPACE path with
-    // the SAME active backend. If the workspace write's invalidation key
-    // ("local-a") diverged from what step 1's read populated
-    // (`config.effective_backend_name()`, also "local-a" when they're the
-    // same backend), this read would still serve the STALE `seed_listing`
-    // from step 1, missing NEW_SECRET entirely.
+    // Step 3: remove the workspace entirely (#341: the first `cx add` also
+    // auto-attached the then-current vault as a "default" alias, so both
+    // entries must be removed to fully restore single-vault behavior) and
+    // read again via the NO-WORKSPACE path with the SAME active backend. If
+    // the workspace write's invalidation key ("local-a") diverged from what
+    // step 1's read populated (`config.effective_backend_name()`, also
+    // "local-a" when they're the same backend), this read would still serve
+    // the STALE `seed_listing` from step 1, missing NEW_SECRET entirely.
     env.ok(&["cx", "rm", "work"]);
+    env.ok(&["cx", "rm", "default"]);
     let no_workspace_listing = env.ok_with_backend("local-a", &["ls", "--format", "table"]);
     assert!(
         no_workspace_listing.contains("NEW_SECRET"),
@@ -2299,13 +2853,17 @@ fn find_unions_workspace() {
 #[test]
 fn find_all_vaults_still_superset() {
     let env = WorkspaceEnv::new();
-    // Written to the top-level active ("local") backend directly, BEFORE
-    // any workspace is attached — once a workspace exists, an unqualified
-    // write always targets the workspace's default entry instead (spec
-    // §Write semantics: unqualified writes never search, never fall back to
-    // "the top-level active backend"), so this ordering is required to land
-    // the secret in the unattached top-level vault at all.
+    // Written to a SEPARATE vault ("toplevel-vault") on the top-level active
+    // ("local") backend, via `context use` — #341: the first `cx add` now
+    // auto-attaches whatever vault `resolve_vault_name(None)` currently
+    // resolves to (this env's `default_vault`, "default"), so writing
+    // TOPLEVEL_ONLY there instead (as this test used to) would make it part
+    // of the workspace via auto-attach, defeating the "unattached top-level
+    // vault" premise this test needs.
+    env.ok(&["vault", "create", "toplevel-vault"]);
+    env.ok(&["context", "use", "toplevel-vault"]);
     env.ok(&["set", "TOPLEVEL_ONLY", "--value", "v2"]);
+    env.ok(&["context", "use", "default"]);
 
     env.ok(&[
         "cx",
@@ -2499,6 +3057,13 @@ fn inject_alias_uri_resolves() {
     // backend's own default vault ("default"/store_default) — proving alias
     // resolution and the raw-vault-name fallback are genuinely distinct
     // code paths, not accidentally the same one.
+    //
+    // #341: the first `cx add` auto-attaches the currently-resolved vault
+    // aliased by ITS OWN name — which would also be "default" here, colliding
+    // with this test's deliberate `--as default`. Shift the current vault via
+    // `context use` first so the auto-attach candidate's alias is "seed"
+    // instead, leaving "default" free for this test's explicit alias.
+    env.ok(&["context", "use", "seed"]);
     env.ok(&[
         "cx",
         "add",
@@ -2571,6 +3136,12 @@ fn inject_backend_qualified_uri_bypasses_alias() {
     let env = WorkspaceEnv::new();
     // Top-level active backend's own "default" vault gets one value...
     env.ok(&["set", "RAW_SECRET", "--value", "raw-active-value"]);
+    // #341: the first `cx add` auto-attaches the currently-resolved vault
+    // aliased by ITS OWN name, which would also be "default" here, colliding
+    // with this test's deliberate `--as default`. Shift the current vault
+    // via `context use` so the auto-attach candidate's alias is "seed"
+    // instead — RAW_SECRET (already written, above) stays put in "default".
+    env.ok(&["context", "use", "seed"]);
     // ...while the ATTACHED ALIAS "default" (same string!) points somewhere
     // else entirely (local-a's "default" vault) with a DIFFERENT value.
     env.ok(&[
@@ -3030,6 +3601,12 @@ fn uri_alias_precedence_over_raw_vault_of_same_name() {
     // Raw vault "default" on the ACTIVE (top-level "local") backend, BEFORE
     // any workspace exists.
     env.ok(&["set", "RAW_SECRET", "--value", "raw-active-value"]);
+    // #341: the first `cx add` auto-attaches the currently-resolved vault
+    // aliased by ITS OWN name, which would also be "default" here, colliding
+    // with this test's deliberate `--as default`. Shift the current vault
+    // via `context use` so the auto-attach candidate's alias is "seed"
+    // instead — RAW_SECRET (already written, above) stays put in "default".
+    env.ok(&["context", "use", "seed"]);
     // Alias "default" attached on a DIFFERENT backend (local-a), same NAME
     // as the raw vault above.
     env.ok(&[

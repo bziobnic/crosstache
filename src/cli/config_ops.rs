@@ -1476,7 +1476,95 @@ async fn execute_cx_add(
         )));
     }
 
-    // Probe the vault exists unless --force (offline setup).
+    // #341 fix: on the very first `cx add` (no workspace exists yet), the
+    // OLD behavior attached only the requested vault, making it the
+    // workspace's sole (and therefore default) entry. That silently
+    // dropped whatever vault was previously "current" — `xv ls`
+    // immediately after `cx add` would stop showing those secrets, which
+    // violates the natural reading of "add" ("add another vault to what I
+    // already have open"). So the first `cx add` now auto-attaches the
+    // CURRENTLY-RESOLVED vault (the effective backend + whatever
+    // `resolve_vault_name(None)` returns, aliased by its own vault name)
+    // as the workspace's default, then attaches the requested vault
+    // alongside it — unless the requested vault already resolves to that
+    // same (backend, vault) pair, in which case the pre-#341 single-entry
+    // behavior is unchanged, or the current vault can't be resolved at
+    // all (fresh setup, no default_vault configured), in which case we
+    // fall back to the pre-#341 behavior and note it in the message.
+    let is_first = entries.is_empty();
+    let mut auto_attach: Option<(String, String, String)> = None; // (vault, backend, alias)
+    let mut auto_attach_unavailable_reason: Option<String> = None;
+    if is_first {
+        // "Current backend" must be `pre_flag_backend` UNCONDITIONALLY, not
+        // `effective_backend_name()` gated on whether THIS subcommand's own
+        // `backend` field is `Some`. Two ways a `--backend` flag can poison
+        // `effective_backend_name()` into reporting the just-REQUESTED
+        // backend instead of the one already in use:
+        //   1. `xv cx add <vault> --backend X` — the subcommand's own
+        //      `--backend` flag shares its long name with the top-level
+        //      `global = true` `--backend` flag on `Cli` (see the doc
+        //      comment on `ContextCommands::Add::backend`), so clap folds
+        //      BOTH to the same value X.
+        //   2. `xv --backend X cx add <vault>` — the TOP-LEVEL flag alone,
+        //      placed before the subcommand, with the subcommand's own
+        //      `backend` field left `None`. `cli_backend_was_arg` is still
+        //      true and X still wins in `effective_backend_name()`, so
+        //      gating on the subcommand field alone (`backend_was_explicit`)
+        //      missed this case entirely (Bugbot review, MEDIUM, PR #343).
+        // `pre_flag_backend` (the profile-aware effective backend,
+        // snapshotted in main.rs BEFORE ANY of this invocation's
+        // `--backend` flags — CLI or subcommand — are folded in) is
+        // unconditionally the right "backend already in use" signal for
+        // all three cases (no flag / subcommand flag / top-level flag): when
+        // no flag was passed at all, it's identical to
+        // `effective_backend_name()`, so this is behavior-preserving there.
+        // NOT `disk_backend` either, which under-counts a `.xv.toml` env
+        // profile's `backend` (it outranks the config file / `XV_BACKEND`
+        // layer; #341 code review, MAJOR).
+        //
+        // `pre_flag_backend` is `None` when main.rs could not faithfully
+        // resolve it — specifically, an active `.xv.toml` env profile
+        // declaring an INVALID `backend` string. Guessing a fallback there
+        // (e.g. `disk_backend`) would be actively wrong: `resolve_vault_name`
+        // below still honors the profile's `vault`, so a guessed backend
+        // would pair that vault with the WRONG backend, and auto-attach
+        // would persist that mismatched pair as the workspace's DEFAULT
+        // entry — breaking every subsequent `ls`/write against it (Bugbot
+        // review, MEDIUM, PR #343). So when it's `None`, skip auto-attach
+        // entirely (same fall-back path as "current vault unresolvable"):
+        // no guessing, no auto-attach, just the pre-#341 single-entry
+        // behavior with an explanatory note.
+        match config.pre_flag_backend.clone() {
+            None => {
+                auto_attach_unavailable_reason = Some(
+                    "current backend could not be determined (invalid backend in .xv.toml \
+                     profile?)"
+                        .to_string(),
+                );
+            }
+            Some(current_backend) => match config.resolve_vault_name(None).await {
+                Ok(current_vault) => {
+                    if current_vault != vault || current_backend != backend_name {
+                        let current_alias = current_vault.clone();
+                        // Alias collision must be caught BEFORE any probing or
+                        // writes (requirement: fail-closed, nothing persisted).
+                        if current_alias == alias {
+                            return Err(CrosstacheError::invalid_argument(format!(
+                                "workspace alias '{alias}' is already attached (vault '{current_vault}')"
+                            )));
+                        }
+                        auto_attach = Some((current_vault, current_backend, current_alias));
+                    }
+                }
+                Err(e) => {
+                    auto_attach_unavailable_reason = Some(e.to_string());
+                }
+            },
+        }
+    }
+
+    // Probe the requested vault exists unless --force (offline setup). The
+    // auto-attached current vault is never probed — it was already in use.
     if !force {
         let probe_registry =
             crate::backend::BackendRegistry::with_lazy(config, std::slice::from_ref(&backend_name))
@@ -1500,19 +1588,35 @@ async fn execute_cx_add(
     }
 
     // First attached vault becomes the default implicitly; `--default`
-    // explicitly reassigns (clearing any prior default).
-    let is_first = entries.is_empty();
-    if default || is_first {
+    // explicitly reassigns (clearing any prior default). When the current
+    // vault was auto-attached, "first attached vault" means the current
+    // vault, not the requested one — `--default` is required to make the
+    // requested vault the default instead.
+    if default || (is_first && auto_attach.is_none()) {
         for e in entries.iter_mut() {
             e.default = false;
         }
     }
 
+    if let Some((auto_vault, auto_backend, auto_alias)) = auto_attach.clone() {
+        entries.push(WorkspaceEntryConfig {
+            vault: auto_vault,
+            backend: Some(auto_backend),
+            alias: Some(auto_alias),
+            default: !default,
+        });
+    }
+
+    let requested_default = if auto_attach.is_some() {
+        default
+    } else {
+        default || is_first
+    };
     entries.push(WorkspaceEntryConfig {
         vault: vault.to_string(),
         backend: Some(backend_name.clone()),
         alias: Some(alias.clone()),
-        default: default || is_first,
+        default: requested_default,
     });
 
     // Validate before persisting (fail-closed): duplicate aliases,
@@ -1538,14 +1642,28 @@ async fn execute_cx_add(
     context_manager.workspace = Some(crate::workspace::WorkspaceState { entries });
     context_manager.save().await?;
 
-    output::success(&format!(
-        "Attached vault '{vault}' as '{alias}' (backend: {backend_name}){}",
-        if default || is_first {
-            " [default]"
-        } else {
-            ""
-        }
-    ));
+    if let Some((_auto_vault, auto_backend, auto_alias)) = auto_attach {
+        output::success(&format!(
+            "Attached current vault '{auto_alias}' (backend: {auto_backend}){}",
+            if !default { " as default" } else { "" }
+        ));
+        output::success(&format!(
+            "Attached vault '{vault}' as '{alias}' (backend: {backend_name}){}",
+            if default { " as default" } else { "" }
+        ));
+    } else {
+        let fallback_note = auto_attach_unavailable_reason
+            .map(|reason| {
+                format!(
+                    " (could not auto-attach the current vault to preserve #341 behavior: {reason})"
+                )
+            })
+            .unwrap_or_default();
+        output::success(&format!(
+            "Attached vault '{vault}' as '{alias}' (backend: {backend_name}){}{fallback_note}",
+            if requested_default { " [default]" } else { "" }
+        ));
+    }
     Ok(())
 }
 
