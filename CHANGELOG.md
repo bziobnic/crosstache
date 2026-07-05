@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.20.1 — First cx add keeps the current vault attached (2026-07-05)
 
 ### Changed
 
