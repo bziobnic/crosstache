@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.20.0 — Multi-vault workspaces (2026-07-04)
 
 ### Added
 
