@@ -31,13 +31,26 @@ pub(crate) async fn active_or_construct_backend(
         .map_err(|e| CrosstacheError::config(e.to_string()))
 }
 
-/// Resolve the current vault name through the unified workspace seam (the
-/// degenerate workspace-of-one's default entry), replacing legacy
-/// `config.resolve_vault_name(None)` call sites. `resolve_workspace` never
-/// yields `None` (it synthesizes a degenerate workspace-of-one) and preserves
-/// the Azure no-vault hard error, so this returns the exact same vault the
-/// legacy resolver produced.
-pub(crate) async fn resolve_current_vault(config: &Config) -> Result<String> {
+/// Resolve the current vault through the unified workspace seam (the
+/// degenerate workspace-of-one's default entry), returning the PAIRED
+/// `(backend, backend_name, vault)`: the backend that OWNS the vault, its
+/// registry name, and the vault name.
+///
+/// The backend and vault MUST come from the SAME entry — in a multi-vault
+/// workspace the default entry's backend can differ from the process-active
+/// backend, so a caller that read secrets/audit through `reg.active()` while
+/// taking the vault from here would hit the wrong backend (Bugbot PR #346).
+/// The entry's backend is materialized like the secret seam: reuse the process
+/// registry when it already holds it, else build a workspace-scoped lazy
+/// registry from config.
+///
+/// `resolve_workspace` never yields `None` (it synthesizes a degenerate
+/// workspace-of-one) and preserves the Azure no-vault hard error, so the vault
+/// name is exactly what the legacy `config.resolve_vault_name(None)` produced.
+pub(crate) async fn resolve_current_vault(
+    config: &Config,
+    registry: Option<&BackendRegistry>,
+) -> Result<(Arc<dyn Backend>, String, String)> {
     let ws = crate::workspace::resolve_workspace(config)
         .await?
         .ok_or_else(|| {
@@ -46,7 +59,19 @@ pub(crate) async fn resolve_current_vault(config: &Config) -> Result<String> {
                  workspace-of-one must always yield Some or Err",
             )
         })?;
-    Ok(ws.default_entry()?.vault.clone())
+    let entry = ws.default_entry()?;
+    let backend = match registry.and_then(|reg| reg.materialize(&entry.backend).ok()) {
+        Some(b) => b,
+        None => {
+            let ws_registry =
+                BackendRegistry::with_lazy(config, std::slice::from_ref(&entry.backend))
+                    .map_err(|e| CrosstacheError::config(e.to_string()))?;
+            ws_registry
+                .materialize(&entry.backend)
+                .map_err(|e| CrosstacheError::config(e.to_string()))?
+        }
+    };
+    Ok((backend, entry.backend.clone(), entry.vault.clone()))
 }
 
 /// Borrow the vault sub-trait from a materialized backend, or produce the

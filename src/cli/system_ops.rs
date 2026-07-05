@@ -92,11 +92,25 @@ pub(crate) async fn execute_audit_command(
     config: Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    // Materialize the resolved backend (reuse the registry, or construct the
-    // config-requested backend when startup could not build it). Every backend
-    // — including Azure — now surfaces its audit trail through the `AuditBackend`
-    // trait; the Azure adapter honors an explicit `--resource-group` override.
-    let backend = crate::cli::vault_ops::active_or_construct_backend(registry, &config).await?;
+    // Resolve the backend + vault the audit targets, PAIRED. An explicit
+    // `--vault` uses the active/requested backend; otherwise the workspace
+    // default ENTRY supplies BOTH the vault and its backend (they can differ
+    // from the process-active backend in a multi-vault workspace, so the
+    // auditor must come from the same entry as the vault — Bugbot PR #346).
+    // Every backend — including Azure — surfaces its audit trail through the
+    // `AuditBackend` trait; the Azure adapter honors an explicit
+    // `--resource-group` override.
+    let (backend, vault_name) = match vault {
+        Some(v) => (
+            crate::cli::vault_ops::active_or_construct_backend(registry, &config).await?,
+            v,
+        ),
+        None => {
+            let (backend, _backend_name, vault) =
+                crate::cli::vault_ops::resolve_current_vault(&config, registry).await?;
+            (backend, vault)
+        }
+    };
 
     // Capability check on the RESOLVED backend.
     if !backend.capabilities().has_audit {
@@ -115,7 +129,7 @@ pub(crate) async fn execute_audit_command(
     execute_backend_audit(
         auditor,
         name,
-        vault,
+        vault_name,
         days,
         operation,
         resource_group_override.as_deref(),
@@ -129,20 +143,14 @@ pub(crate) async fn execute_audit_command(
 async fn execute_backend_audit(
     auditor: &dyn crate::backend::AuditBackend,
     name: Option<String>,
-    vault: Option<String>,
+    vault_name: String,
     days: u32,
     operation: Option<String>,
     resource_group: Option<&str>,
     config: &Config,
 ) -> Result<()> {
-    // An explicit vault argument wins; otherwise resolve the current vault
-    // through the unified workspace seam (matching legacy
-    // `resolve_vault_name(None)` for the degenerate workspace-of-one).
-    let vault_name = match vault {
-        Some(v) => v,
-        None => crate::cli::vault_ops::resolve_current_vault(config).await?,
-    };
-
+    // `vault_name` and `auditor` are resolved together by the caller, so the
+    // audit query always runs against the backend that owns the vault.
     output::step(&format!("Fetching audit logs for {} days...", days));
 
     let mut events: Vec<crate::backend::AuditEvent> = if let Some(secret_name) = name {

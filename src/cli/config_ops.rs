@@ -2207,10 +2207,13 @@ async fn execute_env_pull(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
-    let secrets_backend = reg.active().secrets();
-
-    // Determine the current vault through the unified workspace seam.
-    let vault_name = crate::cli::vault_ops::resolve_current_vault(config).await?;
+    // Resolve the current vault AND the backend that owns it together — the
+    // workspace default entry's backend can differ from the active backend, so
+    // reading/writing through `reg.active()` while taking the vault from the
+    // entry would hit the wrong backend (Bugbot PR #346).
+    let (backend, _backend_name, vault_name) =
+        crate::cli::vault_ops::resolve_current_vault(config, Some(reg)).await?;
+    let secrets_backend = backend.secrets();
 
     eprintln!("Pulling secrets from vault '{}'...", vault_name);
 
@@ -2357,10 +2360,13 @@ async fn execute_env_push(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
-    let secrets_backend = reg.active().secrets();
-
-    // Determine the current vault through the unified workspace seam.
-    let vault_name = crate::cli::vault_ops::resolve_current_vault(config).await?;
+    // Resolve the current vault AND the backend that owns it together — the
+    // workspace default entry's backend can differ from the active backend, so
+    // reading/writing through `reg.active()` while taking the vault from the
+    // entry would hit the wrong backend (Bugbot PR #346).
+    let (backend, _backend_name, vault_name) =
+        crate::cli::vault_ops::resolve_current_vault(config, Some(reg)).await?;
+    let secrets_backend = backend.secrets();
 
     // Read .env content from file or stdin
     let env_content = if let Some(file_path) = file {
