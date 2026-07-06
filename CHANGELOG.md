@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## v0.22.0 — Vault alias ergonomics (2026-07-06)
 
 ### Added
 
