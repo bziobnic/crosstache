@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.21.0 — Multi-backend workspace convergence (2026-07-05)
 
 ### Changed
 
