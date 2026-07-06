@@ -988,6 +988,14 @@ pub(crate) async fn execute_context_command(
         ContextCommands::Default { alias, local } => {
             execute_cx_default(&alias, local, &config).await?;
         }
+        ContextCommands::Alias {
+            entry,
+            new_alias,
+            reset,
+            local,
+        } => {
+            execute_cx_alias(&entry, new_alias, reset, local, &config).await?;
+        }
         ContextCommands::Ls => {
             execute_cx_ls(&config).await?;
         }
@@ -1741,6 +1749,137 @@ async fn execute_cx_default(alias: &str, local: bool, config: &Config) -> Result
     context_manager.workspace = Some(ws_state);
     context_manager.save().await?;
     output::success(&format!("'{alias}' is now the workspace default"));
+    Ok(())
+}
+
+/// Locate the entry to re-alias: an exact alias match first (aliases are
+/// unique), then a vault-name match. A vault name can match several attached
+/// entries (same vault name on different backends), which is ambiguous — list
+/// the candidates and ask the user to disambiguate by alias.
+fn resolve_alias_target_index(
+    entries: &[crate::workspace::WorkspaceEntryConfig],
+    entry: &str,
+) -> Result<usize> {
+    if let Some(i) = entries.iter().position(|e| e.resolved_alias() == entry) {
+        return Ok(i);
+    }
+    let matches: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.vault == entry)
+        .map(|(i, _)| i)
+        .collect();
+    match matches.as_slice() {
+        [i] => Ok(*i),
+        [] => {
+            let attached: Vec<String> = entries.iter().map(|e| e.resolved_alias()).collect();
+            Err(CrosstacheError::invalid_argument(format!(
+                "unknown workspace entry '{entry}'; attached aliases: {}",
+                attached.join(", ")
+            )))
+        }
+        _ => {
+            let candidates: Vec<String> = matches
+                .iter()
+                .map(|&i| {
+                    let e = &entries[i];
+                    format!(
+                        "alias '{}' (backend '{}')",
+                        e.resolved_alias(),
+                        e.backend.clone().unwrap_or_else(|| "active".to_string())
+                    )
+                })
+                .collect();
+            Err(CrosstacheError::invalid_argument(format!(
+                "vault name '{entry}' matches multiple attached entries; disambiguate by alias: {}",
+                candidates.join(", ")
+            )))
+        }
+    }
+}
+
+/// `xv cx alias <entry> <new-alias>` / `xv cx alias <entry> --reset`.
+/// Renames the alias on an attached entry (looked up by its current alias or
+/// its vault name), or resets it back to the vault name. Reuses the same
+/// validation as `cx add` (charset, uniqueness, backend-name collision).
+async fn execute_cx_alias(
+    entry: &str,
+    new_alias: Option<String>,
+    reset: bool,
+    local: bool,
+    config: &Config,
+) -> Result<()> {
+    guard_against_project_vaults_overlay(config).await?;
+
+    if reset && new_alias.is_some() {
+        return Err(CrosstacheError::invalid_argument(
+            "pass either a new alias or --reset, not both",
+        ));
+    }
+    if !reset && new_alias.is_none() {
+        return Err(CrosstacheError::invalid_argument(
+            "provide a new alias, or use --reset to restore the vault name",
+        ));
+    }
+
+    let mut context_manager = load_cx_context(local).await?;
+    let mut ws_state = context_manager.workspace.clone().unwrap_or_default();
+
+    if ws_state.entries.is_empty() {
+        return Err(CrosstacheError::config("no workspace is attached"));
+    }
+
+    let idx = resolve_alias_target_index(&ws_state.entries, entry)?;
+    let target_vault = ws_state.entries[idx].vault.clone();
+    let old = ws_state.entries[idx].resolved_alias();
+    // --reset restores the vault name; aliases default to the vault name, so a
+    // "reset" is just clearing the explicit alias.
+    let new = if reset {
+        target_vault.clone()
+    } else {
+        new_alias.unwrap_or_default()
+    };
+
+    if old == new {
+        output::success(&format!(
+            "alias for '{entry}' is already '{new}'; nothing to change"
+        ));
+        return Ok(());
+    }
+
+    // Store the alias explicitly, except when it equals the vault name (drop to
+    // None so `resolved_alias()` derives it) — keeping the persisted shape
+    // identical to `cx add`'s default-alias case.
+    ws_state.entries[idx].alias = if new == target_vault {
+        None
+    } else {
+        Some(new.clone())
+    };
+
+    // Validate the mutated workspace (charset, duplicate alias, backend-name
+    // collision, exactly-one-default) via the same path `cx add` uses; the new
+    // alias — or the vault name on --reset — must pass unchanged, no fallback.
+    let active_backend = config.effective_backend_name().to_string();
+    let mut backend_names: Vec<String> = crate::workspace::BUILTIN_BACKEND_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for k in config.named_backends.keys() {
+        if !backend_names.iter().any(|n| n == k) {
+            backend_names.push(k.clone());
+        }
+    }
+    let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
+    crate::workspace::build_workspace(
+        &ws_state.entries,
+        &active_backend,
+        crate::workspace::WorkspaceSource::Context,
+        &backend_name_refs,
+    )?;
+
+    context_manager.workspace = Some(ws_state);
+    context_manager.save().await?;
+    output::success(&format!("renamed alias '{old}' to '{new}'"));
     Ok(())
 }
 
@@ -2567,5 +2706,70 @@ mod tests {
         // happens at the call site in execute_config_edit.
         let got = resolve_editor_from(Some("code --wait".into()), None);
         assert_eq!(got, "code --wait");
+    }
+
+    mod resolve_alias_target {
+        use super::super::resolve_alias_target_index;
+        use crate::workspace::WorkspaceEntryConfig;
+
+        fn entry(
+            vault: &str,
+            backend: &str,
+            alias: Option<&str>,
+            default: bool,
+        ) -> WorkspaceEntryConfig {
+            WorkspaceEntryConfig {
+                vault: vault.to_string(),
+                backend: Some(backend.to_string()),
+                alias: alias.map(str::to_string),
+                default,
+            }
+        }
+
+        #[test]
+        fn matches_by_alias_first() {
+            let entries = vec![
+                entry("vault-a", "local", Some("a"), true),
+                entry("vault-b", "local", Some("b"), false),
+            ];
+            assert_eq!(resolve_alias_target_index(&entries, "b").unwrap(), 1);
+        }
+
+        #[test]
+        fn falls_back_to_a_unique_vault_name() {
+            let entries = vec![
+                entry("kv-scottzionic", "local", Some("kv"), true),
+                entry("other", "local", None, false),
+            ];
+            // Addressed by vault name, not alias.
+            assert_eq!(
+                resolve_alias_target_index(&entries, "kv-scottzionic").unwrap(),
+                0
+            );
+        }
+
+        #[test]
+        fn ambiguous_vault_name_across_backends_lists_candidates() {
+            // Same vault name attached on two backends: the vault name alone is
+            // ambiguous, so it must error and name the aliases to disambiguate.
+            let entries = vec![
+                entry("shared", "local", Some("a"), true),
+                entry("shared", "aws", Some("b"), false),
+            ];
+            let err = resolve_alias_target_index(&entries, "shared").unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("matches multiple attached entries"), "{msg}");
+            assert!(
+                msg.contains("alias 'a'") && msg.contains("alias 'b'"),
+                "{msg}"
+            );
+        }
+
+        #[test]
+        fn unknown_entry_lists_attached_aliases() {
+            let entries = vec![entry("vault-a", "local", Some("a"), true)];
+            let err = resolve_alias_target_index(&entries, "nope").unwrap_err();
+            assert!(err.to_string().contains("unknown workspace entry"), "{err}");
+        }
     }
 }

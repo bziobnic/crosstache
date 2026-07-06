@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`--alias` spelling for `cx add`.** `xv cx add <vault> --alias <name>` now
+  works as a visible alias of the existing `--as` flag, matching the spelling
+  most users reach for first. Both spellings are equivalent.
+- **`xv cx alias <entry> <new-alias>` to re-alias an attached entry.** Rename
+  the alias on any attached vault — including the default entry — addressing it
+  by its current alias or its vault name (ambiguous vault names across backends
+  error and list the candidates). `xv cx alias <entry> --reset` restores the
+  vault name. Renames reuse the same validation as `cx add` (charset,
+  uniqueness, no collision with a backend name); a `.xv.toml`-defined workspace
+  is refused with a pointer to the file, matching `cx add`/`rm`/`default`.
+
+### Changed
+
+- **`xv ls -l` shows the real vault name behind an alias.** In a multi-vault
+  workspace, the long listing now appends the backing vault name to each row
+  whose alias differs from it — e.g. `kv/SECRET (kv-scottzionic)` — so `-l`
+  identifies the actual vault even when the alias was renamed. Rows whose
+  alias equals the vault name are unchanged, and the default grid view, the
+  `--format table` Vault column, and single-vault/no-workspace `ls -l` output
+  are all byte-identical to before.
+
 ## v0.21.0 — Multi-backend workspace convergence (2026-07-05)
 
 ### Changed

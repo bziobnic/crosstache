@@ -1187,10 +1187,20 @@ const SECRET_LIST_NOTE_WRAP_WIDTH: usize = 40;
 /// existing folder-scoping/sort/render helper unchanged.
 const WORKSPACE_ALIAS_TAG: &str = "__xv_workspace_alias";
 
+/// Companion to [`WORKSPACE_ALIAS_TAG`] carrying the entry's real vault name,
+/// so the long (`-l`) view can show the actual vault behind an alias.
+const WORKSPACE_VAULT_TAG: &str = "__xv_workspace_vault";
+
 /// Read back a [`WORKSPACE_ALIAS_TAG`] value stashed by the union `ls` path.
 /// `None` for ordinary (non-workspace or single-vault) listings.
 fn workspace_alias_of(s: &crate::secret::manager::SecretSummary) -> Option<&str> {
     s.tags.get(WORKSPACE_ALIAS_TAG).map(String::as_str)
+}
+
+/// Read back the [`WORKSPACE_VAULT_TAG`] value (the entry's real vault name).
+/// `None` for ordinary (non-workspace or single-vault) listings.
+fn workspace_vault_of(s: &crate::secret::manager::SecretSummary) -> Option<&str> {
+    s.tags.get(WORKSPACE_VAULT_TAG).map(String::as_str)
 }
 
 #[derive(Debug, Clone, serde::Serialize, tabled::Tabled)]
@@ -1778,6 +1788,9 @@ pub(crate) fn display_cached_secret_list(
     // to — union listings instead prefix `alias/` onto the displayed name,
     // mirroring `find`'s existing vault-prefix convention (folder entries
     // are virtual groupings that can span vaults, so they stay unprefixed).
+    // The long (`-l`) view additionally appends the real vault name when it
+    // differs from the alias, so `-l` identifies the backing vault (aliases
+    // can be renamed) without the grid/table views changing.
     let entries: Vec<LsEntry> = if show_vault {
         entries
             .into_iter()
@@ -1785,7 +1798,11 @@ pub(crate) fn display_cached_secret_list(
                 LsEntry::Secret(mut s) => {
                     if let Some(alias) = workspace_alias_of(&s) {
                         let label = ls_view::display_name(&s).to_string();
-                        s.original_name = format!("{alias}/{label}");
+                        let vault_suffix = match workspace_vault_of(&s).filter(|_| long) {
+                            Some(vault) if vault != alias => format!(" ({vault})"),
+                            _ => String::new(),
+                        };
+                        s.original_name = format!("{alias}/{label}{vault_suffix}");
                     }
                     LsEntry::Secret(s)
                 }
@@ -2381,6 +2398,8 @@ async fn execute_secret_list_workspace(
         for s in &mut secrets {
             s.tags
                 .insert(WORKSPACE_ALIAS_TAG.to_string(), entry.alias.clone());
+            s.tags
+                .insert(WORKSPACE_VAULT_TAG.to_string(), entry.vault.clone());
         }
         merged.extend(secrets);
     }
