@@ -14,6 +14,6 @@ changes without adding redundant pages.
       local backend file/sync support while preserving the AWS sync limitation.
 - [x] Update `docs/FEATURES.md` capability and command-reference rows so local
       file operations and workspace context commands match shipped behavior.
-- [ ] Verify changed docs against source/tests and run an appropriate
+- [x] Verify changed docs against source/tests and run an appropriate
       docs-only validation command.
-- [ ] Commit, rebase, push, and open the documentation PR.
+- [x] Prepare the branch handoff after verification.
