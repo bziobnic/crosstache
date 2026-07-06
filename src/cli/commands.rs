@@ -1509,7 +1509,7 @@ pub enum ContextCommands {
         #[arg(long)]
         backend: Option<String>,
         /// Alias for this entry (defaults to the vault name)
-        #[arg(long = "as")]
+        #[arg(long = "as", visible_alias = "alias")]
         r#as: Option<String>,
         /// Make this the workspace's default (write target) vault
         #[arg(long)]
@@ -1533,6 +1533,19 @@ pub enum ContextCommands {
     Default {
         /// Alias to make the new default
         alias: String,
+        /// Operate on the local (per-directory) context instead of global
+        #[arg(long)]
+        local: bool,
+    },
+    /// Rename (or reset) the alias on an attached entry
+    Alias {
+        /// Entry to re-alias: its current alias, or its vault name
+        entry: String,
+        /// The new alias (omit when using --reset)
+        new_alias: Option<String>,
+        /// Reset the alias back to the entry's vault name
+        #[arg(long)]
+        reset: bool,
         /// Operate on the local (per-directory) context instead of global
         #[arg(long)]
         local: bool,
