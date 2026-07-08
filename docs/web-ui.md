@@ -7,6 +7,13 @@ port on 127.0.0.1, prints a tokenized URL, and opens your browser
 Everything the UI does goes through the same backend layer as the CLI, so
 all backends (Azure, AWS, local) work, including offline local vaults.
 
+Scope note: the UI operates on the **active backend** — the vault switcher
+lists that backend's vaults and every operation targets it. Multi-backend
+workspaces (`xv cx` attached vaults and aliases) are not resolved here yet;
+like `xv gen` or `xv find --all-vaults`, the UI uses the context/config
+default vault, not the workspace seam. Workspace-aware switching is tracked
+as a follow-up.
+
 Security model: loopback bind only; per-session bearer token (the `?token=`
 in the URL, held in page memory); Host/Origin validation; secret values only
 in POST bodies; `Cache-Control: no-store`. There is no TLS and no login —
