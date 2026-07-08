@@ -403,12 +403,16 @@ pub(crate) mod files {
         let backend = files_backend(&state)?;
         let info = backend.get_file_info(vault, &name).await?;
         let bytes = backend.download_file(vault, &name, None).await?;
+        // Escape \ then " so an untrusted filename can't break out of the
+        // quoted-string and forge extra header parameters. CRLF is already
+        // rejected by HeaderValue parsing.
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
         Ok((
             [
                 (header::CONTENT_TYPE, info.content_type),
                 (
                     header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{name}\""),
+                    format!("attachment; filename=\"{escaped}\""),
                 ),
             ],
             bytes,
@@ -638,5 +642,42 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = get_json(app, "GET", "/api/files/notes.txt", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn download_escapes_quotes_in_content_disposition() {
+        let app = crate::web::build_router(testutil::test_state());
+
+        // upload a file whose name contains a double quote
+        let body = "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"he\\\"llo.txt\"\r\nContent-Type: text/plain\r\n\r\nx\r\n--B--\r\n";
+        let res = app
+            .clone()
+            .oneshot(
+                Request::post("/api/files")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // download it (quote percent-encoded in the path)
+        let res = app
+            .oneshot(
+                Request::get("/api/files/he%22llo.txt")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cd = res.headers()["content-disposition"].to_str().unwrap();
+        assert_eq!(cd, "attachment; filename=\"he\\\"llo.txt\"");
     }
 }
