@@ -17,10 +17,12 @@ use sha2::{Digest, Sha256};
 use super::WebState;
 
 fn is_loopback_name(host_port: &str) -> bool {
-    let name = host_port
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(host_port);
+    // Only strip a real numeric port; "localhost:evil.example.com" must not
+    // parse as name "localhost".
+    let name = match host_port.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host_port,
+    };
     name == "127.0.0.1" || name == "localhost"
 }
 
@@ -85,13 +87,15 @@ mod tests {
 
     fn protected_app(token: &str) -> Router {
         let state = crate::web::testutil::test_state_with_token(token);
+        // Last .layer() is outermost: no_store must wrap require_auth so
+        // auth rejections also carry Cache-Control: no-store.
         Router::new()
             .route("/api/ping", get(|| async { "pong" }))
-            .layer(axum::middleware::from_fn(no_store))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 require_auth,
             ))
+            .layer(axum::middleware::from_fn(no_store))
             .with_state(state)
     }
 
@@ -110,6 +114,19 @@ mod tests {
     async fn rejects_missing_token() {
         let res = send(protected_app("sekrit"), None, "127.0.0.1:1", None).await;
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(res.headers()["cache-control"], "no-store");
+    }
+
+    #[tokio::test]
+    async fn rejects_fake_port_host() {
+        let res = send(
+            protected_app("sekrit"),
+            Some("Bearer sekrit"),
+            "localhost:evil.example.com",
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
