@@ -139,12 +139,13 @@ jobs:
           echo "MINISIGN_BIN=./minisign-bin/minisign.exe" >> "$GITHUB_ENV"
 
       - name: Build release binary
-        # Distribution binaries ship ALL backends: tui (read-only UI) + aws
-        # (Secrets Manager / CloudTrail / S3). AWS is a feature-gated dep
-        # (~1.5 MB/service) kept off the default `cargo build` for lean
-        # source builds, but release artifacts are batteries-included so a
-        # downloaded `xv` supports `--backend aws` out of the box.
-        run: cargo build --release --features tui,aws --target ${{ matrix.target }}
+        # Distribution binaries ship ALL backends and UIs: tui (read-only
+        # terminal UI) + ui (embedded web UI) + aws (Secrets Manager /
+        # CloudTrail / S3). These are feature-gated deps kept off the
+        # default `cargo build` for lean source builds, but release
+        # artifacts are batteries-included so a downloaded `xv` supports
+        # `--backend aws` and `xv ui` out of the box.
+        run: cargo build --release --features tui,ui,aws --target ${{ matrix.target }}
 
       - name: Create archive (Windows)
         if: matrix.os == 'windows-latest'
