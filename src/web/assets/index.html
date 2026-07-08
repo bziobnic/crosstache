@@ -1,3 +1,67 @@
-<!doctype html><html><head><meta charset="utf-8"><title>xv</title>
-<link rel="stylesheet" href="/style.css"></head>
-<body><h1>xv web ui — under construction</h1><script src="/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xv</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <strong>xv</strong>
+  <span id="backend-badge"></span>
+  <select id="vault-select" title="vault"></select>
+  <nav>
+    <button id="tab-secrets" class="tab active">Secrets</button>
+    <button id="tab-files" class="tab">Files</button>
+  </nav>
+</header>
+
+<main>
+  <section id="secrets-view">
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="filter secrets…">
+      <button id="new-secret">+ New secret</button>
+    </div>
+    <table id="secrets-table">
+      <thead><tr><th>Name</th><th>Folder</th><th>Groups</th><th>Note</th><th>Updated</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="files-view" hidden>
+    <div id="dropzone">Drop files here or <label class="linkish">browse<input id="file-input" type="file" multiple hidden></label></div>
+    <table id="files-table">
+      <thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Modified</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<aside id="drawer" hidden>
+  <h2 id="drawer-title"></h2>
+  <form id="secret-form">
+    <label>Name <input name="name" required></label>
+    <label>Value
+      <textarea name="value" rows="4" placeholder="(leave blank to keep current value)"></textarea>
+      <span class="row">
+        <button type="button" id="reveal">Reveal</button>
+        <button type="button" id="copy">Copy</button>
+      </span>
+    </label>
+    <label>Folder <input name="folder"></label>
+    <label>Groups (comma-separated) <input name="groups"></label>
+    <label>Note <input name="note"></label>
+    <label>Expires (RFC3339, blank = never) <input name="expires_on" placeholder="2027-01-01T00:00:00Z"></label>
+    <div class="row">
+      <button type="submit" id="save">Save</button>
+      <button type="button" id="delete" class="danger">Delete</button>
+      <button type="button" id="close-drawer">Close</button>
+    </div>
+  </form>
+</aside>
+
+<div id="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
