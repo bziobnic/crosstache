@@ -31,12 +31,16 @@ pub(crate) mod stub {
 
     pub(crate) struct StubBackend {
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
+        #[cfg(feature = "file-ops")]
+        pub files: Mutex<HashMap<String, (Vec<u8>, String)>>,
     }
 
     impl StubBackend {
         pub fn new() -> Self {
             Self {
                 secrets: Mutex::new(HashMap::new()),
+                #[cfg(feature = "file-ops")]
+                files: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -55,11 +59,17 @@ pub(crate) mod stub {
                 has_groups: true,
                 has_notes: true,
                 has_expiry: true,
+                #[cfg(feature = "file-ops")]
+                has_file_storage: true,
                 ..Default::default()
             }
         }
         fn secrets(&self) -> &dyn SecretBackend {
             self
+        }
+        #[cfg(feature = "file-ops")]
+        fn files(&self) -> Option<&dyn crate::backend::FileBackend> {
+            Some(self)
         }
         async fn health_check(&self) -> Result<(), BackendError> {
             Ok(())
@@ -228,6 +238,105 @@ pub(crate) mod stub {
 
         async fn secret_exists(&self, _vault: &str, name: &str) -> Result<bool, BackendError> {
             Ok(self.secrets.lock().unwrap().contains_key(name))
+        }
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[async_trait]
+    impl crate::backend::FileBackend for StubBackend {
+        async fn upload_file(
+            &self,
+            _vault: &str,
+            request: crate::blob::models::FileUploadRequest,
+            _reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
+        ) -> Result<crate::blob::models::FileInfo, BackendError> {
+            let info = file_info(
+                &request.name,
+                request.content.len() as u64,
+                request
+                    .content_type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream"),
+            );
+            self.files.lock().unwrap().insert(
+                request.name.clone(),
+                (request.content, info.content_type.clone()),
+            );
+            Ok(info)
+        }
+
+        async fn download_file(
+            &self,
+            _vault: &str,
+            name: &str,
+            _reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
+        ) -> Result<Vec<u8>, BackendError> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|(b, _)| b.clone())
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
+        }
+
+        async fn list_files(
+            &self,
+            _vault: &str,
+            request: crate::blob::models::FileListRequest,
+        ) -> Result<Vec<crate::blob::models::FileInfo>, BackendError> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(n, _)| request.prefix.as_deref().map_or(true, |p| n.starts_with(p)))
+                .map(|(n, (b, ct))| file_info(n, b.len() as u64, ct))
+                .collect())
+        }
+
+        async fn delete_file(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
+            self.files
+                .lock()
+                .unwrap()
+                .remove(name)
+                .map(|_| ())
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
+        }
+
+        async fn get_file_info(
+            &self,
+            _vault: &str,
+            name: &str,
+        ) -> Result<crate::blob::models::FileInfo, BackendError> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|(b, ct)| file_info(name, b.len() as u64, ct))
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
+        }
+    }
+
+    #[cfg(feature = "file-ops")]
+    fn file_info(name: &str, size: u64, content_type: &str) -> crate::blob::models::FileInfo {
+        crate::blob::models::FileInfo {
+            name: name.to_string(),
+            size,
+            content_type: content_type.to_string(),
+            last_modified: chrono::Utc::now(),
+            etag: String::new(),
+            groups: Vec::new(),
+            metadata: std::collections::HashMap::new(),
+            tags: std::collections::HashMap::new(),
         }
     }
 }

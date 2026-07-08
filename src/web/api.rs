@@ -312,6 +312,122 @@ pub(crate) async fn move_secret(
     }
 }
 
+#[cfg(feature = "file-ops")]
+pub(crate) mod files {
+    use super::*;
+    use crate::backend::FileBackend;
+    use crate::blob::models::{FileListRequest, FileUploadRequest};
+    use axum::extract::Multipart;
+    use axum::http::header;
+
+    fn files_backend<'a>(state: &'a WebState) -> Result<&'a dyn FileBackend, ApiError> {
+        state.backend.files().ok_or_else(|| {
+            ApiError::Status(
+                StatusCode::NOT_IMPLEMENTED,
+                format!("the {} backend has no file storage", state.backend.name()),
+            )
+        })
+    }
+
+    #[derive(Deserialize)]
+    pub(crate) struct FilesQuery {
+        vault: Option<String>,
+        prefix: Option<String>,
+    }
+
+    pub(crate) async fn list_files(
+        State(state): State<Arc<WebState>>,
+        Query(q): Query<FilesQuery>,
+    ) -> Result<Json<Vec<crate::blob::models::FileInfo>>, ApiError> {
+        let vault = q.vault.as_deref().unwrap_or(&state.vault);
+        let request = FileListRequest {
+            prefix: q.prefix,
+            groups: None,
+            limit: None,
+            delimiter: None,
+        };
+        Ok(Json(
+            files_backend(&state)?.list_files(vault, request).await?,
+        ))
+    }
+
+    pub(crate) async fn upload_file(
+        State(state): State<Arc<WebState>>,
+        Query(q): Query<VaultQuery>,
+        mut multipart: Multipart,
+    ) -> Result<Json<crate::blob::models::FileInfo>, ApiError> {
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|e| ApiError::Status(StatusCode::BAD_REQUEST, format!("bad multipart: {e}")))?
+        {
+            if field.name() != Some("file") {
+                continue;
+            }
+            let name = field.file_name().map(str::to_string).ok_or_else(|| {
+                ApiError::Status(StatusCode::BAD_REQUEST, "file part needs a filename".into())
+            })?;
+            let content_type = field.content_type().map(str::to_string);
+            let content = field
+                .bytes()
+                .await
+                .map_err(|e| {
+                    ApiError::Status(StatusCode::BAD_REQUEST, format!("read upload: {e}"))
+                })?
+                .to_vec();
+            let request = FileUploadRequest {
+                name,
+                content,
+                content_type,
+                groups: Vec::new(),
+                metadata: std::collections::HashMap::new(),
+                tags: std::collections::HashMap::new(),
+            };
+            let info = files_backend(&state)?
+                .upload_file(q.vault(&state), request, None)
+                .await?;
+            return Ok(Json(info));
+        }
+        Err(ApiError::Status(
+            StatusCode::BAD_REQUEST,
+            "multipart body needs a 'file' part".into(),
+        ))
+    }
+
+    pub(crate) async fn download_file(
+        State(state): State<Arc<WebState>>,
+        Path(name): Path<String>,
+        Query(q): Query<VaultQuery>,
+    ) -> Result<Response, ApiError> {
+        let vault = q.vault(&state);
+        let backend = files_backend(&state)?;
+        let info = backend.get_file_info(vault, &name).await?;
+        let bytes = backend.download_file(vault, &name, None).await?;
+        Ok((
+            [
+                (header::CONTENT_TYPE, info.content_type),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{name}\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response())
+    }
+
+    pub(crate) async fn delete_file(
+        State(state): State<Arc<WebState>>,
+        Path(name): Path<String>,
+        Query(q): Query<VaultQuery>,
+    ) -> Result<StatusCode, ApiError> {
+        files_backend(&state)?
+            .delete_file(q.vault(&state), &name)
+            .await?;
+        Ok(StatusCode::OK)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -359,6 +475,9 @@ mod tests {
         assert_eq!(json["backend"], "stub");
         assert_eq!(json["vault"], "default");
         assert_eq!(json["capabilities"]["folders"], true);
+        #[cfg(feature = "file-ops")]
+        assert_eq!(json["capabilities"]["files"], true);
+        #[cfg(not(feature = "file-ops"))]
         assert_eq!(json["capabilities"]["files"], false);
     }
 
@@ -465,5 +584,59 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn file_upload_list_download_delete() {
+        let app = crate::web::build_router(testutil::test_state());
+
+        // upload (multipart)
+        let body = "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\nhello files\r\n--B--\r\n";
+        let res = app
+            .clone()
+            .oneshot(
+                Request::post("/api/files")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // list
+        let (status, json_body) = get_json(app.clone(), "GET", "/api/files", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body[0]["name"], "notes.txt");
+
+        // download
+        let res = app
+            .clone()
+            .oneshot(
+                Request::get("/api/files/notes.txt")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "text/plain");
+        assert!(res.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("notes.txt"));
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"hello files");
+
+        // delete
+        let (status, _) = get_json(app.clone(), "DELETE", "/api/files/notes.txt", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = get_json(app, "GET", "/api/files/notes.txt", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

@@ -42,7 +42,20 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
                 .delete(api::delete_secret),
         )
         .route("/secrets/{name}/value", post(api::reveal_secret))
-        .route("/secrets/{name}/move", post(api::move_secret))
+        .route("/secrets/{name}/move", post(api::move_secret));
+
+    #[cfg(feature = "file-ops")]
+    let api = api
+        .route(
+            "/files",
+            get(api::files::list_files).post(api::files::upload_file),
+        )
+        .route(
+            "/files/{name}",
+            get(api::files::download_file).delete(api::files::delete_file),
+        );
+
+    let api = api
         // Last .layer() is outermost: no_store must wrap require_auth so
         // auth rejections also carry Cache-Control: no-store (see auth.rs).
         .layer(axum::middleware::from_fn_with_state(
