@@ -225,5 +225,9 @@ pub(crate) mod stub {
             secrets.insert(name.to_string(), current);
             Ok(props)
         }
+
+        async fn secret_exists(&self, _vault: &str, name: &str) -> Result<bool, BackendError> {
+            Ok(self.secrets.lock().unwrap().contains_key(name))
+        }
     }
 }

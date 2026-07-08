@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::response::Html;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use rand::Rng;
 
@@ -33,6 +33,16 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
         .route("/context", get(api::get_context))
         .route("/vaults", get(api::list_vaults))
+        .route("/secrets", get(api::list_secrets))
+        .route(
+            "/secrets/{name}",
+            get(api::get_secret)
+                .put(api::put_secret)
+                .patch(api::patch_secret)
+                .delete(api::delete_secret),
+        )
+        .route("/secrets/{name}/value", post(api::reveal_secret))
+        .route("/secrets/{name}/move", post(api::move_secret))
         // Last .layer() is outermost: no_store must wrap require_auth so
         // auth rejections also carry Cache-Control: no-store (see auth.rs).
         .layer(axum::middleware::from_fn_with_state(
