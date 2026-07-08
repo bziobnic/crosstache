@@ -62,7 +62,14 @@ async function init() {
     opt.selected = v.name === currentVault;
     sel.appendChild(opt);
   }
-  sel.onchange = () => { currentVault = sel.value; loadSecrets(); loadFiles(); };
+  sel.onchange = () => {
+    currentVault = sel.value;
+    // Close the drawer: anything open in it belongs to the previous vault,
+    // and saving/deleting it against the new vault would hit the wrong secret.
+    closeDrawer();
+    loadSecrets();
+    loadFiles();
+  };
   await loadSecrets();
   if (ctx.capabilities.files) await loadFiles();
 }
@@ -95,6 +102,12 @@ function renderSecrets() {
 $('#search').oninput = renderSecrets;
 $('#new-secret').onclick = () => openDrawer(null);
 
+function closeDrawer() {
+  $('#drawer').hidden = true;
+  editing = null;
+  editingMeta = null;
+}
+
 async function openDrawer(name) {
   editing = name;
   editingMeta = null;
@@ -122,12 +135,18 @@ async function openDrawer(name) {
         enabled: meta.enabled,
         not_before: meta.not_before || null,
       };
-    } catch (e) { fail(e); }
+    } catch (e) {
+      // Without the fetched metadata a save would send enabled:true and no
+      // custom tags — silently mutating the secret. Don't open the drawer.
+      fail(e);
+      editing = null;
+      return;
+    }
   }
   $('#drawer').hidden = false;
 }
 
-$('#close-drawer').onclick = () => { $('#drawer').hidden = true; };
+$('#close-drawer').onclick = closeDrawer;
 
 $('#reveal').onclick = async () => {
   try {
