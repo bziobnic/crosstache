@@ -56,6 +56,11 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         );
 
     let api = api
+        // Raise axum's default 2MB request body cap so file uploads aren't
+        // rejected with 413. Uploads buffer fully in memory (FileUploadRequest
+        // { content: Vec<u8> }), so keep an explicit cap rather than removing
+        // the limit entirely.
+        .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
         // Last .layer() is outermost: no_store must wrap require_auth so
         // auth rejections also carry Cache-Control: no-store (see auth.rs).
         .layer(axum::middleware::from_fn_with_state(

@@ -40,6 +40,10 @@ let ctx = null;
 let currentVault = null;
 let secrets = [];
 let editing = null; // name of secret open in drawer, null = new
+// content_type + non-canonical tags of the secret open in drawer, so a value
+// edit doesn't silently drop them (the form has no fields for them).
+let editingMeta = null;
+const CANONICAL_TAGS = new Set(['folder', 'groups', 'note', 'original_name', 'created_by']);
 
 const vaultQS = () => `?vault=${encodeURIComponent(currentVault)}`;
 
@@ -93,6 +97,7 @@ $('#new-secret').onclick = () => openDrawer(null);
 
 async function openDrawer(name) {
   editing = name;
+  editingMeta = null;
   const f = $('#secret-form');
   f.reset();
   $('#drawer-title').textContent = name ? `Edit: ${name}` : 'New secret';
@@ -107,6 +112,11 @@ async function openDrawer(name) {
       f.elements.groups.value = tags.groups || '';
       f.elements.note.value = tags.note || '';
       f.elements.expires_on.value = meta.expires_on || '';
+      const customTags = {};
+      for (const [k, v] of Object.entries(tags)) {
+        if (!CANONICAL_TAGS.has(k)) customTags[k] = v;
+      }
+      editingMeta = { content_type: meta.content_type || '', tags: customTags };
     } catch (e) { fail(e); }
   }
   $('#drawer').hidden = false;
@@ -148,6 +158,8 @@ $('#secret-form').onsubmit = async (ev) => {
         note: f.note.value || null,
         groups: groups.length ? groups : null,
         expires_on: f.expires_on.value || null,
+        content_type: editingMeta?.content_type || null,
+        tags: editingMeta && Object.keys(editingMeta.tags).length ? editingMeta.tags : null,
       });
     } else if (editing) {
       // metadata-only patch ("" clears)

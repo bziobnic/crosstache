@@ -319,6 +319,24 @@ pub(crate) mod files {
     use crate::blob::models::{FileListRequest, FileUploadRequest};
     use axum::extract::Multipart;
     use axum::http::header;
+    use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+
+    /// RFC 5987 `attr-char`: ALPHA / DIGIT / "!" / "#" / "$" / "&" / "+" / "-"
+    /// / "." / "^" / "_" / "`" / "|" / "~". Everything else (including all
+    /// non-ASCII bytes, which `AsciiSet` always encodes) gets percent-encoded.
+    const ATTR_CHAR: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'!')
+        .remove(b'#')
+        .remove(b'$')
+        .remove(b'&')
+        .remove(b'+')
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'^')
+        .remove(b'_')
+        .remove(b'`')
+        .remove(b'|')
+        .remove(b'~');
 
     fn files_backend(state: &WebState) -> Result<&dyn FileBackend, ApiError> {
         state.backend.files().ok_or_else(|| {
@@ -407,13 +425,28 @@ pub(crate) mod files {
         // quoted-string and forge extra header parameters. CRLF is already
         // rejected by HeaderValue parsing.
         let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        // HeaderValue is ASCII-only, so a non-ASCII name (e.g. "résumé.pdf")
+        // can't go in the plain `filename=` param. Per RFC 5987/6266, ship an
+        // ASCII fallback (non-ASCII/control bytes replaced with '_') alongside
+        // a percent-encoded `filename*=UTF-8''...` param for clients that
+        // support it.
+        let ascii_fallback: String = escaped
+            .chars()
+            .map(|c| {
+                if c.is_ascii() && !c.is_control() {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let pct_encoded = utf8_percent_encode(&name, ATTR_CHAR);
+        let content_disposition =
+            format!("attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{pct_encoded}");
         Ok((
             [
                 (header::CONTENT_TYPE, info.content_type),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{escaped}\""),
-                ),
+                (header::CONTENT_DISPOSITION, content_disposition),
             ],
             bytes,
         )
@@ -571,6 +604,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn move_folder_only_updates_folder() {
+        let app = crate::web::build_router(testutil::test_state());
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/a",
+            Some(json!({"value": "v"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/a/move",
+            Some(json!({"folder": "new-folder"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json_body) = get_json(app, "GET", "/api/secrets", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body[0]["folder"], "new-folder");
+    }
+
+    #[tokio::test]
+    async fn put_preserves_content_type_and_custom_tags_across_edits() {
+        let app = crate::web::build_router(testutil::test_state());
+
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/api-key",
+            Some(json!({
+                "value": "v1",
+                "content_type": "text/plain",
+                "tags": {"custom": "kept"},
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json_body) = get_json(app.clone(), "GET", "/api/secrets/api-key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body["content_type"], "text/plain");
+        assert_eq!(json_body["tags"]["custom"], "kept");
+
+        // Simulate a value edit that echoes the previously-fetched
+        // content_type/tags back (as the fixed frontend now does) and
+        // confirm they still survive a second PUT.
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/api-key",
+            Some(json!({
+                "value": "v2",
+                "content_type": "text/plain",
+                "tags": {"custom": "kept"},
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json_body) = get_json(app, "GET", "/api/secrets/api-key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body["content_type"], "text/plain");
+        assert_eq!(json_body["tags"]["custom"], "kept");
+    }
+
+    #[tokio::test]
     async fn move_rejects_both_rename_and_folder() {
         let app = crate::web::build_router(testutil::test_state());
         get_json(
@@ -646,6 +749,39 @@ mod tests {
 
     #[cfg(feature = "file-ops")]
     #[tokio::test]
+    async fn upload_over_default_axum_body_limit_succeeds() {
+        let app = crate::web::build_router(testutil::test_state());
+
+        // 3 MB, over axum's default 2 MB body limit, to confirm the
+        // DefaultBodyLimit layer in build_router actually raises the cap.
+        let big = "a".repeat(3 * 1024 * 1024);
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n");
+        body.extend_from_slice(big.as_bytes());
+        body.extend_from_slice(b"\r\n--B--\r\n");
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::post("/api/files")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let (status, json_body) = get_json(app, "GET", "/api/files", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body[0]["name"], "big.bin");
+        assert_eq!(json_body[0]["size"], 3 * 1024 * 1024);
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
     async fn download_escapes_quotes_in_content_disposition() {
         let app = crate::web::build_router(testutil::test_state());
 
@@ -678,6 +814,43 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let cd = res.headers()["content-disposition"].to_str().unwrap();
-        assert_eq!(cd, "attachment; filename=\"he\\\"llo.txt\"");
+        assert!(cd.contains("filename=\"he\\\"llo.txt\""));
+        assert!(cd.contains("filename*=UTF-8''he%22llo.txt"));
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn download_non_ascii_filename_uses_rfc5987_encoding() {
+        let app = crate::web::build_router(testutil::test_state());
+
+        // upload a file with a non-ASCII name ('é' below is a literal UTF-8 char)
+        let body = "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"résumé.txt\"\r\nContent-Type: text/plain\r\n\r\nx\r\n--B--\r\n";
+        let res = app
+            .clone()
+            .oneshot(
+                Request::post("/api/files")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .oneshot(
+                Request::get("/api/files/r%C3%A9sum%C3%A9.txt")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cd = res.headers()["content-disposition"].to_str().unwrap();
+        assert!(cd.contains("filename*=UTF-8''r%C3%A9sum%C3%A9.txt"));
     }
 }
