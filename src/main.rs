@@ -21,6 +21,8 @@ mod secret;
 mod tui;
 mod utils;
 mod vault;
+#[cfg(feature = "ui")]
+mod web;
 
 use crate::cli::Cli;
 use crate::error::{CrosstacheError, Result};
