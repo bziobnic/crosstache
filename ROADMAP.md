@@ -1,6 +1,6 @@
 # Crosstache Roadmap
 
-> **Last reviewed:** 2026-06-15 · **Latest released version:** `v0.15.0` · **Branch protection:** `main` (all changes via PR)
+> **Last reviewed:** 2026-07-05 · **Latest released version:** `v0.15.0` · **Branch protection:** `main` (all changes via PR)
 
 Single source of truth for **unimplemented** ideas, deferred work, and known
 limitations worth fixing. Anything already shipped lives in [`CHANGELOG.md`](./CHANGELOG.md).
@@ -19,6 +19,61 @@ Severity legend (mirrors the UX/code reviews):
 
 No active release-soak lane. Implemented work is tracked in
 [`CHANGELOG.md`](./CHANGELOG.md); this roadmap only tracks open work.
+
+---
+
+## Multi-backend workspace convergence
+
+✅ **COMPLETE — all three phases shipped 2026-07-05.**
+Design: [`2026-07-05-multi-backend-workspace-convergence-design.md`](./docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md),
+targeting `v0.21.0`. Sequenced the remaining multi-backend completion work
+(after Phases A–C of multi-vault workspaces shipped in v0.20.0/v0.20.1) into
+three ordered phases, converging the legacy no-workspace resolution path into
+a single workspace path (ADR-1: workspace-of-one convergence over dual-path
+hardening) and fully retiring the legacy Azure managers (ADR-2: full manager
+retirement over partial). Full user-visible change list in `CHANGELOG.md` §
+Unreleased.
+
+### P1 — Phase 1: workspace-of-one resolution convergence
+Eliminate the legacy no-workspace secret-resolution path (`Config::resolve_vault_name`,
+`BackendRegistry::active()`/`active_arc()`, `get_azure_auth_provider`) from the
+CLI's secret-resolution seam; bare/no-workspace usage becomes a degenerate
+workspace-of-one (`WorkspaceSource::Degenerate`, `Workspace::is_configured()`),
+not a second code path.
+**Acceptance bar (seam-scoped, not repo-wide):** the no-workspace `else` at
+`resolve_workspace_or_default` (`src/cli/helpers.rs:155-164`) is deleted;
+`resolve_workspace` never returns `None`; every enumerated presence-gate uses
+`is_configured()`; every surviving legacy resolution call site carries a
+`// Phase 2`/`// Phase 3` annotation matching the design doc's survivor
+allowlist; `cargo test`/`cargo clippy --all-targets` green; `CHANGELOG.md`
+lists every intentional break.
+
+### P1 — Phase 2: full legacy manager retirement
+✅ **Shipped 2026-07-05.** Deleted `SecretManager` entirely and reduced
+`VaultManager` to the interactive `xv init`/setup path only; all other CLI
+verbs, including Azure-only share/RBAC, audit, and vault-lifecycle operations,
+now route through `Backend` and its `VaultBackend`/`AuditBackend` sub-traits.
+Shipped the design doc's A4 `--vault` composition semantics for
+`run`/`inject`/`rotate`. Also closed the `has_audit` capability-flag
+inconsistency (see § Security hardening below) as a side effect of migrating
+Azure audit onto the trait. See `CHANGELOG.md` § Unreleased for the full
+user-visible change list.
+**Acceptance bar (met):** zero manager references from `src/cli/**`.
+
+### P2 — Phase 3: default-entry file-ops routing
+✅ **Shipped 2026-07-05.** `xv file` now routes through a `FileBackend`
+resolution against the workspace's default entry, uniformly across
+Azure/local/AWS; the separate AWS-only file-ops code path is deleted. No
+union file views, no alias-qualified file addressing. `xv file sync` now also
+works on the local backend (previously Azure-only); AWS sync remains
+unsupported (see § Backend ecosystem below).
+**Acceptance bar (met):** `xv file` resolves through the workspace default
+entry only; no union/aliased file addressing.
+
+**Deferred non-goals (all phases):** multi-instance same-kind backends
+(`NamedBackendEntry::Azure`), union file views, alias-qualified file
+addressing, cross-vault file operations, byte-for-byte legacy output/exit-code
+parity, new backends (tracked separately below).
 
 ---
 
@@ -77,16 +132,28 @@ as history; current AWS capability state lives in `CHANGELOG.md`.
 | Native rotation   | ✅ `xv rotate --native` invokes Secrets Manager `RotateSecret` (Lambda) | v0.12.0 (#250) |
 | File storage (S3) | ✅ `xv file` on S3, vault-prefixed, streaming + containment | v0.12.0 (#251) |
 
-### P3 — `has_audit` capability flag is inconsistent across audit backends
-Surfaced during the v0.12.0 audit work (#249). AWS audit dispatches through
-the `AuditBackend` trait (`registry.active().audit()`), so AWS correctly sets
-`has_audit: true`. Azure audit still uses a **legacy Activity Log path** in
-`src/cli/system_ops.rs` that bypasses the capability system entirely, so
-`xv audit` works on Azure while the Azure backend reports `has_audit: false`.
-Harmless today (the CLI tries the trait first, then falls through to the Azure
-path), but the flag is a lie for Azure. Fix: either migrate Azure audit onto
-the trait and flip `has_audit: true`, or document the flag as "trait-dispatch
-only" so capability introspection isn't misleading.
+### P3 — `xv file sync` unsupported on AWS (S3)
+Carried over from the Multi-backend workspace convergence Phase 3 (default-entry
+file-ops routing, shipped 2026-07-05): `xv file sync` now works on both Azure
+and local, but AWS S3 storage still has no sync support — a capability-gated
+error names the limitation. `xv file upload`/`download`/`list`/`delete`/`info`
+are unaffected and work on AWS today.
+
+### P3 — AWS file ops no longer stream to/from disk
+Also from Phase 3: routing `xv file` through the unified `Backend` trait
+moved AWS uploads/downloads off the old AWS-specific streaming path onto
+in-memory buffering (bounded by the existing 5 GiB download-size guard) — see
+`CHANGELOG.md` § Unreleased for the full behavior-change note, including the
+loss of the old download path's atomic temp-file rename. Candidate follow-up:
+give AWS a streaming upload/download path (mirroring Azure's) if large-file
+memory pressure or partial-write safety on AWS becomes a real-world problem.
+
+### ~~P3 — `has_audit` capability flag is inconsistent across audit backends~~ — closed
+✅ **Closed 2026-07-05** by the Multi-backend workspace convergence Phase 2
+manager retirement (see § above). Azure `xv audit`/`--resource-group` now
+dispatches through the `AuditBackend` trait exactly like AWS; the legacy
+Activity Log client is deleted, so `has_audit: true` for Azure is no longer a
+lie. Retained here for traceability; details in `CHANGELOG.md` § Unreleased.
 
 ### P3 — Additional backends
 Open ground from `2026-04-29-strategic-improvements-phase-1-design.md`:

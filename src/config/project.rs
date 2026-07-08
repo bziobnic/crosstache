@@ -34,6 +34,12 @@ pub struct ProjectConfig {
     /// Optional scanner configuration for leak detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<ScanConfig>,
+
+    /// Custom record types declared as `[types.<name>]` blocks, overriding
+    /// global config / built-in types of the same name. See
+    /// `crate::records::resolve_types`.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub types: std::collections::HashMap<String, crate::records::RecordTypeConfig>,
 }
 
 /// One environment's defaults. All fields optional; a missing field
@@ -53,6 +59,11 @@ pub struct EnvProfile {
     /// Overrides the global config `backend` key but loses to `--backend` CLI flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Multi-vault workspace overlay (spec: multi-vault-workspaces). When
+    /// non-empty, this list REPLACES any context-store workspace for
+    /// commands run under this env — no merging, one source of truth.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vaults: Vec<crate::workspace::WorkspaceEntryConfig>,
 }
 
 /// Validate that a backend value from an env profile is a known backend.
@@ -210,33 +221,64 @@ pub async fn find_or_create_project_config(cwd: &Path) -> Result<(PathBuf, Proje
 }
 
 /// Selection priority for active env: `XV_ENV` env var → `cli_flag`
-/// argument → `cfg.default_env` field → error.
+/// argument → `cfg.default_env` field → no active profile.
 ///
-/// Returns `(env_name, env_profile)` on success. Returns
-/// `CrosstacheError::EnvNotDefined` if the resolved name isn't a key
-/// in `cfg.envs`, OR if no name could be resolved at all (in that
-/// case the missing-name field is `"(none)"`, indicating "no
-/// default_env, no flag, no XV_ENV").
+/// Returns `Ok(Some((env_name, env_profile)))` when an env was resolved.
+///
+/// Returns `Ok(None)` when there was no `XV_ENV`, no `cli_flag`, and no
+/// `default_env` to fall back to, AND `cfg.envs` is empty — i.e. the
+/// `.xv.toml` defines zero `[env.*]` blocks and contributes nothing
+/// env-related. Types-only project files are a legitimate shape (record
+/// types, #321) and must not hard-fail write commands that ask for
+/// profile defaults (#331); callers treat `Ok(None)` as "no defaults
+/// here, fall through to the next layer."
+///
+/// Returns `Err(CrosstacheError::EnvNotDefined)` in every other
+/// unresolvable case:
+/// - An explicit `XV_ENV`/`cli_flag` name that isn't a key in
+///   `cfg.envs` (whether or not `cfg.envs` is empty) — the file *was*
+///   asked for a specific environment by name.
+/// - No `XV_ENV`/`cli_flag`, but `cfg.default_env` names an environment
+///   that isn't a key in `cfg.envs`.
+/// - No `XV_ENV`/`cli_flag`/`default_env` at all, but `cfg.envs` is
+///   non-empty (the file defines environments; the caller must pick
+///   one). This is the pre-#331 "(none)" case and is unchanged.
 pub fn resolve_env<'a>(
     cfg: &'a ProjectConfig,
     cli_flag: Option<&str>,
-) -> Result<(&'a str, &'a EnvProfile)> {
-    let candidate: String = if let Ok(env_var) = std::env::var("XV_ENV") {
-        env_var
+) -> Result<Option<(&'a str, &'a EnvProfile)>> {
+    let candidate: Option<String> = if let Ok(env_var) = std::env::var("XV_ENV") {
+        Some(env_var)
     } else if let Some(flag) = cli_flag {
-        flag.to_string()
-    } else if let Some(default) = cfg.default_env.as_deref() {
-        default.to_string()
+        Some(flag.to_string())
     } else {
-        // No source of truth at all.
-        return Err(CrosstacheError::env_not_defined(
-            "(none)",
-            cfg.envs.keys().cloned().collect(),
-        ));
+        cfg.default_env.clone()
+    };
+
+    let candidate = match candidate {
+        Some(c) => c,
+        None => {
+            if cfg.envs.is_empty() {
+                // No selection source AND no envs defined at all: this
+                // file contributes nothing env-related. Not an error.
+                return Ok(None);
+            }
+            // File defines envs, but none was selected — unchanged
+            // pre-#331 behavior: error with the available list.
+            return Err(CrosstacheError::env_not_defined(
+                "(none)",
+                cfg.envs.keys().cloned().collect(),
+            ));
+        }
     };
 
     if let Some((k, v)) = cfg.envs.get_key_value(&candidate) {
-        Ok((k.as_str(), v))
+        Ok(Some((k.as_str(), v)))
+    } else if cfg.envs.is_empty() {
+        // An explicit --env/XV_ENV name (or a stale default_env) against
+        // a file that defines zero environments — give the clearer
+        // "defines no environments" message instead of an empty list.
+        Err(CrosstacheError::env_not_defined_no_envs(candidate))
     } else {
         Err(CrosstacheError::env_not_defined(
             candidate,
@@ -481,6 +523,7 @@ resource_group = "rg"
             default_env: default_env.map(String::from),
             envs: envs_map,
             scan: None,
+            types: std::collections::HashMap::new(),
         }
     }
 
@@ -503,7 +546,9 @@ resource_group = "rg"
         // No XV_ENV, no cli flag — must pick "dev" from default_env.
         // Force-clear XV_ENV for the test.
         std::env::remove_var("XV_ENV");
-        let (name, _profile) = resolve_env(&cfg, None).expect("must resolve");
+        let (name, _profile) = resolve_env(&cfg, None)
+            .expect("must resolve")
+            .expect("expected an active profile");
         assert_eq!(name, "dev");
     }
 
@@ -518,7 +563,9 @@ resource_group = "rg"
             ],
         );
         std::env::remove_var("XV_ENV");
-        let (name, _profile) = resolve_env(&cfg, Some("prod")).expect("must resolve");
+        let (name, _profile) = resolve_env(&cfg, Some("prod"))
+            .expect("must resolve")
+            .expect("expected an active profile");
         assert_eq!(name, "prod");
     }
 
@@ -534,7 +581,9 @@ resource_group = "rg"
             ],
         );
         std::env::set_var("XV_ENV", "staging");
-        let (name, _profile) = resolve_env(&cfg, Some("prod")).expect("must resolve");
+        let (name, _profile) = resolve_env(&cfg, Some("prod"))
+            .expect("must resolve")
+            .expect("expected an active profile");
         assert_eq!(name, "staging");
         std::env::remove_var("XV_ENV");
     }
@@ -569,6 +618,68 @@ resource_group = "rg"
         match err {
             CrosstacheError::EnvNotDefined { available, .. } => {
                 assert_eq!(available, vec!["dev".to_string()]);
+            }
+            other => panic!("expected EnvNotDefined, got {other:?}"),
+        }
+    }
+
+    // --- #331: types-only / env-less .xv.toml ---
+
+    #[test]
+    fn resolve_env_no_envs_no_default_no_override_returns_no_profile() {
+        // Zero [env.*] blocks, no default_env, no --env, no XV_ENV: a
+        // types-only project file contributes nothing env-related and
+        // must not error.
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = build_cfg(None, &[]);
+        std::env::remove_var("XV_ENV");
+        let resolved = resolve_env(&cfg, None).expect("must not error");
+        assert!(resolved.is_none(), "expected no active profile");
+    }
+
+    #[test]
+    fn resolve_env_no_envs_explicit_flag_errors_with_no_environments_message() {
+        // Explicit --env against a file with zero [env.*] blocks must
+        // still error (the user asked for a specific env by name), but
+        // with a clearer message than an empty "available: " list.
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = build_cfg(None, &[]);
+        std::env::remove_var("XV_ENV");
+        let err = resolve_env(&cfg, Some("staging")).expect_err("must err");
+        match err {
+            CrosstacheError::EnvNotDefined {
+                ref name,
+                ref available,
+            } => {
+                assert_eq!(name, "staging");
+                assert!(available.is_empty());
+            }
+            other => panic!("expected EnvNotDefined, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no environments") || msg.contains("no [env"),
+            "message should explain the file defines no environments: {msg}"
+        );
+        assert!(
+            !msg.contains("available: "),
+            "message should not print an empty available list: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_env_no_envs_but_default_env_set_still_errors() {
+        // default_env is explicitly configured but no [env.*] blocks
+        // exist at all — this is a real misconfiguration (not the "no
+        // envs at all" absent-defaults case), and must keep erroring.
+        let _guard = XV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = build_cfg(Some("dev"), &[]);
+        std::env::remove_var("XV_ENV");
+        let err = resolve_env(&cfg, None).expect_err("must err");
+        match err {
+            CrosstacheError::EnvNotDefined { name, available } => {
+                assert_eq!(name, "dev");
+                assert!(available.is_empty());
             }
             other => panic!("expected EnvNotDefined, got {other:?}"),
         }
@@ -773,12 +884,45 @@ resource_group = "rg"
     }
 
     #[test]
+    fn project_vaults_block_parses() {
+        let toml = r#"
+[env.dev]
+vault = "myproj-dev-kv"
+vaults = [
+  { vault = "myproj-dev-kv", backend = "azure", alias = "dev", default = true },
+  { vault = "shared-staging", backend = "aws-east", alias = "stage" },
+]
+"#;
+        let cfg = parse_str(toml).expect("must parse");
+        let dev = cfg.envs.get("dev").unwrap();
+        assert_eq!(dev.vaults.len(), 2);
+        assert_eq!(dev.vaults[0].vault, "myproj-dev-kv");
+        assert_eq!(dev.vaults[0].backend.as_deref(), Some("azure"));
+        assert_eq!(dev.vaults[0].alias.as_deref(), Some("dev"));
+        assert!(dev.vaults[0].default);
+        assert_eq!(dev.vaults[1].vault, "shared-staging");
+        assert_eq!(dev.vaults[1].backend.as_deref(), Some("aws-east"));
+        assert!(!dev.vaults[1].default);
+    }
+
+    #[test]
+    fn env_profile_vaults_defaults_to_empty() {
+        let toml = r#"
+[env.dev]
+vault = "v"
+resource_group = "rg"
+"#;
+        let cfg = parse_str(toml).expect("must parse");
+        assert!(cfg.envs.get("dev").unwrap().vaults.is_empty());
+    }
+
+    #[test]
     fn parse_str_with_scan_block() {
         let toml = r#"
 [scan]
 exclude = ["dist/**", "*.lock"]
 min_value_length = 12
-patterns = ["aws", "github"]
+patterns = ["aws-access-key-id", "github-token"]
 
 [env.dev]
 vault = "v"
@@ -788,6 +932,6 @@ resource_group = "rg"
         let scan = cfg.scan.as_ref().expect("must have [scan]");
         assert_eq!(scan.exclude, vec!["dist/**", "*.lock"]);
         assert_eq!(scan.min_value_length, Some(12));
-        assert_eq!(scan.patterns, vec!["aws", "github"]);
+        assert_eq!(scan.patterns, vec!["aws-access-key-id", "github-token"]);
     }
 }

@@ -139,9 +139,11 @@ impl AuditBackend for AzureAuditBackend {
     async fn get_vault_events(
         &self,
         vault: &str,
+        resource_group: Option<&str>,
         days: u32,
     ) -> std::result::Result<Vec<AuditEvent>, BackendError> {
-        self.get_vault_audit_logs(&self.default_resource_group, vault, days)
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
+        self.get_vault_audit_logs(resource_group, vault, days)
             .await
             .map_err(map_error)
     }
@@ -150,9 +152,11 @@ impl AuditBackend for AzureAuditBackend {
         &self,
         vault: &str,
         secret_name: &str,
+        resource_group: Option<&str>,
         days: u32,
     ) -> std::result::Result<Vec<AuditEvent>, BackendError> {
-        self.get_secret_audit_logs(&self.default_resource_group, vault, secret_name, days)
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
+        self.get_secret_audit_logs(resource_group, vault, secret_name, days)
             .await
             .map_err(map_error)
     }

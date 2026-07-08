@@ -73,24 +73,36 @@ impl VaultBackend for AzureVaultBackend {
         self.inner.create_vault(&request).await.map_err(map_error)
     }
 
-    async fn get_vault(&self, name: &str) -> Result<VaultProperties, BackendError> {
-        // The old trait requires a resource_group; use the default.
+    async fn get_vault(
+        &self,
+        name: &str,
+        resource_group: Option<&str>,
+    ) -> Result<VaultProperties, BackendError> {
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
         self.inner
-            .get_vault(name, &self.default_resource_group)
+            .get_vault(name, resource_group)
             .await
             .map_err(map_error)
     }
 
-    async fn list_vaults(&self) -> Result<Vec<VaultSummary>, BackendError> {
+    async fn list_vaults(
+        &self,
+        resource_group: Option<&str>,
+    ) -> Result<Vec<VaultSummary>, BackendError> {
         self.inner
-            .list_vaults(Some(&self.subscription_id), None)
+            .list_vaults(Some(&self.subscription_id), resource_group)
             .await
             .map_err(map_error)
     }
 
-    async fn delete_vault(&self, name: &str) -> Result<(), BackendError> {
+    async fn delete_vault(
+        &self,
+        name: &str,
+        resource_group: Option<&str>,
+    ) -> Result<(), BackendError> {
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
         self.inner
-            .delete_vault(name, &self.default_resource_group)
+            .delete_vault(name, resource_group)
             .await
             .map_err(map_error)
     }
@@ -102,24 +114,32 @@ impl VaultBackend for AzureVaultBackend {
     async fn update_vault(
         &self,
         name: &str,
+        resource_group: Option<&str>,
         request: VaultUpdateRequest,
     ) -> Result<VaultProperties, BackendError> {
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
         self.inner
-            .update_vault(name, &self.default_resource_group, &request)
+            .update_vault(name, resource_group, &request)
             .await
             .map_err(map_error)
     }
 
-    async fn restore_vault(&self, name: &str) -> Result<VaultProperties, BackendError> {
+    async fn restore_vault(
+        &self,
+        name: &str,
+        location: Option<&str>,
+    ) -> Result<VaultProperties, BackendError> {
+        let location = location.unwrap_or(&self.default_location);
         self.inner
-            .restore_vault(name, &self.default_location)
+            .restore_vault(name, location)
             .await
             .map_err(map_error)
     }
 
-    async fn purge_vault(&self, name: &str) -> Result<(), BackendError> {
+    async fn purge_vault(&self, name: &str, location: Option<&str>) -> Result<(), BackendError> {
+        let location = location.unwrap_or(&self.default_location);
         self.inner
-            .purge_vault(name, &self.default_location)
+            .purge_vault(name, location)
             .await
             .map_err(map_error)
     }
@@ -131,26 +151,117 @@ impl VaultBackend for AzureVaultBackend {
     async fn grant_access(
         &self,
         vault: &str,
+        resource_group: Option<&str>,
+        principal: &str,
+        level: AccessLevel,
+    ) -> Result<(), BackendError> {
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
+        self.inner
+            .grant_access(vault, resource_group, principal, level)
+            .await
+            .map_err(map_error)
+    }
+
+    async fn revoke_access(
+        &self,
+        vault: &str,
+        resource_group: Option<&str>,
+        principal: &str,
+    ) -> Result<(), BackendError> {
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
+        self.inner
+            .revoke_access(vault, resource_group, principal)
+            .await
+            .map_err(map_error)
+    }
+
+    async fn list_access(
+        &self,
+        vault: &str,
+        resource_group: Option<&str>,
+    ) -> Result<Vec<VaultRole>, BackendError> {
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
+        self.inner
+            .list_access(vault, resource_group)
+            .await
+            .map_err(map_error)
+    }
+
+    async fn vault_uses_rbac(
+        &self,
+        vault: &str,
+        resource_group: Option<&str>,
+    ) -> Result<bool, BackendError> {
+        let resource_group = resource_group.unwrap_or(&self.default_resource_group);
+        let props = self
+            .inner
+            .get_vault(vault, resource_group)
+            .await
+            .map_err(map_error)?;
+        Ok(props.enable_rbac_authorization == Some(true))
+    }
+
+    // ------------------------------------------------------------------
+    // Secret-scoped RBAC
+    // ------------------------------------------------------------------
+
+    async fn grant_secret_access(
+        &self,
+        vault: &str,
+        secret: &str,
         principal: &str,
         level: AccessLevel,
     ) -> Result<(), BackendError> {
         self.inner
-            .grant_access(vault, &self.default_resource_group, principal, level)
+            .grant_secret_access(
+                vault,
+                &self.default_resource_group,
+                secret,
+                principal,
+                level,
+            )
             .await
             .map_err(map_error)
     }
 
-    async fn revoke_access(&self, vault: &str, principal: &str) -> Result<(), BackendError> {
+    async fn revoke_secret_access(
+        &self,
+        vault: &str,
+        secret: &str,
+        principal: &str,
+    ) -> Result<(), BackendError> {
         self.inner
-            .revoke_access(vault, &self.default_resource_group, principal)
+            .revoke_secret_access(vault, &self.default_resource_group, secret, principal)
             .await
             .map_err(map_error)
     }
 
-    async fn list_access(&self, vault: &str) -> Result<Vec<VaultRole>, BackendError> {
+    async fn list_secret_access(
+        &self,
+        vault: &str,
+        secret: &str,
+    ) -> Result<Vec<VaultRole>, BackendError> {
         self.inner
-            .list_access(vault, &self.default_resource_group)
+            .list_secret_access(vault, &self.default_resource_group, secret)
             .await
             .map_err(map_error)
+    }
+
+    // ------------------------------------------------------------------
+    // Principal resolution (Graph-backed; kept inside the Azure layer)
+    // ------------------------------------------------------------------
+
+    async fn resolve_principal(&self, user: &str) -> Result<String, BackendError> {
+        self.inner
+            .resolve_user_to_object_id(user)
+            .await
+            .map_err(map_error)
+    }
+
+    async fn resolve_principal_ids(
+        &self,
+        principal_ids: &[String],
+    ) -> std::collections::HashMap<String, (String, String)> {
+        self.inner.resolve_principal_ids(principal_ids).await
     }
 }

@@ -11,6 +11,7 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod records;
 pub mod scan;
 pub mod secret;
 #[cfg(feature = "tui")]
@@ -19,6 +20,7 @@ pub mod utils;
 pub mod vault;
 #[cfg(feature = "ui")]
 pub mod web;
+pub mod workspace;
 
 // Re-export commonly used types
 pub use error::{CrosstacheError, Result};

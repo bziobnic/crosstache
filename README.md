@@ -5,13 +5,15 @@ A cross-platform secrets manager for the command line. Pluggable backends: Azure
 ```bash
 xv set DB_PASSWORD                     # store a secret (prompts for value)
 xv get DB_PASSWORD                     # copy to clipboard (auto-clears in 30s)
-xv get DB_PASSWORD --raw                # print to stdout (for scripts)
+xv get DB_PASSWORD --raw               # print to stdout (for scripts)
 xv run -- npm start                    # run a process with all secrets injected as env vars
-xv find db --names-only | fzf          # interactive picker, pipe-friendly
+xv set cred --type login --field username=bob   # structured record: username rides along
+xv find --filter 'test-*' --names-only # every secret starting with "test-"
+xv mv --filter 'test-*' archive/       # bulk-move them into a folder
 xv scan install                        # block secret leaks before commit
 ```
 
-**Phase 1 (v0.7) highlights:** structured exit codes for scripting · `.xv.toml` env profiles with walk-up resolution · ranked fuzzy `xv find` · pre-commit leak scanner that matches files against your *actual* vault values · optional read-only TUI behind a feature flag.
+**v0.19 highlights:** record types — structured secrets with typed fields (`login`, `api-key`, `database`, plus custom types) · `--filter <GLOB>` on `ls`/`find`/`mv` · fail-fast `xv run`/`xv inject` (no more silently-missing env vars or half-rendered configs; `--best-effort` opts out) · `.xv.toml` group/folder defaults actually applied · pre-commit leak scanner that matches files against your *actual* vault values.
 
 **Web UI**: `xv ui` opens a local browser interface (build with `--features ui`).
 
@@ -24,11 +26,13 @@ xv scan install                        # block secret leaks before commit
 - [Installation](#installation)
 - [Common workflows](#common-workflows) — end-to-end recipes
 - [Secrets — CRUD](#secrets--crud)
+- [Record types — structured secrets](#record-types--structured-secrets)
 - [Reading secrets — clipboard, stdout, JSON](#reading-secrets--clipboard-stdout-json)
 - [Search & filter](#search--filter) — `xv find`, `xv ls --names-only`, fzf integration
 - [Secret injection — `xv run`](#secret-injection--xv-run)
 - [Template rendering — `xv inject`](#template-rendering--xv-inject)
 - [Project env profiles — `.xv.toml`](#project-env-profiles--xvtoml)
+- [Multi-vault workspaces](#multi-vault-workspaces)
 - [Vault management](#vault-management)
 - [Cross-vault operations — diff, copy, move](#cross-vault-operations--diff-copy-move)
 - [Files (blob storage)](#files-blob-storage)
@@ -61,8 +65,7 @@ xv get DB_PASSWORD --raw                 # prints to stdout (scripts)
 # 4. Inject secrets into a process
 xv run -- ./my-app                       # all secrets in active vault → env vars
 
-# 5. Browse interactively (optional TUI)
-cargo install crosstache --features tui
+# 5. Browse interactively (TUI — included in the pre-built release binaries)
 xv tui
 ```
 
@@ -376,6 +379,16 @@ xv scan install                          # writes .git/hooks/pre-commit
 git commit -m "..."                      # hook scans staged files; exit 50 blocks commit on findings
 ```
 
+### Finding and cleaning up by name pattern
+
+```bash
+xv find --filter 'test-*' --names-only   # what's there? (bare names, pipe-friendly)
+xv ls --filter 'test-*' -l               # same set, with metadata
+xv mv --filter 'test-*' archive/ --dry-run   # preview the bulk move
+xv mv --filter 'test-*' archive/ --yes       # move them all in one confirmed plan
+xv find scratch --min-score 0.5          # fuzzy, when you don't remember the exact prefix
+```
+
 ---
 
 ## Secrets — CRUD
@@ -447,6 +460,9 @@ xv mv db/pass app/pw        # move to folder 'app' and rename to 'pw'
 xv mv db/pass newname       # rename to 'newname' at root
 xv mv app/pass /            # move to root (clears the folder tag)
 xv mv app/ svc/             # bulk: re-folder every secret under 'app/' to 'svc/'
+xv mv --filter 'test-*' archive/ --dry-run   # preview a glob-matched bulk move
+xv mv --filter 'test-*' archive/             # then do it (count + sample confirmation)
+xv mv --filter 'tmp-*' / --yes               # send matches back to the vault root, no prompt
 ```
 
 A trailing `/` marks a folder path (source or destination); `/` alone means
@@ -460,6 +476,17 @@ within-vault only — for moving a secret between vaults see `xv move` under
 name-changing `mv` of a *disabled* secret can partially apply: the folder
 update succeeds but the rename fails with 403 because the value can't be
 read — the same limitation as `xv update --rename` on disabled secrets.
+
+`--filter <GLOB>` bulk-moves every secret whose name matches the glob (either
+its displayed name or its backend/sanitized name — the same either-name rule
+`ls`/`find --filter` use) into a destination folder, in one plan/confirm
+step instead of a shell loop like
+`xv find --filter 'test-*' --names-only | while read -r n; do xv mv "$n" archive/; done`.
+`SOURCE` and `--filter` are mutually exclusive — exactly one is required —
+and with `--filter`, `DEST` must be a folder destination (`folder/` or `/`):
+a rename is impossible for a multi-secret move. Matched secrets already in
+the destination are skipped (noted, not counted as moves); zero matches
+fails loud. Composes with `--yes` and `--dry-run` like a folder move.
 
 ### Delete and recover
 
@@ -493,6 +520,159 @@ xv rotate API_KEY --charset hex              # hex / base64 / numeric / uppercas
 xv rotate API_KEY --generator ./mygen.sh     # custom generator (validated for ownership + 0700 perms)
 xv rotate API_KEY --show-value               # echo the new value to stdout (otherwise silent)
 ```
+
+---
+
+## Record types — structured secrets
+
+A **record** is a secret carrying structured fields — a username and URL
+alongside a password, or host/port/database alongside connection details —
+instead of one opaque value. Every field is either `metadata` (a tag,
+listable without fetching the secret) or `secret` (encrypted inside the
+value); every type declares exactly one `primary` secret field, so plain
+`xv get`/`xv run` on a record behave exactly like on any other secret —
+they return/inject the primary value, byte-identical to today's behavior.
+Untyped secrets are completely unaffected: no envelope, no new tags, on
+every code path.
+
+### Built-in types
+
+| Type | Metadata fields | Secret fields |
+|---|---|---|
+| `login` | `username` (required), `url` | **`password`** (primary) |
+| `api-key` | `url`, `account` | **`key`** (primary) |
+| `database` | `host`, `port`, `database`, `username` | **`password`** (primary), `connection-string` (optional) |
+
+```bash
+xv type list                             # resolved types + source (built-in/global/project)
+xv type list --format json
+xv type show login                       # field table for one type
+```
+
+### Custom types
+
+Declare `[types.<name>]` blocks in global `xv.conf` or a project's
+`.xv.toml` (same config hierarchy as everything else). A project type
+shadows a global type of the same name; shadowing a built-in works but
+warns.
+
+```toml
+# xv.conf (global) or .xv.toml (project override)
+[types.smtp]
+fields = [
+  { name = "host" },                          # metadata by default
+  { name = "port" },
+  { name = "username", required = true },
+  { name = "password", kind = "secret", primary = true },
+]
+```
+
+**One invalid `[types.*]` block fails type resolution globally** (missing
+or duplicate `primary`, a non-secret/non-required `primary`, a field name
+that isn't kebab-case) — by design, fail-closed: a single broken custom
+type definition never lets some types silently resolve while others
+silently vanish.
+
+### Create, read, and update
+
+```bash
+xv set mail-cred --type login --field username=bob --value hunter2
+xv set other-cred --type login --field username=bob --field url=https://mail.example.com \
+  --field-secret backup-code=1234 --value hunter2   # --field-secret: ad-hoc field, stored in the envelope
+
+xv get mail-cred                          # primary field (password), unchanged `get` contract
+xv get mail-cred --field username          # one field, either kind
+xv get mail-cred --record --format json    # every field, requested format
+
+xv update mail-cred --field username=alice           # metadata edit — tag-only, no new version
+xv update other-cred --field-secret backup-code=5678 # secret-field edit — rewrites the envelope, new version
+
+xv set legacy-cred --value some-existing-value  # a bare (untyped) secret
+xv update legacy-cred --type login               # explicit conversion: its value becomes the primary field
+xv update legacy-cred --untype                   # flatten back to a bare secret holding the primary value (--yes
+                                                  # skips the prompt when non-primary secret fields would be dropped)
+
+xv ls --type login                        # filter listing by record type
+xv ls --format json                       # includes "record_type" and a "fields" map for typed records
+```
+
+`--field`/`--field-secret`/`--type`/`--untype` on `xv update` are mutually
+exclusive with each other and with every classic update flag
+(`--value`/`--stdin`/`--note`/`--tags`/…) — a record field edit or
+conversion is a standalone operation in v1.
+
+### Worked example — a database record end to end
+
+```bash
+# Create: host/port/database/username are listable metadata; password is the
+# encrypted primary. Interactive `xv set prod-db --type database` prompts for
+# each field in order; non-interactive:
+xv set prod-db --type database \
+  --field host=db.prod.internal --field port=5432 \
+  --field database=main --field username=app_rw \
+  --value 's3cr3t-pw'
+
+xv get prod-db --raw                     # → s3cr3t-pw     (primary, same as any secret)
+xv get prod-db --field host --raw        # → db.prod.internal
+xv get prod-db --record --format json    # every field in one JSON object
+
+xv ls --type database                    # all database records
+xv run --include prod-db -- ./migrate.sh # child sees PROD_DB=s3cr3t-pw (primary only; dashes become underscores)
+
+# Rotate the primary: a bare-value update on a record sets its primary field,
+# leaving every other field and all metadata untouched:
+xv update prod-db n3w-pw
+
+# The optional connection-string secret field, when you need it:
+xv update prod-db --field-secret connection-string='postgres://app_rw:n3w-pw@db.prod.internal:5432/main'
+xv get prod-db --field connection-string --raw
+```
+
+And a custom type from the `[types.smtp]` block above:
+
+```bash
+xv type show smtp                        # confirm the resolved fields + source
+xv set mailer --type smtp --field host=smtp.example.com --field port=587 \
+  --field username=mailer@example.com --value 'smtp-password'
+xv get mailer --field username --raw     # → mailer@example.com
+```
+
+### Inject field syntax
+
+`xv inject` templates can select one field of a record with a dot, and
+`xv://` URIs use a `#` fragment (invalid in secret names on every backend,
+so unambiguous):
+
+```bash
+# template.yml:
+#   smtp_user: "{{ secret:mail-cred.username }}"
+#   smtp_pass: "{{ secret:mail-cred }}"                     # bare name — primary field
+#   smtp_pass_uri: "xv://other-vault/mail-cred#password"
+
+xv inject --template template.yml --out app.config
+```
+
+An **exact secret name always wins first**: an existing untyped secret
+literally named `a.b` resolves as itself, never as field `b` of a record
+named `a`. Only when there is no exact match does `xv inject` try a
+`name.field` split (on the last dot), and only when the base name is a
+record with a matching field. Unknown fields, or a field reference on a
+non-record, abort injection (exit 3) before anything is written — the same
+fail-fast contract as any other unresolved reference — unless
+`--best-effort`. `xv run` does not expand fields at all: a typed record's
+name injects its primary value as the env var, same as `xv get`.
+
+### External consumers and compatibility
+
+Typed records store their secret fields as a JSON envelope
+(`{"password": "..."}`, content type `application/vnd.xv.record`) with
+metadata fields riding tags (`f.username`, `f.url`, …) and the type name in
+a reserved `xv-type` tag. A consumer reading the secret outside `xv` — the
+Azure portal, a raw SDK call, an older `xv` binary — sees that JSON
+envelope as the value, not the bare password. **Conversion is always
+explicit**: `xv set --type` or `xv update --type`/`--untype` are the only
+ways a secret's shape changes. Nothing implicitly promotes a plain secret
+into a record or vice versa.
 
 ---
 
@@ -592,9 +772,24 @@ Next page: xv list --page 3 --page-size 50
 xv ls --names-only                       # one name per line, no headers, no ANSI
 xv ls --names-only | wc -l               # count secrets
 xv ls --names-only --group production    # filter still applies
+xv ls --filter 'test-*' --names-only     # glob filter on the name, applied before rendering
 ```
 
 `--names-only` overrides `--format` and writes to stdout regardless of TTY status. Designed for scripts and pipes.
+
+`--filter <GLOB>` matches a glob pattern against the secret's name — either its
+displayed name or its backend/sanitized name, the same either-name rule
+`xv mv` and `xv run --include` use. (`xv migrate --filter` shares the glob
+syntax but matches backend names only.) Matching is case-sensitive and
+whole-name (`test-*` matches `test-db`, never `latest-db`). Composes with the
+folder positional, `--type`, `--deleted`, and every output format:
+
+```bash
+xv ls --filter 'db-*'                    # just the db-* secrets, normal grid
+xv ls --filter '*-prod' --type login     # combine with a record-type filter
+xv ls --filter 'test-?' --deleted        # ? and [ab] glob classes work too
+xv ls --filter '[' ; echo "exit $?"      # invalid glob → error before any backend call (exit 2)
+```
 
 ### Fuzzy — `xv find`
 
@@ -612,6 +807,8 @@ xv find db --all-vaults                  # search every vault you can list
 xv find db --names-only                  # pipe-friendly
 xv find db --format json                 # [{name, score, folder, groups}] — score is a "NN.00" string
 xv find db --format csv                  # Name,Score,Folder,Groups
+xv find db --filter 'test-*'             # hard pre-filter by glob before PATTERN is ranked
+xv find --filter 'test-*' --names-only   # canonical prefix search: names starting with "test-"
 ```
 
 ### Pipe into fzf — interactive picker
@@ -651,6 +848,7 @@ xv run --include DB_PASSWORD --include API_KEY -- ./script.sh
 xv run --exclude LEGACY_TOKEN -- ./script.sh
 xv run --no-masking -- ./debug.sh                 # don't mask values in stdout/stderr
 xv run --vault other-vault -- env                 # one-off vault override
+xv run --best-effort -- ./script.sh               # launch even if some secrets fail to fetch
 ```
 
 Values are masked in stdout/stderr by default — accidental `echo $DB_PASSWORD`
@@ -658,6 +856,12 @@ shows `[REDACTED]`. Masking streams in bounded chunks (64 KiB read windows with
 overlap for secrets split across chunk boundaries), so newline-free or very
 large child output does not grow memory without limit. Use `--no-masking` only
 when you understand the consequences.
+
+By default, `xv run` aborts **before** launching the child if any selected
+secret or `xv://` reference fails to fetch (transient backend error, missing
+secret, permission problem, etc.) — every failure is printed, and the command
+never runs with a variable silently missing. Pass `--best-effort` to restore
+the previous behavior: warn on each failure and launch the child anyway.
 
 ---
 
@@ -673,15 +877,27 @@ Render config files with `{{ secret:NAME }}` references resolved:
 
 xv inject --template template.yml --out app.config
 cat template.yml | xv inject > resolved.yml          # also reads stdin
+xv inject --template template.yml --out app.config --best-effort  # render even if some references fail
 
 # Cross-vault references (xv://vault-name/secret-name) work without context switching.
 ```
+
+By default, `xv inject` aborts **before** writing the output (or printing to
+stdout) if any `{{ secret:name }}` or `xv://` reference fails to resolve
+(missing secret, transient backend error, malformed URI, etc.) — every
+failure is printed, and no partially-rendered output is ever written. Pass
+`--best-effort` to restore the previous behavior: warn on each failure and
+render anyway, leaving unresolved references in the output.
+
+For a typed [record](#record-types--structured-secrets), `{{ secret:name.field }}`
+/ `xv://vault/name#field` select one field; bare `{{ secret:name }}` still
+renders the primary field.
 
 ---
 
 ## Project env profiles — `.xv.toml`
 
-Drop a `.xv.toml` at your project root and `xv` resolves vault, resource group, group, and folder defaults from it. Walks up from cwd to find the nearest one.
+Drop a `.xv.toml` at your project root and `xv` resolves vault, resource group, group, and folder defaults from it. Walks up from cwd to find the nearest one. The `group` default applies to `xv run` (injection filter) and `xv set`/`xv gen --save` (write-time group); the `folder` default applies to writes only (`xv set`/`xv gen --save`). Neither scopes `xv list`/`ls` — see [docs/env-profiles.md](docs/env-profiles.md) for the full resolution order.
 
 ### Schema
 
@@ -760,6 +976,127 @@ See [`docs/env-profiles.md`](docs/env-profiles.md) for the full reference.
 
 ---
 
+## Multi-vault workspaces
+
+> Full multi-vault workspaces design, all three phases
+> (`docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md`).
+> `xv file`/blob storage is out of scope for the whole workspaces feature
+> (per the design) and stays single-vault regardless.
+
+Attach several vaults — potentially on different backends — so they behave like one workspace instead of juggling `--vault`/`--backend` flags:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+xv cx add personal-store --backend local --as personal
+xv cx ls
+```
+
+- **The first `xv cx add` also attaches your current vault.** Before any workspace exists, the vault you were already using (whatever `--vault`/context/`default_vault` currently resolves to) predates the workspace — the first `cx add` doesn't hide it. Running just `xv cx add work-kv --backend azure --as work` (no `--default`) prints:
+
+  ```
+  [ok] Attached current vault 'default' (backend: local) as default
+  [ok] Attached vault 'work-kv' as 'work' (backend: azure)
+  ```
+
+  Your prior vault stays the default (so unqualified writes keep landing where they already were) and `xv ls` immediately shows both. Passing `--default` on that first add flips it: the newly added vault becomes default instead, while your prior vault is still attached (just not the write target). If the requested vault is already the same `(backend, vault)` you were on, there's nothing extra to attach and this degenerates to a plain single-entry workspace, as in the two-command example above.
+- **Colon addressing.** `alias:path` qualifies a secret with its vault (`work:app/db/pass`); a literal secret name always wins over alias interpretation — on both reads (checked across every attached vault) and writes (checked in the default vault only, since writes never search elsewhere). This asymmetry has one consequence worth knowing: there's no way to *create* a new literal name like `work:x` via `xv set` once the `work` alias is attached — a qualified write always wins on a fresh secret, so `xv set work:x` targets `work`'s `x`, not a literal `work:x` in the default vault. The exact-name-first rule exists for **pre-existing** secrets (created before the workspace existed, or on the local backend's unrestricted charset), not new ones.
+- **Reads search, writes don't — on every secret verb, not just `get`/`set`.** `xv get`/`xv history`/`xv rollback DB_PASSWORD` search every attached vault on an unqualified name — a unique match resolves, no match is the normal not-found error, and two or more matches error with `xv-ambiguous-secret` (exit `13`), listing every qualified form (`work:DB_PASSWORD` or `personal:DB_PASSWORD`). `xv set`, `xv update`, `xv rotate`, `xv delete` (including `--group`), `xv restore`, and `xv purge` never search — an unqualified name on any of them always targets the workspace's **default** vault. Qualify with `alias:name` to reach another attached vault (e.g. `xv set personal:API_KEY`, `xv delete personal:OLD_KEY --force`). Bulk `set` (`xv set KEY=val KEY2=val2`) resolves each pair independently, so `xv set KEY=val personal:KEY2=val2` writes `KEY` to the default vault and `KEY2` to `personal` in one command.
+- **No workspace attached ⇒ nothing changes.** The feature is entirely opt-in via `xv cx add`; every command above behaves exactly as it did before if you never attach a vault (pinned by a byte-for-byte golden test on `set`/`get`'s full stdout and stderr).
+- **`.xv.toml` overlay.** An env profile may declare `vaults = [...]`, which REPLACES the context-store workspace for that project (no merging):
+
+  ```toml
+  [env.dev]
+  vaults = [
+    { vault = "myproj-dev-kv", backend = "azure", alias = "dev", default = true },
+    { vault = "shared-staging", backend = "aws-east", alias = "stage" },
+  ]
+  ```
+
+  Because that overlay replaces the context workspace entirely, `xv cx add`/`rm`/`default` **error** (exit `3`, naming the `.xv.toml` path and env) when run in a directory governed by one — a context-store mutation there would silently have no effect on what secret commands actually use. There is no override flag in v1: edit `.xv.toml` directly, or run the command outside the project directory. `xv cx ls` stays read-only and always shows the *effective* workspace (with its source column) regardless.
+
+Manage the workspace with `xv cx add/rm/default/ls` (`cx` is a visible alias of `context`); `xv context use` errors pointing at `xv cx default` while a workspace is attached, since the two write-target models don't mix. Note: `xv context ls`/`xv cx ls` now lists the attached workspace, not recent vault contexts — use the unabbreviated `xv context list` for those.
+
+### Union `ls` and `find` (Phase B)
+
+With a workspace attached, `xv ls` and `xv find` span every attached vault as one merged view instead of just the default:
+
+```bash
+xv ls                    # union of every attached vault
+xv ls --filter 'PROD_*'  # --filter/--type/--group/folder scoping apply per vault, then merge
+xv find db-password      # union candidate set, rows prefixed alias/ (e.g. "work/DB_PASSWORD")
+```
+
+- **VAULT column, only with ≥2 attached vaults.** `xv ls`'s table/long views gain a `Vault` column naming the alias each row came from; the grid (default) view instead prefixes `alias/` onto the name, mirroring `find`'s existing convention. A single-entry workspace (or no workspace at all) renders with no VAULT column — byte-identical to the pre-workspace output, pinned by test.
+- **Merge order: alias, then name.** Results from every attached vault are combined and sorted by alias first, then name — pagination (`--page`/`--page-size`) applies to that merged set, not per vault.
+- **`find --all-vaults` keeps its existing meaning** — every vault the active backend can list, a strict superset of "every vault attached to the workspace" — and takes priority even when a workspace is attached.
+- **No partial unions.** If any attached vault errors while listing (auth, network, an unreachable backend), the whole command fails, naming the vault and backend that failed — never silently dropping a vault's results.
+- **Capability gating, never silent.** `xv ls --deleted` in a union workspace applies per vault; a vault whose backend doesn't support soft-delete is skipped with a stderr note naming it (`note: 'personal' (local) has no soft-delete; --deleted skipped for it`) rather than failing the whole view or silently omitting it.
+- **Cache keys are per `(backend, vault)`.** Each attached vault's listing caches independently, so two workspace entries that happen to share a vault name on different backends (e.g. two `"default"` vaults) never collide.
+
+### Aliases in `xv://` URIs and templates (Phase C)
+
+The vault slot of an `xv://` URI — used by `xv run`'s environment-variable
+scan and `xv inject`'s templates alike — checks workspace aliases FIRST,
+falling back to today's raw-vault-name meaning when nothing matches:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+export DB_REF="xv://work/DB_PASSWORD"
+xv run --inherit-env -- printenv DB_REF        # resolves via the "work" alias
+
+# in a template — xv:// form:
+echo 'password: xv://work/DB_PASSWORD' | xv inject
+
+# in a template — {{ secret:… }} form, the COLON slot is the alias:
+echo 'password: {{ secret:work:DB_PASSWORD }}' | xv inject
+echo 'user: {{ secret:work:mail-cred.username }}' | xv inject   # record field composes
+```
+
+- **Explicit backend prefix bypasses aliases entirely.** `xv://azure:work/NAME` names the `azure` *backend kind* directly — even if `work` also happens to be an attached alias, this form never consults the workspace; it addresses a literal vault named `work` on the `azure` backend, exactly as it did before any workspace existed.
+- **No match, no workspace: unchanged.** A vault segment that isn't an attached alias (or is used with no workspace attached at all) keeps resolving as a plain vault name on the active backend — byte-identical to pre-workspace behavior.
+- **`#field` fragments compose.** `xv://work/CREDS#username` resolves the `work` alias first, then extracts the `username` field from the typed record, same as the non-aliased form.
+- **`{{ secret:… }}` templates alias on the COLON slot, not the slash slot.** `{{ secret:work:name }}` and `{{ secret:work:app/db/pass }}` (alias + today's folder-path grammar) resolve via the `work` alias; `{{ secret:app/db/pass }}` with no colon is a plain literal-name match, completely unaffected by aliasing (unchanged whether or not a workspace is attached) — the `/` slot has always meant "folders/literal name," never a vault.
+- **Exact-name-first still applies inside templates.** A secret literally named `work:x` (realistic on the local backend's unrestricted charset) wins over interpreting `work` as an alias, the same rule `get`/`set`/`mv` follow.
+
+### Cross-vault `mv`/`copy` via aliases (Phase C)
+
+`xv mv` and `xv copy`/`xv move --from/--to` accept aliases wherever they'd otherwise take a vault name, so moving/copying a secret between workspace entries — including across backends — is one command:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+xv cx add staging-store --backend local --as stage
+
+xv mv work:API_KEY stage:/              # cross-backend move: azure -> local
+xv mv work:API_KEY stage:archive/       # ...into a folder on the destination
+xv copy DB_PASSWORD --from work --to stage --new-name DB_PASSWORD_BACKUP
+```
+
+- **Every `mv` form resolves through the workspace, the same way `get`/`set` do.** Source and destination are each resolved independently — exact-name-first (a literal colon-containing name in the default vault always wins), then `alias:path`, then unqualified falling back to the workspace's **default** entry. That means all of these work: both sides aliased (`xv mv work:API_KEY stage:/`), only the source (`xv mv work:API_KEY archive/` — destination lands in the *default* vault), only the destination (`xv mv API_KEY stage:new-name` — source comes from the *default* vault), and fully unqualified (`xv mv a b`, which now renames within the workspace's default vault, matching `get`/`set` — not a separate config-level vault). Whenever both sides resolve to the *same* `(backend, vault)`, `mv` degenerates to the ordinary same-vault rename/re-folder logic; only a genuine cross-vault pair uses the copy+delete path below.
+- **Metadata rides along.** Groups, notes, folders, tags, and typed-record envelopes move/copy intact (the same `rename_request_from_properties` path `xv copy`/`xv move` have always used).
+- **Destination tag budget checked before any write.** If the destination backend's tag cap (e.g. Azure's 15 tags) can't hold the secret's tags, the command fails up front — nothing is written to either side.
+- **Cross-vault alias `mv` never overwrites.** `xv mv` has no `--force` flag anywhere — same-vault renames refuse a name collision at the destination too, so this is consistent, not a gap. `xv move --from <alias> --to <alias> --force` (below) is the overwrite path; the collision error names it directly.
+
+### TUI workspace pane (Phase C)
+
+`xv tui`'s vault pane lists workspace entries as `alias (backend)` when a workspace is attached, and selecting one scopes the secrets pane to that entry's own vault on its own backend — even when entries span multiple backends:
+
+```bash
+xv cx add work-kv --backend azure --as work --default
+xv cx add staging-store --backend local --as stage
+xv tui
+```
+
+```
+┌Vaults────────────┐
+│work (azure)      │
+│stage (local)     │
+└──────────────────┘
+```
+
+With no workspace attached, the vault pane lists plain vault names exactly as before.
+
+---
+
 ## Vault management
 
 ### Lifecycle
@@ -827,8 +1164,13 @@ xv copy API_KEY --from vault-a --to vault-b --new-name API_KEY_V2
 xv copy --group production --from vault-a --to vault-b   # bulk
 
 xv move API_KEY --from vault-a --to vault-b
-xv move API_KEY --from vault-a --to vault-b --force      # skip confirmation
+xv move API_KEY --from vault-a --to vault-b --force      # overwrite an existing target and skip confirmation
 ```
+
+Without `--force`, `xv move` refuses when the destination already has a secret
+with that name; with it, the target is overwritten (the source is deleted only
+after the copy succeeds). `xv copy` always refuses to overwrite — there is no
+`--force` on copy.
 
 ### Find across vaults
 
@@ -956,8 +1298,16 @@ JSON envelope (`--format json`) on **stdout**:
 [scan]
 exclude = ["dist/**", "*.lock", "vendor/**"]
 min_value_length = 12
-patterns = ["aws", "github", "stripe"]
+patterns = ["aws-access-key-id", "github-token", "stripe-secret-key"]
 ```
+
+`patterns` is an allowlist of built-in pattern *names* (`aws-access-key-id`,
+`github-token`, `stripe-secret-key`, `slack-token`, `jwt`, `ssh-private-key`,
+`low-confidence-high-entropy`); empty means all. An allowlist that matches no
+known name is a hard error listing the valid names — a typo can't silently
+disable the scanner. `XV_SCAN_DISABLE=1` (or `=true`) skips scanning entirely
+(one stderr notice, exit 0); `scan install`/`uninstall` still work while
+disabled.
 
 Plus `.xvignore` (gitignore syntax, scanner-specific):
 
@@ -981,11 +1331,11 @@ See [`docs/scan.md`](docs/scan.md) for the full reference.
 
 ## Terminal UI — `xv tui`
 
-Read-only three-pane browser. Behind a `tui` feature flag (default off) so the scripting binary stays lean.
+Read-only three-pane browser. Included in the pre-built release binaries; behind a `tui` feature flag (default off) when building from source, so lean scripting builds stay possible.
 
 ```bash
-cargo install crosstache --features tui
-xv tui
+xv tui                                            # pre-built binaries: just works
+cargo install --path . --features tui,aws         # from a source checkout
 ```
 
 ### Layout
@@ -1067,6 +1417,7 @@ Stable across releases — part of the public scripting contract.
 | `34`  | SSL/TLS error | certificate or handshake failure |
 | `35`  | Invalid URL | malformed URL |
 | `40`  | Azure API error | Azure returned an error response |
+| `43`  | Rename incomplete | rename created the new secret but failed to delete the original |
 | `50`  | Scan: leak detected | `xv scan` found a finding |
 
 ### Stable error codes
@@ -1210,7 +1561,10 @@ configuration error.
 | `DEFAULT_LOCATION` | Default Azure location (e.g., `eastus`) |
 | `XV_ENV` | Active env from `.xv.toml` (highest priority for env selection) |
 | `XV_NO_PARENT_CONFIG` | `1` disables `.xv.toml` walk-up |
+| `XV_SCAN_DISABLE` | `1` / `true` skips `xv scan` entirely (stderr notice, exit 0) |
 | `CACHE_TTL` | Cache TTL in seconds |
+| `XV_CACHE_DIR` | Override the on-disk cache root directory (default: OS cache dir + `xv`) |
+| `XV_CONTEXT_DIR` | Override the directory holding the vault context/workspace file (default: `$XDG_CONFIG_HOME/xv` or `$HOME/.config/xv`) — also skips the local `.xv/context` (cwd) check entirely, so this is "my context store lives here, full stop"; mainly for tests that need isolation from the real context |
 | `DEBUG` | `true` / `1` enables debug logging |
 | `NO_COLOR` | Disable colored output (any value; standard [NO_COLOR](https://no-color.org/) convention) |
 | `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_CONTAINER` | Blob storage destination |
@@ -1397,10 +1751,11 @@ Build without file operations: `cargo build --no-default-features`.
 
 ### Release process
 
-```bash
-cargo release patch                      # 0.7.0 → 0.7.1
-cargo release minor                      # 0.7.0 → 0.8.0
-```
+Versions live in `Cargo.toml` only. A release is: bump-version PR (retitle the
+CHANGELOG's `Unreleased` section) → merge → push an annotated `v<X.Y.Z>` tag on
+the merge commit. The tag triggers `.github/workflows/release.yml`, which
+verifies the tag matches `Cargo.toml`, creates the GitHub release, and uploads
+minisign-signed binaries for all four platforms.
 
 ### Documentation
 

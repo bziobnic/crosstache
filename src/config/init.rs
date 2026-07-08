@@ -243,6 +243,8 @@ impl ConfigInitializer {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            pre_flag_backend: None,
+            types: std::collections::HashMap::new(),
         };
 
         self.save_config(&config).await?;
@@ -326,6 +328,8 @@ impl ConfigInitializer {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            pre_flag_backend: None,
+            types: std::collections::HashMap::new(),
         };
 
         self.save_config(&config).await?;
@@ -989,11 +993,7 @@ impl ConfigInitializer {
             Arc::new(DefaultAzureCredentialProvider::new()?) as Arc<dyn AzureAuthProvider>;
 
         // Create vault manager
-        let vault_manager = VaultManager::new(
-            auth_provider,
-            subscription.id.clone(),
-            false, // no_color = false
-        )?;
+        let vault_manager = VaultManager::new(auth_provider, subscription.id.clone())?;
 
         // Create vault request
         let vault_request = VaultCreateRequest {
@@ -1088,6 +1088,8 @@ impl ConfigInitializer {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            pre_flag_backend: None,
+            types: std::collections::HashMap::new(),
         })
     }
 

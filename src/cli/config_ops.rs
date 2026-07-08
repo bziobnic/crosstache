@@ -7,7 +7,6 @@ use crate::cli::helpers::format_cache_size;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::utils::output;
-use crate::vault::VaultManager;
 use zeroize::Zeroizing;
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -332,12 +331,15 @@ async fn execute_config_show_resolved(config: &Config) -> Result<()> {
     // than showing nothing.
     let (project_path, active_env_name, active_profile, env_resolve_err) = match &project_hit {
         Some((path, cfg)) => match project::resolve_env(cfg, config.env_flag.as_deref()) {
-            Ok((name, profile)) => (
+            Ok(Some((name, profile))) => (
                 Some(path.clone()),
                 Some(name.to_string()),
                 Some(profile.clone()),
                 None,
             ),
+            // File defines zero environments (types-only project file,
+            // #331) — no active profile, but not an error either.
+            Ok(None) => (Some(path.clone()), None, None, None),
             Err(e) => (Some(path.clone()), None, None, Some(format!("{e}"))),
         },
         None => (None, None, None, None),
@@ -841,21 +843,29 @@ async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
         .with_extension("lock");
 
     let result = match cache_key {
-        CacheKey::SecretsList { ref vault_name } => {
-            refresh_secrets_list(vault_name.clone(), config).await
-        }
+        CacheKey::SecretsList {
+            ref backend,
+            ref vault_name,
+        } => refresh_secrets_list(backend.clone(), vault_name.clone(), config).await,
         CacheKey::VaultList => refresh_vault_list(config).await,
         CacheKey::FileList {
+            ref backend,
             ref vault_name,
             recursive,
         } => {
             #[cfg(feature = "file-ops")]
             {
-                crate::cli::file_ops::refresh_file_list(vault_name.clone(), recursive, config).await
+                crate::cli::file_ops::refresh_file_list(
+                    backend.clone(),
+                    vault_name.clone(),
+                    recursive,
+                    config,
+                )
+                .await
             }
             #[cfg(not(feature = "file-ops"))]
             {
-                let _ = (vault_name, recursive);
+                let _ = (backend, vault_name, recursive);
                 Ok(())
             }
         }
@@ -865,60 +875,53 @@ async fn execute_cache_refresh(key: &str, config: Config) -> Result<()> {
     result
 }
 
-async fn refresh_secrets_list(vault_name: String, config: Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
+/// Background cache refresh (`xv cache refresh <key>`, spawned by
+/// `cache::refresh::trigger_background_refresh` on stale-while-revalidate
+/// reads). Materializes the backend named by the cache key and lists through
+/// its secret trait, so the refresh reads from — and writes back to — the same
+/// backend the cache entry belongs to (closing the old Azure-only limitation).
+async fn refresh_secrets_list(backend: String, vault_name: String, config: Config) -> Result<()> {
+    use crate::backend::BackendRegistry;
     use crate::cache::{CacheKey, CacheManager};
-    use crate::secret::manager::SecretManager;
-    use std::sync::Arc;
 
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
-
-    let secret_manager = SecretManager::new(auth_provider, config.no_color);
-    let secrets = secret_manager
-        .secret_ops()
+    let registry = BackendRegistry::with_lazy(&config, std::slice::from_ref(&backend))
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+    let backend_impl = registry
+        .materialize(&backend)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+    let secrets = backend_impl
+        .secrets()
         .list_secrets(&vault_name, None)
-        .await?;
+        .await
+        .map_err(CrosstacheError::from)?;
 
     let cache_manager = CacheManager::from_config(&config);
-    let cache_key = CacheKey::SecretsList { vault_name };
+    let cache_key = CacheKey::SecretsList {
+        backend,
+        vault_name,
+    };
     cache_manager.set(&cache_key, &secrets);
 
     Ok(())
 }
 
 async fn refresh_vault_list(config: Config) -> Result<()> {
-    use crate::auth::provider::DefaultAzureCredentialProvider;
+    use crate::backend::BackendRegistry;
     use crate::cache::{CacheKey, CacheManager};
-    use std::sync::Arc;
 
-    let auth_provider = Arc::new(
-        DefaultAzureCredentialProvider::with_credential_priority(
-            config.azure_credential_priority.clone(),
-        )
-        .map_err(|e| {
-            CrosstacheError::authentication(format!("Failed to create auth provider: {e}"))
-        })?,
-    );
-
-    let vault_manager = VaultManager::new(
-        auth_provider,
-        config.subscription_id.clone(),
-        config.no_color,
-    )?;
+    let registry = BackendRegistry::from_config(&config)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
 
     // Fetch WITHOUT rendering: this runs as a cache refresh (often spawned by
-    // `xv cache refresh --key vaults`), so nothing may reach stdout.
-    let vaults = vault_manager
-        .vault_ops()
-        .list_vaults(Some(&config.subscription_id), None)
-        .await?;
+    // `xv cache refresh --key vaults`), so nothing may reach stdout. Backends
+    // that cannot enumerate vaults have nothing to refresh.
+    let Some(vaults_backend) = registry.active().vaults() else {
+        return Ok(());
+    };
+    let vaults = vaults_backend
+        .list_vaults(None)
+        .await
+        .map_err(CrosstacheError::from)?;
 
     let cache_manager = CacheManager::from_config(&config);
     cache_manager.set(&CacheKey::VaultList, &vaults);
@@ -969,6 +972,33 @@ pub(crate) async fn execute_context_command(
             )
             .await?;
         }
+        ContextCommands::Add {
+            vault,
+            backend,
+            r#as,
+            default,
+            local,
+            force,
+        } => {
+            execute_cx_add(&vault, backend, r#as, default, local, force, &config).await?;
+        }
+        ContextCommands::Rm { alias, local } => {
+            execute_cx_rm(&alias, local, &config).await?;
+        }
+        ContextCommands::Default { alias, local } => {
+            execute_cx_default(&alias, local, &config).await?;
+        }
+        ContextCommands::Alias {
+            entry,
+            new_alias,
+            reset,
+            local,
+        } => {
+            execute_cx_alias(&entry, new_alias, reset, local, &config).await?;
+        }
+        ContextCommands::Ls => {
+            execute_cx_ls(&config).await?;
+        }
     }
     Ok(())
 }
@@ -1008,7 +1038,7 @@ async fn execute_context_show(config: &Config) -> Result<()> {
     let cwd = std::env::current_dir()?;
     if let Ok(Some((path, cfg))) = crate::config::project::find_project_config(&cwd).await {
         match crate::config::project::resolve_env(&cfg, config.env_flag.as_deref()) {
-            Ok((name, profile)) => {
+            Ok(Some((name, profile))) => {
                 println!();
                 println!("active env: {name} (from {})", path.display());
                 if let Some(v) = &profile.vault {
@@ -1025,6 +1055,13 @@ async fn execute_context_show(config: &Config) -> Result<()> {
                 }
                 println!(
                     "  hint: env profiles override context/global defaults when a field is set; missing env fields fall back to the vault context, then global config."
+                );
+            }
+            Ok(None) => {
+                println!();
+                println!(
+                    "project config: {} (defines no environments; types-only project file)",
+                    path.display()
                 );
             }
             Err(e) => {
@@ -1045,6 +1082,25 @@ async fn execute_context_use(
     config: &Config,
 ) -> Result<()> {
     use crate::config::{ContextManager, VaultContext};
+
+    // Multi-vault workspaces and the single-vault `context use` model are
+    // mutually exclusive (spec §Workspace management): mixing them would be
+    // confusing (which one wins?), so a REAL (configured) workspace being
+    // present errors, pointing at the workspace-native way to change the write
+    // target. `resolve_configured_workspace` (NOT the converged
+    // `resolve_workspace`) is used so this bootstrap command still works in an
+    // unconfigured Azure env — the degenerate builder's no-vault hard-error
+    // must not fire here, or you could never `xv context use` your first vault.
+    if crate::workspace::resolve_configured_workspace(config)
+        .await?
+        .is_some()
+    {
+        return Err(CrosstacheError::config(
+            "a multi-vault workspace is attached; 'context use' does not apply. \
+             Use `xv cx default <alias>` to change the workspace's default vault, \
+             or `xv cx rm <alias>` to detach vaults back to single-vault mode.",
+        ));
+    }
 
     // P0.1: If the name matches a .xv.toml env profile, reject with a targeted hint.
     let cwd = std::env::current_dir()?;
@@ -1314,6 +1370,7 @@ async fn execute_context_init(
             group: None,
             folder: None,
             backend: profile_backend.map(String::from),
+            vaults: Vec::new(),
         },
     );
 
@@ -1321,6 +1378,7 @@ async fn execute_context_init(
         default_env: Some(env_name.clone()),
         envs,
         scan: None,
+        types: std::collections::HashMap::new(),
     };
 
     let body = toml::to_string_pretty(&cfg)
@@ -1335,6 +1393,555 @@ async fn execute_context_init(
         ".xv.toml written to {} (env: {env_name})",
         path.display()
     ));
+    Ok(())
+}
+
+// ── Workspace (`xv cx add/rm/default/ls`) ───────────────────────────────────
+
+/// Load the context store `cx` operates on: local when `--local`, otherwise
+/// whatever `ContextManager::load()` resolves (local-dir-first, else global)
+/// — matching `execute_context_use`'s existing local/global selection.
+async fn load_cx_context(local: bool) -> Result<crate::config::ContextManager> {
+    use crate::config::ContextManager;
+    if local {
+        ContextManager::new_local()
+    } else {
+        ContextManager::load()
+            .await
+            .or_else(|_| ContextManager::new_global())
+    }
+}
+
+/// Fail-loud guard (Bugbot MEDIUM fix): `cx add`/`rm`/`default` mutate the
+/// CONTEXT STORE, but `resolve_workspace`'s overlay rule means a `.xv.toml`
+/// `[env.<name>].vaults` block active for cwd REPLACES the context
+/// workspace entirely (spec §Workspace management — no merging, one
+/// source of truth per location). Without this guard, a context mutation
+/// would persist and report success while every secret command kept using
+/// the project overlay instead — the same "silently ineffective" class as
+/// the write/read verb bugs fixed earlier in this PR. There is no override
+/// flag in v1: editing `.xv.toml` directly is the explicit, deliberate
+/// path (same reasoning as `context use`'s guard just above).
+async fn guard_against_project_vaults_overlay(config: &Config) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    if let Ok(Some((path, proj_cfg))) = crate::config::project::find_project_config(&cwd).await {
+        if let Ok(Some((env_name, profile))) =
+            crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
+        {
+            if !profile.vaults.is_empty() {
+                return Err(CrosstacheError::config(format!(
+                    "this directory's workspace is defined by .xv.toml ([env.{env_name}].vaults \
+                     in {}) — edit the project file, or run the command outside the project. \
+                     There is no override flag: the project file is the explicit source of truth \
+                     for this directory's workspace.",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn execute_cx_add(
+    vault: &str,
+    backend: Option<String>,
+    r#as: Option<String>,
+    default: bool,
+    local: bool,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
+    use crate::workspace::{build_workspace, WorkspaceEntryConfig, WorkspaceSource};
+
+    guard_against_project_vaults_overlay(config).await?;
+
+    let mut context_manager = load_cx_context(local).await?;
+    let mut entries = context_manager
+        .workspace
+        .clone()
+        .unwrap_or_default()
+        .entries;
+
+    let alias = r#as.unwrap_or_else(|| vault.to_string());
+    let backend_name = backend.unwrap_or_else(|| config.effective_backend_name().to_string());
+
+    if entries.iter().any(|e| e.resolved_alias() == alias) {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "workspace alias '{alias}' is already attached (vault '{}')",
+            entries
+                .iter()
+                .find(|e| e.resolved_alias() == alias)
+                .map(|e| e.vault.as_str())
+                .unwrap_or("?")
+        )));
+    }
+
+    // #341 fix: on the very first `cx add` (no workspace exists yet), the
+    // OLD behavior attached only the requested vault, making it the
+    // workspace's sole (and therefore default) entry. That silently
+    // dropped whatever vault was previously "current" — `xv ls`
+    // immediately after `cx add` would stop showing those secrets, which
+    // violates the natural reading of "add" ("add another vault to what I
+    // already have open"). So the first `cx add` now auto-attaches the
+    // CURRENTLY-RESOLVED vault (the effective backend + whatever
+    // `resolve_vault_name(None)` returns, aliased by its own vault name)
+    // as the workspace's default, then attaches the requested vault
+    // alongside it — unless the requested vault already resolves to that
+    // same (backend, vault) pair, in which case the pre-#341 single-entry
+    // behavior is unchanged, or the current vault can't be resolved at
+    // all (fresh setup, no default_vault configured), in which case we
+    // fall back to the pre-#341 behavior and note it in the message.
+    let is_first = entries.is_empty();
+    let mut auto_attach: Option<(String, String, String)> = None; // (vault, backend, alias)
+    let mut auto_attach_unavailable_reason: Option<String> = None;
+    if is_first {
+        // "Current backend" must be `pre_flag_backend` UNCONDITIONALLY, not
+        // `effective_backend_name()` gated on whether THIS subcommand's own
+        // `backend` field is `Some`. Two ways a `--backend` flag can poison
+        // `effective_backend_name()` into reporting the just-REQUESTED
+        // backend instead of the one already in use:
+        //   1. `xv cx add <vault> --backend X` — the subcommand's own
+        //      `--backend` flag shares its long name with the top-level
+        //      `global = true` `--backend` flag on `Cli` (see the doc
+        //      comment on `ContextCommands::Add::backend`), so clap folds
+        //      BOTH to the same value X.
+        //   2. `xv --backend X cx add <vault>` — the TOP-LEVEL flag alone,
+        //      placed before the subcommand, with the subcommand's own
+        //      `backend` field left `None`. `cli_backend_was_arg` is still
+        //      true and X still wins in `effective_backend_name()`, so
+        //      gating on the subcommand field alone (`backend_was_explicit`)
+        //      missed this case entirely (Bugbot review, MEDIUM, PR #343).
+        // `pre_flag_backend` (the profile-aware effective backend,
+        // snapshotted in main.rs BEFORE ANY of this invocation's
+        // `--backend` flags — CLI or subcommand — are folded in) is
+        // unconditionally the right "backend already in use" signal for
+        // all three cases (no flag / subcommand flag / top-level flag): when
+        // no flag was passed at all, it's identical to
+        // `effective_backend_name()`, so this is behavior-preserving there.
+        // NOT `disk_backend` either, which under-counts a `.xv.toml` env
+        // profile's `backend` (it outranks the config file / `XV_BACKEND`
+        // layer; #341 code review, MAJOR).
+        //
+        // `pre_flag_backend` is `None` when main.rs could not faithfully
+        // resolve it — specifically, an active `.xv.toml` env profile
+        // declaring an INVALID `backend` string. Guessing a fallback there
+        // (e.g. `disk_backend`) would be actively wrong: `resolve_vault_name`
+        // below still honors the profile's `vault`, so a guessed backend
+        // would pair that vault with the WRONG backend, and auto-attach
+        // would persist that mismatched pair as the workspace's DEFAULT
+        // entry — breaking every subsequent `ls`/write against it (Bugbot
+        // review, MEDIUM, PR #343). So when it's `None`, skip auto-attach
+        // entirely (same fall-back path as "current vault unresolvable"):
+        // no guessing, no auto-attach, just the pre-#341 single-entry
+        // behavior with an explanatory note.
+        match config.pre_flag_backend.clone() {
+            None => {
+                auto_attach_unavailable_reason = Some(
+                    "current backend could not be determined (invalid backend in .xv.toml \
+                     profile?)"
+                        .to_string(),
+                );
+            }
+            // `cx add` auto-attach bootstrap: resolve the CURRENT context vault
+            // to seed the first workspace entry. This is context bootstrapping,
+            // not secret-name resolution or a manager call — `resolve_vault_name`
+            // is the right primitive here (a workspace does not yet exist to
+            // resolve against).
+            Some(current_backend) => match config.resolve_vault_name(None).await {
+                Ok(current_vault) => {
+                    if current_vault != vault || current_backend != backend_name {
+                        let current_alias = current_vault.clone();
+                        // Alias collision must be caught BEFORE any probing or
+                        // writes (requirement: fail-closed, nothing persisted).
+                        if current_alias == alias {
+                            return Err(CrosstacheError::invalid_argument(format!(
+                                "workspace alias '{alias}' is already attached (vault '{current_vault}')"
+                            )));
+                        }
+                        auto_attach = Some((current_vault, current_backend, current_alias));
+                    }
+                }
+                Err(e) => {
+                    auto_attach_unavailable_reason = Some(e.to_string());
+                }
+            },
+        }
+    }
+
+    // Probe the requested vault exists unless --force (offline setup). The
+    // auto-attached current vault is never probed — it was already in use.
+    if !force {
+        let probe_registry =
+            crate::backend::BackendRegistry::with_lazy(config, std::slice::from_ref(&backend_name))
+                .map_err(|e| CrosstacheError::config(e.to_string()))?;
+        let probe_backend = probe_registry.materialize(&backend_name).map_err(|e| {
+            CrosstacheError::config(format!(
+                "cannot reach backend '{backend_name}' to verify vault '{vault}' exists: {e}. \
+                 Pass --force to skip this check for offline setup."
+            ))
+        })?;
+        probe_backend
+            .secrets()
+            .list_secrets(vault, None)
+            .await
+            .map_err(|e| {
+                CrosstacheError::config(format!(
+                    "vault '{vault}' on backend '{backend_name}' is not reachable: {e}. \
+                 Pass --force to skip this check for offline setup."
+                ))
+            })?;
+    }
+
+    // First attached vault becomes the default implicitly; `--default`
+    // explicitly reassigns (clearing any prior default). When the current
+    // vault was auto-attached, "first attached vault" means the current
+    // vault, not the requested one — `--default` is required to make the
+    // requested vault the default instead.
+    if default || (is_first && auto_attach.is_none()) {
+        for e in entries.iter_mut() {
+            e.default = false;
+        }
+    }
+
+    if let Some((auto_vault, auto_backend, auto_alias)) = auto_attach.clone() {
+        entries.push(WorkspaceEntryConfig {
+            vault: auto_vault,
+            backend: Some(auto_backend),
+            alias: Some(auto_alias),
+            default: !default,
+        });
+    }
+
+    let requested_default = if auto_attach.is_some() {
+        default
+    } else {
+        default || is_first
+    };
+    entries.push(WorkspaceEntryConfig {
+        vault: vault.to_string(),
+        backend: Some(backend_name.clone()),
+        alias: Some(alias.clone()),
+        default: requested_default,
+    });
+
+    // Validate before persisting (fail-closed): duplicate aliases,
+    // charset, backend-name collisions, exactly-one-default.
+    let active_backend = config.effective_backend_name().to_string();
+    let mut backend_names: Vec<String> = crate::workspace::BUILTIN_BACKEND_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for k in config.named_backends.keys() {
+        if !backend_names.iter().any(|n| n == k) {
+            backend_names.push(k.clone());
+        }
+    }
+    let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
+    build_workspace(
+        &entries,
+        &active_backend,
+        WorkspaceSource::Context,
+        &backend_name_refs,
+    )?;
+
+    context_manager.workspace = Some(crate::workspace::WorkspaceState { entries });
+    context_manager.save().await?;
+
+    if let Some((_auto_vault, auto_backend, auto_alias)) = auto_attach {
+        output::success(&format!(
+            "Attached current vault '{auto_alias}' (backend: {auto_backend}){}",
+            if !default { " as default" } else { "" }
+        ));
+        output::success(&format!(
+            "Attached vault '{vault}' as '{alias}' (backend: {backend_name}){}",
+            if default { " as default" } else { "" }
+        ));
+    } else {
+        let fallback_note = auto_attach_unavailable_reason
+            .map(|reason| {
+                format!(
+                    " (could not auto-attach the current vault to preserve #341 behavior: {reason})"
+                )
+            })
+            .unwrap_or_default();
+        output::success(&format!(
+            "Attached vault '{vault}' as '{alias}' (backend: {backend_name}){}{fallback_note}",
+            if requested_default { " [default]" } else { "" }
+        ));
+    }
+    Ok(())
+}
+
+async fn execute_cx_rm(alias: &str, local: bool, config: &Config) -> Result<()> {
+    guard_against_project_vaults_overlay(config).await?;
+
+    let mut context_manager = load_cx_context(local).await?;
+    let mut ws_state = context_manager.workspace.clone().unwrap_or_default();
+
+    if ws_state.entries.is_empty() {
+        return Err(CrosstacheError::config("no workspace is attached"));
+    }
+
+    let idx = ws_state
+        .entries
+        .iter()
+        .position(|e| e.resolved_alias() == alias)
+        .ok_or_else(|| {
+            let attached: Vec<String> = ws_state
+                .entries
+                .iter()
+                .map(|e| e.resolved_alias())
+                .collect();
+            CrosstacheError::invalid_argument(format!(
+                "unknown workspace alias '{alias}'; attached aliases: {}",
+                attached.join(", ")
+            ))
+        })?;
+
+    let removing_default = ws_state.entries[idx].default;
+    let is_last_entry = ws_state.entries.len() == 1;
+
+    if removing_default && !is_last_entry {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "'{alias}' is the workspace default; run `xv cx default <other-alias>` first, \
+             then `xv cx rm {alias}`"
+        )));
+    }
+
+    ws_state.entries.remove(idx);
+
+    if ws_state.entries.is_empty() {
+        context_manager.workspace = None;
+        context_manager.save().await?;
+        output::success(&format!(
+            "Removed '{alias}' — workspace is now empty; back to single-vault behavior"
+        ));
+    } else {
+        context_manager.workspace = Some(ws_state);
+        context_manager.save().await?;
+        output::success(&format!("Removed '{alias}' from the workspace"));
+    }
+    Ok(())
+}
+
+async fn execute_cx_default(alias: &str, local: bool, config: &Config) -> Result<()> {
+    guard_against_project_vaults_overlay(config).await?;
+
+    let mut context_manager = load_cx_context(local).await?;
+    let mut ws_state = context_manager.workspace.clone().unwrap_or_default();
+
+    if !ws_state.entries.iter().any(|e| e.resolved_alias() == alias) {
+        let attached: Vec<String> = ws_state
+            .entries
+            .iter()
+            .map(|e| e.resolved_alias())
+            .collect();
+        return Err(CrosstacheError::invalid_argument(format!(
+            "unknown workspace alias '{alias}'; attached aliases: {}",
+            attached.join(", ")
+        )));
+    }
+
+    for e in ws_state.entries.iter_mut() {
+        e.default = e.resolved_alias() == alias;
+    }
+
+    context_manager.workspace = Some(ws_state);
+    context_manager.save().await?;
+    output::success(&format!("'{alias}' is now the workspace default"));
+    Ok(())
+}
+
+/// Locate the entry to re-alias: an exact alias match first (aliases are
+/// unique), then a vault-name match. A vault name can match several attached
+/// entries (same vault name on different backends), which is ambiguous — list
+/// the candidates and ask the user to disambiguate by alias.
+fn resolve_alias_target_index(
+    entries: &[crate::workspace::WorkspaceEntryConfig],
+    entry: &str,
+) -> Result<usize> {
+    if let Some(i) = entries.iter().position(|e| e.resolved_alias() == entry) {
+        return Ok(i);
+    }
+    let matches: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.vault == entry)
+        .map(|(i, _)| i)
+        .collect();
+    match matches.as_slice() {
+        [i] => Ok(*i),
+        [] => {
+            let attached: Vec<String> = entries.iter().map(|e| e.resolved_alias()).collect();
+            Err(CrosstacheError::invalid_argument(format!(
+                "unknown workspace entry '{entry}'; attached aliases: {}",
+                attached.join(", ")
+            )))
+        }
+        _ => {
+            let candidates: Vec<String> = matches
+                .iter()
+                .map(|&i| {
+                    let e = &entries[i];
+                    format!(
+                        "alias '{}' (backend '{}')",
+                        e.resolved_alias(),
+                        e.backend.clone().unwrap_or_else(|| "active".to_string())
+                    )
+                })
+                .collect();
+            Err(CrosstacheError::invalid_argument(format!(
+                "vault name '{entry}' matches multiple attached entries; disambiguate by alias: {}",
+                candidates.join(", ")
+            )))
+        }
+    }
+}
+
+/// `xv cx alias <entry> <new-alias>` / `xv cx alias <entry> --reset`.
+/// Renames the alias on an attached entry (looked up by its current alias or
+/// its vault name), or resets it back to the vault name. Reuses the same
+/// validation as `cx add` (charset, uniqueness, backend-name collision).
+async fn execute_cx_alias(
+    entry: &str,
+    new_alias: Option<String>,
+    reset: bool,
+    local: bool,
+    config: &Config,
+) -> Result<()> {
+    guard_against_project_vaults_overlay(config).await?;
+
+    if reset && new_alias.is_some() {
+        return Err(CrosstacheError::invalid_argument(
+            "pass either a new alias or --reset, not both",
+        ));
+    }
+    if !reset && new_alias.is_none() {
+        return Err(CrosstacheError::invalid_argument(
+            "provide a new alias, or use --reset to restore the vault name",
+        ));
+    }
+
+    let mut context_manager = load_cx_context(local).await?;
+    let mut ws_state = context_manager.workspace.clone().unwrap_or_default();
+
+    if ws_state.entries.is_empty() {
+        return Err(CrosstacheError::config("no workspace is attached"));
+    }
+
+    let idx = resolve_alias_target_index(&ws_state.entries, entry)?;
+    let target_vault = ws_state.entries[idx].vault.clone();
+    let old = ws_state.entries[idx].resolved_alias();
+    // --reset restores the vault name; aliases default to the vault name, so a
+    // "reset" is just clearing the explicit alias.
+    let new = if reset {
+        target_vault.clone()
+    } else {
+        new_alias.unwrap_or_default()
+    };
+
+    if old == new {
+        output::success(&format!(
+            "alias for '{entry}' is already '{new}'; nothing to change"
+        ));
+        return Ok(());
+    }
+
+    // Store the alias explicitly, except when it equals the vault name (drop to
+    // None so `resolved_alias()` derives it) — keeping the persisted shape
+    // identical to `cx add`'s default-alias case.
+    ws_state.entries[idx].alias = if new == target_vault {
+        None
+    } else {
+        Some(new.clone())
+    };
+
+    // Validate the mutated workspace (charset, duplicate alias, backend-name
+    // collision, exactly-one-default) via the same path `cx add` uses; the new
+    // alias — or the vault name on --reset — must pass unchanged, no fallback.
+    let active_backend = config.effective_backend_name().to_string();
+    let mut backend_names: Vec<String> = crate::workspace::BUILTIN_BACKEND_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for k in config.named_backends.keys() {
+        if !backend_names.iter().any(|n| n == k) {
+            backend_names.push(k.clone());
+        }
+    }
+    let backend_name_refs: Vec<&str> = backend_names.iter().map(|s| s.as_str()).collect();
+    crate::workspace::build_workspace(
+        &ws_state.entries,
+        &active_backend,
+        crate::workspace::WorkspaceSource::Context,
+        &backend_name_refs,
+    )?;
+
+    context_manager.workspace = Some(ws_state);
+    context_manager.save().await?;
+    output::success(&format!("renamed alias '{old}' to '{new}'"));
+    Ok(())
+}
+
+async fn execute_cx_ls(config: &Config) -> Result<()> {
+    use tabled::Tabled;
+
+    #[derive(Tabled, serde::Serialize)]
+    struct WorkspaceRow {
+        #[tabled(rename = "Alias")]
+        alias: String,
+        #[tabled(rename = "Backend")]
+        backend: String,
+        #[tabled(rename = "Vault")]
+        vault: String,
+        #[tabled(rename = "Default")]
+        default: String,
+        #[tabled(rename = "Source")]
+        source: String,
+    }
+
+    // `xv cx ls` means "show the attached workspace" — a presence question, so
+    // it consults `resolve_configured_workspace` (never the degenerate builder):
+    // with no configured workspace it prints the "no workspace attached" line.
+    let ws = match crate::workspace::resolve_configured_workspace(config).await? {
+        Some(ws) => ws,
+        None => {
+            output::info("No workspace attached (single-vault mode)");
+            output::hint("Use 'xv cx add <vault>' to attach vaults into a workspace");
+            return Ok(());
+        }
+    };
+
+    let source = match ws.source {
+        crate::workspace::WorkspaceSource::Context => "context",
+        crate::workspace::WorkspaceSource::ProjectToml => ".xv.toml",
+        // Unreachable: `resolve_configured_workspace` never yields Degenerate.
+        crate::workspace::WorkspaceSource::Degenerate => "single-vault",
+    };
+
+    let rows: Vec<WorkspaceRow> = ws
+        .entries
+        .iter()
+        .map(|e| WorkspaceRow {
+            alias: e.alias.clone(),
+            backend: e.backend.clone(),
+            vault: e.vault.clone(),
+            default: if e.default {
+                "*".to_string()
+            } else {
+                String::new()
+            },
+            source: source.to_string(),
+        })
+        .collect();
+
+    let formatter = crate::utils::format::TableFormatter::new(
+        config.runtime_output_format,
+        config.no_color,
+        config.template.clone(),
+        config.runtime_columns.clone(),
+    );
+    println!("{}", formatter.format_table(&rows)?);
     Ok(())
 }
 
@@ -1399,17 +2006,27 @@ async fn execute_env_list(config: &Config) -> Result<()> {
 
     let active = project::resolve_env(&cfg, config.env_flag.as_deref())
         .ok()
+        .flatten()
         .map(|(name, _)| name.to_string());
 
     use crate::config::project::resolve_effective_backend;
-    // Precedence for every row mirrors `resolve_effective_backend`:
-    //   cli_backend (--backend / XV_BACKEND via clap) > profile.backend > global.
-    // `cli_backend` is the raw flag/env snapshot; `disk_backend` is the global
-    // config value taken BEFORE main.rs folded the active env's profile in
-    // (using `effective_backend_name()` here would make inactive envs inherit
-    // the active env's backend). A `None` profile backend falls through to the
+    // Precedence for every row mirrors `resolve_effective_backend` as fixed
+    // by issue #305: a true `--backend` flag > profile.backend > global
+    // (which already folds in XV_BACKEND via `load_from_env`). `cli_backend`
+    // is the raw flag/env snapshot — clap cannot distinguish a real flag from
+    // one populated by `XV_BACKEND`, so it is only fed into the CLI slot when
+    // `cli_backend_was_arg` confirms it was an actual argument; otherwise it
+    // falls through to the profile / global layers like any other
+    // XV_BACKEND-sourced value. `disk_backend` is the global config value
+    // taken BEFORE main.rs folded the active env's profile in (using
+    // `effective_backend_name()` here would make inactive envs inherit the
+    // active env's backend). A `None` profile backend falls through to the
     // global layer rather than silently defaulting to "azure".
-    let cli_backend = config.cli_backend.as_deref();
+    let cli_backend = if config.cli_backend_was_arg {
+        config.cli_backend.as_deref()
+    } else {
+        None
+    };
     let global_backend = config.disk_backend.as_deref();
 
     #[derive(tabled::Tabled, serde::Serialize)]
@@ -1434,8 +2051,9 @@ async fn execute_env_list(config: &Config) -> Result<()> {
                 resolve_effective_backend(cli_backend, profile.backend.as_deref(), global_backend);
             // "(inherited)" marks rows whose env profile set no `backend` of
             // its own — the displayed value came from outside the profile.
-            // Keys strictly on the profile field: the CLI override is populated
-            // from XV_BACKEND even when --backend is absent.
+            // Keys strictly on the profile field, independent of where the
+            // resolved value ultimately came from (CLI flag / XV_BACKEND /
+            // global config / built-in default).
             let backend_note = if profile.backend.is_none() {
                 " (inherited)"
             } else {
@@ -1603,6 +2221,7 @@ async fn execute_env_create(
         backend: backend.map(String::from),
         group: group.map(String::from),
         folder: folder.map(String::from),
+        vaults: Vec::new(),
     };
 
     cfg.envs.insert(name.to_string(), profile);
@@ -1691,7 +2310,13 @@ async fn execute_env_show(config: &Config) -> Result<()> {
         return Ok(());
     };
 
-    let (name, profile) = project::resolve_env(&cfg, config.env_flag.as_deref())?;
+    let Some((name, profile)) = project::resolve_env(&cfg, config.env_flag.as_deref())? else {
+        output::info(&format!(
+            "{} defines no environments (types-only project file). Nothing to show — see `xv env list`.",
+            path.display()
+        ));
+        return Ok(());
+    };
 
     println!("Active env: {name} (from {})", path.display());
     if let Some(b) = &profile.backend {
@@ -1728,10 +2353,13 @@ async fn execute_env_pull(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
-    let secrets_backend = reg.active().secrets();
-
-    // Determine vault name
-    let vault_name = config.resolve_vault_name(None).await?;
+    // Resolve the current vault AND the backend that owns it together — the
+    // workspace default entry's backend can differ from the active backend, so
+    // reading/writing through `reg.active()` while taking the vault from the
+    // entry would hit the wrong backend (Bugbot PR #346).
+    let (backend, _backend_name, vault_name) =
+        crate::cli::vault_ops::resolve_current_vault(config, Some(reg)).await?;
+    let secrets_backend = backend.secrets();
 
     eprintln!("Pulling secrets from vault '{}'...", vault_name);
 
@@ -1878,10 +2506,13 @@ async fn execute_env_push(
             "No backend registry available. Run 'xv config show' to check your configuration.",
         )
     })?;
-    let secrets_backend = reg.active().secrets();
-
-    // Determine vault name
-    let vault_name = config.resolve_vault_name(None).await?;
+    // Resolve the current vault AND the backend that owns it together — the
+    // workspace default entry's backend can differ from the active backend, so
+    // reading/writing through `reg.active()` while taking the vault from the
+    // entry would hit the wrong backend (Bugbot PR #346).
+    let (backend, _backend_name, vault_name) =
+        crate::cli::vault_ops::resolve_current_vault(config, Some(reg)).await?;
+    let secrets_backend = backend.secrets();
 
     // Read .env content from file or stdin
     let env_content = if let Some(file_path) = file {
@@ -2075,5 +2706,70 @@ mod tests {
         // happens at the call site in execute_config_edit.
         let got = resolve_editor_from(Some("code --wait".into()), None);
         assert_eq!(got, "code --wait");
+    }
+
+    mod resolve_alias_target {
+        use super::super::resolve_alias_target_index;
+        use crate::workspace::WorkspaceEntryConfig;
+
+        fn entry(
+            vault: &str,
+            backend: &str,
+            alias: Option<&str>,
+            default: bool,
+        ) -> WorkspaceEntryConfig {
+            WorkspaceEntryConfig {
+                vault: vault.to_string(),
+                backend: Some(backend.to_string()),
+                alias: alias.map(str::to_string),
+                default,
+            }
+        }
+
+        #[test]
+        fn matches_by_alias_first() {
+            let entries = vec![
+                entry("vault-a", "local", Some("a"), true),
+                entry("vault-b", "local", Some("b"), false),
+            ];
+            assert_eq!(resolve_alias_target_index(&entries, "b").unwrap(), 1);
+        }
+
+        #[test]
+        fn falls_back_to_a_unique_vault_name() {
+            let entries = vec![
+                entry("kv-scottzionic", "local", Some("kv"), true),
+                entry("other", "local", None, false),
+            ];
+            // Addressed by vault name, not alias.
+            assert_eq!(
+                resolve_alias_target_index(&entries, "kv-scottzionic").unwrap(),
+                0
+            );
+        }
+
+        #[test]
+        fn ambiguous_vault_name_across_backends_lists_candidates() {
+            // Same vault name attached on two backends: the vault name alone is
+            // ambiguous, so it must error and name the aliases to disambiguate.
+            let entries = vec![
+                entry("shared", "local", Some("a"), true),
+                entry("shared", "aws", Some("b"), false),
+            ];
+            let err = resolve_alias_target_index(&entries, "shared").unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("matches multiple attached entries"), "{msg}");
+            assert!(
+                msg.contains("alias 'a'") && msg.contains("alias 'b'"),
+                "{msg}"
+            );
+        }
+
+        #[test]
+        fn unknown_entry_lists_attached_aliases() {
+            let entries = vec![entry("vault-a", "local", Some("a"), true)];
+            let err = resolve_alias_target_index(&entries, "nope").unwrap_err();
+            assert!(err.to_string().contains("unknown workspace entry"), "{err}");
+        }
     }
 }

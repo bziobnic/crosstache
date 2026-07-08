@@ -173,6 +173,12 @@ default_vault = "default"
     fn get_raw_exact(&self, name: &str) -> String {
         self.xv_ok(&["get", name, "--raw"])
     }
+
+    /// Path to this test's isolated temp directory (for scratch files such as
+    /// markers written by child processes spawned via `xv run`).
+    fn tmp_path(&self) -> &std::path::Path {
+        self._tmp.path()
+    }
 }
 
 // ===========================================================================
@@ -1566,4 +1572,588 @@ fn mv_folder_to_root() {
     // 'a' is now at the root; 'b' keeps its remainder 'db'.
     assert!(!json.contains("\"app\""), "{json}");
     assert!(json.contains("\"db\""), "remainder folder lost: {json}");
+}
+
+// ===========================================================================
+// xv run — fail-fast on secret fetch failures (#306)
+// ===========================================================================
+
+#[test]
+fn run_happy_path_launches_child() {
+    let env = TestEnv::new();
+    env.set_secret("HAPPY_KEY", "happy-value");
+    let marker = env.tmp_path().join("happy_marker.txt");
+
+    let output = env
+        .xv()
+        .args([
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("touch '{}'", marker.display()),
+        ])
+        .output()
+        .expect("execute xv run");
+
+    assert!(
+        output.status.success(),
+        "xv run should succeed when all secrets fetch:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        marker.exists(),
+        "child process should have run and created the marker file"
+    );
+}
+
+#[test]
+fn run_aborts_on_failing_uri_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+    let marker = env.tmp_path().join("uri_fail_marker.txt");
+
+    // A parent-environment variable holding an xv:// reference to a secret
+    // that does not exist. Reference resolution only scans the parent
+    // environment when --inherit-env is passed.
+    let mut cmd = env.xv();
+    cmd.env("REF_VAR", "xv://default/does-not-exist");
+    cmd.args([
+        "run",
+        "--inherit-env",
+        "--",
+        "sh",
+        "-c",
+        &format!("touch '{}'", marker.display()),
+    ]);
+    let output = cmd.output().expect("execute xv run");
+
+    // Pin the exact exit code (3 == CrosstacheError::Config, see src/error.rs)
+    // so an accidental change of error variant is caught, not just "any
+    // non-zero exit".
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv run should fail with the config-error exit code (3) when a referenced secret cannot be fetched:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does-not-exist"),
+        "stderr should mention the failing reference: {stderr}"
+    );
+    assert!(
+        !marker.exists(),
+        "child process must NOT run when a secret fetch fails (fail-fast default)"
+    );
+}
+
+// Note: there is no equivalent test here for the selected-secrets fetch loop
+// (the non-URI path in `execute_secret_run`). On the local backend,
+// `get_secret` reads directly from a file this test harness fully controls —
+// there is no network/permission layer to fail transiently, and corrupting
+// an on-disk entry to force a decode error would couple this test tightly to
+// internal storage format details rather than the abort/collect logic under
+// test (which is shared with the URI path above and already covered by it).
+//
+// The "resolved but has no value" branch (added for both loops: a backend
+// returning `Ok` with `value: None`) is likewise not independently testable
+// here: local's `get_secret` always returns `Some(value)` when
+// `include_value: true` (verified in `src/backend/local/secrets.rs`), and
+// `xv set --stdin` with empty input is rejected at write time
+// ("Secret value cannot be empty", exit 3) — so an empty-but-present value,
+// which would still be `Some("")` rather than `None`, isn't reachable via the
+// local backend either. That branch is exercised for the URI path only
+// indirectly through code review / manual reasoning about the shared
+// `fetch_failures` collection logic.
+
+#[test]
+fn run_best_effort_launches_child_despite_failing_uri_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+    let marker = env.tmp_path().join("uri_fail_best_effort_marker.txt");
+
+    let mut cmd = env.xv();
+    cmd.env("REF_VAR", "xv://default/does-not-exist");
+    cmd.args([
+        "run",
+        "--inherit-env",
+        "--best-effort",
+        "--",
+        "sh",
+        "-c",
+        &format!("touch '{}'", marker.display()),
+    ]);
+    let output = cmd.output().expect("execute xv run");
+
+    assert!(
+        output.status.success(),
+        "--best-effort should launch the child (and reflect its exit code) despite the failing reference:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does-not-exist"),
+        "a warning should still be emitted for the failing reference: {stderr}"
+    );
+    assert!(
+        marker.exists(),
+        "child process should have run under --best-effort"
+    );
+}
+
+// ===========================================================================
+// xv inject — fail-fast on secret resolution failures (#313)
+// ===========================================================================
+
+#[test]
+fn inject_happy_path_renders_output() {
+    let env = TestEnv::new();
+    env.set_secret("DB_PASSWORD", "hunter2");
+    env.set_secret("API_KEY", "sk-live-abc123");
+
+    let template_path = env.tmp_path().join("happy_template.yml");
+    std::fs::write(
+        &template_path,
+        "db_password: \"{{ secret:DB_PASSWORD }}\"\napi_key: \"{{ secret:API_KEY }}\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("happy_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert!(
+        output.status.success(),
+        "xv inject should succeed when all references resolve:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let rendered = std::fs::read_to_string(&out_path).expect("read rendered output");
+    assert!(
+        rendered.contains("hunter2") && rendered.contains("sk-live-abc123"),
+        "rendered output should contain both resolved secret values: {rendered}"
+    );
+    assert!(
+        !rendered.contains("{{ secret:"),
+        "rendered output should not contain any unresolved placeholders: {rendered}"
+    );
+}
+
+#[test]
+fn inject_aborts_on_missing_secret_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+
+    let template_path = env.tmp_path().join("missing_template.yml");
+    std::fs::write(
+        &template_path,
+        "present: \"{{ secret:PRESENT }}\"\nmissing: \"{{ secret:DOES_NOT_EXIST }}\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("missing_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    // Pin the exact exit code (3 == CrosstacheError::Config, see src/error.rs)
+    // so an accidental change of error variant is caught, not just "any
+    // non-zero exit" — matches the convention set by the `xv run` fail-fast
+    // tests (#314).
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv inject should fail with the config-error exit code (3) when a referenced secret cannot be resolved:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DOES_NOT_EXIST"),
+        "stderr should name the missing reference: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when a reference fails to resolve (fail-fast default)"
+    );
+}
+
+// Note: the `{{ secret:name }}` abort path above was already correct before
+// this fix — `execute_secret_inject` already collected unresolved
+// `{{ secret:name }}` references and returned an error before writing. The
+// actual regression this issue (#313) fixes is (a) the lack of a
+// `--best-effort` escape hatch (covered below) and (b) a malformed
+// `xv://backend:vault/secret` URI in the template being silently skipped
+// with only a warning instead of being treated as a failure — covered by
+// `inject_aborts_on_invalid_uri_reference` below, which does fail against
+// unpatched code (verified via `git stash` during development).
+#[test]
+fn inject_aborts_on_invalid_uri_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+
+    let template_path = env.tmp_path().join("invalid_uri_template.yml");
+    std::fs::write(
+        &template_path,
+        "present: \"{{ secret:PRESENT }}\"\nbad: \"xv://notabackend:somevault/somesecret\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("invalid_uri_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv inject should fail with the config-error exit code (3) when a template contains an unparseable xv:// URI:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notabackend"),
+        "stderr should name the invalid backend/URI: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when a URI fails to parse (fail-fast default)"
+    );
+}
+
+// Regression test for a bug found in code review of the fix above: the
+// "no secret references found in template" early-return only checked
+// `required_secrets.is_empty() && cross_vault_refs.is_empty()`. An invalid
+// `xv://` URI is pushed into `fetch_failures` but NOT into `cross_vault_refs`
+// (it never becomes a resolvable reference), so when the invalid URI is the
+// template's ONLY reference, both vectors are empty and the early-return
+// fired BEFORE the abort gate — silently warning, writing the template
+// verbatim, and exiting 0. This test targets that exact path (no other
+// reference present) and fails against the code prior to this follow-up fix.
+#[test]
+fn inject_aborts_when_only_reference_is_invalid_uri() {
+    let env = TestEnv::new();
+
+    let template_path = env.tmp_path().join("only_invalid_uri_template.yml");
+    std::fs::write(
+        &template_path,
+        "bad: \"xv://notabackend:somevault/somesecret\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("only_invalid_uri_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "xv inject should fail with the config-error exit code (3) when the template's only reference is an unparseable xv:// URI:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notabackend"),
+        "stderr should name the invalid backend/URI: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "output file must NOT be created when the only reference fails to parse (fail-fast default)"
+    );
+}
+
+#[test]
+fn inject_best_effort_writes_verbatim_when_only_reference_is_invalid_uri() {
+    let env = TestEnv::new();
+
+    let template_path = env
+        .tmp_path()
+        .join("only_invalid_uri_best_effort_template.yml");
+    let template_content = "bad: \"xv://notabackend:somevault/somesecret\"\n";
+    std::fs::write(&template_path, template_content).expect("write template");
+    let out_path = env.tmp_path().join("only_invalid_uri_best_effort_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+            "--best-effort",
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert!(
+        output.status.success(),
+        "--best-effort should write the template verbatim and exit 0 despite the invalid URI:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("notabackend"),
+        "a warning should still be emitted for the invalid URI: {stderr}"
+    );
+    let rendered = std::fs::read_to_string(&out_path).expect("read rendered output");
+    assert_eq!(
+        rendered, template_content,
+        "under --best-effort the template should be written back verbatim: {rendered}"
+    );
+}
+
+#[test]
+fn inject_best_effort_renders_output_despite_missing_secret_reference() {
+    let env = TestEnv::new();
+    env.set_secret("PRESENT", "present-value");
+
+    let template_path = env.tmp_path().join("missing_best_effort_template.yml");
+    std::fs::write(
+        &template_path,
+        "present: \"{{ secret:PRESENT }}\"\nmissing: \"{{ secret:DOES_NOT_EXIST }}\"\n",
+    )
+    .expect("write template");
+    let out_path = env.tmp_path().join("missing_best_effort_out.yml");
+
+    let output = env
+        .xv()
+        .args([
+            "inject",
+            "--template",
+            template_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+            "--best-effort",
+        ])
+        .output()
+        .expect("execute xv inject");
+
+    assert!(
+        output.status.success(),
+        "--best-effort should render and write the output despite the failing reference:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DOES_NOT_EXIST"),
+        "a warning should still be emitted for the failing reference: {stderr}"
+    );
+    let rendered = std::fs::read_to_string(&out_path).expect("read rendered output");
+    assert!(
+        rendered.contains("present-value"),
+        "the resolved reference should still be substituted: {rendered}"
+    );
+    assert!(
+        rendered.contains("{{ secret:DOES_NOT_EXIST }}"),
+        "the unresolved reference should be left in place under --best-effort: {rendered}"
+    );
+}
+
+// ===========================================================================
+// Cross-vault move / copy (issue #307)
+// ===========================================================================
+
+#[test]
+fn move_without_force_refuses_to_overwrite_existing_target() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest"]);
+
+    env.set_secret("src-secret", "src-value");
+    // Set a target secret directly in the destination vault.
+    env.xv_ok(&["context", "use", "dest", "--global"]);
+    env.set_secret("dst-secret", "dst-original-value");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+
+    let (_stdout, stderr) = env.xv_fail(&[
+        "move",
+        "src-secret",
+        "--from",
+        "default",
+        "--to",
+        "dest",
+        "--new-name",
+        "dst-secret",
+    ]);
+    assert!(
+        stderr.contains("already exists"),
+        "expected 'already exists' error, got:\n{stderr}"
+    );
+
+    // Both secrets are unchanged.
+    assert_eq!(env.get_raw("src-secret"), "src-value");
+    env.xv_ok(&["context", "use", "dest", "--global"]);
+    assert_eq!(env.get_raw("dst-secret"), "dst-original-value");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+}
+
+#[test]
+fn move_with_force_overwrites_existing_target_and_deletes_source() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest"]);
+
+    env.set_secret("src-secret2", "src-value2");
+    env.xv_ok(&["context", "use", "dest", "--global"]);
+    env.set_secret("dst-secret2", "dst-original-value2");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+
+    env.xv_ok(&[
+        "move",
+        "src-secret2",
+        "--from",
+        "default",
+        "--to",
+        "dest",
+        "--new-name",
+        "dst-secret2",
+        "--force",
+    ]);
+
+    // Destination now holds the source's value.
+    env.xv_ok(&["context", "use", "dest", "--global"]);
+    assert_eq!(env.get_raw("dst-secret2"), "src-value2");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+
+    // Source is gone.
+    let (_, stderr) = env.xv_fail(&["get", "src-secret2", "--raw"]);
+    assert!(
+        stderr.to_lowercase().contains("not found"),
+        "source secret should be gone after forced move:\n{stderr}"
+    );
+}
+
+#[test]
+fn copy_refuses_to_overwrite_existing_target_even_semantics_unchanged() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest2"]);
+
+    env.set_secret("copy-src", "copy-src-value");
+    env.xv_ok(&["context", "use", "dest2", "--global"]);
+    env.set_secret("copy-dst", "copy-dst-original");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+
+    let (_stdout, stderr) = env.xv_fail(&[
+        "copy",
+        "copy-src",
+        "--from",
+        "default",
+        "--to",
+        "dest2",
+        "--new-name",
+        "copy-dst",
+    ]);
+    assert!(
+        stderr.contains("already exists"),
+        "expected 'already exists' error, got:\n{stderr}"
+    );
+
+    // Both secrets are unchanged; copy has no --force flag to override this.
+    assert_eq!(env.get_raw("copy-src"), "copy-src-value");
+    env.xv_ok(&["context", "use", "dest2", "--global"]);
+    assert_eq!(env.get_raw("copy-dst"), "copy-dst-original");
+    env.xv_ok(&["context", "use", "default", "--global"]);
+}
+
+#[test]
+fn move_preserves_group_folder_and_note_metadata() {
+    let env = TestEnv::new();
+    env.xv_ok(&["vault", "create", "dest3"]);
+
+    env.set_secret_with_args(
+        "meta-src",
+        "meta-value",
+        &[
+            "--group",
+            "backend",
+            "--folder",
+            "prod",
+            "--note",
+            "something",
+        ],
+    );
+
+    env.xv_ok(&[
+        "move",
+        "meta-src",
+        "--from",
+        "default",
+        "--to",
+        "dest3",
+        "--new-name",
+        "meta-dst",
+        "--force",
+    ]);
+
+    // Value moved.
+    env.xv_ok(&["context", "use", "dest3", "--global"]);
+    assert_eq!(env.get_raw("meta-dst"), "meta-value");
+
+    // Group/folder/note metadata rode along to the destination vault; the
+    // local backend's `set_secret` only reads these from the dedicated
+    // `SecretRequest` fields (not raw tags), so hand-building the request
+    // without lifting them out of `tags` silently drops them.
+    let json = env.xv_ok(&["ls", "--format", "json"]);
+    assert!(
+        json.contains("meta-dst")
+            && json.contains("backend")
+            && json.contains("prod")
+            && json.contains("something"),
+        "group/folder/note metadata missing after move:\n{json}"
+    );
+
+    let group_list = env.xv_ok(&["group", "list", "--format", "json"]);
+    assert!(
+        group_list.contains("backend"),
+        "moved secret's group not visible to 'group list':\n{group_list}"
+    );
+
+    let folder_ls = env.xv_ok(&["ls", "prod", "--format", "json"]);
+    assert!(
+        folder_ls.contains("meta-dst"),
+        "moved secret not visible under its folder via 'ls prod':\n{folder_ls}"
+    );
+
+    env.xv_ok(&["context", "use", "default", "--global"]);
 }

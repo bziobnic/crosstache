@@ -23,11 +23,54 @@ resource_group = "myproj-prod-rg"
 
 [env.local-dev]
 backend = "local"          # use local age-encrypted backend for this env
+
+[env.multi]
+vault = "ignored-when-vaults-present"
+vaults = [                 # multi-vault workspace overlay — see below
+  { vault = "myproj-dev-kv", backend = "azure", alias = "dev", default = true },
+  { vault = "shared-staging", backend = "aws-east", alias = "stage" },
+]
 ```
 
 All fields except `[env.<name>]` blocks are optional. New fields (output
 defaults, mask lists, etc.) will be added in v0.7.x without breaking
 existing files.
+
+## `vaults` — multi-vault workspace overlay
+
+An env profile may declare `vaults = [...]` instead of (or alongside) the
+single `vault` field, attaching several vaults — potentially on different
+backends — as one workspace for that project directory:
+
+```toml
+[env.dev]
+vault = "myproj-dev-kv"          # ignored when `vaults` is present (warned once)
+vaults = [
+  { vault = "myproj-dev-kv", backend = "azure", alias = "dev", default = true },
+  { vault = "shared-staging", backend = "aws-east", alias = "stage" },
+]
+```
+
+Each entry:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `vault` | yes | Vault name on that entry's backend. |
+| `backend` | no | Registry backend name (a canonical kind like `azure`/`local`/`aws`, or a `[named_backends.*]` key). Defaults to the active backend when omitted. |
+| `alias` | no | Short name used in colon addressing (`alias:path`) and `xv cx ls`. Defaults to the `vault` value. Must not collide with a registry backend name. |
+| `default` | no | Marks the write target for unqualified writes. Exactly one entry must be `default` (or a single entry is implicitly default). |
+
+- **Replaces, never merges.** When `vaults` is present, it REPLACES any
+  workspace attached via `xv cx add` (the personal context store) for
+  commands run inside that project directory — one source of truth per
+  location, not a union of both.
+- **`xv cx add`/`rm`/`default` refuse to run** in a directory governed by a
+  `.xv.toml` `vaults` overlay (exit `3`, naming the file and env) — a
+  context-store mutation there would silently have no effect on what
+  secret commands actually use. `xv cx ls` stays read-only and always shows
+  the effective workspace regardless of source.
+- See [Multi-vault workspaces](../README.md#multi-vault-workspaces) in the
+  README for the full addressing/read/write/`mv`/`copy`/TUI reference.
 
 ## Active env selection
 
@@ -42,12 +85,25 @@ Priority (highest first):
 
 Each command's `--vault` / `--resource-group` / `--group` / `--folder`
 flag still overrides everything. When the flag is absent, `xv`
-resolves in this order:
+resolves `vault` and `resource_group` in this order:
 
 1. CLI flag (if provided)
 2. The active env's field in `.xv.toml`
 3. The legacy `.xv/context` JSON (deprecated; see below)
 4. The user's global config default
+
+`group` and `folder` only have two layers — CLI flag, then the active
+env's field in `.xv.toml` — there is no legacy-context or global-config
+fallback for either. They're also scoped narrowly, not applied to every
+command that happens to accept a `--group`/`--folder` flag:
+
+- `group` default: applied by `xv run` as the injection filter when
+  `--group` is omitted, and by `xv set`/`xv gen --save` as the write-time
+  group when `--group` is omitted. It is **not** applied by `xv list`/`ls`
+  — listing an env's secrets is never implicitly narrowed by the profile.
+- `folder` default: applied only on writes (`xv set`/`xv gen --save`) when
+  `--folder` is omitted. It is **not** applied by `xv list`/`ls` — the
+  write-side folder default does not scope which secrets a listing shows.
 
 ### Backend resolution
 

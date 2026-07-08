@@ -128,12 +128,19 @@ impl VaultBackend for LocalVaultBackend {
         self.vault_meta_to_properties(&meta)
     }
 
-    async fn get_vault(&self, name: &str) -> Result<VaultProperties, BackendError> {
+    async fn get_vault(
+        &self,
+        name: &str,
+        _resource_group: Option<&str>,
+    ) -> Result<VaultProperties, BackendError> {
         let meta = self.read_vault_meta(name)?;
         self.vault_meta_to_properties(&meta)
     }
 
-    async fn list_vaults(&self) -> Result<Vec<VaultSummary>, BackendError> {
+    async fn list_vaults(
+        &self,
+        _resource_group: Option<&str>,
+    ) -> Result<Vec<VaultSummary>, BackendError> {
         let vaults_dir = self.vaults_dir();
         if !vaults_dir.exists() {
             return Ok(Vec::new());
@@ -171,7 +178,11 @@ impl VaultBackend for LocalVaultBackend {
         Ok(results)
     }
 
-    async fn delete_vault(&self, name: &str) -> Result<(), BackendError> {
+    async fn delete_vault(
+        &self,
+        name: &str,
+        _resource_group: Option<&str>,
+    ) -> Result<(), BackendError> {
         let vault_dir = self.vault_dir(name)?;
         let vault_json = self.vault_json_path(name)?;
 
@@ -251,7 +262,7 @@ mod tests {
         assert_eq!(props.sku, "local");
         assert!(props.tags.contains_key("env"));
 
-        let got = backend.get_vault("myvault").await.unwrap();
+        let got = backend.get_vault("myvault", None).await.unwrap();
         assert_eq!(got.name, "myvault");
     }
 
@@ -264,7 +275,7 @@ mod tests {
         assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
         assert!(!outside.exists());
 
-        let result = backend.delete_vault("../../outside").await;
+        let result = backend.delete_vault("../../outside", None).await;
         assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
     }
 
@@ -297,7 +308,7 @@ mod tests {
         backend.create_vault(create_request("alpha")).await.unwrap();
         backend.create_vault(create_request("beta")).await.unwrap();
 
-        let vaults = backend.list_vaults().await.unwrap();
+        let vaults = backend.list_vaults(None).await.unwrap();
         assert_eq!(vaults.len(), 2);
         assert_eq!(vaults[0].name, "alpha");
         assert_eq!(vaults[1].name, "beta");
@@ -311,9 +322,9 @@ mod tests {
             .create_vault(create_request("to-del"))
             .await
             .unwrap();
-        backend.delete_vault("to-del").await.unwrap();
+        backend.delete_vault("to-del", None).await.unwrap();
 
-        let result = backend.get_vault("to-del").await;
+        let result = backend.get_vault("to-del", None).await;
         assert!(matches!(result, Err(BackendError::VaultNotFound { .. })));
     }
 
@@ -321,7 +332,7 @@ mod tests {
     async fn delete_nonexistent_vault() {
         let (backend, _tmp) = test_vault_backend();
 
-        let result = backend.delete_vault("nope").await;
+        let result = backend.delete_vault("nope", None).await;
         assert!(matches!(result, Err(BackendError::VaultNotFound { .. })));
     }
 
@@ -329,7 +340,7 @@ mod tests {
     async fn get_nonexistent_vault() {
         let (backend, _tmp) = test_vault_backend();
 
-        let result = backend.get_vault("nope").await;
+        let result = backend.get_vault("nope", None).await;
         assert!(matches!(result, Err(BackendError::VaultNotFound { .. })));
     }
 }

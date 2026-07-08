@@ -86,9 +86,14 @@ async fn aws_backend() -> AwsBackend {
         region: Some(aws_region()),
         ..Default::default()
     };
-    AwsBackend::new(&cfg, None, None)
-        .await
-        .expect("failed to build AwsBackend — is the aws CLI authenticated?")
+    AwsBackend::new(
+        &cfg,
+        None,
+        None,
+        crosstache::backend::aws::TransferConfig::default(),
+    )
+    .await
+    .expect("failed to build AwsBackend — is the aws CLI authenticated?")
 }
 
 /// Unique vault prefix for one test run.
@@ -153,7 +158,7 @@ async fn poll_list_vaults_contains(backend: &AwsBackend, vault: &str) {
     let vaults = backend.vaults().expect("AWS backend exposes vaults");
     for attempt in 1..=MAX_ATTEMPTS {
         let all = vaults
-            .list_vaults()
+            .list_vaults(None)
             .await
             .expect("list_vaults should succeed");
         if all.iter().any(|v| v.name == vault) {
@@ -174,7 +179,7 @@ async fn cleanup(backend: &AwsBackend, vault: &str, secrets: &[&str]) {
     // Give AWS a moment so the marker-only delete_vault sees an empty prefix.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     if let Some(vaults) = backend.vaults() {
-        let _ = vaults.delete_vault(vault).await;
+        let _ = vaults.delete_vault(vault, None).await;
     }
 }
 
@@ -470,7 +475,7 @@ async fn e2e_aws_vault_create_list_delete() {
 
     // Empty vault (marker only) — delete_vault should succeed without --force.
     vaults
-        .delete_vault(&vault)
+        .delete_vault(&vault, None)
         .await
         .expect("delete_vault of an empty vault should succeed");
 
@@ -478,7 +483,7 @@ async fn e2e_aws_vault_create_list_delete() {
     let mut gone = false;
     for attempt in 1..=12 {
         let after = vaults
-            .list_vaults()
+            .list_vaults(None)
             .await
             .expect("list_vaults after delete should succeed");
         if !after.iter().any(|v| v.name == vault) {

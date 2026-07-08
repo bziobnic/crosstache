@@ -5,6 +5,7 @@
 //! methods have default implementations that return [`BackendError::Unsupported`].
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 use crate::secret::manager::{
     DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
@@ -184,6 +185,45 @@ pub trait SecretBackend: Send + Sync {
     }
 }
 
+/// Extracts the denormalized `groups`/`note`/`folder` tags out of `tags`
+/// (in place) and returns them, and strips the bookkeeping tags
+/// (`original_name`, `created_by`) that a fresh write regenerates.
+///
+/// Every backend's `get_secret` folds groups/note/folder into plain tag
+/// keys on `SecretProperties.tags` for display convenience — Azure stores
+/// them as literal tags natively (so this "just works" there), while AWS's
+/// `props_from_describe` explicitly lifts `xv:groups`/the description
+/// field/`xv:folder` into the same plain `"groups"`/`"note"`/`"folder"`
+/// keys. Any caller that reads a secret's properties and later writes a
+/// tags map back (`SecretRequest.tags` / `SecretUpdateRequest.tags`) MUST
+/// run it through this first: handing the denormalized map back verbatim
+/// would create extra plain `groups`/`note`/`folder` *user* tags on AWS
+/// (duplicating the real `xv:groups`/description/`xv:folder`) or persist
+/// them into the wrong storage location on the local backend
+/// (`SecretMeta.tags` instead of the dedicated `.groups`/`.note`/`.folder`
+/// fields) — the exact bug class the #315 copy/move review caught, and
+/// later reproduced by the record-types update/conversion paths (Bugbot
+/// review, record-types plan). This is the single source of truth for
+/// that key list; do not hand-roll it elsewhere.
+pub(crate) fn split_denormalized_tags(
+    tags: &mut HashMap<String, String>,
+) -> (Option<Vec<String>>, Option<String>, Option<String>) {
+    let groups = tags
+        .remove("groups")
+        .map(|g| {
+            g.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|g| !g.is_empty());
+    let note = tags.remove("note");
+    let folder = tags.remove("folder");
+    tags.remove(super::TAG_ORIGINAL_NAME);
+    tags.remove(super::TAG_CREATED_BY);
+    (groups, note, folder)
+}
+
 /// Build the create-under-the-new-name request for a rename from the source
 /// secret's properties. Groups/note/folder live under canonical tag keys in
 /// `SecretProperties.tags` on every backend; lift them into the first-class
@@ -202,19 +242,7 @@ pub(crate) fn rename_request_from_properties(
     })?;
 
     let mut tags = current.tags.clone();
-    let groups = tags
-        .remove("groups")
-        .map(|g| {
-            g.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .filter(|g| !g.is_empty());
-    let note = tags.remove("note");
-    let folder = tags.remove("folder");
-    tags.remove("original_name");
-    tags.remove("created_by");
+    let (groups, note, folder) = split_denormalized_tags(&mut tags);
 
     Ok(SecretRequest {
         name: new_name.to_string(),

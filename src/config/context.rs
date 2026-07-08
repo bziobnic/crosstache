@@ -104,15 +104,46 @@ pub struct ContextManager {
     /// Whether this is a local context (directory-specific)
     #[serde(skip)]
     pub is_local: bool,
+    /// Multi-vault workspace state (`xv cx add/rm/default`), if any.
+    /// `#[serde(default)]` so pre-workspace context files (missing this
+    /// field entirely) still load without error.
+    #[serde(default)]
+    pub workspace: Option<crate::workspace::WorkspaceState>,
 }
 
 impl ContextManager {
-    /// Load context from local directory or global config
+    /// Load context from local directory or global config.
+    ///
+    /// `XV_CONTEXT_DIR` (see `global_context_path`'s doc comment), when set
+    /// and non-empty, skips the local (`cwd/.xv/context`) check entirely and
+    /// goes straight to the global path — the override means "my context
+    /// store lives HERE, full stop," so a `.xv/context` that happens to
+    /// exist in the test process's cwd must never take precedence over it.
     pub async fn load() -> Result<Self> {
-        // 1. Check for .xv/context in current directory
-        if let Ok(local_context) = Self::load_local_context().await {
-            debug!("Loaded local vault context");
-            return Ok(local_context);
+        // A `current_dir()` failure (e.g. a deleted cwd) degrades to "no
+        // local context" here, same as the pre-refactor behavior where
+        // `load_local_context`'s own `?` on this call was swallowed by
+        // `load`'s `if let Ok(..)` below.
+        let cwd = std::env::current_dir().ok();
+        Self::load_from(cwd.as_deref()).await
+    }
+
+    /// Core of [`Self::load`], parameterized over `cwd` so it's testable
+    /// without changing the process-global working directory (which unit
+    /// tests can't safely do under parallel `cargo test`). Production code
+    /// always goes through [`Self::load`].
+    async fn load_from(cwd: Option<&std::path::Path>) -> Result<Self> {
+        let context_dir_overridden = std::env::var("XV_CONTEXT_DIR")
+            .map(|d| !d.is_empty())
+            .unwrap_or(false);
+        if !context_dir_overridden {
+            // 1. Check for .xv/context in current directory
+            if let Some(cwd) = cwd {
+                if let Ok(local_context) = Self::load_local_context_from(cwd).await {
+                    debug!("Loaded local vault context");
+                    return Ok(local_context);
+                }
+            }
         }
 
         // 2. Fall back to global context
@@ -120,9 +151,9 @@ impl ContextManager {
         Self::load_global_context().await
     }
 
-    /// Load context from current directory (.xv/context)
-    async fn load_local_context() -> Result<Self> {
-        let context_path = std::env::current_dir()?.join(".xv").join("context");
+    /// Load context from `cwd/.xv/context`.
+    async fn load_local_context_from(cwd: &std::path::Path) -> Result<Self> {
+        let context_path = cwd.join(".xv").join("context");
         if !context_path.exists() {
             return Err(CrosstacheError::config("No local context found"));
         }
@@ -305,8 +336,30 @@ impl ContextManager {
         self.recent.iter().find(|c| c.vault_name == vault_name)
     }
 
-    /// Get global context file path
+    /// Get global context file path.
+    ///
+    /// `XV_CONTEXT_DIR` (if set and non-empty) overrides the resolved
+    /// directory entirely — mirrors `CacheManager::resolve_cache_dir`'s
+    /// `XV_CACHE_DIR` precedent (#318). Intended for tests that need an
+    /// isolated context store (e.g. a `tempfile::TempDir`) without ever
+    /// touching the real `$XDG_CONFIG_HOME`/`$HOME/.config` context file — a
+    /// unit test that calls into `resolve_workspace`/`ContextManager::load`
+    /// without this override reads whatever workspace happens to be
+    /// attached on the machine running the test (#342). A relative
+    /// `XV_CONTEXT_DIR` is resolved against the process's current working
+    /// directory, which can shift under `cd`/`chdir` — an absolute path is
+    /// recommended.
+    ///
+    /// This override also makes `ContextManager::load` skip the LOCAL
+    /// (`cwd/.xv/context`) check entirely, not just the global path — see
+    /// `load`'s own doc comment (#342 code review, MINOR).
     fn global_context_path() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("XV_CONTEXT_DIR") {
+            if !dir.is_empty() {
+                return Ok(PathBuf::from(dir).join("context"));
+            }
+        }
+
         // Use XDG Base Directory specification on Linux and macOS
         // On Windows, use the platform-appropriate config directory
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -370,8 +423,44 @@ impl ContextManager {
     }
 }
 
+/// Test-only helpers shared across `#[cfg(test)] mod tests` blocks in
+/// DIFFERENT modules of this crate (this module's own tests, plus
+/// `crate::cli::secret_ops::tests`) that need to mutate the process-global
+/// `XV_CONTEXT_DIR` env var.
+///
+/// `pub(crate)` (not nested inside a private `mod tests`) so it's visible
+/// crate-wide when compiled for test. A single shared lock is required, not
+/// one per module: two independently-defined mutexes guarding the SAME env
+/// var give each caller a false sense of exclusivity while a test in the
+/// other module can still be mutating that var concurrently — cargo runs
+/// lib tests in parallel threads by default, so two per-module locks race on
+/// `XV_CONTEXT_DIR` exactly like having no lock at all (Bugbot review, LOW,
+/// PR #343).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    /// Serializes tests that mutate the process-global `XV_CONTEXT_DIR` env
+    /// var (#342). Any test whose call path reaches
+    /// `crate::workspace::resolve_workspace` or
+    /// `ContextManager::load`/`load_from`/`new_global` — directly, or
+    /// transitively via `Config::resolve_vault_name`/`resolve_vault_for_trait`/
+    /// `resolve_workspace_or_default` — reads the REAL global context file
+    /// (`$XDG_CONFIG_HOME/xv/context` or `$HOME/.config/xv/context`) unless
+    /// `XV_CONTEXT_DIR` is overridden: on a machine with a multi-vault
+    /// workspace attached (e.g. the maintainer's, per #341/#342), that
+    /// context leaks into the test process and silently changes which
+    /// vault/backend these tests resolve against.
+    pub(crate) fn context_dir_env_lock() -> &'static AsyncMutex<()> {
+        static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| AsyncMutex::new(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::context_dir_env_lock;
     use super::*;
     use tempfile::TempDir;
     use tokio;
@@ -537,6 +626,99 @@ mod tests {
             0o700,
             "context dir must be owner-only (0700), got {:03o}",
             dir_mode & 0o777
+        );
+    }
+
+    /// A pre-workspace context JSON file (no `workspace` key at all) must
+    /// still load cleanly — `#[serde(default)]` on the new field.
+    #[test]
+    fn legacy_context_json_without_workspace_field_loads() {
+        let legacy = r#"{
+            "current": {
+                "vault_name": "myvault",
+                "resource_group": null,
+                "subscription_id": null,
+                "storage_container": null,
+                "last_used": "2024-01-01T00:00:00Z",
+                "usage_count": 1
+            },
+            "recent": []
+        }"#;
+        let manager: ContextManager =
+            serde_json::from_str(legacy).expect("legacy context JSON must still deserialize");
+        assert_eq!(manager.current_vault(), Some("myvault"));
+        assert!(manager.workspace.is_none());
+    }
+
+    /// RAII guard that sets an env var for its lifetime and restores the
+    /// previous value (or removes it, if previously unset) on drop.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// #342 code review (MINOR): `XV_CONTEXT_DIR` must override the LOCAL
+    /// (`cwd/.xv/context`) check too, not just the global path — the
+    /// override means "my context store lives HERE, full stop." Uses
+    /// `load_from` (the cwd-parameterized testable core) instead of
+    /// `load()` + `set_current_dir`, so this never touches the real
+    /// process-global cwd.
+    #[tokio::test]
+    async fn xv_context_dir_override_skips_local_context_check() {
+        let _env_guard = context_dir_env_lock().lock().await;
+
+        // A `.xv/context` planted in what would be the "local" cwd, with a
+        // distinct current vault — if this were ever read, the assertion
+        // below would see "local-current" instead of the override's vault.
+        let local_root = TempDir::new().unwrap();
+        let local_xv_dir = local_root.path().join(".xv");
+        std::fs::create_dir_all(&local_xv_dir).unwrap();
+        std::fs::write(
+            local_xv_dir.join("context"),
+            r#"{"current":{"vault_name":"local-current","resource_group":null,"subscription_id":null,"storage_container":null,"last_used":"2024-01-01T00:00:00Z","usage_count":1},"recent":[]}"#,
+        )
+        .unwrap();
+
+        // The XV_CONTEXT_DIR override target, with its OWN context file.
+        let override_dir = TempDir::new().unwrap();
+        std::fs::write(
+            override_dir.path().join("context"),
+            r#"{"current":{"vault_name":"override-current","resource_group":null,"subscription_id":null,"storage_container":null,"last_used":"2024-01-01T00:00:00Z","usage_count":1},"recent":[]}"#,
+        )
+        .unwrap();
+
+        let _context_dir_guard = EnvVarGuard::set("XV_CONTEXT_DIR", override_dir.path());
+
+        let loaded = ContextManager::load_from(Some(local_root.path()))
+            .await
+            .expect("load_from must succeed");
+
+        assert_eq!(
+            loaded.current_vault(),
+            Some("override-current"),
+            "XV_CONTEXT_DIR must win over a .xv/context present in cwd, not just supplement it"
+        );
+        assert!(
+            !loaded.is_local,
+            "a context loaded via the XV_CONTEXT_DIR override must be reported as global, \
+             never local"
         );
     }
 }

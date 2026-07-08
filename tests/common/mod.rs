@@ -49,6 +49,124 @@ pub fn xv_isolated() -> (Command, TempDir) {
     (cmd, temp)
 }
 
+/// Build an isolated `xv` command backed by the **local** (age-encrypted
+/// file) backend, with a valid `xv.conf` written up front — so commands
+/// that need a working backend (not just filesystem/config-parse checks)
+/// can run fully offline, deterministically, with no Azure credentials or
+/// network access. Mirrors the harness in `e2e_local_backend.rs::TestEnv`.
+///
+/// Returns `(command, tempdir)`; hold the tempdir alive for the test
+/// duration (it cleans up on drop). The `--backend local` selection happens
+/// via `XV_BACKEND=local` (read directly by config loading, unlike a CLI
+/// `--backend` flag which is resolved too late to affect the early
+/// `Config::validate()` pass) plus `backend = "local"` in `xv.conf` as a
+/// belt-and-suspenders match.
+pub fn xv_isolated_local() -> (Command, TempDir) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_dir = temp.path().join(".config");
+    let store_dir = temp.path().join("store");
+    let key_file = temp.path().join("key.txt");
+    let xv_dir = config_dir.join("xv");
+    std::fs::create_dir_all(&xv_dir).expect("create config dir");
+    std::fs::create_dir_all(&store_dir).expect("create store dir");
+
+    let config_content = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store}"
+key_file = "{key}"
+default_vault = "default"
+"#,
+        store = store_dir.display(),
+        key = key_file.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
+
+    let mut cmd = xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(temp.path());
+    (cmd, temp)
+}
+
+/// Build an isolated `xv` command backed by the **local** backend (same
+/// global `xv.conf` as `xv_isolated_local()`) whose cwd is a project
+/// subdirectory containing `xv_toml` written out as `.xv.toml` — for tests
+/// that need env-profile (`.xv.toml`) resolution with a fully hermetic
+/// environment (`env_clear()` + explicit allowlist), per the #317 lesson:
+/// selective `env_remove()` leaks host vars like `DEBUG`, `CACHE_TTL`,
+/// `AZURE_CREDENTIAL_PRIORITY`, `BLOB_*` into the child.
+///
+/// Returns `(command, tempdir)`; hold the tempdir alive for the test
+/// duration. Note: `XV_NO_PARENT_CONFIG=1` is still safe here — a `.xv.toml`
+/// directly in cwd is always found regardless of that flag (it only blocks
+/// *ancestor* walk-up), so profile resolution is still bounded to this one
+/// project dir.
+pub fn xv_isolated_local_with_profile(xv_toml: &str) -> (Command, TempDir) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_dir = temp.path().join(".config");
+    let store_dir = temp.path().join("store");
+    let key_file = temp.path().join("key.txt");
+    let xv_dir = config_dir.join("xv");
+    let project_dir = temp.path().join("project");
+    std::fs::create_dir_all(&xv_dir).expect("create config dir");
+    std::fs::create_dir_all(&store_dir).expect("create store dir");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+    let config_content = format!(
+        r#"backend = "local"
+debug = false
+subscription_id = ""
+default_vault = "default"
+default_resource_group = ""
+default_location = ""
+tenant_id = ""
+output_json = false
+no_color = true
+cache_enabled = false
+cache_ttl_secs = 0
+clipboard_timeout = 0
+
+[local]
+store_path = "{store}"
+key_file = "{key}"
+default_vault = "default"
+"#,
+        store = store_dir.display(),
+        key = key_file.display(),
+    );
+    std::fs::write(xv_dir.join("xv.conf"), config_content).expect("write config");
+    std::fs::write(project_dir.join(".xv.toml"), xv_toml).expect("write .xv.toml");
+
+    let mut cmd = xv();
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XV_NO_PARENT_CONFIG", "1")
+        .env("XV_BACKEND", "local")
+        .env("NO_COLOR", "1")
+        .current_dir(&project_dir);
+    (cmd, temp)
+}
+
 /// Init a minimal git repo at `path`. Used by scan-install tests.
 pub fn init_git_repo(path: &Path) {
     let status = Command::new("git")

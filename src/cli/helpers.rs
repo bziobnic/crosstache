@@ -1,9 +1,10 @@
 //! Shared CLI helper functions (clipboard, token parsing, random generation, formatting).
 
-use crate::backend::{BackendKind, BackendRegistry};
+use crate::backend::{Backend, BackendKind, BackendRegistry};
 use crate::cli::commands::CharsetType;
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Returns `true` if a backend registry is available.
@@ -72,6 +73,45 @@ pub(crate) fn share_unsupported_error(
     }
 }
 
+/// Enrich vault-role access assignments with principal display names/emails
+/// (via the backend's directory resolution) and apply the presentation-side
+/// include-all filter.
+///
+/// This is the split of the former `VaultManager::resolve_and_filter_roles`:
+/// the resolution half now runs through the [`VaultBackend`] trait
+/// ([`resolve_principal_ids`]), while the `ServicePrincipal` filter stays
+/// CLI-side because it is presentation policy (what to show), not a backend
+/// concern. Ids the backend can't resolve are simply left as-is.
+///
+/// [`VaultBackend`]: crate::backend::vault::VaultBackend
+/// [`resolve_principal_ids`]: crate::backend::vault::VaultBackend::resolve_principal_ids
+pub(crate) async fn enrich_and_filter_roles(
+    backend: &dyn crate::backend::vault::VaultBackend,
+    roles: &mut Vec<crate::vault::models::VaultRole>,
+    include_all: bool,
+) {
+    let principal_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        roles
+            .iter()
+            .map(|r| r.principal_id.clone())
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
+    };
+    let resolved = backend.resolve_principal_ids(&principal_ids).await;
+    for role in roles.iter_mut() {
+        if let Some((name, email)) = resolved.get(&role.principal_id) {
+            if !name.is_empty() {
+                role.principal_name = name.clone();
+            }
+            role.email = email.clone();
+        }
+    }
+    if !include_all {
+        roles.retain(|r| r.principal_type != "ServicePrincipal");
+    }
+}
+
 /// Resolve the vault name for the active backend trait path.
 ///
 /// Azure keeps the legacy resolver semantics: no implicit fallback is allowed,
@@ -83,6 +123,13 @@ pub(crate) async fn resolve_vault_for_trait(
     config: &Config,
     registry: Option<&BackendRegistry>,
 ) -> Result<String> {
+    // Retained default-vault resolver for the handful of verb paths that need
+    // just a vault NAME (not a full secret target) against the active backend:
+    // `find --all-vaults`'s single-vault fallback and the `xv gen`/`whoami`-style
+    // callers. It is NOT a legacy manager — it resolves the context/config
+    // default vault and preserves the Azure no-vault hard error. The secret
+    // seam (`resolve_workspace_or_default`) is used wherever a name must resolve
+    // to a `(backend, vault)` pair.
     match config.resolve_vault_name(None).await {
         Ok(name) => return Ok(name),
         Err(e) if registry.is_some_and(|r| r.active().kind() == BackendKind::Azure) => {
@@ -99,6 +146,161 @@ pub(crate) async fn resolve_vault_for_trait(
     }
 
     Ok("default".to_string())
+}
+
+/// Resolve `(backend, backend_name, vault_name, path)` for a raw CLI
+/// secret-name argument, honoring an active multi-vault workspace when one
+/// exists.
+///
+/// `backend_name` is the ONE identifier every `CacheKey::SecretsList`
+/// producer and consumer in the codebase must converge on: the backend's
+/// REGISTRY/config name (e.g. a workspace entry's `backend` field such as
+/// `"local-a"`, or — with no workspace — `config.effective_backend_name()`).
+/// It is never `Backend::name()` (the hardcoded backend *kind*, e.g.
+/// `"local"`), and never `registry.active().name()` either — both return
+/// the kind, which collapses distinct named backends of the same kind onto
+/// one cache path and diverges from the config name whenever a NAMED
+/// backend is active (`config.backend = "local-a"`) (Bugbot review, round
+/// 2). Union `ls` keys its per-vault cache entries by `entry.backend` (the
+/// registry name); the no-workspace `ls`/`ls --deleted` read path keys by
+/// `config.effective_backend_name()` (`trait_secret_cache_key(..)` in
+/// `src/cli/secret_ops.rs`) — every write-side invalidation, including this
+/// function's degenerate branch, must match whichever of those two the
+/// active read path actually uses, or a write silently invalidates a cache
+/// entry nothing ever reads from while the stale one lingers.
+///
+/// **Cache-key identity holds for a bare name**: with no configured
+/// workspace, `resolve_workspace` synthesizes a degenerate workspace-of-one
+/// whose single entry has `backend == config.effective_backend_name()` and
+/// the same vault the legacy `resolve_vault_for_trait` chain produced, so the
+/// returned `(backend kind, backend_name, vault, raw)` — and every
+/// `CacheKey::SecretsList` it feeds — is exactly what `get`/`set` returned
+/// before workspaces existed, matching the string the no-workspace `ls`/`ls
+/// --deleted` read path keys its cache entries by.
+///
+/// Resolution always flows through [`crate::workspace::resolve_secret_target`]
+/// against a lazy multi-backend registry scoped to just the resolved
+/// workspace's attached backends (so a command touching one backend never
+/// constructs another). A degenerate workspace resolves the raw name
+/// literally against its sole entry (no alias parsing, no search); a
+/// configured workspace applies the mode-specific rules (`Read` searches,
+/// `Write` never searches).
+pub(crate) async fn resolve_workspace_or_default(
+    raw: &str,
+    config: &Config,
+    mode: crate::workspace::TargetMode,
+) -> Result<(Arc<dyn Backend>, String, String, String)> {
+    // SINGLE resolution path. `resolve_workspace` never yields
+    // `None` (it synthesizes a degenerate workspace-of-one), so every CLI
+    // secret reference — real workspace or not — resolves through
+    // `resolve_secret_target`. The former no-workspace fallback (which returned
+    // the process active backend plus `resolve_vault_for_trait`) has been
+    // removed; the degenerate builder reproduces its resolved `(backend,
+    // vault)` exactly, keeping bare-name resolution byte-identical. The single
+    // source of backends is the scoped `ws_registry` built from `config` below.
+    let ws = match crate::workspace::resolve_workspace(config).await? {
+        Some(ws) => ws,
+        None => {
+            return Err(CrosstacheError::config(
+                "internal error: resolve_workspace returned None; the degenerate \
+                 workspace-of-one must always yield Some or Err",
+            ))
+        }
+    };
+    let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+    let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
+        .map_err(|e| CrosstacheError::config(e.to_string()))?;
+    let (target, path) =
+        crate::workspace::resolve_secret_target(raw, &ws, &ws_registry, mode).await?;
+    let backend_name = target.entry.backend.clone();
+    Ok((target.backend, backend_name, target.entry.vault, path))
+}
+
+/// Resolve the active workspace (if any) plus a lazy [`BackendRegistry`]
+/// scoped to just its attached backends, for callers that need to resolve
+/// several independent references against the SAME workspace/registry pair
+/// (e.g. `xv run`/`xv inject` resolving many `xv://` URIs in one template —
+/// unlike [`resolve_workspace_or_default`], which targets a single raw CLI
+/// argument).
+///
+/// Returns `(Some(ws), Some(ws_registry))` when a CONFIGURED workspace is
+/// attached, else `(None, None)` — callers (`run`/`inject`) treat `None` as
+/// "fall through to today's raw-vault-name / backend-kind URI resolution,
+/// byte-identical".
+///
+/// This uses [`crate::workspace::resolve_configured_workspace`], NOT the
+/// converged [`resolve_workspace`], deliberately: `run`/`inject` only need a
+/// workspace for `xv://alias/...` resolution. Synthesizing the degenerate
+/// workspace-of-one here would add nothing (its sole alias equals its vault
+/// name, so a URI resolves identically to the raw path either way) while
+/// dragging in the degenerate builder's Azure-no-vault hard-error — which
+/// would wrongly break `xv run` over a template of explicit `xv://` URIs that
+/// never needs a default vault. So the degenerate case stays `(None, None)`.
+pub(crate) async fn resolve_workspace_and_registry(
+    config: &Config,
+) -> Result<(Option<crate::workspace::Workspace>, Option<BackendRegistry>)> {
+    if let Some(ws) = crate::workspace::resolve_configured_workspace(config).await? {
+        let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+        let ws_registry = BackendRegistry::with_lazy(config, &backend_names)
+            .map_err(|e| CrosstacheError::config(e.to_string()))?;
+        Ok((Some(ws), Some(ws_registry)))
+    } else {
+        Ok((None, None))
+    }
+}
+
+/// Resolve a `--from`/`--to` vault argument (or an mv/copy alias-qualified
+/// vault segment) against workspace aliases, falling back to raw-vault-name
+/// meaning unchanged when no workspace is attached or `raw` matches no
+/// attached alias (spec §Addressing / backward compatibility, Phase C Task
+/// 12: cross-vault `mv`/`copy` via aliases).
+///
+/// Returns `(backend, backend_name, vault_name)`. `backend_name` is the ONE
+/// identifier cache invalidation must key on (see
+/// [`resolve_workspace_or_default`]'s doc comment) — the workspace entry's
+/// registry backend name, or `config.effective_backend_name()` when `raw`
+/// isn't an attached alias.
+pub(crate) async fn resolve_vault_ref_with_workspace(
+    raw: &str,
+    ws: Option<&crate::workspace::Workspace>,
+    ws_registry: Option<&BackendRegistry>,
+    registry: &BackendRegistry,
+    config: &Config,
+) -> Result<(Arc<dyn Backend>, String, String)> {
+    if let (Some(ws), Some(ws_registry)) = (ws, ws_registry) {
+        if let Some(entry) = ws.entry(raw) {
+            let backend = ws_registry.materialize(&entry.backend).map_err(|e| {
+                CrosstacheError::config(format!(
+                    "workspace vault '{}' (backend '{}') is unavailable: {e}",
+                    entry.alias, entry.backend
+                ))
+            })?;
+            return Ok((backend, entry.backend.clone(), entry.vault.clone()));
+        }
+    }
+    Ok((
+        registry.active_arc(),
+        config.effective_backend_name().to_string(),
+        raw.to_string(),
+    ))
+}
+
+/// The `(backend_name, vault_name)` a `--from`/`--to` vault argument would
+/// resolve to, WITHOUT materializing a backend — for cache-invalidation call
+/// sites that only need the identifiers (see
+/// [`resolve_vault_ref_with_workspace`]'s doc comment for the "ONE
+/// identifier" convention this must match). Falls back to
+/// `(config.effective_backend_name(), raw)` unchanged when `raw` isn't an
+/// attached alias.
+pub(crate) fn vault_ref_cache_identity(
+    raw: &str,
+    ws: Option<&crate::workspace::Workspace>,
+    config: &Config,
+) -> (String, String) {
+    match ws.and_then(|w| w.entry(raw)) {
+        Some(entry) => (entry.backend.clone(), entry.vault.clone()),
+        None => (config.effective_backend_name().to_string(), raw.to_string()),
+    }
 }
 
 /// Decide whether a destructive operation may proceed, prompting when possible.
@@ -132,33 +334,6 @@ pub(crate) fn confirm_proceed(yes: bool, prompt: &str, flag_hint: &str) -> Resul
         )));
     }
     crate::utils::interactive::InteractivePrompt::new().confirm(prompt, false)
-}
-
-/// Obtain the Azure auth provider, preferring the one from the
-/// [`BackendRegistry`] (which was built once at startup) and falling back
-/// to creating a fresh provider from the config when the registry is absent.
-///
-/// This is a transitional helper: once all commands go through the backend
-/// trait layer directly, this function will be removed.
-pub(crate) fn get_azure_auth_provider(
-    registry: Option<&crate::backend::BackendRegistry>,
-    config: &crate::config::Config,
-) -> Result<std::sync::Arc<dyn crate::auth::provider::AzureAuthProvider>> {
-    // Fast path: reuse the provider the registry already created.
-    if let Some(reg) = registry {
-        if let Some(provider) = reg.azure_auth_provider() {
-            return Ok(provider);
-        }
-    }
-
-    // Fallback: create a fresh provider (e.g. for commands invoked without
-    // a registry, or if the active backend is not Azure).
-    use crate::auth::provider::DefaultAzureCredentialProvider;
-    let provider = DefaultAzureCredentialProvider::with_credential_priority(
-        config.azure_credential_priority.clone(),
-    )
-    .map_err(|e| CrosstacheError::authentication(format!("Failed to create auth provider: {e}")))?;
-    Ok(std::sync::Arc::new(provider))
 }
 
 /// Parse a single key-value pair from `KEY=value` format.

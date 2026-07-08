@@ -18,7 +18,7 @@ from config import OWNER_ROLE_ID, KEY_VAULT_ADMINISTRATOR_ROLE_ID
 # Azure AD JWT validation helpers
 # ---------------------------------------------------------------------------
 
-# Module-level JWKS cache: { "keys": [...], "fetched_at": <epoch>, "jwks_uri": <str> }
+# Module-level JWKS cache: { "keys": [...], "fetched_at": <epoch>, "jwks_uri": <str>, "issuer": <str> }
 _jwks_cache: Dict[str, Any] = {}
 _JWKS_CACHE_TTL_SECONDS = 3600  # 1 hour
 
@@ -29,11 +29,19 @@ def _get_tenant_id() -> Optional[str]:
 
 
 def _get_expected_issuer(tenant_id: Optional[str]) -> Optional[str]:
-    """Return the expected token issuer.
+    """Return the fallback expected token issuer (v1 endpoint).
+
+    This is used only when the OIDC discovery document's own "issuer" field
+    is unavailable (e.g. the metadata endpoint could not be reached). Azure
+    AD v1 tokens use the `sts.windows.net` issuer form; v2 tokens use
+    `login.microsoftonline.com/{tenant}/v2.0`. Since discovery normally
+    supplies the concrete (and correct) issuer for whichever token version
+    is actually presented, this v1 constant is only a best-effort offline
+    fallback and does not by itself support v2 tokens.
 
     Priority:
     1. AZURE_AD_ISSUER env var (explicit override)
-    2. Constructed from AZURE_TENANT_ID (v2 endpoint)
+    2. Constructed from AZURE_TENANT_ID (v1 endpoint, offline fallback)
     """
     explicit = os.environ.get("AZURE_AD_ISSUER")
     if explicit:
@@ -49,12 +57,27 @@ def _get_openid_config_url(tenant_id: Optional[str]) -> str:
     return f"https://login.microsoftonline.com/{tid}/v2.0/.well-known/openid-configuration"
 
 
-def _fetch_jwks_uri(tenant_id: Optional[str]) -> str:
-    """Fetch the JWKS URI from the OpenID Connect metadata endpoint."""
+def _fetch_oidc_metadata(tenant_id: Optional[str]) -> Dict[str, Any]:
+    """Fetch the OpenID Connect discovery document for the tenant."""
     url = _get_openid_config_url(tenant_id)
     resp = http_requests.get(url, timeout=10)
     resp.raise_for_status()
-    return resp.json()["jwks_uri"]
+    return resp.json()
+
+
+def _resolve_issuer(issuer: Optional[str], tenant_id: Optional[str]) -> Optional[str]:
+    """Resolve a discovery-document issuer, substituting any {tenantid} template.
+
+    The `common`/`organizations` discovery endpoints return a templated
+    issuer such as `https://login.microsoftonline.com/{tenantid}/v2.0`; the
+    tenant-specific endpoint returns a concrete issuer already. Substitute
+    the template when present so both cases yield a usable value.
+    """
+    if not issuer:
+        return None
+    if "{tenantid}" in issuer and tenant_id:
+        return issuer.replace("{tenantid}", tenant_id)
+    return issuer
 
 
 def _fetch_signing_keys(jwks_uri: str) -> Dict[str, Any]:
@@ -64,10 +87,15 @@ def _fetch_signing_keys(jwks_uri: str) -> Dict[str, Any]:
     return resp.json()
 
 
-def _get_signing_keys(force_refresh: bool = False) -> Tuple[Dict[str, Any], str]:
-    """Return cached signing keys, refreshing if stale or forced.
+def _get_signing_keys(force_refresh: bool = False) -> Tuple[Dict[str, Any], str, Optional[str]]:
+    """Return cached signing keys and discovery issuer, refreshing if stale or forced.
 
-    Returns (jwks_dict, jwks_uri).
+    The OIDC discovery document is fetched once alongside the JWKS URI (same
+    cache, same TTL) so the issuer used for token validation always reflects
+    metadata that was retrieved together, and discovery is not re-fetched
+    per request any more than the JWKS themselves are.
+
+    Returns (jwks_dict, jwks_uri, issuer).
     """
     global _jwks_cache
 
@@ -79,18 +107,21 @@ def _get_signing_keys(force_refresh: bool = False) -> Tuple[Dict[str, Any], str]
     )
 
     if cache_valid:
-        return _jwks_cache["keys"], _jwks_cache["jwks_uri"]
+        return _jwks_cache["keys"], _jwks_cache["jwks_uri"], _jwks_cache.get("issuer")
 
     tenant_id = _get_tenant_id()
-    jwks_uri = _fetch_jwks_uri(tenant_id)
+    metadata = _fetch_oidc_metadata(tenant_id)
+    jwks_uri = metadata["jwks_uri"]
+    issuer = _resolve_issuer(metadata.get("issuer"), tenant_id)
     jwks_data = _fetch_signing_keys(jwks_uri)
 
     _jwks_cache = {
         "keys": jwks_data,
         "fetched_at": now,
         "jwks_uri": jwks_uri,
+        "issuer": issuer,
     }
-    return jwks_data, jwks_uri
+    return jwks_data, jwks_uri, issuer
 
 
 def _find_key_by_kid(jwks_data: Dict[str, Any], kid: str) -> Optional[Dict[str, Any]]:
@@ -108,7 +139,7 @@ def _validate_jwt(token: str) -> Dict[str, Any]:
     Raises jwt.PyJWTError (or subclass) on any validation failure.
     """
     tenant_id = _get_tenant_id()
-    expected_issuer = _get_expected_issuer(tenant_id)
+    explicit_issuer = os.environ.get("AZURE_AD_ISSUER")
     expected_audience = os.environ.get("EXPECTED_AUDIENCE")
 
     # Fail closed on missing validation configuration: a token minted for any
@@ -119,7 +150,7 @@ def _validate_jwt(token: str) -> Dict[str, Any]:
             "Server misconfiguration: EXPECTED_AUDIENCE is not set; "
             "refusing to validate tokens without audience verification"
         )
-    if not expected_issuer:
+    if not explicit_issuer and not tenant_id:
         raise jwt.InvalidTokenError(
             "Server misconfiguration: AZURE_TENANT_ID / AZURE_AD_ISSUER is not set; "
             "refusing to validate tokens without issuer verification"
@@ -133,19 +164,32 @@ def _validate_jwt(token: str) -> Dict[str, Any]:
     if not kid:
         raise jwt.InvalidTokenError("Token header missing 'kid' claim")
 
-    # Fetch signing keys (from cache if available)
-    jwks_data, _jwks_uri = _get_signing_keys()
+    # Fetch signing keys (from cache if available). The OIDC discovery
+    # document's "issuer" field is fetched and cached alongside the JWKS URI
+    # so the expected issuer tracks whichever token version (v1 or v2) the
+    # tenant's discovery endpoint actually reports.
+    jwks_data, _jwks_uri, discovery_issuer = _get_signing_keys()
 
     key_data = _find_key_by_kid(jwks_data, kid)
 
     # If kid not found, force-refresh keys (handle key rotation)
     if key_data is None:
         logging.info(f"Key ID '{kid}' not found in cached JWKS, refreshing keys")
-        jwks_data, _jwks_uri = _get_signing_keys(force_refresh=True)
+        jwks_data, _jwks_uri, discovery_issuer = _get_signing_keys(force_refresh=True)
         key_data = _find_key_by_kid(jwks_data, kid)
 
     if key_data is None:
         raise jwt.InvalidTokenError(f"Unable to find signing key with kid '{kid}'")
+
+    # Prefer an explicit override, then the issuer reported by discovery,
+    # then fall back to the constructed v1 issuer if discovery didn't
+    # provide one (e.g. metadata unavailable or missing the field).
+    expected_issuer = explicit_issuer or discovery_issuer or _get_expected_issuer(tenant_id)
+    if not expected_issuer:
+        raise jwt.InvalidTokenError(
+            "Server misconfiguration: unable to determine expected token issuer; "
+            "refusing to validate tokens without issuer verification"
+        )
 
     # Build the public key from JWK
     public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)

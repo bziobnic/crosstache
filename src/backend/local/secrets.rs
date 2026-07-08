@@ -341,6 +341,7 @@ fn meta_to_summary(meta: &SecretMeta) -> SecretSummary {
         updated_on: meta.updated_at.format("%Y-%m-%d %H:%M").to_string(),
         enabled: meta.enabled,
         content_type: meta.content_type.clone(),
+        tags: meta.tags.clone(),
     }
 }
 

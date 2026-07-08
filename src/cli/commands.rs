@@ -422,6 +422,19 @@ pub enum Commands {
         /// secret name; mutually exclusive with --stdin.
         #[arg(long, conflicts_with = "stdin")]
         value: Option<String>,
+        /// Create a typed record of this type (built-in or custom `[types.*]`).
+        /// Only valid for a single secret. See `xv type list`/`xv type show`.
+        #[arg(long = "type")]
+        r#type: Option<String>,
+        /// Set a metadata (or type-declared non-primary secret) field
+        /// value, `name=value` (repeatable). Fields not declared by the
+        /// type are accepted as ad-hoc metadata. Requires --type.
+        #[arg(long = "field", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, requires = "type")]
+        fields: Vec<(String, String)>,
+        /// Set an ad-hoc secret field value, `name=value` (repeatable) —
+        /// stored in the record envelope rather than as a tag. Requires --type.
+        #[arg(long = "field-secret", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, requires = "type")]
+        secret_fields: Vec<(String, String)>,
         /// Write-time metadata (group/note/folder/expires/not-before)
         #[command(flatten)]
         meta: SecretWriteArgs,
@@ -436,6 +449,14 @@ pub enum Commands {
         /// Get a specific version of the secret
         #[arg(long)]
         version: Option<String>,
+        /// Read a single field from a typed record (metadata or secret).
+        /// Errors if the secret is untyped. Mutually exclusive with --record.
+        #[arg(long, conflicts_with = "record")]
+        field: Option<String>,
+        /// Print the full record (all fields) in the requested --format.
+        /// Errors if the secret is untyped. Mutually exclusive with --field.
+        #[arg(long, conflicts_with = "field")]
+        record: bool,
     },
     /// Ranked fuzzy search over secrets (alias: search). Non-interactive;
     /// pipe the output through fzf or similar for an interactive picker.
@@ -480,6 +501,12 @@ pub enum Commands {
         /// JSON when stdout is not a TTY.
         #[arg(long)]
         names_only: bool,
+
+        /// Hard-filter the candidate set by glob pattern on the name (e.g.,
+        /// "test-*", "api-*") before PATTERN is scored. With no PATTERN,
+        /// yields an unranked filtered list.
+        #[arg(long, value_name = "GLOB")]
+        filter: Option<String>,
     },
     /// List secrets in the current vault context (alias: ls). Use --format table for the classic table view
     #[command(alias = "ls")]
@@ -531,9 +558,17 @@ pub enum Commands {
         /// secrets (backend must support soft delete)
         #[arg(
             long,
-            conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired"]
+            conflicts_with_all = ["path", "recursive", "group", "all", "expiring", "expired", "type_filter"]
         )]
         deleted: bool,
+        /// Filter by record type (built-in or custom `[types.*]`, e.g. `login`).
+        /// Not supported with --deleted: deleted-secret summaries don't carry
+        /// tags on any backend, so there's no `xv-type` to filter on.
+        #[arg(long = "type")]
+        type_filter: Option<String>,
+        /// Filter secrets by glob pattern on the name (e.g., "test-*", "api-*")
+        #[arg(long, value_name = "GLOB")]
+        filter: Option<String>,
     },
     /// Delete a secret from the current vault context (alias: rm)
     #[command(alias = "rm")]
@@ -567,6 +602,11 @@ pub enum Commands {
     Rotate {
         /// Secret name
         name: String,
+        /// Target vault (overrides context/config default). Matches an
+        /// attached workspace alias when given; otherwise a literal vault on
+        /// the current backend.
+        #[arg(long)]
+        vault: Option<String>,
         /// Length of the generated value (default: 32)
         #[arg(long, default_value = "32")]
         length: usize,
@@ -613,6 +653,11 @@ pub enum Commands {
     },
     /// Run a command with secrets injected as environment variables
     Run {
+        /// Target vault (overrides context/config default). Matches an
+        /// attached workspace alias when given; otherwise a literal vault on
+        /// the current backend.
+        #[arg(long)]
+        vault: Option<String>,
         /// Filter secrets by group (can be specified multiple times)
         #[arg(short, long)]
         group: Vec<String>,
@@ -633,12 +678,22 @@ pub enum Commands {
         /// Inherit the parent process environment (default: child starts with a clean env)
         #[arg(long)]
         inherit_env: bool,
+        /// Continue and launch the command even if some secrets fail to fetch (previous default)
+        #[arg(long)]
+        best_effort: bool,
         /// Command and arguments to run
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
     /// Inject secrets into a template file using {{ secret:name }} syntax
+    /// (or {{ secret:name.field }} / xv://vault/name#field for one field of
+    /// a typed record)
     Inject {
+        /// Target vault (overrides context/config default). Matches an
+        /// attached workspace alias when given; otherwise a literal vault on
+        /// the current backend.
+        #[arg(long)]
+        vault: Option<String>,
         /// Template file path (reads from stdin if not specified)
         #[arg(short, long)]
         template: Option<String>,
@@ -648,6 +703,9 @@ pub enum Commands {
         /// Filter secrets by group (can be specified multiple times)
         #[arg(short, long)]
         group: Vec<String>,
+        /// Continue and render/write the template even if some references fail to resolve (previous default)
+        #[arg(long)]
+        best_effort: bool,
     },
     /// Update secret properties in the current vault context
     Update {
@@ -704,13 +762,84 @@ pub enum Commands {
         /// Enable or disable the secret (true/false)
         #[arg(long)]
         enabled: Option<bool>,
+        /// Edit one metadata (or type-declared non-primary secret) field of
+        /// a typed record, `name=value` (repeatable). A metadata-field edit
+        /// is tag-only; a secret-field edit rewrites the record envelope as
+        /// a new version. Errors if the secret is untyped. Mutually
+        /// exclusive with --type/--untype and with every classic update
+        /// flag (--value/--stdin/--note/--tags/--folder/etc.) — a record
+        /// field edit is a standalone operation in v1; compound edits are
+        /// two commands (e.g. `xv update x --note n` then
+        /// `xv update x --field a=b`).
+        #[arg(long = "field", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = [
+            "type", "untype",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        fields: Vec<(String, String)>,
+        /// Edit an ad-hoc secret field of a typed record, `name=value`
+        /// (repeatable) — stored in the record envelope. Mutually
+        /// exclusive with --type/--untype and with every classic update
+        /// flag; see --field's note.
+        #[arg(long = "field-secret", value_name = "NAME=VALUE", value_parser = parse_key_val::<String, String>, conflicts_with_all = [
+            "type", "untype",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        secret_fields: Vec<(String, String)>,
+        /// Explicitly convert a bare secret into a typed record: its
+        /// current value becomes the primary field. Errors if the secret
+        /// is already a record. Mutually exclusive with --untype/--field/
+        /// --field-secret and with every classic update flag, INCLUDING
+        /// --value/--stdin: converting and replacing the primary value in
+        /// one step is not supported in v1 — convert first (this command,
+        /// no --value/--stdin), then set the primary via
+        /// `xv update <name> --field-secret <primary-field>=<value>`.
+        #[arg(long = "type", conflicts_with_all = [
+            "untype", "fields", "secret_fields",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        r#type: Option<String>,
+        /// Flatten a typed record back to a bare secret holding the
+        /// primary field's value. Dropping non-primary secret fields
+        /// prompts for confirmation unless --yes is given. Mutually
+        /// exclusive with --type/--field/--field-secret and with every
+        /// classic update flag; see --field's note.
+        #[arg(long, conflicts_with_all = [
+            "type", "fields", "secret_fields",
+            "value", "stdin", "trim", "tags", "group", "rename", "note", "folder",
+            "replace_tags", "replace_groups", "expires", "not_before",
+            "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
+        ])]
+        untype: bool,
+        /// Skip the confirmation prompt when --untype would drop
+        /// non-primary secret fields.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
-    /// Move or rename a secret, or re-folder a whole folder (trailing / = folder)
+    /// Move or rename a secret, re-folder a whole folder (trailing / = folder),
+    /// or bulk-move every secret matching a glob (--filter) into a folder
+    #[command(
+        override_usage = "xv mv [OPTIONS] <SOURCE> <DEST>\n       xv mv [OPTIONS] --filter <GLOB> <DEST>"
+    )]
     Mv {
-        /// Source: 'folder/name', 'name', or a folder prefix ending in '/'
-        source: String,
-        /// Destination: 'folder/' (keep name), 'folder/newname', 'newname' (root), or '/'
-        dest: String,
+        /// SOURCE DEST, e.g. 'db/pass app/' or 'app/ svc/'; with --filter,
+        /// provide DEST only (omit SOURCE) — DEST must then be a folder
+        /// destination ('folder/' or '/'), since a rename is impossible for
+        /// a multi-secret move. SOURCE: 'folder/name', 'name', or a folder
+        /// prefix ending in '/'. DEST: 'folder/' (keep name),
+        /// 'folder/newname', 'newname' (root), or '/'.
+        #[arg(value_names = ["SOURCE", "DEST"], num_args = 0..=2)]
+        operands: Vec<String>,
+        /// Bulk-move every secret whose name matches GLOB into DEST (either
+        /// the display name or the backend name, same as `ls`/`find
+        /// --filter`); exactly one of SOURCE or --filter is required
+        #[arg(long)]
+        filter: Option<String>,
         /// Print the full move plan without changing anything
         #[arg(long)]
         dry_run: bool,
@@ -809,8 +938,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Vault context management (alias: cx)
-    #[command(alias = "cx")]
+    /// Vault context and multi-vault workspace management (alias: cx)
+    #[command(visible_alias = "cx")]
     Context {
         #[command(subcommand)]
         command: ContextCommands,
@@ -887,6 +1016,12 @@ pub enum Commands {
     Local {
         #[command(subcommand)]
         command: LocalCommands,
+    },
+    /// Record type management (built-in + custom `[types.*]` config blocks).
+    /// Config-only: never talks to a secrets backend.
+    Type {
+        #[command(subcommand)]
+        command: TypeCommands,
     },
     /// Quick file upload (alias for file upload)
     #[cfg(feature = "file-ops")]
@@ -1304,6 +1439,20 @@ pub enum LocalCommands {
     },
 }
 
+/// Record-type subcommands (`xv type ...`).
+#[derive(Subcommand)]
+pub enum TypeCommands {
+    /// List resolved record types (built-in + global + project), with
+    /// their source (alias: ls)
+    #[command(alias = "ls")]
+    List,
+    /// Show a single resolved record type's field table
+    Show {
+        /// Type name
+        name: String,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum ContextCommands {
     /// Show current vault context
@@ -1322,8 +1471,9 @@ pub enum ContextCommands {
         #[arg(long)]
         local: bool,
     },
-    /// List recent vault contexts (alias: ls)
-    #[command(alias = "ls")]
+    /// List recent vault contexts. NOTE: `ls` is the alias for `xv cx ls`
+    /// (the multi-vault workspace listing) — recent contexts are available
+    /// under the unabbreviated `xv context list` only.
     List,
     /// Clear current context
     Clear {
@@ -1353,6 +1503,66 @@ pub enum ContextCommands {
         #[arg(long)]
         force: bool,
     },
+    /// Attach a vault to the multi-vault workspace
+    Add {
+        /// Vault name to attach
+        vault: String,
+        /// Backend the vault lives on (defaults to the active backend).
+        /// NOTE: this shares its long name with the top-level `global =
+        /// true` `--backend` flag on `Cli`, so clap resolves BOTH to the
+        /// same parsed value — passing `--backend X` here also makes
+        /// `config.effective_backend_name()` report `X` for the rest of
+        /// this command. `execute_cx_add`'s #341 auto-attach logic accounts
+        /// for this (uses `config.disk_backend` instead when this flag was
+        /// passed) rather than trusting `effective_backend_name()` to mean
+        /// "the backend already in use".
+        #[arg(long)]
+        backend: Option<String>,
+        /// Alias for this entry (defaults to the vault name)
+        #[arg(long = "as", visible_alias = "alias")]
+        r#as: Option<String>,
+        /// Make this the workspace's default (write target) vault
+        #[arg(long)]
+        default: bool,
+        /// Store in the local (per-directory) context instead of global
+        #[arg(long)]
+        local: bool,
+        /// Skip the vault-exists probe (for offline setup)
+        #[arg(long)]
+        force: bool,
+    },
+    /// Detach a vault from the multi-vault workspace
+    Rm {
+        /// Alias of the entry to remove
+        alias: String,
+        /// Operate on the local (per-directory) context instead of global
+        #[arg(long)]
+        local: bool,
+    },
+    /// Change the workspace's default (write target) vault
+    Default {
+        /// Alias to make the new default
+        alias: String,
+        /// Operate on the local (per-directory) context instead of global
+        #[arg(long)]
+        local: bool,
+    },
+    /// Rename (or reset) the alias on an attached entry
+    Alias {
+        /// Entry to re-alias: its current alias, or its vault name
+        entry: String,
+        /// The new alias (omit when using --reset)
+        new_alias: Option<String>,
+        /// Reset the alias back to the entry's vault name
+        #[arg(long)]
+        reset: bool,
+        /// Operate on the local (per-directory) context instead of global
+        #[arg(long)]
+        local: bool,
+    },
+    /// List the workspace's attached vaults: alias, backend, vault, default
+    /// marker, source (context vs `.xv.toml`)
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -1524,16 +1734,41 @@ impl Cli {
                 stdin,
                 trim,
                 value,
+                r#type,
+                fields,
+                secret_fields,
                 meta,
             } => {
                 crate::cli::secret_ops::execute_secret_set_direct(
-                    args, stdin, trim, value, meta, config, registry,
+                    args,
+                    stdin,
+                    trim,
+                    value,
+                    r#type,
+                    fields,
+                    secret_fields,
+                    meta,
+                    config,
+                    registry,
                 )
                 .await
             }
-            Commands::Get { name, raw, version } => {
+            Commands::Get {
+                name,
+                raw,
+                version,
+                field,
+                record,
+            } => {
                 crate::cli::secret_ops::execute_secret_get_direct(
-                    &name, raw, version, config, registry,
+                    &name,
+                    raw,
+                    version,
+                    field,
+                    record,
+                    self.format,
+                    config,
+                    registry,
                 )
                 .await
             }
@@ -1545,6 +1780,7 @@ impl Cli {
                 folder,
                 all_vaults,
                 names_only,
+                filter,
             } => {
                 crate::cli::secret_ops::execute_secret_find_direct(
                     pattern,
@@ -1555,6 +1791,7 @@ impl Cli {
                     all_vaults,
                     names_only,
                     self.format,
+                    filter,
                     config,
                     registry,
                 )
@@ -1575,12 +1812,14 @@ impl Cli {
                 names_only,
                 sort,
                 deleted,
+                type_filter,
+                filter,
             } => {
                 let pagination = crate::utils::pagination::Pagination::from_args(page, page_size)?;
                 let pager = pager.map(PagerWhen::wants_pager).unwrap_or(false);
                 if deleted {
                     crate::cli::secret_ops::execute_deleted_secret_list(
-                        pagination, pager, names_only, long, sort, config, registry,
+                        pagination, pager, names_only, long, sort, filter, config, registry,
                     )
                     .await
                 } else {
@@ -1595,8 +1834,22 @@ impl Cli {
                         None => String::new(),
                     };
                     crate::cli::secret_ops::execute_secret_list_direct(
-                        path, group, all, expiring, expired, no_cache, pagination, pager,
-                        names_only, long, recursive, sort, config, registry,
+                        path,
+                        group,
+                        all,
+                        expiring,
+                        expired,
+                        no_cache,
+                        pagination,
+                        pager,
+                        names_only,
+                        long,
+                        recursive,
+                        sort,
+                        type_filter,
+                        filter,
+                        config,
+                        registry,
                     )
                     .await
                 }
@@ -1622,6 +1875,7 @@ impl Cli {
             }
             Commands::Rotate {
                 name,
+                vault,
                 length,
                 charset,
                 generator,
@@ -1630,7 +1884,8 @@ impl Cli {
                 force,
             } => {
                 crate::cli::secret_ops::execute_secret_rotate_direct(
-                    &name, length, charset, generator, native, show_value, force, config, registry,
+                    &name, vault, length, charset, generator, native, show_value, force, config,
+                    registry,
                 )
                 .await
             }
@@ -1648,19 +1903,23 @@ impl Cli {
                 .await
             }
             Commands::Run {
+                vault,
                 group,
                 include,
                 exclude,
                 no_masking,
                 inherit_env,
+                best_effort,
                 command,
             } => {
                 crate::cli::secret_ops::execute_secret_run_direct(
+                    vault,
                     group,
                     include,
                     exclude,
                     no_masking,
                     inherit_env,
+                    best_effort,
                     command,
                     config,
                     registry,
@@ -1668,12 +1927,20 @@ impl Cli {
                 .await
             }
             Commands::Inject {
+                vault,
                 template,
                 out,
                 group,
+                best_effort,
             } => {
                 crate::cli::secret_ops::execute_secret_inject_direct(
-                    template, out, group, config, registry,
+                    vault,
+                    template,
+                    out,
+                    group,
+                    best_effort,
+                    config,
+                    registry,
                 )
                 .await
             }
@@ -1696,6 +1963,11 @@ impl Cli {
                 clear_note,
                 clear_folder,
                 enabled,
+                fields,
+                secret_fields,
+                r#type,
+                untype,
+                yes,
             } => {
                 crate::cli::secret_ops::execute_secret_update_direct(
                     &name,
@@ -1716,17 +1988,43 @@ impl Cli {
                     clear_note,
                     clear_folder,
                     enabled,
+                    fields,
+                    secret_fields,
+                    r#type,
+                    untype,
+                    yes,
                     config,
                     registry,
                 )
                 .await
             }
             Commands::Mv {
-                source,
-                dest,
+                operands,
+                filter,
                 dry_run,
                 yes,
-            } => crate::cli::mv_ops::execute_mv(source, dest, dry_run, yes, config, registry).await,
+            } => {
+                // Two positionals normally map to (SOURCE, DEST); with
+                // --filter, SOURCE is omitted so a single leftover operand is
+                // DEST. Any other count is left for `execute_mv`'s runtime
+                // "exactly one of SOURCE/--filter" / "requires a DEST" checks
+                // to report with a clear message instead of a generic clap error.
+                let (source, dest) = if filter.is_some() {
+                    match operands.as_slice() {
+                        [] => (None, None),
+                        [dest] => (None, Some(dest.clone())),
+                        [source, dest, ..] => (Some(source.clone()), Some(dest.clone())),
+                    }
+                } else {
+                    match operands.as_slice() {
+                        [] => (None, None),
+                        [source] => (Some(source.clone()), None),
+                        [source, dest, ..] => (Some(source.clone()), Some(dest.clone())),
+                    }
+                };
+                crate::cli::mv_ops::execute_mv(source, dest, filter, dry_run, yes, config, registry)
+                    .await
+            }
             Commands::Diff {
                 vault1,
                 vault2,
@@ -1858,6 +2156,9 @@ impl Cli {
             }
             Commands::Local { command } => {
                 crate::cli::local_ops::execute_local_command(command, config).await
+            }
+            Commands::Type { command } => {
+                crate::cli::type_ops::execute_type_command(command, config).await
             }
             #[cfg(feature = "file-ops")]
             Commands::Upload {
@@ -2560,24 +2861,81 @@ mod tests {
     }
 
     #[test]
+    fn cx_is_a_visible_alias_of_context() {
+        // `cx` must parse identically to `context` for the workspace verbs.
+        for args in [
+            vec!["xv", "cx", "add", "myvault"],
+            vec!["xv", "context", "add", "myvault"],
+            vec!["xv", "cx", "rm", "work"],
+            vec!["xv", "cx", "default", "work"],
+            vec!["xv", "cx", "ls"],
+        ] {
+            let result = Cli::try_parse_from(&args);
+            assert!(result.is_ok(), "{args:?} should parse: {:?}", result.err());
+        }
+    }
+
+    #[test]
+    fn cx_add_accepts_backend_as_default_and_force_flags() {
+        let result = Cli::try_parse_from([
+            "xv",
+            "cx",
+            "add",
+            "stage-sm",
+            "--backend",
+            "aws-east",
+            "--as",
+            "stage",
+            "--default",
+            "--force",
+        ]);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[test]
     fn test_mv_parse() {
         let cli =
             Cli::try_parse_from(["xv", "mv", "db/pass", "app/", "--dry-run", "--yes"]).unwrap();
         match cli.command {
             Commands::Mv {
-                source,
-                dest,
+                operands,
+                filter,
                 dry_run,
                 yes,
             } => {
-                assert_eq!(source, "db/pass");
-                assert_eq!(dest, "app/");
+                assert_eq!(operands, vec!["db/pass".to_string(), "app/".to_string()]);
+                assert_eq!(filter, None);
                 assert!(dry_run);
                 assert!(yes);
             }
             _ => panic!("expected mv command"),
         }
-        // Both operands are required.
-        assert!(Cli::try_parse_from(["xv", "mv", "onlyone"]).is_err());
+        // A single leftover positional and no --filter parses fine at the
+        // clap level (`operands` is just a positional collector) — DEST
+        // missing is enforced as a runtime error by `execute_mv`, exercised
+        // by `mv_ops::tests`.
+        match Cli::try_parse_from(["xv", "mv", "onlyone"])
+            .unwrap()
+            .command
+        {
+            Commands::Mv { operands, .. } => {
+                assert_eq!(operands, vec!["onlyone".to_string()]);
+            }
+            _ => panic!("expected mv command"),
+        }
+    }
+
+    #[test]
+    fn test_mv_filter_parse() {
+        let cli = Cli::try_parse_from(["xv", "mv", "--filter", "test-*", "archive/"]).unwrap();
+        match cli.command {
+            Commands::Mv {
+                operands, filter, ..
+            } => {
+                assert_eq!(operands, vec!["archive/".to_string()]);
+                assert_eq!(filter, Some("test-*".to_string()));
+            }
+            _ => panic!("expected mv command"),
+        }
     }
 }

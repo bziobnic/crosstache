@@ -13,7 +13,7 @@ pub mod view;
 use crate::backend::Backend;
 use crate::config::Config;
 use crate::error::Result;
-use app::App;
+use app::{App, WorkspaceTarget};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -40,6 +40,31 @@ pub async fn run_tui(
         }
     });
 
+    // Workspace-aware vault pane (Phase C Task 13): resolved once at
+    // startup. `None` when no REAL (configured) workspace is attached ⇒ the
+    // vault pane and secrets loading below behave exactly as before (spec
+    // §Backward compatibility). `resolve_configured_workspace` returns `None`
+    // with no configured workspace, so `xv tui` renders as the single-vault
+    // TUI, not a 1-entry workspace browser. Any resolution error is swallowed
+    // to `None` rather than failing `xv tui` outright.
+    let workspace = crate::workspace::resolve_configured_workspace(&config)
+        .await
+        .ok()
+        .flatten();
+    let mut workspace_backends: std::collections::HashMap<String, Arc<dyn Backend>> =
+        std::collections::HashMap::new();
+    if let Some(ws) = &workspace {
+        let backend_names: Vec<String> = ws.entries.iter().map(|e| e.backend.clone()).collect();
+        if let Ok(ws_registry) = crate::backend::BackendRegistry::with_lazy(&config, &backend_names)
+        {
+            for entry in &ws.entries {
+                if let Ok(b) = ws_registry.materialize(&entry.backend) {
+                    workspace_backends.insert(entry.alias.clone(), b);
+                }
+            }
+        }
+    }
+
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         reset_terminal_sync();
@@ -47,7 +72,14 @@ pub async fn run_tui(
     }));
 
     let mut terminal = setup_terminal()?;
-    let result = run_loop(&mut terminal, config, backend).await;
+    let result = run_loop(
+        &mut terminal,
+        config,
+        backend,
+        workspace,
+        workspace_backends,
+    )
+    .await;
     teardown_terminal(&mut terminal)?;
     result
 }
@@ -84,6 +116,8 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     config: Config,
     backend: Option<Arc<dyn Backend>>,
+    workspace: Option<crate::workspace::Workspace>,
+    workspace_backends: std::collections::HashMap<String, Arc<dyn Backend>>,
 ) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let mut app = App::new(config.clone());
@@ -95,7 +129,43 @@ async fn run_loop(
 
     let _evt = event::spawn_event_reader(tx.clone(), shutdown.clone());
     let _tick = event::spawn_tick_timer(tx.clone());
-    let _initial = data::spawn_load_vaults(config, tx.clone(), backend.clone());
+
+    app.workspace = workspace;
+    app.workspace_backends = workspace_backends;
+
+    if app.workspace.is_some() {
+        // Workspace attached: the vault pane is populated directly from
+        // attached entries (no network call — this is config, not a vault
+        // listing) instead of spawning `spawn_load_vaults` against a single
+        // active backend, which can't represent a multi-backend workspace.
+        // Shares the exact population logic the `R`-refresh in workspace
+        // mode uses (`App::repopulate_vaults_from_workspace`), so the two
+        // can never diverge — the default entry is ordered first.
+        app.repopulate_vaults_from_workspace();
+        app.vaults_loading = false;
+
+        // Bugbot MEDIUM fix, round 3: the non-workspace path relies on
+        // `Message::VaultsLoaded` to select index 0 and issue the initial
+        // `LoadSecrets` — the workspace path never sends that message (it
+        // populates synchronously above), so without this the secrets pane
+        // stayed empty until the user moved. Select the default entry
+        // (index 0, per the ordering above) and issue the same initial
+        // load, reusing `handle_command`'s workspace-aware resolution
+        // rather than duplicating it.
+        if !app.vaults.is_empty() {
+            app.vault_state.select(Some(0));
+        }
+        if let Some(name) = app.selected_vault().map(String::from) {
+            app.secrets_loading = true;
+            handle_command(&app, &tx, Command::LoadSecrets { vault: name }, &backend).await;
+        }
+    } else {
+        drop(data::spawn_load_vaults(
+            config.clone(),
+            tx.clone(),
+            backend.clone(),
+        ));
+    }
 
     while !app.quit {
         terminal
@@ -130,29 +200,105 @@ async fn handle_command(
             ));
         }
         Command::LoadSecrets { vault } => {
+            // Workspace-aware: `vault` is the selected `app.vaults[i].name`,
+            // which is the ALIAS in workspace mode — resolve it (via the
+            // shared `App::workspace_target_for` helper) to that entry's
+            // own materialized backend and REAL vault name rather than the
+            // single shared `backend`/raw alias string (spec §Backward
+            // compatibility: `app.workspace` is `None` outside a
+            // workspace, so this is unchanged there). The alias itself
+            // stays the `Message::SecretsLoaded` key so
+            // `secrets_by_vault`/`selected_vault()` keep matching, even
+            // though two aliases can share the same real vault name.
+            //
+            // If this entry's backend failed to materialize at startup,
+            // `workspace_target_for` returns `Unavailable` — surface a
+            // visible toast (the same `Message::Error` path every other
+            // TUI failure uses) and never issue a query for that entry.
+            let (real_vault, entry_backend) = match app.workspace_target_for(&vault) {
+                WorkspaceTarget::Entry { backend, vault } => (vault, Some(backend)),
+                WorkspaceTarget::NoWorkspace => (vault.clone(), backend.clone()),
+                WorkspaceTarget::Unavailable => {
+                    let _ = tx
+                        .send(Message::Error(crate::error::CrosstacheError::config(
+                            format!(
+                                "workspace entry '{vault}' unavailable: its backend failed \
+                                 to initialize; secrets were not loaded"
+                            ),
+                        )))
+                        .await;
+                    return;
+                }
+            };
             drop(data::spawn_load_secrets(
                 app.config.clone(),
+                real_vault,
                 vault,
                 tx.clone(),
-                backend.clone(),
+                entry_backend,
             ));
         }
         Command::LoadValue { vault, name } => {
+            // Bugbot HIGH fix (round 2): must resolve through the SAME
+            // `workspace_target_for` helper `LoadSecrets` uses — this used
+            // to pass the shared `backend` and the alias-as-vault-name
+            // unconditionally, so revealing a value (or its record Fields
+            // section) queried the wrong backend/vault (or the legacy
+            // Azure path) while the secrets list looked correct.
+            let (real_vault, entry_backend) = match app.workspace_target_for(&vault) {
+                WorkspaceTarget::Entry {
+                    backend,
+                    vault: real_vault,
+                } => (real_vault, Some(backend)),
+                WorkspaceTarget::NoWorkspace => (vault.clone(), backend.clone()),
+                WorkspaceTarget::Unavailable => {
+                    let _ = tx
+                        .send(Message::Error(crate::error::CrosstacheError::config(
+                            format!(
+                                "workspace entry '{vault}' unavailable: its backend failed \
+                                 to initialize; value was not loaded"
+                            ),
+                        )))
+                        .await;
+                    return;
+                }
+            };
             drop(data::spawn_load_value(
                 app.config.clone(),
+                real_vault,
                 vault,
                 name,
                 tx.clone(),
-                backend.clone(),
+                entry_backend,
             ));
         }
         Command::LoadHistory { vault, name } => {
+            // Bugbot HIGH fix (round 2): same helper as LoadSecrets/LoadValue.
+            let (real_vault, entry_backend) = match app.workspace_target_for(&vault) {
+                WorkspaceTarget::Entry {
+                    backend,
+                    vault: real_vault,
+                } => (real_vault, Some(backend)),
+                WorkspaceTarget::NoWorkspace => (vault.clone(), backend.clone()),
+                WorkspaceTarget::Unavailable => {
+                    let _ = tx
+                        .send(Message::Error(crate::error::CrosstacheError::config(
+                            format!(
+                                "workspace entry '{vault}' unavailable: its backend failed \
+                                 to initialize; history was not loaded"
+                            ),
+                        )))
+                        .await;
+                    return;
+                }
+            };
             drop(data::spawn_load_history(
                 app.config.clone(),
+                real_vault,
                 vault,
                 name,
                 tx.clone(),
-                backend.clone(),
+                entry_backend,
             ));
         }
         Command::LoadAudit { vault, name } => {

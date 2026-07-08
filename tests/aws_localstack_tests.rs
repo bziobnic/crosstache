@@ -36,7 +36,14 @@ async fn build_backend() -> AwsBackend {
         endpoint_url: Some(std::env::var("AWS_ENDPOINT_URL").unwrap()),
         ..Default::default()
     };
-    AwsBackend::new(&cfg, None, None).await.unwrap()
+    AwsBackend::new(
+        &cfg,
+        None,
+        None,
+        crosstache::backend::aws::TransferConfig::default(),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -369,9 +376,9 @@ async fn localstack_vault_marker_create_list_delete() {
         .await
         .unwrap();
 
-    let listed = vaults.list_vaults().await.unwrap();
+    let listed = vaults.list_vaults(None).await.unwrap();
     let names: Vec<String> = listed.iter().map(|v| v.name.clone()).collect();
     assert!(names.contains(&vault));
 
-    vaults.delete_vault(&vault).await.unwrap();
+    vaults.delete_vault(&vault, None).await.unwrap();
 }

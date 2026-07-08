@@ -53,7 +53,7 @@ impl IntoResponse for ApiError {
                     AuthenticationError(_) => StatusCode::UNAUTHORIZED,
                     Conflict(_) => StatusCode::CONFLICT,
                     RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-                    InvalidSecretName { .. } | InvalidArgument(_) => StatusCode::BAD_REQUEST,
+                    InvalidArgument(_) => StatusCode::BAD_REQUEST,
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
                 };
                 (status, e.to_string())
@@ -84,7 +84,7 @@ pub(crate) async fn list_vaults(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     match state.backend.vaults() {
         Some(v) => {
-            let vaults = v.list_vaults().await?;
+            let vaults = v.list_vaults(None).await?;
             Ok(Json(json!({ "vaults": vaults })))
         }
         None => Ok(Json(json!({ "vaults": [{ "name": state.vault }] }))),

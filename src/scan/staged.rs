@@ -109,8 +109,16 @@ where
 /// Scan all staged files. Each file's content comes from `git show :PATH`
 /// (the index, not the working tree) so the scan reflects exactly what
 /// will be committed.
-pub fn scan_staged(engine: &MatchEngine) -> Result<Vec<Finding>> {
-    let files = list_staged_files()?;
+///
+/// `excludes` carries the same default + `[scan].exclude` globs the filesystem
+/// walker and `scan_head` apply (see `walker::build_exclude_set`), so
+/// `--staged` (and therefore the installed pre-commit hook) doesn't scan
+/// `target/`, `node_modules/`, or user-excluded paths that `scan .` skips.
+pub fn scan_staged(engine: &MatchEngine, excludes: &globset::GlobSet) -> Result<Vec<Finding>> {
+    let files: Vec<String> = list_staged_files()?
+        .into_iter()
+        .filter(|f| !excludes.is_match(f))
+        .collect();
     Ok(scan_git_paths(&files, read_staged_file, engine))
 }
 
@@ -127,4 +135,107 @@ pub fn scan_head(engine: &MatchEngine, excludes: &globset::GlobSet) -> Result<Ve
         .filter(|f| !excludes.is_match(f))
         .collect();
     Ok(scan_git_paths(&files, read_head_file, engine))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan::engine::{MatchEngine, SecretRef, DEFAULT_MIN_VALUE_LENGTH};
+    use crate::scan::patterns::builtin_patterns;
+    use crate::scan::walker::build_exclude_set;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    /// `list_staged_files`/`read_staged_file` shell out to `git` using the
+    /// process's current working directory (mirroring the installed
+    /// pre-commit hook, which always runs with cwd = repo root). Tests that
+    /// exercise `scan_staged` against a real git fixture must therefore
+    /// change the process-global cwd; this lock serializes them against each
+    /// other. No other test in this binary changes cwd (see installer.rs's
+    /// tests, which deliberately avoid cwd-dependent code paths).
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Restores the process cwd to the path captured at construction time
+    /// when dropped — including on an early return via `?`/panic/unwrap
+    /// between the `set_current_dir` call and the end of the test. Without
+    /// this, a panicking `unwrap()` in the guarded region would leave the
+    /// whole test binary's cwd pointed at a tempdir that gets deleted when
+    /// `TempDir` drops, breaking every subsequently-run test that touches
+    /// the process cwd.
+    struct CwdGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn change_to(dir: &Path) -> Self {
+            let original = std::env::current_dir().expect("must read current cwd");
+            std::env::set_current_dir(dir).expect("must change cwd");
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git command must spawn");
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    }
+
+    fn init_repo(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "test@example.invalid"]);
+        git(dir, &["config", "user.name", "test"]);
+    }
+
+    /// Issue #309 Finding 7: `scan --staged` (and therefore the installed
+    /// pre-commit hook) must honor `[scan].exclude`, exactly like `scan .`
+    /// and `scan --all` already do.
+    #[test]
+    fn scan_staged_honors_excludes() {
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempdir().unwrap();
+        let dir = temp.path();
+        init_repo(dir);
+
+        // A staged file whose content matches the built-in AWS key pattern.
+        std::fs::write(dir.join("leak.env"), "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n").unwrap();
+        git(dir, &["add", "leak.env"]);
+
+        let secrets: Vec<SecretRef> = vec![];
+        let patterns = builtin_patterns();
+        let engine = MatchEngine::new(&secrets, &patterns, DEFAULT_MIN_VALUE_LENGTH);
+
+        let (unfiltered, filtered) = {
+            let _cwd_guard = CwdGuard::change_to(dir);
+
+            // Sanity check: without excludes, the staged leak is found.
+            let no_excludes = build_exclude_set(&[]).unwrap();
+            let unfiltered = scan_staged(&engine, &no_excludes).unwrap();
+
+            // With [scan].exclude = ["*.env"], the same staged file is skipped.
+            let with_excludes = build_exclude_set(&["*.env".to_string()]).unwrap();
+            let filtered = scan_staged(&engine, &with_excludes).unwrap();
+
+            (unfiltered, filtered)
+            // _cwd_guard drops here, restoring cwd even if one of the
+            // unwraps above had panicked.
+        };
+
+        assert!(
+            !unfiltered.is_empty(),
+            "sanity check: staged leak.env should produce a finding without excludes"
+        );
+        assert!(
+            filtered.is_empty(),
+            "excluded staged file must not produce findings via scan_staged"
+        );
+    }
 }

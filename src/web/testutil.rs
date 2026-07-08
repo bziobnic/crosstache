@@ -178,6 +178,7 @@ pub(crate) mod stub {
                     updated_on: String::new(),
                     enabled: true,
                     content_type: req.content_type.clone().unwrap_or_default(),
+                    tags: req.tags.clone().unwrap_or_default(),
                 })
                 .collect();
             Ok(summaries)

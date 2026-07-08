@@ -203,6 +203,8 @@ impl Backend for AzureBackend {
             max_secret_size: Some(25 * 1024), // 25 KiB Azure limit
             max_name_length: Some(127),       // Azure Key Vault name limit
             name_charset: NameCharset::AlphanumericHyphen,
+            max_tags: Some(15),
+            max_tag_value_len: Some(256),
         }
     }
 

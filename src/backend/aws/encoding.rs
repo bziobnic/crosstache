@@ -8,6 +8,11 @@
 //! rejected at the `set_secret` boundary.
 
 use crate::backend::error::BackendError;
+use crate::backend::NameCharset;
+
+/// Human-readable description of the allowed AWS Secrets Manager charset,
+/// used in validation error messages.
+const ALLOWED_CHARSET_DESC: &str = "letters, digits, and / _ + = . @ -";
 
 /// The AWS Secrets Manager name length limit.
 pub const MAX_NAME_LEN: usize = 512;
@@ -54,6 +59,16 @@ pub fn validate_secret_name(name: &str) -> Result<(), BackendError> {
         return Err(BackendError::InvalidArgument(format!(
             "secret name too long: {} chars (max {MAX_NAME_LEN})",
             name.len()
+        )));
+    }
+    if !NameCharset::AwsRelaxed.is_valid(name) {
+        let offender = name
+            .chars()
+            .find(|c| !NameCharset::AwsRelaxed.is_valid(&c.to_string()))
+            .expect("is_valid returned false, so at least one char must be invalid");
+        return Err(BackendError::InvalidArgument(format!(
+            "secret name '{name}' contains invalid character '{offender}'; \
+             AWS secret names may only contain {ALLOWED_CHARSET_DESC}"
         )));
     }
     Ok(())
@@ -120,6 +135,20 @@ mod tests {
         assert!(validate_secret_name("db-password").is_ok());
         assert!(validate_secret_name("api/v1/key").is_ok());
         assert!(validate_secret_name("v1.2.3-rc.1").is_ok());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_disallowed_characters() {
+        let err = validate_secret_name("has space").unwrap_err();
+        assert!(
+            err.to_string().contains('\''),
+            "error should quote the offending character: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_secret_name_accepts_full_charset() {
+        assert!(validate_secret_name("app/db/key-1_v2.@x").is_ok());
     }
 
     #[test]

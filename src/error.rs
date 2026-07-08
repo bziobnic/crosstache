@@ -1,5 +1,35 @@
 use thiserror::Error;
 
+/// Render the `EnvNotDefined` message. When `available` is empty the
+/// `.xv.toml` in question defines zero `[env.*]` blocks at all (a
+/// types-only project file, see #331) rather than simply lacking the
+/// requested name, so the message says so instead of printing a
+/// confusing empty "available: " list.
+fn format_env_not_defined(name: &str, available: &[String]) -> String {
+    if available.is_empty() {
+        format!(
+            "Environment '{name}' requested, but .xv.toml defines no environments (no [env.*] blocks)"
+        )
+    } else {
+        format!(
+            "Environment '{name}' not defined in .xv.toml; available: {}",
+            available.join(", ")
+        )
+    }
+}
+
+/// Render the `AmbiguousSecret` message: names every workspace alias the
+/// secret was found in and gives the qualified `alias:name` form for each,
+/// per spec §Read semantics.
+fn format_ambiguous_secret(name: &str, candidates: &[String]) -> String {
+    let qualified: Vec<String> = candidates.iter().map(|a| format!("{a}:{name}")).collect();
+    format!(
+        "{name} exists in {} — qualify as {}",
+        candidates.join(", "),
+        qualified.join(" or ")
+    )
+}
+
 /// Main error type for crosstache operations
 #[derive(Debug, Error)]
 pub enum CrosstacheError {
@@ -34,10 +64,7 @@ pub enum CrosstacheError {
         suggestion: Option<String>,
     },
 
-    #[error("Invalid secret name: {name}")]
-    InvalidSecretName { name: String },
-
-    #[error("Environment '{name}' not defined in .xv.toml; available: {}", available.join(", "))]
+    #[error("{}", format_env_not_defined(name, available))]
     EnvNotDefined {
         name: String,
         available: Vec<String>,
@@ -106,6 +133,14 @@ pub enum CrosstacheError {
         cause: Box<CrosstacheError>,
     },
 
+    #[error("{}", format_ambiguous_secret(name, candidates))]
+    AmbiguousSecret {
+        name: String,
+        /// Workspace aliases where `name` was found, in a stable order
+        /// (matches the workspace's entry order).
+        candidates: Vec<String>,
+    },
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -124,7 +159,6 @@ impl CrosstacheError {
             Self::BackendUnavailable { .. } => "xv-backend-unavailable",
             Self::SecretNotFound { .. } => "xv-secret-not-found",
             Self::VaultNotFound { .. } => "xv-vault-not-found",
-            Self::InvalidSecretName { .. } => "xv-invalid-secret-name",
             Self::EnvNotDefined { .. } => "xv-env-not-defined",
             Self::PermissionDenied(_) => "xv-permission-denied",
             Self::NetworkError(_) => "xv-network",
@@ -144,6 +178,7 @@ impl CrosstacheError {
             Self::Upgrade(_) => "xv-upgrade",
             Self::ScanLeakDetected { .. } => "xv-scan-leak-detected",
             Self::RenameIncomplete { .. } => "xv-rename-incomplete",
+            Self::AmbiguousSecret { .. } => "xv-ambiguous-secret",
             Self::Unknown(_) => "xv-unknown",
         }
     }
@@ -158,7 +193,6 @@ impl CrosstacheError {
 
             Self::SecretNotFound { .. } => 10,
             Self::VaultNotFound { .. } => 11,
-            Self::InvalidSecretName { .. } => 12,
 
             Self::AuthenticationError(_) => 20,
             Self::PermissionDenied(_) => 21,
@@ -174,6 +208,10 @@ impl CrosstacheError {
             Self::Conflict(_) => 41,
             Self::RateLimited(_) => 42,
             Self::RenameIncomplete { .. } => 43,
+
+            // 10–19 — secret-family errors (workspace ambiguity is a
+            // read-resolution failure, same family as "secret not found").
+            Self::AmbiguousSecret { .. } => 13,
 
             // 50–59 — policy/scan findings
             Self::ScanLeakDetected { .. } => 50,
@@ -235,10 +273,6 @@ impl CrosstacheError {
         }
     }
 
-    pub fn invalid_secret_name<S: Into<String>>(name: S) -> Self {
-        Self::InvalidSecretName { name: name.into() }
-    }
-
     pub fn env_not_defined<S: Into<String>>(name: S, available: Vec<String>) -> Self {
         Self::EnvNotDefined {
             name: name.into(),
@@ -246,8 +280,31 @@ impl CrosstacheError {
         }
     }
 
+    /// Build the `EnvNotDefined` variant for a `.xv.toml` that defines zero
+    /// `[env.*]` blocks at all, reached when an explicit `--env`/`XV_ENV`
+    /// selection is made against such a file (issue #331). The implicit
+    /// "no envs defined, no selection" case never reaches this — see
+    /// `crate::config::project::resolve_env`, which treats that as "no
+    /// active profile" rather than an error.
+    pub fn env_not_defined_no_envs<S: Into<String>>(name: S) -> Self {
+        Self::EnvNotDefined {
+            name: name.into(),
+            available: Vec::new(),
+        }
+    }
+
     pub fn scan_leak_detected(count: usize) -> Self {
         Self::ScanLeakDetected { count }
+    }
+
+    /// Build the `AmbiguousSecret` variant (exit 13, `xv-ambiguous-secret`):
+    /// an unqualified read matched `name` in two or more attached workspace
+    /// vaults. `candidates` are the aliases it was found in.
+    pub fn ambiguous_secret<S: Into<String>>(name: S, candidates: Vec<String>) -> Self {
+        Self::AmbiguousSecret {
+            name: name.into(),
+            candidates,
+        }
     }
 
     pub fn permission_denied<S: Into<String>>(msg: S) -> Self {
@@ -378,15 +435,6 @@ mod tests {
             matches!(err, CrosstacheError::VaultNotFound { ref name, .. } if name == "prod-vault")
         );
         assert_eq!(err.to_string(), "Vault not found: prod-vault");
-    }
-
-    #[test]
-    fn test_invalid_secret_name_constructor() {
-        let err = CrosstacheError::invalid_secret_name("bad/name");
-        assert!(
-            matches!(err, CrosstacheError::InvalidSecretName { ref name } if name == "bad/name")
-        );
-        assert_eq!(err.to_string(), "Invalid secret name: bad/name");
     }
 
     #[test]
@@ -530,10 +578,6 @@ mod tests {
             ),
             (CrosstacheError::vault_not_found("x"), "xv-vault-not-found"),
             (
-                CrosstacheError::invalid_secret_name("x"),
-                "xv-invalid-secret-name",
-            ),
-            (
                 CrosstacheError::permission_denied("x"),
                 "xv-permission-denied",
             ),
@@ -565,6 +609,13 @@ mod tests {
                 "xv-rename-incomplete",
             ),
             (CrosstacheError::unknown("x"), "xv-unknown"),
+            (
+                CrosstacheError::ambiguous_secret(
+                    "DB_PASSWORD",
+                    vec!["work".into(), "stage".into()],
+                ),
+                "xv-ambiguous-secret",
+            ),
             (
                 CrosstacheError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, "x")),
                 "xv-io",
@@ -600,6 +651,10 @@ mod tests {
         // 10–19 — not-found family
         assert_eq!(CrosstacheError::secret_not_found("x").exit_code(), 10);
         assert_eq!(CrosstacheError::vault_not_found("x").exit_code(), 11);
+        assert_eq!(
+            CrosstacheError::ambiguous_secret("x", vec!["a".into(), "b".into()]).exit_code(),
+            13
+        );
 
         // 20–29 — auth/permission
         assert_eq!(CrosstacheError::authentication("x").exit_code(), 20);
@@ -629,6 +684,18 @@ mod tests {
 
         // 1 — unknown / catch-all
         assert_eq!(CrosstacheError::unknown("x").exit_code(), 1);
+    }
+
+    #[test]
+    fn ambiguous_secret_message_lists_qualified_forms() {
+        let err =
+            CrosstacheError::ambiguous_secret("DB_PASSWORD", vec!["work".into(), "stage".into()]);
+        let msg = err.to_string();
+        assert!(msg.contains("DB_PASSWORD exists in work, stage"), "{msg}");
+        assert!(msg.contains("work:DB_PASSWORD"), "{msg}");
+        assert!(msg.contains("stage:DB_PASSWORD"), "{msg}");
+        assert_eq!(err.code(), "xv-ambiguous-secret");
+        assert_eq!(err.exit_code(), 13);
     }
 
     #[test]
@@ -796,12 +863,6 @@ mod tests {
             },
             SecuritySurface {
                 category: "error variant",
-                name: "InvalidSecretName",
-                fields: &["name"],
-                allowed_value_like_fields: &[],
-            },
-            SecuritySurface {
-                category: "error variant",
                 name: "EnvNotDefined",
                 fields: &["name", "available"],
                 allowed_value_like_fields: &[],
@@ -918,6 +979,12 @@ mod tests {
                 category: "error variant",
                 name: "RenameIncomplete",
                 fields: &["source", "destination", "vault", "cause"],
+                allowed_value_like_fields: &[],
+            },
+            SecuritySurface {
+                category: "error variant",
+                name: "AmbiguousSecret",
+                fields: &["name", "candidates"],
                 allowed_value_like_fields: &[],
             },
             SecuritySurface {

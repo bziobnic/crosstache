@@ -90,12 +90,49 @@ a two-decimal string, `folder`/`groups` default to empty strings.
 
 ---
 
+## Record Types
+
+Typed records attach structured fields (username, URL, connection-string, …)
+to a secret. Each field is `metadata` (a listable tag) or `secret` (JSON
+envelope inside the value); every type has exactly one `primary` secret
+field, so plain `get`/`run` on a record are byte-identical to an untyped
+secret. Untyped secrets are unaffected on every code path — no envelope, no
+new tags, unless explicitly converted.
+
+| Command | Description |
+|---------|-------------|
+| `xv type list` (alias `ls`) | List resolved types (built-in + global `xv.conf` + project `.xv.toml`) with source; `--format json` |
+| `xv type show <name>` | Field table for one type |
+| `xv set <name> --type <type>` | Create a typed record; `--field name=value` for metadata/non-primary-secret fields (repeatable), `--field-secret name=value` for ad-hoc secret fields, primary value via `--value`/`--stdin`/prompt |
+| `xv get <name> --field <name>` | Read one field (either kind) |
+| `xv get <name> --record` | Full record (all fields) in the requested `--format` |
+| `xv update <name> --field name=value` | Edit a metadata field (tag-only) or type-declared non-primary secret field (new version) |
+| `xv update <name> --field-secret name=value` | Edit/add an ad-hoc secret field (rewrites the envelope, new version) |
+| `xv update <name> --type <type>` | Explicit conversion: bare secret's value becomes the primary field |
+| `xv update <name> --untype [--yes]` | Flatten a record back to a bare secret holding the primary value |
+| `xv ls --type <type>` | Filter listing by record type; JSON output lifts `f.*` fields into a `fields` map plus `record_type` |
+
+Built-ins: `login` (username\*, url; password\* primary), `api-key` (url,
+account; key\* primary), `database` (host, port, database, username;
+password\* primary, connection-string optional secret) — `\*` = required.
+Custom types are `[types.<name>]` TOML blocks in global `xv.conf` or
+project `.xv.toml`; a project type shadows a global one, shadowing a
+built-in works but warns. **One invalid `[types.*]` block fails type
+resolution globally** (fail-closed by design).
+
+External consumers (Azure portal, raw SDKs, older `xv` binaries) see a
+typed record's value as a JSON envelope (`application/vnd.xv.record`
+content type), not the bare primary value — conversion between shapes is
+always explicit (`--type`/`--untype`), never implicit.
+
+---
+
 ## Secret Injection
 
 | Command | Description |
 |---------|-------------|
-| `xv run -- <command>` | Run a process with secrets as env vars (`--group`, `--include`, `--exclude`, `--no-masking`) |
-| `xv inject` | Render templates with `{{ secret:name }}` and `xv://vault/secret` refs |
+| `xv run -- <command>` | Run a process with secrets as env vars (`--group`, `--include`, `--exclude`, `--no-masking`, `--best-effort`). Injects a typed record's primary field under its name; no per-field expansion |
+| `xv inject` | Render templates with `{{ secret:name }}` / `{{ secret:name.field }}` and `xv://vault/secret[#field]` refs (`--group`, `--best-effort`). `.field`/`#field` select one field of a typed record; exact secret-name matches (e.g. a secret literally named `a.b`) always win over the dotted split |
 
 Advanced workflows (`run`, `inject`, default `rotate`, `scan`, `env pull`, and
 `env push`) route through the active backend trait. They work with Azure, AWS,
@@ -112,6 +149,17 @@ the original user-facing name shown by `xv list` or the backend-specific stored
 name. If an explicit `--group`/`--include` filter matches nothing, `xv run`
 exits non-zero; an empty vault or an exclusion that removes everything warns
 and still runs the child process.
+
+By default, `xv run` also aborts before spawning the child if any selected
+secret or `xv://` reference fails to fetch — every failure is reported before
+the non-zero exit. Pass `--best-effort` to fall back to the previous
+warn-and-continue behavior.
+
+By default, `xv inject` also aborts before writing/printing the rendered
+output if any `{{ secret:name }}` or `xv://` reference fails to resolve —
+every failure is reported before the non-zero exit, and no
+partially-resolved output is ever written. Pass `--best-effort` to fall back
+to the previous warn-and-continue behavior.
 
 ---
 

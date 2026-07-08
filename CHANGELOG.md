@@ -1,6 +1,141 @@
 # Changelog
 
-## Unreleased
+## v0.22.0 — Vault alias ergonomics (2026-07-06)
+
+### Added
+
+- **`--alias` spelling for `cx add`.** `xv cx add <vault> --alias <name>` now
+  works as a visible alias of the existing `--as` flag, matching the spelling
+  most users reach for first. Both spellings are equivalent.
+- **`xv cx alias <entry> <new-alias>` to re-alias an attached entry.** Rename
+  the alias on any attached vault — including the default entry — addressing it
+  by its current alias or its vault name (ambiguous vault names across backends
+  error and list the candidates). `xv cx alias <entry> --reset` restores the
+  vault name. Renames reuse the same validation as `cx add` (charset,
+  uniqueness, no collision with a backend name); a `.xv.toml`-defined workspace
+  is refused with a pointer to the file, matching `cx add`/`rm`/`default`.
+
+### Changed
+
+- **`xv ls -l` shows the real vault name behind an alias.** In a multi-vault
+  workspace, the long listing now appends the backing vault name to each row
+  whose alias differs from it — e.g. `kv/SECRET (kv-scottzionic)` — so `-l`
+  identifies the actual vault even when the alias was renamed. Rows whose
+  alias equals the vault name are unchanged, and the default grid view, the
+  `--format table` Vault column, and single-vault/no-workspace `ls -l` output
+  are all byte-identical to before.
+
+## v0.21.0 — Multi-backend workspace convergence (2026-07-05)
+
+### Changed
+
+- **Multi-backend workspace convergence, Phase 1: unified secret resolution.**
+  Every `xv` secret-resolution call now flows through the single workspace
+  seam (`resolve_workspace` → `resolve_secret_target`); bare/no-workspace
+  usage resolves as a degenerate workspace-of-one
+  (`WorkspaceSource::Degenerate`) instead of a separate legacy code path. The
+  legacy no-workspace fallback branch inside `resolve_workspace_or_default`
+  is deleted. See
+  [`docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md`](./docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md)
+  for the full design and ADRs.
+  - **No intended user-visible breaks, with one cosmetic exception.** This
+    was an internal-resolution unification, not a behavior change: bare
+    `set`/`get`/`ls` output, exact (colon-containing) secret name matching,
+    `xv://` URI resolution in `run` and `inject`, the `context use` bootstrap
+    flow (setting a vault before any workspace exists), the Azure no-vault
+    hard error, and union rendering for real (non-degenerate) single-entry
+    workspaces are all unchanged. The cosmetic exception: the informational
+    stderr notice printed when a `.xv.toml` env profile's vault is used from
+    outside its project directory is no longer re-emitted during bare
+    secret resolution (the overlay pass already reported it).
+  - **One user-visible improvement:** `xv ls --deleted`'s soft-delete
+    capability gate now evaluates the capabilities of the *resolved* backend
+    for the target vault, rather than the globally active backend — in a
+    mixed-backend workspace, a skip/error now correctly names the backend
+    actually being read, instead of whichever backend happened to be active
+    process-wide.
+
+- **Multi-backend workspace convergence, Phase 2: legacy manager retirement.**
+  Every CLI verb now routes through the `Backend` trait; `SecretManager` is
+  deleted entirely, and `VaultManager` is reduced to the interactive
+  `xv init`/setup path only (access-policy and storage-account provisioning
+  aren't trait surface). Secret-level and vault-level RBAC, principal
+  resolution, and vault lifecycle (create/list/delete/update/restore/purge)
+  are now `Backend`-trait surface, which is what makes future non-Azure
+  backends able to support `xv share`/`xv vault` without another manager.
+  - **New: `--vault` override on `xv run`/`xv inject`/`xv rotate`.** Explicit
+    `--vault <name-or-alias>` overrides the workspace's (or degenerate
+    workspace-of-one's) default entry for that invocation — an attached
+    workspace alias resolves to its entry, anything else is treated as a
+    literal vault name on the currently effective backend. No workspace is
+    required to use it.
+  - **Azure `xv audit --resource-group` now flows through the `AuditBackend`
+    trait** instead of a legacy Activity Log client, closing the long-standing
+    `has_audit` capability-flag inconsistency (`ROADMAP.md` § Backend
+    ecosystem) — Azure's `has_audit` capability flag is no longer a lie.
+  - **Azure-only UX changes:** `xv vault purge`/`restore`/`rollback` no longer
+    print the legacy manager's extra confirm/warning lines or the
+    resolved-version GUID line — output now matches the `local`/`aws`
+    backends' trait-path shape. `xv share grant`/`revoke`/`list` and
+    `xv vault share` output is unchanged. `xv share`/`xv vault share` against
+    a backend without RBAC support now fails with a clean capability-gated
+    error (exit `2`) instead of attempting the operation.
+  - **Edge case:** if backend initialization fails at startup, verbs that used
+    to silently retry a legacy Azure construction path now fail cleanly with
+    the initialization error instead.
+
+- **Multi-backend workspace convergence, Phase 3: default-entry file-ops
+  routing.** `xv file` now resolves its backend and vault the same way secret
+  verbs do — through the workspace's default entry — and dispatches through
+  the `Backend` trait's file-storage surface uniformly across Azure, local,
+  and AWS. The separate AWS-only file-ops code path (`file_ops_aws.rs`) is
+  deleted; there is one dispatch path for every backend.
+  - **New: `xv file sync` now works on the local backend** (previously
+    Azure-only). AWS sync remains unsupported — same limitation as before,
+    now reported through a clearer capability-gated error instead of a
+    bespoke check.
+  - **New: a clearer error when file storage isn't configured.** Running any
+    `xv file` command against a backend with no file storage set up now fails
+    with an actionable message naming the backend and the missing setting
+    (e.g. `storage_account` for Azure, `s3_bucket` for AWS) instead of a
+    generic failure.
+  - **Behavior change: AWS file-op vault targeting now follows the workspace
+    default entry**, replacing the previous AWS-specific `[aws].default_vault`
+    resolution chain. If you relied on that chain resolving to a different
+    vault than your current workspace/context default, `xv file` on AWS may
+    now target a different vault — qualify with the usual vault-selection
+    flags if needed.
+  - **Behavior change: AWS file transfers are now buffered in memory instead
+    of streamed to/from disk.** The retired AWS-specific path streamed
+    uploads and downloads directly against the filesystem; the unified trait
+    path reads the whole file into memory on upload, and buffers a download
+    fully in memory before a single `fs::write` (bounded by the existing
+    5 GiB download-size guard). Very large files on AWS now cost more peak
+    memory than before. The old download path also wrote to a temp file and
+    renamed it into place atomically on success; that atomic rename is gone —
+    a crash mid-write can now leave a truncated file at the destination path
+    (a network failure still leaves nothing, since the write happens only
+    after the full download completes). Azure and local are unaffected
+    (Azure keeps its own streaming/multipart path; local was never
+    streamed). See ROADMAP.md § Backend ecosystem for the tracked follow-up.
+  - **Behavior-preserving (settings only):** the global `[blob]` chunk-size/
+    concurrency settings (`BLOB_CHUNK_SIZE_MB`, `BLOB_MAX_CONCURRENT_UPLOADS`)
+    are still honored on the top-level `[aws]` backend the same way they were
+    before; named AWS backend entries use the built-in defaults (4 MB chunks,
+    3 concurrent uploads) rather than the global setting, unchanged from
+    today. This is a statement about which settings apply, not about the
+    transfer mechanism itself — see the buffering change directly above.
+  - File-listing cache entries are now scoped per `(backend, vault)` instead
+    of `vault` alone (mirroring the Phase B secrets-list cache re-keying), so
+    two workspace entries sharing a vault *name* on different backends never
+    collide; pre-existing file-list cache entries simply miss once and
+    re-populate.
+
+## v0.20.1 — First cx add keeps the current vault attached (2026-07-05)
+
+### Changed
+
+- **The first `xv cx add` now auto-attaches the currently-resolved vault as the workspace default (#341).** v0.20.0's first-add behavior attached only the requested vault, making it the workspace's sole (and therefore default) entry — so `xv ls` right after `cx add` stopped showing whatever vault was already current, silently hiding pre-existing secrets (reported by the maintainer immediately after v0.20.0 shipped). The first `cx add` now also attaches the vault you were already using (whatever `--vault`/context/`default_vault` resolves to) as the default, then attaches the requested vault alongside it — `xv ls` immediately shows both, and unqualified writes keep landing where they already were. Passing `--default` on that first add makes the newly-added vault the default instead (the prior vault stays attached, just not the write target). If the requested vault already resolves to the same `(backend, vault)` as the current one, or the current vault can't be resolved at all (no context, no `default_vault`), this degenerates to the original single-entry behavior (the latter case notes the fallback in the success message). An auto-attach candidate whose alias collides with the requested `--as` alias errors with the existing duplicate-alias message, before anything is written. Subsequent `cx add`s (a workspace already exists) are unchanged. **Code review fix:** the auto-attach's "current backend" signal is now profile-aware (a new `Config::pre_flag_backend`, resolved in `main.rs` before this command's own `--backend` flag is considered) — a `.xv.toml` env profile's `backend` outranks the config file, and using the config-file-only value (as an earlier version of this fix did) recorded the WRONG backend for the auto-attached entry whenever a profile was active, making a subsequent `xv ls` fail against a backend that was never actually in use.
 
 ### Added
 
@@ -11,7 +146,77 @@
 
 ### Fixed
 
+- **Unit tests no longer read the real global vault context/workspace, isolated via a new `XV_CONTEXT_DIR` env override (#342).** Several `#[tokio::test]`s in `src/cli/secret_ops.rs` exercise `execute_secret_rotate_native`/`execute_secret_update_direct`/`resolve_vault_for_trait`, all of which resolve the active workspace/vault through `ContextManager::load()` — with no isolation, that read the developer's REAL `$XDG_CONFIG_HOME/xv/context` (or `$HOME/.config/xv/context`), so a machine with a multi-vault workspace attached (e.g. one whose default entry is on a different backend, such as `azure`) silently hijacked which backend/vault these tests actually resolved against, surfacing as spurious failures unrelated to the change under test (traced to #341's own workspace testing). `XV_CONTEXT_DIR` (mirroring the `XV_CACHE_DIR`/#318 precedent exactly) overrides the context store's directory; the affected tests now point it at a `tempfile::TempDir` for their duration. CI was unaffected (no context file exists there), which is why this went unnoticed until now. **Code review fix:** the override now also skips the LOCAL (`cwd/.xv/context`) check entirely, not just the global path — setting `XV_CONTEXT_DIR` means "my context store lives here, full stop."
+
+## v0.20.0 — Multi-vault workspaces (2026-07-04)
+
+### Added
+
+- **Multi-vault workspaces — Phase A: workspace core (`xv cx add`, colon addressing, default-vault writes).** Attach several vaults, potentially on different backends, so they behave like one workspace: `xv cx add <vault> [--backend] [--as alias] [--default] [--local] [--force]` attaches a vault (alias defaults to the vault name, backend to the active one, the first attach becomes the default, a vault-exists probe runs unless `--force`); `xv cx rm <alias>` detaches one (errors removing the default unless it's the last entry, in which case the workspace is deleted and single-vault behavior resumes); `xv cx default <alias>` changes the write target; `xv cx ls` lists attached vaults (alias, backend, vault, default marker, source). `cx` is now a visible alias of `context`. Colon addressing (`alias:path`, e.g. `xv get work:DB_PASSWORD`) qualifies a secret with its vault; an exact secret name always wins over alias interpretation.
+  - **Reads search, writes don't, on every secret verb.** `xv get`/`xv history`/`xv rollback` on an unqualified name search every attached vault — a unique match resolves, no match is the normal not-found error, and two or more matches error with the new `xv-ambiguous-secret` code (exit `13`), listing every qualified `alias:name` form. `xv set`, `xv update`, `xv rotate` (including `--native`), `xv delete` (including `--group`), `xv restore`, and `xv purge` never search on an unqualified name — every one of them always targets the workspace's default vault; qualify with `alias:name` to reach another attached vault. Bulk `set` (`xv set KEY=val KEY2=val2`) resolves each `KEY=value` pair independently, so a mix of unqualified (→ default vault) and `alias:KEY=value` (→ that vault) pairs works in one command.
+  - A `.xv.toml` `[env.<name>] vaults = [...]` block, when present, REPLACES the context-store workspace entirely for that project (no merging); because of that replacement, `xv cx add`/`rm`/`default` now ERROR (exit `3`, naming the `.xv.toml` path and env) instead of silently mutating a context-store workspace the project overlay would just override — there is no override flag in v1, editing `.xv.toml` directly is the explicit path. **No workspace attached ⇒ every command above is byte-identical to today** (pinned by a byte-golden test comparing full stdout/stderr) — the feature is entirely opt-in via `xv cx add`. Backend construction is lazy: a command that only touches one attached backend never authenticates the others.
+  - **Not yet workspace-aware in Phase A** (landed in Phase B/C below): `ls`/`find` (union view across attached vaults, plus per-vault capability gating), alias support in `xv://` URIs/templates/`mv`/`copy`, and the TUI vault pane. `xv file`/blob storage is single-vault as today and stays out of scope for the whole workspaces feature per the design (workspaces only span secrets).
+- **Multi-vault workspaces — Phase B: union `ls`/`find` views.** With a workspace attached, `xv ls` and `xv find` now span every attached vault instead of just the default:
+  - `xv ls` merges each attached vault's listing (`--filter`/`--type`/folder scoping/`--group` apply per vault, then merge; stable sort alias-then-name; pagination over the merged set). A `Vault` column appears on the table/long views only when the workspace has ≥2 attached entries; the default grid view instead prefixes `alias/` onto the name. A single-entry workspace (or no workspace) renders exactly like today — byte-identical, pinned by test.
+  - `xv find` candidates are the union of attached vaults, rows prefixed `alias/` (mirroring the existing `--all-vaults` convention). `--all-vaults` keeps its documented meaning — every vault the active backend can list, a strict superset of the workspace — and takes priority even with a workspace attached.
+  - **No partial unions**: any attached vault erroring during a union read fails the whole command, naming the vault and backend.
+  - **Capability gating, never silent**: `xv ls --deleted` in a union workspace applies per vault; a vault whose backend lacks soft-delete is skipped with a stderr note naming vault+backend, never a hard failure of the whole view.
+  - Secrets-list cache keys are now scoped per `(backend, vault)` instead of `vault` alone (schema bump `secrets-list-v2.json` → `-v3`, nested under a `backend` directory) so two workspace entries sharing a vault NAME on different backends never collide; pre-existing v2 cache entries simply miss.
+- **Multi-vault workspaces — Phase C: URI/template aliases, cross-vault `mv`/`copy`, TUI pane (feature complete).**
+  - The vault slot of an `xv://` URI (both `xv run`'s environment-variable scan and `xv inject`'s templates) now checks workspace aliases FIRST, falling back to today's raw-vault-name meaning when nothing matches; `xv://azure:vault/name`-style explicit backend prefixes bypass alias resolution entirely, exactly as before. `#field` fragments compose with alias resolution unchanged.
+  - `xv mv alias:secret otheralias:/` (and `otheralias:folder/`) now routes to the existing cross-vault copy+delete machinery — with resolved `(backend, vault)` pairs — when BOTH source and destination carry an attached alias resolving to a different vault; a single alias-qualified side (or none) falls straight through to the unchanged same-vault rename/re-folder path. `xv copy`/`xv move --from/--to` accept aliases in `--from`/`--to` too. Metadata (groups/note/folder/tags/record envelopes) rides along via the existing `rename_request_from_properties` path (#315); a new destination tag-budget pre-check fails loud, before any write, when the destination backend's tag cap (e.g. Azure's 15) can't hold the secret's tags. Cache invalidation for both sides is keyed per-side by each resolved entry's own backend name.
+  - `xv tui`'s vault pane lists workspace entries as `alias (backend)` when a workspace is attached; selecting one scopes the secrets pane to that entry's own vault on its own backend, spanning multiple backends in one session. No workspace attached ⇒ the vault pane is unchanged.
+  - README's "Multi-vault workspaces" section is promoted out of preview, covering all three phases end-to-end.
+
+### Changed
+
+- **`xv context ls` / `xv cx ls` now lists the attached multi-vault workspace** (alias, backend, vault, default marker, source), not recent vault contexts. Recent contexts are still available, unabbreviated, via `xv context list`. This follows the approved multi-vault workspaces spec, which specifies `xv cx ls` for the workspace listing — `cx` and `context` share one subcommand tree, so the `ls` alias could only mean one or the other.
+
+## v0.19.3 — Record write-path integrity and types-only .xv.toml fixes (2026-07-04)
+
+### Fixed
+
+- **A `.xv.toml` with only a `[types.*]` block (no `[env.*]`, no `default_env`) no longer breaks write commands (#331).** The #320 write-default resolvers (`resolve_group`/`resolve_folder`, plus `resolve_vault_name`/`resolve_resource_group`) propagated `project::resolve_env`'s error even when the file simply defined zero environments — so `xv set`, `xv run`, and `xv gen --save` failed with `error[xv-env-not-defined]: Environment '(none)' not defined in .xv.toml; available: ` even though `xv list` worked fine. `resolve_env` now returns `Ok(None)` ("no active profile") instead of erroring when a `.xv.toml` defines no `[env.*]` tables and has no `default_env` — types-only project files are a legitimate shape since record types (#321). A file that *does* define environments keeps erroring exactly as before on an unknown/unselected `--env`/`XV_ENV`; an explicit `--env`/`XV_ENV` against a file with zero environments now gets a clearer "defines no environments" message instead of a rough empty `available: ` list.
+- **Bare-value `xv update <record> <value>`/`--stdin` and `xv rotate <record>` no longer corrupt typed records (#330).** Both wrote the raw string over the record's whole JSON envelope while leaving `content_type` at `application/vnd.xv.record`, so every subsequent read (`get`, `get --field`, `get --record`) failed with `xv-config-invalid` and every non-primary field was lost from the latest version (recoverable only via `xv rollback`). Both now set the record's declared **primary field** inside the envelope instead — the same write-back path `--field`/`--field-secret` edits already use — preserving every other envelope field, metadata field, and tag/group/note/folder. A corrupt envelope or an unresolvable `xv-type` now fails loud before any write, rather than guessing. `--field-secret <primary>=…` (still rejected, since the primary only ever arrives via a bare-value write) now points at the real paths: `xv update <name> <value>`, `--stdin`, or `xv rotate <name>`. Untyped secrets are unaffected on all three paths. **Follow-up (code review):** combining a bare value/`--stdin` with any classic metadata flag (`--note`/`--group`/`--tags`/`--rename`/`--expires`/`--not-before`/`--enabled`/`--folder`/`--clear-*`) against a record used to apply the primary-field write and silently drop the flag while printing "Successfully updated" — now rejected loud, naming every flag supplied, with nothing written; run the value update and the metadata update as two separate commands. `xv rotate` on a record also re-enables it again, matching untyped `rotate`'s existing behavior (previously a disabled record stayed disabled after rotating).
+
+## v0.19.2 — Bulk folder moves with mv --filter (2026-07-04)
+
+### Added
+
+- **`--filter <GLOB>` on `xv mv`**, bulk-moving every secret whose name matches the glob into a destination folder in one plan/confirm step, instead of a shell loop (`xv find --filter 'test-*' --names-only | while read -r n; do xv mv "$n" archive/; done`). Matching is identical to `ls`/`find --filter` (#326): case-sensitive, whole-name, either the display or backend (sanitized) name, whole-vault scope. `SOURCE` and `--filter` are mutually exclusive (exactly one is required); with `--filter`, `DEST` must be a folder destination (`folder/` or `/`) since a rename is impossible for a multi-secret move. Matched secrets keep their names — only the `folder` metadata is rewritten, the same metadata-only update `xv mv`'s bulk folder moves already use. Reuses the existing bulk-move machinery: count + sample plan confirmation, `--yes` bypass, non-TTY refusal without `--yes`, `--dry-run` preview, a collision pre-check before any move, and attempt-all/report-failure-count partial-failure behavior. Secrets already in the destination are skipped and noted (not counted as moves, not an error); zero matches fails loud; an invalid glob fails with `invalid_argument` before any backend call.
+
+## v0.19.1 — Name-glob filtering on ls and find (2026-07-03)
+
+### Added
+
+- **`--filter <GLOB>` on `xv ls`/`list` and `xv find`**, consistent with the existing `xv migrate --filter`. The glob matches either the secret's user-facing (`original_name`) or backend (sanitized) name — the same either-name convention `xv mv` and `xv run --include`/`--exclude` use — case-sensitive and whole-name (`test-*` matches `test-db`, never `latest-db`). On `ls` it's applied client-side before pagination/rendering and composes with the folder positional, `--type`, `--deleted`, and every output format. On `find` it's a hard pre-filter on the candidate set applied before fuzzy scoring, so `PATTERN` ranks only within the filtered set; `--filter` with no `PATTERN` yields an unranked filtered list — `xv find --filter 'test-*' --names-only` is the canonical "names starting with test-" one-liner. An invalid glob pattern fails fast with `invalid_argument`, before any backend call.
+
+## v0.19.0 — Record types, fail-fast run/inject, and backend-resolution fixes (2026-07-03)
+
+### Added
+
+- **Record types: typed secrets with structured fields (#321). Not a breaking change** — only secrets explicitly created with `--type` or converted with `update --type` change shape; every existing/untyped secret is byte-identical on every code path (`get`/`run`/`inject`/`ls`), no envelope, no new tags, unless you opt in.
+  - Built-in types `login`, `api-key`, `database`, plus custom `[types.<name>]` blocks in `xv.conf`/`.xv.toml` (project shadows global, shadowing a built-in warns). Every type declares exactly one `primary` secret field, so plain `get`/`run` on a record return/inject that field, unchanged from today's contract.
+  - Per-field sensitivity: `metadata` fields ride tags (`f.<name>`, listable without fetching the secret); `secret` fields live in a JSON envelope inside the value, marked by a reserved `application/vnd.xv.record` content type (never JSON-sniffed).
+  - `xv type list`/`xv type show`; `xv set --type/--field/--field-secret`; `xv get --field/--record`; `xv update --field/--field-secret` (edit) and `--type/--untype` (explicit conversion, never implicit); `xv ls --type` filter plus `f.*`/`record_type` in JSON output.
+  - `xv inject`'s `{{ secret:name.field }}` template syntax and `xv://vault/name#field` URI fragment select one field; an exact secret name always wins first, so an untyped secret literally named `a.b` still resolves as itself. `xv run` gets no per-field expansion — it injects a record's primary field under its name, same as `get`.
+  - One invalid `[types.*]` block fails type resolution globally (fail-closed by design) rather than silently dropping just that type.
+  - External consumers (Azure portal, raw SDKs, older `xv` binaries) see a typed record's raw JSON envelope as its value — documented in the README, alongside the explicit-conversion rule.
+
+### Changed
+
+- **Breaking: `xv run` now aborts before launching the child when any selected secret or `xv://` reference fails to fetch; use `--best-effort` for the old behavior** (#306). Previously a per-secret fetch failure only printed a warning and the command ran anyway, which could silently launch a process missing an env var (e.g. after a transient backend error or a permission problem). All failures across both the selected-secret list and `xv://` reference resolution are now collected and reported together before the exit.
+- **Breaking: `xv inject` now aborts before writing/printing the rendered output when any `{{ secret:name }}` or `xv://` reference fails to resolve; use `--best-effort` for the old behavior** (#313). Previously a per-reference resolution failure only printed a warning and rendering continued, which could silently write a config file (e.g. `.env`) with unresolved `{{ secret:name }}` / `xv://` placeholders left in place while `xv inject` exited 0. An unparseable `xv://` reference in a template (e.g. a malformed backend prefix) is now also treated as a failure rather than silently skipped, since — unlike `xv run`'s scan of arbitrary parent-environment values, which can incidentally contain `xv://`-shaped substrings — every reference in a template the user wrote for `xv inject` is unambiguously intentional.
+
+### Fixed
+
+- **`.xv.toml` backend selection now resolves before config validation, and `XV_BACKEND` no longer outranks the project profile (#305).** A project profile selecting `local` could fail with "Subscription ID is required" whenever the global Azure config was incomplete, because validation ran before the profile was consulted; and setting `XV_BACKEND` silently suppressed the profile entirely (clap populates the `--backend` slot from the env var, making it indistinguishable from an explicit flag). The documented precedence — `--backend` flag > `.xv.toml` profile > `XV_BACKEND` > global config > `azure` — now actually holds, and purely-local commands (`context`, `cache`, `parse`, …) no longer demand Azure/AWS credentials they never use. A literal `--backend` token in `xv run`'s child command (after `--`) is no longer mistaken for the flag.
+- **`xv move --force` can actually overwrite an existing target, and `xv copy`/`xv move` work on every backend (#307).** `--force` was a dead flag: the move detected the target, warned "Overwriting…", then delegated to the copy step whose unconditional exists-guard aborted — with an error message that pointed back at `--force`. The flag is now honored (source still deleted only after a successful copy; `xv copy` keeps refusing to overwrite). While fixing it: `copy`/`move` were silently Azure-only regardless of `--backend`; they now use the same backend dispatch as get/set/delete/list, preserving `groups`/`folder`/`note` through the canonical metadata extraction.
+- **xfunction: JWT issuer now follows OIDC discovery; installer no longer passes the client secret via argv (#310).** The Azure Function validated tokens against a hard-coded v1 `sts.windows.net` issuer (while fetching v2 discovery metadata for keys only), so genuine v2 tokens were always rejected; the expected issuer now comes from `AZURE_AD_ISSUER` → the discovery document's `issuer` → the v1 fallback, fail-closed with no cache poisoning. The installer's optional credential storage uses `xv set --stdin` instead of `--value` (secret no longer visible in process listings) and reports per-secret store failures instead of unconditional success.
+- **Small-fry from the same review batch (#311):** the cache-invalidation unit test no longer touches the real OS cache directory (new `XV_CACHE_DIR` override, documented in the README); AWS secret names are validated against the advertised `[a-zA-Z0-9/_+=.@-]` charset locally with a clear error naming the offending character, instead of a late remote `ValidationException`; Cargo.toml description/keywords reflect the multi-backend positioning.
+- **Env profile `group`/`folder` defaults are now actually applied, not just parsed (#308).** `.xv.toml`'s `[env.*].group` and `.folder` were documented and read into `EnvProfile`, but no command consulted them — only `xv config show`/`xv env show` displayed them. `Config::resolve_group`/`resolve_folder` (mirroring `resolve_vault_name`) now back `xv run` (group as the injection filter when `--group` is omitted) and, via a shared `apply_profile_write_defaults` helper, both `xv set` and `xv gen --save` (group/folder as write-time defaults when the corresponding flag is omitted) — restoring the "set and gen --save build identical requests" invariant. An explicit `--group`/`--folder` always wins. `xv list`/`ls` is unaffected by either default — its documented contract already states the write-side folder default doesn't scope listings, and the same now holds for group. A blank `group = ""` / `folder = ""` in the profile resolves to no default at all (not an unfilterable empty-string tag); `xv run`'s fail-loud "nothing matched" error now says `(from env profile default)` when the unmatched group came from the profile rather than `--group`.
 - AWS: `list_deleted_secrets` now exposes the `xv:original_name` tag in its summaries (matching `list_secrets`), so `xv ls --deleted` no longer loses the user-facing name on AWS (#301).
+- **`xv scan` now honors every `[scan]` knob it already documented (#309).** `[scan].min_value_length` and `[scan].patterns` were parsed but silently ignored — the engine always used the hard-coded default minimum length, and every scan mode enabled all built-in patterns regardless of the allowlist. `XV_SCAN_DISABLE=1` (or `=true`) was documented as an escape hatch but read nowhere. All three now work, uniformly, across `xv scan [PATH]...`, `--staged`, and `--all`. An `[scan].patterns` allowlist that resolves to zero known pattern names (e.g. a typo) is now a hard config error listing the valid names, rather than a silent all-patterns-disabled scan that still exits 0. **Behavior change:** `xv scan --staged` (and therefore the installed pre-commit hook) now applies the same default excludes and `[scan].exclude` globs that `scan .` and `scan --all` already applied — previously it scanned every staged file regardless of excludes.
 
 ## v0.18.0 — Filesystem verbs: xv mv, ls aliases everywhere, and reliable rename (2026-07-02)
 

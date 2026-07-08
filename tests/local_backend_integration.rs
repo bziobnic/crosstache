@@ -73,7 +73,7 @@ async fn test_full_secret_lifecycle() {
 
     // Create vault (default already exists, use it)
     let vaults = backend.vaults().unwrap();
-    let vault_list = vaults.list_vaults().await.unwrap();
+    let vault_list = vaults.list_vaults(None).await.unwrap();
     assert_eq!(vault_list.len(), 1);
     assert_eq!(vault_list[0].name, "default");
 
@@ -459,7 +459,7 @@ async fn test_multiple_vaults() {
     assert!(default_secrets.is_empty());
 
     // List vaults — should have 3
-    let vault_list = vaults.list_vaults().await.unwrap();
+    let vault_list = vaults.list_vaults(None).await.unwrap();
     assert_eq!(vault_list.len(), 3);
 }
 
@@ -485,7 +485,7 @@ async fn test_error_cases() {
     assert!(matches!(err, Err(BackendError::VaultNotFound { .. })));
 
     // Delete non-existent vault → VaultNotFound
-    let err = vaults.delete_vault("no-such-vault").await;
+    let err = vaults.delete_vault("no-such-vault", None).await;
     assert!(matches!(err, Err(BackendError::VaultNotFound { .. })));
 
     // Create duplicate vault → Conflict

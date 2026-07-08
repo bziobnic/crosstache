@@ -28,6 +28,23 @@ pub mod registry;
 pub mod secret;
 pub mod vault;
 
+/// Reserved tag name for a secret's user-facing original name (before
+/// backend-specific sanitization).
+pub const TAG_ORIGINAL_NAME: &str = "original_name";
+
+/// Reserved tag name recording that crosstache wrote a secret.
+pub const TAG_CREATED_BY: &str = "created_by";
+
+/// Bookkeeping tags written unconditionally on every Azure secret write —
+/// `SecretManager::prepare_secret_request` (create, `src/secret/manager.rs`)
+/// and `azure::secrets::build_patched_tags` (attribute-only update,
+/// `src/backend/azure/secrets.rs`) — one tag slot each, always consumed
+/// regardless of what the caller requests. `records::check_tag_budget`'s
+/// pre-check must count these so it can't under-count relative to what the
+/// backend actually writes; both call sites reference this constant
+/// instead of repeating the literal strings, so the two can't drift apart.
+pub const ALWAYS_WRITTEN_TAGS: [&str; 2] = [TAG_ORIGINAL_NAME, TAG_CREATED_BY];
+
 // Re-exports for convenience.
 pub use addressing::BackendRef;
 pub use audit::{AuditBackend, AuditEvent};
@@ -102,7 +119,7 @@ pub enum NameCharset {
 
 impl NameCharset {
     /// Returns true if `name` is valid under this charset.
-    #[allow(dead_code)] // public API; currently exercised only by tests
+    #[cfg_attr(not(feature = "aws"), allow(dead_code))] // used by the AWS backend's name validation
     pub fn is_valid(&self, name: &str) -> bool {
         match self {
             Self::AlphanumericHyphen => name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
@@ -151,6 +168,14 @@ pub struct BackendCapabilities {
     pub max_name_length: Option<usize>,
     /// Valid character set for secret names.
     pub name_charset: NameCharset,
+    /// Maximum number of tags per secret (None = unlimited). Used by
+    /// `records::check_tag_budget` to fail record writes before they
+    /// exceed the backend's tag cap.
+    pub max_tags: Option<usize>,
+    /// Maximum length of a single tag value (None = unlimited). Used by
+    /// `records::check_tag_budget` to fail record writes whose metadata
+    /// field value is too long for a tag.
+    pub max_tag_value_len: Option<usize>,
 }
 
 impl Default for BackendCapabilities {
@@ -171,6 +196,8 @@ impl Default for BackendCapabilities {
             max_secret_size: None,
             max_name_length: None,
             name_charset: NameCharset::Unrestricted,
+            max_tags: None,
+            max_tag_value_len: None,
         }
     }
 }

@@ -26,6 +26,25 @@ use aws_sdk_secretsmanager::Client as SecretsManagerClient;
 #[cfg(feature = "file-ops")]
 use crate::backend::FileBackend;
 
+/// Blob transfer settings threaded into S3 file storage (chunk size and upload
+/// concurrency). Sourced from the global `[blob]` config so `xv file` on AWS
+/// honors `BLOB_CHUNK_SIZE_MB` / `BLOB_MAX_CONCURRENT_UPLOADS`; named AWS
+/// entries fall back to [`TransferConfig::default`].
+#[derive(Debug, Clone, Copy)]
+pub struct TransferConfig {
+    pub chunk_size_mb: usize,
+    pub max_concurrent_uploads: usize,
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            chunk_size_mb: 4,
+            max_concurrent_uploads: 3,
+        }
+    }
+}
+
 pub struct AwsBackend {
     secrets_impl: Arc<secrets::AwsSecretBackend>,
     vaults_impl: Arc<vaults::AwsVaultBackend>,
@@ -42,6 +61,7 @@ impl AwsBackend {
         aws_cfg: &AwsConfig,
         region_override: Option<String>,
         profile_override: Option<String>,
+        transfer: TransferConfig,
     ) -> Result<Self, BackendError> {
         let sdk_config = auth::load_sdk_config(aws_cfg, region_override, profile_override).await?;
         let client = Arc::new(SecretsManagerClient::new(&sdk_config));
@@ -52,8 +72,15 @@ impl AwsBackend {
         #[cfg(feature = "file-ops")]
         let files_impl = files::resolve_bucket(aws_cfg).ok().map(|bucket| {
             let s3_client = auth::build_s3_client(aws_cfg, &sdk_config);
-            Arc::new(files::AwsFileBackend::new(s3_client, bucket))
+            Arc::new(
+                files::AwsFileBackend::new(s3_client, bucket)
+                    .with_transfer_config(transfer.chunk_size_mb, transfer.max_concurrent_uploads),
+            )
         });
+        // Without file storage there is nothing to transfer; touch both fields
+        // so they don't read as dead when the `file-ops` reader is compiled out.
+        #[cfg(not(feature = "file-ops"))]
+        let _ = (transfer.chunk_size_mb, transfer.max_concurrent_uploads);
 
         Ok(Self {
             secrets_impl: Arc::new(secrets::AwsSecretBackend::new(client.clone())),
@@ -100,6 +127,8 @@ impl Backend for AwsBackend {
             max_secret_size: Some(65_536),
             max_name_length: Some(encoding::MAX_NAME_LEN),
             name_charset: NameCharset::AwsRelaxed,
+            max_tags: Some(50),
+            max_tag_value_len: Some(256),
         }
     }
 

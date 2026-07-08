@@ -283,6 +283,34 @@ pub struct Config {
     #[serde(skip)]
     #[tabled(skip)]
     pub disk_backend: Option<String>,
+
+    /// The EFFECTIVE backend as it would resolve WITHOUT this invocation's own
+    /// `--backend` CLI flag — i.e. `resolve_effective_backend(None,
+    /// profile_backend, disk_backend)`, profile-aware (a `.xv.toml`
+    /// `[env.*].backend` outranks the config file / `XV_BACKEND` layer).
+    /// Set once in main.rs, before `--backend` is folded into `self.backend`.
+    ///
+    /// Unlike `disk_backend` (config-file + `XV_BACKEND` only), this reflects
+    /// what the ACTIVE backend genuinely was before the current command's own
+    /// `--backend` flag is considered — the correct "current backend" signal
+    /// for `execute_cx_add`'s #341 auto-attach when that flag is passed
+    /// explicitly (a subcommand-local `--backend` shares its clap arg id with
+    /// the top-level global flag, so `effective_backend_name()` alone would
+    /// just echo the just-requested backend back — see the doc comment on
+    /// `ContextCommands::Add::backend`). `disk_backend` under-counts here: a
+    /// `.xv.toml` env profile's `backend` outranks the config file, so using
+    /// `disk_backend` instead of this field would report the WRONG prior
+    /// backend whenever a profile is active (#341 code review, MAJOR).
+    #[serde(skip)]
+    #[tabled(skip)]
+    pub pre_flag_backend: Option<String>,
+
+    /// Custom record types declared as `[types.<name>]` blocks. Merged with
+    /// built-in types and any `.xv.toml` project-level types via
+    /// `records::resolve_types` (project overrides global overrides builtin).
+    #[tabled(skip)]
+    #[serde(default)]
+    pub types: std::collections::HashMap<String, crate::records::RecordTypeConfig>,
 }
 
 fn default_clipboard_timeout() -> u64 {
@@ -326,6 +354,8 @@ impl Default for Config {
             cli_backend: None,
             cli_backend_was_arg: false,
             disk_backend: None,
+            pre_flag_backend: None,
+            types: std::collections::HashMap::new(),
         }
     }
 }
@@ -405,6 +435,24 @@ impl Config {
         self.backend.as_deref().unwrap_or("azure")
     }
 
+    /// Resolve the effective set of record types: built-ins merged with
+    /// this config's `[types.*]` blocks and (if present) the project
+    /// `.xv.toml`'s `[types.*]` blocks, with precedence project > global >
+    /// builtin. Same project-config discovery walk as `resolve_group`.
+    pub async fn resolve_record_types(&self) -> Result<Vec<crate::records::RecordType>> {
+        use crate::config::project;
+
+        let project_types = {
+            let cwd = std::env::current_dir()?;
+            match project::find_project_config(&cwd).await {
+                Ok(Some((_, cfg))) => cfg.types,
+                _ => std::collections::HashMap::new(),
+            }
+        };
+
+        crate::records::resolve_types(&self.types, &project_types)
+    }
+
     /// Resolve vault name with context awareness
     /// Priority: CLI argument > .xv.toml env profile > context > config default
     pub async fn resolve_vault_name(&self, vault_arg: Option<String>) -> Result<String> {
@@ -420,21 +468,24 @@ impl Config {
         if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
             // resolve_env returns Err on unknown-env — propagate so the
             // user sees the helpful EnvNotDefined message with the list
-            // of available envs.
-            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
-            // Emit the cross-boundary notice if the .xv.toml lives
-            // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
-            // walk-up wouldn't have reached the ancestor anyway —
-            // but keep this branch defensive.
-            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
-                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
-                    eprintln!("{line}");
+            // of available envs. Ok(None) means the file defines zero
+            // environments at all (types-only project file, #331) — no
+            // profile to apply, so fall through to context/config below.
+            if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
+                // Emit the cross-boundary notice if the .xv.toml lives
+                // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
+                // walk-up wouldn't have reached the ancestor anyway —
+                // but keep this branch defensive.
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                        eprintln!("{line}");
+                    }
                 }
+                if let Some(v) = profile.vault.as_deref() {
+                    return Ok(v.to_string());
+                }
+                // Profile defines no vault — fall through to context/config.
             }
-            if let Some(v) = profile.vault.as_deref() {
-                return Ok(v.to_string());
-            }
-            // Profile defines no vault — fall through to context/config.
         }
 
         // 3. Check local/global context
@@ -467,18 +518,21 @@ impl Config {
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
         if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
-            let (name, profile) = project::resolve_env(&cfg, self.env_flag.as_deref())?;
-            // Emit the cross-boundary notice if the .xv.toml lives
-            // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
-            // walk-up wouldn't have reached the ancestor anyway —
-            // but keep this branch defensive.
-            if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
-                if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
-                    eprintln!("{line}");
+            // Ok(None): file defines zero environments — no profile to
+            // apply, fall through to context/config below (#331).
+            if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
+                // Emit the cross-boundary notice if the .xv.toml lives
+                // above cwd. Suppressed by XV_NO_PARENT_CONFIG=1 since
+                // walk-up wouldn't have reached the ancestor anyway —
+                // but keep this branch defensive.
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                        eprintln!("{line}");
+                    }
                 }
-            }
-            if let Some(rg) = profile.resource_group.as_deref() {
-                return Ok(rg.to_string());
+                if let Some(rg) = profile.resource_group.as_deref() {
+                    return Ok(rg.to_string());
+                }
             }
         }
 
@@ -494,6 +548,87 @@ impl Config {
         }
 
         Err(CrosstacheError::config("No resource group specified"))
+    }
+
+    /// Resolve the secret `group` default with context awareness.
+    /// Priority: CLI argument > .xv.toml env profile > None.
+    ///
+    /// Unlike `resolve_vault_name` / `resolve_resource_group`, there is no
+    /// context or global-config layer here: `group` is a per-project
+    /// write/filter default that only exists as an env-profile field, so
+    /// falling through to `None` (not an error) is correct — callers treat
+    /// an unresolved group as "no default", not a hard failure.
+    pub async fn resolve_group(&self, group_arg: Option<String>) -> Result<Option<String>> {
+        use crate::config::project;
+
+        // 1. Command line argument takes precedence
+        if group_arg.is_some() {
+            return Ok(group_arg);
+        }
+
+        // 2. Project config (.xv.toml) — walk up from cwd
+        let cwd = std::env::current_dir()?;
+        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+            // Ok(None): file defines zero environments — no profile to
+            // apply, so there's simply no group default here (#331).
+            if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
+                // Emit the cross-boundary notice if the .xv.toml lives above cwd.
+                // `capture_cross_boundary_notice` is idempotent per-process, so
+                // this is safe even when `resolve_vault_name` already emitted it
+                // earlier in the same command.
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                        eprintln!("{line}");
+                    }
+                }
+                // Treat a blank `group = ""` as "no default set", not a real
+                // (empty, unfilterable) group — an empty filter would silently
+                // match nothing and trip `xv run`'s fail-loud empty-selection
+                // check with a group the user never typed.
+                if let Some(g) = profile.group.as_deref().filter(|s| !s.trim().is_empty()) {
+                    return Ok(Some(g.to_string()));
+                }
+            }
+        }
+
+        // 3. No default at any layer.
+        Ok(None)
+    }
+
+    /// Resolve the secret `folder` default with context awareness.
+    /// Priority: CLI argument > .xv.toml env profile > None.
+    ///
+    /// Same reasoning as `resolve_group`: `folder` is a write-time default
+    /// that only exists as an env-profile field, with no context or
+    /// global-config fallback layer.
+    pub async fn resolve_folder(&self, folder_arg: Option<String>) -> Result<Option<String>> {
+        use crate::config::project;
+
+        // 1. Command line argument takes precedence
+        if folder_arg.is_some() {
+            return Ok(folder_arg);
+        }
+
+        // 2. Project config (.xv.toml) — walk up from cwd
+        let cwd = std::env::current_dir()?;
+        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+            // Ok(None): file defines zero environments — no profile to
+            // apply, so there's simply no folder default here (#331).
+            if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
+                if path.parent().map(|p| p != cwd.as_path()).unwrap_or(false) {
+                    if let Some(line) = project::capture_cross_boundary_notice(&path, name) {
+                        eprintln!("{line}");
+                    }
+                }
+                // Same blank-is-absent treatment as `resolve_group`.
+                if let Some(f) = profile.folder.as_deref().filter(|s| !s.trim().is_empty()) {
+                    return Ok(Some(f.to_string()));
+                }
+            }
+        }
+
+        // 3. No default at any layer.
+        Ok(None)
     }
 
     /// Resolve subscription ID with context awareness
