@@ -12,6 +12,10 @@ use crate::backend::{Backend, BackendRegistry};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 
+pub(crate) mod auth;
+#[cfg(test)]
+pub(crate) mod testutil;
+
 const INDEX_HTML: &str = include_str!("assets/index.html");
 const APP_JS: &str = include_str!("assets/app.js");
 const STYLE_CSS: &str = include_str!("assets/style.css");
@@ -98,44 +102,9 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn test_state() -> Arc<WebState> {
-        // Task 3 replaces this with testutil::test_state() (real stub backend).
-        // The static-asset routes never touch state.
-        struct NoBackend;
-        #[async_trait::async_trait]
-        impl crate::backend::Backend for NoBackend {
-            fn name(&self) -> &'static str {
-                "none"
-            }
-            fn kind(&self) -> crate::backend::BackendKind {
-                crate::backend::BackendKind::Local
-            }
-            fn capabilities(&self) -> crate::backend::BackendCapabilities {
-                crate::backend::BackendCapabilities::default()
-            }
-            fn secrets(&self) -> &dyn crate::backend::SecretBackend {
-                unimplemented!("static asset tests never call the backend")
-            }
-            async fn health_check(
-                &self,
-            ) -> std::result::Result<(), crate::backend::error::BackendError> {
-                Ok(())
-            }
-        }
-        Arc::new(WebState {
-            backend: Arc::new(NoBackend),
-            token: "t".into(),
-            vault: "v".into(),
-        })
-    }
-
     #[tokio::test]
     async fn serves_index_and_assets() {
-        // Static routes need no state-backed handlers yet, but build_router
-        // requires a state; use a dummy via testutil once it exists. For now
-        // this test only compiles the router with a panicking state factory —
-        // it is rewritten in Task 3 Step 1 to use testutil::test_state().
-        let app = build_router(test_state());
+        let app = build_router(testutil::test_state());
         for (path, ct) in [
             ("/", "text/html; charset=utf-8"),
             ("/app.js", "application/javascript"),
