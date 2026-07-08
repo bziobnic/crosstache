@@ -66,25 +66,73 @@ pub(crate) mod stub {
         }
     }
 
-    // SecretBackend impl arrives in Task 3; a panicking placeholder keeps
-    // Task 2 compiling since auth tests never call it.
+    /// Mirror how real backends surface metadata: groups/note/folder appear
+    /// under canonical tag keys in `SecretProperties.tags`.
+    /// (Duplicated from `src/backend/secret.rs`'s test module — that copy is
+    /// test-only code private to a different module.)
+    pub(crate) fn props_from_request(req: &SecretRequest, include_value: bool) -> SecretProperties {
+        let mut tags = req.tags.clone().unwrap_or_default();
+        if let Some(groups) = req.groups.as_ref().filter(|g| !g.is_empty()) {
+            tags.insert("groups".to_string(), groups.join(","));
+        }
+        if let Some(note) = req.note.as_ref() {
+            tags.insert("note".to_string(), note.clone());
+        }
+        if let Some(folder) = req.folder.as_ref() {
+            tags.insert("folder".to_string(), folder.clone());
+        }
+        tags.insert("original_name".to_string(), req.name.clone());
+        tags.insert("created_by".to_string(), "crosstache".to_string());
+        SecretProperties {
+            name: req.name.clone(),
+            original_name: req.name.clone(),
+            value: include_value.then(|| req.value.clone()),
+            version: "v1".to_string(),
+            version_number: Some(1),
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: req.enabled.unwrap_or(true),
+            expires_on: req.expires_on,
+            not_before: req.not_before,
+            tags,
+            content_type: req.content_type.clone().unwrap_or_default(),
+            recovery_level: None,
+        }
+    }
+
     #[async_trait]
     impl SecretBackend for StubBackend {
         async fn set_secret(
             &self,
             _vault: &str,
-            _request: SecretRequest,
+            request: SecretRequest,
         ) -> Result<SecretProperties, BackendError> {
-            unimplemented!()
+            let props = props_from_request(&request, false);
+            self.secrets
+                .lock()
+                .unwrap()
+                .insert(request.name.clone(), request);
+            Ok(props)
         }
+
         async fn get_secret(
             &self,
             _vault: &str,
-            _name: &str,
-            _include_value: bool,
+            name: &str,
+            include_value: bool,
         ) -> Result<SecretProperties, BackendError> {
-            unimplemented!()
+            self.secrets
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|r| props_from_request(r, include_value))
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
         }
+
         async fn get_secret_version(
             &self,
             _vault: &str,
@@ -92,25 +140,90 @@ pub(crate) mod stub {
             _version: &str,
             _include_value: bool,
         ) -> Result<SecretProperties, BackendError> {
-            unimplemented!()
+            Err(BackendError::Unsupported("versions".into()))
         }
+
         async fn list_secrets(
             &self,
             _vault: &str,
-            _group_filter: Option<&str>,
+            group_filter: Option<&str>,
         ) -> Result<Vec<SecretSummary>, BackendError> {
-            unimplemented!()
+            let secrets = self.secrets.lock().unwrap();
+            let summaries = secrets
+                .values()
+                .map(|req| {
+                    let groups = req.groups.as_ref().map(|g| g.join(","));
+                    (req, groups)
+                })
+                .filter(|(_, groups)| match (group_filter, groups) {
+                    (Some(f), Some(g)) => g.contains(f),
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                })
+                .map(|(req, groups)| SecretSummary {
+                    name: req.name.clone(),
+                    original_name: req.name.clone(),
+                    note: req.note.clone(),
+                    folder: req.folder.clone(),
+                    groups,
+                    updated_on: String::new(),
+                    enabled: true,
+                    content_type: req.content_type.clone().unwrap_or_default(),
+                })
+                .collect();
+            Ok(summaries)
         }
-        async fn delete_secret(&self, _vault: &str, _name: &str) -> Result<(), BackendError> {
-            unimplemented!()
+
+        async fn delete_secret(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
+            self.secrets
+                .lock()
+                .unwrap()
+                .remove(name)
+                .map(|_| ())
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })
         }
+
         async fn update_secret(
             &self,
             _vault: &str,
-            _name: &str,
-            _request: SecretUpdateRequest,
+            name: &str,
+            request: SecretUpdateRequest,
         ) -> Result<SecretProperties, BackendError> {
-            unimplemented!()
+            let mut secrets = self.secrets.lock().unwrap();
+            let mut current = secrets
+                .get(name)
+                .cloned()
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })?;
+
+            if let Some(value) = request.value {
+                current.value = value;
+            }
+            if request.content_type.is_some() {
+                current.content_type = request.content_type;
+            }
+            if request.enabled.is_some() {
+                current.enabled = request.enabled;
+            }
+            current.expires_on = request.expires_on.apply(current.expires_on);
+            current.not_before = request.not_before.apply(current.not_before);
+            current.note = request.note.apply(current.note);
+            current.folder = request.folder.apply(current.folder);
+            if request.groups.is_some() {
+                current.groups = request.groups;
+            }
+            if request.tags.is_some() {
+                current.tags = request.tags;
+            }
+
+            let props = props_from_request(&current, false);
+            secrets.insert(name.to_string(), current);
+            Ok(props)
         }
     }
 }

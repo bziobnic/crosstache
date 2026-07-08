@@ -12,6 +12,7 @@ use crate::backend::{Backend, BackendRegistry};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 
+pub(crate) mod api;
 pub(crate) mod auth;
 #[cfg(test)]
 pub(crate) mod testutil;
@@ -29,7 +30,17 @@ pub(crate) struct WebState {
 }
 
 pub(crate) fn build_router(state: Arc<WebState>) -> Router {
-    let _ = &state; // state used by API routes added in later tasks
+    let api = Router::new()
+        .route("/context", get(api::get_context))
+        .route("/vaults", get(api::list_vaults))
+        // Last .layer() is outermost: no_store must wrap require_auth so
+        // auth rejections also carry Cache-Control: no-store (see auth.rs).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ))
+        .layer(axum::middleware::from_fn(auth::no_store));
+
     Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
         .route(
@@ -45,6 +56,8 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
             "/style.css",
             get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS) }),
         )
+        .nest("/api", api)
+        .with_state(state)
 }
 
 /// Entry point for `xv ui`.
