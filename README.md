@@ -13,6 +13,8 @@ xv scan install                        # block secret leaks before commit
 
 **Phase 1 (v0.7) highlights:** structured exit codes for scripting · `.xv.toml` env profiles with walk-up resolution · ranked fuzzy `xv find` · pre-commit leak scanner that matches files against your *actual* vault values · optional read-only TUI behind a feature flag.
 
+**Web UI**: `xv ui` opens a local browser interface (build with `--features ui`).
+
 ---
 
 ## Table of contents
@@ -32,6 +34,7 @@ xv scan install                        # block secret leaks before commit
 - [Files (blob storage)](#files-blob-storage)
 - [Pre-commit leak scanner — `xv scan`](#pre-commit-leak-scanner--xv-scan)
 - [Terminal UI — `xv tui`](#terminal-ui--xv-tui)
+- [Web UI — `xv ui`](#web-ui--xv-ui)
 - [Scripting & CI](#scripting--ci) — exit codes, JSON envelope, examples
 - [Configuration](#configuration)
 - [Authentication](#authentication)
@@ -275,6 +278,8 @@ cd crosstache
 cargo install --path .
 # With the read-only TUI:
 cargo install --path . --features tui
+# With the embedded web UI:
+cargo install --path . --features ui
 # With AWS backend support (Secrets Manager / CloudTrail / S3):
 cargo install --path . --features tui,aws
 ```
@@ -1023,6 +1028,21 @@ See [`docs/tui.md`](docs/tui.md) for the full reference.
 
 ---
 
+## Web UI — `xv ui`
+
+Embedded localhost web UI behind a `ui` feature flag (default off).
+
+```bash
+cargo install crosstache --features ui
+xv ui                                     # binds 127.0.0.1, opens your browser
+```
+
+Same backend layer as the CLI (Azure, AWS, local all work). Loopback-only,
+per-session bearer token, no TLS and no login by design — see
+[`docs/web-ui.md`](docs/web-ui.md) for the full security model and reference.
+
+---
+
 ## Scripting & CI
 
 ### Exit codes
@@ -1362,8 +1382,10 @@ Names longer than 127 chars are SHA256-hashed; the full original is still stored
 cargo build                              # debug build
 cargo build --release                    # release build
 cargo build --features tui               # include the TUI
+cargo build --features ui                # include the embedded web UI
 cargo test                               # full suite
 cargo test --features tui                # also include TUI snapshot tests
+cargo test --features ui                 # also include web UI tests
 cargo test -- --test-threads=1           # required for some env-var-mutating tests
 cargo fmt --all                          # format
 cargo clippy --all-targets               # lint
@@ -1387,6 +1409,7 @@ cargo release minor                      # 0.7.0 → 0.8.0
 - [`docs/find.md`](docs/find.md) — `xv find` ranked search
 - [`docs/scan.md`](docs/scan.md) — pre-commit leak scanner
 - [`docs/tui.md`](docs/tui.md) — terminal UI keymap
+- [`docs/web-ui.md`](docs/web-ui.md) — embedded web UI reference
 - [`docs/GROUPS.md`](docs/GROUPS.md) — group-based organization
 
 ---

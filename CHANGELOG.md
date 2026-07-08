@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- `xv ui` (feature `ui`): embedded localhost web UI — secret CRUD with
+  reveal/copy, folder & group metadata editing, rename/move, drag-and-drop
+  file upload/download, vault switching. Loopback-only with per-session
+  bearer token. (`docs/web-ui.md`)
+
 ### Fixed
 
 - AWS: `list_deleted_secrets` now exposes the `xv:original_name` tag in its summaries (matching `list_secrets`), so `xv ls --deleted` no longer loses the user-facing name on AWS (#301).

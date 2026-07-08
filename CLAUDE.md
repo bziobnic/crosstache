@@ -65,6 +65,9 @@ cargo build
 # Build release version
 cargo build --release
 
+# Build with a feature (tui, aws, ui — see Cargo.toml [features])
+cargo build --features ui
+
 # Run the CLI tool
 cargo run -- [COMMAND]
 
@@ -215,6 +218,7 @@ As of `v0.14.0` plus current `main`:
 - **Local Backend Hardening**: `[local].encrypt_metadata` encrypts metadata content with `xv local encrypt-metadata`; `[local].opaque_filenames` stores active secrets, versions, and trash under keyed-hash stems with `xv local migrate`.
 - **v0.14 Hardening**: context files use private 0600 writes, `xv run` masking is bounded streaming, Azure `az` auth subprocesses are bounded and JWT claim shapes validated, scanner reads are bounded/fail-loud, cache locks use atomic create, and secret-list detail fetches use bounded concurrency.
 - **TUI**: Read-only browser (`xv tui`), shipped v0.7.0-rc.2.
+- **Web UI**: Embedded localhost browser UI (`xv ui`, `--features ui`) — secret CRUD, folder/group metadata, rename/move, file upload/download, vault switching; loopback-only with a per-session bearer token. See `docs/web-ui.md`.
 - **Leak Scanner**: `xv scan` pre-commit scanner, shipped v0.7.0-rc.1.
 - **Self-update**: `xv upgrade`, shipped v0.5.1.
 

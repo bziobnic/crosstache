@@ -320,7 +320,7 @@ pub(crate) mod files {
     use axum::extract::Multipart;
     use axum::http::header;
 
-    fn files_backend<'a>(state: &'a WebState) -> Result<&'a dyn FileBackend, ApiError> {
+    fn files_backend(state: &WebState) -> Result<&dyn FileBackend, ApiError> {
         state.backend.files().ok_or_else(|| {
             ApiError::Status(
                 StatusCode::NOT_IMPLEMENTED,
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json_body[0]["name"], "db-pass");
         assert_eq!(json_body[0]["folder"], "proj/db");
-        assert!(json_body.to_string().find("hunter2").is_none());
+        assert!(!json_body.to_string().contains("hunter2"));
 
         // metadata get has null value
         let (status, json_body) = get_json(app.clone(), "GET", "/api/secrets/db-pass", None).await;

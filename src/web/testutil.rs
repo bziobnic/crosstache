@@ -1,5 +1,4 @@
 //! Test-only helpers for the web module.
-#![cfg(test)]
 
 use std::sync::Arc;
 
@@ -292,7 +291,7 @@ pub(crate) mod stub {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(n, _)| request.prefix.as_deref().map_or(true, |p| n.starts_with(p)))
+                .filter(|(n, _)| request.prefix.as_deref().is_none_or(|p| n.starts_with(p)))
                 .map(|(n, (b, ct))| file_info(n, b.len() as u64, ct))
                 .collect())
         }
