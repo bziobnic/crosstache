@@ -116,7 +116,12 @@ async function openDrawer(name) {
       for (const [k, v] of Object.entries(tags)) {
         if (!CANONICAL_TAGS.has(k)) customTags[k] = v;
       }
-      editingMeta = { content_type: meta.content_type || '', tags: customTags };
+      editingMeta = {
+        content_type: meta.content_type || '',
+        tags: customTags,
+        enabled: meta.enabled,
+        not_before: meta.not_before || null,
+      };
     } catch (e) { fail(e); }
   }
   $('#drawer').hidden = false;
@@ -160,6 +165,8 @@ $('#secret-form').onsubmit = async (ev) => {
         expires_on: f.expires_on.value || null,
         content_type: editingMeta?.content_type || null,
         tags: editingMeta && Object.keys(editingMeta.tags).length ? editingMeta.tags : null,
+        enabled: editingMeta ? editingMeta.enabled : true,
+        not_before: editingMeta?.not_before || null,
       });
     } else if (editing) {
       // metadata-only patch ("" clears)

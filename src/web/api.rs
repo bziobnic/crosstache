@@ -153,6 +153,9 @@ pub(crate) async fn reveal_secret(
 pub(crate) struct PutSecretBody {
     value: String,
     content_type: Option<String>,
+    /// Absent defaults to enabled — the UI echoes the current state on edits
+    /// so a value change never re-enables a disabled secret.
+    enabled: Option<bool>,
     expires_on: Option<DateTime<Utc>>,
     not_before: Option<DateTime<Utc>>,
     tags: Option<HashMap<String, String>>,
@@ -171,7 +174,7 @@ pub(crate) async fn put_secret(
         name: name.clone(),
         value: Zeroizing::new(body.value),
         content_type: body.content_type,
-        enabled: Some(true),
+        enabled: Some(body.enabled.unwrap_or(true)),
         expires_on: body.expires_on,
         not_before: body.not_before,
         tags: body.tags,
@@ -671,6 +674,50 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json_body["content_type"], "text/plain");
         assert_eq!(json_body["tags"]["custom"], "kept");
+    }
+
+    #[tokio::test]
+    async fn put_preserves_enabled_and_not_before_across_edits() {
+        let app = crate::web::build_router(testutil::test_state());
+
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/disabled-key",
+            Some(json!({
+                "value": "v1",
+                "enabled": false,
+                "not_before": "2027-01-01T00:00:00Z",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json_body) =
+            get_json(app.clone(), "GET", "/api/secrets/disabled-key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body["enabled"], false);
+        assert_eq!(json_body["not_before"], "2027-01-01T00:00:00Z");
+
+        // A value edit echoing the fetched state (as the frontend does) must
+        // not re-enable the secret or drop its not-before constraint.
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/disabled-key",
+            Some(json!({
+                "value": "v2",
+                "enabled": false,
+                "not_before": "2027-01-01T00:00:00Z",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json_body) = get_json(app, "GET", "/api/secrets/disabled-key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body["enabled"], false);
+        assert_eq!(json_body["not_before"], "2027-01-01T00:00:00Z");
     }
 
     #[tokio::test]
