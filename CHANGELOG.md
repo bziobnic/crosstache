@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.23.0 — Embedded web UI (2026-07-08)
+
+### Added
+
+- `xv ui` (feature `ui`): embedded localhost web UI — secret CRUD with
+  reveal/copy, folder & group metadata editing, rename/move, drag-and-drop
+  file upload/download, vault switching on the active backend. Loopback-only
+  with per-session bearer token, Host/Origin validation, and
+  `Cache-Control: no-store` on every API response. One new dependency
+  (`axum`, feature-gated). Multi-backend workspace switching is tracked in
+  #353. (`docs/web-ui.md`, #352)
+
 ## v0.22.0 — Vault alias ergonomics (2026-07-06)
 
 ### Added
@@ -136,13 +148,6 @@
 ### Changed
 
 - **The first `xv cx add` now auto-attaches the currently-resolved vault as the workspace default (#341).** v0.20.0's first-add behavior attached only the requested vault, making it the workspace's sole (and therefore default) entry — so `xv ls` right after `cx add` stopped showing whatever vault was already current, silently hiding pre-existing secrets (reported by the maintainer immediately after v0.20.0 shipped). The first `cx add` now also attaches the vault you were already using (whatever `--vault`/context/`default_vault` resolves to) as the default, then attaches the requested vault alongside it — `xv ls` immediately shows both, and unqualified writes keep landing where they already were. Passing `--default` on that first add makes the newly-added vault the default instead (the prior vault stays attached, just not the write target). If the requested vault already resolves to the same `(backend, vault)` as the current one, or the current vault can't be resolved at all (no context, no `default_vault`), this degenerates to the original single-entry behavior (the latter case notes the fallback in the success message). An auto-attach candidate whose alias collides with the requested `--as` alias errors with the existing duplicate-alias message, before anything is written. Subsequent `cx add`s (a workspace already exists) are unchanged. **Code review fix:** the auto-attach's "current backend" signal is now profile-aware (a new `Config::pre_flag_backend`, resolved in `main.rs` before this command's own `--backend` flag is considered) — a `.xv.toml` env profile's `backend` outranks the config file, and using the config-file-only value (as an earlier version of this fix did) recorded the WRONG backend for the auto-attached entry whenever a profile was active, making a subsequent `xv ls` fail against a backend that was never actually in use.
-
-### Added
-
-- `xv ui` (feature `ui`): embedded localhost web UI — secret CRUD with
-  reveal/copy, folder & group metadata editing, rename/move, drag-and-drop
-  file upload/download, vault switching. Loopback-only with per-session
-  bearer token. (`docs/web-ui.md`)
 
 ### Fixed
 
