@@ -40,11 +40,9 @@ pub enum CrosstacheError {
     AzureApiError(String),
 
     #[error("Conflict: {0}")]
-    #[allow(dead_code)]
     Conflict(String),
 
     #[error("Rate limited: {0}")]
-    #[allow(dead_code)]
     RateLimited(String),
 
     #[error("Configuration error: {0}")]

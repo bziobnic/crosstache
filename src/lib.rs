@@ -18,6 +18,8 @@ pub mod secret;
 pub mod tui;
 pub mod utils;
 pub mod vault;
+#[cfg(feature = "ui")]
+pub mod web;
 pub mod workspace;
 
 // Re-export commonly used types

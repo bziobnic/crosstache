@@ -22,6 +22,8 @@ mod secret;
 mod tui;
 mod utils;
 mod vault;
+#[cfg(feature = "ui")]
+mod web;
 mod workspace;
 
 use crate::cli::Cli;

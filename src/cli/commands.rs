@@ -1102,6 +1102,16 @@ pub enum Commands {
     /// Open the read-only terminal browser. Requires --features tui at build time.
     #[cfg(feature = "tui")]
     Tui,
+    /// Open the local web UI in a browser. Requires --features ui at build time.
+    #[cfg(feature = "ui")]
+    Ui {
+        /// Port to bind on 127.0.0.1 (default: ephemeral)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the URL but don't open a browser
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2213,6 +2223,10 @@ impl Cli {
             }
             #[cfg(feature = "tui")]
             Commands::Tui => crate::tui::run_tui(config, registry).await,
+            #[cfg(feature = "ui")]
+            Commands::Ui { port, no_open } => {
+                crate::web::run_web(config, registry, port, no_open).await
+            }
         }
     }
 }

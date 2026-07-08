@@ -1,0 +1,35 @@
+:root { --fg:#1a1a1a; --bg:#fff; --muted:#666; --line:#e2e2e2; --accent:#0b6e4f; --danger:#b3261e; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg:#e6e6e6; --bg:#161616; --muted:#999; --line:#333; --accent:#4cc38a; }
+}
+* { box-sizing: border-box; }
+body { margin:0; font:14px/1.5 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
+header { display:flex; gap:.75rem; align-items:center; padding:.5rem 1rem; border-bottom:1px solid var(--line); }
+header nav { margin-left:auto; }
+#backend-badge { color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:0 .4rem; }
+.tab { background:none; border:none; padding:.4rem .8rem; cursor:pointer; color:var(--muted); font:inherit; }
+.tab.active { color:var(--accent); border-bottom:2px solid var(--accent); }
+main { padding:1rem; max-width:70rem; }
+.toolbar { display:flex; gap:.5rem; margin-bottom:.75rem; }
+#search { flex:1; padding:.4rem; }
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:.4rem .6rem; border-bottom:1px solid var(--line); }
+#secrets-table tbody tr { cursor:pointer; }
+#secrets-table tbody tr:hover { background:color-mix(in srgb, var(--accent) 8%, transparent); }
+#drawer { position:fixed; top:0; right:0; width:min(26rem, 100vw); height:100vh; background:var(--bg);
+  border-left:1px solid var(--line); padding:1rem; overflow-y:auto; box-shadow:-4px 0 12px rgba(0,0,0,.15); }
+#drawer label { display:block; margin-bottom:.7rem; color:var(--muted); }
+#drawer input, #drawer textarea { width:100%; padding:.4rem; font:inherit; color:var(--fg); background:var(--bg);
+  border:1px solid var(--line); border-radius:4px; }
+.row { display:flex; gap:.5rem; margin-top:.3rem; }
+button { font:inherit; padding:.35rem .8rem; border:1px solid var(--line); border-radius:4px;
+  background:var(--bg); color:var(--fg); cursor:pointer; }
+button:hover { border-color:var(--accent); }
+button.danger { color:var(--danger); }
+#dropzone { border:2px dashed var(--line); border-radius:8px; padding:2rem; text-align:center;
+  color:var(--muted); margin-bottom:1rem; }
+#dropzone.over { border-color:var(--accent); }
+.linkish { color:var(--accent); cursor:pointer; text-decoration:underline; }
+#toast { position:fixed; bottom:1rem; left:50%; transform:translateX(-50%); background:var(--fg);
+  color:var(--bg); padding:.5rem 1rem; border-radius:6px; }
+#toast.error { background:var(--danger); color:#fff; }
