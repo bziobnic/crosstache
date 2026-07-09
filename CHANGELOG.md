@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.24.0 — Web UI record editing (2026-07-09)
 
 ### Added
 
