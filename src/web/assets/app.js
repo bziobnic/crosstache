@@ -5,23 +5,30 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 if (params.has('token')) history.replaceState(null, '', location.pathname);
 
+let inflight = 0;
 async function api(method, path, body, raw = false) {
-  const opts = { method, headers: { Authorization: `Bearer ${TOKEN}` } };
-  if (body instanceof FormData) {
-    opts.body = body;
-  } else if (body !== undefined) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
+  inflight++;
+  document.getElementById('progress').hidden = false;
+  try {
+    const opts = { method, headers: { Authorization: `Bearer ${TOKEN}` } };
+    if (body instanceof FormData) {
+      opts.body = body;
+    } else if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(path, opts);
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = (await res.json()).error || msg; } catch { /* not json */ }
+      throw new Error(msg);
+    }
+    if (raw) return res;
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  } finally {
+    if (--inflight <= 0) { inflight = 0; document.getElementById('progress').hidden = true; }
   }
-  const res = await fetch(path, opts);
-  if (!res.ok) {
-    let msg = res.statusText;
-    try { msg = (await res.json()).error || msg; } catch { /* not json */ }
-    throw new Error(msg);
-  }
-  if (raw) return res;
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
 }
 
 const $ = (sel) => document.querySelector(sel);
@@ -40,6 +47,17 @@ function fmtDate(s) {
   if (!s) return '';
   const d = new Date(s);
   return isNaN(d) ? s : d.toISOString().slice(0, 10);
+}
+
+function showPlaceholder(tbody, text, cols) {
+  tbody.innerHTML = '';
+  const tr = document.createElement('tr');
+  const td = document.createElement('td');
+  td.colSpan = cols;
+  td.className = 'placeholder';
+  td.textContent = text;
+  tr.appendChild(td);
+  tbody.appendChild(tr);
 }
 
 // ---- state ----
@@ -74,8 +92,8 @@ async function init() {
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
-    loadSecrets();
-    loadFiles();
+    loadSecrets().catch(fail);
+    loadFiles().catch(fail);
   };
   await loadSecrets();
   if (ctx.capabilities.files) await loadFiles();
@@ -83,6 +101,7 @@ async function init() {
 
 // ---- secrets ----
 async function loadSecrets() {
+  showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', 5);
   secrets = await api('GET', `/api/secrets${vaultQS()}`);
   renderSecrets();
 }
@@ -103,6 +122,9 @@ function renderSecrets() {
     }
     tr.onclick = () => openDrawer(name);
     tbody.appendChild(tr);
+  }
+  if (!tbody.children.length) {
+    showPlaceholder(tbody, secrets.length ? 'no matching secrets' : 'no secrets', 5);
   }
 }
 
@@ -242,6 +264,7 @@ function switchTab(which) {
 // ---- files ----
 async function loadFiles() {
   if (!ctx.capabilities.files) return;
+  showPlaceholder($('#files-table tbody'), 'Loading files…', 5);
   const files = await api('GET', `/api/files${vaultQS()}`);
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
@@ -270,6 +293,7 @@ async function loadFiles() {
     tr.appendChild(td);
     tbody.appendChild(tr);
   }
+  if (!tbody.children.length) showPlaceholder(tbody, 'no files', 5);
 }
 
 async function downloadFile(name) {

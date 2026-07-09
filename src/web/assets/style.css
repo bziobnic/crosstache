@@ -33,3 +33,8 @@ button.danger { color:var(--danger); }
 #toast { position:fixed; bottom:1rem; left:50%; transform:translateX(-50%); background:var(--fg);
   color:var(--bg); padding:.5rem 1rem; border-radius:6px; }
 #toast.error { background:var(--danger); color:#fff; }
+#progress { position:fixed; top:0; left:0; right:0; height:2px; overflow:hidden; z-index:10; }
+#progress::after { content:""; display:block; width:30%; height:100%; background:var(--accent);
+  animation:progress-slide 1.2s linear infinite; }
+@keyframes progress-slide { from { transform:translateX(-100vw); } to { transform:translateX(100vw); } }
+td.placeholder { color:var(--muted); text-align:center; padding:1rem; }
