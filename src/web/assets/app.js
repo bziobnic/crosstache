@@ -304,7 +304,7 @@ async function openDrawer(name) {
         enabled: meta.enabled,
         not_before: meta.not_before || null,
       };
-      if (isRecordMeta(meta)) await openRecord(name, tags);
+      if (isRecordMeta(meta)) await openRecord(name, meta, tags);
     } catch (e) {
       // Without the fetched metadata a save would send enabled:true and no
       // custom tags — silently mutating the secret. Don't open the drawer.
@@ -318,12 +318,18 @@ async function openDrawer(name) {
 
 // Fetches the envelope so secret fields are editable. Values live in JS
 // memory but display masked — the same exposure as the Reveal button.
-async function openRecord(name, tags) {
+async function openRecord(name, meta, tags) {
   const { value } = await api('POST', `/api/secrets/${encodeURIComponent(name)}/value${vaultQS()}`);
   let secretFields;
   try {
     secretFields = parseEnvelope(value ?? '');
   } catch (e) {
+    if (meta.content_type !== RECORD_CONTENT_TYPE) {
+      // Only an xv-type tag marked this as a record, and the value isn't
+      // an envelope. Content type decides record-ness (same rule as the
+      // CLI), so treat it as a plain secret: fully editable, no record UI.
+      return;
+    }
     // Content type says record but the value isn't a valid envelope: open
     // read-only in the plain view rather than pretending fields are empty.
     // Whole-value Reveal/Copy stay visible here (unlike the valid-record
