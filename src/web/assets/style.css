@@ -3,6 +3,9 @@
   :root { --fg:#e6e6e6; --bg:#161616; --muted:#999; --line:#333; --accent:#4cc38a; }
 }
 * { box-sizing: border-box; }
+/* Author display rules (e.g. #drawer label { display:block }) must not
+   defeat the hidden attribute's UA display:none. */
+[hidden] { display: none !important; }
 body { margin:0; font:14px/1.5 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
 header { display:flex; gap:.75rem; align-items:center; padding:.5rem 1rem; border-bottom:1px solid var(--line); }
 header nav { margin-left:auto; }
