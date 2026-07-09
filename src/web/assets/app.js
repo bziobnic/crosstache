@@ -35,6 +35,13 @@ function toast(msg, isError = false) {
 }
 const fail = (e) => toast(e.message, true);
 
+// Dates only, never timestamps. Unparseable strings pass through raw.
+function fmtDate(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  return isNaN(d) ? s : d.toISOString().slice(0, 10);
+}
+
 // ---- state ----
 let ctx = null;
 let currentVault = null;
@@ -89,7 +96,7 @@ function renderSecrets() {
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
     if (filter && !hay.includes(filter)) continue;
     const tr = document.createElement('tr');
-    for (const cell of [name, s.folder, s.groups, s.note, s.updated_on]) {
+    for (const cell of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)]) {
       const td = document.createElement('td');
       td.textContent = cell || '';
       tr.appendChild(td);
@@ -124,7 +131,7 @@ async function openDrawer(name) {
       f.elements.folder.value = tags.folder || '';
       f.elements.groups.value = tags.groups || '';
       f.elements.note.value = tags.note || '';
-      f.elements.expires_on.value = meta.expires_on || '';
+      f.elements.expires_on.value = meta.expires_on ? meta.expires_on.slice(0, 10) : '';
       const customTags = {};
       for (const [k, v] of Object.entries(tags)) {
         if (!CANONICAL_TAGS.has(k)) customTags[k] = v;
@@ -169,6 +176,8 @@ $('#secret-form').onsubmit = async (ev) => {
   const name = f.name.value.trim();
   if (!name) return;
   const groups = f.groups.value.split(',').map(s => s.trim()).filter(Boolean);
+  const expiresPut = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : null;
+  const expiresPatch = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : '';
   try {
     if (editing && name !== editing) {
       await api('POST', `/api/secrets/${encodeURIComponent(editing)}/move${vaultQS()}`, { new_name: name });
@@ -181,7 +190,7 @@ $('#secret-form').onsubmit = async (ev) => {
         folder: f.folder.value || null,
         note: f.note.value || null,
         groups: groups.length ? groups : null,
-        expires_on: f.expires_on.value || null,
+        expires_on: expiresPut,
         content_type: editingMeta?.content_type || null,
         tags: editingMeta && Object.keys(editingMeta.tags).length ? editingMeta.tags : null,
         enabled: editingMeta ? editingMeta.enabled : true,
@@ -193,7 +202,7 @@ $('#secret-form').onsubmit = async (ev) => {
         folder: f.folder.value,
         note: f.note.value,
         groups,
-        expires_on: f.expires_on.value,
+        expires_on: expiresPatch,
       });
     } else {
       throw new Error('a new secret needs a value');
@@ -238,7 +247,7 @@ async function loadFiles() {
   tbody.innerHTML = '';
   for (const f of files) {
     const tr = document.createElement('tr');
-    const cells = [f.name, `${f.size}`, f.content_type, f.last_modified];
+    const cells = [f.name, `${f.size}`, f.content_type, fmtDate(f.last_modified)];
     for (const c of cells) {
       const td = document.createElement('td');
       td.textContent = c || '';
