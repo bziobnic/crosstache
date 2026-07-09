@@ -168,6 +168,28 @@ async function init() {
   $('#backend-badge').textContent = ctx.backend;
   $('#tab-files').hidden = !ctx.capabilities.files;
   ({ types } = await api('GET', '/api/types'));
+  const picker = $('#type-picker');
+  picker.innerHTML = '';
+  const plain = document.createElement('option');
+  plain.value = '';
+  plain.textContent = 'plain secret';
+  picker.appendChild(plain);
+  for (const rt of types) {
+    const opt = document.createElement('option');
+    opt.value = opt.textContent = rt.name;
+    picker.appendChild(opt);
+  }
+  picker.onchange = () => {
+    if (!picker.value) {
+      recordState = null;
+      $('#record-section').hidden = true;
+      $('#value-section').hidden = false;
+      $('#record-fields').innerHTML = '';
+    } else {
+      recordState = { typeName: picker.value, secretFields: {}, metaFields: {} };
+      renderRecordFields(picker.value, {}, {}, true);
+    }
+  };
   const { vaults } = await api('GET', '/api/vaults');
   const sel = $('#vault-select');
   sel.innerHTML = '';
@@ -242,6 +264,8 @@ async function openDrawer(name) {
   $('#value-section').hidden = false;
   $('#record-fields').innerHTML = '';
   $('#save').disabled = false;
+  $('#type-picker-label').hidden = !!name; // type is chosen at creation only
+  $('#type-picker').value = '';
   if (name) {
     try {
       const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`);
