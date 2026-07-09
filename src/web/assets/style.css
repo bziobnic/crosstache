@@ -3,6 +3,9 @@
   :root { --fg:#e6e6e6; --bg:#161616; --muted:#999; --line:#333; --accent:#4cc38a; }
 }
 * { box-sizing: border-box; }
+/* Author display rules (e.g. #drawer label { display:block }) must not
+   defeat the hidden attribute's UA display:none. */
+[hidden] { display: none !important; }
 body { margin:0; font:14px/1.5 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
 header { display:flex; gap:.75rem; align-items:center; padding:.5rem 1rem; border-bottom:1px solid var(--line); }
 header nav { margin-left:auto; }
@@ -33,3 +36,9 @@ button.danger { color:var(--danger); }
 #toast { position:fixed; bottom:1rem; left:50%; transform:translateX(-50%); background:var(--fg);
   color:var(--bg); padding:.5rem 1rem; border-radius:6px; }
 #toast.error { background:var(--danger); color:#fff; }
+#progress { position:fixed; top:0; left:0; right:0; height:2px; overflow:hidden; z-index:10; }
+#progress::after { content:""; display:block; width:30%; height:100%; background:var(--accent);
+  animation:progress-slide 1.2s linear infinite; }
+@keyframes progress-slide { from { transform:translateX(-100vw); } to { transform:translateX(100vw); } }
+td.placeholder { color:var(--muted); text-align:center; padding:1rem; }
+#record-type { color:var(--muted); margin-bottom:.5rem; }

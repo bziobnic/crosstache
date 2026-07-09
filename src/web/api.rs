@@ -91,6 +91,10 @@ pub(crate) async fn list_vaults(
     }
 }
 
+pub(crate) async fn list_types(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    Json(json!({ "types": state.types }))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
     vault: Option<String>,
@@ -899,5 +903,61 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let cd = res.headers()["content-disposition"].to_str().unwrap();
         assert!(cd.contains("filename*=UTF-8''r%C3%A9sum%C3%A9.txt"));
+    }
+
+    #[tokio::test]
+    async fn types_returns_builtin_types() {
+        let app = crate::web::build_router(testutil::test_state());
+        let (status, json_body) = get_json(app, "GET", "/api/types", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let types = json_body["types"].as_array().unwrap();
+        let login = types.iter().find(|t| t["name"] == "login").unwrap();
+        // login's declared field order and shape, exactly as builtin_types() defines
+        assert_eq!(login["source"], "builtin");
+        assert_eq!(login["fields"][0]["name"], "username");
+        assert_eq!(login["fields"][0]["kind"], "metadata");
+        assert_eq!(login["fields"][0]["required"], true);
+        assert_eq!(login["fields"][2]["name"], "password");
+        assert_eq!(login["fields"][2]["kind"], "secret");
+        assert_eq!(login["fields"][2]["primary"], true);
+        // all three builtins present
+        for name in ["login", "api-key", "database"] {
+            assert!(types.iter().any(|t| t["name"] == name), "{name} missing");
+        }
+    }
+
+    #[tokio::test]
+    async fn record_roundtrip_preserves_envelope_and_field_tags() {
+        let app = crate::web::build_router(testutil::test_state());
+
+        // PUT a typed record the way the record drawer saves one
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/gh-login",
+            Some(json!({
+                "value": r#"{"password":"hunter2"}"#,
+                "content_type": "application/vnd.xv.record",
+                "tags": {"xv-type": "login", "f.username": "bob"},
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // metadata GET: record markers survive, value stays null
+        let (status, meta) = get_json(app.clone(), "GET", "/api/secrets/gh-login", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(meta["content_type"], "application/vnd.xv.record");
+        assert_eq!(meta["tags"]["xv-type"], "login");
+        assert_eq!(meta["tags"]["f.username"], "bob");
+        assert!(meta["value"].is_null());
+
+        // the list never leaks envelope contents
+        let (_, list) = get_json(app.clone(), "GET", "/api/secrets", None).await;
+        assert!(!list.to_string().contains("hunter2"));
+
+        // reveal returns the raw envelope for the drawer to parse
+        let (_, revealed) = get_json(app, "POST", "/api/secrets/gh-login/value", None).await;
+        assert_eq!(revealed["value"], r#"{"password":"hunter2"}"#);
     }
 }

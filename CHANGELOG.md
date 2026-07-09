@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Web UI typed-record editing.** `xv ui` gains a type picker on the "New
+  secret" drawer (`GET /api/types` backs the list) so a record can be
+  created field-by-field instead of typing raw JSON; existing typed records
+  (detected via the `xv-type` tag or the record content type) open the same
+  per-field editor, with secret-kind fields masked as password inputs and
+  a per-field Reveal/Copy control mirroring the whole-value one.
+- **Dates-only display and native date picker.** Timestamps that are really
+  dates (`updated_on`, `last_modified`, `expires_on`) render as `YYYY-MM-DD`
+  everywhere in the UI, and the Expires field uses a native `<input
+  type="date">` picker instead of free text.
+- **Loading indicators.** The secrets and files tables show a "Loading…"
+  placeholder row while their initial fetch is in flight (and a "failed to
+  load" placeholder if it errors), and a slim progress bar at the top of the
+  page tracks in-flight API calls.
+
 ## v0.23.0 — Embedded web UI (2026-07-08)
 
 ### Added

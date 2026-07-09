@@ -27,12 +27,15 @@ pub(crate) struct WebState {
     pub token: String,
     /// Default vault, resolved once at startup. Requests may override per-call.
     pub vault: String,
+    /// Record types (builtin + [types.*] config), resolved once at startup.
+    pub types: Vec<crate::records::RecordType>,
 }
 
 pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
         .route("/context", get(api::get_context))
         .route("/vaults", get(api::list_vaults))
+        .route("/types", get(api::list_types))
         .route("/secrets", get(api::list_secrets))
         .route(
             "/secrets/{name}",
@@ -100,6 +103,9 @@ pub async fn run_web(
     })?;
     let vault = crate::cli::helpers::resolve_vault_for_trait(&config, Some(registry)).await?;
     let backend = registry.active_arc();
+    // Fail loud at startup on a broken [types.*] block, matching the CLI's
+    // eager type-resolution paths.
+    let types = config.resolve_record_types().await?;
 
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
@@ -109,6 +115,7 @@ pub async fn run_web(
         backend,
         token: token.clone(),
         vault,
+        types,
     });
     let app = build_router(state);
 
