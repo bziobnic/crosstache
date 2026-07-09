@@ -213,18 +213,27 @@ async function init() {
 }
 
 // ---- secrets ----
+// 'ready' | 'loading' | 'failed' — guards renderSecrets so a search-box
+// input during a vault switch can't paint the previous vault's rows (or
+// clobber the failed placeholder) while the fetch is in flight.
+let secretsState = 'ready';
 async function loadSecrets() {
+  secretsState = 'loading';
   showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', 5);
   try {
     secrets = await api('GET', `/api/secrets${vaultQS()}`);
   } catch (e) {
+    secretsState = 'failed';
+    secrets = [];
     showPlaceholder($('#secrets-table tbody'), 'failed to load', 5);
     throw e;
   }
+  secretsState = 'ready';
   renderSecrets();
 }
 
 function renderSecrets() {
+  if (secretsState !== 'ready') return; // keep the loading/failed placeholder
   const filter = $('#search').value.toLowerCase();
   const tbody = $('#secrets-table tbody');
   tbody.innerHTML = '';
