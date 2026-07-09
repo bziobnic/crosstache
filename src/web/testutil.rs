@@ -9,6 +9,7 @@ pub(crate) fn test_state_with_token(token: &str) -> Arc<WebState> {
         backend: Arc::new(stub::StubBackend::new()),
         token: token.to_string(),
         vault: "default".to_string(),
+        types: crate::records::builtin_types(),
     })
 }
 
