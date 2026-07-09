@@ -43,13 +43,19 @@
   <h2 id="drawer-title"></h2>
   <form id="secret-form">
     <label>Name <input name="name" required></label>
-    <label>Value
-      <textarea name="value" rows="4" placeholder="(leave blank to keep current value)"></textarea>
-      <span class="row">
-        <button type="button" id="reveal">Reveal</button>
-        <button type="button" id="copy">Copy</button>
-      </span>
-    </label>
+    <div id="value-section">
+      <label>Value
+        <textarea name="value" rows="4" placeholder="(leave blank to keep current value)"></textarea>
+        <span class="row">
+          <button type="button" id="reveal">Reveal</button>
+          <button type="button" id="copy">Copy</button>
+        </span>
+      </label>
+    </div>
+    <div id="record-section" hidden>
+      <div id="record-type"></div>
+      <div id="record-fields"></div>
+    </div>
     <label>Folder <input name="folder"></label>
     <label>Groups (comma-separated) <input name="groups"></label>
     <label>Note <input name="note"></label>

@@ -38,3 +38,4 @@ button.danger { color:var(--danger); }
   animation:progress-slide 1.2s linear infinite; }
 @keyframes progress-slide { from { transform:translateX(-100vw); } to { transform:translateX(100vw); } }
 td.placeholder { color:var(--muted); text-align:center; padding:1rem; }
+#record-type { color:var(--muted); margin-bottom:.5rem; }
