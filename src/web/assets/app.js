@@ -105,6 +105,7 @@ function fieldRow(name, kind, value, required) {
   if (required) input.required = true;
   if (kind === 'secret') {
     input.type = 'password';
+    input.autocomplete = 'new-password';
     const row = document.createElement('span');
     row.className = 'row';
     const rev = document.createElement('button');
@@ -214,7 +215,12 @@ async function init() {
 // ---- secrets ----
 async function loadSecrets() {
   showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', 5);
-  secrets = await api('GET', `/api/secrets${vaultQS()}`);
+  try {
+    secrets = await api('GET', `/api/secrets${vaultQS()}`);
+  } catch (e) {
+    showPlaceholder($('#secrets-table tbody'), 'failed to load', 5);
+    throw e;
+  }
   renderSecrets();
 }
 
@@ -273,6 +279,8 @@ async function openDrawer(name) {
       f.elements.folder.value = tags.folder || '';
       f.elements.groups.value = tags.groups || '';
       f.elements.note.value = tags.note || '';
+      // Use the stored literal date on purpose, not fmtDate: fmtDate's
+      // toISOString conversion could shift the date across a timezone boundary.
       f.elements.expires_on.value = meta.expires_on ? meta.expires_on.slice(0, 10) : '';
       const customTags = {};
       for (const [k, v] of Object.entries(tags)) {
@@ -309,6 +317,9 @@ async function openRecord(name, tags) {
   } catch (e) {
     // Content type says record but the value isn't a valid envelope: open
     // read-only in the plain view rather than pretending fields are empty.
+    // Whole-value Reveal/Copy stay visible here (unlike the valid-record
+    // path below) because they're the only diagnostic escape hatch for
+    // inspecting a corrupt envelope.
     toast(`record envelope is invalid: ${e.message}`, true);
     $('#save').disabled = true;
     return;
@@ -364,6 +375,8 @@ $('#secret-form').onsubmit = async (ev) => {
       }
       const sorted = {};
       for (const k of Object.keys(envelope).sort()) sorted[k] = envelope[k];
+      const tags = { ...(editingMeta?.tags || {}), ...fieldTags };
+      if (recordState.typeName) tags[TYPE_TAG] = recordState.typeName;
       await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`, {
         value: JSON.stringify(sorted),
         content_type: RECORD_CONTENT_TYPE,
@@ -371,7 +384,7 @@ $('#secret-form').onsubmit = async (ev) => {
         note: f.note.value || null,
         groups: groups.length ? groups : null,
         expires_on: expiresPut,
-        tags: { ...(editingMeta?.tags || {}), [TYPE_TAG]: recordState.typeName, ...fieldTags },
+        tags,
         enabled: editingMeta ? editingMeta.enabled : true,
         not_before: editingMeta?.not_before || null,
       });
@@ -435,7 +448,13 @@ function switchTab(which) {
 async function loadFiles() {
   if (!ctx.capabilities.files) return;
   showPlaceholder($('#files-table tbody'), 'Loading files…', 5);
-  const files = await api('GET', `/api/files${vaultQS()}`);
+  let files;
+  try {
+    files = await api('GET', `/api/files${vaultQS()}`);
+  } catch (e) {
+    showPlaceholder($('#files-table tbody'), 'failed to load', 5);
+    throw e;
+  }
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
   for (const f of files) {
