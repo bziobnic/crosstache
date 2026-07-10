@@ -102,13 +102,26 @@ function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceE
     const td = document.createElement('td');
     td.colSpan = cols;
     td.textContent = `${open ? '▾' : '▸'} ${name} (${rows.length})`;
+    td.setAttribute('aria-expanded', String(open));
+    if (forceExpand) {
+      tr.classList.add('static');
+    } else {
+      const toggle = () => {
+        if (expanded.has(name)) expanded.delete(name);
+        else expanded.add(name);
+        rerender();
+      };
+      td.tabIndex = 0;
+      td.setAttribute('role', 'button');
+      tr.onclick = toggle;
+      td.onkeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          if (e.key === ' ') e.preventDefault();
+          toggle();
+        }
+      };
+    }
     tr.appendChild(td);
-    tr.onclick = () => {
-      if (forceExpand) return; // search mode: toggling has no visible effect
-      if (expanded.has(name)) expanded.delete(name);
-      else expanded.add(name);
-      rerender();
-    };
     tbody.appendChild(tr);
     if (open) for (const it of rows) tbody.appendChild(renderRow(it));
   }
@@ -601,7 +614,7 @@ async function uploadFiles(fileList) {
 const dz = $('#dropzone');
 dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
 dz.ondragleave = () => dz.classList.remove('over');
-dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFiles(e.dataTransfer.files); };
-$('#file-input').onchange = (e) => uploadFiles(e.target.files);
+dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFiles(e.dataTransfer.files).catch(fail); };
+$('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
 init().catch(fail);

@@ -11,6 +11,9 @@ Typed records are supported: create one via the type picker on the "New
 secret" drawer or open an existing one to edit it field-by-field, with
 secret-kind fields masked and individually revealable/copyable.
 
+Entries in both tables are grouped by folder into collapsible sections
+(collapsed by default), with file sizes shown in human-readable units.
+
 Scope note: the UI operates on the **active backend** — the vault switcher
 lists that backend's vaults and every operation targets it. Multi-backend
 workspaces (`xv cx` attached vaults and aliases) are not resolved here yet;
