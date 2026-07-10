@@ -104,6 +104,7 @@ function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceE
     td.textContent = `${open ? '▾' : '▸'} ${name} (${rows.length})`;
     tr.appendChild(td);
     tr.onclick = () => {
+      if (forceExpand) return; // search mode: toggling has no visible effect
       if (expanded.has(name)) expanded.delete(name);
       else expanded.add(name);
       rerender();
