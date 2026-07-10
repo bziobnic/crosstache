@@ -72,6 +72,48 @@ function showPlaceholder(tbody, text, cols) {
   tbody.appendChild(tr);
 }
 
+// Expanded folder groups per table. In-memory only: cleared on vault
+// switch, deliberately NOT cleared on save/delete re-renders so an open
+// folder stays open.
+const expandedSecretFolders = new Set();
+const expandedFileFolders = new Set();
+
+// Renders `items` into `tbody` as collapsible folder groups (sorted,
+// listed first) followed by loose items (folderOf(item) === '').
+// forceExpand shows every group open without mutating `expanded` —
+// used while a search filter is active.
+function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceExpand, rerender) {
+  const groups = new Map();
+  const loose = [];
+  for (const it of items) {
+    const f = folderOf(it);
+    if (f) {
+      if (!groups.has(f)) groups.set(f, []);
+      groups.get(f).push(it);
+    } else {
+      loose.push(it);
+    }
+  }
+  for (const name of [...groups.keys()].sort()) {
+    const rows = groups.get(name);
+    const open = forceExpand || expanded.has(name);
+    const tr = document.createElement('tr');
+    tr.className = 'folder-row';
+    const td = document.createElement('td');
+    td.colSpan = cols;
+    td.textContent = `${open ? '▾' : '▸'} ${name} (${rows.length})`;
+    tr.appendChild(td);
+    tr.onclick = () => {
+      if (expanded.has(name)) expanded.delete(name);
+      else expanded.add(name);
+      rerender();
+    };
+    tbody.appendChild(tr);
+    if (open) for (const it of rows) tbody.appendChild(renderRow(it));
+  }
+  for (const it of loose) tbody.appendChild(renderRow(it));
+}
+
 // ---- state ----
 let ctx = null;
 let currentVault = null;
@@ -217,6 +259,8 @@ async function init() {
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
+    expandedSecretFolders.clear();
+    expandedFileFolders.clear();
     loadSecrets().catch(fail);
     loadFiles().catch(fail);
   };
@@ -249,22 +293,31 @@ function renderSecrets() {
   const filter = $('#search').value.toLowerCase();
   const tbody = $('#secrets-table tbody');
   tbody.innerHTML = '';
-  for (const s of secrets) {
+  const visible = secrets.filter((s) => {
+    if (!filter) return true;
     const name = s.original_name || s.name;
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
-    if (filter && !hay.includes(filter)) continue;
-    const tr = document.createElement('tr');
-    for (const cell of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)]) {
-      const td = document.createElement('td');
-      td.textContent = cell || '';
-      tr.appendChild(td);
-    }
-    tr.onclick = () => openDrawer(name);
-    tbody.appendChild(tr);
-  }
+    return hay.includes(filter);
+  });
+  // While filtering, collapse state is ignored so matches are never
+  // hidden inside a collapsed folder; empty groups drop out because
+  // their rows are filtered before grouping.
+  renderGrouped(tbody, visible, (s) => s.folder || '', expandedSecretFolders, 5, secretRow, !!filter, renderSecrets);
   if (!tbody.children.length) {
     showPlaceholder(tbody, secrets.length ? 'no matching secrets' : 'no secrets', 5);
   }
+}
+
+function secretRow(s) {
+  const name = s.original_name || s.name;
+  const tr = document.createElement('tr');
+  for (const cell of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)]) {
+    const td = document.createElement('td');
+    td.textContent = cell || '';
+    tr.appendChild(td);
+  }
+  tr.onclick = () => openDrawer(name);
+  return tr;
 }
 
 $('#search').oninput = renderSecrets;
