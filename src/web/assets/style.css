@@ -42,3 +42,7 @@ button.danger { color:var(--danger); }
 @keyframes progress-slide { from { transform:translateX(-100vw); } to { transform:translateX(100vw); } }
 td.placeholder { color:var(--muted); text-align:center; padding:1rem; }
 #record-type { color:var(--muted); margin-bottom:.5rem; }
+tr.folder-row td { cursor:pointer; font-weight:600; color:var(--muted);
+  background:color-mix(in srgb, var(--fg) 4%, transparent); }
+tr.folder-row:not(.static):hover td { color:var(--fg); }
+tr.folder-row.static td { cursor:default; }

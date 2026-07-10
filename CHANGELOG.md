@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Web UI folder grouping.** Both `xv ui` tables group entries by folder:
+  secrets by their `folder` tag, files by the `/` path prefix. Folder
+  groups render first (sorted, with a member count) as collapsible header
+  rows — collapsed by default — followed by loose entries. Expanded state
+  survives saves/deletes and resets on vault switch; while the search box
+  is active, matches are always shown regardless of collapse state.
+- **Human-readable file sizes.** The files table's Size column renders
+  `1.46 KB`-style values, matching the CLI's `format_size` (binary steps).
+
 ## v0.24.0 — Web UI record editing (2026-07-09)
 
 ### Added

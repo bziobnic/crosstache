@@ -49,6 +49,18 @@ function fmtDate(s) {
   return isNaN(d) ? s : d.toISOString().slice(0, 10);
 }
 
+// Mirrors src/utils/format.rs::format_size: binary (1024) steps, whole
+// bytes without decimals, larger units with two decimals.
+function fmtSize(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes)) return '';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let i = 0;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return i === 0 ? `${Math.floor(size)} B` : `${size.toFixed(2)} ${units[i]}`;
+}
+
 function showPlaceholder(tbody, text, cols) {
   tbody.innerHTML = '';
   const tr = document.createElement('tr');
@@ -58,6 +70,62 @@ function showPlaceholder(tbody, text, cols) {
   td.textContent = text;
   tr.appendChild(td);
   tbody.appendChild(tr);
+}
+
+// Expanded folder groups per table. In-memory only: cleared on vault
+// switch, deliberately NOT cleared on save/delete re-renders so an open
+// folder stays open.
+const expandedSecretFolders = new Set();
+const expandedFileFolders = new Set();
+
+// Renders `items` into `tbody` as collapsible folder groups (sorted,
+// listed first) followed by loose items (folderOf(item) === '').
+// forceExpand shows every group open without mutating `expanded` —
+// used while a search filter is active.
+function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceExpand, rerender) {
+  const groups = new Map();
+  const loose = [];
+  for (const it of items) {
+    const f = folderOf(it);
+    if (f) {
+      if (!groups.has(f)) groups.set(f, []);
+      groups.get(f).push(it);
+    } else {
+      loose.push(it);
+    }
+  }
+  for (const name of [...groups.keys()].sort()) {
+    const rows = groups.get(name);
+    const open = forceExpand || expanded.has(name);
+    const tr = document.createElement('tr');
+    tr.className = 'folder-row';
+    const td = document.createElement('td');
+    td.colSpan = cols;
+    td.textContent = `${open ? '▾' : '▸'} ${name} (${rows.length})`;
+    td.setAttribute('aria-expanded', String(open));
+    if (forceExpand) {
+      tr.classList.add('static');
+    } else {
+      const toggle = () => {
+        if (expanded.has(name)) expanded.delete(name);
+        else expanded.add(name);
+        rerender();
+      };
+      td.tabIndex = 0;
+      td.setAttribute('role', 'button');
+      tr.onclick = toggle;
+      td.onkeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          if (e.key === ' ') e.preventDefault();
+          toggle();
+        }
+      };
+    }
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    if (open) for (const it of rows) tbody.appendChild(renderRow(it));
+  }
+  for (const it of loose) tbody.appendChild(renderRow(it));
 }
 
 // ---- state ----
@@ -205,6 +273,8 @@ async function init() {
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
+    expandedSecretFolders.clear();
+    expandedFileFolders.clear();
     loadSecrets().catch(fail);
     loadFiles().catch(fail);
   };
@@ -237,22 +307,31 @@ function renderSecrets() {
   const filter = $('#search').value.toLowerCase();
   const tbody = $('#secrets-table tbody');
   tbody.innerHTML = '';
-  for (const s of secrets) {
+  const visible = secrets.filter((s) => {
+    if (!filter) return true;
     const name = s.original_name || s.name;
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
-    if (filter && !hay.includes(filter)) continue;
-    const tr = document.createElement('tr');
-    for (const cell of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)]) {
-      const td = document.createElement('td');
-      td.textContent = cell || '';
-      tr.appendChild(td);
-    }
-    tr.onclick = () => openDrawer(name);
-    tbody.appendChild(tr);
-  }
+    return hay.includes(filter);
+  });
+  // While filtering, collapse state is ignored so matches are never
+  // hidden inside a collapsed folder; empty groups drop out because
+  // their rows are filtered before grouping.
+  renderGrouped(tbody, visible, (s) => s.folder || '', expandedSecretFolders, 5, secretRow, !!filter, renderSecrets);
   if (!tbody.children.length) {
     showPlaceholder(tbody, secrets.length ? 'no matching secrets' : 'no secrets', 5);
   }
+}
+
+function secretRow(s) {
+  const name = s.original_name || s.name;
+  const tr = document.createElement('tr');
+  for (const cell of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)]) {
+    const td = document.createElement('td');
+    td.textContent = cell || '';
+    tr.appendChild(td);
+  }
+  tr.onclick = () => openDrawer(name);
+  return tr;
 }
 
 $('#search').oninput = renderSecrets;
@@ -460,44 +539,52 @@ function switchTab(which) {
 }
 
 // ---- files ----
+let files = [];
 async function loadFiles() {
   if (!ctx.capabilities.files) return;
   showPlaceholder($('#files-table tbody'), 'Loading files…', 5);
-  let files;
   try {
     files = await api('GET', `/api/files${vaultQS()}`);
   } catch (e) {
+    files = [];
     showPlaceholder($('#files-table tbody'), 'failed to load', 5);
     throw e;
   }
+  renderFiles();
+}
+
+function renderFiles() {
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
-  for (const f of files) {
-    const tr = document.createElement('tr');
-    const cells = [f.name, `${f.size}`, f.content_type, fmtDate(f.last_modified)];
-    for (const c of cells) {
-      const td = document.createElement('td');
-      td.textContent = c || '';
-      tr.appendChild(td);
-    }
-    const td = document.createElement('td');
-    const dl = document.createElement('button');
-    dl.textContent = '⬇';
-    dl.onclick = () => downloadFile(f.name);
-    const del = document.createElement('button');
-    del.textContent = '✕';
-    del.className = 'danger';
-    del.onclick = async () => {
-      try {
-        await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS()}`);
-        await loadFiles();
-      } catch (e) { fail(e); }
-    };
-    td.append(dl, del);
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-  }
+  const dirOf = (f) => (f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/')) : '');
+  renderGrouped(tbody, files, dirOf, expandedFileFolders, 5, fileRow, false, renderFiles);
   if (!tbody.children.length) showPlaceholder(tbody, 'no files', 5);
+}
+
+function fileRow(f) {
+  const tr = document.createElement('tr');
+  const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
+  for (const c of cells) {
+    const td = document.createElement('td');
+    td.textContent = c || '';
+    tr.appendChild(td);
+  }
+  const td = document.createElement('td');
+  const dl = document.createElement('button');
+  dl.textContent = '⬇';
+  dl.onclick = () => downloadFile(f.name);
+  const del = document.createElement('button');
+  del.textContent = '✕';
+  del.className = 'danger';
+  del.onclick = async () => {
+    try {
+      await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS()}`);
+      await loadFiles();
+    } catch (e) { fail(e); }
+  };
+  td.append(dl, del);
+  tr.appendChild(td);
+  return tr;
 }
 
 async function downloadFile(name) {
@@ -527,7 +614,7 @@ async function uploadFiles(fileList) {
 const dz = $('#dropzone');
 dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
 dz.ondragleave = () => dz.classList.remove('over');
-dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFiles(e.dataTransfer.files); };
-$('#file-input').onchange = (e) => uploadFiles(e.target.files);
+dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFiles(e.dataTransfer.files).catch(fail); };
+$('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
 init().catch(fail);
