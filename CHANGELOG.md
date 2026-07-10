@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.25.0 — Web UI folder grouping (2026-07-10)
 
 ### Added
 
