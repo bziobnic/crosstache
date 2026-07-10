@@ -526,44 +526,52 @@ function switchTab(which) {
 }
 
 // ---- files ----
+let files = [];
 async function loadFiles() {
   if (!ctx.capabilities.files) return;
   showPlaceholder($('#files-table tbody'), 'Loading files…', 5);
-  let files;
   try {
     files = await api('GET', `/api/files${vaultQS()}`);
   } catch (e) {
+    files = [];
     showPlaceholder($('#files-table tbody'), 'failed to load', 5);
     throw e;
   }
+  renderFiles();
+}
+
+function renderFiles() {
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
-  for (const f of files) {
-    const tr = document.createElement('tr');
-    const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
-    for (const c of cells) {
-      const td = document.createElement('td');
-      td.textContent = c || '';
-      tr.appendChild(td);
-    }
-    const td = document.createElement('td');
-    const dl = document.createElement('button');
-    dl.textContent = '⬇';
-    dl.onclick = () => downloadFile(f.name);
-    const del = document.createElement('button');
-    del.textContent = '✕';
-    del.className = 'danger';
-    del.onclick = async () => {
-      try {
-        await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS()}`);
-        await loadFiles();
-      } catch (e) { fail(e); }
-    };
-    td.append(dl, del);
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-  }
+  const dirOf = (f) => (f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/')) : '');
+  renderGrouped(tbody, files, dirOf, expandedFileFolders, 5, fileRow, false, renderFiles);
   if (!tbody.children.length) showPlaceholder(tbody, 'no files', 5);
+}
+
+function fileRow(f) {
+  const tr = document.createElement('tr');
+  const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
+  for (const c of cells) {
+    const td = document.createElement('td');
+    td.textContent = c || '';
+    tr.appendChild(td);
+  }
+  const td = document.createElement('td');
+  const dl = document.createElement('button');
+  dl.textContent = '⬇';
+  dl.onclick = () => downloadFile(f.name);
+  const del = document.createElement('button');
+  del.textContent = '✕';
+  del.className = 'danger';
+  del.onclick = async () => {
+    try {
+      await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS()}`);
+      await loadFiles();
+    } catch (e) { fail(e); }
+  };
+  td.append(dl, del);
+  tr.appendChild(td);
+  return tr;
 }
 
 async function downloadFile(name) {
