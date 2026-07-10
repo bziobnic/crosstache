@@ -49,6 +49,18 @@ function fmtDate(s) {
   return isNaN(d) ? s : d.toISOString().slice(0, 10);
 }
 
+// Mirrors src/utils/format.rs::format_size: binary (1024) steps, whole
+// bytes without decimals, larger units with two decimals.
+function fmtSize(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes)) return '';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let i = 0;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return i === 0 ? `${Math.floor(size)} B` : `${size.toFixed(2)} ${units[i]}`;
+}
+
 function showPlaceholder(tbody, text, cols) {
   tbody.innerHTML = '';
   const tr = document.createElement('tr');
@@ -474,7 +486,7 @@ async function loadFiles() {
   tbody.innerHTML = '';
   for (const f of files) {
     const tr = document.createElement('tr');
-    const cells = [f.name, `${f.size}`, f.content_type, fmtDate(f.last_modified)];
+    const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
     for (const c of cells) {
       const td = document.createElement('td');
       td.textContent = c || '';
