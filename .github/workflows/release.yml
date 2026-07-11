@@ -137,7 +137,7 @@ jobs:
         run: |
           curl -fsSLo minisign.zip https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-macos.zip
           echo "e7c410ae8b8960d7087392472b040bda9b2f307c76df0384ac37f9ad103fc893  minisign.zip" | shasum -a 256 --check
-          unzip -j minisign.zip '*/minisign' -d minisign-bin
+          unzip -j minisign.zip minisign -d minisign-bin
           chmod +x minisign-bin/minisign
           echo "MINISIGN_BIN=./minisign-bin/minisign" >> "$GITHUB_ENV"
 
