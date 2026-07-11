@@ -15,7 +15,7 @@
 | Audit | Azure Activity Log path | CloudTrail `LookupEvents` (`cloudtrail:LookupEvents` required) | Unsupported |
 | Native rotation | Unsupported (`xv rotate` generates a new value) | `xv rotate --native` calls `RotateSecret` and requires a rotation Lambda | Unsupported |
 | Sharing / RBAC commands | Azure RBAC | Unsupported; commands return IAM resource-policy hints | Unsupported |
-| File storage | Azure Blob Storage; includes `xv file sync` | S3 when `[aws].s3_bucket` or `XV_AWS_S3_BUCKET` is set; sync unsupported | Not a public `xv file` workflow today |
+| File storage | Azure Blob Storage; includes `xv file sync` | S3 when `[aws].s3_bucket` or `XV_AWS_S3_BUCKET` is set; sync unsupported | age-encrypted per-vault files; includes `xv file sync` |
 
 ---
 
@@ -209,6 +209,26 @@ to the previous warn-and-continue behavior.
 
 Aliases: `xv cx` for `xv context`, `xv ls` for `xv list`.
 
+### Multi-vault workspaces
+
+`xv cx add` attaches multiple vaults as one workspace. Secret reads and union
+views can span attached entries, while unqualified writes and `xv file` commands
+target the workspace default entry.
+
+| Command | Description |
+|---------|-------------|
+| `xv cx add <vault> --backend <name> --alias <alias>` | Attach a vault to the workspace; `--alias` is a visible alias of `--as`, and `--default` makes it the write target |
+| `xv cx rm <alias>` | Detach an entry by alias |
+| `xv cx default <alias>` | Change the default entry used by unqualified writes and file operations |
+| `xv cx alias <entry> <new-alias>` | Rename an entry's alias, looking up `<entry>` by current alias or unique vault name |
+| `xv cx alias <entry> --reset` | Clear the explicit alias so it displays as the backing vault name |
+| `xv cx ls` | List attached entries with alias, backend, vault, default marker, and source |
+
+Union `xv ls`/`xv find` prefixes rows with `alias/` when more than one vault is
+attached. In long listing mode (`xv ls -l`), a renamed alias also shows the
+backing vault name as `alias/SECRET (vault-name)` so operators can map short
+aliases back to their real vaults.
+
 ---
 
 ## File Storage
@@ -218,6 +238,9 @@ active backend:
 
 - **Azure**: configure Azure Blob Storage with `xv init` or
   `AZURE_STORAGE_ACCOUNT` / `AZURE_STORAGE_CONTAINER`.
+- **Local**: uses age-encrypted files in the configured local store (default
+  `~/.xv/store/vaults/<vault>/files/`); no cloud storage configuration is
+  required.
 - **AWS**: build with `--features aws` (or use a release binary) and set
   `[aws].s3_bucket` or `XV_AWS_S3_BUCKET` to an existing bucket. `xv` stores
   objects under `<vault>/files/<name>` and does not create buckets.
@@ -231,11 +254,15 @@ active backend:
 | `xv file list` | List files (hierarchical by default; `--recursive` for flat; `--names-only` (recursive, pipe-friendly), `--pager [auto\|always\|never]`, `--page-size`, `--page`, `--limit`, `--no-cache`) |
 | `xv file delete` | Delete files (`--force`, `--continue-on-error`) |
 | `xv file info` | File metadata |
-| `xv file sync` | Sync local directory with blob prefix (`--direction` up/down/both, `--dry-run`, `--delete`); Azure path only today |
+| `xv file sync` | Sync local directory with blob prefix (`--direction` up/down/both, `--dry-run`, `--delete`); supported on Azure and local, unsupported on AWS |
 
 AWS supports upload/download/list/delete/info through S3. Attempting
 `xv file sync` on the AWS backend returns a setup-neutral error that recommends
 recursive upload/download as the current bulk-transfer path.
+
+In a multi-vault workspace, file commands resolve through the workspace default
+entry's backend and vault. They do not provide a union listing or `alias:path`
+addressing for files.
 
 `xv file list --format csv` columns match the table: `Kind,Name,Size,Content-Type,Modified,Groups`.
 JSON/YAML keep the full-fidelity serialization (etags, raw byte sizes, extra metadata).

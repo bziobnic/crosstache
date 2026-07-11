@@ -13,7 +13,12 @@ xv mv --filter 'test-*' archive/       # bulk-move them into a folder
 xv scan install                        # block secret leaks before commit
 ```
 
-**v0.19 highlights:** record types — structured secrets with typed fields (`login`, `api-key`, `database`, plus custom types) · `--filter <GLOB>` on `ls`/`find`/`mv` · fail-fast `xv run`/`xv inject` (no more silently-missing env vars or half-rendered configs; `--best-effort` opts out) · `.xv.toml` group/folder defaults actually applied · pre-commit leak scanner that matches files against your *actual* vault values.
+**v0.22 highlights:** multi-vault workspaces with aliases, union `ls`/`find`,
+cross-vault `mv`/`copy`, and alias-aware templates · file storage through the
+unified backend path (`xv file sync` works on Azure and local; AWS sync remains
+gated) · record types with typed fields (`login`, `api-key`, `database`, plus
+custom types) · fail-fast `xv run`/`xv inject` with `--best-effort` opt-out ·
+pre-commit leak scanner that matches files against your *actual* vault values.
 
 **Web UI**: `xv ui` opens a local browser interface (build with `--features ui`).
 
@@ -979,14 +984,16 @@ See [`docs/env-profiles.md`](docs/env-profiles.md) for the full reference.
 ## Multi-vault workspaces
 
 > Full multi-vault workspaces design, all three phases
-> (`docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md`).
-> `xv file`/blob storage is out of scope for the whole workspaces feature
-> (per the design) and stays single-vault regardless.
+> (`docs/superpowers/specs/2026-07-04-multi-vault-workspaces-design.md`), plus
+> backend convergence notes in
+> `docs/superpowers/specs/2026-07-05-multi-backend-workspace-convergence-design.md`.
+> `xv file` has no union view or `alias:path` addressing; it targets the
+> workspace default entry's backend and vault.
 
 Attach several vaults — potentially on different backends — so they behave like one workspace instead of juggling `--vault`/`--backend` flags:
 
 ```bash
-xv cx add work-kv --backend azure --as work --default
+xv cx add work-kv --backend azure --alias work --default  # --alias is also --as
 xv cx add personal-store --backend local --as personal
 xv cx ls
 ```
@@ -1012,9 +1019,28 @@ xv cx ls
   ]
   ```
 
-  Because that overlay replaces the context workspace entirely, `xv cx add`/`rm`/`default` **error** (exit `3`, naming the `.xv.toml` path and env) when run in a directory governed by one — a context-store mutation there would silently have no effect on what secret commands actually use. There is no override flag in v1: edit `.xv.toml` directly, or run the command outside the project directory. `xv cx ls` stays read-only and always shows the *effective* workspace (with its source column) regardless.
+  Because that overlay replaces the context workspace entirely, `xv cx add`/`rm`/`default`/`alias` **error** (exit `3`, naming the `.xv.toml` path and env) when run in a directory governed by one — a context-store mutation there would silently have no effect on what secret commands actually use. There is no override flag in v1: edit `.xv.toml` directly, or run the command outside the project directory. `xv cx ls` stays read-only and always shows the *effective* workspace (with its source column) regardless.
 
-Manage the workspace with `xv cx add/rm/default/ls` (`cx` is a visible alias of `context`); `xv context use` errors pointing at `xv cx default` while a workspace is attached, since the two write-target models don't mix. Note: `xv context ls`/`xv cx ls` now lists the attached workspace, not recent vault contexts — use the unabbreviated `xv context list` for those.
+Manage the workspace with `xv cx add/rm/default/alias/ls` (`cx` is a visible alias of `context`); `xv context use` errors pointing at `xv cx default` while a workspace is attached, since the two write-target models don't mix. Note: `xv context ls`/`xv cx ls` now lists the attached workspace, not recent vault contexts — use the unabbreviated `xv context list` for those.
+
+### Alias management
+
+Aliases are the user-facing handles used in `alias:name` secret addressing, URI
+resolution, union listing prefixes, and cross-vault moves. They can differ from
+the backing vault names when those names are long or environment-specific:
+
+```bash
+xv cx add kv-scottzionic --alias kv         # visible alias for --as
+xv cx alias kv prod-kv                      # rename by current alias
+xv ls -l                                    # shows prod-kv/SECRET (kv-scottzionic)
+xv cx alias prod-kv --reset                 # reset alias back to kv-scottzionic
+xv cx alias kv-scottzionic prod-kv          # vault-name lookup works too
+```
+
+Alias changes use the same validation as `cx add`: aliases must be unique in
+the workspace and cannot collide with registered backend names such as `azure`,
+`aws`, or `local`. Workspaces sourced from `.xv.toml` remain file-owned, so
+`xv cx alias` refuses to mutate them; edit the `vaults = [...]` entries instead.
 
 ### Union `ls` and `find` (Phase B)
 
@@ -1189,10 +1215,18 @@ Optional file/blob storage. The backing service depends on the active backend:
 - **Azure**: Azure Blob Storage. `xv init` can create/configure the storage
   account and container. All commands below, including `xv file sync`, use this
   path.
+- **Local**: age-encrypted files in the configured local store (default
+  `~/.xv/store/vaults/<vault>/files/`). Upload/download/list/delete/info and
+  `xv file sync` are available without cloud services.
 - **AWS**: S3. Set `[aws].s3_bucket` or `XV_AWS_S3_BUCKET` to an existing bucket;
   `xv` never creates buckets. Upload/download/list/delete/info are supported and
   objects are stored under `<vault>/files/<name>`. `xv file sync` is not
   supported on AWS yet.
+
+In a multi-vault workspace, `xv file` does not scan or merge all attached
+vaults. It resolves the workspace's **default entry** and uses that entry's
+backend and vault for every file command; switch the default with
+`xv cx default <alias>` or run outside the workspace to target another vault.
 
 ### Single files
 

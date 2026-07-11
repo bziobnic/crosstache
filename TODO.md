@@ -7,32 +7,13 @@ changes without adding redundant pages.
 
 ## Steps
 
-- [x] Update the README local-backend section for opaque filenames, migration
-      commands, and current local hardening constraints.
-- [x] Refresh README command examples for `xv set` / `xv gen --save` write-time
-      metadata parity, `xv config edit`, bounded `xv run` masking, and private
-      context-file writes.
-- [x] Fix stale group and feature references that still describe groups as
-      update-only.
-- [x] Move shipped security-hardening items out of ROADMAP open work and into
-      shipped history.
-- [x] Update CLAUDE.md current-status notes so future agents see the v0.14+
-      implementation state.
-- [x] Verify documentation diffs for accuracy against source and run an
-      appropriate docs-only validation command.
-
-## Audit Backend Routing Fix Plan
-
-### Audit Routing Goal
-
-Ensure `xv audit --resource-group ...` only uses the legacy Azure Activity Log
-fallback for Azure, and keeps auditor-backed non-Azure backends on the generic
-`AuditBackend` path.
-
-### Audit Routing Steps
-
-- [x] Confirm the baseline routing bug: the old condition skipped generic audit
-      dispatch for any backend when `--resource-group` was supplied.
-- [x] Add a regression test with an auditor-backed non-Azure backend and a
-      resource-group override.
-- [x] Verify the routing fix with targeted tests and lint diagnostics.
+- [x] Refresh README multi-vault workspace docs for the v0.22 alias UX:
+      `cx add --alias`, `cx alias`, `cx alias --reset`, and long-list backing
+      vault suffixes.
+- [x] Correct README file-storage notes for v0.21 default-entry routing and
+      local backend file/sync support while preserving the AWS sync limitation.
+- [x] Update `docs/FEATURES.md` capability and command-reference rows so local
+      file operations and workspace context commands match shipped behavior.
+- [x] Verify changed docs against source/tests and run an appropriate
+      docs-only validation command.
+- [x] Prepare the branch handoff after verification.
