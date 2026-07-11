@@ -31,6 +31,12 @@ pub struct ScanOutcome {
     pub skipped_unreadable: Vec<PathBuf>,
 }
 
+#[derive(Debug, Default)]
+pub struct SecretFetchOutcome {
+    pub secrets: Vec<SecretRef>,
+    pub failures: Vec<String>,
+}
+
 impl ScanOutcome {
     /// Total number of files that were not scanned for any reason.
     pub fn skipped_count(&self) -> usize {
@@ -102,16 +108,17 @@ pub async fn fetch_secret_values(
     backend: std::sync::Arc<dyn crate::backend::Backend>,
     vault_names: &[String],
     concurrency: usize,
-) -> Result<Vec<SecretRef>> {
+) -> Result<SecretFetchOutcome> {
     use tokio::sync::Semaphore;
     let sem = std::sync::Arc::new(Semaphore::new(concurrency.max(1)));
     let mut handles = Vec::new();
+    let mut failures = Vec::new();
     for vault in vault_names {
         // List secrets for this vault via the active backend trait.
         let summaries = match backend.secrets().list_secrets(vault, None).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::debug!("list_secrets failed for vault {vault}: {e}");
+                failures.push(format!("vault '{vault}' could not be listed: {e}"));
                 continue;
             }
         };
@@ -126,21 +133,23 @@ pub async fn fetch_secret_values(
             let backend_name = s.name.clone();
             let backend = backend.clone();
             let handle = tokio::spawn(async move {
-                let _permit = sem.acquire_owned().await.ok()?;
+                let _permit = sem
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| format!("secret fetch semaphore closed: {e}"))?;
                 match backend
                     .secrets()
                     .get_secret(&vault, &backend_name, true)
                     .await
                 {
-                    Ok(props) => props.value.map(|v| SecretRef {
+                    Ok(props) => Ok(props.value.map(|v| SecretRef {
                         name: secret_name,
                         vault,
                         value: v,
-                    }),
-                    Err(e) => {
-                        tracing::debug!("get_secret failed for {vault}/{backend_name}: {e}");
-                        None
-                    }
+                    })),
+                    Err(e) => Err(format!(
+                        "secret '{vault}/{backend_name}' value could not be read: {e}"
+                    )),
                 }
             });
             handles.push(handle);
@@ -148,11 +157,17 @@ pub async fn fetch_secret_values(
     }
     let mut refs = Vec::new();
     for h in handles {
-        if let Ok(Some(r)) = h.await {
-            refs.push(r);
+        match h.await {
+            Ok(Ok(Some(secret))) => refs.push(secret),
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => failures.push(e),
+            Err(e) => failures.push(format!("secret fetch task failed: {e}")),
         }
     }
-    Ok(refs)
+    Ok(SecretFetchOutcome {
+        secrets: refs,
+        failures,
+    })
 }
 
 #[cfg(test)]

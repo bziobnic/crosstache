@@ -143,6 +143,7 @@ fn effective_patterns(scan_cfg: Option<&ScanConfig>) -> Result<Vec<BuiltinPatter
 /// single vault.
 async fn fetch_scan_secrets(
     all_vaults: bool,
+    hook: bool,
     config: &Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<Vec<crate::scan::engine::SecretRef>> {
@@ -183,9 +184,20 @@ async fn fetch_scan_secrets(
         };
 
     let progress = crate::utils::interactive::ProgressIndicator::new("Fetching secret values...");
-    let secrets = fetch_secret_values(backend, &vault_names, 10).await?;
+    let outcome = fetch_secret_values(backend, &vault_names, 10).await?;
     progress.finish_clear();
-    Ok(secrets)
+    if !outcome.failures.is_empty() {
+        if hook {
+            return Err(CrosstacheError::config(format!(
+                "scan secret coverage is incomplete; refusing to pass in hook/CI mode: {}",
+                outcome.failures.join("; ")
+            )));
+        }
+        for failure in &outcome.failures {
+            eprintln!("xv scan: warning: {failure}");
+        }
+    }
+    Ok(outcome.secrets)
 }
 
 async fn execute_scan_paths(
@@ -196,9 +208,13 @@ async fn execute_scan_paths(
     config: &Config,
     registry: Option<&crate::backend::BackendRegistry>,
 ) -> Result<()> {
-    let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
+    let secrets = fetch_scan_secrets(all_vaults, hook, config, registry).await?;
 
-    let scan_cfg = load_scan_config().await?;
+    let scan_cfg = if hook {
+        None
+    } else {
+        load_scan_config().await?
+    };
     let patterns = effective_patterns(scan_cfg.as_ref())?;
     let min_value_length = effective_min_value_length(scan_cfg.as_ref());
     let engine = MatchEngine::new(&secrets, &patterns, min_value_length);
@@ -241,9 +257,13 @@ async fn execute_scan_staged(
 ) -> Result<()> {
     use crate::scan::staged::scan_staged;
 
-    let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
+    let secrets = fetch_scan_secrets(all_vaults, hook, config, registry).await?;
 
-    let scan_cfg = load_scan_config().await?;
+    let scan_cfg = if hook {
+        None
+    } else {
+        load_scan_config().await?
+    };
     let patterns = effective_patterns(scan_cfg.as_ref())?;
     let min_value_length = effective_min_value_length(scan_cfg.as_ref());
     let engine = MatchEngine::new(&secrets, &patterns, min_value_length);
@@ -266,9 +286,13 @@ async fn execute_scan_head(
 ) -> Result<()> {
     use crate::scan::staged::scan_head;
 
-    let secrets = fetch_scan_secrets(all_vaults, config, registry).await?;
+    let secrets = fetch_scan_secrets(all_vaults, hook, config, registry).await?;
 
-    let scan_cfg = load_scan_config().await?;
+    let scan_cfg = if hook {
+        None
+    } else {
+        load_scan_config().await?
+    };
 
     // Apply the same [scan].exclude + default globs the filesystem walk uses,
     // so `scan --all` doesn't scan target/, node_modules/, or user-excluded

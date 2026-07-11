@@ -283,6 +283,24 @@ pub fn resolve_types(
         }
         let record_type = cfg.clone().into_record_type(name, TypeSource::Project)?;
         record_type.validate()?;
+        if let Some(existing) = resolved.get(name) {
+            for field in record_type
+                .fields
+                .iter()
+                .filter(|field| field.kind == FieldKind::Metadata)
+            {
+                if existing
+                    .field(&field.name)
+                    .map(|prior| prior.kind == FieldKind::Secret)
+                    .unwrap_or(false)
+                {
+                    return Err(CrosstacheError::config(format!(
+                        "project type '{name}' cannot expose secret field '{}' as metadata; rename the type or keep the field kind = secret",
+                        field.name
+                    )));
+                }
+            }
+        }
         resolved.insert(name.clone(), record_type);
     }
 
@@ -466,5 +484,36 @@ mod tests {
 
         let err = resolve_types(&global, &project).unwrap_err();
         assert!(err.to_string().contains("bad"));
+    }
+
+    #[test]
+    fn project_override_cannot_downgrade_secret_field_to_metadata() {
+        let global = HashMap::new();
+        let mut project = HashMap::new();
+        project.insert(
+            "login".to_string(),
+            RecordTypeConfig {
+                fields: vec![
+                    FieldDefConfig {
+                        name: "password".to_string(),
+                        kind: Some("metadata".to_string()),
+                        required: false,
+                        primary: false,
+                    },
+                    FieldDefConfig {
+                        name: "replacement".to_string(),
+                        kind: Some("secret".to_string()),
+                        required: true,
+                        primary: true,
+                    },
+                ],
+            },
+        );
+
+        let err = resolve_types(&global, &project).unwrap_err();
+        assert!(
+            err.to_string().contains("password") && err.to_string().contains("metadata"),
+            "the downgrade error must identify the exposed field: {err}"
+        );
     }
 }

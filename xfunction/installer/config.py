@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field, asdict
 
 _REDACTED_KEYS = {"client_secret"}
@@ -51,12 +52,31 @@ class InstallerState:
         return self._steps.get(step_name, {})
 
     def save(self) -> None:
-        with open(self.path, "w") as f:
-            json.dump({"steps": self._steps}, f, indent=2)
+        if os.path.lexists(self.path) and os.path.islink(self.path):
+            raise OSError(f"Refusing symlinked installer state path: {self.path}")
+        parent = os.path.dirname(os.path.abspath(self.path)) or "."
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(prefix=".xfunction-state-", dir=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            payload = json.dumps({"steps": self._steps}, indent=2).encode("utf-8")
+            with os.fdopen(fd, "wb") as handle:
+                fd = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.path)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
 
     @classmethod
     def load(cls, path: str) -> "InstallerState":
         state = cls(path)
+        if os.path.lexists(path) and os.path.islink(path):
+            raise OSError(f"Refusing symlinked installer state path: {path}")
         if os.path.exists(path):
             with open(path) as f:
                 data = json.load(f)

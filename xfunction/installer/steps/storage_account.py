@@ -9,25 +9,21 @@ def _generate_name() -> str:
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
     return f"xfunc{suffix}"
 
-def _find_tagged_account(config: InstallerConfig, az: AzCli) -> dict | None:
-    # Use run_or_none so AzNotFoundError (e.g. resource group already deleted) returns None
-    # gracefully instead of crashing teardown before the confirmation prompt.
-    accounts = az.run_or_none("storage", "account", "list", "--resource-group", config.resource_group, "--query", "[?tags.\"xfunction-installer\"=='true']")
-    if isinstance(accounts, list) and accounts:
-        return accounts[0]
-    return None
-
 def check_exists(config: InstallerConfig, az: AzCli) -> bool:
-    return _find_tagged_account(config, az) is not None
+    if not config.storage_account:
+        return False
+    return az.run_or_none(
+        "storage", "account", "show", "--name", config.storage_account,
+        "--resource-group", config.resource_group,
+    ) is not None
 
 def run(config: InstallerConfig, az: AzCli) -> dict:
-    existing = _find_tagged_account(config, az)
-    if existing:
-        name = existing["name"]
-        warning(f"Storage account '{name}' already exists — skipping")
-        return {"name": name, "status": "exists"}
-
     name = config.storage_account if config.storage_account else _generate_name()
+    if config.storage_account and check_exists(config, az):
+        raise RuntimeError(
+            f"Storage account '{name}' already exists but installer ownership cannot be verified; "
+            "choose a new --storage-account name"
+        )
     for _ in range(5):
         check = az.run("storage", "account", "check-name", "--name", name)
         if isinstance(check, dict) and check.get("nameAvailable", False):
@@ -36,12 +32,41 @@ def run(config: InstallerConfig, az: AzCli) -> dict:
     else:
         raise RuntimeError("Failed to find available storage account name after 5 attempts")
 
-    az.run("storage", "account", "create", "--name", name, "--resource-group", config.resource_group, "--sku", "Standard_LRS", "--tags", "xfunction-installer=true")
+    result = az.run("storage", "account", "create", "--name", name, "--resource-group", config.resource_group, "--sku", "Standard_LRS", "--tags", "xfunction-installer=true")
     success(f"Storage account '{name}' created")
-    return {"name": name, "status": "created"}
+    return {
+        "name": name,
+        "resource_id": result.get("id", "") if isinstance(result, dict) else "",
+        "status": "created",
+    }
 
-def teardown(config: InstallerConfig, az: AzCli) -> None:
-    existing = _find_tagged_account(config, az)
-    if existing:
-        az.run("storage", "account", "delete", "--name", existing["name"], "--resource-group", config.resource_group, "--yes")
-        success(f"Storage account '{existing['name']}' deleted")
+def teardown(config: InstallerConfig, az: AzCli, state_data: dict | None = None) -> None:
+    state_data = state_data or {}
+    if state_data.get("status") != "created":
+        return
+    expected_id = state_data.get("resource_id", "")
+    parts = expected_id.strip("/").split("/")
+    if (
+        len(parts) != 8
+        or parts[0].lower() != "subscriptions"
+        or parts[2].lower() != "resourcegroups"
+        or parts[4].lower() != "providers"
+        or parts[5].lower() != "microsoft.storage"
+        or parts[6].lower() != "storageaccounts"
+        or not all((parts[1], parts[3], parts[7]))
+    ):
+        raise RuntimeError("Refusing to delete storage account: persisted resource ID is invalid")
+    subscription_id, resource_group_name, name = parts[1], parts[3], parts[7]
+    existing = az.run_or_none(
+        "storage", "account", "show", "--name", name,
+        "--resource-group", resource_group_name, "--subscription", subscription_id,
+    )
+    if existing is None:
+        return
+    if not expected_id or existing.get("id", "").lower() != expected_id.lower():
+        raise RuntimeError("Refusing to delete storage account: persisted resource ID does not match")
+    az.run(
+        "storage", "account", "delete", "--name", name,
+        "--resource-group", resource_group_name, "--subscription", subscription_id, "--yes",
+    )
+    success(f"Storage account '{name}' deleted")

@@ -108,6 +108,37 @@ fn scan_disabled_via_env_skips_scan_even_with_leak() {
 }
 
 #[test]
+fn hook_scan_ignores_repository_policy_that_excludes_a_leak() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    common::init_git_repo(temp.path());
+    std::fs::write(
+        temp.path().join(".xv.toml"),
+        "[scan]\nexclude = [\"leak.env\"]\npatterns = [\"github-token\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("leak.env"),
+        "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n",
+    )
+    .unwrap();
+    let staged = std::process::Command::new("git")
+        .args(["add", ".xv.toml", "leak.env"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap();
+    assert!(staged.success());
+
+    let out = cmd.args(["scan", "--staged", "--hook"]).output().unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(50),
+        "repository-controlled scan settings must not weaken the hook baseline: {}",
+        common::stderr_str(&out)
+    );
+}
+
+#[test]
 fn scan_install_outside_git_repo_errors() {
     let temp = tempfile::tempdir().unwrap();
     let out = common::xv()

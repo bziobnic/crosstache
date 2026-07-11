@@ -281,10 +281,7 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
         # Validate the JWT signature and claims against Azure AD
         try:
             decoded_token = _validate_jwt(token)
-            logging.info(
-                "Token validated with signature verification. Claims: %s",
-                json.dumps({k: v for k, v in decoded_token.items() if k not in ('aud', 'iss', 'sub')}),
-            )
+            logging.info("Token validated with signature, issuer, and audience verification")
 
             # Extract user ID from token claims
             # Try different claim types that might contain the user's object ID
@@ -298,7 +295,16 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
                     mimetype="application/json"
                 )
 
-            logging.info(f"User identified from token: {user_id}")
+            allowed_principal_id = os.environ.get("ALLOWED_PRINCIPAL_ID", "")
+            if not allowed_principal_id or user_id.lower() != allowed_principal_id.lower():
+                logging.error("Authenticated caller is outside the delegated principal boundary")
+                return func.HttpResponse(
+                    json.dumps({"error": "Unauthorized: caller is outside the delegated boundary"}),
+                    status_code=403,
+                    mimetype="application/json",
+                )
+
+            logging.info("Authenticated caller identity resolved")
 
         except jwt.ExpiredSignatureError:
             logging.error("Token has expired")
@@ -352,15 +358,32 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
         subscription_id = req_body.get('subscriptionId')
         
         if not resource_uri or not subscription_id:
-            logging.error(f"Missing required parameters: {json.dumps(req_body)}")
+            logging.error("Missing required request parameters")
             return func.HttpResponse(
                 json.dumps({"error": "Missing required parameters: resourceUri and subscriptionId are required"}),
                 status_code=400,
                 mimetype="application/json"
             )
+
+        allowed_resource_group = os.environ.get("ALLOWED_RESOURCE_GROUP_ID", "").rstrip('/')
+        allowed_prefix = f"{allowed_resource_group}/providers/Microsoft.KeyVault/vaults/"
+        vault_segment = resource_uri[len(allowed_prefix):] if resource_uri.lower().startswith(allowed_prefix.lower()) else ""
+        allowed_parts = allowed_resource_group.split('/')
+        allowed_subscription = allowed_parts[2] if len(allowed_parts) > 2 else ""
+        if (
+            not allowed_resource_group
+            or not vault_segment
+            or '/' in vault_segment
+            or subscription_id.lower() != allowed_subscription.lower()
+        ):
+            logging.error("Requested vault is outside the configured resource group boundary")
+            return func.HttpResponse(
+                json.dumps({"error": "Requested resource is outside the allowed resource group"}),
+                status_code=403,
+                mimetype="application/json"
+            )
         
-        logging.info(f"Processing request for resource: {resource_uri}")
-        logging.info(f"Subscription ID: {subscription_id}")
+        logging.info("Processing role request for validated subscription resource")
         
         # Initialize the VaultRoleManager and StorageRoleManager
         vault_manager = VaultRoleManager()
@@ -369,11 +392,9 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
         
         # Get vault information including tags
         vault_info = await vault_manager.get_vault_info(resource_uri)
-        logging.info(f"Vault info type: {type(vault_info)}")
-        logging.info(f"Vault info content: {vault_info}")
         
         if not vault_info:
-            logging.error(f"Could not retrieve vault information for {resource_uri}")
+            logging.error("Could not retrieve vault information for the validated resource")
             return func.HttpResponse(
                 json.dumps({"error": f"Could not retrieve vault information"}),
                 status_code=404,
@@ -385,10 +406,6 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
             vault_tags = vault_info.get('tags', {}) if isinstance(vault_info, dict) else {}
             creator_id = vault_tags.get('CreatedByID')
             
-            logging.info(f"Vault tags: {vault_tags}")
-            logging.info(f"Vault creator ID from tags: {creator_id}")
-            logging.info(f"Current user ID from token: {user_id}")
-            
             if not creator_id:
                 logging.error(
                     "Vault does not have a CreatedByID tag; refusing role assignment "
@@ -396,25 +413,22 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
                 )
                 return func.HttpResponse(
                     json.dumps({
-                        "error": "Unauthorized: vault has no CreatedByID tag, creator cannot be verified",
-                        "userId": user_id
+                        "error": "Unauthorized: vault creator cannot be verified"
                     }),
                     status_code=403,
                     mimetype="application/json"
                 )
             elif creator_id.lower() != user_id.lower():
-                logging.error(f"User {user_id} is not the creator of the vault (creator is {creator_id})")
+                logging.error("Authenticated caller does not match the vault creator marker")
                 return func.HttpResponse(
                     json.dumps({
-                        "error": "Unauthorized: Only the creator of the vault can assign roles",
-                        "userId": user_id,
-                        "creatorId": creator_id
+                        "error": "Unauthorized: caller is not the verified vault creator"
                     }),
                     status_code=403,
                     mimetype="application/json"
                 )
             else:
-                logging.info(f"✅ Verified user {user_id} is the creator of the vault")
+                logging.info("Vault creator marker matched the authenticated caller")
         
         except Exception as ex:
             logging.error(f"Error processing vault info: {str(ex)}")
@@ -423,19 +437,29 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
                 status_code=500,
                 mimetype="application/json"
             )
+
+        if not await vault_manager.caller_has_rbac_authority(resource_uri, user_id):
+            logging.error("Caller lacks pre-existing RBAC delegation authority")
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "Unauthorized: caller lacks existing RBAC delegation authority"
+                }),
+                status_code=403,
+                mimetype="application/json"
+            )
         
         # Build fully-qualified role definition IDs from centralized constants
         owner_role_definition_id = f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleDefinitions/{OWNER_ROLE_ID}"
         admin_role_definition_id = f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/roleDefinitions/{KEY_VAULT_ADMINISTRATOR_ROLE_ID}"
         
         # Assign the Owner role to the user
-        logging.info(f"Attempting to assign Owner role to user {user_id}")
+        logging.info("Attempting to assign Owner role to authenticated caller")
         owner_success = await vault_manager.assign_role_to_user(
             resource_uri, owner_role_definition_id, user_id
         )
         
         # Assign the Key Vault Administrator role to the user
-        logging.info(f"Attempting to assign Key Vault Administrator role to user {user_id}")
+        logging.info("Attempting to assign Key Vault Administrator role to authenticated caller")
         admin_success = await vault_manager.assign_role_to_user(
             resource_uri, admin_role_definition_id, user_id
         )
@@ -481,7 +505,6 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
             "ownerRoleAssigned": owner_success,
             "adminRoleAssigned": admin_success,
             "resourceUri": resource_uri,
-            "userId": user_id,
             "isCreator": creator_id and creator_id.lower() == user_id.lower(),
             "storageAccounts": {
                 "discovered": len(storage_accounts),
@@ -491,7 +514,7 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
         }
         
         if owner_success and admin_success and storage_success:
-            logging.info(f"✅ Successfully assigned all vault and storage roles to user {user_id}")
+            logging.info("Successfully assigned all requested vault and storage roles")
             if storage_accounts:
                 logging.info(f"✅ Storage role assignments: {len(storage_accounts)} accounts processed")
             return func.HttpResponse(
@@ -500,7 +523,7 @@ async def direct_vault_rbac_processor(req: func.HttpRequest) -> func.HttpRespons
                 mimetype="application/json"
             )
         else:
-            logging.error(f"❌ Failed to assign one or more roles to user {user_id}")
+            logging.error("Failed to assign one or more requested roles")
             if not owner_success:
                 logging.error(f"Failed to assign Owner role")
             if not admin_success:

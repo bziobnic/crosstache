@@ -5,9 +5,7 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
-  pull-requests: read
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,8 +14,10 @@ jobs:
   verify-version:
     name: Verify Version Match
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Check Cargo.toml version matches tag
         run: |
@@ -38,8 +38,10 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: verify-version
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       
@@ -70,7 +72,7 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
@@ -84,6 +86,8 @@ jobs:
     name: Build and Upload (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     needs: create-release
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -106,11 +110,11 @@ jobs:
             binary-name: xv
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -123,18 +127,26 @@ jobs:
       - name: Install minisign (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          curl -sL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz | tar xz
+          curl -fsSLo minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz
+          echo "f0a0954413df8531befed169e447a66da6868d79052ed7e892e50a4291af7ae0  minisign.tar.gz" | sha256sum --check --strict
+          tar xzf minisign.tar.gz
           sudo cp -f minisign-linux/x86_64/minisign /usr/local/bin/
 
       - name: Install minisign (macOS)
         if: matrix.os == 'macos-latest'
-        run: brew install minisign
+        run: |
+          curl -fsSLo minisign.zip https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-macos.zip
+          echo "e7c410ae8b8960d7087392472b040bda9b2f307c76df0384ac37f9ad103fc893  minisign.zip" | shasum -a 256 --check
+          unzip -j minisign.zip '*/minisign' -d minisign-bin
+          chmod +x minisign-bin/minisign
+          echo "MINISIGN_BIN=./minisign-bin/minisign" >> "$GITHUB_ENV"
 
       - name: Install minisign (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          curl -sLO https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-win64.zip
+          curl -fsSLO https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-win64.zip
+          echo "b9c31c2c3034f81f0e5f5d92cbcc20e67a9671b6e5455661588638848dc58031  minisign-0.11-win64.zip" | sha256sum --check --strict
           unzip -j minisign-0.11-win64.zip -d minisign-bin
           echo "MINISIGN_BIN=./minisign-bin/minisign.exe" >> "$GITHUB_ENV"
 
@@ -191,7 +203,7 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
 
       - name: Upload Release Assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             ${{ matrix.archive-name }}

@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch, AsyncMock
 import asyncio
 import os
 import sys
+import json
 
 # Add the parent directory to the path so we can import our modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -33,24 +34,8 @@ class TestStorageRoleManager(unittest.TestCase):
         os.environ["AZURE_CLIENT_SECRET"] = "test-client-secret"
         
         # Mock Azure clients to avoid actual Azure calls during testing
-        with patch('StorageRoleManager.storage_role_manager.ClientSecretCredential'), \
-             patch('StorageRoleManager.storage_role_manager.GraphServiceClient'):
+        with patch('StorageRoleManager.storage_role_manager.ClientSecretCredential'):
             self.storage_manager = StorageRoleManager()
-    
-    def test_naming_convention_matching(self):
-        """Test storage account naming convention matching logic."""
-        vault_name = "myvault"
-        
-        # Test positive cases
-        self.assertTrue(self.storage_manager._matches_naming_convention("myvaultstorage", vault_name))
-        self.assertTrue(self.storage_manager._matches_naming_convention("myvaultstor", vault_name))
-        self.assertTrue(self.storage_manager._matches_naming_convention("stormyvault", vault_name))
-        self.assertTrue(self.storage_manager._matches_naming_convention("myvaultst", vault_name))
-        
-        # Test negative cases
-        self.assertFalse(self.storage_manager._matches_naming_convention("otherstorage", vault_name))
-        self.assertFalse(self.storage_manager._matches_naming_convention("randomname", vault_name))
-        self.assertFalse(self.storage_manager._matches_naming_convention("storage", vault_name))
     
     def test_vault_role_to_storage_role_mapping(self):
         """Test mapping of vault roles to storage roles."""
@@ -98,60 +83,23 @@ class TestStorageRoleManager(unittest.TestCase):
         expected = "12345678-1234-1234-1234-123456789abc"
         self.assertEqual(normalized, expected)
     
-    @patch('StorageRoleManager.storage_role_manager.StorageManagementClient')
-    def test_discover_storage_accounts_resource_group_strategy(self, mock_storage_client):
-        """Test storage account discovery using resource group strategy."""
-        # Mock storage account objects
-        mock_account1 = Mock()
-        mock_account1.id = "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.Storage/storageAccounts/account1"
-        mock_account1.name = "account1"
-        mock_account1.tags = {"AssociatedVault": "testvault"}
-        
-        mock_account2 = Mock()
-        mock_account2.id = "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.Storage/storageAccounts/testvaultstorage"
-        mock_account2.name = "testvaultstorage"
-        mock_account2.tags = {}
-        
-        # Configure mock client
-        mock_client_instance = Mock()
-        mock_client_instance.storage_accounts.list_by_resource_group.return_value = [mock_account1, mock_account2]
-        mock_storage_client.return_value = mock_client_instance
-        
-        # Test the discovery
+    def test_discover_uses_only_exact_administrator_configured_ids(self):
         vault_resource_id = "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.KeyVault/vaults/testvault"
-        
-        storage_accounts = asyncio.run(
-            self.storage_manager.discover_associated_storage_accounts(vault_resource_id)
-        )
-        
-        # Should find both accounts - one by tag, one by naming convention
-        self.assertEqual(len(storage_accounts), 2)
-        self.assertIn(mock_account1.id, storage_accounts)
-        self.assertIn(mock_account2.id, storage_accounts)
+        exact = "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.Storage/storageAccounts/exactaccount"
+        outside = "/subscriptions/test-sub/resourceGroups/other/providers/Microsoft.Storage/storageAccounts/outside"
+        bindings = json.dumps({vault_resource_id: [exact, outside, "not-a-resource-id", exact]})
+        with patch.dict(os.environ, {"VAULT_STORAGE_BINDINGS": bindings}):
+            storage_accounts = asyncio.run(
+                self.storage_manager.discover_associated_storage_accounts(vault_resource_id)
+            )
+        self.assertEqual(storage_accounts, [exact])
 
-    @patch('StorageRoleManager.storage_role_manager.StorageManagementClient')
-    def test_discover_skips_unassociated_accounts(self, mock_storage_client):
-        """Accounts with no explicit association must NOT be selected.
-
-        Regression test: discovery used to fall back to *all* storage accounts
-        in the resource group when nothing matched, which granted the caller
-        roles on unrelated accounts in shared resource groups.
-        """
-        mock_unrelated = Mock()
-        mock_unrelated.id = "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.Storage/storageAccounts/somethingelse"
-        mock_unrelated.name = "somethingelse"
-        mock_unrelated.tags = {}
-
-        mock_client_instance = Mock()
-        mock_client_instance.storage_accounts.list_by_resource_group.return_value = [mock_unrelated]
-        mock_storage_client.return_value = mock_client_instance
-
+    def test_discover_skips_unconfigured_accounts(self):
         vault_resource_id = "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.KeyVault/vaults/testvault"
-
-        storage_accounts = asyncio.run(
-            self.storage_manager.discover_associated_storage_accounts(vault_resource_id)
-        )
-
+        with patch.dict(os.environ, {"VAULT_STORAGE_BINDINGS": "{}"}):
+            storage_accounts = asyncio.run(
+                self.storage_manager.discover_associated_storage_accounts(vault_resource_id)
+            )
         self.assertEqual(storage_accounts, [])
 
     @patch('StorageRoleManager.storage_role_manager.StorageManagementClient')
@@ -179,8 +127,7 @@ class TestStorageRoleManagerAsync(unittest.IsolatedAsyncioTestCase):
         os.environ["AZURE_CLIENT_ID"] = "test-client-id"
         os.environ["AZURE_CLIENT_SECRET"] = "test-client-secret"
         
-        with patch('StorageRoleManager.storage_role_manager.ClientSecretCredential'), \
-             patch('StorageRoleManager.storage_role_manager.GraphServiceClient'):
+        with patch('StorageRoleManager.storage_role_manager.ClientSecretCredential'):
             self.storage_manager = StorageRoleManager()
     
     @patch('StorageRoleManager.storage_role_manager.AuthorizationManagementClient')

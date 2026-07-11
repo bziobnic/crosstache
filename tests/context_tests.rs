@@ -1,6 +1,8 @@
 mod common;
 
-use common::{parse_json_envelope, stderr_str, stdout_str, write_xv_toml, xv_isolated};
+use common::{
+    parse_json_envelope, stderr_str, stdout_str, write_xv_toml, xv_isolated, xv_isolated_local,
+};
 
 /// Fake Azure creds that satisfy config validation without hitting any real endpoint.
 /// Commands that only touch the filesystem (context init, env list) exit before
@@ -192,6 +194,39 @@ fn context_init_force_overwrites() {
     assert_eq!(out.status.code(), Some(0));
     let content = std::fs::read_to_string(temp.path().join(".xv.toml")).unwrap();
     assert!(content.contains("vault = \"v2\""));
+}
+
+#[test]
+#[cfg(unix)]
+fn context_init_force_refuses_symlinked_xv_toml() {
+    use std::os::unix::fs::symlink;
+
+    let (mut cmd, temp) = xv_isolated();
+    let outside = tempfile::NamedTempFile::new().expect("outside file");
+    std::fs::write(outside.path(), "must remain unchanged").expect("seed outside file");
+    symlink(outside.path(), temp.path().join(".xv.toml")).expect("create project symlink");
+
+    let out = cmd
+        .env("AZURE_SUBSCRIPTION_ID", FAKE_SUB)
+        .env("AZURE_TENANT_ID", FAKE_TENANT)
+        .args([
+            "context",
+            "init",
+            "--non-interactive",
+            "--force",
+            "--vault",
+            "v2",
+            "--resource-group",
+            "rg",
+        ])
+        .output()
+        .expect("spawn");
+
+    assert!(!out.status.success(), "symlink must be rejected");
+    assert_eq!(
+        std::fs::read_to_string(outside.path()).unwrap(),
+        "must remain unchanged"
+    );
 }
 
 #[test]
@@ -725,5 +760,30 @@ fn env_show_prints_active_env() {
     assert!(
         stdout.contains("vault-dev"),
         "expected vault in output: {stdout}"
+    );
+}
+
+#[test]
+fn malformed_project_config_blocks_secret_mutation() {
+    let (mut cmd, temp) = xv_isolated_local();
+    std::fs::write(
+        temp.path().join(".xv.toml"),
+        "[env.dev\nvault = \\\"wrong\\\"",
+    )
+    .expect("write malformed project config");
+
+    let out = cmd
+        .args(["set", "MUST_NOT_WRITE", "--value", "secret"])
+        .output()
+        .expect("spawn");
+
+    assert!(
+        !out.status.success(),
+        "a discovered malformed .xv.toml must fail closed instead of mutating the global default vault"
+    );
+    assert!(
+        stderr_str(&out).contains(".xv.toml parse error"),
+        "stderr must identify the malformed project config: {}",
+        stderr_str(&out)
     );
 }

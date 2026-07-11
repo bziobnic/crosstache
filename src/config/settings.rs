@@ -444,9 +444,9 @@ impl Config {
 
         let project_types = {
             let cwd = std::env::current_dir()?;
-            match project::find_project_config(&cwd).await {
-                Ok(Some((_, cfg))) => cfg.types,
-                _ => std::collections::HashMap::new(),
+            match project::find_project_config(&cwd).await? {
+                Some((_, cfg)) => cfg.types,
+                None => std::collections::HashMap::new(),
             }
         };
 
@@ -465,7 +465,7 @@ impl Config {
 
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
-        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+        if let Some((path, cfg)) = project::find_project_config(&cwd).await? {
             // resolve_env returns Err on unknown-env — propagate so the
             // user sees the helpful EnvNotDefined message with the list
             // of available envs. Ok(None) means the file defines zero
@@ -489,7 +489,7 @@ impl Config {
         }
 
         // 3. Check local/global context
-        let context_manager = ContextManager::load().await.unwrap_or_default();
+        let context_manager = ContextManager::load().await?;
         if let Some(vault_name) = context_manager.current_vault() {
             return Ok(vault_name.to_string());
         }
@@ -517,7 +517,7 @@ impl Config {
 
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
-        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+        if let Some((path, cfg)) = project::find_project_config(&cwd).await? {
             // Ok(None): file defines zero environments — no profile to
             // apply, fall through to context/config below (#331).
             if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
@@ -537,7 +537,7 @@ impl Config {
         }
 
         // 3. Check context
-        let context_manager = ContextManager::load().await.unwrap_or_default();
+        let context_manager = ContextManager::load().await?;
         if let Some(rg) = context_manager.current_resource_group() {
             return Ok(rg.to_string());
         }
@@ -568,7 +568,7 @@ impl Config {
 
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
-        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+        if let Some((path, cfg)) = project::find_project_config(&cwd).await? {
             // Ok(None): file defines zero environments — no profile to
             // apply, so there's simply no group default here (#331).
             if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
@@ -611,7 +611,7 @@ impl Config {
 
         // 2. Project config (.xv.toml) — walk up from cwd
         let cwd = std::env::current_dir()?;
-        if let Ok(Some((path, cfg))) = project::find_project_config(&cwd).await {
+        if let Some((path, cfg)) = project::find_project_config(&cwd).await? {
             // Ok(None): file defines zero environments — no profile to
             // apply, so there's simply no folder default here (#331).
             if let Some((name, profile)) = project::resolve_env(&cfg, self.env_flag.as_deref())? {
@@ -643,7 +643,7 @@ impl Config {
         }
 
         // 2. Check context
-        let context_manager = ContextManager::load().await.unwrap_or_default();
+        let context_manager = ContextManager::load().await?;
         if let Some(sub) = context_manager.current_subscription_id() {
             return Ok(sub.to_string());
         }

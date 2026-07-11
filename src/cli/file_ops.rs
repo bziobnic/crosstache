@@ -619,8 +619,7 @@ async fn execute_file_download_to_path(
             })?;
         }
     }
-    fs::write(&output_path, content)
-        .map_err(|e| CrosstacheError::config(format!("Failed to write file {output_path}: {e}")))?;
+    crate::utils::helpers::write_file_no_follow(Path::new(&output_path), &content, force)?;
     output::success(&format!("Successfully downloaded file '{name}'"));
 
     Ok(())
@@ -1619,12 +1618,8 @@ async fn execute_file_download_recursive(
                 .download_file(download_request, &NoopReporter)
                 .await
                 .and_then(|content| {
-                    std::fs::write(&local_path, content).map_err(|e| {
-                        CrosstacheError::config(format!(
-                            "Failed to write file {}: {e}",
-                            local_path_str
-                        ))
-                    })
+                    crate::utils::helpers::write_file_no_follow(&local_path, &content, force)
+                        .map(|_| ())
                 })
         };
 
@@ -1875,22 +1870,6 @@ async fn file_sync_delete_remote_not_local(
     Ok(())
 }
 
-/// Ensure parent directories exist for a sync download target.
-fn file_sync_ensure_parent_dirs(target: &std::path::Path) -> Result<()> {
-    use std::fs;
-    if let Some(parent) = target.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|e| {
-                CrosstacheError::config(format!(
-                    "Failed to create directory {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
-    }
-    Ok(())
-}
-
 /// Read local file, upload blob, align local mtime to server `last_modified`.
 async fn file_sync_perform_upload(
     blob_manager: &FileOps<'_>,
@@ -1934,10 +1913,8 @@ async fn file_sync_perform_download(
 ) -> Result<()> {
     use crate::blob::models::FileDownloadRequest;
     use crate::blob::sync;
-    use std::fs;
-    let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name);
+    let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name)?;
     sync_assert_safe_local_path(base_path, &target, blob_name)?;
-    file_sync_ensure_parent_dirs(&target)?;
     if !output_json && !is_tty() {
         println!("download: {blob_name} → {}", target.display());
     }
@@ -1947,10 +1924,8 @@ async fn file_sync_perform_download(
     let content = blob_manager
         .download_file(download_request, reporter)
         .await?;
-    fs::write(&target, content).map_err(|e| {
-        CrosstacheError::config(format!("Failed to write {}: {e}", target.display()))
-    })?;
-    sync::set_file_mtime_utc(&target, remote_info.last_modified)?;
+    let file = crate::utils::helpers::write_file_no_follow(&target, &content, true)?;
+    sync::set_file_mtime_utc_on_file(&file, &target, remote_info.last_modified)?;
     Ok(())
 }
 
@@ -2112,7 +2087,7 @@ async fn execute_file_sync(
             let mp = MultiProgressContext::new(remote_names.len() as u64, threshold, tty);
             for blob_name in &remote_names {
                 let remote_info = remote_by_name.get(blob_name).unwrap();
-                let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name);
+                let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name)?;
                 sync_assert_safe_local_path(base_path, &target, blob_name)?;
 
                 let need = if !target.exists() {
@@ -2221,7 +2196,7 @@ async fn execute_file_sync(
                     }
                     (false, true) => {
                         let remote_info = remote_by_name.get(blob_name).unwrap();
-                        let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name);
+                        let target = sync::local_path_from_blob(base_path, prefix_ref, blob_name)?;
                         sync_assert_safe_local_path(base_path, &target, blob_name)?;
                         if dry_run {
                             if !config.output_json {
@@ -2294,7 +2269,7 @@ async fn execute_file_sync(
                             }
                             BothAction::Download => {
                                 let target =
-                                    sync::local_path_from_blob(base_path, prefix_ref, blob_name);
+                                    sync::local_path_from_blob(base_path, prefix_ref, blob_name)?;
                                 sync_assert_safe_local_path(base_path, &target, blob_name)?;
                                 if dry_run {
                                     if !config.output_json {

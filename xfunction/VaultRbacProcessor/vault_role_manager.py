@@ -1,14 +1,12 @@
 import logging
 import uuid
 import os
-import json
 from azure.identity import ClientSecretCredential
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.keyvault import KeyVaultManagementClient
-from msgraph import GraphServiceClient
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError, ResourceExistsError
 from config import OWNER_ROLE_ID, KEY_VAULT_ADMINISTRATOR_ROLE_ID, AZURE_CONNECTION_TIMEOUT, AZURE_READ_TIMEOUT
-from utils.azure_helpers import is_guid, normalize_guid, detect_principal_type, get_principal_id_for_user, retry_async
+from utils.azure_helpers import is_guid, normalize_guid, retry_async
 
 class VaultRoleManager:
     """
@@ -30,12 +28,6 @@ class VaultRoleManager:
             tenant_id=tenant_id,
             client_id=client_id,
             client_secret=client_secret
-        )
-
-        # Initialize Graph client with proper scopes
-        self.graph_client = GraphServiceClient(
-            credentials=self.credential,
-            scopes=["https://graph.microsoft.com/.default"]
         )
 
     async def create_or_get_custom_role(self, vault_resource_id, role_name):
@@ -74,6 +66,47 @@ class VaultRoleManager:
             logging.error(f"Error getting role: {str(ex)}")
             return None
 
+    async def caller_has_rbac_authority(self, vault_resource_id, principal_id):
+        """Require existing RBAC delegation authority in addition to mutable tags."""
+        parts = vault_resource_id.split('/')
+        if len(parts) < 9 or parts[1].lower() != 'subscriptions' or parts[3].lower() != 'resourcegroups':
+            return False
+        subscription_id = parts[2]
+        resource_group = parts[4]
+        scopes = [
+            vault_resource_id,
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}",
+            f"/subscriptions/{subscription_id}",
+        ]
+        authority_roles = {
+            OWNER_ROLE_ID.lower(),
+            "f58310d9-a9f6-439a-9e8d-f62e7b41a168",
+            "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9",
+        }
+        try:
+            auth_client = AuthorizationManagementClient(
+                self.credential,
+                subscription_id,
+                connection_timeout=AZURE_CONNECTION_TIMEOUT,
+                read_timeout=AZURE_READ_TIMEOUT,
+            )
+            for scope in scopes:
+                assignments = auth_client.role_assignments.list_for_scope(
+                    scope=scope,
+                    filter="atScope()",
+                )
+                for assignment in assignments:
+                    role_id = (assignment.role_definition_id or "").rsplit('/', 1)[-1].lower()
+                    if (
+                        (assignment.principal_id or "").lower() == principal_id.lower()
+                        and role_id in authority_roles
+                    ):
+                        return True
+            return False
+        except Exception as ex:
+            logging.error("Failed to verify caller RBAC authority: %s", type(ex).__name__)
+            return False
+
     @retry_async
     async def assign_role_to_user(self, vault_resource_id, role_definition_id, principal_id):
         """
@@ -90,18 +123,15 @@ class VaultRoleManager:
             parts = vault_resource_id.split('/')
             subscription_id = parts[2]
 
-            # Check if principal_id is a GUID or an email address
+            # The authenticated endpoint supplies an Entra object ID. Refuse
+            # alternate identifiers instead of performing directory-wide Graph lookups.
             if not is_guid(principal_id):
-                # Convert UPN to object ID if it's not a GUID
-                object_id = await get_principal_id_for_user(self.credential, principal_id)
-                if not object_id:
-                    logging.error(f"Could not resolve principal ID for {principal_id}")
-                    return False
-                principal_id = object_id
+                logging.error("Authenticated principal ID is not a GUID")
+                return False
 
             # Format principal_id correctly - ensure it has hyphens
             principal_id = normalize_guid(principal_id)
-            logging.info(f"Normalized principal ID: {principal_id}")
+            logging.info("Validated and normalized authenticated principal ID")
 
             # Get the authorization client
             auth_client = AuthorizationManagementClient(self.credential, subscription_id, connection_timeout=AZURE_CONNECTION_TIMEOUT, read_timeout=AZURE_READ_TIMEOUT)
@@ -128,12 +158,12 @@ class VaultRoleManager:
                     # Check if user already has Owner role
                     if OWNER_ROLE_ID in assignment.role_definition_id:
                         has_owner_role = True
-                        logging.info(f"Principal {principal_id} already has Owner role")
+                        logging.info("Authenticated principal already has Owner role")
 
                     # Check if the exact role is already assigned
                     if assignment.role_definition_id == role_definition_id:
                         role_already_assigned = True
-                        logging.info(f"Role {role_definition_id} already assigned to principal {principal_id}")
+                        logging.info("Requested role is already assigned to authenticated principal")
 
                     # If assigning Owner role, track other role assignments for removal
                     elif is_owner_role:
@@ -141,7 +171,7 @@ class VaultRoleManager:
 
             # If assigning a non-Owner role but user already has Owner role, we still need to assign Key Vault Administrator
             if not is_owner_role and has_owner_role and not is_admin_role:
-                logging.info(f"Skipping non-admin role assignment as principal {principal_id} already has Owner role")
+                logging.info("Skipping redundant non-admin role assignment")
                 return True
 
             # For Key Vault Administrator role, we always want to assign it even if Owner role exists
@@ -150,7 +180,7 @@ class VaultRoleManager:
 
             # If role already assigned, nothing more to do
             if role_already_assigned:
-                logging.info(f"Role assignment already exists for principal {principal_id}")
+                logging.info("Requested role assignment already exists")
 
                 # If Owner role is assigned but there are redundant roles, remove them
                 if is_owner_role and redundant_assignments:
@@ -170,11 +200,10 @@ class VaultRoleManager:
             # Create a unique name for the role assignment
             role_assignment_name = str(uuid.uuid4())
 
-            # Try to determine principal type (User/ServicePrincipal/Group)
-            principal_type = await detect_principal_type(self.credential, principal_id)
+            principal_type = "User"
 
             # Create the role assignment with principalType specified to avoid replication delay issues
-            logging.info(f"Assigning role to principal {principal_id} with type {principal_type}")
+            logging.info("Assigning requested role to authenticated principal")
             result = auth_client.role_assignments.create(
                 scope=vault_resource_id,
                 role_assignment_name=role_assignment_name,
@@ -202,12 +231,12 @@ class VaultRoleManager:
             return True
 
         except ResourceExistsError:
-            logging.info(f"Role assignment for {principal_id} already exists")
+            logging.info("Requested role assignment already exists")
             return True
         except HttpResponseError as ex:
             error_code = getattr(getattr(ex, 'error', None), 'code', None) or ""
             if error_code == "RoleAssignmentExists" or "already exists" in str(ex):
-                logging.info(f"Role assignment for {principal_id} already exists")
+                logging.info("Requested role assignment already exists")
                 return True
             elif error_code == "PrincipalNotFound" or "PrincipalNotFound" in str(ex):
                 logging.error(f"Principal not found error (replication delay or invalid principal): {str(ex)}")
@@ -261,7 +290,7 @@ class VaultRoleManager:
                 }
             }
 
-            logging.info(f"Retrieved vault info for {vault_name} with tags: {json.dumps(vault_info['tags'])}")
+            logging.info("Retrieved required vault authorization metadata")
             return vault_info
 
         except ResourceNotFoundError:

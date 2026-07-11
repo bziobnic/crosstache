@@ -1,65 +1,57 @@
-# Set these variables before running the script
-$FunctionAppName = "fa-user-keyvault"
-$ResourceGroup = "Vaults"
+param(
+    [string]$FunctionAppName = "fa-user-keyvault",
+    [string]$ResourceGroup = "Vaults"
+)
 
-# Check if Azure CLI is installed
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+function Invoke-Native {
+    param([Parameter(Mandatory=$true)][scriptblock]$Command)
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native command failed with exit code $LASTEXITCODE"
+    }
+}
+
 try {
     $null = Get-Command az -ErrorAction Stop
-}
-catch {
-    Write-Error "Azure CLI is not installed. Please install it first."
-    exit 1
-}
-
-# Check if Azure Functions Core Tools is installed
-try {
     $null = Get-Command func -ErrorAction Stop
+    $null = Get-Command python -ErrorAction Stop
+    Invoke-Native { az account show --only-show-errors --output none }
+
+    # The function host files and requirements.txt live one directory above
+    # this script. Publishing from scripts/ can report success without finding
+    # the intended Azure Functions project.
+    $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+    if (-not (Test-Path (Join-Path $projectRoot "host.json") -PathType Leaf)) {
+        throw "Azure Functions project root is missing host.json: $projectRoot"
+    }
+    if (-not (Test-Path (Join-Path $projectRoot "requirements.txt") -PathType Leaf)) {
+        throw "Azure Functions project root is missing requirements.txt: $projectRoot"
+    }
+
+    Push-Location $projectRoot
+    try {
+        Write-Host "Installing required Python packages..."
+        Invoke-Native { python -m pip install -r requirements.txt }
+
+        Write-Host "Deploying function app to Azure..."
+        Invoke-Native { func azure functionapp publish $FunctionAppName --python }
+
+        Write-Host "Verifying deployment..."
+        $hostName = az functionapp show --name $FunctionAppName --resource-group $ResourceGroup --query defaultHostName --output tsv --only-show-errors
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($hostName)) {
+            throw "Function App verification failed"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    Write-Host "Deployment complete: https://$hostName" -ForegroundColor Green
 }
 catch {
-    Write-Error "Azure Functions Core Tools is not installed. Please install it first."
+    Write-Error "Deployment failed: $($_.Exception.Message)"
     exit 1
 }
-
-# Ensure user is logged in
-try {
-    $null = az account show
-}
-catch {
-    Write-Error "Not logged in to Azure. Please run 'az login' first."
-    exit 1
-}
-
-# Navigate to the vaultserver directory
-$ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location -Path $ScriptPath
-
-# Install dependencies
-Write-Host "Installing required Python packages..."
-pip install -r requirements.txt
-
-# Deploy the function to Azure
-Write-Host "Deploying function app to Azure..."
-func azure functionapp publish $FunctionAppName --python
-
-# Verify deployment
-Write-Host "Verifying deployment..."
-az functionapp show `
-  --name $FunctionAppName `
-  --resource-group $ResourceGroup `
-  --query defaultHostName `
-  --output tsv
-
-Write-Host "---------------------------------------------"
-Write-Host "Deployment complete!"
-Write-Host "You can test the function by creating a Key Vault with RBAC authorization enabled:"
-Write-Host ""
-Write-Host "az keyvault create \"
-Write-Host "  --name <vault-name> \"
-Write-Host "  --resource-group <resource-group> \"
-Write-Host "  --location <location> \"
-Write-Host "  --enable-rbac-authorization true"
-Write-Host ""
-Write-Host "Then verify the role assignment was created using:"
-Write-Host ""
-Write-Host "az role assignment list --scope /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.KeyVault/vaults/<vault-name>"
-Write-Host "---------------------------------------------" 

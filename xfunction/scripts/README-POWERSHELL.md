@@ -1,81 +1,20 @@
-# Key Vault RBAC Processor - PowerShell Scripts
+# Key Vault RBAC Processor PowerShell Scripts
 
-This directory contains PowerShell scripts to set up and deploy the Azure Function that automatically assigns RBAC permissions to Key Vault creators.
+The supported provisioning workflow is `python -m installer install` from the `xfunction` directory. It persists exact resource ownership IDs and can safely resume or uninstall.
 
-## Prerequisites
+The remaining PowerShell scripts are narrow maintenance helpers:
 
-- Azure subscription
-- Azure CLI installed and logged in
-- Azure Functions Core Tools (if developing locally)
-- PowerShell 5.1 or higher
-- Python 3.8+
+- `setup-app-registration.ps1` creates a fresh app registration without Graph permissions and applies credentials through a private temporary file.
+- `deploy-function.ps1` publishes from the actual `xfunction` project root and fails on every native-command error.
+- `verify-deployment.ps1` verifies the deployed HTTP Function inventory, exact constrained resource-group RBAC assignment, required settings, and absence of the obsolete Event Grid trigger.
+- `update-event-grid-filter.ps1` and `fix-event-grid-endpoint.ps1` are intentionally disabled because no Event Grid-triggered Function is deployed.
+- `configure-graph-permissions.ps1` is a no-op because Graph permissions are not required.
+- `setup-managed-identity.ps1` is intentionally disabled because its old workflow granted an unused identity subscription-wide administration.
 
-## Available Scripts
-
-### 1. setup-managed-identity.ps1
-
-This script creates the Azure resources and configures the Managed Identity for the function app:
-
-- Creates a resource group (if it doesn't exist)
-- Creates a storage account
-- Creates a function app with system-assigned managed identity
-- Assigns necessary RBAC permissions to the managed identity
-- Creates an Event Grid subscription to trigger the function
-
-To run:
+Example deployment and verification:
 
 ```powershell
-.\setup-managed-identity.ps1
+python -m installer install
+./deploy-function.ps1 -FunctionAppName <name> -ResourceGroup <group>
+./verify-deployment.ps1 -FunctionAppName <name> -ResourceGroup <group> -SubscriptionId <subscription>
 ```
-
-### 2. deploy-function.ps1
-
-This script deploys the function code to the Azure Function App:
-
-- Installs required Python packages
-- Deploys the function code to Azure
-- Verifies the deployment
-
-To run:
-
-```powershell
-.\deploy-function.ps1
-```
-
-### 3. test-function.ps1
-
-This script tests the function by creating a Key Vault with RBAC authorization enabled:
-
-- Creates a new Key Vault with a unique name
-- Enables RBAC authorization on the vault
-- Waits for the function to process
-- Checks the role assignments on the vault
-
-To run:
-
-```powershell
-.\test-function.ps1
-```
-
-## Usage Workflow
-
-1. First, customize the variables at the top of each script with your own values
-2. Run `setup-managed-identity.ps1` to create all Azure resources
-3. Run `deploy-function.ps1` to deploy the function code
-4. Run `test-function.ps1` to test the function by creating a Key Vault
-
-## Monitoring
-
-To view the function logs after deployment:
-
-```powershell
-az functionapp logs tail --name fa-user-keyvault --resource-group Vaults
-```
-
-## Cleanup
-
-To clean up all resources when you're done testing:
-
-```powershell
-az group delete --name Vaults --yes
-``` 

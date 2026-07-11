@@ -277,9 +277,7 @@ fn known_backend_names(config: &Config) -> Vec<String> {
 /// secret-resolution seam uses [`resolve_workspace`] instead.
 pub async fn resolve_configured_workspace(config: &Config) -> Result<Option<Workspace>> {
     let cwd = std::env::current_dir()?;
-    let context_manager = crate::config::ContextManager::load()
-        .await
-        .unwrap_or_default();
+    let context_manager = crate::config::ContextManager::load().await?;
     resolve_configured_workspace_from(config, Some(&cwd), &context_manager).await
 }
 
@@ -310,9 +308,7 @@ pub async fn resolve_workspace(config: &Config) -> Result<Option<Workspace>> {
     // ever `None` in tests, which can't safely touch the process-global
     // cwd) — production always supplies `Some` here or fails loud.
     let cwd = std::env::current_dir()?;
-    let context_manager = crate::config::ContextManager::load()
-        .await
-        .unwrap_or_default();
+    let context_manager = crate::config::ContextManager::load().await?;
     resolve_workspace_from(config, Some(&cwd), &context_manager).await
 }
 
@@ -347,8 +343,7 @@ async fn resolve_configured_workspace_from(
     // workspace here would let a secret command target personal vaults
     // inside a project directory that clearly intends project-scoped ones.
     if let Some(cwd) = cwd {
-        if let Ok(Some((_path, proj_cfg))) = crate::config::project::find_project_config(cwd).await
-        {
+        if let Some((_path, proj_cfg)) = crate::config::project::find_project_config(cwd).await? {
             if let Some((_name, profile)) =
                 crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())?
             {

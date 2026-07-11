@@ -5,7 +5,6 @@ import json
 from azure.identity import ClientSecretCredential
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.storage import StorageManagementClient
-from msgraph import GraphServiceClient
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError, ResourceExistsError
 from config import (
     OWNER_ROLE_ID,
@@ -16,7 +15,7 @@ from config import (
     AZURE_CONNECTION_TIMEOUT,
     AZURE_READ_TIMEOUT,
 )
-from utils.azure_helpers import is_guid, normalize_guid, detect_principal_type, get_principal_id_for_user, retry_async
+from utils.azure_helpers import is_guid, normalize_guid, retry_async
 
 class StorageRoleManager:
     """
@@ -40,15 +39,9 @@ class StorageRoleManager:
             client_secret=client_secret
         )
 
-        # Initialize Graph client with proper scopes
-        self.graph_client = GraphServiceClient(
-            credentials=self.credential,
-            scopes=["https://graph.microsoft.com/.default"]
-        )
-
     async def discover_associated_storage_accounts(self, vault_resource_id):
         """
-        Discover storage accounts associated with a given vault using multiple strategies.
+        Resolve administrator-configured exact storage resource IDs for a vault.
 
         :param vault_resource_id: The resource ID of the Key Vault
         :return: List of storage account resource IDs
@@ -63,80 +56,42 @@ class StorageRoleManager:
 
             subscription_id = parts[2]
             resource_group = parts[4]
-            vault_name = parts[8]
-
-            logging.info(f"Discovering storage accounts for vault {vault_name} in resource group {resource_group}")
-
-            # Initialize Storage Management client
-            storage_client = StorageManagementClient(self.credential, subscription_id, connection_timeout=AZURE_CONNECTION_TIMEOUT, read_timeout=AZURE_READ_TIMEOUT)
-
-            # Strategy 1: Find storage accounts in the same resource group
-            storage_accounts = []
-            try:
-                accounts_in_rg = list(storage_client.storage_accounts.list_by_resource_group(resource_group))
-                logging.info(f"Found {len(accounts_in_rg)} storage accounts in resource group {resource_group}")
-
-                for account in accounts_in_rg:
-                    # Strategy 2: Check for tag-based association
-                    if account.tags and account.tags.get('AssociatedVault') == vault_name:
-                        logging.info(f"Found storage account {account.name} linked via AssociatedVault tag")
-                        storage_accounts.append(account.id)
-                        continue
-
-                    # Strategy 3: Check naming convention
-                    if self._matches_naming_convention(account.name, vault_name):
-                        logging.info(f"Found storage account {account.name} linked via naming convention")
-                        storage_accounts.append(account.id)
-                        continue
-
-                # Never broaden to unassociated accounts: granting roles on every
-                # storage account in a shared resource group would hand the caller
-                # access far beyond the vault relationship that was verified.
-                if not storage_accounts and accounts_in_rg:
-                    logging.warning(
-                        "No storage accounts explicitly associated with vault %s "
-                        "(via AssociatedVault tag or naming convention); skipping "
-                        "storage role assignment for the %d unassociated account(s) "
-                        "in resource group %s",
-                        vault_name, len(accounts_in_rg), resource_group,
-                    )
-
-            except Exception as ex:
-                logging.error(f"Error listing storage accounts in resource group: {str(ex)}")
+            raw_bindings = os.environ.get("VAULT_STORAGE_BINDINGS", "{}")
+            bindings = json.loads(raw_bindings)
+            if not isinstance(bindings, dict):
+                logging.error("VAULT_STORAGE_BINDINGS must be a JSON object")
                 return []
 
-            logging.info(f"Discovered {len(storage_accounts)} associated storage accounts")
+            configured = next(
+                (value for key, value in bindings.items() if key.rstrip('/').lower() == vault_resource_id.rstrip('/').lower()),
+                [],
+            )
+            if not isinstance(configured, list):
+                logging.error("Configured storage binding must be a list of exact resource IDs")
+                return []
+
+            required_prefix = (
+                f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+                "/providers/Microsoft.Storage/storageAccounts/"
+            )
+            storage_accounts = []
+            for resource_id in configured:
+                if not isinstance(resource_id, str):
+                    logging.error("Ignoring non-string storage resource binding")
+                    continue
+                account_name = resource_id[len(required_prefix):] if resource_id.lower().startswith(required_prefix.lower()) else ""
+                if not account_name or '/' in account_name:
+                    logging.error("Ignoring storage binding outside the validated resource group")
+                    continue
+                if resource_id.lower() not in {item.lower() for item in storage_accounts}:
+                    storage_accounts.append(resource_id)
+
+            logging.info("Resolved %d administrator-configured storage binding(s)", len(storage_accounts))
             return storage_accounts
 
         except Exception as ex:
             logging.error(f"Error discovering storage accounts: {str(ex)}")
             return []
-
-    def _matches_naming_convention(self, storage_name, vault_name):
-        """
-        Check if storage account name matches naming convention with vault name.
-
-        :param storage_name: Name of the storage account
-        :param vault_name: Name of the vault
-        :return: True if matches naming convention
-        """
-        # Convert to lowercase for comparison (Azure storage names are lowercase)
-        storage_lower = storage_name.lower()
-        vault_lower = vault_name.lower()
-
-        # Common patterns: {vault}storage, {vault}stor, stor{vault}
-        patterns = [
-            f"{vault_lower}storage",
-            f"{vault_lower}stor",
-            f"stor{vault_lower}",
-            f"{vault_lower}st"
-        ]
-
-        for pattern in patterns:
-            if pattern in storage_lower:
-                return True
-
-        return False
 
     async def get_storage_role_assignments_for_vault_role(self, vault_role_id):
         """
@@ -183,7 +138,7 @@ class StorageRoleManager:
             storage_name = storage_resource_id.split('/')[-1]
             results[storage_name] = {}
 
-            logging.info(f"Assigning storage roles to {storage_name} for principal {principal_id}")
+            logging.info(f"Assigning storage roles on associated account {storage_name}")
 
             # Extract subscription ID for role definition formatting
             subscription_id = storage_resource_id.split('/')[2]
@@ -219,12 +174,8 @@ class StorageRoleManager:
 
             # Normalize principal ID
             if not is_guid(principal_id):
-                # Convert UPN to object ID if needed
-                object_id = await get_principal_id_for_user(self.credential, principal_id)
-                if not object_id:
-                    logging.error(f"Could not resolve principal ID for {principal_id}")
-                    return False
-                principal_id = object_id
+                logging.error("Authenticated principal ID is not a GUID")
+                return False
 
             principal_id = normalize_guid(principal_id)
 
@@ -240,16 +191,15 @@ class StorageRoleManager:
             for assignment in assignments:
                 if (assignment.principal_id == principal_id and
                     assignment.role_definition_id == role_definition_id):
-                    logging.info(f"Role {role_id} already assigned to principal {principal_id} for storage account")
+                    logging.info("Requested storage role is already assigned")
                     return True
 
-            # Detect principal type
-            principal_type = await detect_principal_type(self.credential, principal_id)
+            principal_type = "User"
 
             # Create role assignment
             role_assignment_name = str(uuid.uuid4())
 
-            logging.info(f"Assigning storage role {role_id} to principal {principal_id}")
+            logging.info("Assigning requested storage role to authenticated principal")
             result = auth_client.role_assignments.create(
                 scope=storage_resource_id,
                 role_assignment_name=role_assignment_name,
@@ -326,7 +276,7 @@ class StorageRoleManager:
                 }
             }
 
-            logging.info(f"Retrieved storage account info for {storage_name} with tags: {json.dumps(account_info['tags'])}")
+            logging.info(f"Retrieved required metadata for associated storage account {storage_name}")
             return account_info
 
         except ResourceNotFoundError:

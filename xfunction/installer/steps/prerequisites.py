@@ -69,6 +69,13 @@ def run(config: InstallerConfig, az: AzCli) -> dict:
         result["subscription_name"] = sub_name
         result["subscription_id"] = sub_id
         result["tenant_id"] = account.get("tenantId", "")
+        signed_in_user = az.run("ad", "signed-in-user", "show")
+        principal_id = signed_in_user.get("id", "") if isinstance(signed_in_user, dict) else ""
+        if not principal_id:
+            raise RuntimeError(
+                "Installer requires an interactive signed-in user object ID for constrained RBAC delegation"
+            )
+        result["principal_id"] = principal_id
         success(f"Logged in as {user_name}")
         success(f"Subscription: {sub_name} ({sub_id})")
     except (AzAuthError, Exception):

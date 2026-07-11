@@ -1,163 +1,101 @@
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$ResourceGroup,
-    
-    [Parameter(Mandatory=$true)]
-    [string]$FunctionAppName,
-    
-    [Parameter(Mandatory=$true)]
-    [string]$SubscriptionId
+    [Parameter(Mandatory=$true)][string]$ResourceGroup,
+    [Parameter(Mandatory=$true)][string]$FunctionAppName,
+    [Parameter(Mandatory=$true)][string]$SubscriptionId
 )
 
-# Ensure we're logged in and in the correct subscription
-Write-Host "Verifying Azure CLI login and subscription..."
-$currentContext = az account show --query id -o tsv
-if ($currentContext -ne $SubscriptionId) {
-    Write-Error "Not logged in to the correct subscription. Expected: $SubscriptionId, Current: $currentContext"
-    exit 1
-}
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+$script:ErrorCount = 0
+$script:WarningCount = 0
 
-$errors = 0
-$warnings = 0
-
-# Function to standardize status output
 function Write-Status {
-    param(
-        [string]$Component,
-        [string]$Status,
-        [string]$Details = ""
-    )
-    
-    $color = "Green"
-    if ($Status -eq "WARNING") { 
-        $color = "Yellow"
-        $global:warnings++
-    }
-    elseif ($Status -eq "ERROR") { 
-        $color = "Red"
-        $global:errors++
-    }
-    
-    Write-Host "[$Component] " -NoNewline
-    Write-Host $Status -ForegroundColor $color -NoNewline
-    if ($Details) {
-        Write-Host ": $Details"
-    } else {
-        Write-Host ""
-    }
+    param([string]$Component, [string]$Status, [string]$Details = "")
+    if ($Status -eq "ERROR") { $script:ErrorCount++ }
+    if ($Status -eq "WARNING") { $script:WarningCount++ }
+    $color = if ($Status -eq "ERROR") { "Red" } elseif ($Status -eq "WARNING") { "Yellow" } else { "Green" }
+    Write-Host "[$Component] $Status$(if ($Details) { ": $Details" })" -ForegroundColor $color
 }
 
-# Check Function App existence and status
-Write-Host "`nChecking Function App..."
-$functionApp = az functionapp show --name $FunctionAppName --resource-group $ResourceGroup 2>$null | ConvertFrom-Json
-if ($functionApp) {
-    Write-Status "Function App" "OK" "Found $FunctionAppName"
-    
-    # Check if function app is running
-    $state = $functionApp.state
-    if ($state -eq "Running") {
-        Write-Status "Function App State" "OK" "Running"
-    } else {
-        Write-Status "Function App State" "WARNING" "Not running (State: $state)"
+function Invoke-AzJson {
+    param([Parameter(Mandatory=$true)][scriptblock]$Command)
+    $raw = & $Command
+    if ($LASTEXITCODE -ne 0) { throw "Azure CLI command failed with exit code $LASTEXITCODE" }
+    return $raw | ConvertFrom-Json
+}
+
+try {
+    $currentSubscription = az account show --query id --output tsv --only-show-errors
+    if ($LASTEXITCODE -ne 0 -or $currentSubscription -ne $SubscriptionId) {
+        throw "Expected subscription $SubscriptionId, current subscription is $currentSubscription"
     }
-    
-    # Check managed identity
-    $identity = $functionApp.identity
-    if ($identity.type -eq "SystemAssigned") {
-        Write-Status "Managed Identity" "OK" "System assigned identity enabled"
-        $principalId = $identity.principalId
-        
-        # Check RBAC assignments
-        Write-Host "`nChecking RBAC assignments..."
-        $roleAssignments = az role assignment list --assignee $principalId | ConvertFrom-Json
-        
-        $hasKeyVaultAdmin = $false
-        foreach ($role in $roleAssignments) {
-            if ($role.roleDefinitionName -eq "Key Vault Administrator") {
-                $hasKeyVaultAdmin = $true
-                break
+
+    $functionApp = Invoke-AzJson { az functionapp show --name $FunctionAppName --resource-group $ResourceGroup --only-show-errors }
+    Write-Status "Function App" "OK" "Found $FunctionAppName"
+    if ($functionApp.state -eq "Running") { Write-Status "Function App State" "OK" "Running" }
+    else { Write-Status "Function App State" "ERROR" "Expected Running, got $($functionApp.state)" }
+
+    $functionInventory = @(Invoke-AzJson { az functionapp function list --name $FunctionAppName --resource-group $ResourceGroup --only-show-errors })
+    $directFunction = $functionInventory | Where-Object {
+        ([string]$_.name).Split('/')[-1] -eq "DirectVaultRbacProcessor"
+    } | Select-Object -First 1
+    if ($null -ne $directFunction) { Write-Status "Function Inventory" "OK" "DirectVaultRbacProcessor is deployed" }
+    else { Write-Status "Function Inventory" "ERROR" "DirectVaultRbacProcessor is not deployed" }
+
+    $settings = @(Invoke-AzJson { az functionapp config appsettings list --name $FunctionAppName --resource-group $ResourceGroup --only-show-errors })
+    $requiredSettings = @("FUNCTIONS_EXTENSION_VERSION", "FUNCTIONS_WORKER_RUNTIME", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "ALLOWED_RESOURCE_GROUP_ID", "ALLOWED_PRINCIPAL_ID")
+    foreach ($name in $requiredSettings) {
+        $setting = $settings | Where-Object { $_.name -eq $name } | Select-Object -First 1
+        if ($null -ne $setting -and -not [string]::IsNullOrWhiteSpace([string]$setting.value)) {
+            Write-Status "App Setting" "OK" "$name is configured"
+        } else {
+            Write-Status "App Setting" "ERROR" "Missing required setting: $name"
+        }
+    }
+
+    $clientId = ($settings | Where-Object { $_.name -eq "AZURE_CLIENT_ID" } | Select-Object -First 1).value
+    $principalId = az ad sp show --id $clientId --query id --output tsv --only-show-errors
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($principalId)) {
+        Write-Status "Service Principal" "ERROR" "Cannot resolve AZURE_CLIENT_ID"
+    } else {
+        $expectedScope = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
+        $assignments = @(Invoke-AzJson { az role assignment list --assignee-object-id $principalId --scope $expectedScope --include-inherited false --only-show-errors })
+        foreach ($requiredRole in @("Role Based Access Control Administrator", "Reader")) {
+            $match = $assignments | Where-Object { $_.roleDefinitionName -eq $requiredRole -and $_.scope -ieq $expectedScope } | Select-Object -First 1
+            if ($null -eq $match) {
+                Write-Status "RBAC Role" "ERROR" "Missing $requiredRole at $expectedScope"
+            } elseif ($requiredRole -eq "Role Based Access Control Administrator") {
+                $allowedPrincipalId = ($settings | Where-Object { $_.name -eq "ALLOWED_PRINCIPAL_ID" } | Select-Object -First 1).value
+                $requiredRoleIds = @(
+                    "8e3af657-a8ff-443c-a75c-2fe8c4bcb635",
+                    "00482a5a-887f-4fb3-b363-3b7fe8e74483",
+                    "17d1049b-9a84-46fb-8f53-869881c3d3ab",
+                    "b7e6dc6d-f1e8-4753-8033-0f276bb0955b",
+                    "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+                )
+                $conditionText = [string]$match.condition
+                $conditionValid = $match.conditionVersion -eq "2.0" -and $conditionText -match [regex]::Escape($allowedPrincipalId)
+                foreach ($roleId in $requiredRoleIds) { $conditionValid = $conditionValid -and $conditionText.Contains($roleId) }
+                if ($conditionValid) { Write-Status "RBAC Role" "OK" "RBAC delegation has exact principal and role constraints" }
+                else { Write-Status "RBAC Role" "ERROR" "RBAC delegation condition is missing or broader than expected" }
+            } else {
+                Write-Status "RBAC Role" "OK" "$requiredRole at exact resource-group scope"
             }
         }
-        
-        if ($hasKeyVaultAdmin) {
-            Write-Status "RBAC Roles" "OK" "Has Key Vault Administrator role"
-        } else {
-            Write-Status "RBAC Roles" "ERROR" "Missing Key Vault Administrator role"
-        }
-    } else {
-        Write-Status "Managed Identity" "ERROR" "System assigned identity not enabled"
     }
-} else {
-    Write-Status "Function App" "ERROR" "Function App $FunctionAppName not found"
+
+    # The deployed architecture exposes an authenticated HTTP trigger. A
+    # legacy subscription-level Event Grid trigger would bypass that request
+    # boundary and references a function that no longer exists.
+    $sourceScope = "/subscriptions/$SubscriptionId"
+    $null = az eventgrid event-subscription show --name KeyVaultCreationEvents --source-resource-id $sourceScope --only-show-errors 2>$null
+    if ($LASTEXITCODE -eq 0) { Write-Status "Legacy Event Grid" "ERROR" "Obsolete KeyVaultCreationEvents subscription is still active" }
+    else { Write-Status "Legacy Event Grid" "OK" "No obsolete subscription-level trigger" }
+}
+catch {
+    Write-Status "Verification" "ERROR" $_.Exception.Message
 }
 
-# Check Event Grid subscription
-Write-Host "`nChecking Event Grid subscription..."
-$eventSub = az eventgrid event-subscription show --name "KeyVaultCreationEvents" --source-resource-id "/subscriptions/$SubscriptionId" 2>$null | ConvertFrom-Json
-if ($eventSub) {
-    Write-Status "Event Grid Sub" "OK" "Found KeyVaultCreationEvents subscription"
-    
-    # Verify endpoint
-    $expectedEndpoint = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Web/sites/$FunctionAppName/functions/VaultRbacProcessor"
-    if ($eventSub.destination.resourceId -eq $expectedEndpoint) {
-        Write-Status "Event Grid Endpoint" "OK" "Correctly configured to VaultRbacProcessor"
-    } else {
-        Write-Status "Event Grid Endpoint" "ERROR" "Incorrect endpoint configuration. Expected: $expectedEndpoint, Got: $($eventSub.destination.resourceId)"
-    }
-    
-    # Verify filters
-    $filters = $eventSub.filter.advancedFilters
-    $hasCorrectFilter = $false
-    foreach ($filter in $filters) {
-        if ($filter.operatorType -eq "StringContains" -and 
-            $filter.key -eq "data.operationName" -and 
-            $filter.values -contains "Microsoft.KeyVault/vaults/write") {
-            $hasCorrectFilter = $true
-            break
-        }
-    }
-    
-    if ($hasCorrectFilter) {
-        Write-Status "Event Grid Filter" "OK" "Correctly configured for Key Vault creation events"
-    } else {
-        Write-Status "Event Grid Filter" "ERROR" "Missing or incorrect event filter configuration"
-    }
-} else {
-    Write-Status "Event Grid Sub" "ERROR" "Event Grid subscription not found"
-}
-
-# Check Function App application settings
-Write-Host "`nChecking Function App settings..."
-$appSettings = az functionapp config appsettings list --name $FunctionAppName --resource-group $ResourceGroup | ConvertFrom-Json
-
-# Check for required settings (add any specific settings your function needs)
-$requiredSettings = @(
-    "FUNCTIONS_EXTENSION_VERSION",
-    "FUNCTIONS_WORKER_RUNTIME"
-)
-
-foreach ($setting in $requiredSettings) {
-    if ($appSettings.name -contains $setting) {
-        Write-Status "App Setting" "OK" "$setting is configured"
-    } else {
-        Write-Status "App Setting" "ERROR" "Missing required setting: $setting"
-    }
-}
-
-# Summary
-Write-Host "`n----------------------------------------"
-Write-Host "Verification Summary:"
-Write-Host "----------------------------------------"
-Write-Host "Total Errors: $errors"
-Write-Host "Total Warnings: $warnings"
-
-if ($errors -gt 0) {
-    Write-Host "`nDeployment verification failed with $errors errors and $warnings warnings." -ForegroundColor Red
-    exit 1
-} elseif ($warnings -gt 0) {
-    Write-Host "`nDeployment verification completed with $warnings warnings." -ForegroundColor Yellow
-    exit 0
-} else {
-    Write-Host "`nDeployment verification completed successfully!" -ForegroundColor Green
-    exit 0
-}
+Write-Host "Verification summary: $script:ErrorCount errors, $script:WarningCount warnings"
+if ($script:ErrorCount -gt 0) { exit 1 }
+exit 0

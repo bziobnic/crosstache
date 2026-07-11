@@ -13,6 +13,20 @@ pub const SYNC_MTIME_EPSILON_SECS: i64 = 2;
 /// Set the local file's modification time to match the blob's `last_modified` so subsequent
 /// sync runs can compare mtimes without re-transferring the same content.
 pub fn set_file_mtime_utc(path: &Path, mtime: DateTime<Utc>) -> Result<()> {
+    let file = OpenOptions::new().write(true).open(path).map_err(|e| {
+        CrosstacheError::config(format!(
+            "Failed to open {} to set modification time: {e}",
+            path.display()
+        ))
+    })?;
+    set_file_mtime_utc_on_file(&file, path, mtime)
+}
+
+pub fn set_file_mtime_utc_on_file(
+    file: &std::fs::File,
+    path: &Path,
+    mtime: DateTime<Utc>,
+) -> Result<()> {
     let secs = mtime.timestamp();
     let nanos = mtime.timestamp_subsec_nanos();
     if secs < 0 {
@@ -21,12 +35,6 @@ pub fn set_file_mtime_utc(path: &Path, mtime: DateTime<Utc>) -> Result<()> {
         ));
     }
     let st = UNIX_EPOCH + StdDuration::new(secs as u64, nanos);
-    let file = OpenOptions::new().write(true).open(path).map_err(|e| {
-        CrosstacheError::config(format!(
-            "Failed to open {} to set modification time: {e}",
-            path.display()
-        ))
-    })?;
     file.set_modified(st).map_err(|e| {
         CrosstacheError::config(format!(
             "Failed to set modification time on {}: {e}",
@@ -94,8 +102,11 @@ pub fn resolve_both(local_size: u64, local_mtime: DateTime<Utc>, remote: &FileIn
 
 /// Map a blob name back to a local path under `base_path`, inverting upload path rules
 /// when given the same optional `prefix` used during upload (`path_to_blob_name` in the CLI).
-#[must_use]
-pub fn local_path_from_blob(base_path: &Path, prefix: Option<&str>, blob_name: &str) -> PathBuf {
+pub fn local_path_from_blob(
+    base_path: &Path,
+    prefix: Option<&str>,
+    blob_name: &str,
+) -> Result<PathBuf> {
     let rel = match prefix.map(str::trim).filter(|s| !s.is_empty()) {
         Some(p) => {
             let p = p.trim_matches('/');
@@ -104,8 +115,7 @@ pub fn local_path_from_blob(base_path: &Path, prefix: Option<&str>, blob_name: &
         }
         None => blob_name,
     };
-    rel.split('/')
-        .fold(base_path.to_path_buf(), |acc, c| acc.join(c))
+    crate::utils::helpers::safe_join(base_path, rel)
 }
 
 /// Longest shared prefix ending with `/` across blob names, if any.

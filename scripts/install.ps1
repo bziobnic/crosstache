@@ -326,6 +326,7 @@ function Install-crosstache {
     $archiveName = "xv-windows-x64.zip"
     $downloadUrl = "https://github.com/$GitHubRepo/releases/download/$targetVersion/$archiveName"
     $checksumUrl = "https://github.com/$GitHubRepo/releases/download/$targetVersion/$archiveName.sha256"
+    $signatureUrl = "https://github.com/$GitHubRepo/releases/download/$targetVersion/$archiveName.minisig"
     
     Write-Info "Installing crosstache $targetVersion for Windows x64"
     Write-Info "Download URL: $downloadUrl"
@@ -334,6 +335,7 @@ function Install-crosstache {
     $tempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
     $archivePath = Join-Path $tempDir $archiveName
     $checksumPath = Join-Path $tempDir "$archiveName.sha256"
+    $signaturePath = Join-Path $tempDir "$archiveName.minisig"
     
     try {
         # Download files
@@ -341,11 +343,27 @@ function Install-crosstache {
         
         try {
             Download-File -Url $checksumUrl -OutFile $checksumPath -Description "checksum"
+            Download-File -Url $signatureUrl -OutFile $signaturePath -Description "signature"
         }
         catch {
-            Write-Error "Could not download checksum file: $_. Refusing to install without verification."
+            Write-Error "Could not download release verification metadata: $_. Refusing to install without verification."
         }
         Test-Checksum -FilePath $archivePath -ChecksumPath $checksumPath
+
+        $minisign = Get-Command minisign -ErrorAction SilentlyContinue
+        if (-not $minisign) {
+            throw "minisign is required to authenticate releases. Install minisign and retry."
+        }
+        $releaseSigningKey = "RWRuXFh34rB613dgsXyAMmtKvYK0SFwxq4i44dhGFXVTrhAQ7hJXf6Ym"
+        & $minisign.Source -Vm $archivePath -x $signaturePath -P $releaseSigningKey | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Release signature verification failed. Refusing to install."
+        }
+        $trustedComment = Get-Content $signaturePath | Where-Object { $_ -like 'trusted comment: *' } | Select-Object -First 1
+        if ($trustedComment -ne "trusted comment: crosstache $targetVersion") {
+            throw "Release signature belongs to '$trustedComment', not 'crosstache $targetVersion'. Refusing a replayed archive."
+        }
+        Write-Info "Release signature verified"
         
         # Create installation directory
         if (-not (Test-Path $InstallDir)) {

@@ -38,8 +38,8 @@ try {
     Write-Host "Processing logs..."
     
     foreach ($line in $allLogs) {
-        # Check if this line indicates start of a VaultRbacProcessor invocation
-        if ($line -match "Executing 'Functions\.VaultRbacProcessor'" -or $line -match "Executing 'vault_rbac_processor'") {
+        # Check if this line indicates start of a DirectVaultRbacProcessor invocation
+        if ($line -match "Executing 'Functions\.DirectVaultRbacProcessor'") {
             # If we were already in an invocation, save it before starting a new one
             if ($inInvocation) {
                 $invocations += ,@($currentInvocation)
@@ -53,7 +53,7 @@ try {
         }
         
         # Check if this line indicates the end of a function execution
-        if ($inInvocation -and $line -match "Executed 'Functions\.VaultRbacProcessor'" -or $line -match "Executed 'vault_rbac_processor'") {
+        if ($inInvocation -and $line -match "Executed 'Functions\.DirectVaultRbacProcessor'") {
             $currentInvocation += $line
             $invocations += ,@($currentInvocation)
             $currentInvocation = @()
@@ -77,7 +77,7 @@ try {
         Write-Host "No invocations of 'vault_rbac_processor' found in the logs" -ForegroundColor Yellow
         
         # Check if there are specific logs for the function without the invocation marker
-        $functionLogs = $allLogs | Where-Object { $_ -match "VaultRbacProcessor" -or $_ -match "vault_rbac_processor" }
+        $functionLogs = $allLogs | Where-Object { $_ -match "DirectVaultRbacProcessor" }
         
         if ($functionLogs -and $functionLogs.Count -gt 0) {
             Write-Host "However, found $($functionLogs.Count) log entries mentioning this function:" -ForegroundColor Cyan
@@ -119,9 +119,9 @@ try {
         }
     }
     Write-Host "================================================================" -ForegroundColor Green
-    
+
     # Show a count of all invocations found
-    Write-Host "`nFound $($invocations.Count) total invocation(s) of vault_rbac_processor in the logs" -ForegroundColor Cyan
+    Write-Host "`nFound $($invocations.Count) total invocation(s) of DirectVaultRbacProcessor in the logs" -ForegroundColor Cyan
     Write-Host "To see more logs, increase the MaxLogEntries parameter:" -ForegroundColor Cyan
     Write-Host "./get-function-logs.ps1 -ResourceGroup $ResourceGroup -FunctionAppName $FunctionAppName -MaxLogEntries 200" -ForegroundColor Cyan
 }
@@ -130,4 +130,4 @@ finally {
     if (Test-Path $tempLogFile) {
         Remove-Item -Path $tempLogFile -Force
     }
-} 
+}

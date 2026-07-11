@@ -5,8 +5,8 @@
 //! resource names by the vault prefix (`vault/secret` naming scheme).
 //!
 //! CloudTrail returns events newest-first and retains 90 days of management
-//! events; `LookupEvents` is rate-limited to 2 requests/second, so pagination
-//! is capped (the cap drops only the oldest events).
+//! events. Pagination continues until CloudTrail confirms the requested time
+//! window is exhausted so unrelated activity cannot hide older vault events.
 
 use std::sync::Arc;
 
@@ -25,11 +25,6 @@ const SECRETS_MANAGER_EVENT_SOURCE: &str = "secretsmanager.amazonaws.com";
 
 /// `LookupEvents` page size (API maximum is 50).
 const PAGE_SIZE: i32 = 50;
-
-/// Pagination ceiling. CloudTrail throttles `LookupEvents` at 2 req/s, so an
-/// unbounded scan of a busy account could take minutes; events arrive
-/// newest-first, so the cap only drops the oldest events in the window.
-const MAX_PAGES: usize = 40;
 
 pub struct AwsAuditBackend {
     client: Arc<CloudTrailClient>,
@@ -76,8 +71,6 @@ impl AwsAuditBackend {
 
         let mut events: Vec<AuditEvent> = Vec::new();
         let mut next_token: Option<String> = None;
-        let mut pages = 0usize;
-
         loop {
             let mut req = self
                 .client
@@ -98,18 +91,9 @@ impl AwsAuditBackend {
                 }
             }
 
-            pages += 1;
             let new_token = resp.next_token().map(|t| t.to_string());
             // Defensive: a repeated token would loop forever.
             if new_token.is_none() || new_token == next_token {
-                break;
-            }
-            if pages >= MAX_PAGES {
-                tracing::warn!(
-                    "CloudTrail returned more than {} pages of Secrets Manager events; \
-                     older events in the {days}-day window were truncated",
-                    MAX_PAGES
-                );
                 break;
             }
             next_token = new_token;

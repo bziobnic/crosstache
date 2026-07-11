@@ -25,13 +25,26 @@ def _find_xfunction_dir() -> str:
 def _create_deployment_zip(source_dir: str, zip_path: str) -> None:
     exclude_dirs = {".venv", "__pycache__", ".pytest_cache", ".vscode", "tests", "installer", ".git", "scripts", "dev"}
     exclude_files = {".gitignore", ".funcignore", "local.settings.json"}
+    source_real = os.path.realpath(source_dir)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(source_dir):
             dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            root_real = os.path.realpath(root)
+            if os.path.commonpath([source_real, root_real]) != source_real:
+                raise ValueError(f"deployment path escapes source directory: {root}")
+            for directory in dirs:
+                candidate = os.path.join(root, directory)
+                if os.path.islink(candidate):
+                    raise ValueError(f"deployment archive refuses symlink directory: {candidate}")
             for file in files:
                 if file in exclude_files:
                     continue
                 filepath = os.path.join(root, file)
+                if os.path.islink(filepath):
+                    raise ValueError(f"deployment archive refuses symlink file: {filepath}")
+                file_real = os.path.realpath(filepath)
+                if os.path.commonpath([source_real, file_real]) != source_real:
+                    raise ValueError(f"deployment file escapes source directory: {filepath}")
                 arcname = os.path.relpath(filepath, source_dir)
                 zf.write(filepath, arcname)
 

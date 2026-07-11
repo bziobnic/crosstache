@@ -9,7 +9,7 @@ import sys
 from installer.az import AzCli, AzCliError
 from installer.config import InstallerConfig, InstallerState
 from installer.utils.output import success, error, warning, bold, step_header, summary_table
-from installer.utils.prompts import prompt, confirm
+from installer.utils.prompts import prompt, prompt_secret, confirm
 from installer.steps import INSTALL_STEPS
 from installer.steps import prerequisites, resource_group, storage_account, app_registration, function_app, rbac, deployment, verification
 from installer.steps.teardown import run as run_teardown
@@ -159,7 +159,7 @@ def run_install(config: InstallerConfig) -> int:
                                     success("Client secret rotated")
                                     _secret_rotated = True
                                 if not app_reg_data.get("client_secret"):
-                                    app_reg_data["client_secret"] = prompt("Enter client secret manually", required=True)
+                                    app_reg_data["client_secret"] = prompt_secret("Enter client secret manually", required=True)
                                     _secret_rotated = True
                             else:
                                 # In non-interactive mode, auto-rotate the secret
@@ -187,12 +187,32 @@ def run_install(config: InstallerConfig) -> int:
                 if not config.subscription_id:
                     config.subscription_id = result.get("subscription_id", "")
             elif step_name == "function_app":
-                merged = {**app_reg_data, "tenant_id": prereq_data.get("tenant_id", "")}
+                merged = {
+                    **app_reg_data,
+                    "tenant_id": prereq_data.get("tenant_id", ""),
+                    "delegated_principal_id": prereq_data.get("principal_id", ""),
+                }
                 config.storage_account = sa_data.get("name", config.storage_account)
-                result = module.run(config, az, app_registration_data=merged)
+                prior_function_data = state.get_step_data("function_app")
+                expected_resource_id = prior_function_data.get("resource_id", "")
+                result = module.run(
+                    config,
+                    az,
+                    app_registration_data=merged,
+                    expected_resource_id=expected_resource_id,
+                    expected_status=prior_function_data.get("status", ""),
+                )
             elif step_name == "rbac":
                 sp_object_id = app_reg_data.get("sp_object_id", "")
-                result = module.run(config, az, sp_object_id=sp_object_id)
+                result = module.run(
+                    config,
+                    az,
+                    sp_object_id=sp_object_id,
+                    delegated_principal_id=prereq_data.get("principal_id", ""),
+                )
+            elif step_name == "app_registration":
+                expected_object_id = state.get_step_data("app_registration").get("app_object_id", "")
+                result = module.run(config, az, expected_object_id=expected_object_id)
             else:
                 result = module.run(config, az)
 
@@ -211,7 +231,7 @@ def run_install(config: InstallerConfig) -> int:
                                 app_reg_data["client_secret"] = cred.get("password", "")
                                 success("Client secret generated")
                             if not app_reg_data.get("client_secret"):
-                                app_reg_data["client_secret"] = prompt("Enter client secret manually", required=True)
+                                app_reg_data["client_secret"] = prompt_secret("Enter client secret manually", required=True)
                         else:
                             cred = az.run("ad", "app", "credential", "reset", "--id", app_id, "--years", "2")
                             app_reg_data["client_secret"] = cred.get("password", "")
@@ -238,7 +258,11 @@ def run_install(config: InstallerConfig) -> int:
         ("Storage Account", sa_data.get("name", ""), "Created"),
         ("App Registration", config.app_name, "Created"),
         ("Function App", config.function_app_name, "Deployed" if not config.skip_deploy else "Created"),
-        ("RBAC Assignments", "3 roles", "Assigned"),
+        (
+            "RBAC Assignments",
+            f"{len(state.get_step_data('rbac').get('roles', {}))} roles",
+            "Assigned",
+        ),
     ]
     if config.output_format == "json":
         print(json_module.dumps({"resources": [{"type": r, "name": n, "status": s} for r, n, s in summary_rows]}, indent=2))
