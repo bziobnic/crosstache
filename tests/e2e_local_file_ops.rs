@@ -182,6 +182,72 @@ fn file_roundtrip_upload_list_info_download_delete_on_local() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn single_download_rejects_symlink_destination() {
+    use std::os::unix::fs::symlink;
+
+    let env = FileEnv::new();
+    std::fs::write(env.path().join("payload.bin"), b"remote-content").unwrap();
+    env.ok(&["file", "upload", "payload.bin", "--name", "remote.txt"]);
+
+    let outside = env.path().join("outside.txt");
+    std::fs::write(&outside, b"outside-original").unwrap();
+    let destination = env.path().join("download.txt");
+    symlink(&outside, &destination).unwrap();
+
+    let out = env.run(&[
+        "file",
+        "download",
+        "remote.txt",
+        "--output",
+        destination.to_str().unwrap(),
+        "--force",
+    ]);
+
+    assert!(
+        !out.status.success(),
+        "symlink destination must be rejected"
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside-original");
+}
+
+#[cfg(unix)]
+#[test]
+fn recursive_download_rejects_symlink_parent_component() {
+    use std::os::unix::fs::symlink;
+
+    let env = FileEnv::new();
+    std::fs::create_dir_all(env.path().join("source")).unwrap();
+    std::fs::write(env.path().join("source/file.txt"), b"remote-content").unwrap();
+    env.ok(&[
+        "file",
+        "upload",
+        "source/file.txt",
+        "--name",
+        "nested/file.txt",
+    ]);
+
+    let output = env.path().join("downloads");
+    let outside = env.path().join("outside");
+    std::fs::create_dir_all(&output).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, output.join("nested")).unwrap();
+
+    let out = env.run(&[
+        "file",
+        "download",
+        "nested",
+        "--recursive",
+        "--output",
+        output.to_str().unwrap(),
+        "--force",
+    ]);
+
+    assert!(!out.status.success(), "symlinked parent must be rejected");
+    assert!(!outside.join("file.txt").exists());
+}
+
 // ---------------------------------------------------------------------------
 // 2. Default-entry targeting
 // ---------------------------------------------------------------------------
@@ -297,6 +363,32 @@ fn file_sync_up_down_roundtrip_on_local() {
         b"beta-payload",
         "sync-down should restore b.txt content"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn file_sync_down_rejects_symlink_parent_component() {
+    use std::os::unix::fs::symlink;
+
+    let env = FileEnv::new();
+    let data = env.path().join("data");
+    std::fs::create_dir_all(data.join("nested")).unwrap();
+    std::fs::write(data.join("nested/file.txt"), b"remote-content").unwrap();
+    env.ok(&["file", "sync", "data", "--direction", "up"]);
+
+    std::fs::remove_file(data.join("nested/file.txt")).unwrap();
+    std::fs::remove_dir(data.join("nested")).unwrap();
+    let outside = env.path().join("outside-sync");
+    std::fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, data.join("nested")).unwrap();
+
+    let out = env.run(&["file", "sync", "data", "--direction", "down"]);
+
+    assert!(
+        !out.status.success(),
+        "sync-down symlinked parent must be rejected"
+    );
+    assert!(!outside.join("file.txt").exists());
 }
 
 #[test]

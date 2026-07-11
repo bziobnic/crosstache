@@ -204,9 +204,7 @@ impl ProjectConfig {
         let body = toml::to_string_pretty(self)
             .map_err(|e| CrosstacheError::config(format!(".xv.toml serialize error: {e}")))?;
         let full = format!("{}{body}", Self::HEADER);
-        tokio::fs::write(path, full).await.map_err(|e| {
-            CrosstacheError::config(format!("failed to write {}: {e}", path.display()))
-        })
+        crate::utils::helpers::atomic_write_file_no_follow_async(path, full.as_bytes(), false).await
     }
 }
 
@@ -707,6 +705,21 @@ resource_group = "rg"
         let dev = loaded.envs.get("dev").expect("env.dev must be present");
         assert_eq!(dev.vault.as_deref(), Some("myvault"));
         assert_eq!(dev.resource_group.as_deref(), Some("myrg"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_config_save_rejects_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside.toml");
+        std::fs::write(&outside, b"outside-original").unwrap();
+        let path = temp.path().join(".xv.toml");
+        symlink(&outside, &path).unwrap();
+
+        assert!(ProjectConfig::default().save(&path).await.is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside-original");
     }
 
     /// PR #211 Bugbot finding (Medium): `save()` must use umask-respecting

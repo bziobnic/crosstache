@@ -39,10 +39,19 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
             "resourceUri": "/subscriptions/test-subscription-id/resourceGroups/Vaults/providers/Microsoft.KeyVault/vaults/test-vault",
             "subscriptionId": "test-subscription-id"
         }
+        self.allowed_scope = patch.dict(
+            os.environ,
+            {
+                "ALLOWED_RESOURCE_GROUP_ID": "/subscriptions/test-subscription-id/resourceGroups/Vaults",
+                "ALLOWED_PRINCIPAL_ID": "test-user-id",
+            },
+        )
+        self.allowed_scope.start()
         
         # Mock the VaultRoleManager
         self.mock_manager = AsyncMock()
         self.mock_manager.assign_role_to_user = AsyncMock(return_value=True)
+        self.mock_manager.caller_has_rbac_authority = AsyncMock(return_value=True)
         
         # Mock vault info with creator ID matching the token
         self.mock_vault_info = {
@@ -72,6 +81,7 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test method."""
         self.loop.close()
+        self.allowed_scope.stop()
 
     def _run_async_test(self, coro):
         """Helper method to run an async test function."""
@@ -110,6 +120,33 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         # Assert manager was called correctly
         self.assertEqual(mock_vault_role_manager_class.call_count, 1)
         self.assertEqual(self.mock_manager.assign_role_to_user.call_count, 2)
+
+    @patch('function_app._validate_jwt')
+    @patch('function_app.StorageRoleManager')
+    @patch('function_app.VaultRoleManager')
+    def test_mutable_creator_tag_cannot_elevate_caller_without_existing_rbac_authority(
+        self,
+        mock_vault_role_manager_class,
+        mock_storage_role_manager_class,
+        mock_validate_jwt,
+    ):
+        mock_vault_role_manager_class.return_value = self.mock_manager
+        storage_manager = AsyncMock()
+        storage_manager.discover_associated_storage_accounts = AsyncMock(return_value=[])
+        mock_storage_role_manager_class.return_value = storage_manager
+        mock_validate_jwt.return_value = self.valid_token_payload
+        self.mock_manager.caller_has_rbac_authority.return_value = False
+        req = func.HttpRequest(
+            method='POST',
+            body=json.dumps(self.valid_request_body).encode(),
+            url='/api/assign-roles',
+            headers={'Authorization': f'Bearer {self.valid_token}'},
+        )
+
+        resp = self._run_async_test(direct_vault_rbac_processor(req))
+
+        self.assertEqual(resp.status_code, 403)
+        self.mock_manager.assign_role_to_user.assert_not_called()
 
     @patch('function_app.VaultRoleManager')
     def test_missing_auth_header(self, mock_vault_role_manager_class):
@@ -374,8 +411,8 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         resp_body = json.loads(resp.get_body())
         self.assertIn('error', resp_body)
         self.assertIn('Unauthorized', resp_body['error'])
-        self.assertEqual(resp_body['userId'], 'test-user-id')
-        self.assertEqual(resp_body['creatorId'], 'different-user-id')
+        self.assertNotIn('userId', resp_body)
+        self.assertNotIn('creatorId', resp_body)
         
         # Assert role assignment was not attempted
         self.mock_manager.assign_role_to_user.assert_not_called()
@@ -419,7 +456,7 @@ class TestDirectVaultRbacProcessor(unittest.TestCase):
         self.assertEqual(resp.status_code, 403)
         resp_body = json.loads(resp.get_body())
         self.assertIn('error', resp_body)
-        self.assertIn('CreatedByID', resp_body['error'])
+        self.assertIn('creator cannot be verified', resp_body['error'])
 
         # Assert role assignment was never attempted
         self.mock_manager.assign_role_to_user.assert_not_called()

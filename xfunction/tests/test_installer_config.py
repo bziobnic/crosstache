@@ -86,6 +86,30 @@ class TestInstallerState(unittest.TestCase):
         self.assertNotIn("should-not-persist", raw)
         self.assertIn("app-123", raw)
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unsupported")
+    def test_save_rejects_symlink_state_path(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+            handle.write("outside-original")
+            outside = handle.name
+        self.addCleanup(lambda: os.path.exists(outside) and os.unlink(outside))
+        os.symlink(outside, self.state_path)
+        state = InstallerState(self.state_path)
+        state.mark_completed("test", {"ok": True})
+
+        with self.assertRaises(OSError):
+            state.save()
+
+        with open(outside) as handle:
+            self.assertEqual(handle.read(), "outside-original")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permissions only")
+    def test_saved_state_is_owner_only(self):
+        state = InstallerState(self.state_path)
+        state.mark_completed("test", {"ok": True})
+        state.save()
+
+        self.assertEqual(os.stat(self.state_path).st_mode & 0o777, 0o600)
+
     def test_clear_removes_file(self):
         state = InstallerState(self.state_path)
         state.mark_completed("resource_group", {})

@@ -3,13 +3,19 @@
 use crate::error::{CrosstacheError, Result};
 use crate::scan::engine::MatchEngine;
 use crate::scan::finding::Finding;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Run `git diff --cached --name-only -z` to enumerate staged files.
-fn list_staged_files() -> Result<Vec<String>> {
+fn list_staged_files() -> Result<Vec<PathBuf>> {
     let out = Command::new("git")
-        .args(["diff", "--cached", "--name-only", "-z"])
+        .args([
+            "diff",
+            "--cached",
+            "--name-only",
+            "--diff-filter=ACMR",
+            "-z",
+        ])
         .output()
         .map_err(|e| CrosstacheError::config(format!("failed to run git: {e}")))?;
     if !out.status.success() {
@@ -18,31 +24,33 @@ fn list_staged_files() -> Result<Vec<String>> {
             String::from_utf8_lossy(&out.stderr)
         )));
     }
-    Ok(out
-        .stdout
-        .split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect())
+    nul_paths(&out.stdout)
 }
 
 /// Read the staged content of a file (post-staging, pre-commit).
-fn read_staged_file(path: &str) -> Result<String> {
+fn read_staged_file(path: &Path) -> Result<String> {
     let out = Command::new("git")
-        .args(["show", &format!(":{path}")])
+        .arg("show")
+        .arg(git_object_spec(":", path)?)
         .output()
         .map_err(|e| CrosstacheError::config(format!("failed to run git show: {e}")))?;
     if !out.status.success() {
         return Err(CrosstacheError::config(format!(
-            "git show :{path} failed: {}",
+            "git show :{} failed: {}",
+            path.display(),
             String::from_utf8_lossy(&out.stderr)
         )));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    String::from_utf8(out.stdout).map_err(|e| {
+        CrosstacheError::config(format!(
+            "staged object '{}' is not UTF-8 and cannot be scanned safely: {e}",
+            path.display()
+        ))
+    })
 }
 
 /// Enumerate every file tracked at `HEAD` via `git ls-tree -r --name-only -z HEAD`.
-fn list_head_files() -> Result<Vec<String>> {
+fn list_head_files() -> Result<Vec<PathBuf>> {
     let out = Command::new("git")
         .args(["ls-tree", "-r", "--name-only", "-z", "HEAD"])
         .output()
@@ -53,57 +61,96 @@ fn list_head_files() -> Result<Vec<String>> {
             String::from_utf8_lossy(&out.stderr)
         )));
     }
-    Ok(out
-        .stdout
-        .split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect())
+    nul_paths(&out.stdout)
 }
 
 /// Read a file's content at `HEAD` (the last commit, not the index or worktree).
-fn read_head_file(path: &str) -> Result<String> {
+fn read_head_file(path: &Path) -> Result<String> {
     let out = Command::new("git")
-        .args(["show", &format!("HEAD:{path}")])
+        .arg("show")
+        .arg(git_object_spec("HEAD:", path)?)
         .output()
         .map_err(|e| CrosstacheError::config(format!("failed to run git show: {e}")))?;
     if !out.status.success() {
         return Err(CrosstacheError::config(format!(
-            "git show HEAD:{path} failed: {}",
+            "git show HEAD:{} failed: {}",
+            path.display(),
             String::from_utf8_lossy(&out.stderr)
         )));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    String::from_utf8(out.stdout).map_err(|e| {
+        CrosstacheError::config(format!(
+            "HEAD object '{}' is not UTF-8 and cannot be scanned safely: {e}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn nul_paths(bytes: &[u8]) -> Result<Vec<PathBuf>> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    Ok(bytes
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| PathBuf::from(OsString::from_vec(s.to_vec())))
+        .collect())
+}
+
+#[cfg(not(unix))]
+fn nul_paths(bytes: &[u8]) -> Result<Vec<PathBuf>> {
+    bytes
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            std::str::from_utf8(s).map(PathBuf::from).map_err(|e| {
+                CrosstacheError::config(format!("git returned an unreadable staged path: {e}"))
+            })
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn git_object_spec(prefix: &str, path: &Path) -> Result<std::ffi::OsString> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let mut bytes = prefix.as_bytes().to_vec();
+    bytes.extend_from_slice(path.as_os_str().as_bytes());
+    Ok(std::ffi::OsString::from_vec(bytes))
+}
+
+#[cfg(not(unix))]
+fn git_object_spec(prefix: &str, path: &Path) -> Result<std::ffi::OsString> {
+    let path = path.to_str().ok_or_else(|| {
+        CrosstacheError::config("git returned a staged path that cannot be represented safely")
+    })?;
+    Ok(std::ffi::OsString::from(format!("{prefix}{path}")))
 }
 
 /// Heuristically skip binary-looking paths by extension; git object reads
 /// don't expose raw bytes for a content-sniff here.
-fn looks_binary(path: &str) -> bool {
+fn looks_binary(path: &Path) -> bool {
     const BIN_EXT: &[&str] = &[
         ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".gz", ".tar",
     ];
-    let lower = path.to_lowercase();
+    let lower = path.to_string_lossy().to_lowercase();
     BIN_EXT.iter().any(|e| lower.ends_with(e))
 }
 
 /// Scan a set of git-tracked paths, reading each one's content via `reader`
 /// (the index for staged scans, `HEAD` for full-tree scans).
-fn scan_git_paths<F>(files: &[String], reader: F, engine: &MatchEngine) -> Vec<Finding>
+fn scan_git_paths<F>(files: &[PathBuf], reader: F, engine: &MatchEngine) -> Result<Vec<Finding>>
 where
-    F: Fn(&str) -> Result<String>,
+    F: Fn(&Path) -> Result<String>,
 {
     let mut findings: Vec<Finding> = Vec::new();
     for f in files {
         if looks_binary(f) {
             continue;
         }
-        let content = match reader(f) {
-            Ok(c) => c,
-            Err(_) => continue, // file might be deleted in this revision
-        };
-        findings.extend(engine.scan_text(Path::new(f), &content));
+        let content = reader(f)?;
+        findings.extend(engine.scan_text(f, &content));
     }
-    findings
+    Ok(findings)
 }
 
 /// Scan all staged files. Each file's content comes from `git show :PATH`
@@ -115,11 +162,11 @@ where
 /// `--staged` (and therefore the installed pre-commit hook) doesn't scan
 /// `target/`, `node_modules/`, or user-excluded paths that `scan .` skips.
 pub fn scan_staged(engine: &MatchEngine, excludes: &globset::GlobSet) -> Result<Vec<Finding>> {
-    let files: Vec<String> = list_staged_files()?
+    let files: Vec<PathBuf> = list_staged_files()?
         .into_iter()
         .filter(|f| !excludes.is_match(f))
         .collect();
-    Ok(scan_git_paths(&files, read_staged_file, engine))
+    scan_git_paths(&files, read_staged_file, engine)
 }
 
 /// Scan every file tracked at `HEAD` (`xv scan --all`). Content comes from the
@@ -130,11 +177,11 @@ pub fn scan_staged(engine: &MatchEngine, excludes: &globset::GlobSet) -> Result<
 /// walker applies (see `walker::build_exclude_set`), so `--all` does not scan
 /// `target/`, `node_modules/`, or user-excluded paths that `scan .` skips.
 pub fn scan_head(engine: &MatchEngine, excludes: &globset::GlobSet) -> Result<Vec<Finding>> {
-    let files: Vec<String> = list_head_files()?
+    let files: Vec<PathBuf> = list_head_files()?
         .into_iter()
         .filter(|f| !excludes.is_match(f))
         .collect();
-    Ok(scan_git_paths(&files, read_head_file, engine))
+    scan_git_paths(&files, read_head_file, engine)
 }
 
 #[cfg(test)]
@@ -236,6 +283,66 @@ mod tests {
         assert!(
             filtered.is_empty(),
             "excluded staged file must not produce findings via scan_staged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_staged_preserves_non_utf8_filename_bytes() {
+        use std::io::Write;
+
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempdir().unwrap();
+        let dir = temp.path();
+        init_repo(dir);
+
+        // macOS filesystems reject arbitrary non-UTF-8 names, but Git's index
+        // permits them. Create the blob and index entry through Git's NUL-safe
+        // plumbing so this regression test works on every Unix runner.
+        let mut hash_child = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        hash_child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"AWS_KEY=AKIAIOSFODNN7EXAMPLE\n")
+            .unwrap();
+        let hash_output = hash_child.wait_with_output().unwrap();
+        assert!(hash_output.status.success());
+        let hash = String::from_utf8(hash_output.stdout).unwrap();
+
+        let mut update_child = Command::new("git")
+            .args(["update-index", "-z", "--index-info"])
+            .current_dir(dir)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut record = format!("100644 {}\t", hash.trim()).into_bytes();
+        record.extend_from_slice(b"leak-\xff.env\0");
+        update_child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(&record)
+            .unwrap();
+        assert!(update_child.wait().unwrap().success());
+
+        let engine = MatchEngine::new(&[], &builtin_patterns(), DEFAULT_MIN_VALUE_LENGTH);
+        let excludes = build_exclude_set(&[]).unwrap();
+        let findings = {
+            let _cwd_guard = CwdGuard::change_to(dir);
+            scan_staged(&engine, &excludes)
+        }
+        .unwrap();
+
+        assert!(
+            !findings.is_empty(),
+            "the scanner must address the raw staged path rather than skip it"
         );
     }
 }

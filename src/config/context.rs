@@ -139,9 +139,15 @@ impl ContextManager {
         if !context_dir_overridden {
             // 1. Check for .xv/context in current directory
             if let Some(cwd) = cwd {
-                if let Ok(local_context) = Self::load_local_context_from(cwd).await {
-                    debug!("Loaded local vault context");
-                    return Ok(local_context);
+                let local_path = cwd.join(".xv").join("context");
+                match tokio::fs::symlink_metadata(&local_path).await {
+                    Ok(_) => {
+                        let local_context = Self::load_local_context_from(cwd).await?;
+                        debug!("Loaded local vault context");
+                        return Ok(local_context);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
                 }
             }
         }
@@ -218,15 +224,16 @@ impl ContextManager {
             // Ensure parent directory exists with private (0700) permissions —
             // context files hold the user's active vault/subscription state and
             // are treated as user-private config.
-            if let Some(parent) = path.parent() {
-                crate::utils::helpers::create_private_dir(parent)?;
-            }
-
             let content = serde_json::to_string_pretty(self)?;
             // Route through the sensitive-file writer: atomic 0600 create with
             // O_NOFOLLOW, so the context file is never group/world-readable and
             // a symlinked path cannot redirect the write.
-            crate::utils::helpers::write_sensitive_file_async(path, content.as_bytes()).await?;
+            crate::utils::helpers::atomic_write_file_no_follow_async(
+                path,
+                content.as_bytes(),
+                true,
+            )
+            .await?;
 
             debug!("Saved context to: {}", path.display());
         }
@@ -629,6 +636,28 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn saved_context_rejects_symlinked_parent_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("context"), b"outside-original").unwrap();
+        symlink(&outside, temp.path().join(".xv")).unwrap();
+
+        let manager = ContextManager {
+            context_file: Some(temp.path().join(".xv/context")),
+            ..Default::default()
+        };
+        assert!(manager.save().await.is_err());
+        assert_eq!(
+            std::fs::read(outside.join("context")).unwrap(),
+            b"outside-original"
+        );
+    }
+
     /// A pre-workspace context JSON file (no `workspace` key at all) must
     /// still load cleanly — `#[serde(default)]` on the new field.
     #[test]
@@ -719,6 +748,33 @@ mod tests {
             !loaded.is_local,
             "a context loaded via the XV_CONTEXT_DIR override must be reported as global, \
              never local"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_local_context_does_not_fall_back_to_global_context() {
+        let _env_guard = context_dir_env_lock().lock().await;
+
+        let local_root = TempDir::new().unwrap();
+        std::fs::create_dir_all(local_root.path().join(".xv")).unwrap();
+        std::fs::write(local_root.path().join(".xv/context"), b"not-json").unwrap();
+
+        let config_home = TempDir::new().unwrap();
+        std::fs::create_dir_all(config_home.path().join("xv")).unwrap();
+        std::fs::write(
+            config_home.path().join("xv/context"),
+            r#"{"current":{"vault_name":"global-fallback","resource_group":null,"subscription_id":null,"storage_container":null,"last_used":"2024-01-01T00:00:00Z","usage_count":1},"recent":[]}"#,
+        )
+        .unwrap();
+
+        let _context_override = EnvVarGuard::set("XV_CONTEXT_DIR", "");
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", config_home.path());
+
+        assert!(
+            ContextManager::load_from(Some(local_root.path()))
+                .await
+                .is_err(),
+            "a corrupt discovered local context must fail closed"
         );
     }
 }

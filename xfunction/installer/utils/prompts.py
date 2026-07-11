@@ -1,4 +1,5 @@
 """Interactive prompts with defaults for the installer."""
+import getpass
 
 def prompt(message: str, default: str = "", required: bool = True) -> str:
     if default:
@@ -25,3 +26,11 @@ def confirm(message: str, default: bool = True) -> bool:
         if value in ("n", "no"):
             return False
         print("  Please enter 'y' or 'n'.")
+
+def prompt_secret(message: str, required: bool = True) -> str:
+    while True:
+        value = getpass.getpass(f"{message}: ").strip()
+        if not value and required:
+            print("  This field is required. Please enter a value.")
+            continue
+        return value

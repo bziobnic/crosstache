@@ -982,6 +982,57 @@ fn env_pull_exports_secrets_dotenv() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn env_pull_dotenv_does_not_execute_command_substitution_when_sourced() {
+    let env = TestEnv::new();
+    let marker = env._tmp.path().join("command-substitution-ran");
+    let export_path = env._tmp.path().join("export.env");
+    let payload = format!("$(touch {})", marker.display());
+    env.set_secret("UNTRUSTED_VALUE", &payload);
+
+    env.xv_ok(&["env", "pull", "--output", export_path.to_str().unwrap()]);
+
+    let status = Command::new("/bin/sh")
+        .args(["-c", ". \"$1\"", "sh", export_path.to_str().unwrap()])
+        .status()
+        .expect("source exported dotenv");
+    assert!(
+        status.success(),
+        "exported dotenv must be valid POSIX shell syntax"
+    );
+    assert!(
+        !marker.exists(),
+        "sourcing a dotenv export must not execute command substitution from a secret value"
+    );
+}
+
+#[test]
+fn env_pull_csv_neutralizes_spreadsheet_formulas() {
+    let env = TestEnv::new();
+    env.set_secret("FORMULA", "=HYPERLINK(\"https://example.invalid\")");
+
+    let out = env.xv_ok(&["env", "pull", "--fmt", "csv"]);
+
+    assert!(
+        out.contains("'=HYPERLINK"),
+        "CSV exports must prefix formula-like values with an apostrophe: {out}"
+    );
+}
+
+#[test]
+fn env_pull_dotenv_rejects_invalid_assignment_names() {
+    let env = TestEnv::new();
+    env.set_secret("not-a-shell-name", "value");
+
+    let (_stdout, stderr) = env.xv_fail(&["env", "pull"]);
+
+    assert!(
+        stderr.contains("not a valid POSIX environment variable name"),
+        "invalid dotenv assignment names must fail closed: {stderr}"
+    );
+}
+
 #[test]
 fn env_push_imports_secrets() {
     let env = TestEnv::new();
@@ -1605,6 +1656,20 @@ fn run_happy_path_launches_child() {
     assert!(
         marker.exists(),
         "child process should have run and created the marker file"
+    );
+}
+
+#[test]
+fn run_rejects_colliding_derived_environment_names() {
+    let env = TestEnv::new();
+    env.set_secret("service-key", "first");
+    env.set_secret("service_key", "second");
+
+    let (_stdout, stderr) = env.xv_fail(&["run", "--", "sh", "-c", "exit 0"]);
+
+    assert!(
+        stderr.contains("SERVICE_KEY") && stderr.contains("collision"),
+        "normalization collisions must fail before launching the child: {stderr}"
     );
 }
 

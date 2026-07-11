@@ -5199,7 +5199,7 @@ async fn execute_secret_rotate(
         vault.expect("execute_secret_rotate is only called with an already-resolved vault");
 
     // Update context usage tracking
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let mut context_manager = ContextManager::load().await?;
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Check if the secret exists first
@@ -5614,7 +5614,7 @@ async fn execute_secret_run(
     let reg = &target_registry;
 
     // Update context usage tracking
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let mut context_manager = ContextManager::load().await?;
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Parse current environment for xv:// URI references (supports optional backend prefix).
@@ -5724,6 +5724,7 @@ async fn execute_secret_run(
 
     // Fetch secret values and build environment map
     let mut env_vars: HashMap<String, Zeroizing<String>> = HashMap::new();
+    let mut env_var_sources: HashMap<String, String> = HashMap::new();
     let mut secret_values: Vec<Zeroizing<String>> = Vec::new(); // For masking
     let mut uri_values: HashMap<String, Zeroizing<String>> = HashMap::new(); // URI -> value mapping
 
@@ -5763,6 +5764,16 @@ async fn execute_secret_run(
                 match resolved {
                     Ok(value) => {
                         let env_name = to_env_var_name(&secret.name);
+                        if let Some(existing_name) = env_var_sources.get(&env_name) {
+                            if existing_name != &secret.name {
+                                return Err(CrosstacheError::invalid_argument(format!(
+                                    "environment name collision: secrets '{}' and '{}' both map to '{env_name}'; use --include/--exclude or rename one secret",
+                                    existing_name, secret.name
+                                )));
+                            }
+                        } else {
+                            env_var_sources.insert(env_name.clone(), secret.name.clone());
+                        }
                         env_vars.insert(env_name, value.clone());
 
                         // Store for masking (if enabled)
@@ -6133,7 +6144,7 @@ async fn execute_secret_inject(
     let reg = &target_registry;
 
     // Update context usage tracking
-    let mut context_manager = ContextManager::load().await.unwrap_or_default();
+    let mut context_manager = ContextManager::load().await?;
     let _ = context_manager.update_usage(&vault_name).await;
 
     // Read template content

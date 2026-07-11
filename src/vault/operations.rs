@@ -30,6 +30,30 @@ fn enc(s: &str) -> impl std::fmt::Display + '_ {
     utf8_percent_encode(s, PATH_SEGMENT)
 }
 
+fn normalized_scope(scope: &str) -> String {
+    percent_encoding::percent_decode_str(scope.trim_end_matches('/'))
+        .decode_utf8_lossy()
+        .to_ascii_lowercase()
+}
+
+/// ARM may include inherited assignments when listing below a resource. Never
+/// trust the listing URL alone when a caller is about to delete an assignment.
+fn assignment_has_exact_scope(assignment: &Value, expected_scope: &str) -> bool {
+    assignment
+        .get("properties")
+        .and_then(|properties| properties.get("scope"))
+        .and_then(Value::as_str)
+        .is_some_and(|scope| normalized_scope(scope) == normalized_scope(expected_scope))
+}
+
+fn key_vault_role_definition_id(access_level: &AccessLevel) -> &'static str {
+    match access_level {
+        AccessLevel::Reader => "4633458b-17de-408a-b874-0445c86b69e6", // Key Vault Secrets User
+        AccessLevel::Contributor => "b86a8fe4-44ce-4948-aee5-eccb2c155cd7", // Key Vault Secrets Officer
+        AccessLevel::Admin => "00482a5a-887f-4fb3-b363-3b7fe8e74483", // Key Vault Administrator
+    }
+}
+
 use super::models::{
     AccessLevel, AccessPolicy, VaultCreateRequest, VaultProperties, VaultRole, VaultSummary,
     VaultUpdateRequest,
@@ -650,40 +674,43 @@ impl VaultOperations for AzureVaultOperations {
         user_object_id: &str,
         access_level: AccessLevel,
     ) -> Result<()> {
-        let vault_name = self.validated_vault_name(vault_name)?;
-        // Get current vault to update access policies
-        let mut current_vault = self.get_vault(vault_name.as_str(), resource_group).await?;
+        let operation = || async {
+            let vault_name = self.validated_vault_name(vault_name)?;
+            let headers = self.create_headers().await?;
+            let scope = self.get_vault_resource_id(&vault_name, resource_group);
+            let assignment_id = Uuid::new_v4();
+            let url = self.build_arm_url(&format!(
+                "{scope}/providers/Microsoft.Authorization/roleAssignments/{assignment_id}?api-version=2022-04-01"
+            ));
+            let role_definition_id = key_vault_role_definition_id(&access_level);
+            let body = json!({
+                "properties": {
+                    "roleDefinitionId": format!(
+                        "/subscriptions/{}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}",
+                        enc(&self.subscription_id)
+                    ),
+                    "principalId": user_object_id
+                }
+            });
 
-        // Remove existing policy for this user if any
-        current_vault
-            .access_policies
-            .retain(|p| p.object_id != user_object_id);
-
-        // Add new policy
-        let tenant_id = self.auth_provider.get_tenant_id().await?;
-        let new_policy = AccessPolicy::new(
-            tenant_id,
-            user_object_id.to_string(),
-            access_level,
-            None,
-            None,
-        );
-        current_vault.access_policies.push(new_policy);
-
-        // Update vault with new access policies
-        let update_request = VaultUpdateRequest {
-            enabled_for_deployment: None,
-            enabled_for_disk_encryption: None,
-            enabled_for_template_deployment: None,
-            soft_delete_retention_in_days: None,
-            purge_protection: None,
-            tags: None,
-            access_policies: Some(current_vault.access_policies),
+            let response = self
+                .http_client
+                .put(&url)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    CrosstacheError::network(format!("Failed to grant vault access: {e}"))
+                })?;
+            if !response.status().is_success() {
+                let status_code = response.status().as_u16();
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(self.parse_azure_error(status_code, &error_body));
+            }
+            Ok(())
         };
-
-        self.update_vault(vault_name.as_str(), resource_group, &update_request)
-            .await?;
-        Ok(())
+        self.execute_with_retry(operation).await
     }
 
     async fn revoke_access(
@@ -692,73 +719,169 @@ impl VaultOperations for AzureVaultOperations {
         resource_group: &str,
         user_object_id: &str,
     ) -> Result<()> {
-        let vault_name = self.validated_vault_name(vault_name)?;
-        // Get current vault to update access policies
-        let mut current_vault = self.get_vault(vault_name.as_str(), resource_group).await?;
-
-        // Remove policy for this user
-        let original_count = current_vault.access_policies.len();
-        current_vault
-            .access_policies
-            .retain(|p| p.object_id != user_object_id);
-
-        if current_vault.access_policies.len() == original_count {
-            return Err(CrosstacheError::permission_denied(
-                "User does not have access to this vault",
+        let operation = || async {
+            let vault_name = self.validated_vault_name(vault_name)?;
+            let headers = self.create_headers().await?;
+            let scope = self.get_vault_resource_id(&vault_name, resource_group);
+            let list_url = self.build_arm_url(&format!(
+                "{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter={}",
+                crate::utils::url_helpers::odata_eq("principalId", user_object_id)
             ));
-        }
-
-        // Update vault with new access policies
-        let update_request = VaultUpdateRequest {
-            enabled_for_deployment: None,
-            enabled_for_disk_encryption: None,
-            enabled_for_template_deployment: None,
-            soft_delete_retention_in_days: None,
-            purge_protection: None,
-            tags: None,
-            access_policies: Some(current_vault.access_policies),
+            let response = self
+                .http_client
+                .get(&list_url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map_err(|e| {
+                    CrosstacheError::network(format!("Failed to list vault role assignments: {e}"))
+                })?;
+            if !response.status().is_success() {
+                let status_code = response.status().as_u16();
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(self.parse_azure_error(status_code, &error_body));
+            }
+            let response_data: Value = response.json().await.map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to parse role assignments: {e}"))
+            })?;
+            let assignments = response_data
+                .get("value")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let exact_assignments: Vec<_> = assignments
+                .iter()
+                .filter(|assignment| assignment_has_exact_scope(assignment, &scope))
+                .collect();
+            if exact_assignments.is_empty() {
+                return Err(CrosstacheError::permission_denied(
+                    "User does not have an exact-scope role assignment on this vault",
+                ));
+            }
+            for assignment in exact_assignments {
+                let assignment_id =
+                    assignment
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            CrosstacheError::serialization(
+                                "Exact-scope role assignment is missing its resource ID",
+                            )
+                        })?;
+                let delete_url =
+                    self.build_arm_url(&format!("{assignment_id}?api-version=2022-04-01"));
+                let response = self
+                    .http_client
+                    .delete(&delete_url)
+                    .headers(headers.clone())
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        CrosstacheError::network(format!(
+                            "Failed to delete vault role assignment: {e}"
+                        ))
+                    })?;
+                if !response.status().is_success() {
+                    let status_code = response.status().as_u16();
+                    let error_body = response.text().await.unwrap_or_default();
+                    return Err(self.parse_azure_error(status_code, &error_body));
+                }
+            }
+            Ok(())
         };
-
-        self.update_vault(vault_name.as_str(), resource_group, &update_request)
-            .await?;
-        Ok(())
+        self.execute_with_retry(operation).await
     }
 
     async fn list_access(&self, vault_name: &str, resource_group: &str) -> Result<Vec<VaultRole>> {
         let operation = || async {
             let vault_name = self.validated_vault_name(vault_name)?;
-            let vault = self.get_vault(vault_name.as_str(), resource_group).await?;
-            let mut roles = Vec::new();
-
-            for policy in &vault.access_policies {
-                // Convert access policy to vault role for display
-                let role = VaultRole {
-                    assignment_id: Uuid::new_v4().to_string(),
-                    role_id: "access-policy".to_string(),
-                    role_name: self.determine_access_level_from_permissions(&policy.permissions),
-                    role_description: "Access Policy".to_string(),
-                    principal_id: policy.object_id.clone(),
-                    principal_name: policy
-                        .user_email
-                        .clone()
-                        .unwrap_or_else(|| policy.object_id.clone()),
-                    email: String::new(),
-                    principal_type: if policy.application_id.is_some() {
-                        "ServicePrincipal"
-                    } else {
-                        "User"
-                    }
-                    .to_string(),
-                    scope: vault.id.clone(),
-                    created_on: vault.created_at,
-                    updated_on: vault.created_at,
-                };
-                roles.push(role);
+            let headers = self.create_headers().await?;
+            let scope = self.get_vault_resource_id(&vault_name, resource_group);
+            let url = self.build_arm_url(&format!(
+                "{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=atScope()"
+            ));
+            let response = self
+                .http_client
+                .get(&url)
+                .headers(headers)
+                .send()
+                .await
+                .map_err(|e| {
+                    CrosstacheError::network(format!("Failed to list vault access: {e}"))
+                })?;
+            if !response.status().is_success() {
+                let status_code = response.status().as_u16();
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(self.parse_azure_error(status_code, &error_body));
             }
-
-            Ok(roles)
+            let response_data: Value = response.json().await.map_err(|e| {
+                CrosstacheError::serialization(format!("Failed to parse role assignments: {e}"))
+            })?;
+            let assignments = response_data
+                .get("value")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let now = chrono::Utc::now;
+            Ok(assignments
+                .iter()
+                .filter(|assignment| assignment_has_exact_scope(assignment, &scope))
+                .map(|assignment| {
+                    let props = assignment.get("properties").unwrap_or(assignment);
+                    let role_definition_id = props
+                        .get("roleDefinitionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    VaultRole {
+                        assignment_id: assignment
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        role_id: role_definition_id.to_string(),
+                        role_name: role_definition_id
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("Unknown Role")
+                            .to_string(),
+                        role_description: "Azure RBAC role assignment".to_string(),
+                        principal_id: props
+                            .get("principalId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        principal_name: props
+                            .get("principalId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        email: String::new(),
+                        principal_type: props
+                            .get("principalType")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Unknown")
+                            .to_string(),
+                        scope: props
+                            .get("scope")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        created_on: props
+                            .get("createdOn")
+                            .and_then(Value::as_str)
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(now),
+                        updated_on: props
+                            .get("updatedOn")
+                            .and_then(Value::as_str)
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(now),
+                    }
+                })
+                .collect())
         };
-
         self.execute_with_retry(operation).await
     }
 
@@ -781,11 +904,7 @@ impl VaultOperations for AzureVaultOperations {
                 enc(secret_name)
             );
 
-            let role_definition_id = match access_level {
-                AccessLevel::Reader => "4633458b-17de-408a-b874-0445c86b69e6",
-                AccessLevel::Contributor => "b86a8fe4-44ce-4948-aee5-eccb2c155cd7",
-                AccessLevel::Admin => "00482a5a-887f-4fb3-b363-3b7fe8e74483",
-            };
+            let role_definition_id = key_vault_role_definition_id(&access_level);
 
             let assignment_id = Uuid::new_v4();
             let url = self.build_arm_url(&format!(
@@ -881,29 +1000,45 @@ impl VaultOperations for AzureVaultOperations {
                 ));
             }
 
-            // Delete each matching assignment
-            for assignment in &assignments {
-                if let Some(assignment_id) = assignment.get("id").and_then(|v| v.as_str()) {
-                    let delete_url =
-                        self.build_arm_url(&format!("{assignment_id}?api-version=2022-04-01"));
+            let exact_assignments: Vec<_> = assignments
+                .iter()
+                .filter(|assignment| assignment_has_exact_scope(assignment, &scope))
+                .collect();
+            if exact_assignments.is_empty() {
+                return Err(CrosstacheError::permission_denied(
+                    "User does not have an exact-scope role assignment on this secret",
+                ));
+            }
 
-                    let del_response = self
-                        .http_client
-                        .delete(&delete_url)
-                        .headers(headers.clone())
-                        .send()
-                        .await
-                        .map_err(|e| {
-                            CrosstacheError::network(format!(
-                                "Failed to delete role assignment: {e}"
-                            ))
+            // Delete only assignments whose ARM properties confirm the exact
+            // secret scope; inherited vault/resource-group assignments remain.
+            for assignment in exact_assignments {
+                let assignment_id =
+                    assignment
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            CrosstacheError::serialization(
+                                "Exact-scope role assignment is missing its resource ID",
+                            )
                         })?;
+                let delete_url =
+                    self.build_arm_url(&format!("{assignment_id}?api-version=2022-04-01"));
 
-                    if !del_response.status().is_success() {
-                        let status_code = del_response.status().as_u16();
-                        let error_body = del_response.text().await.unwrap_or_default();
-                        return Err(self.parse_azure_error(status_code, &error_body));
-                    }
+                let del_response = self
+                    .http_client
+                    .delete(&delete_url)
+                    .headers(headers.clone())
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        CrosstacheError::network(format!("Failed to delete role assignment: {e}"))
+                    })?;
+
+                if !del_response.status().is_success() {
+                    let status_code = del_response.status().as_u16();
+                    let error_body = del_response.text().await.unwrap_or_default();
+                    return Err(self.parse_azure_error(status_code, &error_body));
                 }
             }
 
@@ -1373,22 +1508,6 @@ impl AzureVaultOperations {
             user_email: None, // Resolved asynchronously by the caller via resolve_principal_ids
         })
     }
-
-    /// Determine access level from permissions
-    fn determine_access_level_from_permissions(
-        &self,
-        permissions: &super::models::AccessPolicyPermissions,
-    ) -> String {
-        if permissions.secrets.contains(&"purge".to_string()) {
-            "Admin".to_string()
-        } else if permissions.secrets.contains(&"set".to_string()) {
-            "Contributor".to_string()
-        } else if permissions.secrets.contains(&"get".to_string()) {
-            "Reader".to_string()
-        } else {
-            "Custom".to_string()
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1427,6 +1546,25 @@ mod tests {
     #[test]
     fn test_enc_alphanumeric_and_hyphen_unchanged() {
         assert_eq!(enc("abc-123_XYZ").to_string(), "abc-123_XYZ");
+    }
+
+    #[test]
+    fn exact_scope_check_rejects_inherited_assignments() {
+        let secret_scope =
+            "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/v/secrets/s";
+        let inherited = json!({"properties": {"scope": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/v"}});
+        let exact = json!({"properties": {"scope": secret_scope.to_ascii_uppercase()}});
+        assert!(!assignment_has_exact_scope(&inherited, secret_scope));
+        assert!(assignment_has_exact_scope(&exact, secret_scope));
+    }
+
+    #[test]
+    fn exact_scope_check_accepts_arm_percent_encoding() {
+        let encoded = json!({"properties": {"scope": "/subscriptions/sub/resourceGroups/my%20rg/providers/Microsoft.KeyVault/vaults/v"}});
+        assert!(assignment_has_exact_scope(
+            &encoded,
+            "/subscriptions/sub/resourceGroups/my rg/providers/Microsoft.KeyVault/vaults/v/"
+        ));
     }
 
     // --- get_vault_resource_id tests ---

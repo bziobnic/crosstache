@@ -79,6 +79,349 @@ pub async fn write_sensitive_file_async(path: &Path, content: &[u8]) -> std::io:
         .map_err(std::io::Error::other)?
 }
 
+/// Write a downloaded file without following symlinks in any path component.
+///
+/// On Unix, every directory is opened relative to the previously opened
+/// directory handle with `O_NOFOLLOW`, and the final file is opened the same
+/// way. This keeps the security check and the write on the same kernel-resolved
+/// path. Other platforms perform the strongest std-only equivalent by rejecting
+/// reparse/symlink metadata for every existing component before opening.
+pub fn write_file_no_follow(path: &Path, content: &[u8], overwrite: bool) -> Result<std::fs::File> {
+    write_file_no_follow_with_mode(path, content, overwrite, 0o666, 0o777)
+}
+
+fn write_file_no_follow_with_mode(
+    path: &Path,
+    content: &[u8],
+    overwrite: bool,
+    file_mode: libc::mode_t,
+    directory_mode: libc::mode_t,
+) -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::io::Write;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Component;
+
+        let mut absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| {
+                    CrosstacheError::config(format!("Cannot resolve current directory: {e}"))
+                })?
+                .join(path)
+        };
+        // macOS and some Unix layouts expose root-owned compatibility links
+        // such as /var -> /private/var. Resolve only symlinks owned by root
+        // and not writable by group/other; user-controlled links remain in
+        // the path and are rejected by the O_NOFOLLOW traversal below.
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mut resolved = PathBuf::from("/");
+            let mut tail = Vec::new();
+            let mut components = absolute.components();
+            let _ = components.next();
+            for component in components {
+                if !tail.is_empty() {
+                    tail.push(component.as_os_str().to_os_string());
+                    continue;
+                }
+                let candidate = resolved.join(component.as_os_str());
+                match std::fs::symlink_metadata(&candidate) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        if metadata.uid() == 0 && metadata.mode() & 0o022 == 0 {
+                            resolved = candidate.canonicalize().map_err(|e| {
+                                CrosstacheError::config(format!(
+                                    "Failed to resolve trusted system path '{}': {e}",
+                                    candidate.display()
+                                ))
+                            })?;
+                        } else {
+                            tail.push(component.as_os_str().to_os_string());
+                        }
+                    }
+                    Ok(_) => resolved.push(component.as_os_str()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        tail.push(component.as_os_str().to_os_string());
+                    }
+                    Err(e) => return Err(CrosstacheError::config(e.to_string())),
+                }
+            }
+            for component in tail {
+                resolved.push(component);
+            }
+            absolute = resolved;
+        }
+        let mut components = absolute.components();
+        if !matches!(components.next(), Some(Component::RootDir)) {
+            return Err(CrosstacheError::invalid_argument(format!(
+                "Download destination '{}' is not an absolute filesystem path",
+                absolute.display()
+            )));
+        }
+        let names: Vec<_> = components
+            .map(|component| match component {
+                Component::Normal(name) => Ok(name.to_os_string()),
+                _ => Err(CrosstacheError::invalid_argument(format!(
+                    "Download destination '{}' contains an unsafe path component",
+                    absolute.display()
+                ))),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (file_name, parent_names) = names.split_last().ok_or_else(|| {
+            CrosstacheError::invalid_argument("Download destination must name a file")
+        })?;
+
+        let root_fd = unsafe {
+            libc::open(
+                c"/".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if root_fd < 0 {
+            return Err(CrosstacheError::config(format!(
+                "Failed to open filesystem root: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let mut directory = unsafe { std::fs::File::from_raw_fd(root_fd) };
+
+        for name in parent_names {
+            let c_name = CString::new(name.as_bytes()).map_err(|_| {
+                CrosstacheError::invalid_argument("Download destination contains a NUL byte")
+            })?;
+            let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            let mut next_fd =
+                unsafe { libc::openat(directory.as_raw_fd(), c_name.as_ptr(), flags) };
+            if next_fd < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+            {
+                let mkdir_result = unsafe {
+                    libc::mkdirat(directory.as_raw_fd(), c_name.as_ptr(), directory_mode)
+                };
+                if mkdir_result < 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+                {
+                    return Err(CrosstacheError::config(format!(
+                        "Failed to create download directory '{}': {}",
+                        name.to_string_lossy(),
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                next_fd = unsafe { libc::openat(directory.as_raw_fd(), c_name.as_ptr(), flags) };
+            }
+            if next_fd < 0 {
+                return Err(CrosstacheError::config(format!(
+                    "Refusing unsafe download path component '{}': {}",
+                    name.to_string_lossy(),
+                    std::io::Error::last_os_error()
+                )));
+            }
+            directory = unsafe { std::fs::File::from_raw_fd(next_fd) };
+        }
+
+        let c_name = CString::new(file_name.as_bytes()).map_err(|_| {
+            CrosstacheError::invalid_argument("Download destination contains a NUL byte")
+        })?;
+        let create_mode = if overwrite {
+            libc::O_TRUNC
+        } else {
+            libc::O_EXCL
+        };
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | create_mode | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::c_uint::from(file_mode),
+            )
+        };
+        if fd < 0 {
+            return Err(CrosstacheError::config(format!(
+                "Refusing unsafe download destination '{}': {}",
+                absolute.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        file.write_all(content).map_err(|e| {
+            CrosstacheError::config(format!("Failed to write file {}: {e}", absolute.display()))
+        })?;
+        Ok(file)
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| {
+                    CrosstacheError::config(format!("Cannot resolve current directory: {e}"))
+                })?
+                .join(path)
+        };
+        if let Some(parent) = absolute.parent() {
+            let mut current = PathBuf::new();
+            for component in parent.components() {
+                current.push(component.as_os_str());
+                match std::fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(CrosstacheError::config(format!(
+                            "Refusing symlinked download path component '{}'",
+                            current.display()
+                        )));
+                    }
+                    Ok(metadata) if !metadata.is_dir() => {
+                        return Err(CrosstacheError::config(format!(
+                            "Download path component '{}' is not a directory",
+                            current.display()
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        std::fs::create_dir(&current).map_err(|e| {
+                            CrosstacheError::config(format!(
+                                "Failed to create download directory '{}': {e}",
+                                current.display()
+                            ))
+                        })?;
+                    }
+                    Err(e) => return Err(CrosstacheError::config(e.to_string())),
+                }
+            }
+        }
+        if std::fs::symlink_metadata(&absolute)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(CrosstacheError::config(format!(
+                "Refusing symlinked download destination '{}'",
+                absolute.display()
+            )));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true);
+        if overwrite {
+            options.truncate(true);
+        } else {
+            options.create_new(true);
+        }
+        let mut file = options.open(&absolute).map_err(|e| {
+            CrosstacheError::config(format!("Failed to open {}: {e}", absolute.display()))
+        })?;
+        file.write_all(content).map_err(|e| {
+            CrosstacheError::config(format!("Failed to write {}: {e}", absolute.display()))
+        })?;
+        Ok(file)
+    }
+}
+
+/// Atomically replace a file while refusing symlink components and final
+/// symlinks. The temporary file is created exclusively in the destination
+/// directory, flushed, and then renamed over the destination.
+pub fn atomic_write_file_no_follow(path: &Path, content: &[u8], private: bool) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        CrosstacheError::invalid_argument("Atomic destination must have a parent directory")
+    })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| CrosstacheError::invalid_argument("Atomic destination must name a file"))?;
+    let temp_name = format!(".{}.{}.tmp", file_name.to_string_lossy(), Uuid::new_v4());
+    let temp_path = parent.join(temp_name);
+    let (file_mode, directory_mode) = if private {
+        (0o600, 0o700)
+    } else {
+        (0o666, 0o777)
+    };
+
+    let result = (|| {
+        let file =
+            write_file_no_follow_with_mode(&temp_path, content, false, file_mode, directory_mode)?;
+        file.sync_all().map_err(|e| {
+            CrosstacheError::config(format!(
+                "Failed to flush temporary file '{}': {e}",
+                temp_path.display()
+            ))
+        })?;
+
+        if std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(CrosstacheError::config(format!(
+                "Refusing symlinked destination '{}'",
+                path.display()
+            )));
+        }
+        #[cfg(not(target_os = "windows"))]
+        std::fs::rename(&temp_path, path).map_err(|e| {
+            CrosstacheError::config(format!(
+                "Failed to atomically replace '{}': {e}",
+                path.display()
+            ))
+        })?;
+
+        // Unlike Unix rename(2), std::fs::rename does not replace an existing
+        // file on Windows. MoveFileExW preserves the atomic-replacement
+        // contract used by context and project saves on every supported OS.
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            };
+
+            let source: Vec<u16> = temp_path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let destination: Vec<u16> = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let moved = unsafe {
+                MoveFileExW(
+                    source.as_ptr(),
+                    destination.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if moved == 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(CrosstacheError::config(format!(
+                    "Failed to atomically replace '{}': {error}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+pub async fn atomic_write_file_no_follow_async(
+    path: &Path,
+    content: &[u8],
+    private: bool,
+) -> Result<()> {
+    let path = path.to_path_buf();
+    let content = content.to_vec();
+    tokio::task::spawn_blocking(move || atomic_write_file_no_follow(&path, &content, private))
+        .await
+        .map_err(|e| CrosstacheError::config(format!("Atomic file write task failed: {e}")))?
+}
+
 /// Check if a string is a valid GUID/UUID
 #[allow(dead_code)]
 pub fn is_guid(s: &str) -> bool {
@@ -227,14 +570,27 @@ pub fn validate_folder_path(folder_path: &str) -> Result<()> {
 pub fn safe_join(base: &Path, untrusted: &str) -> Result<PathBuf> {
     let untrusted_path = Path::new(untrusted);
 
-    if untrusted_path.is_absolute() {
+    let bytes = untrusted.as_bytes();
+    let has_windows_drive_prefix =
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if untrusted_path.is_absolute()
+        || untrusted.starts_with('/')
+        || untrusted.starts_with('\\')
+        || untrusted.contains('\\')
+        || has_windows_drive_prefix
+    {
         return Err(CrosstacheError::invalid_argument(format!(
             "Blob name '{untrusted}' is an absolute path, which is not allowed"
         )));
     }
 
     for component in untrusted_path.components() {
-        if component == std::path::Component::ParentDir {
+        if matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        ) {
             return Err(CrosstacheError::invalid_argument(format!(
                 "Blob name '{untrusted}' contains '..', which is not allowed"
             )));
@@ -348,6 +704,14 @@ mod tests {
         let base = std::path::Path::new("/tmp/base");
         assert!(safe_join(base, "/etc/passwd").is_err());
         assert!(safe_join(base, "/absolute/path").is_err());
+    }
+
+    #[test]
+    fn test_safe_join_rejects_windows_drive_and_unc_paths_on_every_platform() {
+        let base = std::path::Path::new("/safe/base");
+        assert!(safe_join(base, r"C:\Windows\system32\payload.dll").is_err());
+        assert!(safe_join(base, r"\\server\share\payload.dll").is_err());
+        assert!(safe_join(base, r"nested\..\payload.dll").is_err());
     }
 
     #[test]

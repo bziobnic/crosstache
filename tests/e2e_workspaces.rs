@@ -1450,7 +1450,7 @@ fn set_qualified_writes_named_vault() {
 }
 
 #[test]
-fn exact_name_with_colon_wins_over_alias() {
+fn explicit_alias_wins_over_literal_colon_name() {
     let env = WorkspaceEnv::new();
     env.ok(&[
         "cx",
@@ -1471,33 +1471,17 @@ fn exact_name_with_colon_wins_over_alias() {
         "stage",
     ]);
 
-    // A secret literally named "work:x" (colon included) written via a
-    // qualified write targets the "work" vault's stored name "work:x"
-    // itself only when addressed unambiguously; here we seed it through
-    // the resolver's own exact-name-first path by writing to work with the
-    // literal name, then reading the same literal string back.
+    // Keep both a literal "work:x" and the alias-qualified secret "x" in
+    // the work vault. The explicit alias must be authoritative.
     env.ok(&["set", "work:work:x", "--value", "literal-value"]);
+    env.ok(&["set", "work:x", "--value", "alias-value"]);
     let value = env.ok(&["get", "work:x", "--raw"]);
-    assert_eq!(value, "literal-value");
+    assert_eq!(value, "alias-value");
+    assert_eq!(env.ok(&["get", "work:work:x", "--raw"]), "literal-value");
 }
 
-/// Bugbot MEDIUM fix: write-mode verbs (`update`/`delete`) must also apply
-/// exact-name-first, scoped to the default vault — not just `set`.
-///
-/// How a literal `work:x` ends up in the default vault at all (since a
-/// *qualified write* always wins on the fresh-secret path — there is no way
-/// to `set` a literal `work:x` into the default vault once the `work`
-/// alias is attached, because `xv set work:x` would target the `work`
-/// vault's `x`, not create a literal in the default): this test creates
-/// the literal BEFORE any workspace is attached (single-vault mode, where
-/// "work:x" is just an ordinary — if colon-containing — name with no alias
-/// interpretation at all), then attaches a workspace afterward whose
-/// DEFAULT vault is that same pre-existing store under a different alias
-/// ("home") while a SEPARATE alias ("work") points elsewhere. This is the
-/// realistic scenario: pre-existing secrets predate the workspace; new
-/// ones go through qualified addressing from the start.
 #[test]
-fn update_and_delete_exact_name_with_colon_wins_over_alias_in_default() {
+fn update_and_delete_explicit_alias_do_not_mutate_default_literal() {
     let env = WorkspaceEnv::new();
 
     // Single-vault mode: "work:x" is an ordinary literal name in the
@@ -1526,23 +1510,15 @@ fn update_and_delete_exact_name_with_colon_wins_over_alias_in_default() {
         "--default",
     ]);
 
-    // "work:x" must resolve the literal secret in the DEFAULT vault
-    // ("home"), not alias-interpret "work" (-> local-a, path "x", which
-    // doesn't exist there — `update_secret` on a nonexistent local-a
-    // target would fail, so this `update` succeeding at all is itself
-    // part of the proof).
+    env.ok(&["set", "work:x", "--value", "alias-original"]);
     env.ok(&["update", "work:x", "updated-value"]);
-    // Read back via "home:work:x": a QUALIFIED read ("home" is a real
-    // alias) always targets that vault directly with the remainder as the
-    // path, bypassing exact-name-first entirely — the cleanest way to
-    // confirm placement without depending on read's own exact-name-first
-    // (which would otherwise intercept a bare "work:x" query too, since
-    // read searches every vault for literal matches first).
-    assert_eq!(env.ok(&["get", "home:work:x", "--raw"]), "updated-value");
+    assert_eq!(env.ok(&["get", "work:x", "--raw"]), "updated-value");
+    assert_eq!(env.ok(&["get", "home:work:x", "--raw"]), "original-value");
 
     env.ok(&["delete", "work:x", "--force"]);
-    let deleted_lookup = env.err(&["get", "home:work:x"]);
+    let deleted_lookup = env.err(&["get", "work:x"]);
     assert!(!deleted_lookup.status.success());
+    assert_eq!(env.ok(&["get", "home:work:x", "--raw"]), "original-value");
 }
 
 // ---------------------------------------------------------------------------
@@ -3551,7 +3527,7 @@ fn mv_alias_qualified_source_matching_default_degenerates_to_same_vault_rename()
 }
 
 #[test]
-fn mv_source_exact_name_with_colon_wins_over_alias_when_default_differs() {
+fn mv_source_explicit_alias_wins_when_default_has_literal_collision() {
     let env = WorkspaceEnv::new();
     // Default is "stage" (NOT "work") — so alias interpretation of the
     // "work:" prefix and the exact-name-first literal probe (scoped to the
@@ -3576,18 +3552,18 @@ fn mv_source_exact_name_with_colon_wins_over_alias_when_default_differs() {
         "work",
     ]);
 
-    // A secret LITERALLY named "work:x" sitting in the DEFAULT vault (stage).
+    // A literal collision sits in stage while the explicit alias target sits
+    // in work. Moving `work:x` must move the alias target.
     env.ok(&["set", "stage:work:x", "--value", "literal-value"]);
+    env.ok(&["set", "work:x", "--value", "alias-value"]);
 
     env.ok(&["mv", "work:x", "moved-literal"]);
 
-    // Must have renamed the LITERAL "work:x" in "stage" (the default), not
-    // treated "work" as an alias pointing at the "work" backend/vault.
     let value = env.ok(&["get", "stage:moved-literal", "--raw"]);
-    assert_eq!(value.trim(), "literal-value");
-    // The "work" alias's vault must be untouched (nothing was ever set there).
+    assert_eq!(value.trim(), "alias-value");
     let missing = env.err(&["get", "work:x"]);
     assert!(!missing.status.success());
+    assert_eq!(env.ok(&["get", "stage:work:x", "--raw"]), "literal-value");
 }
 
 // ===========================================================================
@@ -3766,7 +3742,7 @@ fn inject_folder_slash_template_unchanged_by_workspace() {
 }
 
 #[test]
-fn inject_template_literal_colon_name_wins_over_alias() {
+fn inject_template_explicit_alias_wins_over_literal_colon_name() {
     let env = WorkspaceEnv::new();
     env.ok(&[
         "cx",
@@ -3787,11 +3763,8 @@ fn inject_template_literal_colon_name_wins_over_alias() {
         "--as",
         "stage",
     ]);
-    // A secret LITERALLY named "work:LITERAL" sitting in "stage" — exact-
-    // name-first searches every attached vault for the FULL raw token
-    // before treating "work" as an alias qualifier, so this must win
-    // regardless of which vault the alias "work" would otherwise resolve to.
-    env.ok(&["set", "stage:work:LITERAL", "--value", "literal-wins"]);
+    env.ok(&["set", "stage:work:LITERAL", "--value", "literal-value"]);
+    env.ok(&["set", "work:LITERAL", "--value", "alias-wins"]);
 
     let template_path = env.home.join("tpl_literal.txt");
     std::fs::write(&template_path, "v: {{ secret:work:LITERAL }}\n").expect("write template");
@@ -3804,7 +3777,11 @@ fn inject_template_literal_colon_name_wins_over_alias() {
         out_path.to_str().unwrap(),
     ]);
     let rendered = std::fs::read_to_string(&out_path).expect("read output");
-    assert!(rendered.contains("literal-wins"), "{rendered}");
+    assert!(rendered.contains("alias-wins"), "{rendered}");
+    assert_eq!(
+        env.ok(&["get", "stage:work:LITERAL", "--raw"]),
+        "literal-value"
+    );
 }
 
 #[test]

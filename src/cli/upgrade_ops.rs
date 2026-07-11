@@ -134,7 +134,7 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
 
     // Signature verification (before checksum)
     let sig_bytes = download_asset(&sig_asset.browser_download_url, sig_asset.size).await?;
-    verify_signature(&archive_bytes, &sig_bytes)?;
+    verify_signature(&archive_bytes, &sig_bytes, &release.tag_name)?;
     output::success("Signature verified");
 
     // Verify checksum
@@ -148,7 +148,7 @@ pub(crate) async fn execute_upgrade_command(check: bool, force: bool) -> Result<
     let binary_bytes = extract_binary(&archive_bytes, asset_name)?;
 
     // Replace current binary
-    replace_binary(&binary_bytes)?;
+    replace_binary(&binary_bytes, &latest)?;
 
     output::success(&format!(
         "Successfully upgraded xv from v{current} to v{latest}"
@@ -278,7 +278,11 @@ fn parse_checksum_line(line: &str) -> &str {
 }
 
 /// Verify the minisign signature of a release archive.
-fn verify_signature(archive_bytes: &[u8], signature_bytes: &[u8]) -> Result<()> {
+fn verify_signature(
+    archive_bytes: &[u8],
+    signature_bytes: &[u8],
+    expected_tag: &str,
+) -> Result<()> {
     use minisign_verify::{PublicKey, Signature};
 
     let pk = PublicKey::from_base64(RELEASE_SIGNING_KEY)
@@ -290,6 +294,13 @@ fn verify_signature(archive_bytes: &[u8], signature_bytes: &[u8]) -> Result<()> 
             "Signature verification FAILED. The release archive may have been tampered with. \
              Do NOT install this binary. Report this at https://github.com/bziobnic/crosstache/issues"
         ))?;
+    let expected_comment = format!("crosstache {expected_tag}");
+    if sig.trusted_comment() != expected_comment {
+        return Err(CrosstacheError::upgrade(format!(
+            "Release signature is valid but belongs to '{}', not '{}'. Refusing a replayed or mislabeled archive.",
+            sig.trusted_comment(), expected_comment
+        )));
+    }
     Ok(())
 }
 
@@ -402,7 +413,7 @@ fn extract_from_zip(_data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Replace the current binary with the new one.
-fn replace_binary(new_binary: &[u8]) -> Result<()> {
+fn replace_binary(new_binary: &[u8], expected_version: &semver::Version) -> Result<()> {
     use std::fs;
     use std::io::Write;
 
@@ -425,9 +436,19 @@ fn replace_binary(new_binary: &[u8]) -> Result<()> {
         .ok_or_else(|| CrosstacheError::upgrade("Cannot determine binary directory".to_string()))?;
 
     // Write new binary to temp file in the same directory (same filesystem for atomic rename)
-    let temp_path = parent_dir.join(".xv-upgrade-tmp");
+    #[cfg(unix)]
+    let temp_path = parent_dir.join(format!(".xv-upgrade-{}.tmp", uuid::Uuid::new_v4()));
+    #[cfg(windows)]
+    let temp_path = parent_dir.join(format!(".xv-upgrade-{}.exe", uuid::Uuid::new_v4()));
 
-    let mut temp_file = fs::File::create(&temp_path).map_err(|e| {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o700).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut temp_file = options.open(&temp_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             CrosstacheError::upgrade(
                 "Permission denied. Try running with elevated privileges (sudo on Unix)."
@@ -450,6 +471,28 @@ fn replace_binary(new_binary: &[u8]) -> Result<()> {
         let permissions = fs::Permissions::from_mode(0o755);
         fs::set_permissions(&temp_path, permissions)
             .map_err(|e| CrosstacheError::upgrade(format!("Failed to set permissions: {e}")))?;
+    }
+
+    // The signature's trusted comment binds the archive to the release tag;
+    // independently require the extracted executable to report that same
+    // version before it can replace the running binary.
+    let version_output = std::process::Command::new(&temp_path)
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_file(&temp_path);
+            CrosstacheError::upgrade(format!("Failed to validate downloaded binary version: {e}"))
+        })?;
+    let reported = format!(
+        "{} {}",
+        String::from_utf8_lossy(&version_output.stdout),
+        String::from_utf8_lossy(&version_output.stderr)
+    );
+    if !version_output.status.success() || !version_output_matches(&reported, expected_version) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(CrosstacheError::upgrade(format!(
+            "Downloaded binary does not report expected version v{expected_version}; refusing installation"
+        )));
     }
 
     // Replace the binary
@@ -486,6 +529,18 @@ fn replace_binary(new_binary: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn version_output_matches(output: &str, expected: &semver::Version) -> bool {
+    output
+        .split_whitespace()
+        .filter_map(|word| {
+            parse_tag_version(word.trim_matches(|c: char| {
+                !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+            }))
+            .ok()
+        })
+        .any(|version| &version == expected)
 }
 
 #[cfg(test)]
@@ -577,6 +632,14 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000000"
         )
         .is_err());
+    }
+
+    #[test]
+    fn version_output_must_match_release_tag_exactly() {
+        let expected = semver::Version::new(1, 2, 3);
+        assert!(version_output_matches("xv 1.2.3", &expected));
+        assert!(!version_output_matches("xv 1.2.2", &expected));
+        assert!(!version_output_matches("xv 2.0.0", &expected));
     }
 
     #[tokio::test]

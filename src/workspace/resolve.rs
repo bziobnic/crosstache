@@ -50,22 +50,11 @@ impl std::fmt::Debug for TargetVault {
 /// - **Write**: an unqualified name ALWAYS targets the default entry —
 ///   never searched. A qualified `alias:path` goes to that vault.
 ///
-/// **Exact-name-first** applies to both modes: before alias interpretation,
-/// the FULL raw string is probed as a literal secret name. A hit
-/// short-circuits alias parsing entirely — mirrors `inject`'s dot-split
-/// rule, protecting literal names that happen to contain `:` (realistic
-/// only on the local backend's unrestricted charset). The two modes differ
-/// only in *where* that probe looks: **Read** checks every attached vault
-/// (it's already searching); **Write** checks the default vault ONLY —
-/// writes never search beyond it, so the exact-name-first probe can't
-/// either. Consequently a pre-existing literal secret like `work:x` in the
-/// default vault is reachable by an unqualified write only if the
-/// workspace's default IS `work` (so `raw == "work:x"` probes the vault
-/// that actually holds it); there is no way to *create* such a literal
-/// name via `set` once the `work` alias is attached, because a qualified
-/// write always wins on the fresh-secret path — pre-existing literal names
-/// are the concern here, not new ones (documented in the README preview
-/// section too).
+/// In a configured workspace, a syntactically valid `alias:path` is always
+/// authoritative. Literal-name probing must never redirect an explicitly
+/// qualified read or mutation to another vault. In a degenerate workspace
+/// with no configured aliases, the raw name remains literal for backward
+/// compatibility.
 pub async fn resolve_secret_target(
     raw: &str,
     ws: &Workspace,
@@ -94,34 +83,6 @@ pub async fn resolve_secret_target(
         TargetMode::Write => {
             let default_entry = ws.default_entry()?.clone();
 
-            // Exact-name-first, scoped to the default vault only (a write
-            // never searches beyond it): only meaningful when the raw
-            // string parsed as `alias:path` at all — a bare name has no
-            // alias interpretation to win over in the first place.
-            if addr.alias.is_some() {
-                let default_backend = materialize(registry, &default_entry)?;
-                let exists = default_backend
-                    .secrets()
-                    .secret_exists(&default_entry.vault, raw)
-                    .await
-                    .map_err(|e| {
-                        CrosstacheError::config(format!(
-                            "workspace default vault '{}' (backend '{}') failed while checking \
-                             for a literal name: {e}",
-                            default_entry.alias, default_entry.backend
-                        ))
-                    })?;
-                if exists {
-                    return Ok((
-                        TargetVault {
-                            backend: default_backend,
-                            entry: default_entry,
-                        },
-                        raw.to_string(),
-                    ));
-                }
-            }
-
             // `addr.alias == None` covers two distinct cases that both
             // land here as "literal name in the default vault", by
             // construction of `parse_address`: a genuinely bare name
@@ -147,16 +108,6 @@ pub async fn resolve_secret_target(
             Ok((TargetVault { backend, entry }, path))
         }
         TargetMode::Read => {
-            // Exact-name-first: only meaningful when the raw string parsed
-            // as `alias:path` at all (a bare name IS the search target
-            // already, so there's nothing to "win over").
-            if addr.alias.is_some() {
-                if let Some(entry) = exact_name_match(raw, ws, registry).await? {
-                    let backend = materialize(registry, &entry)?;
-                    return Ok((TargetVault { backend, entry }, raw.to_string()));
-                }
-            }
-
             if let Some(alias) = &addr.alias {
                 let entry = ws
                     .entry(alias)
@@ -199,30 +150,6 @@ fn unknown_alias_error(ws: &Workspace, alias: &str) -> CrosstacheError {
         "unknown workspace alias '{alias}'; attached aliases: {}",
         attached.join(", ")
     ))
-}
-
-/// Probe whether the FULL raw string (including any `:`) is a literal
-/// secret name anywhere in the workspace. Fail-loud on any probe error —
-/// a partial union could hide a real match. Returns the single matching
-/// entry, or `None` if it exists in zero vaults (fall through to alias
-/// interpretation), or an ambiguity error if it exists in ≥2.
-async fn exact_name_match(
-    raw: &str,
-    ws: &Workspace,
-    registry: &BackendRegistry,
-) -> Result<Option<WorkspaceEntry>> {
-    let matches = search_all(raw, ws, registry).await?;
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(Some(matches.into_iter().next().unwrap())),
-        _ => {
-            let candidates: Vec<String> = matches.iter().map(|e| e.alias.clone()).collect();
-            Err(CrosstacheError::ambiguous_secret(
-                raw.to_string(),
-                candidates,
-            ))
-        }
-    }
 }
 
 /// Search every attached vault for a secret literally named `name`.
@@ -476,15 +403,8 @@ mod tests {
         assert_eq!(path, "NEW_SECRET");
     }
 
-    /// Bugbot MEDIUM fix: Write mode's exact-name-first probe, scoped to
-    /// the default vault only. Here the workspace's default is
-    /// deliberately NOT the alias the raw string's prefix names ("stage"
-    /// is default; the prefix is "work") — a pre-existing literal secret
-    /// named exactly `work:x` sitting in the DEFAULT vault must win over
-    /// interpreting "work" as an alias qualifier, for `update`/`delete`
-    /// just as much as `set`.
     #[tokio::test]
-    async fn write_exact_name_with_colon_in_default_wins_over_alias() {
+    async fn qualified_write_alias_wins_over_literal_name_in_default() {
         let tmp = tempfile::tempdir().unwrap();
         let (registry, mut ws) = two_vault_workspace(&tmp);
         // Flip the default to "stage" so "work" (the alias-shaped prefix
@@ -503,12 +423,12 @@ mod tests {
 
         let (target, path) = resolve_secret_target("work:x", &ws, &registry, TargetMode::Write)
             .await
-            .expect("must resolve the literal name in the default vault");
+            .expect("must resolve the explicit workspace alias");
         assert_eq!(
-            target.entry.alias, "stage",
-            "must target the DEFAULT vault (stage), not the 'work' alias"
+            target.entry.alias, "work",
+            "an explicit alias must target its attached vault"
         );
-        assert_eq!(path, "work:x");
+        assert_eq!(path, "x");
     }
 
     /// When the alias-shaped prefix IS a real attached alias but no
@@ -553,7 +473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_name_with_colon_wins_over_alias_interpretation() {
+    async fn qualified_read_alias_wins_over_literal_name_probe() {
         let tmp = tempfile::tempdir().unwrap();
         let (registry, ws) = two_vault_workspace(&tmp);
 
@@ -569,9 +489,9 @@ mod tests {
 
         let (target, path) = resolve_secret_target("work:x", &ws, &registry, TargetMode::Read)
             .await
-            .expect("must resolve via exact-name-first");
+            .expect("must resolve via explicit alias");
         assert_eq!(target.entry.alias, "work");
-        assert_eq!(path, "work:x");
+        assert_eq!(path, "x");
     }
 
     #[tokio::test]

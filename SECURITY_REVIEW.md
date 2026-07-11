@@ -2,6 +2,21 @@
 
 Repository-wide review of revision `98a39ff9266d08d001dc4851b4eb414a8a7d762b`. All 175 in-scope files received full-file review receipts. Final policy calibration produced 15 High, 32 Medium, and 2 Low findings; one dependency-reachability question remains deferred.
 
+## Remediation Validation (2026-07-10)
+
+All 49 report findings were reproduced or confirmed from their code paths and are remediated in the working revision. The original findings remain below as the audit record. Remediation was organized around the affected trust boundaries:
+
+| Boundary | Validated remediation |
+|---|---|
+| Filesystem and export safety | Directory-handle-relative no-follow downloads; Windows prefix/UNC rejection; atomic no-follow context/project/state writes; archive symlink containment; POSIX-safe dotenv quoting; structured, formula-neutral CSV output. |
+| Authorization and ownership | Exact-scope vault/secret ARM RBAC operations; pre-existing RBAC authority required in addition to creator tags; the Function endpoint and its delegation condition are bound to one exact installer principal; exact persisted Azure resource IDs drive adoption and teardown; exact storage association; teardown state retained on any cleanup failure. |
+| Least privilege and credential handling | Function principal narrowed to the installer resource group with exact role-and-principal-conditioned RBAC delegation; existing unconditioned delegation is rejected; legacy subscription-wide identity and Event Grid setup are disabled; Graph permissions removed; client secrets transferred through private temporary files and no-echo prompts; sensitive claims, principal IDs, and resource tags removed from logs. |
+| Configuration and resolution | Corrupt discovered project/context files fail closed; explicit workspace aliases are authoritative; secret-to-metadata record-type downgrades are rejected; environment-name collisions abort before process launch; migration existence errors abort. |
+| Security gates and audit | Hook scans use a non-repository-controlled baseline and fail on incomplete vault coverage; raw Git path bytes are preserved; obsolete Event Grid mutation helpers are disabled and deployment verification requires that the legacy subscription trigger is absent; CloudTrail pagination covers the full requested window. |
+| Supply chain and updates | Actions are pinned to reviewed SHAs with job-scoped permissions; release signer downloads are digest-pinned; both installers require minisign authentication bound to the release tag; the updater also requires the extracted binary to report the signed tag's exact version. |
+
+Validation included the Rust unit/integration suite, 117 Python tests, all-feature Rust compilation, PowerShell parser checks, shell syntax checks, and workflow YAML parsing. No live Azure or AWS mutation was performed.
+
 ## P1 - High
 
 - **Deployment archive follows repository symlinks and uploads outside files** (`xfunction/installer/steps/deployment.py:25`) - A lower-trust input or workflow state reaches the local file disclosure control at xfunction/installer/steps/deployment.py:25 under the validated preconditions. Fix: Reject symlinks and require realpath containment for every archive entry.
@@ -60,14 +75,14 @@ Repository-wide review of revision `98a39ff9266d08d001dc4851b4eb414a8a7d762b`. A
 - **CSV exports preserve spreadsheet formulas from secret values** (`src/cli/config_ops.rs:2442`) - A lower-trust input or workflow state reaches the formula injection control at src/cli/config_ops.rs:2442 under the validated preconditions. Fix: Neutralize formula prefixes and use a structured CSV writer for every field.
 - **Unrelated account activity can hide vault audit events** (`src/backend/aws/audit.rs:63`) - A lower-trust input or workflow state reaches the audit integrity control at src/backend/aws/audit.rs:63 under the validated preconditions. Fix: Filter at the service when possible and page until the requested time window is covered.
 
-## Needs Follow-up
+## Dependency Reachability Resolution
 
-- **quick-xml advisory reachability** (`Cargo.lock:4530`) - `quick-xml 0.31.0` is in the active Azure SDK dependency graph and matches RUSTSEC-2026-0194, but the review did not establish whether an attacker can induce an attribute-dense Azure XML response.
+- **quick-xml advisory reachability** (`Cargo.lock:4530`) - Confirmed present through `azure_core 0.21.0`, and the affected XML deserializer is active in Azure Blob SDK response parsing. The advisory requires attacker control over the number of attributes on one XML start tag. Crosstache constructs the Blob service endpoint from the Azure storage account name, does not wire its legacy storage endpoint override into this client, and sends user-controlled blob names/metadata through SDK fields that Azure serializes as element names/text rather than arbitrary response attributes. The only XML peer is therefore the authenticated Microsoft service, which controls response schema and attribute cardinality. The advisory's low-trust precondition is not reachable in the current application threat model, so this is not a reportable vulnerability. Upgrade the Azure SDK when it admits `quick-xml >= 0.41.0`; the current SDK pins the affected `0.31` series. See [RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194.html).
 
 ## Coverage And Limitations
 
 - Included Rust runtime code, Azure Function code, embedded web assets, installers, PowerShell deployment scripts, GitHub Actions workflows, `Cargo.lock`, and Python requirements.
 - Excluded ignored duplicate worktrees and local agent state under `.beads/`, `.claude/`, and `.omc/`; docs and tests were supporting evidence.
 - No live Azure or AWS account was used for destructive or privilege-changing reproduction.
-- `cargo-audit` and `cargo-deny` were not installed; the lockfile received manual/advisory review.
+- `cargo-audit` and `cargo-deny` were not installed; the lockfile and deferred advisory received manual reachability review against the authoritative RustSec record.
 - The full sealed scan report and evidence bundle are stored in the scan artifact directory referenced in the session handoff.

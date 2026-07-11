@@ -8,6 +8,7 @@ set -e
 # Configuration
 GITHUB_REPO="bziobnic/crosstache"
 BINARY_NAME="xv"
+RELEASE_SIGNING_KEY="RWRuXFh34rB613dgsXyAMmtKvYK0SFwxq4i44dhGFXVTrhAQ7hJXf6Ym"
 INSTALL_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 VERSION="${1:-latest}"
 
@@ -185,6 +186,7 @@ download_and_install() {
     archive_name="xv-${platform}.tar.gz"
     download_url="https://github.com/$GITHUB_REPO/releases/download/$version/$archive_name"
     checksum_url="https://github.com/$GITHUB_REPO/releases/download/$version/$archive_name.sha256"
+    signature_url="https://github.com/$GITHUB_REPO/releases/download/$version/$archive_name.minisig"
     
     info "Installing crosstache $version for $platform"
     info "Download URL: $download_url"
@@ -200,10 +202,24 @@ download_and_install() {
     if command -v curl >/dev/null 2>&1; then
         curl -sSL "$download_url" -o "$archive_name" || error "Failed to download archive"
         curl -sSL "$checksum_url" -o "$archive_name.sha256" 2>/dev/null || error "Failed to download checksum file. Refusing to install without verification."
+        curl -sSL "$signature_url" -o "$archive_name.minisig" 2>/dev/null || error "Failed to download signature file. Refusing to install an unsigned release."
     elif command -v wget >/dev/null 2>&1; then
         wget -q "$download_url" -O "$archive_name" || error "Failed to download archive"
         wget -q "$checksum_url" -O "$archive_name.sha256" 2>/dev/null || error "Failed to download checksum file. Refusing to install without verification."
+        wget -q "$signature_url" -O "$archive_name.minisig" 2>/dev/null || error "Failed to download signature file. Refusing to install an unsigned release."
     fi
+
+    if ! command -v minisign >/dev/null 2>&1; then
+        error "minisign is required to authenticate releases. Install minisign and retry."
+    fi
+    if ! minisign -Vm "$archive_name" -x "$archive_name.minisig" -P "$RELEASE_SIGNING_KEY" >/dev/null; then
+        error "Release signature verification failed. Refusing to install."
+    fi
+    trusted_comment=$(sed -n '3s/^trusted comment: //p' "$archive_name.minisig")
+    if [ "$trusted_comment" != "crosstache $version" ]; then
+        error "Release signature belongs to '$trusted_comment', not 'crosstache $version'. Refusing a replayed archive."
+    fi
+    info "Release signature verified"
 
     # Verify checksum. Verification is mandatory: installing an unverified
     # archive is never acceptable, so every failure path below is fatal.
@@ -242,7 +258,7 @@ download_and_install() {
     
     # Install binary
     if [ -f "$BINARY_NAME" ]; then
-        cp "$BINARY_NAME" "$INSTALL_DIR/" || error "Failed to copy binary to $INSTALL_DIR"
+        cp -f "$BINARY_NAME" "$INSTALL_DIR/" || error "Failed to copy binary to $INSTALL_DIR"
         chmod +x "$INSTALL_DIR/$BINARY_NAME" || error "Failed to make binary executable"
         
         # On macOS, remove quarantine attribute to avoid "could not verify" error

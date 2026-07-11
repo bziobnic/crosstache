@@ -70,8 +70,9 @@ async fn compute_diff(
             Ok(true) => conflicts.push(name),
             Ok(false) => to_migrate.push(name),
             Err(e) => {
-                tracing::debug!("secret_exists check failed for {name}: {e}; assuming new");
-                to_migrate.push(name);
+                return Err(CrosstacheError::Unknown(format!(
+                    "Failed to determine whether target secret '{name}' exists: {e}"
+                )));
             }
         }
     }
@@ -169,13 +170,22 @@ async fn migrate_one(
 
     // Idempotency check
     if !force_replace {
-        if let Ok(existing) = target.secrets().get_secret(target_vault, name, false).await {
-            if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
-                let expected =
-                    format!("{}:{}:{}", source_name_for_tag, source_vault, props.version);
-                if prev_from == &expected {
-                    return Ok(MigrateOutcome::Skipped(name.to_string()));
+        match target.secrets().get_secret(target_vault, name, false).await {
+            Ok(existing) => {
+                if let Some(prev_from) = existing.tags.get(TAG_MIGRATED_FROM) {
+                    let expected =
+                        format!("{}:{}:{}", source_name_for_tag, source_vault, props.version);
+                    if prev_from == &expected {
+                        return Ok(MigrateOutcome::Skipped(name.to_string()));
+                    }
                 }
+            }
+            Err(BackendError::NotFound { .. }) => {}
+            Err(e) => {
+                return Err((
+                    name.to_string(),
+                    format!("target existence check failed: {e}"),
+                ));
             }
         }
     }
@@ -334,8 +344,9 @@ pub(crate) async fn execute_migrate(
                     })?;
                 }
                 Err(e) => {
-                    // Non-fatal — some backends may not implement get_vault
-                    tracing::debug!("Could not check target vault existence: {e}");
+                    return Err(CrosstacheError::Unknown(format!(
+                        "Failed to determine whether target vault '{target_vault}' exists: {e}"
+                    )));
                 }
             }
         }

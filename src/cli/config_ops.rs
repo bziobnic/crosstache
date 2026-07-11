@@ -1006,7 +1006,7 @@ pub(crate) async fn execute_context_command(
 async fn execute_context_show(config: &Config) -> Result<()> {
     use crate::config::ContextManager;
 
-    let context_manager = ContextManager::load().await.unwrap_or_default();
+    let context_manager = ContextManager::load().await?;
 
     if let Some(ref context) = context_manager.current {
         println!("Current Vault Context:");
@@ -1036,7 +1036,7 @@ async fn execute_context_show(config: &Config) -> Result<()> {
 
     // New: project-config (.xv.toml) section.
     let cwd = std::env::current_dir()?;
-    if let Ok(Some((path, cfg))) = crate::config::project::find_project_config(&cwd).await {
+    if let Some((path, cfg)) = crate::config::project::find_project_config(&cwd).await? {
         match crate::config::project::resolve_env(&cfg, config.env_flag.as_deref()) {
             Ok(Some((name, profile))) => {
                 println!();
@@ -1104,7 +1104,7 @@ async fn execute_context_use(
 
     // P0.1: If the name matches a .xv.toml env profile, reject with a targeted hint.
     let cwd = std::env::current_dir()?;
-    if let Ok(Some((_path, proj_cfg))) = crate::config::project::find_project_config(&cwd).await {
+    if let Some((_path, proj_cfg)) = crate::config::project::find_project_config(&cwd).await? {
         if proj_cfg.envs.contains_key(vault_name) {
             return Err(CrosstacheError::config(format!(
                 "'{vault_name}' is an env profile in .xv.toml, not a vault name. \
@@ -1121,9 +1121,7 @@ Use `xv --env {vault_name} <command>` to activate it, or set XV_ENV={vault_name}
         ContextManager::new_global()?
     } else {
         // Load existing or create new (defaults to global)
-        ContextManager::load()
-            .await
-            .unwrap_or_else(|_| ContextManager::new_global().unwrap_or_default())
+        ContextManager::load().await?
     };
 
     // Create new context
@@ -1163,7 +1161,7 @@ async fn execute_context_list(config: &Config) -> Result<()> {
     use crate::utils::format::OutputFormat;
     use tabled::Tabled;
 
-    let context_manager = ContextManager::load().await.unwrap_or_default();
+    let context_manager = ContextManager::load().await?;
 
     #[derive(Tabled, serde::Serialize)]
     struct ContextItem {
@@ -1253,7 +1251,7 @@ async fn execute_context_clear(global: bool, _config: &Config) -> Result<()> {
     let mut context_manager = if global {
         ContextManager::new_global()?
     } else {
-        ContextManager::load().await.unwrap_or_default()
+        ContextManager::load().await?
     };
 
     if context_manager.current.is_none() {
@@ -1381,14 +1379,7 @@ async fn execute_context_init(
         types: std::collections::HashMap::new(),
     };
 
-    let body = toml::to_string_pretty(&cfg)
-        .map_err(|e| CrosstacheError::config(format!("failed to serialize .xv.toml: {e}")))?;
-
-    // Use the same header `ProjectConfig::save()` writes, so the comment
-    // survives later `xv env use/create/delete` rewrites.
-    let full = format!("{}{body}", crate::config::project::ProjectConfig::HEADER);
-
-    tokio::fs::write(&path, full).await?;
+    cfg.save(&path).await?;
     crate::utils::output::success(&format!(
         ".xv.toml written to {} (env: {env_name})",
         path.display()
@@ -1406,9 +1397,7 @@ async fn load_cx_context(local: bool) -> Result<crate::config::ContextManager> {
     if local {
         ContextManager::new_local()
     } else {
-        ContextManager::load()
-            .await
-            .or_else(|_| ContextManager::new_global())
+        ContextManager::load().await
     }
 }
 
@@ -1424,9 +1413,9 @@ async fn load_cx_context(local: bool) -> Result<crate::config::ContextManager> {
 /// path (same reasoning as `context use`'s guard just above).
 async fn guard_against_project_vaults_overlay(config: &Config) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    if let Ok(Some((path, proj_cfg))) = crate::config::project::find_project_config(&cwd).await {
-        if let Ok(Some((env_name, profile))) =
-            crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())
+    if let Some((path, proj_cfg)) = crate::config::project::find_project_config(&cwd).await? {
+        if let Some((env_name, profile)) =
+            crate::config::project::resolve_env(&proj_cfg, config.env_flag.as_deref())?
         {
             if !profile.vaults.is_empty() {
                 return Err(CrosstacheError::config(format!(
@@ -2337,6 +2326,36 @@ async fn execute_env_show(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn is_posix_assignment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('A'..='Z' | 'a'..='z' | '_'))
+        && chars.all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_'))
+}
+
+fn quote_posix_shell_value(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '%' | '+' | ',' | '-' | '.' | '/' | ':' | '@')
+        })
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn neutralize_spreadsheet_formula(value: &str) -> String {
+    if matches!(
+        value.chars().next(),
+        Some('=' | '+' | '-' | '@' | '\t' | '\r' | '\n')
+    ) {
+        format!("'{value}")
+    } else {
+        value.to_string()
+    }
+}
+
 async fn execute_env_pull(
     format: &crate::utils::format::OutputFormat,
     groups: Vec<String>,
@@ -2435,14 +2454,28 @@ async fn execute_env_pull(
             })?
         }
         OutputFormat::Csv => {
-            let mut csv = String::from("name,value\n");
+            let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
+            writer.write_record(["name", "value"]).map_err(|e| {
+                CrosstacheError::serialization(format!("CSV serialization failed: {e}"))
+            })?;
             for s in &all_secrets {
                 if let Some(ref v) = s.value {
-                    let escaped = v.replace('"', "\"\"");
-                    csv.push_str(&format!("{},\"{}\"\n", s.original_name, escaped));
+                    writer
+                        .write_record([
+                            neutralize_spreadsheet_formula(&s.original_name),
+                            neutralize_spreadsheet_formula(v),
+                        ])
+                        .map_err(|e| {
+                            CrosstacheError::serialization(format!("CSV serialization failed: {e}"))
+                        })?;
                 }
             }
-            csv
+            let bytes = writer.into_inner().map_err(|e| {
+                CrosstacheError::serialization(format!("CSV serialization failed: {e}"))
+            })?;
+            String::from_utf8(bytes).map_err(|e| {
+                CrosstacheError::serialization(format!("CSV serialization was not UTF-8: {e}"))
+            })?
         }
         // Plain / Auto / Table / Template / Raw: use dotenv format
         _ => {
@@ -2450,21 +2483,16 @@ async fn execute_env_pull(
             for secret in &all_secrets {
                 if let Some(ref value) = secret.value {
                     let key = &secret.original_name;
-                    let escaped_value =
-                        if value.contains('\n') || value.contains('"') || value.contains('\\') {
-                            format!(
-                                "\"{}\"",
-                                value
-                                    .replace('\\', "\\\\")
-                                    .replace('"', "\\\"")
-                                    .replace('\n', "\\n")
-                            )
-                        } else if value.contains(' ') || value.starts_with('#') {
-                            format!("\"{}\"", value.as_str())
-                        } else {
-                            value.to_string()
-                        };
-                    dotenv_content.push_str(&format!("{}={}\n", key, escaped_value));
+                    if !is_posix_assignment_name(key) {
+                        return Err(CrosstacheError::invalid_argument(format!(
+                            "secret name '{key}' is not a valid POSIX environment variable name"
+                        )));
+                    }
+                    dotenv_content.push_str(&format!(
+                        "{}={}\n",
+                        key,
+                        quote_posix_shell_value(value)
+                    ));
                 }
             }
             dotenv_content
