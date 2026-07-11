@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.25.1 — Security hardening (2026-07-11)
+
+### Security
+
+- Hardened file downloads, sync, archives, and configuration/state writes
+  against path traversal and symlink attacks across the CLI and Azure Function
+  installer.
+- Tightened Azure RBAC provisioning, authorization scopes, resource ownership,
+  and teardown so privileged operations apply only to exact, verified
+  resources and identities.
+- Strengthened the release supply chain with pinned GitHub Actions, verified
+  minisign tooling, mandatory signed archives, and release-tag/version binding
+  in installers and the self-updater.
+- Made workspace/config resolution, staged leak scanning, migration checks, and
+  secret-to-environment mapping fail closed on ambiguous or incomplete state.
+
+### Fixed
+
+- Preserved explicit workspace-alias precedence and rejected record-type
+  overrides that could expose secret fields as metadata.
+- Completed AWS audit pagination for the requested time window and corrected
+  exact-scope Azure role-assignment handling.
+
 ## v0.25.0 — Web UI folder grouping (2026-07-10)
 
 ### Added
