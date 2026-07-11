@@ -9,6 +9,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+#[cfg(unix)]
+type FileMode = libc::mode_t;
+#[cfg(not(unix))]
+type FileMode = u32;
+
 /// Write bytes to a file with mode 0o600 (owner read/write only).
 /// Refuses to follow symlinks on Unix (O_NOFOLLOW).
 pub fn write_private(
@@ -94,8 +99,8 @@ fn write_file_no_follow_with_mode(
     path: &Path,
     content: &[u8],
     overwrite: bool,
-    file_mode: libc::mode_t,
-    directory_mode: libc::mode_t,
+    file_mode: FileMode,
+    directory_mode: FileMode,
 ) -> Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -255,6 +260,8 @@ fn write_file_no_follow_with_mode(
     #[cfg(not(unix))]
     {
         use std::io::Write;
+
+        let _ = (file_mode, directory_mode);
 
         let absolute = if path.is_absolute() {
             path.to_path_buf()
