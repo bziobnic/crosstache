@@ -216,4 +216,23 @@ mod tests {
         assert!(APP_JS.contains("function resetConfirmation"));
         assert!(APP_JS.contains("resetConfirmation($('#delete'), 'Delete')"));
     }
+
+    #[test]
+    fn ui_guards_drawer_action_continuations_by_selection() {
+        assert!(APP_JS.contains("function isCurrentDrawer(generation, selection)"));
+        assert!(
+            APP_JS
+                .matches("if (!isCurrentDrawer(generation, selection)) return;")
+                .count()
+                >= 8
+        );
+    }
+
+    #[test]
+    fn ui_hides_and_clears_drawer_while_selection_loads() {
+        assert!(APP_JS.contains(
+            "async function openDrawer(name) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
+        ));
+        assert!(APP_JS.contains("function clearDrawerState()"));
+    }
 }

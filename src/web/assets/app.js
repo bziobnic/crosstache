@@ -392,21 +392,29 @@ function secretRow(s) {
 $('#search').oninput = renderSecrets;
 $('#new-secret').onclick = () => openDrawer(null);
 
-function closeDrawer() {
-  drawerGeneration++;
-  resetConfirmation($('#delete'), 'Delete');
-  $('#drawer').hidden = true;
+function isCurrentDrawer(generation, selection) {
+  return generation === drawerGeneration && selection === editing;
+}
+
+function clearDrawerState() {
   editing = null;
   editingMeta = null;
   recordState = null;
 }
 
+function closeDrawer() {
+  drawerGeneration++;
+  resetConfirmation($('#delete'), 'Delete');
+  $('#drawer').hidden = true;
+  clearDrawerState();
+}
+
 async function openDrawer(name) {
   const generation = ++drawerGeneration;
+  $('#drawer').hidden = true;
   resetConfirmation($('#delete'), 'Delete');
+  clearDrawerState();
   editing = name;
-  editingMeta = null;
-  recordState = null;
   const f = $('#secret-form');
   f.reset();
   $('#drawer-title').textContent = name ? `Edit: ${name}` : 'New secret';
@@ -450,7 +458,7 @@ async function openDrawer(name) {
       // Without the fetched metadata a save would send enabled:true and no
       // custom tags — silently mutating the secret. Don't open the drawer.
       fail(e);
-      editing = null;
+      clearDrawerState();
       return;
     }
   }
@@ -494,22 +502,37 @@ async function openRecord(name, meta, tags, generation) {
 $('#close-drawer').onclick = closeDrawer;
 
 $('#reveal').onclick = async () => {
+  const generation = drawerGeneration;
+  const selection = editing;
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(editing)}/value${vaultQS(currentVault)}`);
+    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    if (!isCurrentDrawer(generation, selection)) return;
     $('#secret-form').elements.value.value = value ?? '';
-  } catch (e) { fail(e); }
+  } catch (e) {
+    if (!isCurrentDrawer(generation, selection)) return;
+    fail(e);
+  }
 };
 
 $('#copy').onclick = async () => {
+  const generation = drawerGeneration;
+  const selection = editing;
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(editing)}/value${vaultQS(currentVault)}`);
+    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    if (!isCurrentDrawer(generation, selection)) return;
     await navigator.clipboard.writeText(value ?? '');
+    if (!isCurrentDrawer(generation, selection)) return;
     toast('copied');
-  } catch (e) { fail(e); }
+  } catch (e) {
+    if (!isCurrentDrawer(generation, selection)) return;
+    fail(e);
+  }
 };
 
 $('#secret-form').onsubmit = async (ev) => {
   ev.preventDefault();
+  const generation = drawerGeneration;
+  let selection = editing;
   const f = ev.target.elements;
   const name = f.name.value.trim();
   if (!name) return;
@@ -517,9 +540,11 @@ $('#secret-form').onsubmit = async (ev) => {
   const expiresPut = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : null;
   const expiresPatch = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : '';
   try {
-    if (editing && name !== editing) {
-      await api('POST', `/api/secrets/${encodeURIComponent(editing)}/move${vaultQS(currentVault)}`, { new_name: name });
+    if (selection && name !== selection) {
+      await api('POST', `/api/secrets/${encodeURIComponent(selection)}/move${vaultQS(currentVault)}`, { new_name: name });
+      if (!isCurrentDrawer(generation, selection)) return;
       editing = name;
+      selection = name;
     }
     if (recordState) {
       // Records always take the full-PUT path: field edits change the value.
@@ -558,7 +583,7 @@ $('#secret-form').onsubmit = async (ev) => {
         enabled: editingMeta ? editingMeta.enabled : true,
         not_before: editingMeta?.not_before || null,
       });
-    } else if (editing) {
+    } else if (selection) {
       // metadata-only patch ("" clears)
       await api('PATCH', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
         folder: f.folder.value,
@@ -569,22 +594,29 @@ $('#secret-form').onsubmit = async (ev) => {
     } else {
       throw new Error('a new secret needs a value');
     }
+    if (!isCurrentDrawer(generation, selection)) return;
     closeDrawer();
     toast('saved');
     await loadSecrets(currentVault);
-  } catch (e) { fail(e); }
+  } catch (e) {
+    if (!isCurrentDrawer(generation, selection)) return;
+    fail(e);
+  }
 };
 
 $('#delete').onclick = async () => {
   const btn = $('#delete');
   if (!armConfirmation(btn, 'Really delete?')) return;
+  const generation = drawerGeneration;
+  const selection = editing;
   try {
-    await api('DELETE', `/api/secrets/${encodeURIComponent(editing)}${vaultQS(currentVault)}`);
-    $('#drawer').hidden = true;
-    resetConfirmation(btn, 'Delete');
+    await api('DELETE', `/api/secrets/${encodeURIComponent(selection)}${vaultQS(currentVault)}`);
+    if (!isCurrentDrawer(generation, selection)) return;
+    closeDrawer();
     toast('deleted');
     await loadSecrets(currentVault);
   } catch (e) {
+    if (!isCurrentDrawer(generation, selection)) return;
     resetConfirmation(btn, 'Delete');
     fail(e);
   }
