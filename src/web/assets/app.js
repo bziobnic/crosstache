@@ -1,8 +1,11 @@
 'use strict';
 
-// ---- auth token: read once from URL, keep in memory only, scrub the URL ----
+// ---- auth token: persist per tab for reloads, scrub the URL ----
+const TOKEN_STORAGE_KEY = 'xv.ui.token';
 const params = new URLSearchParams(location.search);
-const TOKEN = params.get('token') || '';
+const queryToken = params.get('token') || '';
+if (queryToken) sessionStorage.setItem(TOKEN_STORAGE_KEY, queryToken);
+const TOKEN = queryToken || sessionStorage.getItem(TOKEN_STORAGE_KEY) || '';
 if (params.has('token')) history.replaceState(null, '', location.pathname);
 
 let inflight = 0;
@@ -21,7 +24,9 @@ async function api(method, path, body, raw = false) {
     if (!res.ok) {
       let msg = res.statusText;
       try { msg = (await res.json()).error || msg; } catch { /* not json */ }
-      throw new Error(msg);
+      const error = new Error(msg);
+      error.status = res.status;
+      throw error;
     }
     if (raw) return res;
     const text = await res.text();
@@ -41,6 +46,34 @@ function toast(msg, isError = false) {
   t._timer = setTimeout(() => { t.hidden = true; }, 4000);
 }
 const fail = (e) => toast(e.message, true);
+
+function resetConfirmation(button, label) {
+  clearTimeout(button._confirmTimer);
+  button._confirmTimer = null;
+  button.dataset.armed = '';
+  button.disabled = false;
+  button.textContent = label;
+}
+
+function beginPendingAction(button, label) {
+  clearTimeout(button._confirmTimer);
+  button._confirmTimer = null;
+  button.dataset.armed = '';
+  button.disabled = true;
+  button.textContent = label;
+}
+
+function armConfirmation(button, armedLabel, timeoutMs = 3000) {
+  if (button.dataset.armed === '1') return true;
+  button.dataset.armed = '1';
+  button.textContent = armedLabel;
+  clearTimeout(button._confirmTimer);
+  button._confirmTimer = setTimeout(
+    () => resetConfirmation(button, button.dataset.defaultLabel),
+    timeoutMs,
+  );
+  return false;
+}
 
 // Dates only, never timestamps. Unparseable strings pass through raw.
 function fmtDate(s) {
@@ -133,6 +166,7 @@ let ctx = null;
 let currentVault = null;
 let secrets = [];
 let editing = null; // name of secret open in drawer, null = new
+let drawerGeneration = 0;
 // content_type + non-canonical tags of the secret open in drawer, so a value
 // edit doesn't silently drop them (the form has no fields for them).
 let editingMeta = null;
@@ -228,11 +262,31 @@ function renderRecordFields(typeName, secretFields, metaFields, forNew) {
   $('#value-section').hidden = true;
 }
 
-const vaultQS = () => `?vault=${encodeURIComponent(currentVault)}`;
+const vaultQS = (vault) => `?vault=${encodeURIComponent(vault)}`;
 
 // ---- context & vaults ----
+let authRecoveryActive = false;
+function showAuthRecovery() {
+  authRecoveryActive = true;
+  $('#secrets-view').hidden = true;
+  $('#files-view').hidden = true;
+  $('#auth-recovery').hidden = false;
+}
+
 async function init() {
-  ctx = await api('GET', '/api/context');
+  if (!TOKEN) {
+    showAuthRecovery();
+    return;
+  }
+  try {
+    ctx = await api('GET', '/api/context');
+  } catch (e) {
+    if (e.status === 401) {
+      showAuthRecovery();
+      return;
+    }
+    throw e;
+  }
   currentVault = ctx.vault;
   $('#backend-badge').textContent = ctx.backend;
   $('#tab-files').hidden = !ctx.capabilities.files;
@@ -270,16 +324,22 @@ async function init() {
   }
   sel.onchange = () => {
     currentVault = sel.value;
+    const vault = currentVault;
+    secretLoadGeneration++;
+    fileLoadGeneration++;
+    fileActionGeneration++;
+    pendingFileDeletes.clear();
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
     expandedSecretFolders.clear();
     expandedFileFolders.clear();
-    loadSecrets().catch(fail);
-    loadFiles().catch(fail);
+    loadSecrets(vault).catch(fail);
+    loadFiles(vault).catch(fail);
   };
-  await loadSecrets();
-  if (ctx.capabilities.files) await loadFiles();
+  const vault = currentVault;
+  if (!(await loadSecrets(vault))) return;
+  if (ctx.capabilities.files) await loadFiles(vault);
 }
 
 // ---- secrets ----
@@ -287,12 +347,17 @@ async function init() {
 // input during a vault switch can't paint the previous vault's rows (or
 // clobber the failed placeholder) while the fetch is in flight.
 let secretsState = 'ready';
-async function loadSecrets() {
+let secretLoadGeneration = 0;
+async function loadSecrets(vault) {
+  const generation = ++secretLoadGeneration;
   secretsState = 'loading';
   showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', 5);
   try {
-    secrets = await api('GET', `/api/secrets${vaultQS()}`);
+    const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault)}`);
+    if (generation !== secretLoadGeneration) return false;
+    secrets = loadedSecrets;
   } catch (e) {
+    if (generation !== secretLoadGeneration) return false;
     secretsState = 'failed';
     secrets = [];
     showPlaceholder($('#secrets-table tbody'), 'failed to load', 5);
@@ -300,6 +365,7 @@ async function loadSecrets() {
   }
   secretsState = 'ready';
   renderSecrets();
+  return true;
 }
 
 function renderSecrets() {
@@ -337,17 +403,29 @@ function secretRow(s) {
 $('#search').oninput = renderSecrets;
 $('#new-secret').onclick = () => openDrawer(null);
 
-function closeDrawer() {
-  $('#drawer').hidden = true;
+function isCurrentDrawer(generation, selection) {
+  return generation === drawerGeneration && selection === editing;
+}
+
+function clearDrawerState() {
   editing = null;
   editingMeta = null;
   recordState = null;
 }
 
+function closeDrawer() {
+  drawerGeneration++;
+  resetConfirmation($('#delete'), 'Delete');
+  $('#drawer').hidden = true;
+  clearDrawerState();
+}
+
 async function openDrawer(name) {
+  const generation = ++drawerGeneration;
+  $('#drawer').hidden = true;
+  resetConfirmation($('#delete'), 'Delete');
+  clearDrawerState();
   editing = name;
-  editingMeta = null;
-  recordState = null;
   const f = $('#secret-form');
   f.reset();
   $('#drawer-title').textContent = name ? `Edit: ${name}` : 'New secret';
@@ -362,7 +440,8 @@ async function openDrawer(name) {
   $('#type-picker').value = '';
   if (name) {
     try {
-      const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`);
+      const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`);
+      if (generation !== drawerGeneration) return;
       const tags = meta.tags || {};
       f.elements.folder.value = tags.folder || '';
       f.elements.groups.value = tags.groups || '';
@@ -383,12 +462,14 @@ async function openDrawer(name) {
         enabled: meta.enabled,
         not_before: meta.not_before || null,
       };
-      if (isRecordMeta(meta)) await openRecord(name, meta, tags);
+      if (isRecordMeta(meta)) await openRecord(name, meta, tags, generation);
+      if (generation !== drawerGeneration) return;
     } catch (e) {
+      if (generation !== drawerGeneration) return;
       // Without the fetched metadata a save would send enabled:true and no
       // custom tags — silently mutating the secret. Don't open the drawer.
       fail(e);
-      editing = null;
+      clearDrawerState();
       return;
     }
   }
@@ -397,8 +478,9 @@ async function openDrawer(name) {
 
 // Fetches the envelope so secret fields are editable. Values live in JS
 // memory but display masked — the same exposure as the Reveal button.
-async function openRecord(name, meta, tags) {
-  const { value } = await api('POST', `/api/secrets/${encodeURIComponent(name)}/value${vaultQS()}`);
+async function openRecord(name, meta, tags, generation) {
+  const { value } = await api('POST', `/api/secrets/${encodeURIComponent(name)}/value${vaultQS(currentVault)}`);
+  if (generation !== drawerGeneration) return;
   let secretFields;
   try {
     secretFields = parseEnvelope(value ?? '');
@@ -431,22 +513,37 @@ async function openRecord(name, meta, tags) {
 $('#close-drawer').onclick = closeDrawer;
 
 $('#reveal').onclick = async () => {
+  const generation = drawerGeneration;
+  const selection = editing;
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(editing)}/value${vaultQS()}`);
+    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    if (!isCurrentDrawer(generation, selection)) return;
     $('#secret-form').elements.value.value = value ?? '';
-  } catch (e) { fail(e); }
+  } catch (e) {
+    if (!isCurrentDrawer(generation, selection)) return;
+    fail(e);
+  }
 };
 
 $('#copy').onclick = async () => {
+  const generation = drawerGeneration;
+  const selection = editing;
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(editing)}/value${vaultQS()}`);
+    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    if (!isCurrentDrawer(generation, selection)) return;
     await navigator.clipboard.writeText(value ?? '');
+    if (!isCurrentDrawer(generation, selection)) return;
     toast('copied');
-  } catch (e) { fail(e); }
+  } catch (e) {
+    if (!isCurrentDrawer(generation, selection)) return;
+    fail(e);
+  }
 };
 
 $('#secret-form').onsubmit = async (ev) => {
   ev.preventDefault();
+  const generation = drawerGeneration;
+  let selection = editing;
   const f = ev.target.elements;
   const name = f.name.value.trim();
   if (!name) return;
@@ -454,9 +551,11 @@ $('#secret-form').onsubmit = async (ev) => {
   const expiresPut = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : null;
   const expiresPatch = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : '';
   try {
-    if (editing && name !== editing) {
-      await api('POST', `/api/secrets/${encodeURIComponent(editing)}/move${vaultQS()}`, { new_name: name });
+    if (selection && name !== selection) {
+      await api('POST', `/api/secrets/${encodeURIComponent(selection)}/move${vaultQS(currentVault)}`, { new_name: name });
+      if (!isCurrentDrawer(generation, selection)) return;
       editing = name;
+      selection = name;
     }
     if (recordState) {
       // Records always take the full-PUT path: field edits change the value.
@@ -471,7 +570,7 @@ $('#secret-form').onsubmit = async (ev) => {
       for (const k of Object.keys(envelope).sort()) sorted[k] = envelope[k];
       const tags = { ...(editingMeta?.tags || {}), ...fieldTags };
       if (recordState.typeName) tags[TYPE_TAG] = recordState.typeName;
-      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`, {
+      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
         value: JSON.stringify(sorted),
         content_type: RECORD_CONTENT_TYPE,
         folder: f.folder.value || null,
@@ -484,7 +583,7 @@ $('#secret-form').onsubmit = async (ev) => {
       });
     } else if (f.value.value) {
       // full write: value + all metadata
-      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`, {
+      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
         value: f.value.value,
         folder: f.folder.value || null,
         note: f.note.value || null,
@@ -495,9 +594,9 @@ $('#secret-form').onsubmit = async (ev) => {
         enabled: editingMeta ? editingMeta.enabled : true,
         not_before: editingMeta?.not_before || null,
       });
-    } else if (editing) {
+    } else if (selection) {
       // metadata-only patch ("" clears)
-      await api('PATCH', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`, {
+      await api('PATCH', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
         folder: f.folder.value,
         note: f.note.value,
         groups,
@@ -506,32 +605,42 @@ $('#secret-form').onsubmit = async (ev) => {
     } else {
       throw new Error('a new secret needs a value');
     }
+    if (!isCurrentDrawer(generation, selection)) return;
     closeDrawer();
     toast('saved');
-    await loadSecrets();
-  } catch (e) { fail(e); }
+    await loadSecrets(currentVault);
+  } catch (e) {
+    if (!isCurrentDrawer(generation, selection)) return;
+    fail(e);
+  }
 };
 
 $('#delete').onclick = async () => {
   const btn = $('#delete');
-  if (btn.dataset.armed !== '1') {
-    btn.dataset.armed = '1';
-    btn.textContent = 'Really delete?';
-    setTimeout(() => { btn.dataset.armed = ''; btn.textContent = 'Delete'; }, 3000);
-    return;
-  }
+  if (btn.disabled) return;
+  if (!armConfirmation(btn, 'Really delete?')) return;
+  beginPendingAction(btn, 'Deleting…');
+  const generation = drawerGeneration;
+  const selection = editing;
+  const vault = currentVault;
   try {
-    await api('DELETE', `/api/secrets/${encodeURIComponent(editing)}${vaultQS()}`);
-    $('#drawer').hidden = true;
+    await api('DELETE', `/api/secrets/${encodeURIComponent(selection)}${vaultQS(vault)}`);
+    if (!isCurrentDrawer(generation, selection)) return;
+    closeDrawer();
     toast('deleted');
-    await loadSecrets();
-  } catch (e) { fail(e); }
+    await loadSecrets(vault);
+  } catch (e) {
+    if (!isCurrentDrawer(generation, selection)) return;
+    resetConfirmation(btn, 'Delete');
+    fail(e);
+  }
 };
 
 // ---- tabs ----
 $('#tab-secrets').onclick = () => switchTab('secrets');
 $('#tab-files').onclick = () => switchTab('files');
 function switchTab(which) {
+  if (authRecoveryActive) return;
   $('#secrets-view').hidden = which !== 'secrets';
   $('#files-view').hidden = which !== 'files';
   $('#tab-secrets').classList.toggle('active', which === 'secrets');
@@ -540,17 +649,42 @@ function switchTab(which) {
 
 // ---- files ----
 let files = [];
-async function loadFiles() {
-  if (!ctx.capabilities.files) return;
+let fileLoadGeneration = 0;
+let fileActionGeneration = 0;
+const pendingFileDeletes = new Map();
+
+function isFileDeletePending(vault, name) {
+  return pendingFileDeletes.get(vault)?.has(name) || false;
+}
+
+function setFileDeletePending(vault, name, generation) {
+  if (!pendingFileDeletes.has(vault)) pendingFileDeletes.set(vault, new Map());
+  pendingFileDeletes.get(vault).set(name, generation);
+}
+
+function clearFileDeletePending(vault, name, generation) {
+  const vaultDeletes = pendingFileDeletes.get(vault);
+  if (vaultDeletes?.get(name) !== generation) return;
+  vaultDeletes.delete(name);
+  if (!vaultDeletes.size) pendingFileDeletes.delete(vault);
+}
+
+async function loadFiles(vault) {
+  const generation = ++fileLoadGeneration;
+  if (!ctx.capabilities.files) return false;
   showPlaceholder($('#files-table tbody'), 'Loading files…', 5);
   try {
-    files = await api('GET', `/api/files${vaultQS()}`);
+    const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
+    if (generation !== fileLoadGeneration) return false;
+    files = loadedFiles;
   } catch (e) {
+    if (generation !== fileLoadGeneration) return false;
     files = [];
     showPlaceholder($('#files-table tbody'), 'failed to load', 5);
     throw e;
   }
   renderFiles();
+  return true;
 }
 
 function renderFiles() {
@@ -561,7 +695,31 @@ function renderFiles() {
   if (!tbody.children.length) showPlaceholder(tbody, 'no files', 5);
 }
 
+function isCurrentFileAction(generation, vault) {
+  return generation === fileActionGeneration && vault === currentVault;
+}
+
+function syncFileDeleteButtons(vault, name) {
+  const pending = isFileDeletePending(vault, name);
+  for (const button of document.querySelectorAll('#files-table button[data-file-name]')) {
+    if (button.dataset.fileVault !== vault || button.dataset.fileName !== name) continue;
+    if (pending) beginPendingAction(button, 'Deleting…');
+    else resetConfirmation(button, 'Delete');
+  }
+}
+
+async function reconcileFilesAfterDelete(generation, vault) {
+  try {
+    await loadFiles(vault);
+  } catch (e) {
+    if (!isCurrentFileAction(generation, vault)) return;
+    fail(e);
+  }
+}
+
 function fileRow(f) {
+  const vault = currentVault;
+  const name = f.name;
   const tr = document.createElement('tr');
   const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
   for (const c of cells) {
@@ -570,17 +728,37 @@ function fileRow(f) {
     tr.appendChild(td);
   }
   const td = document.createElement('td');
+  td.className = 'file-actions';
   const dl = document.createElement('button');
-  dl.textContent = '⬇';
+  dl.textContent = 'Download';
   dl.onclick = () => downloadFile(f.name);
   const del = document.createElement('button');
-  del.textContent = '✕';
+  const pending = isFileDeletePending(vault, name);
+  del.textContent = pending ? 'Deleting…' : 'Delete';
+  del.disabled = pending;
+  del.dataset.defaultLabel = 'Delete';
+  del.dataset.fileVault = vault;
+  del.dataset.fileName = name;
   del.className = 'danger';
   del.onclick = async () => {
+    if (isFileDeletePending(vault, name)) return;
+    if (del.disabled) return;
+    if (!armConfirmation(del, 'Really delete?')) return;
+    const generation = fileActionGeneration;
+    setFileDeletePending(vault, name, generation);
+    beginPendingAction(del, 'Deleting…');
     try {
-      await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS()}`);
-      await loadFiles();
-    } catch (e) { fail(e); }
+      await api('DELETE', `/api/files/${encodeURIComponent(name)}${vaultQS(vault)}`);
+    } catch (e) {
+      clearFileDeletePending(vault, name, generation);
+      if (!isCurrentFileAction(generation, vault)) return;
+      syncFileDeleteButtons(vault, name);
+      fail(e);
+      return;
+    }
+    clearFileDeletePending(vault, name, generation);
+    if (!isCurrentFileAction(generation, vault)) return;
+    await reconcileFilesAfterDelete(generation, vault);
   };
   td.append(dl, del);
   tr.appendChild(td);
@@ -589,7 +767,7 @@ function fileRow(f) {
 
 async function downloadFile(name) {
   try {
-    const res = await api('GET', `/api/files/${encodeURIComponent(name)}${vaultQS()}`, undefined, true);
+    const res = await api('GET', `/api/files/${encodeURIComponent(name)}${vaultQS(currentVault)}`, undefined, true);
     const blob = await res.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -604,11 +782,11 @@ async function uploadFiles(fileList) {
     const form = new FormData();
     form.append('file', file, file.name);
     try {
-      await api('POST', `/api/files${vaultQS()}`, form);
+      await api('POST', `/api/files${vaultQS(currentVault)}`, form);
       toast(`uploaded ${file.name}`);
     } catch (e) { fail(e); }
   }
-  await loadFiles();
+  await loadFiles(currentVault);
 }
 
 const dz = $('#dropzone');

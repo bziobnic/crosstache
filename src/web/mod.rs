@@ -168,4 +168,125 @@ mod tests {
             assert_eq!(got, ct, "{path}");
         }
     }
+
+    #[test]
+    fn ui_persists_token_for_tab_reloads() {
+        assert!(APP_JS.contains("sessionStorage.setItem(TOKEN_STORAGE_KEY"));
+        assert!(APP_JS.contains("sessionStorage.getItem(TOKEN_STORAGE_KEY)"));
+        assert!(!APP_JS.contains("localStorage"));
+    }
+
+    #[test]
+    fn ui_has_persistent_missing_token_recovery() {
+        assert!(INDEX_HTML.contains("id=\"auth-recovery\""));
+        assert!(INDEX_HTML.contains("Reopen the URL printed by"));
+        assert!(INDEX_HTML.contains("<code>xv ui</code>"));
+        assert!(APP_JS.contains("showAuthRecovery"));
+    }
+
+    #[test]
+    fn ui_auth_recovery_cannot_be_dismissed_by_tabs() {
+        assert!(APP_JS.contains("authRecoveryActive = true;"));
+        assert!(APP_JS.contains("if (authRecoveryActive) return;"));
+    }
+
+    #[test]
+    fn ui_guards_list_loads_against_stale_responses() {
+        assert!(APP_JS.contains("let secretLoadGeneration = 0"));
+        assert!(APP_JS.contains("let fileLoadGeneration = 0"));
+        assert!(APP_JS.contains("async function loadSecrets(vault)"));
+        assert!(APP_JS.contains("async function loadFiles(vault)"));
+        assert!(APP_JS.contains("if (generation !== secretLoadGeneration) return"));
+        assert!(APP_JS.contains("if (generation !== fileLoadGeneration) return"));
+    }
+
+    #[test]
+    fn ui_stops_stale_init_before_loading_files() {
+        assert!(APP_JS.contains("if (!(await loadSecrets(vault))) return;"));
+    }
+
+    #[test]
+    fn ui_guards_drawer_loads_against_stale_responses() {
+        assert!(APP_JS.contains("let drawerGeneration = 0"));
+        assert!(APP_JS.contains("if (generation !== drawerGeneration) return"));
+    }
+
+    #[test]
+    fn ui_resets_secret_delete_confirmation_on_drawer_transitions() {
+        assert!(APP_JS.contains("function resetConfirmation"));
+        assert!(APP_JS.contains("resetConfirmation($('#delete'), 'Delete')"));
+    }
+
+    #[test]
+    fn ui_file_actions_are_named_and_delete_is_confirmed() {
+        assert!(APP_JS.contains("dl.textContent = 'Download'"));
+        assert!(APP_JS.contains("del.dataset.defaultLabel = 'Delete'"));
+        assert!(APP_JS.contains("armConfirmation(del, 'Really delete?')"));
+        assert!(!APP_JS.contains("dl.textContent = '⬇'"));
+        assert!(!APP_JS.contains("del.textContent = '✕'"));
+    }
+
+    #[test]
+    fn ui_file_delete_success_refreshes_current_vault_independent_of_list_generation() {
+        assert!(APP_JS.contains("let fileActionGeneration = 0"));
+        assert!(APP_JS.contains("fileActionGeneration++;"));
+        assert!(APP_JS.contains("function isCurrentFileAction(generation, vault)"));
+        assert!(APP_JS.contains("generation === fileActionGeneration"));
+        assert!(APP_JS.contains("vault === currentVault"));
+        assert!(
+            !APP_JS.contains("generation === fileLoadGeneration &&\n    vault === currentVault")
+        );
+        assert!(APP_JS.contains("if (!isCurrentFileAction(generation, vault)) return;"));
+        assert!(APP_JS.contains("await reconcileFilesAfterDelete(generation, vault);"));
+    }
+
+    #[test]
+    fn ui_delete_buttons_enter_non_repeatable_pending_state() {
+        assert!(APP_JS.contains("function beginPendingAction(button, label)"));
+        assert!(APP_JS.contains("button.disabled = true;"));
+        assert!(APP_JS.contains("button.disabled = false;"));
+        assert!(APP_JS.contains("beginPendingAction(btn, 'Deleting…')"));
+        assert!(APP_JS.contains("beginPendingAction(del, 'Deleting…')"));
+    }
+
+    #[test]
+    fn ui_file_delete_pending_state_survives_same_vault_rerenders() {
+        assert!(APP_JS.contains("const pendingFileDeletes = new Map()"));
+        assert!(APP_JS.contains("function isFileDeletePending(vault, name)"));
+        assert!(APP_JS.contains("function setFileDeletePending(vault, name, generation)"));
+        assert!(APP_JS.contains("function clearFileDeletePending(vault, name, generation)"));
+        assert!(APP_JS.contains("pendingFileDeletes.clear();"));
+        assert!(APP_JS.contains("if (isFileDeletePending(vault, name)) return;"));
+        assert!(APP_JS.contains("setFileDeletePending(vault, name, generation);"));
+        assert!(APP_JS.contains("del.textContent = pending ? 'Deleting…' : 'Delete';"));
+        assert!(APP_JS.contains("del.disabled = pending;"));
+    }
+
+    #[test]
+    fn ui_reports_current_file_reconciliation_failures() {
+        assert!(APP_JS.contains("async function reconcileFilesAfterDelete(generation, vault)"));
+        assert!(APP_JS.contains("await reconcileFilesAfterDelete(generation, vault);"));
+        assert!(
+            APP_JS.contains("if (!isCurrentFileAction(generation, vault)) return;\n    fail(e);")
+        );
+    }
+
+    #[test]
+    fn ui_guards_drawer_action_continuations_by_selection() {
+        assert!(APP_JS.contains("function isCurrentDrawer(generation, selection)"));
+        assert!(
+            APP_JS
+                .matches("if (!isCurrentDrawer(generation, selection)) return;")
+                .count()
+                >= 8
+        );
+    }
+
+    #[test]
+    fn ui_hides_and_clears_drawer_while_selection_loads() {
+        assert!(APP_JS.contains(
+            "async function openDrawer(name) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
+        ));
+        assert!(APP_JS.contains("function clearDrawerState()"));
+    }
 }
