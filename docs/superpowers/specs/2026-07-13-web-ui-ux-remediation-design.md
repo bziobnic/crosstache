@@ -1,6 +1,6 @@
 # Web UI UX Remediation Design
 
-**Date:** 2026-07-13  
+**Date:** 2026-07-13<br>
 **Status:** Approved
 
 ## Goal
