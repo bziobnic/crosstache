@@ -51,6 +51,15 @@ function resetConfirmation(button, label) {
   clearTimeout(button._confirmTimer);
   button._confirmTimer = null;
   button.dataset.armed = '';
+  button.disabled = false;
+  button.textContent = label;
+}
+
+function beginPendingAction(button, label) {
+  clearTimeout(button._confirmTimer);
+  button._confirmTimer = null;
+  button.dataset.armed = '';
+  button.disabled = true;
   button.textContent = label;
 }
 
@@ -318,6 +327,7 @@ async function init() {
     const vault = currentVault;
     secretLoadGeneration++;
     fileLoadGeneration++;
+    fileActionGeneration++;
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
@@ -606,15 +616,18 @@ $('#secret-form').onsubmit = async (ev) => {
 
 $('#delete').onclick = async () => {
   const btn = $('#delete');
+  if (btn.disabled) return;
   if (!armConfirmation(btn, 'Really delete?')) return;
+  beginPendingAction(btn, 'Deleting…');
   const generation = drawerGeneration;
   const selection = editing;
+  const vault = currentVault;
   try {
-    await api('DELETE', `/api/secrets/${encodeURIComponent(selection)}${vaultQS(currentVault)}`);
+    await api('DELETE', `/api/secrets/${encodeURIComponent(selection)}${vaultQS(vault)}`);
     if (!isCurrentDrawer(generation, selection)) return;
     closeDrawer();
     toast('deleted');
-    await loadSecrets(currentVault);
+    await loadSecrets(vault);
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     resetConfirmation(btn, 'Delete');
@@ -636,6 +649,7 @@ function switchTab(which) {
 // ---- files ----
 let files = [];
 let fileLoadGeneration = 0;
+let fileActionGeneration = 0;
 async function loadFiles(vault) {
   const generation = ++fileLoadGeneration;
   if (!ctx.capabilities.files) return false;
@@ -662,10 +676,8 @@ function renderFiles() {
   if (!tbody.children.length) showPlaceholder(tbody, 'no files', 5);
 }
 
-function isCurrentFileAction(generation, vault, name) {
-  return generation === fileLoadGeneration &&
-    vault === currentVault &&
-    files.some((file) => file.name === name);
+function isCurrentFileAction(generation, vault) {
+  return generation === fileActionGeneration && vault === currentVault;
 }
 
 function fileRow(f) {
@@ -686,17 +698,19 @@ function fileRow(f) {
   del.dataset.defaultLabel = 'Delete';
   del.className = 'danger';
   del.onclick = async () => {
+    if (del.disabled) return;
     if (!armConfirmation(del, 'Really delete?')) return;
-    const generation = fileLoadGeneration;
+    beginPendingAction(del, 'Deleting…');
+    const generation = fileActionGeneration;
     const vault = currentVault;
     const name = f.name;
     try {
       await api('DELETE', `/api/files/${encodeURIComponent(name)}${vaultQS(vault)}`);
-      if (!isCurrentFileAction(generation, vault, name)) return;
-      resetConfirmation(del, 'Delete');
+      if (!isCurrentFileAction(generation, vault)) return;
       await loadFiles(vault);
     } catch (e) {
-      if (!isCurrentFileAction(generation, vault, name)) return;
+      if (!isCurrentFileAction(generation, vault)) return;
+      if (!del.isConnected) return;
       resetConfirmation(del, 'Delete');
       fail(e);
     }

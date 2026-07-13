@@ -227,17 +227,28 @@ mod tests {
     }
 
     #[test]
-    fn ui_guards_file_delete_continuations_by_vault_generation_and_identity() {
-        assert!(APP_JS.contains("function isCurrentFileAction(generation, vault, name)"));
-        assert!(APP_JS.contains("generation === fileLoadGeneration"));
+    fn ui_file_delete_success_refreshes_current_vault_independent_of_list_generation() {
+        assert!(APP_JS.contains("let fileActionGeneration = 0"));
+        assert!(APP_JS.contains("fileActionGeneration++;"));
+        assert!(APP_JS.contains("function isCurrentFileAction(generation, vault)"));
+        assert!(APP_JS.contains("generation === fileActionGeneration"));
         assert!(APP_JS.contains("vault === currentVault"));
-        assert!(APP_JS.contains("files.some((file) => file.name === name)"));
         assert!(
-            APP_JS
-                .matches("if (!isCurrentFileAction(generation, vault, name)) return;")
-                .count()
-                >= 2
+            !APP_JS.contains("generation === fileLoadGeneration &&\n    vault === currentVault")
         );
+        assert!(APP_JS.contains(
+            "if (!isCurrentFileAction(generation, vault)) return;\n      await loadFiles(vault);"
+        ));
+        assert!(APP_JS.contains("if (!del.isConnected) return;"));
+    }
+
+    #[test]
+    fn ui_delete_buttons_enter_non_repeatable_pending_state() {
+        assert!(APP_JS.contains("function beginPendingAction(button, label)"));
+        assert!(APP_JS.contains("button.disabled = true;"));
+        assert!(APP_JS.contains("button.disabled = false;"));
+        assert!(APP_JS.contains("beginPendingAction(btn, 'Deleting…')"));
+        assert!(APP_JS.contains("beginPendingAction(del, 'Deleting…')"));
     }
 
     #[test]
