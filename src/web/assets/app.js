@@ -236,7 +236,9 @@ function renderRecordFields(typeName, secretFields, metaFields, forNew) {
 const vaultQS = () => `?vault=${encodeURIComponent(currentVault)}`;
 
 // ---- context & vaults ----
+let authRecoveryActive = false;
 function showAuthRecovery() {
+  authRecoveryActive = true;
   $('#secrets-view').hidden = true;
   $('#files-view').hidden = true;
   $('#auth-recovery').hidden = false;
@@ -555,6 +557,7 @@ $('#delete').onclick = async () => {
 $('#tab-secrets').onclick = () => switchTab('secrets');
 $('#tab-files').onclick = () => switchTab('files');
 function switchTab(which) {
+  if (authRecoveryActive) return;
   $('#secrets-view').hidden = which !== 'secrets';
   $('#files-view').hidden = which !== 'files';
   $('#tab-secrets').classList.toggle('active', which === 'secrets');

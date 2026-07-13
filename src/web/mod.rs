@@ -183,4 +183,10 @@ mod tests {
         assert!(INDEX_HTML.contains("<code>xv ui</code>"));
         assert!(APP_JS.contains("showAuthRecovery"));
     }
+
+    #[test]
+    fn ui_auth_recovery_cannot_be_dismissed_by_tabs() {
+        assert!(APP_JS.contains("authRecoveryActive = true;"));
+        assert!(APP_JS.contains("if (authRecoveryActive) return;"));
+    }
 }
