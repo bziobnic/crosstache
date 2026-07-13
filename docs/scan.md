@@ -26,9 +26,9 @@ xv scan uninstall           # remove the managed hook
 
 | Mode | Reads from | Typical use | Notes |
 |------|------------|-------------|-------|
-| `xv scan [PATH]...` | Working tree files under the requested paths | Local checks before staging | Honors default excludes, `.xvignore`, and `[scan].exclude`; prints skipped-file warnings outside hook mode. |
-| `xv scan --staged` | Git index via `git diff --cached` + `git show :PATH` | Pre-commit hooks | Scans exactly what would be committed, not unstaged edits; honors the same default and `[scan].exclude` globs as path scans (this is a behavior change from earlier releases, which scanned every staged file regardless of excludes). |
-| `xv scan --all` | Committed `HEAD` tree via `git ls-tree HEAD` + `git show HEAD:PATH` | CI sweeps of the current revision | Ignores unstaged and staged-but-uncommitted edits; honors the same default and `[scan].exclude` globs as path scans. |
+| `xv scan [PATH]...` | Working tree files under the requested paths | Local checks before staging | Normal mode honors default excludes, `.xvignore`, and `[scan].exclude`; with `--hook`, repository `[scan]` policy is ignored and skipped-file warnings become failures. |
+| `xv scan --staged` | Git index via `git diff --cached` + `git show :PATH` | Pre-commit hooks | Scans exactly what would be committed, not unstaged edits. Normal mode honors the same default and `[scan].exclude` globs as path scans; `--hook` uses the trusted hook baseline below. |
+| `xv scan --all` | Committed `HEAD` tree via `git ls-tree HEAD` + `git show HEAD:PATH` | CI sweeps of the current revision | Ignores unstaged and staged-but-uncommitted edits. Normal mode honors the same default and `[scan].exclude` globs as path scans; `--hook` uses the trusted hook baseline below. |
 
 `--staged` and `--all` are mutually exclusive. Use a path scan for working-tree
 content, `--staged` for index content, and `--all` for the last committed tree.
@@ -37,6 +37,31 @@ content, `--staged` for index content, and `--all` for the last committed tree.
 the active backend. It works only when the backend can list vaults; otherwise
 the command fails with a capability error instead of silently scanning one
 vault.
+
+## Hook / CI mode (`--hook`)
+
+Use `--hook` when the scan is acting as a gate, such as the installed
+pre-commit hook or a CI job. Hook mode is intentionally stricter and quieter
+than local exploratory scans:
+
+- No findings: exits `0` without the "no findings" message.
+- Findings: prints findings and exits `50`.
+- Repository `[scan]` settings are not loaded. A committed `.xv.toml` cannot
+  narrow the hook by setting `[scan].patterns`, raising
+  `[scan].min_value_length`, or adding `[scan].exclude`.
+- The hook baseline uses all built-in patterns, the default secret-value
+  minimum length, and the scanner's built-in excludes:
+  `.git/**`, `target/**`, `dist/**`, `node_modules/**`, `*.lock`,
+  and `*.min.*`.
+- Incomplete secret coverage is a failure. If any requested vault cannot be
+  listed or any secret value cannot be read, hook mode refuses to pass instead
+  of warning and continuing.
+- Unscanned files are a failure where the scanner can detect them. Working-tree
+  path scans fail on oversized or unreadable files; staged/HEAD scans fail when
+  Git object content cannot be read as UTF-8.
+
+The installed hook runs `xv scan --staged --hook`, so it scans the exact index
+contents that would be committed while using this trusted baseline.
 
 ## Exit codes
 
@@ -62,6 +87,10 @@ unscanned file could hide a leak. Outside hook mode, skipped files are reported
 on stderr and the command continues.
 
 ## `.xv.toml` `[scan]` block
+
+These settings apply to normal, user-invoked scans. They are ignored in
+`--hook` mode so repository-controlled configuration cannot weaken a
+pre-commit or CI gate.
 
 ```toml
 [scan]

@@ -5,15 +5,26 @@
 Keep engineering and user-facing documentation aligned with recently shipped
 changes without adding redundant pages.
 
+## Current pass: scanner hook/CI hardening
+
+Recent v0.25.1 security hardening made `xv scan --hook` use a trusted,
+fail-closed baseline. The existing scanner guide still described older
+repository-controlled `[scan]` behavior for all `--staged` runs, so this pass
+updates the existing guide instead of creating a redundant page.
+
 ## Steps
 
-- [x] Refresh README multi-vault workspace docs for the v0.22 alias UX:
-      `cx add --alias`, `cx alias`, `cx alias --reset`, and long-list backing
-      vault suffixes.
-- [x] Correct README file-storage notes for v0.21 default-entry routing and
-      local backend file/sync support while preserving the AWS sync limitation.
-- [x] Update `docs/FEATURES.md` capability and command-reference rows so local
-      file operations and workspace context commands match shipped behavior.
-- [x] Verify changed docs against source/tests and run an appropriate
-      docs-only validation command.
-- [x] Prepare the branch handoff after verification.
+- [x] Confirm branch and working-tree state (`cursor/engineering-documentation-updates-a31b`, clean).
+- [x] Review recent commits, automation memory, existing docs, and scanner
+      source/tests to identify a focused documentation gap.
+- [x] Update `docs/scan.md` to distinguish normal scan config from `--hook` /
+      CI behavior:
+  - [x] Fix scan-mode notes for `--staged` and `--all` when combined with
+        `--hook`.
+  - [x] Document the trusted hook baseline: all built-in patterns, default
+        minimum secret length, built-in excludes only, and no repository
+        `[scan]` overrides.
+  - [x] Document fail-closed behavior for unreadable/oversized files and
+        incomplete vault secret coverage.
+- [ ] Verify the documentation-only change against source/tests.
+- [ ] Commit and push the branch, then open the documentation PR.
