@@ -54,7 +54,8 @@ fn ui_persists_token_for_tab_reloads() {
 #[test]
 fn ui_has_persistent_missing_token_recovery() {
     assert!(INDEX_HTML.contains("id=\"auth-recovery\""));
-    assert!(INDEX_HTML.contains("Reopen the URL printed by `xv ui`"));
+    assert!(INDEX_HTML.contains("Reopen the URL printed by"));
+    assert!(INDEX_HTML.contains("<code>xv ui</code>"));
     assert!(APP_JS.contains("showAuthRecovery"));
 }
 ```
@@ -382,8 +383,8 @@ Start `target/debug/xv ui --no-open` with an isolated temporary `HOME`, `XDG_CON
 
 1. Open the tokenized URL, reload, and confirm the populated UI remains authenticated.
 2. Open the scrubbed URL in a fresh tab and confirm the persistent “Session link required” recovery state.
-3. Seed two vaults and secrets; use Playwright request routing to delay the first vault's list responses until after the second vault renders, then confirm only the final vault's rows remain actionable.
-4. Use Playwright request routing to delay the first secret's metadata response until after the second drawer renders, then confirm the drawer title, fields, save target, and delete target agree.
+3. Seed two vaults and secrets; use a temporary external Playwright smoke script (matching the existing repository UI-test recipe) to delay the first vault's list responses until after the second vault renders, then confirm only the final vault's rows remain actionable.
+4. In the same temporary Playwright smoke script, delay the first secret's metadata response until after the second drawer renders, then confirm the drawer title, fields, save target, and delete target agree.
 5. Arm secret deletion, close the drawer, open another secret, and confirm its Delete button is unarmed.
 6. Confirm file controls are named `Download` and `Delete`, and that one Delete click only arms confirmation while the second performs deletion.
 
