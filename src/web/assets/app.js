@@ -1,8 +1,11 @@
 'use strict';
 
-// ---- auth token: read once from URL, keep in memory only, scrub the URL ----
+// ---- auth token: persist per tab for reloads, scrub the URL ----
+const TOKEN_STORAGE_KEY = 'xv.ui.token';
 const params = new URLSearchParams(location.search);
-const TOKEN = params.get('token') || '';
+const queryToken = params.get('token') || '';
+if (queryToken) sessionStorage.setItem(TOKEN_STORAGE_KEY, queryToken);
+const TOKEN = queryToken || sessionStorage.getItem(TOKEN_STORAGE_KEY) || '';
 if (params.has('token')) history.replaceState(null, '', location.pathname);
 
 let inflight = 0;
@@ -21,7 +24,9 @@ async function api(method, path, body, raw = false) {
     if (!res.ok) {
       let msg = res.statusText;
       try { msg = (await res.json()).error || msg; } catch { /* not json */ }
-      throw new Error(msg);
+      const error = new Error(msg);
+      error.status = res.status;
+      throw error;
     }
     if (raw) return res;
     const text = await res.text();
@@ -231,8 +236,26 @@ function renderRecordFields(typeName, secretFields, metaFields, forNew) {
 const vaultQS = () => `?vault=${encodeURIComponent(currentVault)}`;
 
 // ---- context & vaults ----
+function showAuthRecovery() {
+  $('#secrets-view').hidden = true;
+  $('#files-view').hidden = true;
+  $('#auth-recovery').hidden = false;
+}
+
 async function init() {
-  ctx = await api('GET', '/api/context');
+  if (!TOKEN) {
+    showAuthRecovery();
+    return;
+  }
+  try {
+    ctx = await api('GET', '/api/context');
+  } catch (e) {
+    if (e.status === 401) {
+      showAuthRecovery();
+      return;
+    }
+    throw e;
+  }
   currentVault = ctx.vault;
   $('#backend-badge').textContent = ctx.backend;
   $('#tab-files').hidden = !ctx.capabilities.files;

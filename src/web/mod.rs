@@ -168,4 +168,19 @@ mod tests {
             assert_eq!(got, ct, "{path}");
         }
     }
+
+    #[test]
+    fn ui_persists_token_for_tab_reloads() {
+        assert!(APP_JS.contains("sessionStorage.setItem(TOKEN_STORAGE_KEY"));
+        assert!(APP_JS.contains("sessionStorage.getItem(TOKEN_STORAGE_KEY)"));
+        assert!(!APP_JS.contains("localStorage"));
+    }
+
+    #[test]
+    fn ui_has_persistent_missing_token_recovery() {
+        assert!(INDEX_HTML.contains("id=\"auth-recovery\""));
+        assert!(INDEX_HTML.contains("Reopen the URL printed by"));
+        assert!(INDEX_HTML.contains("<code>xv ui</code>"));
+        assert!(APP_JS.contains("showAuthRecovery"));
+    }
 }
