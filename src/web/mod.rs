@@ -227,6 +227,20 @@ mod tests {
     }
 
     #[test]
+    fn ui_guards_file_delete_continuations_by_vault_generation_and_identity() {
+        assert!(APP_JS.contains("function isCurrentFileAction(generation, vault, name)"));
+        assert!(APP_JS.contains("generation === fileLoadGeneration"));
+        assert!(APP_JS.contains("vault === currentVault"));
+        assert!(APP_JS.contains("files.some((file) => file.name === name)"));
+        assert!(
+            APP_JS
+                .matches("if (!isCurrentFileAction(generation, vault, name)) return;")
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
     fn ui_guards_drawer_action_continuations_by_selection() {
         assert!(APP_JS.contains("function isCurrentDrawer(generation, selection)"));
         assert!(

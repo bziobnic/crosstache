@@ -662,6 +662,12 @@ function renderFiles() {
   if (!tbody.children.length) showPlaceholder(tbody, 'no files', 5);
 }
 
+function isCurrentFileAction(generation, vault, name) {
+  return generation === fileLoadGeneration &&
+    vault === currentVault &&
+    files.some((file) => file.name === name);
+}
+
 function fileRow(f) {
   const tr = document.createElement('tr');
   const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
@@ -681,11 +687,16 @@ function fileRow(f) {
   del.className = 'danger';
   del.onclick = async () => {
     if (!armConfirmation(del, 'Really delete?')) return;
+    const generation = fileLoadGeneration;
+    const vault = currentVault;
+    const name = f.name;
     try {
-      await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS(currentVault)}`);
+      await api('DELETE', `/api/files/${encodeURIComponent(name)}${vaultQS(vault)}`);
+      if (!isCurrentFileAction(generation, vault, name)) return;
       resetConfirmation(del, 'Delete');
-      await loadFiles(currentVault);
+      await loadFiles(vault);
     } catch (e) {
+      if (!isCurrentFileAction(generation, vault, name)) return;
       resetConfirmation(del, 'Delete');
       fail(e);
     }
