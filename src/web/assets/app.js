@@ -47,6 +47,25 @@ function toast(msg, isError = false) {
 }
 const fail = (e) => toast(e.message, true);
 
+function resetConfirmation(button, label) {
+  clearTimeout(button._confirmTimer);
+  button._confirmTimer = null;
+  button.dataset.armed = '';
+  button.textContent = label;
+}
+
+function armConfirmation(button, armedLabel, timeoutMs = 3000) {
+  if (button.dataset.armed === '1') return true;
+  button.dataset.armed = '1';
+  button.textContent = armedLabel;
+  clearTimeout(button._confirmTimer);
+  button._confirmTimer = setTimeout(
+    () => resetConfirmation(button, button.dataset.defaultLabel),
+    timeoutMs,
+  );
+  return false;
+}
+
 // Dates only, never timestamps. Unparseable strings pass through raw.
 function fmtDate(s) {
   if (!s) return '';
@@ -138,6 +157,7 @@ let ctx = null;
 let currentVault = null;
 let secrets = [];
 let editing = null; // name of secret open in drawer, null = new
+let drawerGeneration = 0;
 // content_type + non-canonical tags of the secret open in drawer, so a value
 // edit doesn't silently drop them (the form has no fields for them).
 let editingMeta = null;
@@ -373,6 +393,8 @@ $('#search').oninput = renderSecrets;
 $('#new-secret').onclick = () => openDrawer(null);
 
 function closeDrawer() {
+  drawerGeneration++;
+  resetConfirmation($('#delete'), 'Delete');
   $('#drawer').hidden = true;
   editing = null;
   editingMeta = null;
@@ -380,6 +402,8 @@ function closeDrawer() {
 }
 
 async function openDrawer(name) {
+  const generation = ++drawerGeneration;
+  resetConfirmation($('#delete'), 'Delete');
   editing = name;
   editingMeta = null;
   recordState = null;
@@ -398,6 +422,7 @@ async function openDrawer(name) {
   if (name) {
     try {
       const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`);
+      if (generation !== drawerGeneration) return;
       const tags = meta.tags || {};
       f.elements.folder.value = tags.folder || '';
       f.elements.groups.value = tags.groups || '';
@@ -418,8 +443,10 @@ async function openDrawer(name) {
         enabled: meta.enabled,
         not_before: meta.not_before || null,
       };
-      if (isRecordMeta(meta)) await openRecord(name, meta, tags);
+      if (isRecordMeta(meta)) await openRecord(name, meta, tags, generation);
+      if (generation !== drawerGeneration) return;
     } catch (e) {
+      if (generation !== drawerGeneration) return;
       // Without the fetched metadata a save would send enabled:true and no
       // custom tags — silently mutating the secret. Don't open the drawer.
       fail(e);
@@ -432,8 +459,9 @@ async function openDrawer(name) {
 
 // Fetches the envelope so secret fields are editable. Values live in JS
 // memory but display masked — the same exposure as the Reveal button.
-async function openRecord(name, meta, tags) {
+async function openRecord(name, meta, tags, generation) {
   const { value } = await api('POST', `/api/secrets/${encodeURIComponent(name)}/value${vaultQS(currentVault)}`);
+  if (generation !== drawerGeneration) return;
   let secretFields;
   try {
     secretFields = parseEnvelope(value ?? '');
@@ -549,18 +577,17 @@ $('#secret-form').onsubmit = async (ev) => {
 
 $('#delete').onclick = async () => {
   const btn = $('#delete');
-  if (btn.dataset.armed !== '1') {
-    btn.dataset.armed = '1';
-    btn.textContent = 'Really delete?';
-    setTimeout(() => { btn.dataset.armed = ''; btn.textContent = 'Delete'; }, 3000);
-    return;
-  }
+  if (!armConfirmation(btn, 'Really delete?')) return;
   try {
     await api('DELETE', `/api/secrets/${encodeURIComponent(editing)}${vaultQS(currentVault)}`);
     $('#drawer').hidden = true;
+    resetConfirmation(btn, 'Delete');
     toast('deleted');
     await loadSecrets(currentVault);
-  } catch (e) { fail(e); }
+  } catch (e) {
+    resetConfirmation(btn, 'Delete');
+    fail(e);
+  }
 };
 
 // ---- tabs ----

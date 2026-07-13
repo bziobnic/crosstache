@@ -204,4 +204,16 @@ mod tests {
     fn ui_stops_stale_init_before_loading_files() {
         assert!(APP_JS.contains("if (!(await loadSecrets(vault))) return;"));
     }
+
+    #[test]
+    fn ui_guards_drawer_loads_against_stale_responses() {
+        assert!(APP_JS.contains("let drawerGeneration = 0"));
+        assert!(APP_JS.contains("if (generation !== drawerGeneration) return"));
+    }
+
+    #[test]
+    fn ui_resets_secret_delete_confirmation_on_drawer_transitions() {
+        assert!(APP_JS.contains("function resetConfirmation"));
+        assert!(APP_JS.contains("resetConfirmation($('#delete'), 'Delete')"));
+    }
 }
