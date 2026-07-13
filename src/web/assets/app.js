@@ -233,7 +233,7 @@ function renderRecordFields(typeName, secretFields, metaFields, forNew) {
   $('#value-section').hidden = true;
 }
 
-const vaultQS = () => `?vault=${encodeURIComponent(currentVault)}`;
+const vaultQS = (vault) => `?vault=${encodeURIComponent(vault)}`;
 
 // ---- context & vaults ----
 let authRecoveryActive = false;
@@ -295,16 +295,20 @@ async function init() {
   }
   sel.onchange = () => {
     currentVault = sel.value;
+    const vault = currentVault;
+    secretLoadGeneration++;
+    fileLoadGeneration++;
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
     expandedSecretFolders.clear();
     expandedFileFolders.clear();
-    loadSecrets().catch(fail);
-    loadFiles().catch(fail);
+    loadSecrets(vault).catch(fail);
+    loadFiles(vault).catch(fail);
   };
-  await loadSecrets();
-  if (ctx.capabilities.files) await loadFiles();
+  const vault = currentVault;
+  await loadSecrets(vault);
+  if (ctx.capabilities.files) await loadFiles(vault);
 }
 
 // ---- secrets ----
@@ -312,12 +316,17 @@ async function init() {
 // input during a vault switch can't paint the previous vault's rows (or
 // clobber the failed placeholder) while the fetch is in flight.
 let secretsState = 'ready';
-async function loadSecrets() {
+let secretLoadGeneration = 0;
+async function loadSecrets(vault) {
+  const generation = ++secretLoadGeneration;
   secretsState = 'loading';
   showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', 5);
   try {
-    secrets = await api('GET', `/api/secrets${vaultQS()}`);
+    const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault)}`);
+    if (generation !== secretLoadGeneration) return false;
+    secrets = loadedSecrets;
   } catch (e) {
+    if (generation !== secretLoadGeneration) return false;
     secretsState = 'failed';
     secrets = [];
     showPlaceholder($('#secrets-table tbody'), 'failed to load', 5);
@@ -325,6 +334,7 @@ async function loadSecrets() {
   }
   secretsState = 'ready';
   renderSecrets();
+  return true;
 }
 
 function renderSecrets() {
@@ -387,7 +397,7 @@ async function openDrawer(name) {
   $('#type-picker').value = '';
   if (name) {
     try {
-      const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`);
+      const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`);
       const tags = meta.tags || {};
       f.elements.folder.value = tags.folder || '';
       f.elements.groups.value = tags.groups || '';
@@ -423,7 +433,7 @@ async function openDrawer(name) {
 // Fetches the envelope so secret fields are editable. Values live in JS
 // memory but display masked — the same exposure as the Reveal button.
 async function openRecord(name, meta, tags) {
-  const { value } = await api('POST', `/api/secrets/${encodeURIComponent(name)}/value${vaultQS()}`);
+  const { value } = await api('POST', `/api/secrets/${encodeURIComponent(name)}/value${vaultQS(currentVault)}`);
   let secretFields;
   try {
     secretFields = parseEnvelope(value ?? '');
@@ -457,14 +467,14 @@ $('#close-drawer').onclick = closeDrawer;
 
 $('#reveal').onclick = async () => {
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(editing)}/value${vaultQS()}`);
+    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(editing)}/value${vaultQS(currentVault)}`);
     $('#secret-form').elements.value.value = value ?? '';
   } catch (e) { fail(e); }
 };
 
 $('#copy').onclick = async () => {
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(editing)}/value${vaultQS()}`);
+    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(editing)}/value${vaultQS(currentVault)}`);
     await navigator.clipboard.writeText(value ?? '');
     toast('copied');
   } catch (e) { fail(e); }
@@ -480,7 +490,7 @@ $('#secret-form').onsubmit = async (ev) => {
   const expiresPatch = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : '';
   try {
     if (editing && name !== editing) {
-      await api('POST', `/api/secrets/${encodeURIComponent(editing)}/move${vaultQS()}`, { new_name: name });
+      await api('POST', `/api/secrets/${encodeURIComponent(editing)}/move${vaultQS(currentVault)}`, { new_name: name });
       editing = name;
     }
     if (recordState) {
@@ -496,7 +506,7 @@ $('#secret-form').onsubmit = async (ev) => {
       for (const k of Object.keys(envelope).sort()) sorted[k] = envelope[k];
       const tags = { ...(editingMeta?.tags || {}), ...fieldTags };
       if (recordState.typeName) tags[TYPE_TAG] = recordState.typeName;
-      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`, {
+      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
         value: JSON.stringify(sorted),
         content_type: RECORD_CONTENT_TYPE,
         folder: f.folder.value || null,
@@ -509,7 +519,7 @@ $('#secret-form').onsubmit = async (ev) => {
       });
     } else if (f.value.value) {
       // full write: value + all metadata
-      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`, {
+      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
         value: f.value.value,
         folder: f.folder.value || null,
         note: f.note.value || null,
@@ -522,7 +532,7 @@ $('#secret-form').onsubmit = async (ev) => {
       });
     } else if (editing) {
       // metadata-only patch ("" clears)
-      await api('PATCH', `/api/secrets/${encodeURIComponent(name)}${vaultQS()}`, {
+      await api('PATCH', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
         folder: f.folder.value,
         note: f.note.value,
         groups,
@@ -533,7 +543,7 @@ $('#secret-form').onsubmit = async (ev) => {
     }
     closeDrawer();
     toast('saved');
-    await loadSecrets();
+    await loadSecrets(currentVault);
   } catch (e) { fail(e); }
 };
 
@@ -546,10 +556,10 @@ $('#delete').onclick = async () => {
     return;
   }
   try {
-    await api('DELETE', `/api/secrets/${encodeURIComponent(editing)}${vaultQS()}`);
+    await api('DELETE', `/api/secrets/${encodeURIComponent(editing)}${vaultQS(currentVault)}`);
     $('#drawer').hidden = true;
     toast('deleted');
-    await loadSecrets();
+    await loadSecrets(currentVault);
   } catch (e) { fail(e); }
 };
 
@@ -566,17 +576,23 @@ function switchTab(which) {
 
 // ---- files ----
 let files = [];
-async function loadFiles() {
-  if (!ctx.capabilities.files) return;
+let fileLoadGeneration = 0;
+async function loadFiles(vault) {
+  const generation = ++fileLoadGeneration;
+  if (!ctx.capabilities.files) return false;
   showPlaceholder($('#files-table tbody'), 'Loading files…', 5);
   try {
-    files = await api('GET', `/api/files${vaultQS()}`);
+    const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
+    if (generation !== fileLoadGeneration) return false;
+    files = loadedFiles;
   } catch (e) {
+    if (generation !== fileLoadGeneration) return false;
     files = [];
     showPlaceholder($('#files-table tbody'), 'failed to load', 5);
     throw e;
   }
   renderFiles();
+  return true;
 }
 
 function renderFiles() {
@@ -604,8 +620,8 @@ function fileRow(f) {
   del.className = 'danger';
   del.onclick = async () => {
     try {
-      await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS()}`);
-      await loadFiles();
+      await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS(currentVault)}`);
+      await loadFiles(currentVault);
     } catch (e) { fail(e); }
   };
   td.append(dl, del);
@@ -615,7 +631,7 @@ function fileRow(f) {
 
 async function downloadFile(name) {
   try {
-    const res = await api('GET', `/api/files/${encodeURIComponent(name)}${vaultQS()}`, undefined, true);
+    const res = await api('GET', `/api/files/${encodeURIComponent(name)}${vaultQS(currentVault)}`, undefined, true);
     const blob = await res.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -630,11 +646,11 @@ async function uploadFiles(fileList) {
     const form = new FormData();
     form.append('file', file, file.name);
     try {
-      await api('POST', `/api/files${vaultQS()}`, form);
+      await api('POST', `/api/files${vaultQS(currentVault)}`, form);
       toast(`uploaded ${file.name}`);
     } catch (e) { fail(e); }
   }
-  await loadFiles();
+  await loadFiles(currentVault);
 }
 
 const dz = $('#dropzone');

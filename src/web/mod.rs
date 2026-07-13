@@ -189,4 +189,14 @@ mod tests {
         assert!(APP_JS.contains("authRecoveryActive = true;"));
         assert!(APP_JS.contains("if (authRecoveryActive) return;"));
     }
+
+    #[test]
+    fn ui_guards_list_loads_against_stale_responses() {
+        assert!(APP_JS.contains("let secretLoadGeneration = 0"));
+        assert!(APP_JS.contains("let fileLoadGeneration = 0"));
+        assert!(APP_JS.contains("async function loadSecrets(vault)"));
+        assert!(APP_JS.contains("async function loadFiles(vault)"));
+        assert!(APP_JS.contains("if (generation !== secretLoadGeneration) return"));
+        assert!(APP_JS.contains("if (generation !== fileLoadGeneration) return"));
+    }
 }
