@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn ui_file_actions_are_named_and_delete_is_confirmed() {
         assert!(APP_JS.contains("dl.textContent = 'Download'"));
-        assert!(APP_JS.contains("del.textContent = 'Delete'"));
+        assert!(APP_JS.contains("del.dataset.defaultLabel = 'Delete'"));
         assert!(APP_JS.contains("armConfirmation(del, 'Really delete?')"));
         assert!(!APP_JS.contains("dl.textContent = '⬇'"));
         assert!(!APP_JS.contains("del.textContent = '✕'"));
@@ -236,10 +236,8 @@ mod tests {
         assert!(
             !APP_JS.contains("generation === fileLoadGeneration &&\n    vault === currentVault")
         );
-        assert!(APP_JS.contains(
-            "if (!isCurrentFileAction(generation, vault)) return;\n      await loadFiles(vault);"
-        ));
-        assert!(APP_JS.contains("if (!del.isConnected) return;"));
+        assert!(APP_JS.contains("if (!isCurrentFileAction(generation, vault)) return;"));
+        assert!(APP_JS.contains("await reconcileFilesAfterDelete(generation, vault);"));
     }
 
     #[test]
@@ -249,6 +247,28 @@ mod tests {
         assert!(APP_JS.contains("button.disabled = false;"));
         assert!(APP_JS.contains("beginPendingAction(btn, 'Deleting…')"));
         assert!(APP_JS.contains("beginPendingAction(del, 'Deleting…')"));
+    }
+
+    #[test]
+    fn ui_file_delete_pending_state_survives_same_vault_rerenders() {
+        assert!(APP_JS.contains("const pendingFileDeletes = new Map()"));
+        assert!(APP_JS.contains("function isFileDeletePending(vault, name)"));
+        assert!(APP_JS.contains("function setFileDeletePending(vault, name, generation)"));
+        assert!(APP_JS.contains("function clearFileDeletePending(vault, name, generation)"));
+        assert!(APP_JS.contains("pendingFileDeletes.clear();"));
+        assert!(APP_JS.contains("if (isFileDeletePending(vault, name)) return;"));
+        assert!(APP_JS.contains("setFileDeletePending(vault, name, generation);"));
+        assert!(APP_JS.contains("del.textContent = pending ? 'Deleting…' : 'Delete';"));
+        assert!(APP_JS.contains("del.disabled = pending;"));
+    }
+
+    #[test]
+    fn ui_reports_current_file_reconciliation_failures() {
+        assert!(APP_JS.contains("async function reconcileFilesAfterDelete(generation, vault)"));
+        assert!(APP_JS.contains("await reconcileFilesAfterDelete(generation, vault);"));
+        assert!(
+            APP_JS.contains("if (!isCurrentFileAction(generation, vault)) return;\n    fail(e);")
+        );
     }
 
     #[test]

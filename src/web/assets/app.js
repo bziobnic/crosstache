@@ -328,6 +328,7 @@ async function init() {
     secretLoadGeneration++;
     fileLoadGeneration++;
     fileActionGeneration++;
+    pendingFileDeletes.clear();
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
@@ -650,6 +651,24 @@ function switchTab(which) {
 let files = [];
 let fileLoadGeneration = 0;
 let fileActionGeneration = 0;
+const pendingFileDeletes = new Map();
+
+function isFileDeletePending(vault, name) {
+  return pendingFileDeletes.get(vault)?.has(name) || false;
+}
+
+function setFileDeletePending(vault, name, generation) {
+  if (!pendingFileDeletes.has(vault)) pendingFileDeletes.set(vault, new Map());
+  pendingFileDeletes.get(vault).set(name, generation);
+}
+
+function clearFileDeletePending(vault, name, generation) {
+  const vaultDeletes = pendingFileDeletes.get(vault);
+  if (vaultDeletes?.get(name) !== generation) return;
+  vaultDeletes.delete(name);
+  if (!vaultDeletes.size) pendingFileDeletes.delete(vault);
+}
+
 async function loadFiles(vault) {
   const generation = ++fileLoadGeneration;
   if (!ctx.capabilities.files) return false;
@@ -680,7 +699,27 @@ function isCurrentFileAction(generation, vault) {
   return generation === fileActionGeneration && vault === currentVault;
 }
 
+function syncFileDeleteButtons(vault, name) {
+  const pending = isFileDeletePending(vault, name);
+  for (const button of document.querySelectorAll('#files-table button[data-file-name]')) {
+    if (button.dataset.fileVault !== vault || button.dataset.fileName !== name) continue;
+    if (pending) beginPendingAction(button, 'Deleting…');
+    else resetConfirmation(button, 'Delete');
+  }
+}
+
+async function reconcileFilesAfterDelete(generation, vault) {
+  try {
+    await loadFiles(vault);
+  } catch (e) {
+    if (!isCurrentFileAction(generation, vault)) return;
+    fail(e);
+  }
+}
+
 function fileRow(f) {
+  const vault = currentVault;
+  const name = f.name;
   const tr = document.createElement('tr');
   const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
   for (const c of cells) {
@@ -694,26 +733,32 @@ function fileRow(f) {
   dl.textContent = 'Download';
   dl.onclick = () => downloadFile(f.name);
   const del = document.createElement('button');
-  del.textContent = 'Delete';
+  const pending = isFileDeletePending(vault, name);
+  del.textContent = pending ? 'Deleting…' : 'Delete';
+  del.disabled = pending;
   del.dataset.defaultLabel = 'Delete';
+  del.dataset.fileVault = vault;
+  del.dataset.fileName = name;
   del.className = 'danger';
   del.onclick = async () => {
+    if (isFileDeletePending(vault, name)) return;
     if (del.disabled) return;
     if (!armConfirmation(del, 'Really delete?')) return;
-    beginPendingAction(del, 'Deleting…');
     const generation = fileActionGeneration;
-    const vault = currentVault;
-    const name = f.name;
+    setFileDeletePending(vault, name, generation);
+    beginPendingAction(del, 'Deleting…');
     try {
       await api('DELETE', `/api/files/${encodeURIComponent(name)}${vaultQS(vault)}`);
-      if (!isCurrentFileAction(generation, vault)) return;
-      await loadFiles(vault);
     } catch (e) {
+      clearFileDeletePending(vault, name, generation);
       if (!isCurrentFileAction(generation, vault)) return;
-      if (!del.isConnected) return;
-      resetConfirmation(del, 'Delete');
+      syncFileDeleteButtons(vault, name);
       fail(e);
+      return;
     }
+    clearFileDeletePending(vault, name, generation);
+    if (!isCurrentFileAction(generation, vault)) return;
+    await reconcileFilesAfterDelete(generation, vault);
   };
   td.append(dl, del);
   tr.appendChild(td);
