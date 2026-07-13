@@ -199,4 +199,9 @@ mod tests {
         assert!(APP_JS.contains("if (generation !== secretLoadGeneration) return"));
         assert!(APP_JS.contains("if (generation !== fileLoadGeneration) return"));
     }
+
+    #[test]
+    fn ui_stops_stale_init_before_loading_files() {
+        assert!(APP_JS.contains("if (!(await loadSecrets(vault))) return;"));
+    }
 }

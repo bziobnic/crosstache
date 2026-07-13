@@ -307,7 +307,7 @@ async function init() {
     loadFiles(vault).catch(fail);
   };
   const vault = currentVault;
-  await loadSecrets(vault);
+  if (!(await loadSecrets(vault))) return;
   if (ctx.capabilities.files) await loadFiles(vault);
 }
 
