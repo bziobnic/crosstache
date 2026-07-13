@@ -53,6 +53,10 @@ than local exploratory scans:
   minimum length, and the scanner's built-in excludes:
   `.git/**`, `target/**`, `dist/**`, `node_modules/**`, `*.lock`,
   and `*.min.*`.
+  Working-tree path scans still pass through the filesystem walker, so
+  `.gitignore` and `.xvignore` can affect path discovery there; the installed
+  staged hook and `--all --hook` use Git object scans plus the built-in
+  scanner excludes.
 - Incomplete secret coverage is a failure. If any requested vault cannot be
   listed or any secret value cannot be read, hook mode refuses to pass instead
   of warning and continuing.

@@ -26,5 +26,6 @@ updates the existing guide instead of creating a redundant page.
         `[scan]` overrides.
   - [x] Document fail-closed behavior for unreadable/oversized files and
         incomplete vault secret coverage.
-- [ ] Verify the documentation-only change against source/tests.
+- [x] Verify the documentation-only change against source/tests:
+      `cargo +stable test --test scan_tests hook_scan_ignores_repository_policy_that_excludes_a_leak`.
 - [ ] Commit and push the branch, then open the documentation PR.
