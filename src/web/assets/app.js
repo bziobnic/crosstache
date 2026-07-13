@@ -671,17 +671,24 @@ function fileRow(f) {
     tr.appendChild(td);
   }
   const td = document.createElement('td');
+  td.className = 'file-actions';
   const dl = document.createElement('button');
-  dl.textContent = '⬇';
+  dl.textContent = 'Download';
   dl.onclick = () => downloadFile(f.name);
   const del = document.createElement('button');
-  del.textContent = '✕';
+  del.textContent = 'Delete';
+  del.dataset.defaultLabel = 'Delete';
   del.className = 'danger';
   del.onclick = async () => {
+    if (!armConfirmation(del, 'Really delete?')) return;
     try {
       await api('DELETE', `/api/files/${encodeURIComponent(f.name)}${vaultQS(currentVault)}`);
+      resetConfirmation(del, 'Delete');
       await loadFiles(currentVault);
-    } catch (e) { fail(e); }
+    } catch (e) {
+      resetConfirmation(del, 'Delete');
+      fail(e);
+    }
   };
   td.append(dl, del);
   tr.appendChild(td);

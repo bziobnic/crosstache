@@ -218,6 +218,15 @@ mod tests {
     }
 
     #[test]
+    fn ui_file_actions_are_named_and_delete_is_confirmed() {
+        assert!(APP_JS.contains("dl.textContent = 'Download'"));
+        assert!(APP_JS.contains("del.textContent = 'Delete'"));
+        assert!(APP_JS.contains("armConfirmation(del, 'Really delete?')"));
+        assert!(!APP_JS.contains("dl.textContent = '⬇'"));
+        assert!(!APP_JS.contains("del.textContent = '✕'"));
+    }
+
+    #[test]
     fn ui_guards_drawer_action_continuations_by_selection() {
         assert!(APP_JS.contains("function isCurrentDrawer(generation, selection)"));
         assert!(
