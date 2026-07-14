@@ -8,14 +8,25 @@
 </head>
 <body>
 <div id="progress" hidden></div>
-<header>
-  <strong>xv</strong>
-  <span id="backend-badge"></span>
-  <select id="vault-select" title="vault"></select>
-  <nav>
-    <button id="tab-secrets" class="tab active">Secrets</button>
-    <button id="tab-files" class="tab">Files</button>
-  </nav>
+<header id="app-header" class="app-header">
+  <div class="app-header-inner">
+    <div class="brand" aria-label="Crosstache Vault">
+      <span class="brand-mark" aria-hidden="true">xv</span>
+      <span class="brand-name">Crosstache Vault</span>
+    </div>
+    <div class="vault-context">
+      <span id="backend-badge" class="backend-badge"></span>
+      <label class="vault-picker">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span class="sr-only">Current vault</span>
+        <select id="vault-select" title="Current vault"></select>
+      </label>
+    </div>
+    <nav class="tab-list" aria-label="Vault content">
+      <button id="tab-secrets" class="tab active" type="button">Secrets</button>
+      <button id="tab-files" class="tab" type="button">Files</button>
+    </nav>
+  </div>
 </header>
 
 <main>
@@ -25,6 +36,14 @@
   </section>
 
   <section id="secrets-view">
+    <div class="view-heading">
+      <div>
+        <span class="eyebrow">Vault contents</span>
+        <h1>Your secrets</h1>
+        <p>Browse, organize, and safely manage credentials in this vault.</p>
+      </div>
+      <span id="secret-item-count" class="item-count" aria-live="polite">0 secrets</span>
+    </div>
     <div class="toolbar">
       <input id="search" type="search" placeholder="filter secrets…">
       <button id="select-secrets" type="button">Select</button>
@@ -44,6 +63,14 @@
   </section>
 
   <section id="files-view" hidden>
+    <div class="view-heading">
+      <div>
+        <span class="eyebrow">Vault files</span>
+        <h1>Your files</h1>
+        <p>Upload, download, and organize encrypted files in this vault.</p>
+      </div>
+      <span id="file-item-count" class="item-count" aria-live="polite">0 files</span>
+    </div>
     <div class="toolbar file-toolbar">
       <span class="toolbar-spacer"></span>
       <button id="select-files" type="button">Select</button>

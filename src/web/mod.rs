@@ -384,6 +384,36 @@ mod tests {
     }
 
     #[test]
+    fn ui_has_semantic_visual_shell_and_tokens() {
+        for marker in [
+            "id=\"app-header\"",
+            "class=\"app-header-inner\"",
+            "class=\"brand-mark\"",
+            "class=\"brand-name\"",
+            "class=\"vault-context\"",
+            "class=\"tab-list\"",
+            "id=\"secret-item-count\"",
+            "id=\"file-item-count\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        for token in [
+            "--color-canvas:",
+            "--color-surface:",
+            "--color-surface-subtle:",
+            "--color-text:",
+            "--color-text-muted:",
+            "--color-border:",
+            "--color-accent:",
+            "--color-accent-quiet:",
+            "--color-danger:",
+            "--shadow-raised:",
+        ] {
+            assert!(STYLE_CSS.contains(token), "missing {token}");
+        }
+    }
+
+    #[test]
     fn ui_bulk_move_uses_pending_button_state() {
         assert!(APP_JS.contains("beginPendingAction(moveButton, 'Moving…');"));
         assert!(APP_JS.contains("resetConfirmation(moveButton, 'Move');"));
