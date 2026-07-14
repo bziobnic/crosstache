@@ -434,6 +434,9 @@ mod tests {
         assert!(APP_JS.contains("icon('secret')"));
         assert!(APP_JS.contains("icon('file')"));
         assert!(APP_JS.contains("icon(open ? 'chevron-down' : 'chevron-right')"));
+        assert!(APP_JS.contains("content.className = 'folder-cell-content'"));
+        assert!(STYLE_CSS.contains(".folder-cell-content { display:flex;"));
+        assert!(!STYLE_CSS.contains(".folder-cell { display:flex;"));
     }
 
     #[test]

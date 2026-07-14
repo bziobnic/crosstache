@@ -120,8 +120,9 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transpa
 .item-name > .icon { width:1.5rem; height:1.5rem; padding:.32rem; border-radius:.4375rem;
   color:var(--color-accent); background:var(--color-accent-quiet); }
 .item-name strong { overflow:hidden; text-overflow:ellipsis; }
-.folder-cell { display:flex; align-items:center; gap:.5rem; color:var(--color-text); }
-.folder-cell .icon { width:.875rem; height:.875rem; color:var(--color-accent); }
+.folder-cell { color:var(--color-text); }
+.folder-cell-content { display:flex; align-items:center; gap:.5rem; }
+.folder-cell-content .icon { width:.875rem; height:.875rem; color:var(--color-accent); }
 .folder-name { font-weight:700; }
 .folder-count, .tag { display:inline-flex; padding:.15rem .45rem; border-radius:999px;
   color:var(--color-text-muted); background:color-mix(in srgb, var(--color-text) 6%, transparent); font-size:.7rem; }

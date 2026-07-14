@@ -289,15 +289,18 @@ function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceE
     const td = document.createElement('td');
     td.colSpan = cols;
     td.className = 'folder-cell';
-    td.appendChild(icon(open ? 'chevron-down' : 'chevron-right'));
-    td.appendChild(icon('folder'));
+    const content = document.createElement('div');
+    content.className = 'folder-cell-content';
+    content.appendChild(icon(open ? 'chevron-down' : 'chevron-right'));
+    content.appendChild(icon('folder'));
     const label = document.createElement('span');
     label.className = 'folder-name';
     label.textContent = name;
     const count = document.createElement('span');
     count.className = 'folder-count';
     count.textContent = `${rows.length} ${rows.length === 1 ? 'item' : 'items'}`;
-    td.append(label, count);
+    content.append(label, count);
+    td.appendChild(content);
     td.setAttribute('aria-expanded', String(open));
     if (forceExpand) {
       tr.classList.add('static');
