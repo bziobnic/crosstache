@@ -289,4 +289,112 @@ mod tests {
         ));
         assert!(APP_JS.contains("function clearDrawerState()"));
     }
+
+    #[test]
+    fn ui_exposes_selection_controls_for_both_tables() {
+        for id in [
+            "select-secrets",
+            "select-files",
+            "select-all-secrets",
+            "select-all-files",
+            "secret-bulk-bar",
+            "file-bulk-bar",
+        ] {
+            assert!(INDEX_HTML.contains(&format!("id=\"{id}\"")), "{id}");
+        }
+    }
+
+    #[test]
+    fn ui_marks_group_children_for_indentation() {
+        assert!(APP_JS.contains("renderRow(it, true)"));
+        assert!(APP_JS.contains("tr.classList.add('folder-child')"));
+        assert!(APP_JS.contains("td.classList.add('item-name')"));
+        assert!(STYLE_CSS.contains(".folder-child .item-name"));
+    }
+
+    #[test]
+    fn ui_selection_uses_visible_items_and_mixed_header_state() {
+        assert!(APP_JS.contains("function syncSelectionUi(kind, visibleIds)"));
+        assert!(APP_JS.contains("selectAll.indeterminate = selectedVisible > 0 && !allVisible"));
+        assert!(APP_JS.contains("for (const id of visibleIds)"));
+        assert!(APP_JS.contains("clearSelection('secrets')"));
+        assert!(APP_JS.contains("clearSelection('files')"));
+    }
+
+    #[test]
+    fn ui_bulk_actions_are_bounded_and_reuse_item_routes() {
+        assert!(APP_JS.contains("async function runBounded(items, limit, operation)"));
+        assert!(APP_JS.contains("runBounded(items, 4"));
+        assert!(APP_JS.contains("api('DELETE', `/api/secrets/"));
+        assert!(APP_JS.contains("api('DELETE', `/api/files/"));
+        assert!(APP_JS.contains("/move${vaultQS(vault)}`, { folder }"));
+    }
+
+    #[test]
+    fn ui_bulk_deletes_require_confirmation() {
+        assert!(APP_JS.contains("armConfirmation(button, `Delete ${items.length} secrets?`)"));
+        assert!(APP_JS.contains("armConfirmation(button, `Delete ${items.length} files?`)"));
+    }
+
+    #[test]
+    fn ui_cancelling_selection_restores_bulk_controls() {
+        assert!(APP_JS.contains("function resetSelectionControls(kind)"));
+        assert!(APP_JS.contains("if (!enabled) {\n    resetSelectionControls(kind);"));
+        assert!(APP_JS.contains("resetConfirmation(moveButton, 'Move');"));
+        assert!(APP_JS.contains("cancelButton.disabled = false;"));
+    }
+
+    #[test]
+    fn ui_selection_changes_reset_bulk_confirmation() {
+        assert!(APP_JS.contains("function resetBulkConfirmation(kind)"));
+        assert!(
+            APP_JS.matches("resetBulkConfirmation(kind);").count() >= 4,
+            "every selection mutation path must disarm bulk delete"
+        );
+    }
+
+    #[test]
+    fn ui_bulk_actions_reconcile_same_vault_after_tab_switch() {
+        assert!(APP_JS.contains("const selectionIsCurrent = generation === state.generation;"));
+        assert!(
+            APP_JS
+                .matches("if (vault !== currentVault) return;")
+                .count()
+                >= 4,
+            "bulk delete and move must reconcile same-vault data independently of selection state"
+        );
+        assert!(!APP_JS
+            .contains("if (generation !== state.generation || vault !== currentVault) return;"));
+    }
+
+    #[test]
+    fn ui_preserves_failed_file_load_state_during_bulk_recovery() {
+        assert!(APP_JS.contains("let filesState = 'ready';"));
+        assert!(APP_JS.contains("filesState = 'loading';"));
+        assert!(APP_JS.contains("filesState = 'failed';"));
+        assert!(APP_JS.contains("function renderFiles() {\n  if (filesState !== 'ready') return;"));
+    }
+
+    #[test]
+    fn ui_uses_wait_cursor_only_for_pending_buttons() {
+        assert!(APP_JS.contains("button.classList.add('pending');"));
+        assert!(APP_JS.contains("button.classList.remove('pending');"));
+        assert!(STYLE_CSS.contains("button:disabled { cursor:not-allowed;"));
+        assert!(STYLE_CSS.contains("button.pending:disabled { cursor:wait;"));
+    }
+
+    #[test]
+    fn ui_bulk_move_uses_pending_button_state() {
+        assert!(APP_JS.contains("beginPendingAction(moveButton, 'Moving…');"));
+        assert!(APP_JS.contains("resetConfirmation(moveButton, 'Move');"));
+    }
+
+    #[test]
+    fn ui_bulk_toolbar_sync_does_not_depend_on_table_render() {
+        assert!(APP_JS.contains("function updateSelectionControls(kind)"));
+        assert!(APP_JS.contains(
+            "function setBulkPending(kind, pending, label) {\n  const state = selectionState(kind);"
+        ));
+        assert!(APP_JS.contains("updateSelectionControls(kind);\n  renderSelectionKind(kind);"));
+    }
 }

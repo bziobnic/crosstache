@@ -12,7 +12,14 @@ secret" drawer or open an existing one to edit it field-by-field, with
 secret-kind fields masked and individually revealable/copyable.
 
 Entries in both tables are grouped by folder into collapsible sections
-(collapsed by default), with file sizes shown in human-readable units.
+(collapsed by default). Expanded contents are indented beneath their folder
+header, and file sizes use human-readable units.
+
+Use **Select** to reveal per-item checkboxes. The header checkbox selects only
+items currently visible (including the active secret filter and expanded
+folders). Both tables support bulk deletion; selected secrets can also be moved
+to another folder. Bulk file moves are not available because file backends do
+not expose a portable move operation.
 
 The URL token is copied into per-tab `sessionStorage`, so reloads in that tab
 remain authenticated while the server is running. Closing the tab discards the
@@ -32,4 +39,5 @@ values only in POST bodies; `Cache-Control: no-store`. There is no TLS and no
 login — if you need network access to your vaults from another device, this is
 deliberately not the tool.
 
-Design: `docs/superpowers/specs/2026-07-08-web-ui-design.md`.
+Designs: `docs/superpowers/specs/2026-07-08-web-ui-design.md` and
+`docs/superpowers/specs/2026-07-14-web-ui-selection-design.md`.
