@@ -452,6 +452,26 @@ mod tests {
     }
 
     #[test]
+    fn ui_has_structured_drawer_and_button_hierarchy() {
+        for marker in [
+            "class=\"drawer-header\"",
+            "id=\"drawer-kicker\"",
+            "class=\"drawer-body\"",
+            "class=\"drawer-footer\"",
+            "class=\"button primary\"",
+            "class=\"button ghost\"",
+            "class=\"button danger\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("label.className = 'form-field'"));
+        assert!(APP_JS
+            .contains("$('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret'"));
+        assert!(STYLE_CSS.contains(".drawer-footer {"));
+        assert!(STYLE_CSS.contains("position:sticky"));
+    }
+
+    #[test]
     fn ui_bulk_move_uses_pending_button_state() {
         assert!(APP_JS.contains("beginPendingAction(moveButton, 'Moving…');"));
         assert!(APP_JS.contains("resetConfirmation(moveButton, 'Move');"));

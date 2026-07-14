@@ -414,7 +414,17 @@ function parseEnvelope(raw) {
 
 function fieldRow(name, kind, value, required) {
   const label = document.createElement('label');
-  label.append(`${name}${required ? ' *' : ''}`);
+  label.className = 'form-field';
+  const heading = document.createElement('span');
+  heading.className = 'field-label';
+  heading.append(name);
+  if (required || kind === 'secret') {
+    const hint = document.createElement('span');
+    hint.className = 'field-hint';
+    hint.textContent = required ? 'Required' : 'Protected';
+    heading.appendChild(hint);
+  }
+  label.appendChild(heading);
   const input = document.createElement('input');
   input.dataset.fieldName = name;
   input.dataset.fieldKind = kind;
@@ -424,9 +434,10 @@ function fieldRow(name, kind, value, required) {
     input.type = 'password';
     input.autocomplete = 'new-password';
     const row = document.createElement('span');
-    row.className = 'row';
+    row.className = 'field-actions';
     const rev = document.createElement('button');
     rev.type = 'button';
+    rev.className = 'button secondary';
     rev.textContent = 'Reveal';
     rev.onclick = () => {
       const showing = input.type === 'text';
@@ -435,6 +446,7 @@ function fieldRow(name, kind, value, required) {
     };
     const cp = document.createElement('button');
     cp.type = 'button';
+    cp.className = 'button secondary';
     cp.textContent = 'Copy';
     cp.onclick = async () => {
       try {
@@ -677,7 +689,9 @@ async function openDrawer(name) {
   editing = name;
   const f = $('#secret-form');
   f.reset();
-  $('#drawer-title').textContent = name ? `Edit: ${name}` : 'New secret';
+  $('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret';
+  $('#drawer-title').textContent = name || 'New secret';
+  $('#save').textContent = name ? 'Save changes' : 'Create secret';
   f.elements.name.value = name || '';
   f.elements.name.readOnly = false;
   $('#reveal').hidden = $('#copy').hidden = $('#delete').hidden = !name;

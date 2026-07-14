@@ -94,32 +94,39 @@
   </section>
 </main>
 
-<aside id="drawer" hidden>
-  <h2 id="drawer-title"></h2>
+<aside id="drawer" aria-labelledby="drawer-title" hidden>
+  <div class="drawer-header">
+    <span id="drawer-kicker" class="eyebrow">Create secret</span>
+    <h2 id="drawer-title">New secret</h2>
+    <p>Values remain concealed until explicitly revealed.</p>
+  </div>
   <form id="secret-form" autocomplete="off">
-    <label>Name <input name="name" required></label>
-    <label id="type-picker-label" hidden>Type <select id="type-picker"></select></label>
-    <div id="value-section">
-      <label>Value
-        <textarea name="value" rows="4" placeholder="(leave blank to keep current value)"></textarea>
-        <span class="row">
-          <button type="button" id="reveal">Reveal</button>
-          <button type="button" id="copy">Copy</button>
-        </span>
-      </label>
+    <div class="drawer-body">
+      <label class="form-field"><span class="field-label">Name <span class="field-hint">Required</span></span><input name="name" required></label>
+      <label id="type-picker-label" class="form-field" hidden><span class="field-label">Type</span><select id="type-picker"></select></label>
+      <div id="value-section">
+        <label class="form-field"><span class="field-label">Value <span class="field-hint">Protected</span></span>
+          <textarea name="value" rows="4" placeholder="Leave blank to keep the current value"></textarea>
+          <span class="field-actions">
+            <button type="button" id="reveal" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg>Reveal</button>
+            <button type="button" id="copy" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy</button>
+          </span>
+        </label>
+      </div>
+      <div id="record-section" hidden>
+        <div id="record-type"></div>
+        <div id="record-fields"></div>
+      </div>
+      <label class="form-field"><span class="field-label">Folder</span><input name="folder"></label>
+      <label class="form-field"><span class="field-label">Groups</span><input name="groups" placeholder="Comma-separated"></label>
+      <label class="form-field"><span class="field-label">Note</span><input name="note"></label>
+      <label class="form-field"><span class="field-label">Expires</span><input name="expires_on" type="date"></label>
     </div>
-    <div id="record-section" hidden>
-      <div id="record-type"></div>
-      <div id="record-fields"></div>
-    </div>
-    <label>Folder <input name="folder"></label>
-    <label>Groups (comma-separated) <input name="groups"></label>
-    <label>Note <input name="note"></label>
-    <label>Expires <input name="expires_on" type="date"></label>
-    <div class="row">
-      <button type="submit" id="save">Save</button>
-      <button type="button" id="delete" class="danger" data-default-label="Delete">Delete</button>
-      <button type="button" id="close-drawer">Close</button>
+    <div class="drawer-footer">
+      <button type="button" id="delete" class="button danger" data-default-label="Delete">Delete</button>
+      <span class="drawer-footer-spacer"></span>
+      <button type="button" id="close-drawer" class="button ghost"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg>Cancel</button>
+      <button type="submit" id="save" class="button primary">Save changes</button>
     </div>
   </form>
 </aside>
