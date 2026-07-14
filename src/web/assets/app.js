@@ -52,6 +52,7 @@ function resetConfirmation(button, label) {
   button._confirmTimer = null;
   button.dataset.armed = '';
   button.disabled = false;
+  button.classList.remove('pending');
   button.textContent = label;
 }
 
@@ -60,6 +61,7 @@ function beginPendingAction(button, label) {
   button._confirmTimer = null;
   button.dataset.armed = '';
   button.disabled = true;
+  button.classList.add('pending');
   button.textContent = label;
 }
 
@@ -111,6 +113,133 @@ function showPlaceholder(tbody, text, cols) {
 const expandedSecretFolders = new Set();
 const expandedFileFolders = new Set();
 
+const secretSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };
+const fileSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };
+
+function selectionState(kind) {
+  return kind === 'secrets' ? secretSelection : fileSelection;
+}
+
+function selectionElements(kind) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  return {
+    table: $(`#${kind}-table`),
+    toggle: $(`#select-${kind}`),
+    selectAll: $(`#select-all-${kind}`),
+    bulkBar: $(`#${singular}-bulk-bar`),
+    count: $(`#${singular}-selection-count`),
+    deleteButton: $(`#bulk-delete-${kind}`),
+  };
+}
+
+function resetBulkConfirmation(kind) {
+  const state = selectionState(kind);
+  if (!state.pending) resetConfirmation(selectionElements(kind).deleteButton, 'Delete');
+}
+
+function renderSelectionKind(kind) {
+  if (kind === 'secrets') renderSecrets();
+  else renderFiles();
+}
+
+function resetSelectionControls(kind) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  const cancelButton = $(`#cancel-${singular}-selection`);
+  cancelButton.disabled = false;
+  if (kind === 'secrets') {
+    const moveButton = $('#bulk-move-secrets');
+    resetConfirmation(moveButton, 'Move');
+    $('#secret-move-folder').disabled = false;
+  }
+}
+
+function setSelectionMode(kind, enabled) {
+  const state = selectionState(kind);
+  const elements = selectionElements(kind);
+  state.enabled = enabled;
+  state.generation++;
+  if (!enabled) {
+    resetSelectionControls(kind);
+    state.pending = false;
+    state.ids.clear();
+    state.visibleIds = [];
+    resetConfirmation(elements.deleteButton, 'Delete');
+  }
+  elements.toggle.hidden = enabled;
+  elements.bulkBar.hidden = !enabled;
+  elements.table.querySelector('thead .selection-column').hidden = !enabled;
+  elements.table.classList.toggle('selection-mode', enabled);
+  renderSelectionKind(kind);
+}
+
+function clearSelection(kind) {
+  setSelectionMode(kind, false);
+}
+
+function syncSelectionUi(kind, visibleIds) {
+  const state = selectionState(kind);
+  state.visibleIds = visibleIds;
+  const available = new Set(
+    (kind === 'secrets' ? secrets : files).map((item) => (
+      kind === 'secrets' ? (item.original_name || item.name) : item.name
+    )),
+  );
+  let selectionChanged = false;
+  for (const id of [...state.ids]) {
+    if (!available.has(id)) {
+      state.ids.delete(id);
+      selectionChanged = true;
+    }
+  }
+  if (selectionChanged) resetBulkConfirmation(kind);
+  updateSelectionControls(kind);
+}
+
+function updateSelectionControls(kind) {
+  const state = selectionState(kind);
+  const elements = selectionElements(kind);
+  const visibleIds = state.visibleIds;
+  const selectedVisible = visibleIds.filter((id) => state.ids.has(id)).length;
+  const allVisible = visibleIds.length > 0 && selectedVisible === visibleIds.length;
+  elements.selectAll.checked = allVisible;
+  elements.selectAll.indeterminate = selectedVisible > 0 && !allVisible;
+  elements.selectAll.disabled = visibleIds.length === 0;
+  elements.count.textContent = `${state.ids.size} selected`;
+  elements.deleteButton.disabled = state.pending || state.ids.size === 0;
+  elements.selectAll.disabled = state.pending || visibleIds.length === 0;
+  if (kind === 'secrets') $('#bulk-move-secrets').disabled = state.pending || state.ids.size === 0;
+}
+
+function selectionCell(kind, id) {
+  const state = selectionState(kind);
+  const td = document.createElement('td');
+  td.className = 'selection-column';
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.checked = state.ids.has(id);
+  checkbox.disabled = state.pending;
+  checkbox.setAttribute('aria-label', `Select ${kind === 'secrets' ? 'secret' : 'file'} ${id}`);
+  checkbox.onclick = (e) => e.stopPropagation();
+  checkbox.onchange = () => {
+    if (checkbox.checked) state.ids.add(id);
+    else state.ids.delete(id);
+    resetBulkConfirmation(kind);
+    renderSelectionKind(kind);
+  };
+  td.onclick = (e) => e.stopPropagation();
+  td.appendChild(checkbox);
+  return td;
+}
+
+function toggleSelected(kind, id) {
+  const state = selectionState(kind);
+  if (state.pending) return;
+  if (state.ids.has(id)) state.ids.delete(id);
+  else state.ids.add(id);
+  resetBulkConfirmation(kind);
+  renderSelectionKind(kind);
+}
+
 // Renders `items` into `tbody` as collapsible folder groups (sorted,
 // listed first) followed by loose items (folderOf(item) === '').
 // forceExpand shows every group open without mutating `expanded` —
@@ -118,6 +247,7 @@ const expandedFileFolders = new Set();
 function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceExpand, rerender) {
   const groups = new Map();
   const loose = [];
+  const rendered = [];
   for (const it of items) {
     const f = folderOf(it);
     if (f) {
@@ -156,9 +286,18 @@ function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceE
     }
     tr.appendChild(td);
     tbody.appendChild(tr);
-    if (open) for (const it of rows) tbody.appendChild(renderRow(it));
+    if (open) {
+      for (const it of rows) {
+        rendered.push(it);
+        tbody.appendChild(renderRow(it, true));
+      }
+    }
   }
-  for (const it of loose) tbody.appendChild(renderRow(it));
+  for (const it of loose) {
+    rendered.push(it);
+    tbody.appendChild(renderRow(it, false));
+  }
+  return rendered;
 }
 
 // ---- state ----
@@ -332,6 +471,8 @@ async function init() {
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
+    clearSelection('secrets');
+    clearSelection('files');
     expandedSecretFolders.clear();
     expandedFileFolders.clear();
     loadSecrets(vault).catch(fail);
@@ -351,7 +492,7 @@ let secretLoadGeneration = 0;
 async function loadSecrets(vault) {
   const generation = ++secretLoadGeneration;
   secretsState = 'loading';
-  showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', 5);
+  showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', secretSelection.enabled ? 6 : 5);
   try {
     const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault)}`);
     if (generation !== secretLoadGeneration) return false;
@@ -360,7 +501,7 @@ async function loadSecrets(vault) {
     if (generation !== secretLoadGeneration) return false;
     secretsState = 'failed';
     secrets = [];
-    showPlaceholder($('#secrets-table tbody'), 'failed to load', 5);
+    showPlaceholder($('#secrets-table tbody'), 'failed to load', secretSelection.enabled ? 6 : 5);
     throw e;
   }
   secretsState = 'ready';
@@ -382,21 +523,39 @@ function renderSecrets() {
   // While filtering, collapse state is ignored so matches are never
   // hidden inside a collapsed folder; empty groups drop out because
   // their rows are filtered before grouping.
-  renderGrouped(tbody, visible, (s) => s.folder || '', expandedSecretFolders, 5, secretRow, !!filter, renderSecrets);
+  const cols = secretSelection.enabled ? 6 : 5;
+  const rendered = renderGrouped(
+    tbody,
+    visible,
+    (s) => s.folder || '',
+    expandedSecretFolders,
+    cols,
+    secretRow,
+    !!filter,
+    renderSecrets,
+  );
+  syncSelectionUi('secrets', rendered.map((s) => s.original_name || s.name));
   if (!tbody.children.length) {
-    showPlaceholder(tbody, secrets.length ? 'no matching secrets' : 'no secrets', 5);
+    showPlaceholder(tbody, secrets.length ? 'no matching secrets' : 'no secrets', cols);
   }
 }
 
-function secretRow(s) {
+function secretRow(s, grouped = false) {
   const name = s.original_name || s.name;
   const tr = document.createElement('tr');
-  for (const cell of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)]) {
+  if (grouped) tr.classList.add('folder-child');
+  if (secretSelection.ids.has(name)) tr.classList.add('selected-row');
+  if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
+  for (const [index, cell] of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)].entries()) {
     const td = document.createElement('td');
+    if (index === 0) td.classList.add('item-name');
     td.textContent = cell || '';
     tr.appendChild(td);
   }
-  tr.onclick = () => openDrawer(name);
+  tr.onclick = () => {
+    if (secretSelection.enabled) toggleSelected('secrets', name);
+    else openDrawer(name);
+  };
   return tr;
 }
 
@@ -639,8 +798,14 @@ $('#delete').onclick = async () => {
 // ---- tabs ----
 $('#tab-secrets').onclick = () => switchTab('secrets');
 $('#tab-files').onclick = () => switchTab('files');
+let activeTab = 'secrets';
 function switchTab(which) {
   if (authRecoveryActive) return;
+  if (which !== activeTab) {
+    clearSelection('secrets');
+    clearSelection('files');
+    activeTab = which;
+  }
   $('#secrets-view').hidden = which !== 'secrets';
   $('#files-view').hidden = which !== 'files';
   $('#tab-secrets').classList.toggle('active', which === 'secrets');
@@ -649,6 +814,7 @@ function switchTab(which) {
 
 // ---- files ----
 let files = [];
+let filesState = 'ready';
 let fileLoadGeneration = 0;
 let fileActionGeneration = 0;
 const pendingFileDeletes = new Map();
@@ -672,27 +838,33 @@ function clearFileDeletePending(vault, name, generation) {
 async function loadFiles(vault) {
   const generation = ++fileLoadGeneration;
   if (!ctx.capabilities.files) return false;
-  showPlaceholder($('#files-table tbody'), 'Loading files…', 5);
+  filesState = 'loading';
+  showPlaceholder($('#files-table tbody'), 'Loading files…', fileSelection.enabled ? 6 : 5);
   try {
     const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
     if (generation !== fileLoadGeneration) return false;
     files = loadedFiles;
   } catch (e) {
     if (generation !== fileLoadGeneration) return false;
+    filesState = 'failed';
     files = [];
-    showPlaceholder($('#files-table tbody'), 'failed to load', 5);
+    showPlaceholder($('#files-table tbody'), 'failed to load', fileSelection.enabled ? 6 : 5);
     throw e;
   }
+  filesState = 'ready';
   renderFiles();
   return true;
 }
 
 function renderFiles() {
+  if (filesState !== 'ready') return;
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
   const dirOf = (f) => (f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/')) : '');
-  renderGrouped(tbody, files, dirOf, expandedFileFolders, 5, fileRow, false, renderFiles);
-  if (!tbody.children.length) showPlaceholder(tbody, 'no files', 5);
+  const cols = fileSelection.enabled ? 6 : 5;
+  const rendered = renderGrouped(tbody, files, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
+  syncSelectionUi('files', rendered.map((f) => f.name));
+  if (!tbody.children.length) showPlaceholder(tbody, 'no files', cols);
 }
 
 function isCurrentFileAction(generation, vault) {
@@ -717,18 +889,27 @@ async function reconcileFilesAfterDelete(generation, vault) {
   }
 }
 
-function fileRow(f) {
+function fileRow(f, grouped = false) {
   const vault = currentVault;
   const name = f.name;
   const tr = document.createElement('tr');
+  if (grouped) tr.classList.add('folder-child');
+  if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
+  if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
   const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
-  for (const c of cells) {
+  for (const [index, c] of cells.entries()) {
     const td = document.createElement('td');
+    if (index === 0) td.classList.add('item-name');
     td.textContent = c || '';
     tr.appendChild(td);
   }
   const td = document.createElement('td');
   td.className = 'file-actions';
+  if (fileSelection.enabled) {
+    tr.onclick = () => toggleSelected('files', name);
+    tr.appendChild(td);
+    return tr;
+  }
   const dl = document.createElement('button');
   dl.textContent = 'Download';
   dl.onclick = () => downloadFile(f.name);
@@ -764,6 +945,163 @@ function fileRow(f) {
   tr.appendChild(td);
   return tr;
 }
+
+function setVisibleSelection(kind, checked) {
+  const state = selectionState(kind);
+  const visibleIds = state.visibleIds;
+  for (const id of visibleIds) {
+    if (checked) state.ids.add(id);
+    else state.ids.delete(id);
+  }
+  resetBulkConfirmation(kind);
+  renderSelectionKind(kind);
+}
+
+async function runBounded(items, limit, operation) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const index = next++;
+      const item = items[index];
+      try {
+        await operation(item);
+        results[index] = { item, ok: true };
+      } catch (error) {
+        results[index] = { item, ok: false, error };
+      }
+    }
+  }
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+function reportBulkResults(verb, results) {
+  const succeeded = results.filter((result) => result.ok).length;
+  const failures = results.filter((result) => !result.ok);
+  if (!failures.length) {
+    toast(`${verb} ${succeeded} item${succeeded === 1 ? '' : 's'}`);
+    return;
+  }
+  const details = failures
+    .map(({ item, error }) => `${item}: ${error.message}`)
+    .join('; ');
+  toast(`${verb} ${succeeded}; ${failures.length} failed — ${details}`, true);
+}
+
+function setBulkPending(kind, pending, label) {
+  const state = selectionState(kind);
+  const elements = selectionElements(kind);
+  state.pending = pending;
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  $(`#cancel-${singular}-selection`).disabled = pending;
+  if (kind === 'secrets') {
+    $('#secret-move-folder').disabled = pending;
+    $('#bulk-move-secrets').disabled = pending || state.ids.size === 0;
+  }
+  if (pending) beginPendingAction(elements.deleteButton, label);
+  else resetConfirmation(elements.deleteButton, 'Delete');
+  updateSelectionControls(kind);
+  renderSelectionKind(kind);
+}
+
+async function bulkDelete(kind) {
+  const state = selectionState(kind);
+  const items = [...state.ids];
+  if (!items.length || state.pending) return;
+  const button = selectionElements(kind).deleteButton;
+  if (kind === 'secrets') {
+    if (!armConfirmation(button, `Delete ${items.length} secrets?`)) return;
+  } else if (!armConfirmation(button, `Delete ${items.length} files?`)) {
+    return;
+  }
+
+  const generation = state.generation;
+  const vault = currentVault;
+  setBulkPending(kind, true, 'Deleting…');
+  const results = await runBounded(items, 4, (item) => {
+    if (kind === 'secrets') {
+      return api('DELETE', `/api/secrets/${encodeURIComponent(item)}${vaultQS(vault)}`);
+    }
+    return api('DELETE', `/api/files/${encodeURIComponent(item)}${vaultQS(vault)}`);
+  });
+  if (vault !== currentVault) return;
+
+  const selectionIsCurrent = generation === state.generation;
+  if (selectionIsCurrent) {
+    for (const result of results) {
+      if (result.ok) state.ids.delete(result.item);
+    }
+    state.pending = false;
+  }
+  try {
+    if (kind === 'secrets') await loadSecrets(vault);
+    else await loadFiles(vault);
+  } catch (e) {
+    fail(e);
+  }
+  if (vault !== currentVault) return;
+  if (!selectionIsCurrent || generation !== state.generation) return;
+  setBulkPending(kind, false, '');
+  reportBulkResults('Deleted', results);
+}
+
+async function bulkMoveSecrets() {
+  const state = secretSelection;
+  const items = [...state.ids];
+  if (!items.length || state.pending) return;
+  const folder = $('#secret-move-folder').value.trim();
+  if (!folder) {
+    toast('enter a destination folder', true);
+    return;
+  }
+
+  const generation = state.generation;
+  const vault = currentVault;
+  const moveButton = $('#bulk-move-secrets');
+  state.pending = true;
+  $('#cancel-secret-selection').disabled = true;
+  $('#secret-move-folder').disabled = true;
+  $('#bulk-delete-secrets').disabled = true;
+  beginPendingAction(moveButton, 'Moving…');
+  renderSecrets();
+  const results = await runBounded(items, 4, (item) => (
+    api('POST', `/api/secrets/${encodeURIComponent(item)}/move${vaultQS(vault)}`, { folder })
+  ));
+  if (vault !== currentVault) return;
+
+  const selectionIsCurrent = generation === state.generation;
+  if (selectionIsCurrent) {
+    for (const result of results) {
+      if (result.ok) state.ids.delete(result.item);
+    }
+    state.pending = false;
+  }
+  try {
+    await loadSecrets(vault);
+  } catch (e) {
+    fail(e);
+  }
+  if (vault !== currentVault) return;
+  if (!selectionIsCurrent || generation !== state.generation) return;
+  $('#cancel-secret-selection').disabled = false;
+  $('#secret-move-folder').disabled = false;
+  resetConfirmation(moveButton, 'Move');
+  updateSelectionControls('secrets');
+  renderSecrets();
+  reportBulkResults('Moved', results);
+}
+
+$('#select-secrets').onclick = () => setSelectionMode('secrets', true);
+$('#select-files').onclick = () => setSelectionMode('files', true);
+$('#cancel-secret-selection').onclick = () => clearSelection('secrets');
+$('#cancel-file-selection').onclick = () => clearSelection('files');
+$('#select-all-secrets').onchange = (e) => setVisibleSelection('secrets', e.target.checked);
+$('#select-all-files').onchange = (e) => setVisibleSelection('files', e.target.checked);
+$('#bulk-delete-secrets').onclick = () => bulkDelete('secrets').catch(fail);
+$('#bulk-delete-files').onclick = () => bulkDelete('files').catch(fail);
+$('#bulk-move-secrets').onclick = () => bulkMoveSecrets().catch(fail);
 
 async function downloadFile(name) {
   try {

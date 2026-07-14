@@ -27,18 +27,35 @@
   <section id="secrets-view">
     <div class="toolbar">
       <input id="search" type="search" placeholder="filter secrets…">
+      <button id="select-secrets" type="button">Select</button>
       <button id="new-secret">+ New secret</button>
     </div>
+    <div id="secret-bulk-bar" class="bulk-toolbar" hidden>
+      <span id="secret-selection-count" aria-live="polite">0 selected</span>
+      <input id="secret-move-folder" placeholder="destination folder" aria-label="Destination folder">
+      <button id="bulk-move-secrets" type="button">Move</button>
+      <button id="bulk-delete-secrets" type="button" class="danger" data-default-label="Delete">Delete</button>
+      <button id="cancel-secret-selection" type="button">Cancel</button>
+    </div>
     <table id="secrets-table">
-      <thead><tr><th>Name</th><th>Folder</th><th>Groups</th><th>Note</th><th>Updated</th></tr></thead>
+      <thead><tr><th class="selection-column" hidden><input id="select-all-secrets" type="checkbox" aria-label="Select all visible secrets"></th><th>Name</th><th>Folder</th><th>Groups</th><th>Note</th><th>Updated</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
 
   <section id="files-view" hidden>
+    <div class="toolbar file-toolbar">
+      <span class="toolbar-spacer"></span>
+      <button id="select-files" type="button">Select</button>
+    </div>
+    <div id="file-bulk-bar" class="bulk-toolbar" hidden>
+      <span id="file-selection-count" aria-live="polite">0 selected</span>
+      <button id="bulk-delete-files" type="button" class="danger" data-default-label="Delete">Delete</button>
+      <button id="cancel-file-selection" type="button">Cancel</button>
+    </div>
     <div id="dropzone">Drop files here or <label class="linkish">browse<input id="file-input" type="file" multiple hidden></label></div>
     <table id="files-table">
-      <thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Modified</th><th></th></tr></thead>
+      <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th>Name</th><th>Size</th><th>Type</th><th>Modified</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </section>

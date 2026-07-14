@@ -14,10 +14,19 @@ header nav { margin-left:auto; }
 .tab.active { color:var(--accent); border-bottom:2px solid var(--accent); }
 main { padding:1rem; max-width:70rem; }
 .recovery { max-width:36rem; margin:2rem 0; }
-.toolbar { display:flex; gap:.5rem; margin-bottom:.75rem; }
+.toolbar { display:flex; gap:.5rem; align-items:center; margin-bottom:.75rem; }
+.toolbar-spacer { flex:1; }
 #search { flex:1; padding:.4rem; }
+.bulk-toolbar { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; margin-bottom:.75rem;
+  padding:.55rem .65rem; border:1px solid var(--line); border-radius:6px;
+  background:color-mix(in srgb, var(--accent) 5%, transparent); }
+.bulk-toolbar span { min-width:6.5rem; font-weight:600; }
+.bulk-toolbar input { min-width:10rem; flex:1; padding:.35rem .5rem; font:inherit;
+  color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:4px; }
 table { width:100%; border-collapse:collapse; }
 th, td { text-align:left; padding:.4rem .6rem; border-bottom:1px solid var(--line); }
+.selection-column { width:2.5rem; text-align:center; padding-inline:.35rem; }
+.selection-column input { width:1rem; height:1rem; margin:0; vertical-align:middle; accent-color:var(--accent); }
 .file-actions { display:flex; flex-wrap:wrap; gap:.25rem; }
 #secrets-table tbody tr { cursor:pointer; }
 #secrets-table tbody tr:hover { background:color-mix(in srgb, var(--accent) 8%, transparent); }
@@ -30,6 +39,8 @@ th, td { text-align:left; padding:.4rem .6rem; border-bottom:1px solid var(--lin
 button { font:inherit; padding:.35rem .8rem; border:1px solid var(--line); border-radius:4px;
   background:var(--bg); color:var(--fg); cursor:pointer; }
 button:hover { border-color:var(--accent); }
+button:disabled { cursor:not-allowed; opacity:.65; }
+button.pending:disabled { cursor:wait; }
 button.danger { color:var(--danger); }
 #dropzone { border:2px dashed var(--line); border-radius:8px; padding:2rem; text-align:center;
   color:var(--muted); margin-bottom:1rem; }
@@ -48,3 +59,10 @@ tr.folder-row td { cursor:pointer; font-weight:600; color:var(--muted);
   background:color-mix(in srgb, var(--fg) 4%, transparent); }
 tr.folder-row:not(.static):hover td { color:var(--fg); }
 tr.folder-row.static td { cursor:default; }
+.folder-child .item-name { position:relative; padding-inline-start:2rem; }
+.folder-child .item-name::before { content:""; position:absolute; inset-block:0; inset-inline-start:1rem;
+  width:1px; background:var(--line); }
+tr.selected-row { background:color-mix(in srgb, var(--accent) 12%, transparent); }
+@media (max-width: 42rem) {
+  .bulk-toolbar input { flex-basis:100%; }
+}
