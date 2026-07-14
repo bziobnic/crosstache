@@ -120,13 +120,53 @@ function fmtSize(bytes) {
   return i === 0 ? `${Math.floor(size)} B` : `${size.toFixed(2)} ${units[i]}`;
 }
 
-function showPlaceholder(tbody, text, cols) {
+function showListState(tbody, kind, state, cols) {
   tbody.innerHTML = '';
+  if (state === 'loading') {
+    for (let index = 0; index < 3; index++) {
+      const tr = document.createElement('tr');
+      tr.className = 'skeleton-row';
+      const td = document.createElement('td');
+      td.colSpan = cols;
+      td.innerHTML = '<span></span><span></span><span></span>';
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    return;
+  }
+
+  const copy = {
+    secrets: {
+      failed: ['Couldn’t load secrets', 'The current vault could not be read.'],
+      empty: ['No secrets yet', 'Create the first secret in this vault.'],
+      filtered: ['No matching secrets', 'Try a different name, folder, group, or note.'],
+    },
+    files: {
+      failed: ['Couldn’t load files', 'The current vault could not be read.'],
+      empty: ['No files yet', 'Upload the first encrypted file to this vault.'],
+    },
+  };
+  const [title, description] = copy[kind][state];
   const tr = document.createElement('tr');
   const td = document.createElement('td');
   td.colSpan = cols;
-  td.className = 'placeholder';
-  td.textContent = text;
+  const container = document.createElement('div');
+  container.className = `empty-state ${state}`;
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  const message = document.createElement('span');
+  message.textContent = description;
+  container.append(heading, message);
+  if (state === 'empty') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button secondary';
+    button.textContent = kind === 'secrets' ? 'New secret' : 'Browse files';
+    if (kind === 'secrets') button.onclick = () => openDrawer(null);
+    else button.onclick = () => $('#file-input').click();
+    container.appendChild(button);
+  }
+  td.appendChild(container);
   tr.appendChild(td);
   tbody.appendChild(tr);
 }
@@ -528,7 +568,7 @@ let secretLoadGeneration = 0;
 async function loadSecrets(vault) {
   const generation = ++secretLoadGeneration;
   secretsState = 'loading';
-  showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', secretSelection.enabled ? 6 : 5);
+  showListState($('#secrets-table tbody'), 'secrets', 'loading', secretSelection.enabled ? 6 : 5);
   try {
     const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault)}`);
     if (generation !== secretLoadGeneration) return false;
@@ -537,7 +577,7 @@ async function loadSecrets(vault) {
     if (generation !== secretLoadGeneration) return false;
     secretsState = 'failed';
     secrets = [];
-    showPlaceholder($('#secrets-table tbody'), 'failed to load', secretSelection.enabled ? 6 : 5);
+    showListState($('#secrets-table tbody'), 'secrets', 'failed', secretSelection.enabled ? 6 : 5);
     throw e;
   }
   secretsState = 'ready';
@@ -574,7 +614,7 @@ function renderSecrets() {
   );
   syncSelectionUi('secrets', rendered.map((s) => s.original_name || s.name));
   if (!tbody.children.length) {
-    showPlaceholder(tbody, secrets.length ? 'no matching secrets' : 'no secrets', cols);
+    showListState(tbody, 'secrets', secrets.length ? 'filtered' : 'empty', cols);
   }
 }
 
@@ -889,7 +929,7 @@ async function loadFiles(vault) {
   const generation = ++fileLoadGeneration;
   if (!ctx.capabilities.files) return false;
   filesState = 'loading';
-  showPlaceholder($('#files-table tbody'), 'Loading files…', fileSelection.enabled ? 6 : 5);
+  showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 6 : 5);
   try {
     const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
     if (generation !== fileLoadGeneration) return false;
@@ -898,7 +938,7 @@ async function loadFiles(vault) {
     if (generation !== fileLoadGeneration) return false;
     filesState = 'failed';
     files = [];
-    showPlaceholder($('#files-table tbody'), 'failed to load', fileSelection.enabled ? 6 : 5);
+    showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 6 : 5);
     throw e;
   }
   filesState = 'ready';
@@ -916,7 +956,7 @@ function renderFiles() {
   const cols = fileSelection.enabled ? 6 : 5;
   const rendered = renderGrouped(tbody, files, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
   syncSelectionUi('files', rendered.map((f) => f.name));
-  if (!tbody.children.length) showPlaceholder(tbody, 'no files', cols);
+  if (!tbody.children.length) showListState(tbody, 'files', 'empty', cols);
 }
 
 function isCurrentFileAction(generation, vault) {

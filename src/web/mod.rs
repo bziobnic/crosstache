@@ -201,6 +201,18 @@ mod tests {
     }
 
     #[test]
+    fn ui_renders_purposeful_list_states() {
+        assert!(APP_JS.contains("function showListState(tbody, kind, state, cols)"));
+        assert!(APP_JS.contains("for (let index = 0; index < 3; index++)"));
+        assert!(APP_JS.contains("button.onclick = () => openDrawer(null)"));
+        assert!(APP_JS.contains("button.onclick = () => $('#file-input').click()"));
+        assert!(APP_JS.contains("showListState($('#secrets-table tbody'), 'secrets', 'loading'"));
+        assert!(APP_JS.contains("showListState($('#files-table tbody'), 'files', 'failed'"));
+        assert!(STYLE_CSS.contains(".skeleton-row"));
+        assert!(STYLE_CSS.contains(".empty-state"));
+    }
+
+    #[test]
     fn ui_stops_stale_init_before_loading_files() {
         assert!(APP_JS.contains("if (!(await loadSecrets(vault))) return;"));
     }
