@@ -414,6 +414,29 @@ mod tests {
     }
 
     #[test]
+    fn ui_has_embedded_icons_and_data_surface_summaries() {
+        for marker in [
+            "id=\"xv-icon-sprite\"",
+            "id=\"icon-secret\"",
+            "id=\"icon-folder\"",
+            "id=\"icon-check\"",
+            "id=\"icon-alert\"",
+            "class=\"data-surface\"",
+            "id=\"secret-list-summary\"",
+            "id=\"file-list-summary\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("function icon(name)"));
+        assert!(
+            APP_JS.contains("function setListSummary(kind, visibleCount, totalCount, folderCount)")
+        );
+        assert!(APP_JS.contains("icon('secret')"));
+        assert!(APP_JS.contains("icon('file')"));
+        assert!(APP_JS.contains("icon(open ? 'chevron-down' : 'chevron-right')"));
+    }
+
+    #[test]
     fn ui_bulk_move_uses_pending_button_state() {
         assert!(APP_JS.contains("beginPendingAction(moveButton, 'Moving…');"));
         assert!(APP_JS.contains("resetConfirmation(moveButton, 'Move');"));

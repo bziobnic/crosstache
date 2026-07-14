@@ -104,3 +104,26 @@ tr.folder-row.static td { cursor:default; }
 .folder-child .item-name::before { content:""; position:absolute; inset-block:0; inset-inline-start:1rem;
   width:1px; background:var(--color-border); }
 tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.icon-sprite { position:absolute; width:0; height:0; overflow:hidden; }
+.icon { width:1rem; height:1rem; flex:none; fill:none; stroke:currentColor; stroke-width:1.8;
+  stroke-linecap:round; stroke-linejoin:round; }
+.data-surface { overflow:hidden; border:1px solid var(--color-border); border-radius:var(--radius-surface);
+  background:var(--color-surface); box-shadow:var(--shadow-raised); }
+.data-surface table { width:100%; border-collapse:collapse; }
+.data-surface th { height:2.1875rem; padding:0 1rem; text-align:left; color:var(--color-text-muted);
+  background:var(--color-surface-subtle); font-size:.6875rem; font-weight:730; letter-spacing:.07em;
+  text-transform:uppercase; }
+.data-surface td { height:2.75rem; padding:0 1rem; border-top:1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  color:var(--color-text-muted); }
+.data-surface tbody tr:not(.folder-row):hover { background:color-mix(in srgb, var(--color-accent) 6%, transparent); }
+.item-name { display:flex; align-items:center; gap:.625rem; color:var(--color-text); }
+.item-name > .icon { width:1.5rem; height:1.5rem; padding:.32rem; border-radius:.4375rem;
+  color:var(--color-accent); background:var(--color-accent-quiet); }
+.item-name strong { overflow:hidden; text-overflow:ellipsis; }
+.folder-cell { display:flex; align-items:center; gap:.5rem; color:var(--color-text); }
+.folder-cell .icon { width:.875rem; height:.875rem; color:var(--color-accent); }
+.folder-name { font-weight:700; }
+.folder-count, .tag { display:inline-flex; padding:.15rem .45rem; border-radius:999px;
+  color:var(--color-text-muted); background:color-mix(in srgb, var(--color-text) 6%, transparent); font-size:.7rem; }
+.folder-count { margin-left:.25rem; }
+.list-summary { display:flex; justify-content:flex-end; margin-top:.75rem; color:var(--color-text-muted); font-size:.72rem; }

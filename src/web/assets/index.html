@@ -56,10 +56,13 @@
       <button id="bulk-delete-secrets" type="button" class="danger" data-default-label="Delete">Delete</button>
       <button id="cancel-secret-selection" type="button">Cancel</button>
     </div>
-    <table id="secrets-table">
-      <thead><tr><th class="selection-column" hidden><input id="select-all-secrets" type="checkbox" aria-label="Select all visible secrets"></th><th>Name</th><th>Folder</th><th>Groups</th><th>Note</th><th>Updated</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="data-surface">
+      <table id="secrets-table">
+        <thead><tr><th class="selection-column" hidden><input id="select-all-secrets" type="checkbox" aria-label="Select all visible secrets"></th><th>Name</th><th>Folder</th><th>Groups</th><th>Note</th><th>Updated</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="secret-list-summary" class="list-summary" aria-live="polite">Values remain hidden until revealed.</div>
   </section>
 
   <section id="files-view" hidden>
@@ -81,10 +84,13 @@
       <button id="cancel-file-selection" type="button">Cancel</button>
     </div>
     <div id="dropzone">Drop files here or <label class="linkish">browse<input id="file-input" type="file" multiple hidden></label></div>
-    <table id="files-table">
-      <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th>Name</th><th>Size</th><th>Type</th><th>Modified</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="data-surface">
+      <table id="files-table">
+        <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th>Name</th><th>Size</th><th>Type</th><th>Modified</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="file-list-summary" class="list-summary" aria-live="polite">Files remain encrypted in the current vault.</div>
   </section>
 </main>
 
@@ -119,6 +125,22 @@
 </aside>
 
 <div id="toast" hidden></div>
+<svg id="xv-icon-sprite" class="icon-sprite" aria-hidden="true">
+  <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
+  <symbol id="icon-secret" viewBox="0 0 24 24"><circle cx="8" cy="12" r="4"></circle><path d="M12 12h8m-3 0v3m-3-3v2"></path></symbol>
+  <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"></path></symbol>
+  <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h4"></path></symbol>
+  <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V4m-5 5 5-5 5 5M5 20h14"></path></symbol>
+  <symbol id="icon-chevron-right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"></path></symbol>
+  <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m5 9 7 7 7-7"></path></symbol>
+  <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"></path></symbol>
+  <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 4v12m-5-5 5 5 5-5M5 20h14"></path></symbol>
+  <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"></path><circle cx="12" cy="12" r="2.5"></circle></symbol>
+  <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></symbol>
+  <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"></path></symbol>
+  <symbol id="icon-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v6M12 17h.01"></path></symbol>
+</svg>
 <script src="/app.js"></script>
 </body>
 </html>

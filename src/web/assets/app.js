@@ -37,6 +37,30 @@ async function api(method, path, body, raw = false) {
 }
 
 const $ = (sel) => document.querySelector(sel);
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.classList.add('icon');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  const use = document.createElementNS(SVG_NS, 'use');
+  use.setAttribute('href', `#icon-${name}`);
+  svg.appendChild(use);
+  return svg;
+}
+
+function setListSummary(kind, visibleCount, totalCount, folderCount) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  const noun = visibleCount === 1 ? singular : kind;
+  $(`#${singular}-item-count`).textContent = `${visibleCount} ${noun}`;
+  const visibility = visibleCount === totalCount
+    ? `${totalCount} ${totalCount === 1 ? singular : kind}`
+    : `${visibleCount} of ${totalCount} ${kind}`;
+  const folders = `${folderCount} ${folderCount === 1 ? 'folder' : 'folders'}`;
+  const safety = kind === 'secrets' ? 'Values remain hidden until revealed.' : 'Files remain encrypted in this vault.';
+  $(`#${singular}-list-summary`).textContent = `${visibility} across ${folders}. ${safety}`;
+}
+
 function toast(msg, isError = false) {
   const t = $('#toast');
   t.textContent = msg;
@@ -264,7 +288,16 @@ function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceE
     tr.className = 'folder-row';
     const td = document.createElement('td');
     td.colSpan = cols;
-    td.textContent = `${open ? '▾' : '▸'} ${name} (${rows.length})`;
+    td.className = 'folder-cell';
+    td.appendChild(icon(open ? 'chevron-down' : 'chevron-right'));
+    td.appendChild(icon('folder'));
+    const label = document.createElement('span');
+    label.className = 'folder-name';
+    label.textContent = name;
+    const count = document.createElement('span');
+    count.className = 'folder-count';
+    count.textContent = `${rows.length} ${rows.length === 1 ? 'item' : 'items'}`;
+    td.append(label, count);
     td.setAttribute('aria-expanded', String(open));
     if (forceExpand) {
       tr.classList.add('static');
@@ -520,6 +553,8 @@ function renderSecrets() {
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
     return hay.includes(filter);
   });
+  const secretFolders = new Set(visible.map((secret) => secret.folder).filter(Boolean));
+  setListSummary('secrets', visible.length, secrets.length, secretFolders.size);
   // While filtering, collapse state is ignored so matches are never
   // hidden inside a collapsed folder; empty groups drop out because
   // their rows are filtered before grouping.
@@ -548,8 +583,20 @@ function secretRow(s, grouped = false) {
   if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
   for (const [index, cell] of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)].entries()) {
     const td = document.createElement('td');
-    if (index === 0) td.classList.add('item-name');
-    td.textContent = cell || '';
+    if (index === 0) {
+      td.classList.add('item-name');
+      td.appendChild(icon('secret'));
+      const label = document.createElement('strong');
+      label.textContent = cell || '';
+      td.appendChild(label);
+    } else if (index === 2 && cell) {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = cell;
+      td.appendChild(tag);
+    } else {
+      td.textContent = cell || '';
+    }
     tr.appendChild(td);
   }
   tr.onclick = () => {
@@ -861,6 +908,8 @@ function renderFiles() {
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
   const dirOf = (f) => (f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/')) : '');
+  const fileFolders = new Set(files.map(dirOf).filter(Boolean));
+  setListSummary('files', files.length, files.length, fileFolders.size);
   const cols = fileSelection.enabled ? 6 : 5;
   const rendered = renderGrouped(tbody, files, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
   syncSelectionUi('files', rendered.map((f) => f.name));
@@ -896,11 +945,17 @@ function fileRow(f, grouped = false) {
   if (grouped) tr.classList.add('folder-child');
   if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
-  const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
-  for (const [index, c] of cells.entries()) {
+  for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)].entries()) {
     const td = document.createElement('td');
-    if (index === 0) td.classList.add('item-name');
-    td.textContent = c || '';
+    if (index === 0) {
+      td.classList.add('item-name');
+      td.appendChild(icon('file'));
+      const label = document.createElement('strong');
+      label.textContent = cell || '';
+      td.appendChild(label);
+    } else {
+      td.textContent = cell || '';
+    }
     tr.appendChild(td);
   }
   const td = document.createElement('td');
