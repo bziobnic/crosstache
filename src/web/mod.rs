@@ -469,6 +469,11 @@ mod tests {
             .contains("$('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret'"));
         assert!(STYLE_CSS.contains(".drawer-footer {"));
         assert!(STYLE_CSS.contains("position:sticky"));
+        assert!(!STYLE_CSS.contains("#drawer label {"));
+        assert!(!STYLE_CSS.contains("#drawer input, #drawer textarea {"));
+        assert!(STYLE_CSS.contains(".form-field { display:block;"));
+        assert!(STYLE_CSS.contains("input, select, textarea { width:100%;"));
+        assert!(STYLE_CSS.contains("textarea { padding:.65rem; resize:vertical; }"));
     }
 
     #[test]
