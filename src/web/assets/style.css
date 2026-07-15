@@ -251,6 +251,7 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .toolbar { flex-wrap:wrap; }
   .search-field { flex-basis:100%; }
   .bulk-toolbar input { flex-basis:100%; }
+  #secrets-table, #files-table { table-layout:auto; }
   .column-groups, .column-file-type { display:none; }
   .column-file-size, .column-file-type, .column-file-modified { display:none; }
   #files-table:not(.selection-mode) .file-actions { width:12rem; }

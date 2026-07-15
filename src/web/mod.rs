@@ -555,6 +555,7 @@ mod tests {
         assert!(STYLE_CSS.contains(
             ".column-file-size, .column-file-type, .column-file-modified { display:none; }"
         ));
+        assert!(STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
         assert!(
             STYLE_CSS.contains("#files-table:not(.selection-mode) .file-actions { width:12rem; }")
         );
