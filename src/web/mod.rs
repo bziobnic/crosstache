@@ -514,4 +514,29 @@ mod tests {
         ));
         assert!(APP_JS.contains("updateSelectionControls(kind);\n  renderSelectionKind(kind);"));
     }
+
+    #[test]
+    fn ui_has_dark_responsive_and_accessible_visual_rules() {
+        for marker in [
+            "class=\"column-groups\"",
+            "class=\"column-note\"",
+            "class=\"column-file-type\"",
+            "aria-label=\"Vault content\"",
+            "aria-labelledby=\"drawer-title\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        for rule in [
+            "@media (prefers-color-scheme: dark)",
+            "@media (max-width: 48rem)",
+            "@media (max-width: 34rem)",
+            "@media (prefers-reduced-motion: reduce)",
+            ":focus-visible",
+            ".column-groups",
+            ".column-note",
+            ".column-file-type",
+        ] {
+            assert!(STYLE_CSS.contains(rule), "missing {rule}");
+        }
+    }
 }

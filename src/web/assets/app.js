@@ -639,6 +639,8 @@ function secretRow(s, grouped = false) {
   if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
   for (const [index, cell] of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)].entries()) {
     const td = document.createElement('td');
+    if (index === 2) td.classList.add('column-groups');
+    if (index === 3) td.classList.add('column-note');
     if (index === 0) {
       td.classList.add('item-name');
       td.appendChild(icon('secret'));
@@ -1005,6 +1007,7 @@ function fileRow(f, grouped = false) {
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
   for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)].entries()) {
     const td = document.createElement('td');
+    if (index === 2) td.classList.add('column-file-type');
     if (index === 0) {
       td.classList.add('item-name');
       td.appendChild(icon('file'));
