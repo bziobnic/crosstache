@@ -185,6 +185,16 @@ mod tests {
     }
 
     #[test]
+    fn ui_auth_recovery_hides_header_controls_but_keeps_brand() {
+        assert!(INDEX_HTML.contains("id=\"vault-context\""));
+        assert!(INDEX_HTML.contains("id=\"vault-tabs\""));
+        assert!(INDEX_HTML.contains("class=\"brand\""));
+        assert!(APP_JS.contains("$('#vault-context').hidden = true;"));
+        assert!(APP_JS.contains("$('#vault-tabs').hidden = true;"));
+        assert!(!APP_JS.contains("$('#app-header').hidden = true;"));
+    }
+
+    #[test]
     fn ui_auth_recovery_cannot_be_dismissed_by_tabs() {
         assert!(APP_JS.contains("authRecoveryActive = true;"));
         assert!(APP_JS.contains("if (authRecoveryActive) return;"));
@@ -198,6 +208,78 @@ mod tests {
         assert!(APP_JS.contains("async function loadFiles(vault)"));
         assert!(APP_JS.contains("if (generation !== secretLoadGeneration) return"));
         assert!(APP_JS.contains("if (generation !== fileLoadGeneration) return"));
+    }
+
+    #[test]
+    fn ui_renders_purposeful_list_states() {
+        assert!(APP_JS.contains("function showListState(tbody, kind, state, cols)"));
+        assert!(APP_JS.contains("for (let index = 0; index < 3; index++)"));
+        assert!(APP_JS.contains("button.onclick = () => openDrawer(null)"));
+        assert!(APP_JS.contains("button.onclick = () => $('#file-input').click()"));
+        assert!(APP_JS.contains("showListState($('#secrets-table tbody'), 'secrets', 'loading'"));
+        assert!(APP_JS.contains("showListState($('#files-table tbody'), 'files', 'failed'"));
+        assert!(STYLE_CSS.contains(".skeleton-row"));
+        assert!(STYLE_CSS.contains(".empty-state"));
+    }
+
+    #[test]
+    fn ui_skeleton_keeps_spanning_table_cell_semantics() {
+        assert!(APP_JS.contains("content.className = 'skeleton-content'"));
+        assert!(STYLE_CSS.contains(".skeleton-content { display:grid;"));
+        assert!(!STYLE_CSS.contains(".skeleton-row td { display:grid;"));
+    }
+
+    #[test]
+    fn ui_resets_list_summaries_for_current_load_generation() {
+        assert!(APP_JS.contains("function setListLoadStatus(kind, state)"));
+        for marker in [
+            "setListLoadStatus('secrets', 'loading');",
+            "setListLoadStatus('secrets', 'failed');",
+            "setListLoadStatus('files', 'loading');",
+            "setListLoadStatus('files', 'failed');",
+            "Loading secrets…",
+            "Secrets unavailable",
+            "Loading files…",
+            "Files unavailable",
+        ] {
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
+
+        let secret_load = APP_JS
+            .split_once("async function loadSecrets(vault) {")
+            .unwrap()
+            .1
+            .split_once("function renderSecrets()")
+            .unwrap()
+            .0;
+        assert!(secret_load.contains("secrets = [];\n  setListLoadStatus('secrets', 'loading');"));
+        assert!(
+            secret_load
+                .find("if (generation !== secretLoadGeneration) return false;")
+                .unwrap()
+                < secret_load
+                    .find("setListLoadStatus('secrets', 'failed');")
+                    .unwrap(),
+            "a stale failed secret request must not overwrite the current vault status"
+        );
+
+        let file_load = APP_JS
+            .split_once("async function loadFiles(vault) {")
+            .unwrap()
+            .1
+            .split_once("function renderFiles()")
+            .unwrap()
+            .0;
+        assert!(file_load.contains("files = [];\n  setListLoadStatus('files', 'loading');"));
+        assert!(
+            file_load
+                .find("if (generation !== fileLoadGeneration) return false;")
+                .unwrap()
+                < file_load
+                    .find("setListLoadStatus('files', 'failed');")
+                    .unwrap(),
+            "a stale failed file request must not overwrite the current vault status"
+        );
     }
 
     #[test]
@@ -224,6 +306,30 @@ mod tests {
         assert!(APP_JS.contains("armConfirmation(del, 'Really delete?')"));
         assert!(!APP_JS.contains("dl.textContent = '⬇'"));
         assert!(!APP_JS.contains("del.textContent = '✕'"));
+    }
+
+    #[test]
+    fn ui_unifies_actions_upload_and_feedback_components() {
+        for marker in [
+            "class=\"search-field\"",
+            "class=\"dropzone-content\"",
+            "role=\"status\"",
+            "aria-live=\"polite\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("t.className = `toast ${isError ? 'error' : 'success'}`"));
+        assert!(APP_JS.contains("t.replaceChildren(icon(isError ? 'alert' : 'check')"));
+        assert!(APP_JS.contains("dl.className = 'button secondary compact'"));
+        assert!(APP_JS.contains("dl.prepend(icon('download'))"));
+        assert!(APP_JS.contains("del.className = 'button danger compact'"));
+        assert!(STYLE_CSS.contains(".bulk-toolbar {"));
+        assert!(STYLE_CSS.contains(".dropzone-content {"));
+        assert!(STYLE_CSS.contains(".toast.success {"));
+        assert!(
+            !STYLE_CSS.contains("#toast {"),
+            "legacy toast id styles override the unified toast component"
+        );
     }
 
     #[test]
@@ -384,6 +490,87 @@ mod tests {
     }
 
     #[test]
+    fn ui_has_semantic_visual_shell_and_tokens() {
+        for marker in [
+            "id=\"app-header\"",
+            "class=\"app-header-inner\"",
+            "class=\"brand-mark\"",
+            "class=\"brand-name\"",
+            "class=\"vault-context\"",
+            "class=\"tab-list\"",
+            "id=\"secret-item-count\"",
+            "id=\"file-item-count\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        for token in [
+            "--color-canvas:",
+            "--color-surface:",
+            "--color-surface-subtle:",
+            "--color-text:",
+            "--color-text-muted:",
+            "--color-border:",
+            "--color-accent:",
+            "--color-accent-quiet:",
+            "--color-danger:",
+            "--shadow-raised:",
+        ] {
+            assert!(STYLE_CSS.contains(token), "missing {token}");
+        }
+    }
+
+    #[test]
+    fn ui_has_embedded_icons_and_data_surface_summaries() {
+        for marker in [
+            "id=\"xv-icon-sprite\"",
+            "id=\"icon-secret\"",
+            "id=\"icon-folder\"",
+            "id=\"icon-check\"",
+            "id=\"icon-alert\"",
+            "class=\"data-surface\"",
+            "id=\"secret-list-summary\"",
+            "id=\"file-list-summary\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("function icon(name)"));
+        assert!(
+            APP_JS.contains("function setListSummary(kind, visibleCount, totalCount, folderCount)")
+        );
+        assert!(APP_JS.contains("icon('secret')"));
+        assert!(APP_JS.contains("icon('file')"));
+        assert!(APP_JS.contains("icon(open ? 'chevron-down' : 'chevron-right')"));
+        assert!(APP_JS.contains("content.className = 'folder-cell-content'"));
+        assert!(STYLE_CSS.contains(".folder-cell-content { display:flex;"));
+        assert!(!STYLE_CSS.contains(".folder-cell { display:flex;"));
+    }
+
+    #[test]
+    fn ui_has_structured_drawer_and_button_hierarchy() {
+        for marker in [
+            "class=\"drawer-header\"",
+            "id=\"drawer-kicker\"",
+            "class=\"drawer-body\"",
+            "class=\"drawer-footer\"",
+            "class=\"button primary\"",
+            "class=\"button ghost\"",
+            "class=\"button danger\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("label.className = 'form-field'"));
+        assert!(APP_JS
+            .contains("$('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret'"));
+        assert!(STYLE_CSS.contains(".drawer-footer {"));
+        assert!(STYLE_CSS.contains("position:sticky"));
+        assert!(!STYLE_CSS.contains("#drawer label {"));
+        assert!(!STYLE_CSS.contains("#drawer input, #drawer textarea {"));
+        assert!(STYLE_CSS.contains(".form-field { display:block;"));
+        assert!(STYLE_CSS.contains("input, select, textarea { width:100%;"));
+        assert!(STYLE_CSS.contains("textarea { padding:.65rem; resize:vertical; }"));
+    }
+
+    #[test]
     fn ui_bulk_move_uses_pending_button_state() {
         assert!(APP_JS.contains("beginPendingAction(moveButton, 'Moving…');"));
         assert!(APP_JS.contains("resetConfirmation(moveButton, 'Move');"));
@@ -396,5 +583,97 @@ mod tests {
             "function setBulkPending(kind, pending, label) {\n  const state = selectionState(kind);"
         ));
         assert!(APP_JS.contains("updateSelectionControls(kind);\n  renderSelectionKind(kind);"));
+    }
+
+    #[test]
+    fn ui_has_dark_responsive_and_accessible_visual_rules() {
+        for marker in [
+            "class=\"column-groups\"",
+            "class=\"column-note\"",
+            "class=\"column-file-type\"",
+            "aria-label=\"Vault content\"",
+            "aria-labelledby=\"drawer-title\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        for rule in [
+            "@media (prefers-color-scheme: dark)",
+            "@media (max-width: 48rem)",
+            "@media (max-width: 34rem)",
+            "@media (prefers-reduced-motion: reduce)",
+            ":focus-visible",
+            ".column-groups",
+            ".column-note",
+            ".column-file-type",
+        ] {
+            assert!(STYLE_CSS.contains(rule), "missing {rule}");
+        }
+    }
+
+    #[test]
+    fn ui_keeps_file_table_cells_semantic_and_phone_actions_visible() {
+        assert!(APP_JS.contains("content.className = 'item-name-content'"));
+        assert!(APP_JS.contains("actions.className = 'file-actions-content'"));
+        assert!(!STYLE_CSS.contains(".item-name { display:flex;"));
+        assert!(!STYLE_CSS.contains(".file-actions { display:flex;"));
+        assert!(STYLE_CSS.contains(".item-name-content { display:flex;"));
+        assert!(STYLE_CSS.contains(".file-actions-content { display:flex;"));
+        for marker in ["column-file-size", "column-file-modified"] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
+        for marker in [
+            "column-secret-name",
+            "column-secret-folder",
+            "column-secret-updated",
+            "column-file-name",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
+        assert!(STYLE_CSS.contains(
+            ".column-file-size, .column-file-type, .column-file-modified { display:none; }"
+        ));
+        assert!(!STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
+        for rule in [
+            "#secrets-table:not(.selection-mode) .column-secret-name { width:50%; }",
+            "#secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }",
+            "#secrets-table:not(.selection-mode) .column-secret-updated { width:28%; }",
+            ".selection-column { width:12.36%; }",
+            "#secrets-table.selection-mode .column-secret-name { width:37.64%; }",
+            "#files-table:not(.selection-mode) .column-file-name { width:46%; }",
+            "#files-table:not(.selection-mode) .file-actions { width:54%; }",
+            "#files-table.selection-mode .column-file-name { width:87.64%; }",
+        ] {
+            assert!(STYLE_CSS.contains(rule), "missing {rule}");
+        }
+        for calc_width in [
+            "width:calc(50% - 2.75rem)",
+            "width:calc(100% - 12rem)",
+            "width:calc(100% - 2.75rem)",
+        ] {
+            assert!(!STYLE_CSS.contains(calc_width), "unexpected {calc_width}");
+        }
+        assert!(STYLE_CSS.contains("#files-table.selection-mode .file-actions { display:none; }"));
+    }
+
+    #[test]
+    fn ui_row_and_upload_workflows_are_keyboard_operable() {
+        assert!(INDEX_HTML.contains("id=\"browse-files\""));
+        assert!(INDEX_HTML.contains("<button id=\"browse-files\""));
+        assert!(!INDEX_HTML.contains("<label class=\"linkish\""));
+        assert!(APP_JS.contains("$('#browse-files').onclick = () => $('#file-input').click();"));
+        assert!(APP_JS.contains("function itemNameCell(kind, name, activate, accessibleLabel)"));
+        assert!(APP_JS.contains("button.className = 'item-name-content row-action'"));
+        assert!(APP_JS.contains("`Edit secret ${name}`"));
+        assert!(APP_JS.contains("`Select file ${name}`"));
+        assert!(STYLE_CSS.contains(".row-action:focus-visible"));
+    }
+
+    #[test]
+    fn ui_compact_controls_keep_minimum_interaction_height() {
+        assert!(STYLE_CSS.contains(".tab { min-height:2.25rem;"));
+        assert!(STYLE_CSS.contains(".button.compact { min-height:2.25rem;"));
+        assert!(STYLE_CSS.contains(".linkish { min-height:2.25rem;"));
     }
 }

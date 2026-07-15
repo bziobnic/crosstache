@@ -37,10 +37,52 @@ async function api(method, path, body, raw = false) {
 }
 
 const $ = (sel) => document.querySelector(sel);
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.classList.add('icon');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  const use = document.createElementNS(SVG_NS, 'use');
+  use.setAttribute('href', `#icon-${name}`);
+  svg.appendChild(use);
+  return svg;
+}
+
+function setListSummary(kind, visibleCount, totalCount, folderCount) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  const noun = visibleCount === 1 ? singular : kind;
+  $(`#${singular}-item-count`).textContent = `${visibleCount} ${noun}`;
+  const visibility = visibleCount === totalCount
+    ? `${totalCount} ${totalCount === 1 ? singular : kind}`
+    : `${visibleCount} of ${totalCount} ${kind}`;
+  const folders = `${folderCount} ${folderCount === 1 ? 'folder' : 'folders'}`;
+  const safety = kind === 'secrets' ? 'Values remain hidden until revealed.' : 'Files remain encrypted in this vault.';
+  $(`#${singular}-list-summary`).textContent = `${visibility} across ${folders}. ${safety}`;
+}
+
+function setListLoadStatus(kind, state) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  const copy = {
+    secrets: {
+      loading: ['Loading secrets…', 'Loading secrets from the current vault…'],
+      failed: ['Secrets unavailable', 'Current vault secrets are unavailable.'],
+    },
+    files: {
+      loading: ['Loading files…', 'Loading files from the current vault…'],
+      failed: ['Files unavailable', 'Current vault files are unavailable.'],
+    },
+  };
+  const [count, summary] = copy[kind][state];
+  $(`#${singular}-item-count`).textContent = count;
+  $(`#${singular}-list-summary`).textContent = summary;
+}
+
 function toast(msg, isError = false) {
   const t = $('#toast');
-  t.textContent = msg;
-  t.className = isError ? 'error' : '';
+  t.replaceChildren(icon(isError ? 'alert' : 'check'), document.createTextNode(msg));
+  t.className = `toast ${isError ? 'error' : 'success'}`;
+  t.setAttribute('role', isError ? 'alert' : 'status');
   t.hidden = false;
   clearTimeout(t._timer);
   t._timer = setTimeout(() => { t.hidden = true; }, 4000);
@@ -96,13 +138,56 @@ function fmtSize(bytes) {
   return i === 0 ? `${Math.floor(size)} B` : `${size.toFixed(2)} ${units[i]}`;
 }
 
-function showPlaceholder(tbody, text, cols) {
+function showListState(tbody, kind, state, cols) {
   tbody.innerHTML = '';
+  if (state === 'loading') {
+    for (let index = 0; index < 3; index++) {
+      const tr = document.createElement('tr');
+      tr.className = 'skeleton-row';
+      const td = document.createElement('td');
+      td.colSpan = cols;
+      const content = document.createElement('div');
+      content.className = 'skeleton-content';
+      content.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
+      td.appendChild(content);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    return;
+  }
+
+  const copy = {
+    secrets: {
+      failed: ['Couldn’t load secrets', 'The current vault could not be read.'],
+      empty: ['No secrets yet', 'Create the first secret in this vault.'],
+      filtered: ['No matching secrets', 'Try a different name, folder, group, or note.'],
+    },
+    files: {
+      failed: ['Couldn’t load files', 'The current vault could not be read.'],
+      empty: ['No files yet', 'Upload the first encrypted file to this vault.'],
+    },
+  };
+  const [title, description] = copy[kind][state];
   const tr = document.createElement('tr');
   const td = document.createElement('td');
   td.colSpan = cols;
-  td.className = 'placeholder';
-  td.textContent = text;
+  const container = document.createElement('div');
+  container.className = `empty-state ${state}`;
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  const message = document.createElement('span');
+  message.textContent = description;
+  container.append(heading, message);
+  if (state === 'empty') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'button secondary';
+    button.textContent = kind === 'secrets' ? 'New secret' : 'Browse files';
+    if (kind === 'secrets') button.onclick = () => openDrawer(null);
+    else button.onclick = () => $('#file-input').click();
+    container.appendChild(button);
+  }
+  td.appendChild(container);
   tr.appendChild(td);
   tbody.appendChild(tr);
 }
@@ -264,7 +349,19 @@ function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceE
     tr.className = 'folder-row';
     const td = document.createElement('td');
     td.colSpan = cols;
-    td.textContent = `${open ? '▾' : '▸'} ${name} (${rows.length})`;
+    td.className = 'folder-cell';
+    const content = document.createElement('div');
+    content.className = 'folder-cell-content';
+    content.appendChild(icon(open ? 'chevron-down' : 'chevron-right'));
+    content.appendChild(icon('folder'));
+    const label = document.createElement('span');
+    label.className = 'folder-name';
+    label.textContent = name;
+    const count = document.createElement('span');
+    count.className = 'folder-count';
+    count.textContent = `${rows.length} ${rows.length === 1 ? 'item' : 'items'}`;
+    content.append(label, count);
+    td.appendChild(content);
     td.setAttribute('aria-expanded', String(open));
     if (forceExpand) {
       tr.classList.add('static');
@@ -338,7 +435,17 @@ function parseEnvelope(raw) {
 
 function fieldRow(name, kind, value, required) {
   const label = document.createElement('label');
-  label.append(`${name}${required ? ' *' : ''}`);
+  label.className = 'form-field';
+  const heading = document.createElement('span');
+  heading.className = 'field-label';
+  heading.append(name);
+  if (required || kind === 'secret') {
+    const hint = document.createElement('span');
+    hint.className = 'field-hint';
+    hint.textContent = required ? 'Required' : 'Protected';
+    heading.appendChild(hint);
+  }
+  label.appendChild(heading);
   const input = document.createElement('input');
   input.dataset.fieldName = name;
   input.dataset.fieldKind = kind;
@@ -348,9 +455,10 @@ function fieldRow(name, kind, value, required) {
     input.type = 'password';
     input.autocomplete = 'new-password';
     const row = document.createElement('span');
-    row.className = 'row';
+    row.className = 'field-actions';
     const rev = document.createElement('button');
     rev.type = 'button';
+    rev.className = 'button secondary';
     rev.textContent = 'Reveal';
     rev.onclick = () => {
       const showing = input.type === 'text';
@@ -359,6 +467,7 @@ function fieldRow(name, kind, value, required) {
     };
     const cp = document.createElement('button');
     cp.type = 'button';
+    cp.className = 'button secondary';
     cp.textContent = 'Copy';
     cp.onclick = async () => {
       try {
@@ -407,6 +516,8 @@ const vaultQS = (vault) => `?vault=${encodeURIComponent(vault)}`;
 let authRecoveryActive = false;
 function showAuthRecovery() {
   authRecoveryActive = true;
+  $('#vault-context').hidden = true;
+  $('#vault-tabs').hidden = true;
   $('#secrets-view').hidden = true;
   $('#files-view').hidden = true;
   $('#auth-recovery').hidden = false;
@@ -492,7 +603,9 @@ let secretLoadGeneration = 0;
 async function loadSecrets(vault) {
   const generation = ++secretLoadGeneration;
   secretsState = 'loading';
-  showPlaceholder($('#secrets-table tbody'), 'Loading secrets…', secretSelection.enabled ? 6 : 5);
+  secrets = [];
+  setListLoadStatus('secrets', 'loading');
+  showListState($('#secrets-table tbody'), 'secrets', 'loading', secretSelection.enabled ? 6 : 5);
   try {
     const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault)}`);
     if (generation !== secretLoadGeneration) return false;
@@ -501,7 +614,8 @@ async function loadSecrets(vault) {
     if (generation !== secretLoadGeneration) return false;
     secretsState = 'failed';
     secrets = [];
-    showPlaceholder($('#secrets-table tbody'), 'failed to load', secretSelection.enabled ? 6 : 5);
+    setListLoadStatus('secrets', 'failed');
+    showListState($('#secrets-table tbody'), 'secrets', 'failed', secretSelection.enabled ? 6 : 5);
     throw e;
   }
   secretsState = 'ready';
@@ -520,6 +634,8 @@ function renderSecrets() {
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
     return hay.includes(filter);
   });
+  const secretFolders = new Set(visible.map((secret) => secret.folder).filter(Boolean));
+  setListSummary('secrets', visible.length, secrets.length, secretFolders.size);
   // While filtering, collapse state is ignored so matches are never
   // hidden inside a collapsed folder; empty groups drop out because
   // their rows are filtered before grouping.
@@ -536,26 +652,70 @@ function renderSecrets() {
   );
   syncSelectionUi('secrets', rendered.map((s) => s.original_name || s.name));
   if (!tbody.children.length) {
-    showPlaceholder(tbody, secrets.length ? 'no matching secrets' : 'no secrets', cols);
+    showListState(tbody, 'secrets', secrets.length ? 'filtered' : 'empty', cols);
   }
+}
+
+function itemNameCell(kind, name, activate, accessibleLabel) {
+  const td = document.createElement('td');
+  td.classList.add('item-name');
+  const content = document.createElement('div');
+  content.className = 'item-name-content';
+  content.appendChild(kind === 'secret' ? icon('secret') : icon('file'));
+  const label = document.createElement('strong');
+  label.textContent = name || '';
+  content.appendChild(label);
+  if (!activate) {
+    td.appendChild(content);
+    return td;
+  }
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'item-name-content row-action';
+  button.setAttribute('aria-label', accessibleLabel);
+  button.replaceChildren(...content.childNodes);
+  button.onclick = (event) => {
+    event.stopPropagation();
+    activate();
+  };
+  td.appendChild(button);
+  return td;
 }
 
 function secretRow(s, grouped = false) {
   const name = s.original_name || s.name;
+  const activate = () => {
+    if (secretSelection.enabled) toggleSelected('secrets', name);
+    else openDrawer(name);
+  };
   const tr = document.createElement('tr');
   if (grouped) tr.classList.add('folder-child');
   if (secretSelection.ids.has(name)) tr.classList.add('selected-row');
   if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
   for (const [index, cell] of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)].entries()) {
+    if (index === 0) {
+      const actionLabel = secretSelection.enabled ? `Select secret ${name}` : `Edit secret ${name}`;
+      const nameCell = itemNameCell('secret', name, activate, actionLabel);
+      nameCell.classList.add('column-secret-name');
+      tr.appendChild(nameCell);
+      continue;
+    }
     const td = document.createElement('td');
-    if (index === 0) td.classList.add('item-name');
-    td.textContent = cell || '';
+    if (index === 1) td.classList.add('column-secret-folder');
+    if (index === 2) td.classList.add('column-groups');
+    if (index === 3) td.classList.add('column-note');
+    if (index === 4) td.classList.add('column-secret-updated');
+    if (index === 2 && cell) {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = cell;
+      td.appendChild(tag);
+    } else {
+      td.textContent = cell || '';
+    }
     tr.appendChild(td);
   }
-  tr.onclick = () => {
-    if (secretSelection.enabled) toggleSelected('secrets', name);
-    else openDrawer(name);
-  };
+  tr.onclick = activate;
   return tr;
 }
 
@@ -587,7 +747,9 @@ async function openDrawer(name) {
   editing = name;
   const f = $('#secret-form');
   f.reset();
-  $('#drawer-title').textContent = name ? `Edit: ${name}` : 'New secret';
+  $('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret';
+  $('#drawer-title').textContent = name || 'New secret';
+  $('#save').textContent = name ? 'Save changes' : 'Create secret';
   f.elements.name.value = name || '';
   f.elements.name.readOnly = false;
   $('#reveal').hidden = $('#copy').hidden = $('#delete').hidden = !name;
@@ -839,7 +1001,9 @@ async function loadFiles(vault) {
   const generation = ++fileLoadGeneration;
   if (!ctx.capabilities.files) return false;
   filesState = 'loading';
-  showPlaceholder($('#files-table tbody'), 'Loading files…', fileSelection.enabled ? 6 : 5);
+  files = [];
+  setListLoadStatus('files', 'loading');
+  showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 6 : 5);
   try {
     const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
     if (generation !== fileLoadGeneration) return false;
@@ -848,7 +1012,8 @@ async function loadFiles(vault) {
     if (generation !== fileLoadGeneration) return false;
     filesState = 'failed';
     files = [];
-    showPlaceholder($('#files-table tbody'), 'failed to load', fileSelection.enabled ? 6 : 5);
+    setListLoadStatus('files', 'failed');
+    showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 6 : 5);
     throw e;
   }
   filesState = 'ready';
@@ -861,10 +1026,12 @@ function renderFiles() {
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
   const dirOf = (f) => (f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/')) : '');
+  const fileFolders = new Set(files.map(dirOf).filter(Boolean));
+  setListSummary('files', files.length, files.length, fileFolders.size);
   const cols = fileSelection.enabled ? 6 : 5;
   const rendered = renderGrouped(tbody, files, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
   syncSelectionUi('files', rendered.map((f) => f.name));
-  if (!tbody.children.length) showPlaceholder(tbody, 'no files', cols);
+  if (!tbody.children.length) showListState(tbody, 'files', 'empty', cols);
 }
 
 function isCurrentFileAction(generation, vault) {
@@ -896,22 +1063,35 @@ function fileRow(f, grouped = false) {
   if (grouped) tr.classList.add('folder-child');
   if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
-  const cells = [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)];
-  for (const [index, c] of cells.entries()) {
+  for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)].entries()) {
+    if (index === 0) {
+      const activate = fileSelection.enabled ? () => toggleSelected('files', name) : null;
+      const nameCell = itemNameCell('file', name, activate, `Select file ${name}`);
+      nameCell.classList.add('column-file-name');
+      tr.appendChild(nameCell);
+      continue;
+    }
     const td = document.createElement('td');
-    if (index === 0) td.classList.add('item-name');
-    td.textContent = c || '';
+    if (index === 1) td.classList.add('column-file-size');
+    if (index === 2) td.classList.add('column-file-type');
+    if (index === 3) td.classList.add('column-file-modified');
+    td.textContent = cell || '';
     tr.appendChild(td);
   }
   const td = document.createElement('td');
   td.className = 'file-actions';
+  const actions = document.createElement('div');
+  actions.className = 'file-actions-content';
   if (fileSelection.enabled) {
     tr.onclick = () => toggleSelected('files', name);
+    td.appendChild(actions);
     tr.appendChild(td);
     return tr;
   }
   const dl = document.createElement('button');
   dl.textContent = 'Download';
+  dl.className = 'button secondary compact';
+  dl.prepend(icon('download'));
   dl.onclick = () => downloadFile(f.name);
   const del = document.createElement('button');
   const pending = isFileDeletePending(vault, name);
@@ -920,7 +1100,7 @@ function fileRow(f, grouped = false) {
   del.dataset.defaultLabel = 'Delete';
   del.dataset.fileVault = vault;
   del.dataset.fileName = name;
-  del.className = 'danger';
+  del.className = 'button danger compact';
   del.onclick = async () => {
     if (isFileDeletePending(vault, name)) return;
     if (del.disabled) return;
@@ -941,7 +1121,8 @@ function fileRow(f, grouped = false) {
     if (!isCurrentFileAction(generation, vault)) return;
     await reconcileFilesAfterDelete(generation, vault);
   };
-  td.append(dl, del);
+  actions.append(dl, del);
+  td.appendChild(actions);
   tr.appendChild(td);
   return tr;
 }
@@ -1131,6 +1312,7 @@ const dz = $('#dropzone');
 dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
 dz.ondragleave = () => dz.classList.remove('over');
 dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFiles(e.dataTransfer.files).catch(fail); };
+$('#browse-files').onclick = () => $('#file-input').click();
 $('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
 init().catch(fail);
