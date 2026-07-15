@@ -61,6 +61,23 @@ function setListSummary(kind, visibleCount, totalCount, folderCount) {
   $(`#${singular}-list-summary`).textContent = `${visibility} across ${folders}. ${safety}`;
 }
 
+function setListLoadStatus(kind, state) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  const copy = {
+    secrets: {
+      loading: ['Loading secrets…', 'Loading secrets from the current vault…'],
+      failed: ['Secrets unavailable', 'Current vault secrets are unavailable.'],
+    },
+    files: {
+      loading: ['Loading files…', 'Loading files from the current vault…'],
+      failed: ['Files unavailable', 'Current vault files are unavailable.'],
+    },
+  };
+  const [count, summary] = copy[kind][state];
+  $(`#${singular}-item-count`).textContent = count;
+  $(`#${singular}-list-summary`).textContent = summary;
+}
+
 function toast(msg, isError = false) {
   const t = $('#toast');
   t.replaceChildren(icon(isError ? 'alert' : 'check'), document.createTextNode(msg));
@@ -129,7 +146,10 @@ function showListState(tbody, kind, state, cols) {
       tr.className = 'skeleton-row';
       const td = document.createElement('td');
       td.colSpan = cols;
-      td.innerHTML = '<span></span><span></span><span></span>';
+      const content = document.createElement('div');
+      content.className = 'skeleton-content';
+      content.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
+      td.appendChild(content);
       tr.appendChild(td);
       tbody.appendChild(tr);
     }
@@ -496,6 +516,8 @@ const vaultQS = (vault) => `?vault=${encodeURIComponent(vault)}`;
 let authRecoveryActive = false;
 function showAuthRecovery() {
   authRecoveryActive = true;
+  $('#vault-context').hidden = true;
+  $('#vault-tabs').hidden = true;
   $('#secrets-view').hidden = true;
   $('#files-view').hidden = true;
   $('#auth-recovery').hidden = false;
@@ -581,6 +603,8 @@ let secretLoadGeneration = 0;
 async function loadSecrets(vault) {
   const generation = ++secretLoadGeneration;
   secretsState = 'loading';
+  secrets = [];
+  setListLoadStatus('secrets', 'loading');
   showListState($('#secrets-table tbody'), 'secrets', 'loading', secretSelection.enabled ? 6 : 5);
   try {
     const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault)}`);
@@ -590,6 +614,7 @@ async function loadSecrets(vault) {
     if (generation !== secretLoadGeneration) return false;
     secretsState = 'failed';
     secrets = [];
+    setListLoadStatus('secrets', 'failed');
     showListState($('#secrets-table tbody'), 'secrets', 'failed', secretSelection.enabled ? 6 : 5);
     throw e;
   }
@@ -976,6 +1001,8 @@ async function loadFiles(vault) {
   const generation = ++fileLoadGeneration;
   if (!ctx.capabilities.files) return false;
   filesState = 'loading';
+  files = [];
+  setListLoadStatus('files', 'loading');
   showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 6 : 5);
   try {
     const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
@@ -985,6 +1012,7 @@ async function loadFiles(vault) {
     if (generation !== fileLoadGeneration) return false;
     filesState = 'failed';
     files = [];
+    setListLoadStatus('files', 'failed');
     showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 6 : 5);
     throw e;
   }

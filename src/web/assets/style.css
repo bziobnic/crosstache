@@ -41,7 +41,7 @@ button, input, select, textarea { font:inherit; }
 .vault-picker select { max-width:14rem; border:0; color:var(--color-text); background:transparent; font-weight:650; }
 .tab-list { margin-left:auto; display:flex; gap:.1875rem; padding:.25rem; border:1px solid var(--color-border);
   border-radius:.625rem; background:color-mix(in srgb, var(--color-text) 4%, transparent); }
-.tab { min-height:2.125rem; padding:.4rem .75rem; border:0; border-radius:.4375rem; color:var(--color-text-muted);
+.tab { min-height:2.25rem; padding:.4rem .75rem; border:0; border-radius:.4375rem; color:var(--color-text-muted);
   background:transparent; cursor:pointer; font-weight:650; }
 .tab.active { color:var(--color-accent-hover); background:var(--color-surface); box-shadow:0 1px 4px rgb(28 44 34 / 8%); }
 main { width:min(100%, 76rem); margin:0 auto; padding:2rem 1.5rem 3rem; }
@@ -128,11 +128,11 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transpa
 .folder-count { margin-left:.25rem; }
 .list-summary { display:flex; justify-content:flex-end; margin-top:.75rem; color:var(--color-text-muted); font-size:.72rem; }
 .skeleton-row td { height:2.75rem; padding:0 1rem; }
-.skeleton-row td { display:grid; grid-template-columns:1.4fr .8fr .6fr; gap:1.5rem; align-items:center; }
-.skeleton-row span { height:.55rem; border-radius:999px; background:color-mix(in srgb, var(--color-text) 9%, transparent);
+.skeleton-content { display:grid; grid-template-columns:1.4fr .8fr .6fr; gap:1.5rem; align-items:center; }
+.skeleton-content span { height:.55rem; border-radius:999px; background:color-mix(in srgb, var(--color-text) 9%, transparent);
   animation:skeleton-pulse 1.4s ease-in-out infinite alternate; }
-.skeleton-row span:nth-child(2) { width:75%; }
-.skeleton-row span:nth-child(3) { width:55%; }
+.skeleton-content span:nth-child(2) { width:75%; }
+.skeleton-content span:nth-child(3) { width:55%; }
 @keyframes skeleton-pulse { to { opacity:.42; } }
 .empty-state { min-height:12rem; display:flex; flex-direction:column; align-items:center; justify-content:center;
   gap:.45rem; padding:2rem; text-align:center; white-space:normal; }
@@ -183,7 +183,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:0; b
 .search-field > .icon { color:var(--color-text-muted); }
 #search { min-height:0; padding:0; border:0; border-radius:0; background:transparent; box-shadow:none; }
 #search:focus-visible { box-shadow:none; }
-.button.compact { min-height:2rem; padding:.3rem .6rem; font-size:.75rem; }
+.button.compact { min-height:2.25rem; padding:.3rem .6rem; font-size:.75rem; }
 .bulk-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin-bottom:.75rem; padding:.6rem .7rem;
   border:1px solid color-mix(in srgb, var(--color-accent) 32%, var(--color-border));
   border-radius:.625rem; background:var(--color-accent-quiet); box-shadow:0 4px 12px rgb(33 76 50 / 6%); }
@@ -201,7 +201,7 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 11%, transpa
 .dropzone-content strong { color:var(--color-text); }
 .dropzone-icon { width:2.4rem; height:2.4rem; display:grid; place-items:center; border-radius:.625rem;
   color:var(--color-accent); background:var(--color-accent-quiet); }
-.linkish { padding:0; border:0; border-radius:0; color:var(--color-accent); background:transparent;
+.linkish { min-height:2.25rem; display:inline-flex; align-items:center; padding:0; border:0; border-radius:0; color:var(--color-accent); background:transparent;
   box-shadow:none; cursor:pointer; font-weight:inherit; text-decoration:underline; text-underline-offset:.15em; }
 .toast { position:fixed; z-index:30; right:1rem; bottom:1rem; left:auto; transform:none;
   display:flex; align-items:center; gap:.5rem;
@@ -273,5 +273,5 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior:auto !important; transition-duration:.01ms !important;
     animation-duration:.01ms !important; animation-iteration-count:1 !important; }
-  .skeleton-row span { animation:none; }
+  .skeleton-content span { animation:none; }
 }

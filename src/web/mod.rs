@@ -185,6 +185,16 @@ mod tests {
     }
 
     #[test]
+    fn ui_auth_recovery_hides_header_controls_but_keeps_brand() {
+        assert!(INDEX_HTML.contains("id=\"vault-context\""));
+        assert!(INDEX_HTML.contains("id=\"vault-tabs\""));
+        assert!(INDEX_HTML.contains("class=\"brand\""));
+        assert!(APP_JS.contains("$('#vault-context').hidden = true;"));
+        assert!(APP_JS.contains("$('#vault-tabs').hidden = true;"));
+        assert!(!APP_JS.contains("$('#app-header').hidden = true;"));
+    }
+
+    #[test]
     fn ui_auth_recovery_cannot_be_dismissed_by_tabs() {
         assert!(APP_JS.contains("authRecoveryActive = true;"));
         assert!(APP_JS.contains("if (authRecoveryActive) return;"));
@@ -210,6 +220,66 @@ mod tests {
         assert!(APP_JS.contains("showListState($('#files-table tbody'), 'files', 'failed'"));
         assert!(STYLE_CSS.contains(".skeleton-row"));
         assert!(STYLE_CSS.contains(".empty-state"));
+    }
+
+    #[test]
+    fn ui_skeleton_keeps_spanning_table_cell_semantics() {
+        assert!(APP_JS.contains("content.className = 'skeleton-content'"));
+        assert!(STYLE_CSS.contains(".skeleton-content { display:grid;"));
+        assert!(!STYLE_CSS.contains(".skeleton-row td { display:grid;"));
+    }
+
+    #[test]
+    fn ui_resets_list_summaries_for_current_load_generation() {
+        assert!(APP_JS.contains("function setListLoadStatus(kind, state)"));
+        for marker in [
+            "setListLoadStatus('secrets', 'loading');",
+            "setListLoadStatus('secrets', 'failed');",
+            "setListLoadStatus('files', 'loading');",
+            "setListLoadStatus('files', 'failed');",
+            "Loading secrets…",
+            "Secrets unavailable",
+            "Loading files…",
+            "Files unavailable",
+        ] {
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
+
+        let secret_load = APP_JS
+            .split_once("async function loadSecrets(vault) {")
+            .unwrap()
+            .1
+            .split_once("function renderSecrets()")
+            .unwrap()
+            .0;
+        assert!(secret_load.contains("secrets = [];\n  setListLoadStatus('secrets', 'loading');"));
+        assert!(
+            secret_load
+                .find("if (generation !== secretLoadGeneration) return false;")
+                .unwrap()
+                < secret_load
+                    .find("setListLoadStatus('secrets', 'failed');")
+                    .unwrap(),
+            "a stale failed secret request must not overwrite the current vault status"
+        );
+
+        let file_load = APP_JS
+            .split_once("async function loadFiles(vault) {")
+            .unwrap()
+            .1
+            .split_once("function renderFiles()")
+            .unwrap()
+            .0;
+        assert!(file_load.contains("files = [];\n  setListLoadStatus('files', 'loading');"));
+        assert!(
+            file_load
+                .find("if (generation !== fileLoadGeneration) return false;")
+                .unwrap()
+                < file_load
+                    .find("setListLoadStatus('files', 'failed');")
+                    .unwrap(),
+            "a stale failed file request must not overwrite the current vault status"
+        );
     }
 
     #[test]
@@ -598,5 +668,12 @@ mod tests {
         assert!(APP_JS.contains("`Edit secret ${name}`"));
         assert!(APP_JS.contains("`Select file ${name}`"));
         assert!(STYLE_CSS.contains(".row-action:focus-visible"));
+    }
+
+    #[test]
+    fn ui_compact_controls_keep_minimum_interaction_height() {
+        assert!(STYLE_CSS.contains(".tab { min-height:2.25rem;"));
+        assert!(STYLE_CSS.contains(".button.compact { min-height:2.25rem;"));
+        assert!(STYLE_CSS.contains(".linkish { min-height:2.25rem;"));
     }
 }
