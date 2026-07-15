@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.26.1 — Windows upgrade and bare-update prompt fixes (2026-07-15)
+
+### Fixed
+
+- **`xv upgrade` failed on Windows with ERROR_SHARING_VIOLATION (os error 32).**
+  The updater spawned the downloaded binary for `--version` validation while
+  its write handle was still open, which Windows rejects. The handle is now
+  synced and closed before the validation spawn; the sync also surfaces write
+  errors previously swallowed at implicit close.
+- **Bare `xv update NAME` silently did nothing.** Despite the documented
+  "if not provided, will prompt" behavior, no prompt existed — the command
+  reported success without changing anything. It now prompts for the new
+  value (hidden input, same as `xv set`) when no value, `--stdin`, or other
+  update flag is supplied; a prompted value on a typed record updates the
+  primary field, and empty input is rejected.
+
 ## v0.26.0 — Web UI UX and visual refresh (2026-07-14)
 
 ### Added
