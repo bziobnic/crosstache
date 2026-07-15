@@ -670,12 +670,16 @@ function secretRow(s, grouped = false) {
   for (const [index, cell] of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)].entries()) {
     if (index === 0) {
       const actionLabel = secretSelection.enabled ? `Select secret ${name}` : `Edit secret ${name}`;
-      tr.appendChild(itemNameCell('secret', name, activate, actionLabel));
+      const nameCell = itemNameCell('secret', name, activate, actionLabel);
+      nameCell.classList.add('column-secret-name');
+      tr.appendChild(nameCell);
       continue;
     }
     const td = document.createElement('td');
+    if (index === 1) td.classList.add('column-secret-folder');
     if (index === 2) td.classList.add('column-groups');
     if (index === 3) td.classList.add('column-note');
+    if (index === 4) td.classList.add('column-secret-updated');
     if (index === 2 && cell) {
       const tag = document.createElement('span');
       tag.className = 'tag';
@@ -1034,7 +1038,9 @@ function fileRow(f, grouped = false) {
   for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)].entries()) {
     if (index === 0) {
       const activate = fileSelection.enabled ? () => toggleSelected('files', name) : null;
-      tr.appendChild(itemNameCell('file', name, activate, `Select file ${name}`));
+      const nameCell = itemNameCell('file', name, activate, `Select file ${name}`);
+      nameCell.classList.add('column-file-name');
+      tr.appendChild(nameCell);
       continue;
     }
     const td = document.createElement('td');

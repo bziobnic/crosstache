@@ -251,10 +251,17 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .toolbar { flex-wrap:wrap; }
   .search-field { flex-basis:100%; }
   .bulk-toolbar input { flex-basis:100%; }
-  #secrets-table, #files-table { table-layout:auto; }
   .column-groups, .column-file-type { display:none; }
   .column-file-size, .column-file-type, .column-file-modified { display:none; }
+  #secrets-table:not(.selection-mode) .column-secret-name { width:50%; }
+  #secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }
+  #secrets-table:not(.selection-mode) .column-secret-updated { width:28%; }
+  #secrets-table.selection-mode .column-secret-name { width:calc(50% - 2.75rem); }
+  #secrets-table.selection-mode .column-secret-folder { width:22%; }
+  #secrets-table.selection-mode .column-secret-updated { width:28%; }
+  #files-table:not(.selection-mode) .column-file-name { width:calc(100% - 12rem); }
   #files-table:not(.selection-mode) .file-actions { width:12rem; }
+  #files-table.selection-mode .column-file-name { width:calc(100% - 2.75rem); }
   #files-table.selection-mode .file-actions { display:none; }
   .data-surface th, .data-surface td { padding-inline:.65rem; }
   .list-summary { justify-content:flex-start; }

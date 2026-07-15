@@ -552,10 +552,29 @@ mod tests {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
             assert!(APP_JS.contains(marker), "missing {marker}");
         }
+        for marker in [
+            "column-secret-name",
+            "column-secret-folder",
+            "column-secret-updated",
+            "column-file-name",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
         assert!(STYLE_CSS.contains(
             ".column-file-size, .column-file-type, .column-file-modified { display:none; }"
         ));
-        assert!(STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
+        assert!(!STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
+        for rule in [
+            "#secrets-table:not(.selection-mode) .column-secret-name { width:50%; }",
+            "#secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }",
+            "#secrets-table:not(.selection-mode) .column-secret-updated { width:28%; }",
+            "#secrets-table.selection-mode .column-secret-name { width:calc(50% - 2.75rem); }",
+            "#files-table:not(.selection-mode) .column-file-name { width:calc(100% - 12rem); }",
+            "#files-table.selection-mode .column-file-name { width:calc(100% - 2.75rem); }",
+        ] {
+            assert!(STYLE_CSS.contains(rule), "missing {rule}");
+        }
         assert!(
             STYLE_CSS.contains("#files-table:not(.selection-mode) .file-actions { width:12rem; }")
         );
