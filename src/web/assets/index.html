@@ -86,12 +86,13 @@
     <div id="dropzone">
       <div class="dropzone-content">
         <span class="dropzone-icon"><svg class="icon" aria-hidden="true"><use href="#icon-upload"></use></svg></span>
-        <span><strong>Drop files here to upload</strong><small>or <label class="linkish">browse from your computer<input id="file-input" type="file" multiple hidden></label></small></span>
+        <span><strong>Drop files here to upload</strong><small>or <button id="browse-files" class="linkish" type="button">browse from your computer</button></small></span>
+        <input id="file-input" type="file" multiple hidden>
       </div>
     </div>
     <div class="data-surface">
       <table id="files-table">
-        <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th>Name</th><th>Size</th><th class="column-file-type">Type</th><th>Modified</th><th></th></tr></thead>
+        <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th>Name</th><th class="column-file-size">Size</th><th class="column-file-type">Type</th><th class="column-file-modified">Modified</th><th class="file-actions"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>

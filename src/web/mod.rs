@@ -539,4 +539,38 @@ mod tests {
             assert!(STYLE_CSS.contains(rule), "missing {rule}");
         }
     }
+
+    #[test]
+    fn ui_keeps_file_table_cells_semantic_and_phone_actions_visible() {
+        assert!(APP_JS.contains("content.className = 'item-name-content'"));
+        assert!(APP_JS.contains("actions.className = 'file-actions-content'"));
+        assert!(!STYLE_CSS.contains(".item-name { display:flex;"));
+        assert!(!STYLE_CSS.contains(".file-actions { display:flex;"));
+        assert!(STYLE_CSS.contains(".item-name-content { display:flex;"));
+        assert!(STYLE_CSS.contains(".file-actions-content { display:flex;"));
+        for marker in ["column-file-size", "column-file-modified"] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+            assert!(APP_JS.contains(marker), "missing {marker}");
+        }
+        assert!(STYLE_CSS.contains(
+            ".column-file-size, .column-file-type, .column-file-modified { display:none; }"
+        ));
+        assert!(
+            STYLE_CSS.contains("#files-table:not(.selection-mode) .file-actions { width:12rem; }")
+        );
+        assert!(STYLE_CSS.contains("#files-table.selection-mode .file-actions { display:none; }"));
+    }
+
+    #[test]
+    fn ui_row_and_upload_workflows_are_keyboard_operable() {
+        assert!(INDEX_HTML.contains("id=\"browse-files\""));
+        assert!(INDEX_HTML.contains("<button id=\"browse-files\""));
+        assert!(!INDEX_HTML.contains("<label class=\"linkish\""));
+        assert!(APP_JS.contains("$('#browse-files').onclick = () => $('#file-input').click();"));
+        assert!(APP_JS.contains("function itemNameCell(kind, name, activate, accessibleLabel)"));
+        assert!(APP_JS.contains("button.className = 'item-name-content row-action'"));
+        assert!(APP_JS.contains("`Edit secret ${name}`"));
+        assert!(APP_JS.contains("`Select file ${name}`"));
+        assert!(STYLE_CSS.contains(".row-action:focus-visible"));
+    }
 }

@@ -631,23 +631,52 @@ function renderSecrets() {
   }
 }
 
+function itemNameCell(kind, name, activate, accessibleLabel) {
+  const td = document.createElement('td');
+  td.classList.add('item-name');
+  const content = document.createElement('div');
+  content.className = 'item-name-content';
+  content.appendChild(kind === 'secret' ? icon('secret') : icon('file'));
+  const label = document.createElement('strong');
+  label.textContent = name || '';
+  content.appendChild(label);
+  if (!activate) {
+    td.appendChild(content);
+    return td;
+  }
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'item-name-content row-action';
+  button.setAttribute('aria-label', accessibleLabel);
+  button.replaceChildren(...content.childNodes);
+  button.onclick = (event) => {
+    event.stopPropagation();
+    activate();
+  };
+  td.appendChild(button);
+  return td;
+}
+
 function secretRow(s, grouped = false) {
   const name = s.original_name || s.name;
+  const activate = () => {
+    if (secretSelection.enabled) toggleSelected('secrets', name);
+    else openDrawer(name);
+  };
   const tr = document.createElement('tr');
   if (grouped) tr.classList.add('folder-child');
   if (secretSelection.ids.has(name)) tr.classList.add('selected-row');
   if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
   for (const [index, cell] of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)].entries()) {
+    if (index === 0) {
+      const actionLabel = secretSelection.enabled ? `Select secret ${name}` : `Edit secret ${name}`;
+      tr.appendChild(itemNameCell('secret', name, activate, actionLabel));
+      continue;
+    }
     const td = document.createElement('td');
     if (index === 2) td.classList.add('column-groups');
     if (index === 3) td.classList.add('column-note');
-    if (index === 0) {
-      td.classList.add('item-name');
-      td.appendChild(icon('secret'));
-      const label = document.createElement('strong');
-      label.textContent = cell || '';
-      td.appendChild(label);
-    } else if (index === 2 && cell) {
+    if (index === 2 && cell) {
       const tag = document.createElement('span');
       tag.className = 'tag';
       tag.textContent = cell;
@@ -657,10 +686,7 @@ function secretRow(s, grouped = false) {
     }
     tr.appendChild(td);
   }
-  tr.onclick = () => {
-    if (secretSelection.enabled) toggleSelected('secrets', name);
-    else openDrawer(name);
-  };
+  tr.onclick = activate;
   return tr;
 }
 
@@ -1006,23 +1032,25 @@ function fileRow(f, grouped = false) {
   if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
   for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)].entries()) {
-    const td = document.createElement('td');
-    if (index === 2) td.classList.add('column-file-type');
     if (index === 0) {
-      td.classList.add('item-name');
-      td.appendChild(icon('file'));
-      const label = document.createElement('strong');
-      label.textContent = cell || '';
-      td.appendChild(label);
-    } else {
-      td.textContent = cell || '';
+      const activate = fileSelection.enabled ? () => toggleSelected('files', name) : null;
+      tr.appendChild(itemNameCell('file', name, activate, `Select file ${name}`));
+      continue;
     }
+    const td = document.createElement('td');
+    if (index === 1) td.classList.add('column-file-size');
+    if (index === 2) td.classList.add('column-file-type');
+    if (index === 3) td.classList.add('column-file-modified');
+    td.textContent = cell || '';
     tr.appendChild(td);
   }
   const td = document.createElement('td');
   td.className = 'file-actions';
+  const actions = document.createElement('div');
+  actions.className = 'file-actions-content';
   if (fileSelection.enabled) {
     tr.onclick = () => toggleSelected('files', name);
+    td.appendChild(actions);
     tr.appendChild(td);
     return tr;
   }
@@ -1059,7 +1087,8 @@ function fileRow(f, grouped = false) {
     if (!isCurrentFileAction(generation, vault)) return;
     await reconcileFilesAfterDelete(generation, vault);
   };
-  td.append(dl, del);
+  actions.append(dl, del);
+  td.appendChild(actions);
   tr.appendChild(td);
   return tr;
 }
@@ -1249,6 +1278,7 @@ const dz = $('#dropzone');
 dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
 dz.ondragleave = () => dz.classList.remove('over');
 dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFiles(e.dataTransfer.files).catch(fail); };
+$('#browse-files').onclick = () => $('#file-input').click();
 $('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
 init().catch(fail);
