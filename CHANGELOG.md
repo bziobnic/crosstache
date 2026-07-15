@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.26.0 — Web UI UX and visual refresh (2026-07-14)
+
+### Added
+
+- **Bulk selection for secrets and files.** Selection mode adds visible-only
+  select-all, bounded-concurrency bulk delete, and bulk folder moves for
+  secrets. Expanded folder members are indented for clearer hierarchy.
+- **Responsive, accessible visual system.** The embedded UI now uses a refined
+  app shell, semantic data surfaces, consistent action and feedback styles,
+  purposeful loading/empty/error states, automatic light/dark theming, and
+  keyboard-operable controls across desktop, tablet, and phone layouts.
+
+### Changed
+
+- **Polished primary workflows.** Vault tables, the secret editor drawer,
+  file uploads, destructive confirmations, and toasts have clearer hierarchy,
+  stronger status feedback, and more consistent interaction targets.
+- **Reload-safe per-tab sessions.** The UI preserves its bearer token in
+  `sessionStorage`, scrubs it from the URL, and presents a persistent recovery
+  state when a valid session link is unavailable.
+
+### Fixed
+
+- Prevented stale vault, list, drawer, bulk-action, and delete responses from
+  overwriting newer UI state or acting on the wrong secret, file, or vault.
+- Made destructive actions non-repeatable while pending and resilient to list
+  rerenders, tab changes, vault switches, and reconciliation failures.
+
 ## v0.25.1 — Security hardening (2026-07-11)
 
 ### Security
