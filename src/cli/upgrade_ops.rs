@@ -463,6 +463,14 @@ fn replace_binary(new_binary: &[u8], expected_version: &semver::Version) -> Resu
         let _ = fs::remove_file(&temp_path);
         CrosstacheError::upgrade(format!("Failed to write new binary: {e}"))
     })?;
+    temp_file.sync_all().map_err(|e| {
+        let _ = fs::remove_file(&temp_path);
+        CrosstacheError::upgrade(format!("Failed to flush new binary: {e}"))
+    })?;
+    // Close the write handle before the `--version` spawn below: Windows
+    // refuses to execute a file with an open write handle
+    // (ERROR_SHARING_VIOLATION, os error 32).
+    drop(temp_file);
 
     // Set executable permissions on Unix
     #[cfg(unix)]
