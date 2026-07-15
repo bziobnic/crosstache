@@ -3820,6 +3820,44 @@ pub(crate) async fn execute_secret_update_direct(
         let local_registry = BackendRegistry::new(resolved_backend);
         let reg = &local_registry;
 
+        // A bare `xv update NAME` — no value, no --stdin, and no other
+        // update flag — prompts for the new value, matching the `value`
+        // arg's documented "if not provided, will prompt" and `xv set`.
+        // Without this it fell through to the all-unchanged update call
+        // below and reported success without changing anything.
+        let mut value = value;
+        if value.is_none()
+            && !stdin
+            && type_name.is_none()
+            && !untype
+            && fields.is_empty()
+            && secret_fields.is_empty()
+            && classic_flags_present(
+                &tags,
+                &groups,
+                &rename,
+                &note,
+                &folder,
+                replace_tags,
+                replace_groups,
+                &expires,
+                &not_before,
+                clear_expires,
+                clear_not_before,
+                clear_note,
+                clear_folder,
+                enabled,
+            )
+            .is_empty()
+        {
+            let prompted =
+                rpassword::prompt_password(format!("Enter new value for secret '{name}': "))?;
+            if prompted.is_empty() {
+                return Err(CrosstacheError::config("Secret value cannot be empty"));
+            }
+            value = Some(prompted);
+        }
+
         // Record-types edit/conversion paths (record-types plan Tasks 8/9)
         // take over completely — clap's `conflicts_with_all` on --type/
         // --untype/--field/--field-secret already guarantees at most one
