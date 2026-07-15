@@ -253,15 +253,16 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .bulk-toolbar input { flex-basis:100%; }
   .column-groups, .column-file-type { display:none; }
   .column-file-size, .column-file-type, .column-file-modified { display:none; }
+  .selection-column { width:12.36%; }
   #secrets-table:not(.selection-mode) .column-secret-name { width:50%; }
   #secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }
   #secrets-table:not(.selection-mode) .column-secret-updated { width:28%; }
-  #secrets-table.selection-mode .column-secret-name { width:calc(50% - 2.75rem); }
+  #secrets-table.selection-mode .column-secret-name { width:37.64%; }
   #secrets-table.selection-mode .column-secret-folder { width:22%; }
   #secrets-table.selection-mode .column-secret-updated { width:28%; }
-  #files-table:not(.selection-mode) .column-file-name { width:calc(100% - 12rem); }
-  #files-table:not(.selection-mode) .file-actions { width:12rem; }
-  #files-table.selection-mode .column-file-name { width:calc(100% - 2.75rem); }
+  #files-table:not(.selection-mode) .column-file-name { width:46%; }
+  #files-table:not(.selection-mode) .file-actions { width:54%; }
+  #files-table.selection-mode .column-file-name { width:87.64%; }
   #files-table.selection-mode .file-actions { display:none; }
   .data-surface th, .data-surface td { padding-inline:.65rem; }
   .list-summary { justify-content:flex-start; }

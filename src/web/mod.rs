@@ -569,15 +569,21 @@ mod tests {
             "#secrets-table:not(.selection-mode) .column-secret-name { width:50%; }",
             "#secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }",
             "#secrets-table:not(.selection-mode) .column-secret-updated { width:28%; }",
-            "#secrets-table.selection-mode .column-secret-name { width:calc(50% - 2.75rem); }",
-            "#files-table:not(.selection-mode) .column-file-name { width:calc(100% - 12rem); }",
-            "#files-table.selection-mode .column-file-name { width:calc(100% - 2.75rem); }",
+            ".selection-column { width:12.36%; }",
+            "#secrets-table.selection-mode .column-secret-name { width:37.64%; }",
+            "#files-table:not(.selection-mode) .column-file-name { width:46%; }",
+            "#files-table:not(.selection-mode) .file-actions { width:54%; }",
+            "#files-table.selection-mode .column-file-name { width:87.64%; }",
         ] {
             assert!(STYLE_CSS.contains(rule), "missing {rule}");
         }
-        assert!(
-            STYLE_CSS.contains("#files-table:not(.selection-mode) .file-actions { width:12rem; }")
-        );
+        for calc_width in [
+            "width:calc(50% - 2.75rem)",
+            "width:calc(100% - 12rem)",
+            "width:calc(100% - 2.75rem)",
+        ] {
+            assert!(!STYLE_CSS.contains(calc_width), "unexpected {calc_width}");
+        }
         assert!(STYLE_CSS.contains("#files-table.selection-mode .file-actions { display:none; }"));
     }
 
