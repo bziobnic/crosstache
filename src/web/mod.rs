@@ -239,6 +239,30 @@ mod tests {
     }
 
     #[test]
+    fn ui_unifies_actions_upload_and_feedback_components() {
+        for marker in [
+            "class=\"search-field\"",
+            "class=\"dropzone-content\"",
+            "role=\"status\"",
+            "aria-live=\"polite\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(APP_JS.contains("t.className = `toast ${isError ? 'error' : 'success'}`"));
+        assert!(APP_JS.contains("t.replaceChildren(icon(isError ? 'alert' : 'check')"));
+        assert!(APP_JS.contains("dl.className = 'button secondary compact'"));
+        assert!(APP_JS.contains("dl.prepend(icon('download'))"));
+        assert!(APP_JS.contains("del.className = 'button danger compact'"));
+        assert!(STYLE_CSS.contains(".bulk-toolbar {"));
+        assert!(STYLE_CSS.contains(".dropzone-content {"));
+        assert!(STYLE_CSS.contains(".toast.success {"));
+        assert!(
+            !STYLE_CSS.contains("#toast {"),
+            "legacy toast id styles override the unified toast component"
+        );
+    }
+
+    #[test]
     fn ui_file_delete_success_refreshes_current_vault_independent_of_list_generation() {
         assert!(APP_JS.contains("let fileActionGeneration = 0"));
         assert!(APP_JS.contains("fileActionGeneration++;"));

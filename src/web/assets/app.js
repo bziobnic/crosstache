@@ -63,8 +63,9 @@ function setListSummary(kind, visibleCount, totalCount, folderCount) {
 
 function toast(msg, isError = false) {
   const t = $('#toast');
-  t.textContent = msg;
-  t.className = isError ? 'error' : '';
+  t.replaceChildren(icon(isError ? 'alert' : 'check'), document.createTextNode(msg));
+  t.className = `toast ${isError ? 'error' : 'success'}`;
+  t.setAttribute('role', isError ? 'alert' : 'status');
   t.hidden = false;
   clearTimeout(t._timer);
   t._timer = setTimeout(() => { t.hidden = true; }, 4000);
@@ -1024,6 +1025,8 @@ function fileRow(f, grouped = false) {
   }
   const dl = document.createElement('button');
   dl.textContent = 'Download';
+  dl.className = 'button secondary compact';
+  dl.prepend(icon('download'));
   dl.onclick = () => downloadFile(f.name);
   const del = document.createElement('button');
   const pending = isFileDeletePending(vault, name);
@@ -1032,7 +1035,7 @@ function fileRow(f, grouped = false) {
   del.dataset.defaultLabel = 'Delete';
   del.dataset.fileVault = vault;
   del.dataset.fileName = name;
-  del.className = 'danger';
+  del.className = 'button danger compact';
   del.onclick = async () => {
     if (isFileDeletePending(vault, name)) return;
     if (del.disabled) return;

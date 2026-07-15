@@ -45,16 +45,16 @@
       <span id="secret-item-count" class="item-count" aria-live="polite">0 secrets</span>
     </div>
     <div class="toolbar">
-      <input id="search" type="search" placeholder="filter secrets…">
-      <button id="select-secrets" type="button">Select</button>
-      <button id="new-secret">+ New secret</button>
+      <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search by name, folder, group, or note"></label>
+      <button id="select-secrets" class="button secondary" type="button">Select</button>
+      <button id="new-secret" class="button primary" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New secret</button>
     </div>
     <div id="secret-bulk-bar" class="bulk-toolbar" hidden>
       <span id="secret-selection-count" aria-live="polite">0 selected</span>
       <input id="secret-move-folder" placeholder="destination folder" aria-label="Destination folder">
-      <button id="bulk-move-secrets" type="button">Move</button>
-      <button id="bulk-delete-secrets" type="button" class="danger" data-default-label="Delete">Delete</button>
-      <button id="cancel-secret-selection" type="button">Cancel</button>
+      <button id="bulk-move-secrets" class="button primary" type="button">Move</button>
+      <button id="bulk-delete-secrets" class="button danger" type="button" data-default-label="Delete">Delete</button>
+      <button id="cancel-secret-selection" class="button ghost" type="button">Cancel</button>
     </div>
     <div class="data-surface">
       <table id="secrets-table">
@@ -76,14 +76,19 @@
     </div>
     <div class="toolbar file-toolbar">
       <span class="toolbar-spacer"></span>
-      <button id="select-files" type="button">Select</button>
+      <button id="select-files" class="button secondary" type="button">Select</button>
     </div>
     <div id="file-bulk-bar" class="bulk-toolbar" hidden>
       <span id="file-selection-count" aria-live="polite">0 selected</span>
-      <button id="bulk-delete-files" type="button" class="danger" data-default-label="Delete">Delete</button>
-      <button id="cancel-file-selection" type="button">Cancel</button>
+      <button id="bulk-delete-files" class="button danger" type="button" data-default-label="Delete">Delete</button>
+      <button id="cancel-file-selection" class="button ghost" type="button">Cancel</button>
     </div>
-    <div id="dropzone">Drop files here or <label class="linkish">browse<input id="file-input" type="file" multiple hidden></label></div>
+    <div id="dropzone">
+      <div class="dropzone-content">
+        <span class="dropzone-icon"><svg class="icon" aria-hidden="true"><use href="#icon-upload"></use></svg></span>
+        <span><strong>Drop files here to upload</strong><small>or <label class="linkish">browse from your computer<input id="file-input" type="file" multiple hidden></label></small></span>
+      </div>
+    </div>
     <div class="data-surface">
       <table id="files-table">
         <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th>Name</th><th>Size</th><th>Type</th><th>Modified</th><th></th></tr></thead>
@@ -131,7 +136,7 @@
   </form>
 </aside>
 
-<div id="toast" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <svg id="xv-icon-sprite" class="icon-sprite" aria-hidden="true">
   <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></symbol>
   <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
