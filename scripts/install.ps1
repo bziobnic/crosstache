@@ -352,7 +352,7 @@ function Install-crosstache {
 
         $minisign = Get-Command minisign -ErrorAction SilentlyContinue
         if (-not $minisign) {
-            throw "minisign is required to authenticate releases. Install minisign and retry."
+            throw "minisign is required to authenticate releases. Install it with 'winget install jedisct1.minisign' (or 'scoop install minisign' / 'choco install minisign') and retry."
         }
         $releaseSigningKey = "RWRuXFh34rB613dgsXyAMmtKvYK0SFwxq4i44dhGFXVTrhAQ7hJXf6Ym"
         & $minisign.Source -Vm $archivePath -x $signaturePath -P $releaseSigningKey | Out-Null
