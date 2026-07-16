@@ -242,6 +242,65 @@ function initSorting() {
   }
 }
 
+const TABLE_WIDTHS = {
+  secrets: { defaults:[28,15,14,25,18], minimums:[14,10,10,14,12], storageKey:'xv.ui.columns.secrets.v1' },
+  files: { defaults:[42,12,24,22], minimums:[20,10,14,14], storageKey:'xv.ui.columns.files.v1' },
+};
+function dataColumns(kind) {
+  return [...document.querySelectorAll(`#${kind}-table colgroup col:not(.selection-col)`)];
+}
+function applyColumnWidths(kind, widths) {
+  TABLE_WIDTHS[kind].widths = widths;
+  dataColumns(kind).forEach((column, index) => { column.style.width = `${widths[index]}%`; });
+}
+function saveColumnWidths(kind) {
+  const config = TABLE_WIDTHS[kind];
+  try { localStorage.setItem(config.storageKey, JSON.stringify(config.widths)); } catch (_) { /* use in-memory widths */ }
+}
+function resizeColumns(kind, index, deltaPercent) {
+  const config = TABLE_WIDTHS[kind];
+  const widths = [...config.widths];
+  const left = Math.max(config.minimums[index], widths[index] + deltaPercent);
+  const applied = left - widths[index];
+  const right = widths[index + 1] - applied;
+  if (right < config.minimums[index + 1]) return;
+  widths[index] = left;
+  widths[index + 1] = right;
+  applyColumnWidths(kind, widths);
+  saveColumnWidths(kind);
+}
+function initColumnResizing() {
+  for (const kind of ['secrets', 'files']) {
+    const config = TABLE_WIDTHS[kind];
+    let saved = '';
+    try { saved = localStorage.getItem(config.storageKey) || ''; } catch (_) { saved = ''; }
+    applyColumnWidths(kind, XvUiModel.normalizeWidths(saved, config.defaults, config.minimums));
+    const table = $(`#${kind}-table`);
+    [...table.querySelectorAll('.column-resizer')].forEach((handle, index) => {
+      handle.onpointerdown = (event) => {
+        event.preventDefault();
+        const startX = event.clientX;
+        const startWidths = [...config.widths];
+        const move = (moveEvent) => {
+          config.widths = [...startWidths];
+          resizeColumns(kind, index, ((moveEvent.clientX - startX) / table.clientWidth) * 100);
+        };
+        const stop = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', stop);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', stop, { once: true });
+      };
+      handle.onkeydown = (event) => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        resizeColumns(kind, index, event.key === 'ArrowLeft' ? -2 : 2);
+      };
+    });
+  }
+}
+
 const secretSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };
 const fileSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };
 
@@ -297,6 +356,7 @@ function setSelectionMode(kind, enabled) {
   elements.toggle.hidden = enabled;
   elements.bulkBar.hidden = !enabled;
   elements.table.querySelector('thead .selection-column').hidden = !enabled;
+  elements.table.querySelector('col.selection-col').hidden = !enabled;
   elements.table.classList.toggle('selection-mode', enabled);
   renderSelectionKind(kind);
 }
@@ -1399,5 +1459,6 @@ dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFile
 $('#browse-files').onclick = () => $('#file-input').click();
 $('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
+initColumnResizing();
 initSorting();
 init().catch(fail);

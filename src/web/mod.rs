@@ -231,7 +231,34 @@ mod tests {
     fn ui_persists_token_for_tab_reloads() {
         assert!(APP_JS.contains("sessionStorage.setItem(TOKEN_STORAGE_KEY"));
         assert!(APP_JS.contains("sessionStorage.getItem(TOKEN_STORAGE_KEY)"));
-        assert!(!APP_JS.contains("localStorage"));
+        assert!(!APP_JS.contains("localStorage.setItem(TOKEN_STORAGE_KEY"));
+    }
+
+    #[test]
+    fn ui_persists_pointer_and_keyboard_column_resizing() {
+        assert!(INDEX_HTML.contains("<colgroup>"));
+        for class in [
+            "column-secret-name",
+            "column-secret-folder",
+            "column-groups",
+            "column-note",
+            "column-secret-updated",
+            "column-file-name",
+            "column-file-size",
+            "column-file-type",
+            "column-file-modified",
+        ] {
+            assert!(
+                INDEX_HTML.contains(&format!("<col class=\"{class}\">")),
+                "missing responsive col class {class}"
+            );
+        }
+        assert!(INDEX_HTML.contains("class=\"column-resizer\""));
+        assert!(INDEX_HTML.contains("role=\"separator\""));
+        assert!(APP_JS.contains("xv.ui.columns.secrets.v1"));
+        assert!(APP_JS.contains("xv.ui.columns.files.v1"));
+        assert!(APP_JS.contains("handle.onpointerdown"));
+        assert!(APP_JS.contains("handle.onkeydown"));
     }
 
     #[test]
@@ -719,6 +746,7 @@ mod tests {
             ".column-file-size, .column-file-type, .column-file-modified { display:none; }"
         ));
         assert!(!STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
+        assert!(STYLE_CSS.contains(".selection-column { width:2.75rem;"));
         for rule in [
             "#secrets-table:not(.selection-mode) .column-secret-name { width:50%; }",
             "#secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }",
@@ -729,7 +757,7 @@ mod tests {
             "#files-table:not(.selection-mode) .file-actions { width:54%; }",
             "#files-table.selection-mode .column-file-name { width:87.64%; }",
         ] {
-            assert!(STYLE_CSS.contains(rule), "missing {rule}");
+            assert!(!STYLE_CSS.contains(rule), "unexpected {rule}");
         }
         for calc_width in [
             "width:calc(50% - 2.75rem)",

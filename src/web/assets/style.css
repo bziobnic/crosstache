@@ -113,6 +113,11 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transpa
   font:inherit; letter-spacing:inherit; text-transform:inherit; text-align:left; }
 .sort-button:hover { color:var(--color-text); border-color:transparent; }
 .sort-indicator { margin-left:auto; color:var(--color-accent); font-size:.6rem; }
+.column-resizer { position:absolute; z-index:2; inset-block:0; inset-inline-end:-.25rem;
+  width:.5rem; cursor:col-resize; touch-action:none; }
+.column-resizer::after { content:""; position:absolute; inset-block:.4rem; inset-inline-start:.22rem;
+  width:1px; background:var(--color-border); }
+.column-resizer:hover::after, .column-resizer:focus-visible::after { width:2px; background:var(--color-accent); }
 .data-surface td { height:2.75rem; padding:0 1rem; border-top:1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
   color:var(--color-text-muted); }
 .data-surface tbody tr:not(.folder-row):hover { background:color-mix(in srgb, var(--color-accent) 6%, transparent); }
@@ -259,16 +264,6 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .bulk-toolbar input { flex-basis:100%; }
   .column-groups, .column-file-type { display:none; }
   .column-file-size, .column-file-type, .column-file-modified { display:none; }
-  .selection-column { width:12.36%; }
-  #secrets-table:not(.selection-mode) .column-secret-name { width:50%; }
-  #secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }
-  #secrets-table:not(.selection-mode) .column-secret-updated { width:28%; }
-  #secrets-table.selection-mode .column-secret-name { width:37.64%; }
-  #secrets-table.selection-mode .column-secret-folder { width:22%; }
-  #secrets-table.selection-mode .column-secret-updated { width:28%; }
-  #files-table:not(.selection-mode) .column-file-name { width:46%; }
-  #files-table:not(.selection-mode) .file-actions { width:54%; }
-  #files-table.selection-mode .column-file-name { width:87.64%; }
   #files-table.selection-mode .file-actions { display:none; }
   .data-surface th, .data-surface td { padding-inline:.65rem; }
   .list-summary { justify-content:flex-start; }
