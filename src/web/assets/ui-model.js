@@ -16,16 +16,33 @@
     return typeof value === 'string' && value.length >= 10 ? value.slice(0, 10) : '';
   }
   function createProtectedState(value = null, hasStoredValue = value !== null) {
-    return { value, hasStoredValue, masked: hasStoredValue, dirty: false };
+    return { value, hasStoredValue, masked: hasStoredValue, dirty: false, revision: 0, loadPromise: null };
   }
   function protectedDisplay(state) { return state.masked ? PROTECTED_MASK : (state.value ?? ''); }
   function revealProtected(state, loaded = state.value) {
-    state.value = loaded ?? ''; state.hasStoredValue = true; state.masked = false; return state;
+    state.revision++; state.value = loaded ?? ''; state.hasStoredValue = true; state.masked = false; return state;
   }
   function editProtected(state, value) {
-    state.value = value; state.hasStoredValue = true; state.dirty = true; return state;
+    state.revision++; state.value = value; state.hasStoredValue = true; state.dirty = true; return state;
   }
-  function hideProtected(state) { if (state.hasStoredValue) state.masked = true; return state; }
+  function hideProtected(state) { state.revision++; if (state.hasStoredValue) state.masked = true; return state; }
+  function loadProtected(state, loader) {
+    if (state.value !== null) return Promise.resolve(state.value);
+    if (state.loadPromise) return state.loadPromise;
+    const revision = state.revision;
+    let request;
+    try { request = Promise.resolve(loader()); }
+    catch (error) { request = Promise.reject(error); }
+    let pending = request.then((loaded) => {
+      if (state.revision === revision && state.value === null) state.value = loaded ?? '';
+      return state.value;
+    });
+    pending = pending.finally(() => {
+      if (state.loadPromise === pending) state.loadPromise = null;
+    });
+    state.loadPromise = pending;
+    return pending;
+  }
 
   function comparable(value, type) {
     if (type === 'number') return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -60,5 +77,6 @@
     return valid ? widths : [...defaults];
   }
   return { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
-    protectedDisplay, revealProtected, editProtected, hideProtected, sortedCopy, normalizeWidths };
+    protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
+    sortedCopy, normalizeWidths };
 }));

@@ -843,11 +843,13 @@ async function openRecord(name, meta, tags, generation) {
 $('#close-drawer').onclick = closeDrawer;
 
 async function loadPlainSecretValue(generation, selection) {
-  if (plainSecretState.value !== null) return plainSecretState.value;
-  const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
-  if (!isCurrentDrawer(generation, selection)) return null;
-  plainSecretState.value = value ?? '';
-  return plainSecretState.value;
+  const state = plainSecretState;
+  const value = await XvUiModel.loadProtected(state, async () => {
+    const response = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    return response.value ?? '';
+  });
+  if (!isCurrentDrawer(generation, selection) || state !== plainSecretState) return null;
+  return value;
 }
 
 $('#reveal').onclick = async () => {
@@ -855,9 +857,11 @@ $('#reveal').onclick = async () => {
   const selection = editing;
   try {
     const state = plainSecretState;
+    const transition = state.revision;
     if (state.masked) {
       const value = await loadPlainSecretValue(generation, selection);
-      if (!isCurrentDrawer(generation, selection) || state !== plainSecretState) return;
+      if (!isCurrentDrawer(generation, selection) || state !== plainSecretState
+        || state.revision !== transition || value === null) return;
       XvUiModel.revealProtected(state, value);
     } else {
       XvUiModel.hideProtected(state);
@@ -874,8 +878,9 @@ $('#copy').onclick = async () => {
   const generation = drawerGeneration;
   const selection = editing;
   try {
+    const state = plainSecretState;
     const value = await loadPlainSecretValue(generation, selection);
-    if (!isCurrentDrawer(generation, selection)) return;
+    if (!isCurrentDrawer(generation, selection) || state !== plainSecretState || value === null) return;
     await navigator.clipboard.writeText(value);
     if (!isCurrentDrawer(generation, selection)) return;
     toast('copied');

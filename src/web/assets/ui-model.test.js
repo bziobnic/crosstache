@@ -24,6 +24,30 @@ test('all stored protected values use the same mask', () => {
   assert.equal(short.dirty, true);
 });
 
+test('overlapping protected loads cannot overwrite a newer edit and hide', async () => {
+  const state = model.createProtectedState(null, true);
+  let resolveLoad;
+  let loadCount = 0;
+  const storedValue = new Promise((resolve) => { resolveLoad = resolve; });
+  const loader = () => { loadCount++; return storedValue; };
+
+  const revealLoad = model.loadProtected(state, loader);
+  const copyLoad = model.loadProtected(state, loader);
+  assert.strictEqual(revealLoad, copyLoad);
+  assert.equal(loadCount, 1);
+
+  model.revealProtected(state, 'draft');
+  model.editProtected(state, 'edited');
+  model.hideProtected(state);
+  resolveLoad('stored value');
+
+  assert.equal(await revealLoad, 'edited');
+  assert.equal(await copyLoad, 'edited');
+  assert.equal(state.value, 'edited');
+  assert.equal(state.masked, true);
+  assert.equal(loadCount, 1);
+});
+
 test('numeric and date sorts use name tie breaking and empty-last order', () => {
   const items = [
     { name: 'beta', size: 5, updated: '2025-01-02T00:00:00Z' },

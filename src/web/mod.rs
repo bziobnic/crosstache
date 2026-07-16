@@ -363,6 +363,9 @@ mod tests {
     fn ui_plain_secret_toggles_and_never_submits_the_mask() {
         assert!(APP_JS.contains("let plainSecretState = null;"));
         assert!(APP_JS.contains("async function loadPlainSecretValue(generation, selection)"));
+        assert!(APP_JS.contains("XvUiModel.loadProtected(state"));
+        assert!(APP_JS.contains("const transition = state.revision;"));
+        assert!(APP_JS.contains("state.revision !== transition"));
         assert!(APP_JS.contains("else if (plainSecretState?.dirty"));
         assert!(!APP_JS.contains("value: XvUiModel.PROTECTED_MASK"));
     }
