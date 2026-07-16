@@ -119,13 +119,6 @@ function armConfirmation(button, armedLabel, timeoutMs = 3000) {
   return false;
 }
 
-// Dates only, never timestamps. Unparseable strings pass through raw.
-function fmtDate(s) {
-  if (!s) return '';
-  const d = new Date(s);
-  return isNaN(d) ? s : d.toISOString().slice(0, 10);
-}
-
 // Mirrors src/utils/format.rs::format_size: binary (1024) steps, whole
 // bytes without decimals, larger units with two decimals.
 function fmtSize(bytes) {
@@ -198,6 +191,112 @@ function showListState(tbody, kind, state, cols) {
 const expandedSecretFolders = new Set();
 const expandedFileFolders = new Set();
 
+const tableSort = {
+  secrets: { key: 'name', direction: 'asc' },
+  files: { key: 'name', direction: 'asc' },
+};
+const SORT_COLUMNS = {
+  secrets: {
+    name: [(item) => item.original_name || item.name, 'text'],
+    folder: [(item) => item.folder || '', 'text'],
+    groups: [(item) => item.groups || '', 'text'],
+    note: [(item) => item.note || '', 'text'],
+    updated: [(item) => item.updated_on || '', 'date'],
+  },
+  files: {
+    name: [(item) => item.name, 'text'],
+    size: [(item) => item.size, 'number'],
+    type: [(item) => item.content_type || '', 'text'],
+    modified: [(item) => item.last_modified || '', 'date'],
+  },
+};
+function sortedTableItems(kind, items) {
+  const state = tableSort[kind];
+  const [valueOf, type] = SORT_COLUMNS[kind][state.key];
+  const nameOf = kind === 'secrets'
+    ? (item) => item.original_name || item.name
+    : (item) => item.name;
+  return XvUiModel.sortedCopy(items, valueOf, nameOf, type, state.direction);
+}
+function syncSortHeaders(kind) {
+  const state = tableSort[kind];
+  for (const header of document.querySelectorAll(`#${kind}-table th[data-sort-key]`)) {
+    const active = header.dataset.sortKey === state.key;
+    header.setAttribute('aria-sort', active ? (state.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+    header.querySelector('.sort-indicator').textContent = active ? (state.direction === 'asc' ? '▲' : '▼') : '';
+  }
+}
+function setSort(kind, key) {
+  const state = tableSort[kind];
+  if (state.key === key) state.direction = state.direction === 'asc' ? 'desc' : 'asc';
+  else { state.key = key; state.direction = 'asc'; }
+  syncSortHeaders(kind);
+  renderSelectionKind(kind);
+}
+function initSorting() {
+  for (const kind of ['secrets', 'files']) {
+    for (const header of document.querySelectorAll(`#${kind}-table th[data-sort-key]`)) {
+      header.querySelector('.sort-button').onclick = () => setSort(kind, header.dataset.sortKey);
+    }
+    syncSortHeaders(kind);
+  }
+}
+
+const TABLE_WIDTHS = {
+  secrets: { defaults:[28,15,14,25,18], minimums:[14,10,10,14,12], storageKey:'xv.ui.columns.secrets.v1' },
+  files: { defaults:[42,12,24,22], minimums:[20,10,14,14], storageKey:'xv.ui.columns.files.v1' },
+};
+function dataColumns(kind) {
+  return [...document.querySelectorAll(`#${kind}-table colgroup col:not(.selection-col)`)];
+}
+function applyColumnWidths(kind, widths) {
+  TABLE_WIDTHS[kind].widths = widths;
+  dataColumns(kind).forEach((column, index) => { column.style.width = `${widths[index]}%`; });
+}
+function saveColumnWidths(kind) {
+  const config = TABLE_WIDTHS[kind];
+  try { localStorage.setItem(config.storageKey, JSON.stringify(config.widths)); } catch (_) { /* use in-memory widths */ }
+}
+function resizeColumns(kind, index, deltaPercent) {
+  const config = TABLE_WIDTHS[kind];
+  const widths = XvUiModel.resizeAdjacentWidths(config.widths, config.minimums, index, deltaPercent);
+  applyColumnWidths(kind, widths);
+  saveColumnWidths(kind);
+}
+function initColumnResizing() {
+  for (const kind of ['secrets', 'files']) {
+    const config = TABLE_WIDTHS[kind];
+    let saved = '';
+    try { saved = localStorage.getItem(config.storageKey) || ''; } catch (_) { saved = ''; }
+    applyColumnWidths(kind, XvUiModel.normalizeWidths(saved, config.defaults, config.minimums));
+    const table = $(`#${kind}-table`);
+    [...table.querySelectorAll('.column-resizer')].forEach((handle, index) => {
+      handle.onpointerdown = (event) => {
+        event.preventDefault();
+        const startX = event.clientX;
+        const startWidths = [...config.widths];
+        const move = (moveEvent) => {
+          config.widths = [...startWidths];
+          resizeColumns(kind, index, ((moveEvent.clientX - startX) / table.clientWidth) * 100);
+        };
+        const stop = () => {
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', stop);
+          window.removeEventListener('pointercancel', stop);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', stop, { once: true });
+        window.addEventListener('pointercancel', stop, { once: true });
+      };
+      handle.onkeydown = (event) => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        resizeColumns(kind, index, event.key === 'ArrowLeft' ? -2 : 2);
+      };
+    });
+  }
+}
+
 const secretSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };
 const fileSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };
 
@@ -253,6 +352,7 @@ function setSelectionMode(kind, enabled) {
   elements.toggle.hidden = enabled;
   elements.bulkBar.hidden = !enabled;
   elements.table.querySelector('thead .selection-column').hidden = !enabled;
+  elements.table.querySelector('col.selection-col').hidden = !enabled;
   elements.table.classList.toggle('selection-mode', enabled);
   renderSelectionKind(kind);
 }
@@ -417,6 +517,18 @@ let types = []; // resolved record types from /api/types
 // Non-null while the drawer holds a typed record:
 // { typeName, secretFields: {name: value}, metaFields: {name: value} }
 let recordState = null;
+let plainSecretState = null;
+
+function setRevealLabel(button, label) {
+  if (button.id === 'reveal') button.replaceChildren(icon('eye'), label);
+  else button.textContent = label;
+}
+
+function renderProtectedControl(input, button, state) {
+  input.readOnly = state.masked;
+  input.value = XvUiModel.protectedDisplay(state);
+  setRevealLabel(button, state.masked ? 'Reveal' : 'Hide');
+}
 
 // Same rule as the TUI: the xv-type tag OR the exact record content type.
 function isRecordMeta(meta) {
@@ -449,35 +561,35 @@ function fieldRow(name, kind, value, required) {
   const input = document.createElement('input');
   input.dataset.fieldName = name;
   input.dataset.fieldKind = kind;
-  input.value = value || '';
   if (required) input.required = true;
   if (kind === 'secret') {
-    input.type = 'password';
+    const state = XvUiModel.createProtectedState(value, value !== undefined);
+    input._protectedState = state;
     input.autocomplete = 'new-password';
     const row = document.createElement('span');
     row.className = 'field-actions';
     const rev = document.createElement('button');
     rev.type = 'button';
     rev.className = 'button secondary';
-    rev.textContent = 'Reveal';
+    renderProtectedControl(input, rev, state);
     rev.onclick = () => {
-      const showing = input.type === 'text';
-      input.type = showing ? 'password' : 'text';
-      rev.textContent = showing ? 'Reveal' : 'Hide';
+      if (state.masked) XvUiModel.revealProtected(state);
+      else XvUiModel.hideProtected(state);
+      renderProtectedControl(input, rev, state);
     };
+    input.oninput = () => XvUiModel.editProtected(state, input.value);
     const cp = document.createElement('button');
     cp.type = 'button';
     cp.className = 'button secondary';
     cp.textContent = 'Copy';
     cp.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(input.value);
-        toast('copied');
-      } catch (e) { fail(e); }
+      try { await navigator.clipboard.writeText(state.value ?? ''); toast('copied'); }
+      catch (e) { fail(e); }
     };
     row.append(rev, cp);
     label.append(input, row);
   } else {
+    input.value = value || '';
     label.append(input);
   }
   return label;
@@ -577,8 +689,6 @@ async function init() {
     const vault = currentVault;
     secretLoadGeneration++;
     fileLoadGeneration++;
-    fileActionGeneration++;
-    pendingFileDeletes.clear();
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
@@ -634,6 +744,7 @@ function renderSecrets() {
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
     return hay.includes(filter);
   });
+  const sorted = sortedTableItems('secrets', visible);
   const secretFolders = new Set(visible.map((secret) => secret.folder).filter(Boolean));
   setListSummary('secrets', visible.length, secrets.length, secretFolders.size);
   // While filtering, collapse state is ignored so matches are never
@@ -642,7 +753,7 @@ function renderSecrets() {
   const cols = secretSelection.enabled ? 6 : 5;
   const rendered = renderGrouped(
     tbody,
-    visible,
+    sorted,
     (s) => s.folder || '',
     expandedSecretFolders,
     cols,
@@ -692,7 +803,7 @@ function secretRow(s, grouped = false) {
   if (grouped) tr.classList.add('folder-child');
   if (secretSelection.ids.has(name)) tr.classList.add('selected-row');
   if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
-  for (const [index, cell] of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)].entries()) {
+  for (const [index, cell] of [name, s.folder, s.groups, s.note, XvUiModel.formatDate(s.updated_on)].entries()) {
     if (index === 0) {
       const actionLabel = secretSelection.enabled ? `Select secret ${name}` : `Edit secret ${name}`;
       const nameCell = itemNameCell('secret', name, activate, actionLabel);
@@ -730,6 +841,7 @@ function clearDrawerState() {
   editing = null;
   editingMeta = null;
   recordState = null;
+  plainSecretState = null;
 }
 
 function closeDrawer() {
@@ -747,6 +859,10 @@ async function openDrawer(name) {
   editing = name;
   const f = $('#secret-form');
   f.reset();
+  f.elements.expires_on.value = '';
+  plainSecretState = XvUiModel.createProtectedState(name ? null : '', !!name);
+  renderProtectedControl(f.elements.value, $('#reveal'), plainSecretState);
+  f.elements.value.oninput = () => XvUiModel.editProtected(plainSecretState, f.elements.value.value);
   $('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret';
   $('#drawer-title').textContent = name || 'New secret';
   $('#save').textContent = name ? 'Save changes' : 'Create secret';
@@ -767,9 +883,7 @@ async function openDrawer(name) {
       f.elements.folder.value = tags.folder || '';
       f.elements.groups.value = tags.groups || '';
       f.elements.note.value = tags.note || '';
-      // Use the stored literal date on purpose, not fmtDate: fmtDate's
-      // toISOString conversion could shift the date across a timezone boundary.
-      f.elements.expires_on.value = meta.expires_on ? meta.expires_on.slice(0, 10) : '';
+      f.elements.expires_on.value = XvUiModel.expirationDate(meta.expires_on);
       const customTags = {};
       for (const [k, v] of Object.entries(tags)) {
         // xv-type and f.* are managed by the record editor, not echoed blindly.
@@ -833,13 +947,32 @@ async function openRecord(name, meta, tags, generation) {
 
 $('#close-drawer').onclick = closeDrawer;
 
+async function loadPlainSecretValue(generation, selection) {
+  const state = plainSecretState;
+  const value = await XvUiModel.loadProtected(state, async () => {
+    const response = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    return response.value ?? '';
+  });
+  if (!isCurrentDrawer(generation, selection) || state !== plainSecretState) return null;
+  return value;
+}
+
 $('#reveal').onclick = async () => {
   const generation = drawerGeneration;
   const selection = editing;
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    const state = plainSecretState;
+    const transition = state.revision;
+    if (state.masked) {
+      const value = await loadPlainSecretValue(generation, selection);
+      if (!isCurrentDrawer(generation, selection) || state !== plainSecretState
+        || state.revision !== transition || value === null) return;
+      XvUiModel.revealProtected(state, value);
+    } else {
+      XvUiModel.hideProtected(state);
+    }
     if (!isCurrentDrawer(generation, selection)) return;
-    $('#secret-form').elements.value.value = value ?? '';
+    renderProtectedControl($('#secret-form').elements.value, $('#reveal'), state);
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     fail(e);
@@ -850,9 +983,10 @@ $('#copy').onclick = async () => {
   const generation = drawerGeneration;
   const selection = editing;
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
-    if (!isCurrentDrawer(generation, selection)) return;
-    await navigator.clipboard.writeText(value ?? '');
+    const state = plainSecretState;
+    const value = await loadPlainSecretValue(generation, selection);
+    if (!isCurrentDrawer(generation, selection) || state !== plainSecretState || value === null) return;
+    await navigator.clipboard.writeText(value);
     if (!isCurrentDrawer(generation, selection)) return;
     toast('copied');
   } catch (e) {
@@ -883,9 +1017,10 @@ $('#secret-form').onsubmit = async (ev) => {
       const envelope = {};
       const fieldTags = {};
       for (const input of $('#record-fields').querySelectorAll('input[data-field-name]')) {
-        if (!input.value) continue; // empty = omit field / drop tag
-        if (input.dataset.fieldKind === 'secret') envelope[input.dataset.fieldName] = input.value;
-        else fieldTags[FIELD_TAG_PREFIX + input.dataset.fieldName] = input.value;
+        const value = input.dataset.fieldKind === 'secret' ? input._protectedState.value : input.value;
+        if (!value) continue; // empty = omit field / drop tag
+        if (input.dataset.fieldKind === 'secret') envelope[input.dataset.fieldName] = value;
+        else fieldTags[FIELD_TAG_PREFIX + input.dataset.fieldName] = value;
       }
       const sorted = {};
       for (const k of Object.keys(envelope).sort()) sorted[k] = envelope[k];
@@ -902,10 +1037,11 @@ $('#secret-form').onsubmit = async (ev) => {
         enabled: editingMeta ? editingMeta.enabled : true,
         not_before: editingMeta?.not_before || null,
       });
-    } else if (f.value.value) {
+    } else if (plainSecretState?.dirty || (!selection && f.value.value)) {
       // full write: value + all metadata
+      const value = selection ? plainSecretState.value : f.value.value;
       await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
-        value: f.value.value,
+        value,
         folder: f.folder.value || null,
         note: f.note.value || null,
         groups: groups.length ? groups : null,
@@ -978,24 +1114,6 @@ function switchTab(which) {
 let files = [];
 let filesState = 'ready';
 let fileLoadGeneration = 0;
-let fileActionGeneration = 0;
-const pendingFileDeletes = new Map();
-
-function isFileDeletePending(vault, name) {
-  return pendingFileDeletes.get(vault)?.has(name) || false;
-}
-
-function setFileDeletePending(vault, name, generation) {
-  if (!pendingFileDeletes.has(vault)) pendingFileDeletes.set(vault, new Map());
-  pendingFileDeletes.get(vault).set(name, generation);
-}
-
-function clearFileDeletePending(vault, name, generation) {
-  const vaultDeletes = pendingFileDeletes.get(vault);
-  if (vaultDeletes?.get(name) !== generation) return;
-  vaultDeletes.delete(name);
-  if (!vaultDeletes.size) pendingFileDeletes.delete(vault);
-}
 
 async function loadFiles(vault) {
   const generation = ++fileLoadGeneration;
@@ -1003,7 +1121,7 @@ async function loadFiles(vault) {
   filesState = 'loading';
   files = [];
   setListLoadStatus('files', 'loading');
-  showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 6 : 5);
+  showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 5 : 4);
   try {
     const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
     if (generation !== fileLoadGeneration) return false;
@@ -1013,7 +1131,7 @@ async function loadFiles(vault) {
     filesState = 'failed';
     files = [];
     setListLoadStatus('files', 'failed');
-    showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 6 : 5);
+    showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 5 : 4);
     throw e;
   }
   filesState = 'ready';
@@ -1028,47 +1146,43 @@ function renderFiles() {
   const dirOf = (f) => (f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/')) : '');
   const fileFolders = new Set(files.map(dirOf).filter(Boolean));
   setListSummary('files', files.length, files.length, fileFolders.size);
-  const cols = fileSelection.enabled ? 6 : 5;
-  const rendered = renderGrouped(tbody, files, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
+  const cols = fileSelection.enabled ? 5 : 4;
+  const sorted = sortedTableItems('files', files);
+  const rendered = renderGrouped(tbody, sorted, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
   syncSelectionUi('files', rendered.map((f) => f.name));
   if (!tbody.children.length) showListState(tbody, 'files', 'empty', cols);
 }
 
-function isCurrentFileAction(generation, vault) {
-  return generation === fileActionGeneration && vault === currentVault;
-}
-
-function syncFileDeleteButtons(vault, name) {
-  const pending = isFileDeletePending(vault, name);
-  for (const button of document.querySelectorAll('#files-table button[data-file-name]')) {
-    if (button.dataset.fileVault !== vault || button.dataset.fileName !== name) continue;
-    if (pending) beginPendingAction(button, 'Deleting…');
-    else resetConfirmation(button, 'Delete');
+function fileNameCell(name) {
+  if (fileSelection.enabled) {
+    const cell = itemNameCell('file', name, () => toggleSelected('files', name), `Select file ${name}`);
+    cell.classList.add('column-file-name');
+    return cell;
   }
-}
-
-async function reconcileFilesAfterDelete(generation, vault) {
-  try {
-    await loadFiles(vault);
-  } catch (e) {
-    if (!isCurrentFileAction(generation, vault)) return;
-    fail(e);
-  }
+  const td = document.createElement('td');
+  td.className = 'item-name column-file-name';
+  const link = document.createElement('a');
+  link.className = 'item-name-content file-link';
+  link.href = `/api/files/${encodeURIComponent(name)}${vaultQS(currentVault)}`;
+  link.download = name;
+  link.appendChild(icon('file'));
+  const label = document.createElement('strong');
+  label.textContent = name;
+  link.appendChild(label);
+  link.onclick = (event) => { event.preventDefault(); downloadFile(name); };
+  td.appendChild(link);
+  return td;
 }
 
 function fileRow(f, grouped = false) {
-  const vault = currentVault;
   const name = f.name;
   const tr = document.createElement('tr');
   if (grouped) tr.classList.add('folder-child');
   if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
-  for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)].entries()) {
+  for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, XvUiModel.formatDate(f.last_modified)].entries()) {
     if (index === 0) {
-      const activate = fileSelection.enabled ? () => toggleSelected('files', name) : null;
-      const nameCell = itemNameCell('file', name, activate, `Select file ${name}`);
-      nameCell.classList.add('column-file-name');
-      tr.appendChild(nameCell);
+      tr.appendChild(fileNameCell(name));
       continue;
     }
     const td = document.createElement('td');
@@ -1078,52 +1192,9 @@ function fileRow(f, grouped = false) {
     td.textContent = cell || '';
     tr.appendChild(td);
   }
-  const td = document.createElement('td');
-  td.className = 'file-actions';
-  const actions = document.createElement('div');
-  actions.className = 'file-actions-content';
   if (fileSelection.enabled) {
     tr.onclick = () => toggleSelected('files', name);
-    td.appendChild(actions);
-    tr.appendChild(td);
-    return tr;
   }
-  const dl = document.createElement('button');
-  dl.textContent = 'Download';
-  dl.className = 'button secondary compact';
-  dl.prepend(icon('download'));
-  dl.onclick = () => downloadFile(f.name);
-  const del = document.createElement('button');
-  const pending = isFileDeletePending(vault, name);
-  del.textContent = pending ? 'Deleting…' : 'Delete';
-  del.disabled = pending;
-  del.dataset.defaultLabel = 'Delete';
-  del.dataset.fileVault = vault;
-  del.dataset.fileName = name;
-  del.className = 'button danger compact';
-  del.onclick = async () => {
-    if (isFileDeletePending(vault, name)) return;
-    if (del.disabled) return;
-    if (!armConfirmation(del, 'Really delete?')) return;
-    const generation = fileActionGeneration;
-    setFileDeletePending(vault, name, generation);
-    beginPendingAction(del, 'Deleting…');
-    try {
-      await api('DELETE', `/api/files/${encodeURIComponent(name)}${vaultQS(vault)}`);
-    } catch (e) {
-      clearFileDeletePending(vault, name, generation);
-      if (!isCurrentFileAction(generation, vault)) return;
-      syncFileDeleteButtons(vault, name);
-      fail(e);
-      return;
-    }
-    clearFileDeletePending(vault, name, generation);
-    if (!isCurrentFileAction(generation, vault)) return;
-    await reconcileFilesAfterDelete(generation, vault);
-  };
-  actions.append(dl, del);
-  td.appendChild(actions);
-  tr.appendChild(td);
   return tr;
 }
 
@@ -1315,4 +1386,6 @@ dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFile
 $('#browse-files').onclick = () => $('#file-input').click();
 $('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
+initColumnResizing();
+initSorting();
 init().catch(fail);

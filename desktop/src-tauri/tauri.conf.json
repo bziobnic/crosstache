@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Crosstache Vault",
+  "version": "0.26.0",
+  "identifier": "com.crosstache.xv",
+  "build": {
+    "frontendDist": "../frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Crosstache Vault",
+        "url": "index.html",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 820,
+        "minHeight": 560,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:*; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.icns", "icons/icon.png"],
+    "category": "DeveloperTool",
+    "shortDescription": "Manage Crosstache secrets and files",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}
