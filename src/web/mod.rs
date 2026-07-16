@@ -404,6 +404,10 @@ mod tests {
         assert!(APP_JS.contains("f.elements.expires_on.value = '';"));
         assert!(APP_JS.contains("XvUiModel.expirationDate(meta.expires_on)"));
         assert!(APP_JS.contains("XvUiModel.formatDate(s.updated_on)"));
+        assert!(INDEX_HTML.contains(
+            "input name=\"expires_on\" type=\"text\" inputmode=\"numeric\" placeholder=\"YYYY-MM-DD\""
+        ));
+        assert!(!INDEX_HTML.contains("input name=\"expires_on\" type=\"date\""));
     }
 
     #[test]

@@ -9,6 +9,7 @@
 
   function formatDate(value) {
     if (!value) return '';
+    if (typeof value === 'string' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}/.test(value)) return value.slice(0, 10);
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? String(value) : date.toISOString().slice(0, 10);
   }

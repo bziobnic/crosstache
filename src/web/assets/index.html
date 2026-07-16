@@ -128,7 +128,7 @@
       <label class="form-field"><span class="field-label">Folder</span><input name="folder"></label>
       <label class="form-field"><span class="field-label">Groups</span><input name="groups" placeholder="Comma-separated"></label>
       <label class="form-field"><span class="field-label">Note</span><input name="note"></label>
-      <label class="form-field"><span class="field-label">Expires</span><input name="expires_on" type="date"></label>
+      <label class="form-field"><span class="field-label">Expires</span><input name="expires_on" type="text" inputmode="numeric" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" title="Enter a date as YYYY-MM-DD"></label>
     </div>
     <div class="drawer-footer">
       <button type="button" id="delete" class="button danger" data-default-label="Delete">Delete</button>

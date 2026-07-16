@@ -10,6 +10,20 @@ test('dates are date-only and absent expiration is blank', () => {
   assert.equal(model.expirationDate('2027-02-03T00:00:00Z'), '2027-02-03');
 });
 
+test('Azure timestamps stay date-only when the runtime cannot parse their suffix', () => {
+  const NativeDate = global.Date;
+  global.Date = class WebKitDate extends NativeDate {
+    constructor(value) {
+      super(value === '2023-05-13 13:03:15 UTC' ? Number.NaN : value);
+    }
+  };
+  try {
+    assert.equal(model.formatDate('2023-05-13 13:03:15 UTC'), '2023-05-13');
+  } finally {
+    global.Date = NativeDate;
+  }
+});
+
 test('all stored protected values use the same mask', () => {
   const short = model.createProtectedState('a', true);
   const long = model.createProtectedState('a much longer secret', true);
