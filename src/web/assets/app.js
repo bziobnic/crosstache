@@ -690,8 +690,6 @@ async function init() {
     const vault = currentVault;
     secretLoadGeneration++;
     fileLoadGeneration++;
-    fileActionGeneration++;
-    pendingFileDeletes.clear();
     // Close the drawer: anything open in it belongs to the previous vault,
     // and saving/deleting it against the new vault would hit the wrong secret.
     closeDrawer();
@@ -1117,24 +1115,6 @@ function switchTab(which) {
 let files = [];
 let filesState = 'ready';
 let fileLoadGeneration = 0;
-let fileActionGeneration = 0;
-const pendingFileDeletes = new Map();
-
-function isFileDeletePending(vault, name) {
-  return pendingFileDeletes.get(vault)?.has(name) || false;
-}
-
-function setFileDeletePending(vault, name, generation) {
-  if (!pendingFileDeletes.has(vault)) pendingFileDeletes.set(vault, new Map());
-  pendingFileDeletes.get(vault).set(name, generation);
-}
-
-function clearFileDeletePending(vault, name, generation) {
-  const vaultDeletes = pendingFileDeletes.get(vault);
-  if (vaultDeletes?.get(name) !== generation) return;
-  vaultDeletes.delete(name);
-  if (!vaultDeletes.size) pendingFileDeletes.delete(vault);
-}
 
 async function loadFiles(vault) {
   const generation = ++fileLoadGeneration;
@@ -1142,7 +1122,7 @@ async function loadFiles(vault) {
   filesState = 'loading';
   files = [];
   setListLoadStatus('files', 'loading');
-  showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 6 : 5);
+  showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 5 : 4);
   try {
     const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
     if (generation !== fileLoadGeneration) return false;
@@ -1152,7 +1132,7 @@ async function loadFiles(vault) {
     filesState = 'failed';
     files = [];
     setListLoadStatus('files', 'failed');
-    showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 6 : 5);
+    showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 5 : 4);
     throw e;
   }
   filesState = 'ready';
@@ -1167,37 +1147,35 @@ function renderFiles() {
   const dirOf = (f) => (f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/')) : '');
   const fileFolders = new Set(files.map(dirOf).filter(Boolean));
   setListSummary('files', files.length, files.length, fileFolders.size);
-  const cols = fileSelection.enabled ? 6 : 5;
+  const cols = fileSelection.enabled ? 5 : 4;
   const sorted = sortedTableItems('files', files);
   const rendered = renderGrouped(tbody, sorted, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
   syncSelectionUi('files', rendered.map((f) => f.name));
   if (!tbody.children.length) showListState(tbody, 'files', 'empty', cols);
 }
 
-function isCurrentFileAction(generation, vault) {
-  return generation === fileActionGeneration && vault === currentVault;
-}
-
-function syncFileDeleteButtons(vault, name) {
-  const pending = isFileDeletePending(vault, name);
-  for (const button of document.querySelectorAll('#files-table button[data-file-name]')) {
-    if (button.dataset.fileVault !== vault || button.dataset.fileName !== name) continue;
-    if (pending) beginPendingAction(button, 'Deleting…');
-    else resetConfirmation(button, 'Delete');
+function fileNameCell(name) {
+  if (fileSelection.enabled) {
+    const cell = itemNameCell('file', name, () => toggleSelected('files', name), `Select file ${name}`);
+    cell.classList.add('column-file-name');
+    return cell;
   }
-}
-
-async function reconcileFilesAfterDelete(generation, vault) {
-  try {
-    await loadFiles(vault);
-  } catch (e) {
-    if (!isCurrentFileAction(generation, vault)) return;
-    fail(e);
-  }
+  const td = document.createElement('td');
+  td.className = 'item-name column-file-name';
+  const link = document.createElement('a');
+  link.className = 'item-name-content file-link';
+  link.href = `/api/files/${encodeURIComponent(name)}${vaultQS(currentVault)}`;
+  link.download = name;
+  link.appendChild(icon('file'));
+  const label = document.createElement('strong');
+  label.textContent = name;
+  link.appendChild(label);
+  link.onclick = (event) => { event.preventDefault(); downloadFile(name); };
+  td.appendChild(link);
+  return td;
 }
 
 function fileRow(f, grouped = false) {
-  const vault = currentVault;
   const name = f.name;
   const tr = document.createElement('tr');
   if (grouped) tr.classList.add('folder-child');
@@ -1205,10 +1183,7 @@ function fileRow(f, grouped = false) {
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
   for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, XvUiModel.formatDate(f.last_modified)].entries()) {
     if (index === 0) {
-      const activate = fileSelection.enabled ? () => toggleSelected('files', name) : null;
-      const nameCell = itemNameCell('file', name, activate, `Select file ${name}`);
-      nameCell.classList.add('column-file-name');
-      tr.appendChild(nameCell);
+      tr.appendChild(fileNameCell(name));
       continue;
     }
     const td = document.createElement('td');
@@ -1218,52 +1193,9 @@ function fileRow(f, grouped = false) {
     td.textContent = cell || '';
     tr.appendChild(td);
   }
-  const td = document.createElement('td');
-  td.className = 'file-actions';
-  const actions = document.createElement('div');
-  actions.className = 'file-actions-content';
   if (fileSelection.enabled) {
     tr.onclick = () => toggleSelected('files', name);
-    td.appendChild(actions);
-    tr.appendChild(td);
-    return tr;
   }
-  const dl = document.createElement('button');
-  dl.textContent = 'Download';
-  dl.className = 'button secondary compact';
-  dl.prepend(icon('download'));
-  dl.onclick = () => downloadFile(f.name);
-  const del = document.createElement('button');
-  const pending = isFileDeletePending(vault, name);
-  del.textContent = pending ? 'Deleting…' : 'Delete';
-  del.disabled = pending;
-  del.dataset.defaultLabel = 'Delete';
-  del.dataset.fileVault = vault;
-  del.dataset.fileName = name;
-  del.className = 'button danger compact';
-  del.onclick = async () => {
-    if (isFileDeletePending(vault, name)) return;
-    if (del.disabled) return;
-    if (!armConfirmation(del, 'Really delete?')) return;
-    const generation = fileActionGeneration;
-    setFileDeletePending(vault, name, generation);
-    beginPendingAction(del, 'Deleting…');
-    try {
-      await api('DELETE', `/api/files/${encodeURIComponent(name)}${vaultQS(vault)}`);
-    } catch (e) {
-      clearFileDeletePending(vault, name, generation);
-      if (!isCurrentFileAction(generation, vault)) return;
-      syncFileDeleteButtons(vault, name);
-      fail(e);
-      return;
-    }
-    clearFileDeletePending(vault, name, generation);
-    if (!isCurrentFileAction(generation, vault)) return;
-    await reconcileFilesAfterDelete(generation, vault);
-  };
-  actions.append(dl, del);
-  td.appendChild(actions);
-  tr.appendChild(td);
   return tr;
 }
 

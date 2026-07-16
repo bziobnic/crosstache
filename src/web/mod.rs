@@ -413,12 +413,25 @@ mod tests {
     }
 
     #[test]
-    fn ui_file_actions_are_named_and_delete_is_confirmed() {
-        assert!(APP_JS.contains("dl.textContent = 'Download'"));
-        assert!(APP_JS.contains("del.dataset.defaultLabel = 'Delete'"));
-        assert!(APP_JS.contains("armConfirmation(del, 'Really delete?')"));
-        assert!(!APP_JS.contains("dl.textContent = '⬇'"));
-        assert!(!APP_JS.contains("del.textContent = '✕'"));
+    fn ui_files_are_links_without_row_actions() {
+        assert!(APP_JS.contains("function fileNameCell(name)"));
+        assert!(APP_JS.contains("document.createElement('a')"));
+        assert!(APP_JS.contains("downloadFile(name)"));
+        assert!(!INDEX_HTML.contains("class=\"file-actions\""));
+        assert!(!APP_JS.contains("dl.textContent = 'Download'"));
+        assert!(!APP_JS.contains("del.dataset.fileName"));
+    }
+
+    #[test]
+    fn ui_file_delete_exists_only_in_selection_toolbar() {
+        assert_eq!(INDEX_HTML.matches("id=\"bulk-delete-files\"").count(), 1);
+        assert!(APP_JS.contains("$('#bulk-delete-files').onclick"));
+        assert!(!APP_JS.contains("pendingFileDeletes"));
+    }
+
+    #[test]
+    fn ui_file_colspans_match_four_data_columns() {
+        assert!(APP_JS.contains("fileSelection.enabled ? 5 : 4"));
     }
 
     #[test]
@@ -433,9 +446,6 @@ mod tests {
         }
         assert!(APP_JS.contains("t.className = `toast ${isError ? 'error' : 'success'}`"));
         assert!(APP_JS.contains("t.replaceChildren(icon(isError ? 'alert' : 'check')"));
-        assert!(APP_JS.contains("dl.className = 'button secondary compact'"));
-        assert!(APP_JS.contains("dl.prepend(icon('download'))"));
-        assert!(APP_JS.contains("del.className = 'button danger compact'"));
         assert!(STYLE_CSS.contains(".bulk-toolbar {"));
         assert!(STYLE_CSS.contains(".dropzone-content {"));
         assert!(STYLE_CSS.contains(".toast.success {"));
@@ -446,48 +456,11 @@ mod tests {
     }
 
     #[test]
-    fn ui_file_delete_success_refreshes_current_vault_independent_of_list_generation() {
-        assert!(APP_JS.contains("let fileActionGeneration = 0"));
-        assert!(APP_JS.contains("fileActionGeneration++;"));
-        assert!(APP_JS.contains("function isCurrentFileAction(generation, vault)"));
-        assert!(APP_JS.contains("generation === fileActionGeneration"));
-        assert!(APP_JS.contains("vault === currentVault"));
-        assert!(
-            !APP_JS.contains("generation === fileLoadGeneration &&\n    vault === currentVault")
-        );
-        assert!(APP_JS.contains("if (!isCurrentFileAction(generation, vault)) return;"));
-        assert!(APP_JS.contains("await reconcileFilesAfterDelete(generation, vault);"));
-    }
-
-    #[test]
     fn ui_delete_buttons_enter_non_repeatable_pending_state() {
         assert!(APP_JS.contains("function beginPendingAction(button, label)"));
         assert!(APP_JS.contains("button.disabled = true;"));
         assert!(APP_JS.contains("button.disabled = false;"));
         assert!(APP_JS.contains("beginPendingAction(btn, 'Deleting…')"));
-        assert!(APP_JS.contains("beginPendingAction(del, 'Deleting…')"));
-    }
-
-    #[test]
-    fn ui_file_delete_pending_state_survives_same_vault_rerenders() {
-        assert!(APP_JS.contains("const pendingFileDeletes = new Map()"));
-        assert!(APP_JS.contains("function isFileDeletePending(vault, name)"));
-        assert!(APP_JS.contains("function setFileDeletePending(vault, name, generation)"));
-        assert!(APP_JS.contains("function clearFileDeletePending(vault, name, generation)"));
-        assert!(APP_JS.contains("pendingFileDeletes.clear();"));
-        assert!(APP_JS.contains("if (isFileDeletePending(vault, name)) return;"));
-        assert!(APP_JS.contains("setFileDeletePending(vault, name, generation);"));
-        assert!(APP_JS.contains("del.textContent = pending ? 'Deleting…' : 'Delete';"));
-        assert!(APP_JS.contains("del.disabled = pending;"));
-    }
-
-    #[test]
-    fn ui_reports_current_file_reconciliation_failures() {
-        assert!(APP_JS.contains("async function reconcileFilesAfterDelete(generation, vault)"));
-        assert!(APP_JS.contains("await reconcileFilesAfterDelete(generation, vault);"));
-        assert!(
-            APP_JS.contains("if (!isCurrentFileAction(generation, vault)) return;\n    fail(e);")
-        );
     }
 
     #[test]
@@ -724,13 +697,11 @@ mod tests {
     }
 
     #[test]
-    fn ui_keeps_file_table_cells_semantic_and_phone_actions_visible() {
+    fn ui_keeps_file_table_cells_semantic_on_phone() {
         assert!(APP_JS.contains("content.className = 'item-name-content'"));
-        assert!(APP_JS.contains("actions.className = 'file-actions-content'"));
         assert!(!STYLE_CSS.contains(".item-name { display:flex;"));
         assert!(!STYLE_CSS.contains(".file-actions { display:flex;"));
         assert!(STYLE_CSS.contains(".item-name-content { display:flex;"));
-        assert!(STYLE_CSS.contains(".file-actions-content { display:flex;"));
         for marker in ["column-file-size", "column-file-modified"] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
             assert!(APP_JS.contains(marker), "missing {marker}");
@@ -768,7 +739,7 @@ mod tests {
         ] {
             assert!(!STYLE_CSS.contains(calc_width), "unexpected {calc_width}");
         }
-        assert!(STYLE_CSS.contains("#files-table.selection-mode .file-actions { display:none; }"));
+        assert!(!STYLE_CSS.contains("#files-table.selection-mode .file-actions { display:none; }"));
     }
 
     #[test]
