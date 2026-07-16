@@ -259,13 +259,7 @@ function saveColumnWidths(kind) {
 }
 function resizeColumns(kind, index, deltaPercent) {
   const config = TABLE_WIDTHS[kind];
-  const widths = [...config.widths];
-  const left = Math.max(config.minimums[index], widths[index] + deltaPercent);
-  const applied = left - widths[index];
-  const right = widths[index + 1] - applied;
-  if (right < config.minimums[index + 1]) return;
-  widths[index] = left;
-  widths[index + 1] = right;
+  const widths = XvUiModel.resizeAdjacentWidths(config.widths, config.minimums, index, deltaPercent);
   applyColumnWidths(kind, widths);
   saveColumnWidths(kind);
 }
@@ -288,9 +282,11 @@ function initColumnResizing() {
         const stop = () => {
           window.removeEventListener('pointermove', move);
           window.removeEventListener('pointerup', stop);
+          window.removeEventListener('pointercancel', stop);
         };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', stop, { once: true });
+        window.addEventListener('pointercancel', stop, { once: true });
       };
       handle.onkeydown = (event) => {
         if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;

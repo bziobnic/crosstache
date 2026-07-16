@@ -259,6 +259,8 @@ mod tests {
         assert!(APP_JS.contains("xv.ui.columns.files.v1"));
         assert!(APP_JS.contains("handle.onpointerdown"));
         assert!(APP_JS.contains("handle.onkeydown"));
+        assert!(APP_JS.contains("window.addEventListener('pointercancel', stop"));
+        assert!(APP_JS.contains("window.removeEventListener('pointercancel', stop"));
     }
 
     #[test]

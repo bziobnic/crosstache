@@ -76,7 +76,18 @@
       && Math.abs(widths.reduce((sum, width) => sum + width, 0) - 100) < 0.1;
     return valid ? widths : [...defaults];
   }
+  function resizeAdjacentWidths(widths, minimums, index, delta) {
+    const resized = [...widths];
+    const pairTotal = widths[index] + widths[index + 1];
+    const left = Math.min(
+      pairTotal - minimums[index + 1],
+      Math.max(minimums[index], widths[index] + delta),
+    );
+    resized[index] = left;
+    resized[index + 1] = pairTotal - left;
+    return resized;
+  }
   return { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
     protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
-    sortedCopy, normalizeWidths };
+    sortedCopy, normalizeWidths, resizeAdjacentWidths };
 }));

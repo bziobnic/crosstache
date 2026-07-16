@@ -84,3 +84,20 @@ test('saved widths must match shape, total, and minimums', () => {
   assert.deepEqual(model.normalizeWidths('[5,20,20,35,20]', defaults, minimums), defaults);
   assert.deepEqual(model.normalizeWidths('[28,15,14,25]', defaults, minimums), defaults);
 });
+
+test('adjacent width growth clamps exactly at the right minimum and preserves total', () => {
+  assert.equal(typeof model.resizeAdjacentWidths, 'function');
+  const widths = model.resizeAdjacentWidths([32, 11, 57], [14, 10, 12], 0, 2);
+  assert.deepEqual(widths, [33, 10, 57]);
+  assert.equal(widths.reduce((sum, width) => sum + width, 0), 100);
+
+  const extreme = model.resizeAdjacentWidths([28, 15, 57], [14, 10, 12], 0, 100);
+  assert.deepEqual(extreme, [33, 10, 57]);
+});
+
+test('adjacent width shrink clamps exactly at the left minimum and preserves total', () => {
+  assert.equal(typeof model.resizeAdjacentWidths, 'function');
+  const widths = model.resizeAdjacentWidths([28, 15, 57], [14, 10, 12], 0, -100);
+  assert.deepEqual(widths, [14, 29, 57]);
+  assert.equal(widths.reduce((sum, width) => sum + width, 0), 100);
+});
