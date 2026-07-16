@@ -31,6 +31,42 @@ pub(crate) struct WebState {
     pub types: Vec<crate::records::RecordType>,
 }
 
+/// A bound web UI server that has not started accepting requests yet.
+///
+/// Keeping binding separate from serving lets native shells obtain the
+/// tokenized URL before they navigate their webview to it.
+pub struct PreparedWebServer {
+    url: String,
+    listener: tokio::net::TcpListener,
+    app: Router,
+}
+
+impl PreparedWebServer {
+    /// The loopback-only URL for this server, including its session token.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Serve until the supplied shutdown signal completes.
+    pub async fn serve_with_shutdown<F>(self, shutdown: F) -> Result<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        axum::serve(self.listener, self.app)
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(|e| CrosstacheError::config(format!("web server error: {e}")))
+    }
+
+    /// Serve until the process exits.
+    #[allow(dead_code)] // Used by the desktop crate; the xv binary module copy does not call it.
+    pub async fn serve(self) -> Result<()> {
+        axum::serve(self.listener, self.app)
+            .await
+            .map_err(|e| CrosstacheError::config(format!("web server error: {e}")))
+    }
+}
+
 pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
         .route("/context", get(api::get_context))
@@ -91,13 +127,12 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .with_state(state)
 }
 
-/// Entry point for `xv ui`.
-pub async fn run_web(
+/// Bind the embedded web UI and return it without starting the accept loop.
+pub async fn prepare_web(
     config: Config,
     registry: Option<&BackendRegistry>,
     port: Option<u16>,
-    no_open: bool,
-) -> Result<()> {
+) -> Result<PreparedWebServer> {
     let registry = registry.ok_or_else(|| {
         CrosstacheError::config("backend initialization failed; `xv ui` needs a working backend")
     })?;
@@ -127,6 +162,19 @@ pub async fn run_web(
         .map_err(|e| CrosstacheError::config(format!("local_addr: {e}")))?;
     let url = format!("http://127.0.0.1:{}/?token={token}", addr.port());
 
+    Ok(PreparedWebServer { url, listener, app })
+}
+
+/// Entry point for `xv ui`.
+pub async fn run_web(
+    config: Config,
+    registry: Option<&BackendRegistry>,
+    port: Option<u16>,
+    no_open: bool,
+) -> Result<()> {
+    let server = prepare_web(config, registry, port).await?;
+    let url = server.url().to_string();
+
     println!("xv ui listening at {url}");
     println!("Press Ctrl-C to stop.");
     if !no_open {
@@ -135,12 +183,11 @@ pub async fn run_web(
         }
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+    server
+        .serve_with_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await
-        .map_err(|e| CrosstacheError::config(format!("web server error: {e}")))
 }
 
 #[cfg(test)]

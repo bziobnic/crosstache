@@ -9,6 +9,11 @@ repository = "https://github.com/bziobnic/crosstache"
 keywords = ["secrets", "cli", "azure", "aws", "keyvault"]
 categories = ["command-line-utilities", "authentication"]
 
+[workspace]
+members = ["desktop/src-tauri"]
+default-members = ["."]
+resolver = "2"
+
 [[bin]]
 name = "xv"
 path = "src/main.rs"
