@@ -18,6 +18,7 @@ pub(crate) mod auth;
 pub(crate) mod testutil;
 
 const INDEX_HTML: &str = include_str!("assets/index.html");
+const UI_MODEL_JS: &str = include_str!("assets/ui-model.js");
 const APP_JS: &str = include_str!("assets/app.js");
 const STYLE_CSS: &str = include_str!("assets/style.css");
 
@@ -111,6 +112,15 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
         .route(
+            "/ui-model.js",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+                    UI_MODEL_JS,
+                )
+            }),
+        )
+        .route(
             "/app.js",
             get(|| async {
                 (
@@ -202,6 +212,7 @@ mod tests {
         let app = build_router(testutil::test_state());
         for (path, ct) in [
             ("/", "text/html; charset=utf-8"),
+            ("/ui-model.js", "application/javascript"),
             ("/app.js", "application/javascript"),
             ("/style.css", "text/css"),
         ] {
@@ -220,7 +231,36 @@ mod tests {
     fn ui_persists_token_for_tab_reloads() {
         assert!(APP_JS.contains("sessionStorage.setItem(TOKEN_STORAGE_KEY"));
         assert!(APP_JS.contains("sessionStorage.getItem(TOKEN_STORAGE_KEY)"));
-        assert!(!APP_JS.contains("localStorage"));
+        assert!(!APP_JS.contains("localStorage.setItem(TOKEN_STORAGE_KEY"));
+    }
+
+    #[test]
+    fn ui_persists_pointer_and_keyboard_column_resizing() {
+        assert!(INDEX_HTML.contains("<colgroup>"));
+        for class in [
+            "column-secret-name",
+            "column-secret-folder",
+            "column-groups",
+            "column-note",
+            "column-secret-updated",
+            "column-file-name",
+            "column-file-size",
+            "column-file-type",
+            "column-file-modified",
+        ] {
+            assert!(
+                INDEX_HTML.contains(&format!("<col class=\"{class}\">")),
+                "missing responsive col class {class}"
+            );
+        }
+        assert!(INDEX_HTML.contains("class=\"column-resizer\""));
+        assert!(INDEX_HTML.contains("role=\"separator\""));
+        assert!(APP_JS.contains("xv.ui.columns.secrets.v1"));
+        assert!(APP_JS.contains("xv.ui.columns.files.v1"));
+        assert!(APP_JS.contains("handle.onpointerdown"));
+        assert!(APP_JS.contains("handle.onkeydown"));
+        assert!(APP_JS.contains("window.addEventListener('pointercancel', stop"));
+        assert!(APP_JS.contains("window.removeEventListener('pointercancel', stop"));
     }
 
     #[test]
@@ -341,18 +381,61 @@ mod tests {
     }
 
     #[test]
+    fn ui_masks_every_existing_protected_value_with_fixed_length() {
+        assert!(UI_MODEL_JS.contains("const PROTECTED_MASK = '***************';"));
+        assert!(APP_JS.contains("XvUiModel.createProtectedState(value, value !== undefined)"));
+        assert!(APP_JS.contains("input.readOnly = state.masked;"));
+        assert!(APP_JS.contains("input.value = XvUiModel.protectedDisplay(state);"));
+    }
+
+    #[test]
+    fn ui_plain_secret_toggles_and_never_submits_the_mask() {
+        assert!(APP_JS.contains("let plainSecretState = null;"));
+        assert!(APP_JS.contains("async function loadPlainSecretValue(generation, selection)"));
+        assert!(APP_JS.contains("XvUiModel.loadProtected(state"));
+        assert!(APP_JS.contains("const transition = state.revision;"));
+        assert!(APP_JS.contains("state.revision !== transition"));
+        assert!(APP_JS.contains("else if (plainSecretState?.dirty"));
+        assert!(!APP_JS.contains("value: XvUiModel.PROTECTED_MASK"));
+    }
+
+    #[test]
+    fn ui_expiration_is_blank_when_absent_and_updated_is_date_only() {
+        assert!(APP_JS.contains("f.elements.expires_on.value = '';"));
+        assert!(APP_JS.contains("XvUiModel.expirationDate(meta.expires_on)"));
+        assert!(APP_JS.contains("XvUiModel.formatDate(s.updated_on)"));
+        assert!(INDEX_HTML.contains(
+            "input name=\"expires_on\" type=\"text\" inputmode=\"numeric\" placeholder=\"YYYY-MM-DD\""
+        ));
+        assert!(!INDEX_HTML.contains("input name=\"expires_on\" type=\"date\""));
+    }
+
+    #[test]
     fn ui_resets_secret_delete_confirmation_on_drawer_transitions() {
         assert!(APP_JS.contains("function resetConfirmation"));
         assert!(APP_JS.contains("resetConfirmation($('#delete'), 'Delete')"));
     }
 
     #[test]
-    fn ui_file_actions_are_named_and_delete_is_confirmed() {
-        assert!(APP_JS.contains("dl.textContent = 'Download'"));
-        assert!(APP_JS.contains("del.dataset.defaultLabel = 'Delete'"));
-        assert!(APP_JS.contains("armConfirmation(del, 'Really delete?')"));
-        assert!(!APP_JS.contains("dl.textContent = '⬇'"));
-        assert!(!APP_JS.contains("del.textContent = '✕'"));
+    fn ui_files_are_links_without_row_actions() {
+        assert!(APP_JS.contains("function fileNameCell(name)"));
+        assert!(APP_JS.contains("document.createElement('a')"));
+        assert!(APP_JS.contains("downloadFile(name)"));
+        assert!(!INDEX_HTML.contains("class=\"file-actions\""));
+        assert!(!APP_JS.contains("dl.textContent = 'Download'"));
+        assert!(!APP_JS.contains("del.dataset.fileName"));
+    }
+
+    #[test]
+    fn ui_file_delete_exists_only_in_selection_toolbar() {
+        assert_eq!(INDEX_HTML.matches("id=\"bulk-delete-files\"").count(), 1);
+        assert!(APP_JS.contains("$('#bulk-delete-files').onclick"));
+        assert!(!APP_JS.contains("pendingFileDeletes"));
+    }
+
+    #[test]
+    fn ui_file_colspans_match_four_data_columns() {
+        assert!(APP_JS.contains("fileSelection.enabled ? 5 : 4"));
     }
 
     #[test]
@@ -367,9 +450,6 @@ mod tests {
         }
         assert!(APP_JS.contains("t.className = `toast ${isError ? 'error' : 'success'}`"));
         assert!(APP_JS.contains("t.replaceChildren(icon(isError ? 'alert' : 'check')"));
-        assert!(APP_JS.contains("dl.className = 'button secondary compact'"));
-        assert!(APP_JS.contains("dl.prepend(icon('download'))"));
-        assert!(APP_JS.contains("del.className = 'button danger compact'"));
         assert!(STYLE_CSS.contains(".bulk-toolbar {"));
         assert!(STYLE_CSS.contains(".dropzone-content {"));
         assert!(STYLE_CSS.contains(".toast.success {"));
@@ -380,48 +460,11 @@ mod tests {
     }
 
     #[test]
-    fn ui_file_delete_success_refreshes_current_vault_independent_of_list_generation() {
-        assert!(APP_JS.contains("let fileActionGeneration = 0"));
-        assert!(APP_JS.contains("fileActionGeneration++;"));
-        assert!(APP_JS.contains("function isCurrentFileAction(generation, vault)"));
-        assert!(APP_JS.contains("generation === fileActionGeneration"));
-        assert!(APP_JS.contains("vault === currentVault"));
-        assert!(
-            !APP_JS.contains("generation === fileLoadGeneration &&\n    vault === currentVault")
-        );
-        assert!(APP_JS.contains("if (!isCurrentFileAction(generation, vault)) return;"));
-        assert!(APP_JS.contains("await reconcileFilesAfterDelete(generation, vault);"));
-    }
-
-    #[test]
     fn ui_delete_buttons_enter_non_repeatable_pending_state() {
         assert!(APP_JS.contains("function beginPendingAction(button, label)"));
         assert!(APP_JS.contains("button.disabled = true;"));
         assert!(APP_JS.contains("button.disabled = false;"));
         assert!(APP_JS.contains("beginPendingAction(btn, 'Deleting…')"));
-        assert!(APP_JS.contains("beginPendingAction(del, 'Deleting…')"));
-    }
-
-    #[test]
-    fn ui_file_delete_pending_state_survives_same_vault_rerenders() {
-        assert!(APP_JS.contains("const pendingFileDeletes = new Map()"));
-        assert!(APP_JS.contains("function isFileDeletePending(vault, name)"));
-        assert!(APP_JS.contains("function setFileDeletePending(vault, name, generation)"));
-        assert!(APP_JS.contains("function clearFileDeletePending(vault, name, generation)"));
-        assert!(APP_JS.contains("pendingFileDeletes.clear();"));
-        assert!(APP_JS.contains("if (isFileDeletePending(vault, name)) return;"));
-        assert!(APP_JS.contains("setFileDeletePending(vault, name, generation);"));
-        assert!(APP_JS.contains("del.textContent = pending ? 'Deleting…' : 'Delete';"));
-        assert!(APP_JS.contains("del.disabled = pending;"));
-    }
-
-    #[test]
-    fn ui_reports_current_file_reconciliation_failures() {
-        assert!(APP_JS.contains("async function reconcileFilesAfterDelete(generation, vault)"));
-        assert!(APP_JS.contains("await reconcileFilesAfterDelete(generation, vault);"));
-        assert!(
-            APP_JS.contains("if (!isCurrentFileAction(generation, vault)) return;\n    fail(e);")
-        );
     }
 
     #[test]
@@ -635,9 +678,9 @@ mod tests {
     #[test]
     fn ui_has_dark_responsive_and_accessible_visual_rules() {
         for marker in [
-            "class=\"column-groups\"",
-            "class=\"column-note\"",
-            "class=\"column-file-type\"",
+            "class=\"column-groups sortable\"",
+            "class=\"column-note sortable\"",
+            "class=\"column-file-type sortable\"",
             "aria-label=\"Vault content\"",
             "aria-labelledby=\"drawer-title\"",
         ] {
@@ -658,13 +701,11 @@ mod tests {
     }
 
     #[test]
-    fn ui_keeps_file_table_cells_semantic_and_phone_actions_visible() {
+    fn ui_keeps_file_table_cells_semantic_on_phone() {
         assert!(APP_JS.contains("content.className = 'item-name-content'"));
-        assert!(APP_JS.contains("actions.className = 'file-actions-content'"));
         assert!(!STYLE_CSS.contains(".item-name { display:flex;"));
         assert!(!STYLE_CSS.contains(".file-actions { display:flex;"));
         assert!(STYLE_CSS.contains(".item-name-content { display:flex;"));
-        assert!(STYLE_CSS.contains(".file-actions-content { display:flex;"));
         for marker in ["column-file-size", "column-file-modified"] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
             assert!(APP_JS.contains(marker), "missing {marker}");
@@ -682,6 +723,7 @@ mod tests {
             ".column-file-size, .column-file-type, .column-file-modified { display:none; }"
         ));
         assert!(!STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
+        assert!(STYLE_CSS.contains(".selection-column { width:2.75rem;"));
         for rule in [
             "#secrets-table:not(.selection-mode) .column-secret-name { width:50%; }",
             "#secrets-table:not(.selection-mode) .column-secret-folder { width:22%; }",
@@ -692,7 +734,7 @@ mod tests {
             "#files-table:not(.selection-mode) .file-actions { width:54%; }",
             "#files-table.selection-mode .column-file-name { width:87.64%; }",
         ] {
-            assert!(STYLE_CSS.contains(rule), "missing {rule}");
+            assert!(!STYLE_CSS.contains(rule), "unexpected {rule}");
         }
         for calc_width in [
             "width:calc(50% - 2.75rem)",
@@ -701,7 +743,7 @@ mod tests {
         ] {
             assert!(!STYLE_CSS.contains(calc_width), "unexpected {calc_width}");
         }
-        assert!(STYLE_CSS.contains("#files-table.selection-mode .file-actions { display:none; }"));
+        assert!(!STYLE_CSS.contains("#files-table.selection-mode .file-actions { display:none; }"));
     }
 
     #[test]
@@ -722,5 +764,26 @@ mod tests {
         assert!(STYLE_CSS.contains(".tab { min-height:2.25rem;"));
         assert!(STYLE_CSS.contains(".button.compact { min-height:2.25rem;"));
         assert!(STYLE_CSS.contains(".linkish { min-height:2.25rem;"));
+    }
+
+    #[test]
+    fn ui_exposes_accessible_sortable_headers() {
+        for key in [
+            "name", "folder", "groups", "note", "updated", "size", "type", "modified",
+        ] {
+            assert!(
+                INDEX_HTML.contains(&format!("data-sort-key=\"{key}\"")),
+                "missing {key}"
+            );
+        }
+        assert!(APP_JS.contains("function syncSortHeaders(kind)"));
+        assert!(APP_JS.contains("header.setAttribute('aria-sort'"));
+    }
+
+    #[test]
+    fn ui_sorts_before_grouping() {
+        assert!(APP_JS.contains("const sorted = sortedTableItems('secrets', visible);"));
+        assert!(APP_JS.contains("const sorted = sortedTableItems('files', files);"));
+        assert!(APP_JS.contains("for (const name of [...groups.keys()].sort())"));
     }
 }
