@@ -18,6 +18,7 @@ pub(crate) mod auth;
 pub(crate) mod testutil;
 
 const INDEX_HTML: &str = include_str!("assets/index.html");
+const UI_MODEL_JS: &str = include_str!("assets/ui-model.js");
 const APP_JS: &str = include_str!("assets/app.js");
 const STYLE_CSS: &str = include_str!("assets/style.css");
 
@@ -111,6 +112,15 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
         .route(
+            "/ui-model.js",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+                    UI_MODEL_JS,
+                )
+            }),
+        )
+        .route(
             "/app.js",
             get(|| async {
                 (
@@ -202,6 +212,7 @@ mod tests {
         let app = build_router(testutil::test_state());
         for (path, ct) in [
             ("/", "text/html; charset=utf-8"),
+            ("/ui-model.js", "application/javascript"),
             ("/app.js", "application/javascript"),
             ("/style.css", "text/css"),
         ] {
