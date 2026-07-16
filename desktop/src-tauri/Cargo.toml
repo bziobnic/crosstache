@@ -1,6 +1,6 @@
 [package]
 name = "xv-desktop"
-version = "0.26.1"
+version = "0.26.2"
 description = "macOS desktop proof of concept for Crosstache Vault"
 authors = ["crosstache Team"]
 edition = "2021"
