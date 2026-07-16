@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.26.2 — Tauri secret and file table polish (2026-07-16)
+
+### Added
+
+- Sortable, resizable table columns with per-table width persistence while
+  retaining folder groups and sorting rows within each group.
+- Authenticated file-name links that download directly from the file table.
+
+### Changed
+
+- File deletion is available only from the top selection toolbar; per-row
+  download and delete actions were removed.
+- Every protected field now uses the same fixed-length mask and Reveal/Hide
+  behavior, including protected fields in typed records.
+
+### Fixed
+
+- Missing expirations remain visibly blank, stored expirations display as
+  `YYYY-MM-DD`, and Updated values no longer include a time.
+- Protected-value loads cannot overwrite newer edits, and the secret drawer
+  supports both textarea and record-input controls without runtime errors.
+
 ## v0.26.1 — Windows upgrade and bare-update prompt fixes (2026-07-15)
 
 ### Fixed

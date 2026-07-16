@@ -1984,7 +1984,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "crosstache"
-version = "0.26.1"
+version = "0.26.2"
 dependencies = [
  "age",
  "aho-corasick",
@@ -9393,7 +9393,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xv-desktop"
-version = "0.26.1"
+version = "0.26.2"
 dependencies = [
  "crosstache",
  "serde_json",
