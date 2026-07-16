@@ -36,19 +36,19 @@
     }
     return value === null || value === undefined || value === '' ? null : String(value);
   }
-  function compareValues(left, right, type) {
+  function compareValues(left, right, type, direction) {
     const a = comparable(left, type); const b = comparable(right, type);
     if (a === null && b === null) return 0;
     if (a === null) return 1;
     if (b === null) return -1;
-    if (type === 'text') return collator.compare(a, b);
-    return a === b ? 0 : (a < b ? -1 : 1);
+    const multiplier = direction === 'desc' ? -1 : 1;
+    if (type === 'text') return collator.compare(a, b) * multiplier;
+    return a === b ? 0 : (a < b ? -1 : 1) * multiplier;
   }
   function sortedCopy(items, valueOf, nameOf, type = 'text', direction = 'asc') {
-    const multiplier = direction === 'desc' ? -1 : 1;
     return [...items].sort((left, right) => {
-      const primary = compareValues(valueOf(left), valueOf(right), type);
-      return primary ? primary * multiplier : collator.compare(String(nameOf(left)), String(nameOf(right)));
+      const primary = compareValues(valueOf(left), valueOf(right), type, direction);
+      return primary || collator.compare(String(nameOf(left)), String(nameOf(right)));
     });
   }
   function normalizeWidths(serialized, defaults, minimums) {

@@ -34,6 +34,24 @@ test('numeric and date sorts use name tie breaking and empty-last order', () => 
   assert.deepEqual(model.sortedCopy(items, x => x.updated, x => x.name, 'date', 'asc').map(x => x.name), ['charlie', 'beta', 'Alpha']);
 });
 
+test('descending numeric sorts keep empty values last', () => {
+  const items = [
+    { name: 'empty', size: null },
+    { name: 'small', size: 5 },
+    { name: 'large', size: 10 },
+  ];
+  assert.deepEqual(model.sortedCopy(items, x => x.size, x => x.name, 'number', 'desc').map(x => x.name), ['large', 'small', 'empty']);
+});
+
+test('descending date sorts keep empty values last', () => {
+  const items = [
+    { name: 'empty', updated: '' },
+    { name: 'older', updated: '2025-01-01T00:00:00Z' },
+    { name: 'newer', updated: '2025-01-02T00:00:00Z' },
+  ];
+  assert.deepEqual(model.sortedCopy(items, x => x.updated, x => x.name, 'date', 'desc').map(x => x.name), ['newer', 'older', 'empty']);
+});
+
 test('saved widths must match shape, total, and minimums', () => {
   const defaults = [28, 15, 14, 25, 18];
   const minimums = [14, 10, 10, 14, 12];
