@@ -191,6 +191,57 @@ function showListState(tbody, kind, state, cols) {
 const expandedSecretFolders = new Set();
 const expandedFileFolders = new Set();
 
+const tableSort = {
+  secrets: { key: 'name', direction: 'asc' },
+  files: { key: 'name', direction: 'asc' },
+};
+const SORT_COLUMNS = {
+  secrets: {
+    name: [(item) => item.original_name || item.name, 'text'],
+    folder: [(item) => item.folder || '', 'text'],
+    groups: [(item) => item.groups || '', 'text'],
+    note: [(item) => item.note || '', 'text'],
+    updated: [(item) => item.updated_on || '', 'date'],
+  },
+  files: {
+    name: [(item) => item.name, 'text'],
+    size: [(item) => item.size, 'number'],
+    type: [(item) => item.content_type || '', 'text'],
+    modified: [(item) => item.last_modified || '', 'date'],
+  },
+};
+function sortedTableItems(kind, items) {
+  const state = tableSort[kind];
+  const [valueOf, type] = SORT_COLUMNS[kind][state.key];
+  const nameOf = kind === 'secrets'
+    ? (item) => item.original_name || item.name
+    : (item) => item.name;
+  return XvUiModel.sortedCopy(items, valueOf, nameOf, type, state.direction);
+}
+function syncSortHeaders(kind) {
+  const state = tableSort[kind];
+  for (const header of document.querySelectorAll(`#${kind}-table th[data-sort-key]`)) {
+    const active = header.dataset.sortKey === state.key;
+    header.setAttribute('aria-sort', active ? (state.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+    header.querySelector('.sort-indicator').textContent = active ? (state.direction === 'asc' ? '▲' : '▼') : '';
+  }
+}
+function setSort(kind, key) {
+  const state = tableSort[kind];
+  if (state.key === key) state.direction = state.direction === 'asc' ? 'desc' : 'asc';
+  else { state.key = key; state.direction = 'asc'; }
+  syncSortHeaders(kind);
+  renderSelectionKind(kind);
+}
+function initSorting() {
+  for (const kind of ['secrets', 'files']) {
+    for (const header of document.querySelectorAll(`#${kind}-table th[data-sort-key]`)) {
+      header.querySelector('.sort-button').onclick = () => setSort(kind, header.dataset.sortKey);
+    }
+    syncSortHeaders(kind);
+  }
+}
+
 const secretSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };
 const fileSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };
 
@@ -640,6 +691,7 @@ function renderSecrets() {
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
     return hay.includes(filter);
   });
+  const sorted = sortedTableItems('secrets', visible);
   const secretFolders = new Set(visible.map((secret) => secret.folder).filter(Boolean));
   setListSummary('secrets', visible.length, secrets.length, secretFolders.size);
   // While filtering, collapse state is ignored so matches are never
@@ -648,7 +700,7 @@ function renderSecrets() {
   const cols = secretSelection.enabled ? 6 : 5;
   const rendered = renderGrouped(
     tbody,
-    visible,
+    sorted,
     (s) => s.folder || '',
     expandedSecretFolders,
     cols,
@@ -1060,7 +1112,8 @@ function renderFiles() {
   const fileFolders = new Set(files.map(dirOf).filter(Boolean));
   setListSummary('files', files.length, files.length, fileFolders.size);
   const cols = fileSelection.enabled ? 6 : 5;
-  const rendered = renderGrouped(tbody, files, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
+  const sorted = sortedTableItems('files', files);
+  const rendered = renderGrouped(tbody, sorted, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
   syncSelectionUi('files', rendered.map((f) => f.name));
   if (!tbody.children.length) showListState(tbody, 'files', 'empty', cols);
 }
@@ -1346,4 +1399,5 @@ dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFile
 $('#browse-files').onclick = () => $('#file-input').click();
 $('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
+initSorting();
 init().catch(fail);

@@ -58,7 +58,7 @@
     </div>
     <div class="data-surface">
       <table id="secrets-table">
-        <thead><tr><th class="selection-column" hidden><input id="select-all-secrets" type="checkbox" aria-label="Select all visible secrets"></th><th class="column-secret-name">Name</th><th class="column-secret-folder">Folder</th><th class="column-groups">Groups</th><th class="column-note">Note</th><th class="column-secret-updated">Updated</th></tr></thead>
+        <thead><tr><th class="selection-column" hidden><input id="select-all-secrets" type="checkbox" aria-label="Select all visible secrets"></th><th class="column-secret-name sortable" data-sort-key="name" aria-sort="ascending"><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="column-secret-folder sortable" data-sort-key="folder" aria-sort="none"><button class="sort-button" type="button">Folder<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="column-groups sortable" data-sort-key="groups" aria-sort="none"><button class="sort-button" type="button">Groups<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="column-note sortable" data-sort-key="note" aria-sort="none"><button class="sort-button" type="button">Note<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="column-secret-updated sortable" data-sort-key="updated" aria-sort="none"><button class="sort-button" type="button">Updated<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -92,7 +92,7 @@
     </div>
     <div class="data-surface">
       <table id="files-table">
-        <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th class="column-file-name">Name</th><th class="column-file-size">Size</th><th class="column-file-type">Type</th><th class="column-file-modified">Modified</th><th class="file-actions"><span class="sr-only">Actions</span></th></tr></thead>
+        <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th class="column-file-name sortable" data-sort-key="name" aria-sort="ascending"><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="column-file-size sortable" data-sort-key="size" aria-sort="none"><button class="sort-button" type="button">Size<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="column-file-type sortable" data-sort-key="type" aria-sort="none"><button class="sort-button" type="button">Type<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="column-file-modified sortable" data-sort-key="modified" aria-sort="none"><button class="sort-button" type="button">Modified<span class="sort-indicator" aria-hidden="true"></span></button></th><th class="file-actions"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>

@@ -672,9 +672,9 @@ mod tests {
     #[test]
     fn ui_has_dark_responsive_and_accessible_visual_rules() {
         for marker in [
-            "class=\"column-groups\"",
-            "class=\"column-note\"",
-            "class=\"column-file-type\"",
+            "class=\"column-groups sortable\"",
+            "class=\"column-note sortable\"",
+            "class=\"column-file-type sortable\"",
             "aria-label=\"Vault content\"",
             "aria-labelledby=\"drawer-title\"",
         ] {
@@ -759,5 +759,26 @@ mod tests {
         assert!(STYLE_CSS.contains(".tab { min-height:2.25rem;"));
         assert!(STYLE_CSS.contains(".button.compact { min-height:2.25rem;"));
         assert!(STYLE_CSS.contains(".linkish { min-height:2.25rem;"));
+    }
+
+    #[test]
+    fn ui_exposes_accessible_sortable_headers() {
+        for key in [
+            "name", "folder", "groups", "note", "updated", "size", "type", "modified",
+        ] {
+            assert!(
+                INDEX_HTML.contains(&format!("data-sort-key=\"{key}\"")),
+                "missing {key}"
+            );
+        }
+        assert!(APP_JS.contains("function syncSortHeaders(kind)"));
+        assert!(APP_JS.contains("header.setAttribute('aria-sort'"));
+    }
+
+    #[test]
+    fn ui_sorts_before_grouping() {
+        assert!(APP_JS.contains("const sorted = sortedTableItems('secrets', visible);"));
+        assert!(APP_JS.contains("const sorted = sortedTableItems('files', files);"));
+        assert!(APP_JS.contains("for (const name of [...groups.keys()].sort())"));
     }
 }

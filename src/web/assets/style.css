@@ -107,6 +107,12 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transpa
 .data-surface th { height:2.1875rem; padding:0 1rem; text-align:left; color:var(--color-text-muted);
   background:var(--color-surface-subtle); font-size:.6875rem; font-weight:730; letter-spacing:.07em;
   text-transform:uppercase; }
+.sortable { position:relative; padding:0 !important; }
+.sort-button { width:100%; min-height:2.1875rem; display:flex; align-items:center; gap:.35rem;
+  padding:0 1rem; border:0; color:inherit; background:transparent; box-shadow:none;
+  font:inherit; letter-spacing:inherit; text-transform:inherit; text-align:left; }
+.sort-button:hover { color:var(--color-text); border-color:transparent; }
+.sort-indicator { margin-left:auto; color:var(--color-accent); font-size:.6rem; }
 .data-surface td { height:2.75rem; padding:0 1rem; border-top:1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
   color:var(--color-text-muted); }
 .data-surface tbody tr:not(.folder-row):hover { background:color-mix(in srgb, var(--color-accent) 6%, transparent); }
