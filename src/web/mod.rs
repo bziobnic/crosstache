@@ -352,6 +352,29 @@ mod tests {
     }
 
     #[test]
+    fn ui_masks_every_existing_protected_value_with_fixed_length() {
+        assert!(UI_MODEL_JS.contains("const PROTECTED_MASK = '***************';"));
+        assert!(APP_JS.contains("XvUiModel.createProtectedState(value, value !== undefined)"));
+        assert!(APP_JS.contains("input.readOnly = state.masked;"));
+        assert!(APP_JS.contains("input.value = XvUiModel.protectedDisplay(state);"));
+    }
+
+    #[test]
+    fn ui_plain_secret_toggles_and_never_submits_the_mask() {
+        assert!(APP_JS.contains("let plainSecretState = null;"));
+        assert!(APP_JS.contains("async function loadPlainSecretValue(generation, selection)"));
+        assert!(APP_JS.contains("else if (plainSecretState?.dirty"));
+        assert!(!APP_JS.contains("value: XvUiModel.PROTECTED_MASK"));
+    }
+
+    #[test]
+    fn ui_expiration_is_blank_when_absent_and_updated_is_date_only() {
+        assert!(APP_JS.contains("f.elements.expires_on.value = '';"));
+        assert!(APP_JS.contains("XvUiModel.expirationDate(meta.expires_on)"));
+        assert!(APP_JS.contains("XvUiModel.formatDate(s.updated_on)"));
+    }
+
+    #[test]
     fn ui_resets_secret_delete_confirmation_on_drawer_transitions() {
         assert!(APP_JS.contains("function resetConfirmation"));
         assert!(APP_JS.contains("resetConfirmation($('#delete'), 'Delete')"));

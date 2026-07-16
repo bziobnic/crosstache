@@ -119,13 +119,6 @@ function armConfirmation(button, armedLabel, timeoutMs = 3000) {
   return false;
 }
 
-// Dates only, never timestamps. Unparseable strings pass through raw.
-function fmtDate(s) {
-  if (!s) return '';
-  const d = new Date(s);
-  return isNaN(d) ? s : d.toISOString().slice(0, 10);
-}
-
 // Mirrors src/utils/format.rs::format_size: binary (1024) steps, whole
 // bytes without decimals, larger units with two decimals.
 function fmtSize(bytes) {
@@ -417,6 +410,19 @@ let types = []; // resolved record types from /api/types
 // Non-null while the drawer holds a typed record:
 // { typeName, secretFields: {name: value}, metaFields: {name: value} }
 let recordState = null;
+let plainSecretState = null;
+
+function setRevealLabel(button, label) {
+  if (button.id === 'reveal') button.replaceChildren(icon('eye'), label);
+  else button.textContent = label;
+}
+
+function renderProtectedControl(input, button, state) {
+  input.type = 'text';
+  input.readOnly = state.masked;
+  input.value = XvUiModel.protectedDisplay(state);
+  setRevealLabel(button, state.masked ? 'Reveal' : 'Hide');
+}
 
 // Same rule as the TUI: the xv-type tag OR the exact record content type.
 function isRecordMeta(meta) {
@@ -449,35 +455,35 @@ function fieldRow(name, kind, value, required) {
   const input = document.createElement('input');
   input.dataset.fieldName = name;
   input.dataset.fieldKind = kind;
-  input.value = value || '';
   if (required) input.required = true;
   if (kind === 'secret') {
-    input.type = 'password';
+    const state = XvUiModel.createProtectedState(value, value !== undefined);
+    input._protectedState = state;
     input.autocomplete = 'new-password';
     const row = document.createElement('span');
     row.className = 'field-actions';
     const rev = document.createElement('button');
     rev.type = 'button';
     rev.className = 'button secondary';
-    rev.textContent = 'Reveal';
+    renderProtectedControl(input, rev, state);
     rev.onclick = () => {
-      const showing = input.type === 'text';
-      input.type = showing ? 'password' : 'text';
-      rev.textContent = showing ? 'Reveal' : 'Hide';
+      if (state.masked) XvUiModel.revealProtected(state);
+      else XvUiModel.hideProtected(state);
+      renderProtectedControl(input, rev, state);
     };
+    input.oninput = () => XvUiModel.editProtected(state, input.value);
     const cp = document.createElement('button');
     cp.type = 'button';
     cp.className = 'button secondary';
     cp.textContent = 'Copy';
     cp.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(input.value);
-        toast('copied');
-      } catch (e) { fail(e); }
+      try { await navigator.clipboard.writeText(state.value ?? ''); toast('copied'); }
+      catch (e) { fail(e); }
     };
     row.append(rev, cp);
     label.append(input, row);
   } else {
+    input.value = value || '';
     label.append(input);
   }
   return label;
@@ -692,7 +698,7 @@ function secretRow(s, grouped = false) {
   if (grouped) tr.classList.add('folder-child');
   if (secretSelection.ids.has(name)) tr.classList.add('selected-row');
   if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
-  for (const [index, cell] of [name, s.folder, s.groups, s.note, fmtDate(s.updated_on)].entries()) {
+  for (const [index, cell] of [name, s.folder, s.groups, s.note, XvUiModel.formatDate(s.updated_on)].entries()) {
     if (index === 0) {
       const actionLabel = secretSelection.enabled ? `Select secret ${name}` : `Edit secret ${name}`;
       const nameCell = itemNameCell('secret', name, activate, actionLabel);
@@ -730,6 +736,7 @@ function clearDrawerState() {
   editing = null;
   editingMeta = null;
   recordState = null;
+  plainSecretState = null;
 }
 
 function closeDrawer() {
@@ -747,6 +754,10 @@ async function openDrawer(name) {
   editing = name;
   const f = $('#secret-form');
   f.reset();
+  f.elements.expires_on.value = '';
+  plainSecretState = XvUiModel.createProtectedState(name ? null : '', !!name);
+  renderProtectedControl(f.elements.value, $('#reveal'), plainSecretState);
+  f.elements.value.oninput = () => XvUiModel.editProtected(plainSecretState, f.elements.value.value);
   $('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret';
   $('#drawer-title').textContent = name || 'New secret';
   $('#save').textContent = name ? 'Save changes' : 'Create secret';
@@ -767,9 +778,7 @@ async function openDrawer(name) {
       f.elements.folder.value = tags.folder || '';
       f.elements.groups.value = tags.groups || '';
       f.elements.note.value = tags.note || '';
-      // Use the stored literal date on purpose, not fmtDate: fmtDate's
-      // toISOString conversion could shift the date across a timezone boundary.
-      f.elements.expires_on.value = meta.expires_on ? meta.expires_on.slice(0, 10) : '';
+      f.elements.expires_on.value = XvUiModel.expirationDate(meta.expires_on);
       const customTags = {};
       for (const [k, v] of Object.entries(tags)) {
         // xv-type and f.* are managed by the record editor, not echoed blindly.
@@ -833,13 +842,28 @@ async function openRecord(name, meta, tags, generation) {
 
 $('#close-drawer').onclick = closeDrawer;
 
+async function loadPlainSecretValue(generation, selection) {
+  if (plainSecretState.value !== null) return plainSecretState.value;
+  const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+  if (!isCurrentDrawer(generation, selection)) return null;
+  plainSecretState.value = value ?? '';
+  return plainSecretState.value;
+}
+
 $('#reveal').onclick = async () => {
   const generation = drawerGeneration;
   const selection = editing;
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    const state = plainSecretState;
+    if (state.masked) {
+      const value = await loadPlainSecretValue(generation, selection);
+      if (!isCurrentDrawer(generation, selection) || state !== plainSecretState) return;
+      XvUiModel.revealProtected(state, value);
+    } else {
+      XvUiModel.hideProtected(state);
+    }
     if (!isCurrentDrawer(generation, selection)) return;
-    $('#secret-form').elements.value.value = value ?? '';
+    renderProtectedControl($('#secret-form').elements.value, $('#reveal'), state);
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     fail(e);
@@ -850,9 +874,9 @@ $('#copy').onclick = async () => {
   const generation = drawerGeneration;
   const selection = editing;
   try {
-    const { value } = await api('POST', `/api/secrets/${encodeURIComponent(selection)}/value${vaultQS(currentVault)}`);
+    const value = await loadPlainSecretValue(generation, selection);
     if (!isCurrentDrawer(generation, selection)) return;
-    await navigator.clipboard.writeText(value ?? '');
+    await navigator.clipboard.writeText(value);
     if (!isCurrentDrawer(generation, selection)) return;
     toast('copied');
   } catch (e) {
@@ -883,9 +907,10 @@ $('#secret-form').onsubmit = async (ev) => {
       const envelope = {};
       const fieldTags = {};
       for (const input of $('#record-fields').querySelectorAll('input[data-field-name]')) {
-        if (!input.value) continue; // empty = omit field / drop tag
-        if (input.dataset.fieldKind === 'secret') envelope[input.dataset.fieldName] = input.value;
-        else fieldTags[FIELD_TAG_PREFIX + input.dataset.fieldName] = input.value;
+        const value = input.dataset.fieldKind === 'secret' ? input._protectedState.value : input.value;
+        if (!value) continue; // empty = omit field / drop tag
+        if (input.dataset.fieldKind === 'secret') envelope[input.dataset.fieldName] = value;
+        else fieldTags[FIELD_TAG_PREFIX + input.dataset.fieldName] = value;
       }
       const sorted = {};
       for (const k of Object.keys(envelope).sort()) sorted[k] = envelope[k];
@@ -902,10 +927,11 @@ $('#secret-form').onsubmit = async (ev) => {
         enabled: editingMeta ? editingMeta.enabled : true,
         not_before: editingMeta?.not_before || null,
       });
-    } else if (f.value.value) {
+    } else if (plainSecretState?.dirty || (!selection && f.value.value)) {
       // full write: value + all metadata
+      const value = selection ? plainSecretState.value : f.value.value;
       await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
-        value: f.value.value,
+        value,
         folder: f.folder.value || null,
         note: f.note.value || null,
         groups: groups.length ? groups : null,
@@ -1063,7 +1089,7 @@ function fileRow(f, grouped = false) {
   if (grouped) tr.classList.add('folder-child');
   if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
-  for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, fmtDate(f.last_modified)].entries()) {
+  for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, XvUiModel.formatDate(f.last_modified)].entries()) {
     if (index === 0) {
       const activate = fileSelection.enabled ? () => toggleSelected('files', name) : null;
       const nameCell = itemNameCell('file', name, activate, `Select file ${name}`);
