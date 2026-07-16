@@ -525,7 +525,6 @@ function setRevealLabel(button, label) {
 }
 
 function renderProtectedControl(input, button, state) {
-  input.type = 'text';
   input.readOnly = state.masked;
   input.value = XvUiModel.protectedDisplay(state);
   setRevealLabel(button, state.masked ? 'Reveal' : 'Hide');
