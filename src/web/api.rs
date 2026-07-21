@@ -174,6 +174,7 @@ pub(crate) async fn put_secret(
     Query(q): Query<VaultQuery>,
     Json(body): Json<PutSecretBody>,
 ) -> Result<Json<SecretProperties>, ApiError> {
+    reject_reserved_attachment_key(&name)?;
     let request = SecretRequest {
         name: name.clone(),
         value: Zeroizing::new(body.value),
@@ -233,6 +234,7 @@ pub(crate) async fn patch_secret(
     Query(q): Query<VaultQuery>,
     Json(body): Json<PatchSecretBody>,
 ) -> Result<Json<SecretProperties>, ApiError> {
+    reject_reserved_attachment_key(&name)?;
     let request = SecretUpdateRequest {
         name: name.clone(),
         value: None,
@@ -271,15 +273,16 @@ pub(crate) async fn delete_secret(
 
 /// Blunt refusal for the reserved attachment-encryption-key secret — the web
 /// UI has no confirm plumbing to warn (unlike the CLI's `confirm_destructive`
-/// prompts), so deleting or renaming it from here is rejected outright.
+/// prompts), so writing, deleting, or renaming it from here is rejected
+/// outright.
 fn reject_reserved_attachment_key(name: &str) -> Result<(), ApiError> {
     if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
         return Err(ApiError::Status(
             StatusCode::BAD_REQUEST,
             format!(
-                "'{name}' is the attachment encryption key for this vault; deleting or renaming \
-                 it would make all attachments unreadable. Use the CLI (`xv delete --force` / \
-                 `xv mv`) if you really mean to."
+                "'{name}' is the attachment encryption key for this vault; writing, deleting, \
+                 or renaming it would make all attachments unreadable. Use the CLI \
+                 (`xv set` / `xv delete --force` / `xv mv`) if you really mean to."
             ),
         ));
     }
@@ -498,7 +501,9 @@ mod tests {
     use http_body_util::BodyExt;
     use serde_json::json;
     use tower::ServiceExt;
+    use zeroize::Zeroizing;
 
+    use crate::secret::manager::SecretRequest;
     use crate::web::testutil;
 
     pub(crate) async fn get_json(
@@ -631,17 +636,32 @@ mod tests {
 
     #[tokio::test]
     async fn reserved_attachment_key_rejects_delete_and_rename_but_allows_folder_move() {
-        let app = crate::web::build_router(testutil::test_state());
+        let state = testutil::test_state();
         let reserved = crate::secret::attachments::ATTACHMENT_KEY_SECRET;
-
-        let (status, _) = get_json(
-            app.clone(),
-            "PUT",
-            &format!("/api/secrets/{reserved}"),
-            Some(json!({"value": "AGE-SECRET-KEY-1..."})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
+        // Seed the reserved key directly through the backend trait, since
+        // PUT now rejects it too (see `reserved_attachment_key_rejects_put`
+        // below) — there's no API path left to create it.
+        state
+            .backend
+            .secrets()
+            .set_secret(
+                "default",
+                SecretRequest {
+                    name: reserved.to_string(),
+                    value: Zeroizing::new("AGE-SECRET-KEY-1...".to_string()),
+                    content_type: None,
+                    enabled: None,
+                    expires_on: None,
+                    not_before: None,
+                    tags: None,
+                    groups: None,
+                    note: None,
+                    folder: None,
+                },
+            )
+            .await
+            .unwrap();
+        let app = crate::web::build_router(state);
 
         // Delete is refused outright.
         let (status, _) = get_json(
@@ -682,6 +702,44 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reserved_attachment_key_rejects_put_and_patch() {
+        let app = crate::web::build_router(testutil::test_state());
+        let reserved = crate::secret::attachments::ATTACHMENT_KEY_SECRET;
+
+        // Creating/overwriting the reserved key via PUT is refused outright
+        // — the web UI has no confirm plumbing, unlike `xv set`.
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            &format!("/api/secrets/{reserved}"),
+            Some(json!({"value": "AGE-SECRET-KEY-1..."})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Metadata-only PATCH is refused outright too, even though it never
+        // touches the secret value — consistent blunt rejection surface.
+        let (status, _) = get_json(
+            app.clone(),
+            "PATCH",
+            &format!("/api/secrets/{reserved}"),
+            Some(json!({"note": "hi"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // The key was never created, so it doesn't exist.
+        let (status, _) = get_json(
+            app.clone(),
+            "GET",
+            &format!("/api/secrets/{reserved}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

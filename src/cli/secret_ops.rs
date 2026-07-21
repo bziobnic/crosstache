@@ -628,6 +628,17 @@ pub(crate) async fn execute_secret_set_direct(
                             continue;
                         }
                     };
+                // Bulk set has no per-item confirmation flow (unlike the
+                // single-secret path above), so the reserved attachment key
+                // is refused outright rather than prompted for.
+                if is_reserved_attachment_key(&resolved_key) {
+                    output::warn(&format!(
+                        "  ✗ {resolved_key}: reserved for attachment encryption; use 'xv set {resolved_key}' \
+                         (single-secret form) to overwrite it interactively"
+                    ));
+                    error_count += 1;
+                    continue;
+                }
                 // Build each request via the shared helper so bulk set applies
                 // the same write-time metadata (--group/--note/--folder/--tag)
                 // as the single-secret path. (--expires/--not-before are rejected
@@ -1074,6 +1085,13 @@ pub(crate) fn invalidate_trait_secret_cache(config: &Config, backend_name: &str,
 /// "Re-run with {flag_hint} to confirm") — must match what `force` actually
 /// is, since `set` has no override flag at all and `mv` uses `--yes`, not
 /// `--force`.
+/// True if `name` is the reserved attachment-encryption-key secret. Bulk set
+/// has no per-item confirmation flow, so it uses this to refuse outright
+/// instead of going through [`confirm_reserved_key_write`]'s prompt.
+fn is_reserved_attachment_key(name: &str) -> bool {
+    name == crate::secret::attachments::ATTACHMENT_KEY_SECRET
+}
+
 pub(crate) fn confirm_reserved_key_write(
     name: &str,
     force: bool,
@@ -6792,6 +6810,14 @@ async fn execute_secret_copy(
     // Determine target name (use new_name if provided, otherwise use original)
     let target_name = new_name.as_deref().unwrap_or(name);
 
+    // A copy (or `xv move`, which calls this) landing on the reserved
+    // attachment key would silently replace this vault's attachment
+    // identity — same guard as `xv mv`'s rename path.
+    if !confirm_reserved_key_write(target_name, force, "Copying to", "--force")? {
+        output::info("Aborted; secret not copied.");
+        return Ok(());
+    }
+
     println!(
         "Copying secret '{}' from vault '{}' to vault '{}' as '{}'...",
         name, from_vault, to_vault, target_name
@@ -8543,6 +8569,14 @@ mod tests {
         let out = filter_secret_summaries_for_display(secrets, None, true);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "normal");
+    }
+
+    #[test]
+    fn bulk_set_refuses_reserved_key_name() {
+        assert!(is_reserved_attachment_key(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET
+        ));
+        assert!(!is_reserved_attachment_key("normal-secret"));
     }
 
     #[test]
