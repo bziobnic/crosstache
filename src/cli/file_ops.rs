@@ -117,7 +117,9 @@ async fn resolve_file_backend(
 }
 
 /// Actionable capability-gate error for a backend without file storage.
-fn file_storage_unsupported_error(backend: &dyn crate::backend::Backend) -> CrosstacheError {
+pub(crate) fn file_storage_unsupported_error(
+    backend: &dyn crate::backend::Backend,
+) -> CrosstacheError {
     use crate::backend::BackendKind;
     let hint = match backend.kind() {
         BackendKind::Azure => "set a storage account (AZURE_STORAGE_ACCOUNT or [azure].storage_account) and run 'xv init'",

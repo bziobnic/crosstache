@@ -27,13 +27,11 @@ pub const ENC_METADATA_KEY: &str = "xv-encrypted";
 pub const ENC_METADATA_VALUE: &str = "age";
 
 /// Blob-name prefix for a secret's attachments.
-#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub fn attachment_prefix(secret_name: &str) -> String {
     format!("attachments/{secret_name}/")
 }
 
 /// Full blob name for one attachment of a secret.
-#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub fn attachment_blob_name(secret_name: &str, attachment: &str) -> String {
     format!("{}{attachment}", attachment_prefix(secret_name))
 }
@@ -130,7 +128,6 @@ use crate::utils::progress::ProgressReporter;
 
 /// Age-encrypt `request.content` with the vault's attachment key (created on
 /// first use) and upload the ciphertext, flagged `xv-encrypted: age`.
-#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub async fn upload_encrypted(
     secrets: &dyn SecretBackend,
     files: &dyn FileBackend,
@@ -153,7 +150,6 @@ pub async fn upload_encrypted(
 /// Download a file, transparently decrypting it when it carries the
 /// `xv-encrypted: age` metadata flag. Unflagged files (including user-supplied
 /// `.age` files encrypted with foreign keys) pass through untouched.
-#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub async fn download_decrypted(
     secrets: &dyn SecretBackend,
     files: &dyn FileBackend,
@@ -186,7 +182,6 @@ pub async fn download_decrypted(
 }
 
 /// List all attachments of `secret_name` (full blob names).
-#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub async fn list_attachments(
     files: &dyn FileBackend,
     vault: &str,
