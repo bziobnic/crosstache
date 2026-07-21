@@ -218,11 +218,10 @@ Expected: the working tree is clean; the two artifact commits and this implement
 Run:
 
 ```bash
-git pull --rebase
-git push
+git pull --rebase origin agent/tauri-macos-poc
+git push -u origin codex/boothbay-immersive-palette
 ```
 
-Expected: the rebase completes without conflicts and `agent/tauri-macos-poc` is up to date with its upstream remote.
+Expected: the rebase completes without conflicts and `codex/boothbay-immersive-palette` is pushed with its upstream remote configured.
 
 Report clickable paths for `tailwind.css`, the PNG mockup, and the design/implementation documents, plus the verification results.
-
