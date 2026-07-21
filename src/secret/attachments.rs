@@ -17,23 +17,29 @@ use crate::error::{CrosstacheError, Result};
 use crate::secret::manager::SecretRequest;
 
 /// Reserved per-vault secret holding the age identity for attachments.
+#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub const ATTACHMENT_KEY_SECRET: &str = "xv-attachment-key";
 /// File-metadata key marking client-side-encrypted content.
+#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub const ENC_METADATA_KEY: &str = "xv-encrypted";
 /// File-metadata value for age encryption.
+#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub const ENC_METADATA_VALUE: &str = "age";
 
 /// Blob-name prefix for a secret's attachments.
+#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub fn attachment_prefix(secret_name: &str) -> String {
     format!("attachments/{secret_name}/")
 }
 
 /// Full blob name for one attachment of a secret.
+#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub fn attachment_blob_name(secret_name: &str, attachment: &str) -> String {
     format!("{}{attachment}", attachment_prefix(secret_name))
 }
 
 /// Parse an age identity out of a stored secret value.
+#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 fn parse_identity(value: &str, vault: &str) -> Result<age::x25519::Identity> {
     value.trim().parse::<age::x25519::Identity>().map_err(|e| {
         CrosstacheError::invalid_argument(format!(
@@ -43,6 +49,7 @@ fn parse_identity(value: &str, vault: &str) -> Result<age::x25519::Identity> {
 }
 
 /// Fetch the vault's attachment identity. Errors (actionably) if absent.
+#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub async fn get_identity(
     secrets: &dyn SecretBackend,
     vault: &str,
@@ -66,6 +73,7 @@ pub async fn get_identity(
 /// Fetch the vault's attachment identity, generating and storing it on first
 /// use. After a create, the stored value is re-read and used, so a concurrent
 /// create race converges on a single key.
+#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub async fn get_or_create_identity(
     secrets: &dyn SecretBackend,
     vault: &str,
