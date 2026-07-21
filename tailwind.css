@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@theme {
+  --color-boothbay-navy: #0e0f52;
+  --color-boothbay-deep: #0f1974;
+  --color-boothbay-blue: #192ac2;
+  --color-boothbay-cyan: #08a2d1;
+  --color-boothbay-sky: #a5d6fe;
+  --color-boothbay-white: #ffffff;
+}
+
+:root {
+  --color-canvas: var(--color-boothbay-navy);
+  --color-surface: var(--color-boothbay-deep);
+  --color-surface-elevated: var(--color-boothbay-blue);
+  --color-action-primary: var(--color-boothbay-cyan);
+  --color-border: var(--color-boothbay-sky);
+  --color-text: var(--color-boothbay-white);
+  --color-text-muted: var(--color-boothbay-sky);
+}
