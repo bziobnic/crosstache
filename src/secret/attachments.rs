@@ -121,13 +121,18 @@ pub async fn get_or_create_identity(
     }
 }
 
+#[cfg(feature = "file-ops")]
 use crate::backend::file::FileBackend;
+#[cfg(feature = "file-ops")]
 use crate::backend::local::crypto;
+#[cfg(feature = "file-ops")]
 use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
+#[cfg(feature = "file-ops")]
 use crate::utils::progress::ProgressReporter;
 
 /// Age-encrypt `request.content` with the vault's attachment key (created on
 /// first use) and upload the ciphertext, flagged `xv-encrypted: age`.
+#[cfg(feature = "file-ops")]
 pub async fn upload_encrypted(
     secrets: &dyn SecretBackend,
     files: &dyn FileBackend,
@@ -150,6 +155,7 @@ pub async fn upload_encrypted(
 /// Download a file, transparently decrypting it when it carries the
 /// `xv-encrypted: age` metadata flag. Unflagged files (including user-supplied
 /// `.age` files encrypted with foreign keys) pass through untouched.
+#[cfg(feature = "file-ops")]
 pub async fn download_decrypted(
     secrets: &dyn SecretBackend,
     files: &dyn FileBackend,
@@ -182,6 +188,7 @@ pub async fn download_decrypted(
 }
 
 /// List all attachments of `secret_name` (full blob names).
+#[cfg(feature = "file-ops")]
 pub async fn list_attachments(
     files: &dyn FileBackend,
     vault: &str,
@@ -203,6 +210,7 @@ pub async fn list_attachments(
 
 /// Delete every attachment of `secret_name`. Returns the number deleted.
 #[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
+#[cfg(feature = "file-ops")]
 pub async fn delete_attachments(
     files: &dyn FileBackend,
     vault: &str,
@@ -225,11 +233,14 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    #[cfg(feature = "file-ops")]
     use crate::backend::file::FileBackend;
+    #[cfg(feature = "file-ops")]
     use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
     use crate::secret::manager::{
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
+    #[cfg(feature = "file-ops")]
     use crate::utils::progress::ProgressReporter;
 
     /// In-memory SecretBackend: get/set only, everything else Unsupported.
@@ -336,11 +347,13 @@ mod tests {
     }
 
     /// In-memory FileBackend storing (content, metadata) per name.
+    #[cfg(feature = "file-ops")]
     #[allow(clippy::type_complexity)]
     pub(super) struct StubFiles {
         pub files: Mutex<HashMap<String, (Vec<u8>, HashMap<String, String>)>>,
     }
 
+    #[cfg(feature = "file-ops")]
     impl StubFiles {
         pub fn new() -> Self {
             Self {
@@ -349,6 +362,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "file-ops")]
     fn file_info(name: &str, size: u64, metadata: HashMap<String, String>) -> FileInfo {
         FileInfo {
             name: name.to_string(),
@@ -362,6 +376,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "file-ops")]
     #[async_trait]
     impl FileBackend for StubFiles {
         async fn upload_file(
@@ -452,6 +467,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "file-ops")]
     fn upload_req(name: &str, content: &[u8]) -> FileUploadRequest {
         FileUploadRequest {
             name: name.to_string(),
@@ -463,6 +479,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "file-ops")]
     #[tokio::test]
     async fn encrypted_round_trip() {
         let secrets = StubSecrets::new();
@@ -497,6 +514,7 @@ mod tests {
         assert_eq!(roundtrip.as_slice(), plaintext);
     }
 
+    #[cfg(feature = "file-ops")]
     #[tokio::test]
     async fn download_passes_through_unencrypted_files() {
         let secrets = StubSecrets::new();
@@ -511,6 +529,7 @@ mod tests {
         assert_eq!(content, b"hello");
     }
 
+    #[cfg(feature = "file-ops")]
     #[tokio::test]
     async fn download_flagged_file_without_key_names_the_problem() {
         let secrets = StubSecrets::new();
@@ -540,6 +559,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "file-ops")]
     #[tokio::test]
     async fn download_with_wrong_key_is_actionable() {
         let secrets = StubSecrets::new();
@@ -568,6 +588,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "file-ops")]
     #[tokio::test]
     async fn list_and_delete_scope_to_one_secrets_prefix() {
         let secrets = StubSecrets::new();
