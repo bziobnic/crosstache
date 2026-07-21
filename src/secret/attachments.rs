@@ -17,7 +17,6 @@ use crate::error::{CrosstacheError, Result};
 use crate::secret::manager::SecretRequest;
 
 /// Reserved per-vault secret holding the age identity for attachments.
-#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub const ATTACHMENT_KEY_SECRET: &str = "xv-attachment-key";
 /// File-metadata key marking client-side-encrypted content.
 #[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)

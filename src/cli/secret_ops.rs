@@ -1047,6 +1047,8 @@ fn filter_secret_summaries_for_display(
     group: Option<&str>,
     all: bool,
 ) -> Vec<crate::secret::manager::SecretSummary> {
+    // The attachment key is infrastructure, not a user secret.
+    secrets.retain(|s| s.name != crate::secret::attachments::ATTACHMENT_KEY_SECRET);
     if !all {
         secrets.retain(|s| s.enabled);
     }
@@ -2682,7 +2684,15 @@ pub(crate) async fn execute_secret_delete_direct(
                     crate::workspace::TargetMode::Write,
                 )
                 .await?;
-            if !confirm_destructive(force, &format!("Delete secret '{resolved_name}'?"))? {
+            let prompt = if resolved_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+                format!(
+                    "'{resolved_name}' is the attachment encryption key for vault '{vault_name}'. \
+                     Deleting it makes ALL attachments in this vault permanently unreadable. Delete anyway?"
+                )
+            } else {
+                format!("Delete secret '{resolved_name}'?")
+            };
+            if !confirm_destructive(force, &prompt)? {
                 output::info("Aborted; secret not deleted.");
                 return Ok(());
             }
@@ -8369,5 +8379,29 @@ mod tests {
             buggy.is_empty(),
             "demonstrates the pre-fix bug: filtering after alias-prefixing loses the match"
         );
+    }
+
+    #[test]
+    fn reserved_attachment_key_is_hidden_from_listings() {
+        fn summary(name: &str) -> crate::secret::manager::SecretSummary {
+            crate::secret::manager::SecretSummary {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                note: None,
+                folder: None,
+                groups: None,
+                updated_on: String::new(),
+                enabled: true,
+                content_type: String::new(),
+                tags: std::collections::HashMap::new(),
+            }
+        }
+        let secrets = vec![
+            summary("normal"),
+            summary(crate::secret::attachments::ATTACHMENT_KEY_SECRET),
+        ];
+        let out = filter_secret_summaries_for_display(secrets, None, true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "normal");
     }
 }
