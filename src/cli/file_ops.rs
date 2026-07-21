@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 /// so routing through the trait needs no handler-body changes.
 pub(crate) struct FileOps<'a> {
     files: &'a dyn FileBackend,
+    secrets: &'a dyn crate::backend::secret::SecretBackend,
     vault: &'a str,
     /// Registry name of the backend that owns `vault` — the cache-key
     /// identifier (`CacheKey::FileList { backend, .. }`).
@@ -36,12 +37,14 @@ pub(crate) struct FileOps<'a> {
 impl<'a> FileOps<'a> {
     fn new(
         files: &'a dyn FileBackend,
+        secrets: &'a dyn crate::backend::secret::SecretBackend,
         vault: &'a str,
         backend_name: &'a str,
         kind: BackendKind,
     ) -> Self {
         Self {
             files,
+            secrets,
             vault,
             backend_name,
             kind,
@@ -64,10 +67,29 @@ impl<'a> FileOps<'a> {
         request: FileDownloadRequest,
         reporter: &dyn ProgressReporter,
     ) -> Result<Vec<u8>> {
-        self.files
-            .download_file(self.vault, &request.name, Some(reporter))
-            .await
-            .map_err(CrosstacheError::from)
+        crate::secret::attachments::download_decrypted(
+            self.secrets,
+            self.files,
+            self.vault,
+            &request.name,
+            Some(reporter),
+        )
+        .await
+    }
+
+    async fn upload_file_encrypted(
+        &self,
+        request: FileUploadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<FileInfo> {
+        crate::secret::attachments::upload_encrypted(
+            self.secrets,
+            self.files,
+            self.vault,
+            request,
+            Some(reporter),
+        )
+        .await
     }
 
     async fn list_files(&self, request: FileListRequest) -> Result<Vec<FileInfo>> {
@@ -150,7 +172,13 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
     let files = backend
         .files()
         .expect("resolve_file_backend guarantees files() is Some");
-    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
+    let blob_manager = FileOps::new(
+        files,
+        backend.secrets(),
+        &vault,
+        &backend_name,
+        backend.kind(),
+    );
 
     match command {
         FileCommands::Upload {
@@ -164,7 +192,14 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             tag,
             content_type,
             continue_on_error,
+            encrypt,
         } => {
+            // ponytail: --encrypt is single-file only; extend to multi/recursive when needed
+            if encrypt && (recursive || files.len() > 1) {
+                return Err(CrosstacheError::invalid_argument(
+                    "--encrypt currently supports single-file uploads only",
+                ));
+            }
             // Handle recursive directory upload
             if recursive {
                 // Validate that --name and --content-type are not used with --recursive
@@ -201,6 +236,7 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
                     metadata,
                     tag,
                     content_type,
+                    encrypt,
                     &config,
                 )
                 .await?;
@@ -409,7 +445,13 @@ pub(crate) async fn execute_file_info_from_root(file_name: &str, config: &Config
     let files = backend
         .files()
         .expect("resolve_file_backend guarantees file storage");
-    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
+    let blob_manager = FileOps::new(
+        files,
+        backend.secrets(),
+        &vault,
+        &backend_name,
+        backend.kind(),
+    );
 
     execute_file_info(&blob_manager, file_name, config).await
 }
@@ -476,6 +518,7 @@ async fn execute_file_upload(
     metadata: Vec<(String, String)>,
     tags: Vec<(String, String)>,
     content_type: Option<String>,
+    encrypt: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileUploadRequest;
@@ -543,9 +586,15 @@ async fn execute_file_upload(
     let reporter = progress::create_file_reporter(file_size, threshold, tty);
     reporter.set_message(format!("Uploading '{remote_name}'..."));
 
-    let file_info = blob_manager
-        .upload_file(upload_request, reporter.as_ref())
-        .await?;
+    let file_info = if encrypt {
+        blob_manager
+            .upload_file_encrypted(upload_request, reporter.as_ref())
+            .await?
+    } else {
+        blob_manager
+            .upload_file(upload_request, reporter.as_ref())
+            .await?
+    };
     output::success(&format!("Successfully uploaded file '{}'", file_info.name));
     println!("   Size: {} bytes", file_info.size);
     println!("   Content-Type: {}", file_info.content_type);
@@ -1297,7 +1346,8 @@ async fn execute_file_upload_multiple(
             group.clone(),
             metadata.clone(),
             tag.clone(),
-            None, // content_type is not allowed for multiple files
+            None,  // content_type is not allowed for multiple files
+            false, // --encrypt is single-file only
             config,
         )
         .await
@@ -2420,7 +2470,13 @@ pub(crate) async fn execute_file_upload_quick(
     let files = backend
         .files()
         .expect("resolve_file_backend guarantees file storage");
-    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
+    let blob_manager = FileOps::new(
+        files,
+        backend.secrets(),
+        &vault,
+        &backend_name,
+        backend.kind(),
+    );
 
     // Convert parameters to match FileCommands::Upload format
     let groups_vec = groups
@@ -2446,6 +2502,7 @@ pub(crate) async fn execute_file_upload_quick(
         metadata_map,
         Vec::new(),
         None,
+        false, // no --encrypt flag on the quick-upload path
         config,
     )
     .await
@@ -2462,7 +2519,13 @@ pub(crate) async fn execute_file_download_quick(
     let files = backend
         .files()
         .expect("resolve_file_backend guarantees file storage");
-    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
+    let blob_manager = FileOps::new(
+        files,
+        backend.secrets(),
+        &vault,
+        &backend_name,
+        backend.kind(),
+    );
 
     let final_output_path = resolve_single_download_path(name, output.as_deref())?;
     execute_file_download(
