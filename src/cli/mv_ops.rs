@@ -348,6 +348,7 @@ pub(crate) async fn execute_mv(
                 &src_path,
                 &dst_path,
                 dry_run,
+                yes,
             )
             .await;
         }
@@ -479,6 +480,7 @@ async fn execute_cross_vault_alias_mv(
     src_path: &str,
     dst_path: &str,
     dry_run: bool,
+    yes: bool,
 ) -> Result<()> {
     let plan = parse_mv(src_path, dst_path)?;
     let (src_folder, src_name, dest_folder, dest_name) = match plan {
@@ -560,6 +562,15 @@ async fn execute_cross_vault_alias_mv(
     if dry_run {
         println!("{qualified_src} -> {qualified_dst}");
         output::info("1 secret would move across vaults (dry run)");
+        return Ok(());
+    }
+
+    // Moving the reserved attachment-encryption-key secret out of its source
+    // vault displaces it there — see the same-vault `execute_secret_mv`
+    // guard above. Cross-vault `mv` has no `--force` (mirrors same-vault),
+    // so always prompt.
+    if !confirm_reserved_key_write(&found.name, yes, "Moving", "--yes")? {
+        output::info("Aborted; secret not moved.");
         return Ok(());
     }
 

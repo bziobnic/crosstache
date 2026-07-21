@@ -2735,6 +2735,19 @@ pub(crate) async fn execute_secret_delete_direct(
                 return Ok(());
             }
             for s in &secrets {
+                // Group delete has no per-item confirmation (unlike the
+                // single-secret path below, which prompts specifically for
+                // the reserved key), so refuse outright rather than sweep it
+                // up silently — mirrors bulk `xv set`'s `is_reserved_attachment_key`
+                // refusal.
+                if is_reserved_attachment_key(&s.name) {
+                    output::warn(&format!(
+                        "  ✗ {}: reserved for attachment encryption; use 'xv delete {}' \
+                         (single-secret form) to delete it interactively",
+                        s.name, s.name
+                    ));
+                    continue;
+                }
                 backend
                     .secrets()
                     .delete_secret(&vault_name, &s.name)
@@ -5446,6 +5459,15 @@ async fn execute_secret_rotate(
             println!("Rotation cancelled.");
             return Ok(());
         }
+    }
+
+    // Rotating the reserved attachment-encryption-key secret replaces its
+    // value with freshly generated garbage, making ALL attachments in this
+    // vault unreadable — the generic confirmation above doesn't say that,
+    // and with `--force` it wouldn't say anything at all.
+    if !confirm_reserved_key_write(name, force, "Rotating", "--force")? {
+        output::info("Aborted; secret not rotated.");
+        return Ok(());
     }
 
     // Generate the new value

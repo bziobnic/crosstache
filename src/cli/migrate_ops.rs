@@ -16,6 +16,7 @@ const TAG_MIGRATED_FROM: &str = "xv:migrated_from";
 const TAG_MIGRATED_AT: &str = "xv:migrated_at";
 
 /// Outcome of a single secret migration attempt.
+#[derive(Debug)]
 enum MigrateOutcome {
     /// Secret was successfully copied to the target backend.
     Migrated(String),
@@ -179,6 +180,32 @@ async fn migrate_one(
                         return Ok(MigrateOutcome::Skipped(name.to_string()));
                     }
                 }
+            }
+            Err(BackendError::NotFound { .. }) => {}
+            Err(e) => {
+                return Err((
+                    name.to_string(),
+                    format!("target existence check failed: {e}"),
+                ));
+            }
+        }
+    }
+
+    // The idempotency check above is skipped under `force_replace`, so a
+    // blind overwrite of the target vault's OWN reserved attachment key
+    // (distinct from the source's copy of the same well-known name) would
+    // otherwise make every attachment already in the target unreadable.
+    // Migrating the key into a vault that doesn't have one yet is fine —
+    // that vault has no attachments depending on it.
+    if force_replace && name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+        match target.secrets().get_secret(target_vault, name, false).await {
+            Ok(_) => {
+                output::warn(&format!(
+                    "skipping '{name}': target vault '{target_vault}' already has its own \
+                     attachment encryption key; overwriting it would make existing attachments \
+                     there unreadable, so it was preserved"
+                ));
+                return Ok(MigrateOutcome::Skipped(name.to_string()));
             }
             Err(BackendError::NotFound { .. }) => {}
             Err(e) => {
@@ -750,6 +777,103 @@ mod tests {
                 .unwrap();
             assert_eq!(src.value, tgt.value);
         }
+    }
+
+    #[tokio::test]
+    async fn migrate_one_preserves_targets_own_reserved_attachment_key_under_force() {
+        let source_tmp = TempDir::new().unwrap();
+        let target_tmp = TempDir::new().unwrap();
+        let source_config = LocalConfig {
+            store_path: Some(
+                source_tmp
+                    .path()
+                    .join("store")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            key_file: Some(
+                source_tmp
+                    .path()
+                    .join("key.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            default_vault: Some("default".into()),
+            encrypt_metadata: None,
+            opaque_filenames: None,
+        };
+        let target_config = LocalConfig {
+            store_path: Some(
+                target_tmp
+                    .path()
+                    .join("store")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            key_file: Some(
+                target_tmp
+                    .path()
+                    .join("key.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            default_vault: Some("default".into()),
+            encrypt_metadata: None,
+            opaque_filenames: None,
+        };
+        let source = crate::backend::local::LocalBackend::new(Some(&source_config)).unwrap();
+        let target = crate::backend::local::LocalBackend::new(Some(&target_config)).unwrap();
+
+        let reserved = crate::secret::attachments::ATTACHMENT_KEY_SECRET;
+        let seed = |value: &str| SecretRequest {
+            name: reserved.to_string(),
+            value: Zeroizing::new(value.to_string()),
+            content_type: None,
+            enabled: Some(true),
+            expires_on: None,
+            not_before: None,
+            tags: None,
+            groups: None,
+            note: None,
+            folder: None,
+        };
+        source
+            .secrets()
+            .set_secret("default", seed("source-key"))
+            .await
+            .unwrap();
+        target
+            .secrets()
+            .set_secret("default", seed("target-key"))
+            .await
+            .unwrap();
+
+        let source_arc: Arc<dyn Backend> = Arc::new(source);
+        let target_arc: Arc<dyn Backend> = Arc::new(target);
+
+        // force_replace=true would normally skip the idempotency check and
+        // overwrite unconditionally — the reserved-key guard must still
+        // preserve the target's own key rather than clobbering it with the
+        // source's.
+        let outcome = migrate_one(
+            &source_arc,
+            &target_arc,
+            "default",
+            "default",
+            reserved,
+            true,
+            "local",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, MigrateOutcome::Skipped(_)), "{outcome:?}");
+
+        let tgt = target_arc
+            .secrets()
+            .get_secret("default", reserved, true)
+            .await
+            .unwrap();
+        assert_eq!(tgt.value.unwrap().as_str(), "target-key");
     }
 
     #[test]

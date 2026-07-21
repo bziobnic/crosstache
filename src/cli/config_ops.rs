@@ -2637,6 +2637,16 @@ async fn execute_env_push(
     let mut error_count = 0;
 
     for (key, value) in secrets {
+        // Never let a `.env` key silently clobber the reserved attachment
+        // encryption key — same convention as bulk `xv set`.
+        if key == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+            output::warn(&format!(
+                "  Skipping '{key}': reserved for attachment encryption; use 'xv set {key}' \
+                 (single-secret form) to overwrite it interactively"
+            ));
+            error_count += 1;
+            continue;
+        }
         let secret_request = SecretRequest {
             name: key.clone(),
             value: Zeroizing::new(value.clone()),
