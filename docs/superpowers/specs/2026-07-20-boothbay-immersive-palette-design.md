@@ -66,4 +66,3 @@ The visual treatment will use the navy canvas throughout, deep-blue surfaces for
 - Confirm `tailwind.css` contains all six exact source hex values and valid Tailwind v4 `@theme` syntax.
 - Confirm the generated image exists at the specified project path and can be decoded as a PNG.
 - Visually verify the mockup preserves the Crosstache layout, uses the extracted palette, keeps secret values concealed, and contains no Boothbay brand assets.
-
