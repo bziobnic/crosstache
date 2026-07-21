@@ -260,12 +260,30 @@ pub(crate) async fn delete_secret(
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
 ) -> Result<StatusCode, ApiError> {
+    reject_reserved_attachment_key(&name)?;
     state
         .backend
         .secrets()
         .delete_secret(q.vault(&state), &name)
         .await?;
     Ok(StatusCode::OK)
+}
+
+/// Blunt refusal for the reserved attachment-encryption-key secret — the web
+/// UI has no confirm plumbing to warn (unlike the CLI's `confirm_destructive`
+/// prompts), so deleting or renaming it from here is rejected outright.
+fn reject_reserved_attachment_key(name: &str) -> Result<(), ApiError> {
+    if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+        return Err(ApiError::Status(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "'{name}' is the attachment encryption key for this vault; deleting or renaming \
+                 it would make all attachments unreadable. Use the CLI (`xv delete --force` / \
+                 `xv mv`) if you really mean to."
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -283,6 +301,7 @@ pub(crate) async fn move_secret(
     let vault = q.vault(&state).to_string();
     match (body.new_name, body.folder) {
         (Some(new_name), None) => {
+            reject_reserved_attachment_key(&name)?;
             let props = state
                 .backend
                 .secrets()
@@ -608,6 +627,61 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = get_json(app.clone(), "GET", "/api/secrets/db-pass-2", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reserved_attachment_key_rejects_delete_and_rename_but_allows_folder_move() {
+        let app = crate::web::build_router(testutil::test_state());
+        let reserved = crate::secret::attachments::ATTACHMENT_KEY_SECRET;
+
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            &format!("/api/secrets/{reserved}"),
+            Some(json!({"value": "AGE-SECRET-KEY-1..."})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Delete is refused outright.
+        let (status, _) = get_json(
+            app.clone(),
+            "DELETE",
+            &format!("/api/secrets/{reserved}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Rename (the destructive form of move) is refused outright.
+        let (status, _) = get_json(
+            app.clone(),
+            "POST",
+            &format!("/api/secrets/{reserved}/move"),
+            Some(json!({"new_name": "renamed-key"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // A folder-only move doesn't displace the key, so it's still allowed.
+        let (status, _) = get_json(
+            app.clone(),
+            "POST",
+            &format!("/api/secrets/{reserved}/move"),
+            Some(json!({"folder": "infra"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The key is untouched under its reserved name.
+        let (status, _) = get_json(
+            app.clone(),
+            "GET",
+            &format!("/api/secrets/{reserved}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

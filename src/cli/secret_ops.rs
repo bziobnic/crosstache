@@ -4,7 +4,7 @@ use crate::backend::BackendCapabilities;
 use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, SecretWriteArgs, ShareCommands};
 use crate::cli::helpers::{
-    confirm_destructive, copy_to_clipboard, generate_random_value, mask_secrets,
+    confirm_destructive, confirm_proceed, copy_to_clipboard, generate_random_value, mask_secrets,
     resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error, use_trait_path,
 };
 use crate::config::Config;
@@ -501,6 +501,15 @@ pub(crate) async fn execute_secret_set_direct(
                 )
                 .await?;
             let name = &name;
+            if !confirm_reserved_key_write(
+                name,
+                false,
+                "Overwriting",
+                "an interactive terminal (xv set has no override flag)",
+            )? {
+                output::info("Aborted; secret not set.");
+                return Ok(());
+            }
             let request = build_record_set_request(
                 name,
                 value.clone(),
@@ -536,6 +545,15 @@ pub(crate) async fn execute_secret_set_direct(
                 )
                 .await?;
             let name = &name;
+            if !confirm_reserved_key_write(
+                name,
+                false,
+                "Overwriting",
+                "an interactive terminal (xv set has no override flag)",
+            )? {
+                output::info("Aborted; secret not set.");
+                return Ok(());
+            }
             let secret_value = if let Some(v) = value.clone() {
                 v
             } else if stdin {
@@ -1040,6 +1058,39 @@ fn trait_secret_cache_key(backend_name: &str, vault_name: &str) -> crate::cache:
 pub(crate) fn invalidate_trait_secret_cache(config: &Config, backend_name: &str, vault_name: &str) {
     let cache_manager = crate::cache::CacheManager::from_config(config);
     cache_manager.invalidate(&trait_secret_cache_key(backend_name, vault_name));
+}
+
+/// Extra confirmation gate for any CLI write that targets the reserved
+/// attachment-encryption-key secret (`xv-attachment-key`) — overwriting,
+/// retyping, or renaming it makes every attachment in the vault permanently
+/// unreadable. Only `delete` warned about this before; `set`, `update`,
+/// `rollback`, and `mv` displaced/overwrote the key silently. No-op (returns
+/// `Ok(true)` without prompting) for every other secret name.
+///
+/// `action` is a gerund phrase describing the write, e.g. "Overwriting",
+/// "Renaming"; `force` follows each caller's own skip-confirmation flag (or
+/// `false` — always prompt — where the caller has none). `flag_hint` names
+/// that flag for the non-interactive refusal message (`confirm_proceed`'s
+/// "Re-run with {flag_hint} to confirm") — must match what `force` actually
+/// is, since `set` has no override flag at all and `mv` uses `--yes`, not
+/// `--force`.
+pub(crate) fn confirm_reserved_key_write(
+    name: &str,
+    force: bool,
+    action: &str,
+    flag_hint: &str,
+) -> Result<bool> {
+    if name != crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+        return Ok(true);
+    }
+    confirm_proceed(
+        force,
+        &format!(
+            "{action} '{name}' — the attachment encryption key for this vault — will make ALL \
+             attachments in this vault unreadable. Continue?"
+        ),
+        flag_hint,
+    )
 }
 
 fn filter_secret_summaries_for_display(
@@ -2672,13 +2723,32 @@ pub(crate) async fn execute_secret_delete_direct(
                     .await?;
                 output::success(&format!("Deleted '{}'", s.name));
                 #[cfg(feature = "file-ops")]
-                if let Some(files) = backend.files() {
-                    let n =
-                        crate::secret::attachments::delete_attachments(files, &vault_name, &s.name)
-                            .await
-                            .unwrap_or(0); // best-effort in bulk path
-                    if n > 0 {
-                        output::info(&format!("Deleted {n} attachment(s) of '{}'", s.name));
+                if s.name.contains('/') || s.name.contains('\\') {
+                    // A path separator can't safely address the
+                    // attachments/<name>/ prefix without risking a
+                    // cross-secret cascade — skip rather than guess.
+                    output::warn(&format!(
+                        "'{}' contains a path separator; skipping attachment cascade",
+                        s.name
+                    ));
+                } else if let Some(files) = backend.files() {
+                    match crate::secret::attachments::delete_attachments(
+                        files,
+                        &vault_name,
+                        &s.name,
+                    )
+                    .await
+                    {
+                        Ok(n) if n > 0 => {
+                            output::info(&format!("Deleted {n} attachment(s) of '{}'", s.name));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            output::warn(&format!(
+                                "failed to delete attachments of '{}': {e}",
+                                s.name
+                            ));
+                        }
                     }
                 }
             }
@@ -2695,15 +2765,37 @@ pub(crate) async fn execute_secret_delete_direct(
                 )
                 .await?;
             // Attachments cascade: count first so the confirmation is honest.
+            // A resolved name containing a path separator can't safely
+            // address the attachments/<name>/ prefix (risk of cross-secret
+            // cascade — see delete-cascade path traversal finding), so skip
+            // listing/cascading under it and warn instead of guessing.
             #[cfg(feature = "file-ops")]
-            let attachment_count = match backend.files() {
-                Some(files) => {
-                    crate::secret::attachments::list_attachments(files, &vault_name, &resolved_name)
-                        .await
-                        .map(|a| a.len())
-                        .unwrap_or(0) // listing failure must not block deletion
+            let attachment_count = if resolved_name.contains('/') || resolved_name.contains('\\') {
+                output::warn(&format!(
+                    "'{resolved_name}' contains a path separator; skipping attachment cascade"
+                ));
+                0
+            } else {
+                match backend.files() {
+                    Some(files) => match crate::secret::attachments::list_attachments(
+                        files,
+                        &vault_name,
+                        &resolved_name,
+                    )
+                    .await
+                    {
+                        Ok(a) => a.len(),
+                        Err(e) => {
+                            // Listing failure must not block deletion, but it
+                            // must not be silent either.
+                            output::warn(&format!(
+                                "could not list attachments of '{resolved_name}' before delete: {e}"
+                            ));
+                            0
+                        }
+                    },
+                    None => 0,
                 }
-                None => 0,
             };
             #[cfg(not(feature = "file-ops"))]
             let attachment_count = 0;
@@ -2726,6 +2818,10 @@ pub(crate) async fn execute_secret_delete_direct(
                 .delete_secret(&vault_name, &resolved_name)
                 .await?;
             output::success(&format!("Successfully deleted secret '{resolved_name}'"));
+            // Invalidate before the (possibly-failing) attachment cascade so
+            // a cascade error can never leave a stale cached secret list
+            // behind — the secret delete above already committed.
+            invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
             #[cfg(feature = "file-ops")]
             if attachment_count > 0 {
                 if let Some(files) = backend.files() {
@@ -2738,7 +2834,6 @@ pub(crate) async fn execute_secret_delete_direct(
                     output::info(&format!("Deleted {n} attachment(s)"));
                 }
             }
-            invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         } else {
             return Err(CrosstacheError::invalid_argument(
                 "Either secret name or --group must be specified",
@@ -2883,6 +2978,10 @@ pub(crate) async fn execute_secret_rollback_direct(
     }
 
     let name = resolved_name.as_str();
+    if !confirm_reserved_key_write(name, force, "Rolling back", "--force")? {
+        output::info("Aborted; no rollback performed.");
+        return Ok(());
+    }
     if !confirm_destructive(
         force,
         &format!("Roll back secret '{name}' to version {version}?"),
@@ -3864,6 +3963,10 @@ pub(crate) async fn execute_secret_update_direct(
             )
             .await?;
         let name = resolved_name.as_str();
+        if !confirm_reserved_key_write(name, yes, "Updating", "--yes")? {
+            output::info("Aborted; secret not updated.");
+            return Ok(());
+        }
         let local_registry = BackendRegistry::new(resolved_backend);
         let reg = &local_registry;
 
@@ -8440,5 +8543,43 @@ mod tests {
         let out = filter_secret_summaries_for_display(secrets, None, true);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "normal");
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_is_a_noop_for_other_secrets() {
+        // No TTY in the test process, so a real prompt would error out
+        // (`confirm_proceed`'s non-interactive-session refusal); a
+        // non-reserved name must never reach that path at all.
+        assert!(
+            confirm_reserved_key_write("normal-secret", false, "Overwriting", "--force").unwrap()
+        );
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_skips_prompt_when_forced() {
+        assert!(confirm_reserved_key_write(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET,
+            true,
+            "Overwriting",
+            "--force"
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_refuses_unattended_without_force() {
+        // Not a TTY here, so `confirm_proceed(false, ..)` can't prompt — it
+        // must refuse loudly rather than silently defaulting either way.
+        let err = confirm_reserved_key_write(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET,
+            false,
+            "Overwriting",
+            "--force",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("attachment encryption key"),
+            "{err}"
+        );
     }
 }

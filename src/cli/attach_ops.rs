@@ -19,7 +19,7 @@ use crate::workspace::TargetMode;
 /// Reject attachment names that would escape the `attachments/<secret>/`
 /// prefix or produce surprising nested paths.
 fn validate_attachment_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+    if !attachments::is_valid_path_component(name) {
         return Err(CrosstacheError::invalid_argument(format!(
             "invalid attachment name '{name}': must be a plain file name (no path separators)"
         )));
@@ -38,6 +38,15 @@ async fn resolve(
         resolve_workspace_or_default(secret, config, mode).await?;
     if backend.files().is_none() {
         return Err(file_storage_unsupported_error(backend.as_ref()));
+    }
+    // A resolved secret name containing a path separator would break the
+    // `attachments/<name>/` prefix's isolation from other secrets' blobs
+    // (see delete-cascade path-traversal finding) — reject before any
+    // attach/list/get/detach verb can create or address such a blob.
+    if !attachments::is_valid_path_component(&resolved_name) {
+        return Err(CrosstacheError::invalid_argument(format!(
+            "secret name '{resolved_name}' cannot be used with attachments (path separators)"
+        )));
     }
     Ok((backend, vault, resolved_name))
 }
@@ -121,8 +130,10 @@ pub(crate) async fn execute_attachments(
                 "File '{out}' already exists — pass --output to choose another path"
             )));
         }
-        std::fs::write(&out, &content)
-            .map_err(|e| CrosstacheError::config(format!("Failed to write '{out}': {e}")))?;
+        // `overwrite: false` opens with O_EXCL|O_NOFOLLOW, so a dangling
+        // symlink planted at `out` after the exists() check above (or one
+        // the check missed) is refused rather than written through.
+        crate::utils::helpers::write_file_no_follow(Path::new(&out), &content, false)?;
         output::success(&format!(
             "Downloaded attachment '{attachment_name}' to '{out}' ({})",
             format_size(content.len() as u64)

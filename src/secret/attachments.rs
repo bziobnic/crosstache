@@ -25,6 +25,16 @@ pub const ENC_METADATA_KEY: &str = "xv-encrypted";
 #[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub const ENC_METADATA_VALUE: &str = "age";
 
+/// True if `name` is safe to use as a single path component in the
+/// `attachments/<name>/...` blob namespace: non-empty, no `/` or `\`, and
+/// not `.`/`..`. Shared by attachment-file-name validation and the
+/// resolved-secret-name guard — a secret name containing `/` would
+/// otherwise let its `attachments/<name>/` prefix overlap a different
+/// secret's attachment blobs (cross-secret cascade on delete).
+pub fn is_valid_path_component(name: &str) -> bool {
+    !(name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == "..")
+}
+
 /// Blob-name prefix for a secret's attachments.
 pub fn attachment_prefix(secret_name: &str) -> String {
     format!("attachments/{secret_name}/")
@@ -33,6 +43,26 @@ pub fn attachment_prefix(secret_name: &str) -> String {
 /// Full blob name for one attachment of a secret.
 pub fn attachment_blob_name(secret_name: &str, attachment: &str) -> String {
     format!("{}{attachment}", attachment_prefix(secret_name))
+}
+
+/// True if a blob is a client-side-encrypted attachment: reserved-namespace
+/// name convention (anything under `attachments/`) OR explicit
+/// `xv-encrypted: age` metadata flag. `metadata` may be empty (e.g. for a
+/// local file that hasn't been uploaded yet) — the name check alone still
+/// catches the reserved namespace.
+///
+/// `xv file sync` speaks plaintext only: it would decrypt ciphertext to disk
+/// on download, or clobber ciphertext with an unflagged plaintext re-upload.
+/// Callers use this to keep sync out of the attachment namespace entirely.
+// ponytail: sync just skips these rather than transferring ciphertext or
+// decrypting; teach it real encrypted-blob sync (or a `--decrypt` opt-in)
+// if someone needs `xv file sync` to round-trip attachments/.
+pub fn is_encrypted_attachment(
+    name: &str,
+    metadata: &std::collections::HashMap<String, String>,
+) -> bool {
+    name.starts_with("attachments/")
+        || metadata.get(ENC_METADATA_KEY).map(String::as_str) == Some(ENC_METADATA_VALUE)
 }
 
 /// Parse an age identity out of a stored secret value.
@@ -626,6 +656,33 @@ mod tests {
             .unwrap()
             .contains_key("attachments/other/f.txt"));
         assert!(files.files.lock().unwrap().contains_key("normal.txt"));
+    }
+
+    #[test]
+    fn is_encrypted_attachment_matches_on_name_prefix_or_flag() {
+        let empty = HashMap::new();
+        assert!(is_encrypted_attachment("attachments/db/cert.pem", &empty));
+
+        let mut flagged = HashMap::new();
+        flagged.insert(ENC_METADATA_KEY.to_string(), ENC_METADATA_VALUE.to_string());
+        assert!(is_encrypted_attachment("docs/readme.md", &flagged));
+
+        assert!(!is_encrypted_attachment("docs/readme.md", &empty));
+
+        let mut other = HashMap::new();
+        other.insert(ENC_METADATA_KEY.to_string(), "not-age".to_string());
+        assert!(!is_encrypted_attachment("docs/readme.md", &other));
+    }
+
+    #[test]
+    fn is_valid_path_component_rejects_separators_and_dots() {
+        assert!(!is_valid_path_component("a/b"));
+        assert!(!is_valid_path_component("a\\b"));
+        assert!(!is_valid_path_component(""));
+        assert!(!is_valid_path_component("."));
+        assert!(!is_valid_path_component(".."));
+        assert!(is_valid_path_component("db-cert"));
+        assert!(is_valid_path_component("normal_name.txt"));
     }
 
     #[test]
