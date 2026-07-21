@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Secret File Attachments**: `xv attach <secret> <file>`, `xv attachments <secret> [--get <name>]`, `xv detach <secret> <name>` — files age-encrypted client-side with a per-vault key stored as the reserved `xv-attachment-key` secret, so attachment access is gated by vault permissions on every backend (Azure/AWS/local). Also `xv file upload --encrypt` for standalone confidential files; `xv file download` decrypts transparently. `xv delete` cascades a secret's attachments.
+
 ## v0.26.2 — Tauri secret and file table polish (2026-07-16)
 
 ### Added

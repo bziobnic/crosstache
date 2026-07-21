@@ -208,7 +208,6 @@ pub async fn list_attachments(
 }
 
 /// Delete every attachment of `secret_name`. Returns the number deleted.
-#[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 #[cfg(feature = "file-ops")]
 pub async fn delete_attachments(
     files: &dyn FileBackend,

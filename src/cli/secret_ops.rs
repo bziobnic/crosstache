@@ -2671,6 +2671,16 @@ pub(crate) async fn execute_secret_delete_direct(
                     .delete_secret(&vault_name, &s.name)
                     .await?;
                 output::success(&format!("Deleted '{}'", s.name));
+                #[cfg(feature = "file-ops")]
+                if let Some(files) = backend.files() {
+                    let n =
+                        crate::secret::attachments::delete_attachments(files, &vault_name, &s.name)
+                            .await
+                            .unwrap_or(0); // best-effort in bulk path
+                    if n > 0 {
+                        output::info(&format!("Deleted {n} attachment(s) of '{}'", s.name));
+                    }
+                }
             }
             invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         } else if let Some(secret_name) = name {
@@ -2684,11 +2694,26 @@ pub(crate) async fn execute_secret_delete_direct(
                     crate::workspace::TargetMode::Write,
                 )
                 .await?;
+            // Attachments cascade: count first so the confirmation is honest.
+            #[cfg(feature = "file-ops")]
+            let attachment_count = match backend.files() {
+                Some(files) => {
+                    crate::secret::attachments::list_attachments(files, &vault_name, &resolved_name)
+                        .await
+                        .map(|a| a.len())
+                        .unwrap_or(0) // listing failure must not block deletion
+                }
+                None => 0,
+            };
+            #[cfg(not(feature = "file-ops"))]
+            let attachment_count = 0;
             let prompt = if resolved_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
                 format!(
                     "'{resolved_name}' is the attachment encryption key for vault '{vault_name}'. \
                      Deleting it makes ALL attachments in this vault permanently unreadable. Delete anyway?"
                 )
+            } else if attachment_count > 0 {
+                format!("Delete secret '{resolved_name}' and its {attachment_count} attachment(s)?")
             } else {
                 format!("Delete secret '{resolved_name}'?")
             };
@@ -2701,6 +2726,18 @@ pub(crate) async fn execute_secret_delete_direct(
                 .delete_secret(&vault_name, &resolved_name)
                 .await?;
             output::success(&format!("Successfully deleted secret '{resolved_name}'"));
+            #[cfg(feature = "file-ops")]
+            if attachment_count > 0 {
+                if let Some(files) = backend.files() {
+                    let n = crate::secret::attachments::delete_attachments(
+                        files,
+                        &vault_name,
+                        &resolved_name,
+                    )
+                    .await?;
+                    output::info(&format!("Deleted {n} attachment(s)"));
+                }
+            }
             invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         } else {
             return Err(CrosstacheError::invalid_argument(
