@@ -2724,11 +2724,16 @@ pub(crate) async fn execute_secret_delete_direct(
                 output::info(&format!("No secrets found in group '{group_name}'"));
                 return Ok(());
             }
+            // Exclude reserved-key entries from the prompt count (they're refused below anyway)
+            let deletable_count = secrets
+                .iter()
+                .filter(|s| !is_reserved_attachment_key(&s.name))
+                .count();
             if !confirm_destructive(
                 force,
                 &format!(
                     "Delete {} secret(s) in group '{group_name}'?",
-                    secrets.len()
+                    deletable_count
                 ),
             )? {
                 output::info("Aborted; no secrets deleted.");

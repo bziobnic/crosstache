@@ -2635,6 +2635,7 @@ async fn execute_env_push(
     // Set each secret
     let mut success_count = 0;
     let mut error_count = 0;
+    let mut skipped_reserved_count = 0;
 
     for (key, value) in secrets {
         // Never let a `.env` key silently clobber the reserved attachment
@@ -2644,7 +2645,7 @@ async fn execute_env_push(
                 "  Skipping '{key}': reserved for attachment encryption; use 'xv set {key}' \
                  (single-secret form) to overwrite it interactively"
             ));
-            error_count += 1;
+            skipped_reserved_count += 1;
             continue;
         }
         let secret_request = SecretRequest {
@@ -2682,13 +2683,26 @@ async fn execute_env_push(
         }
     }
 
-    if error_count > 0 {
+    if error_count > 0 || skipped_reserved_count > 0 {
         // Surface partial failures as a non-zero exit so CI/scripts don't treat
         // a half-finished push as success.
-        return Err(CrosstacheError::unknown(format!(
-            "env push: {error_count} of {} secret(s) failed to set in vault '{vault_name}'",
-            success_count + error_count
-        )));
+        let msg = if error_count > 0 && skipped_reserved_count > 0 {
+            format!(
+                "env push: {} actual error(s) and {} reserved-key skip(s) in vault '{vault_name}'",
+                error_count, skipped_reserved_count
+            )
+        } else if error_count > 0 {
+            format!(
+                "env push: {error_count} of {} secret(s) failed to set in vault '{vault_name}'",
+                success_count + error_count
+            )
+        } else {
+            format!(
+                "env push: skipped {} reserved-key(s) in vault '{vault_name}' (use 'xv set' to overwrite)",
+                skipped_reserved_count
+            )
+        };
+        return Err(CrosstacheError::unknown(msg));
     }
     output::success(&format!(
         "Successfully pushed {} secret(s) to vault '{}'",

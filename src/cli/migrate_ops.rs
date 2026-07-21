@@ -197,7 +197,7 @@ async fn migrate_one(
     // otherwise make every attachment already in the target unreadable.
     // Migrating the key into a vault that doesn't have one yet is fine —
     // that vault has no attachments depending on it.
-    if force_replace && name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+    if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
         match target.secrets().get_secret(target_vault, name, false).await {
             Ok(_) => {
                 output::warn(&format!(
@@ -862,6 +862,27 @@ mod tests {
             "default",
             reserved,
             true,
+            "local",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, MigrateOutcome::Skipped(_)), "{outcome:?}");
+
+        let tgt = target_arc
+            .secrets()
+            .get_secret("default", reserved, true)
+            .await
+            .unwrap();
+        assert_eq!(tgt.value.unwrap().as_str(), "target-key");
+
+        // force_replace=false should also skip and preserve the target's key.
+        let outcome = migrate_one(
+            &source_arc,
+            &target_arc,
+            "default",
+            "default",
+            reserved,
+            false,
             "local",
         )
         .await
