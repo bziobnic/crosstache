@@ -92,3 +92,23 @@ test('modal manager cycles Tab and delegates Escape to the top modal', () => {
   document.listeners.get('keydown')({ key: 'Escape', preventDefault() {} });
   assert.equal(escaped, 1);
 });
+
+test('modal manager skips CSS-hidden focusables', () => {
+  const document = modalDocument();
+  const manager = createDialogManager(document);
+  const first = new DialogElement(document);
+  const displayNone = new DialogElement(document);
+  const visibilityHidden = new DialogElement(document);
+  const last = new DialogElement(document);
+  for (const element of [first, displayNone, visibilityHidden, last]) element.hidden = false;
+  displayNone.style = { display: 'none' };
+  visibilityHidden.style = { visibility: 'hidden' };
+  const sheet = new DialogElement(document);
+  sheet.focusables = [displayNone, visibilityHidden, first, last];
+
+  manager.openModal(sheet);
+  assert.equal(document.activeElement, first);
+  document.activeElement = last;
+  document.listeners.get('keydown')({ key: 'Tab', preventDefault() {} });
+  assert.equal(document.activeElement, first);
+});

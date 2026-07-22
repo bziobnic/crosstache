@@ -11,7 +11,12 @@ const focusableSelector = [
 
 function focusableElements(element) {
   return [...element.querySelectorAll(focusableSelector)]
-    .filter((candidate) => !candidate.hidden && !candidate.disabled && !candidate.closest?.('[hidden]'));
+    .filter((candidate) => {
+      if (candidate.hidden || candidate.disabled || candidate.closest?.('[hidden]')) return false;
+      const style = candidate.ownerDocument?.defaultView?.getComputedStyle?.(candidate) ?? candidate.style;
+      if (style?.display === 'none' || style?.visibility === 'hidden' || style?.visibility === 'collapse') return false;
+      return typeof candidate.getClientRects !== 'function' || candidate.getClientRects().length > 0;
+    });
 }
 
 function setModalInert(element, active) {

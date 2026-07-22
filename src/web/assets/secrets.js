@@ -1020,7 +1020,7 @@ async function openRecord(name, meta, tags, generation) {
 
 $('#close-drawer').onclick = () => requestDrawerClose();
 $('#drawer-backdrop').onclick = (event) => {
-  if (store.snapshot().savePending) {
+  if (store.snapshot().savePending || dialogs.topModal() !== $('#drawer')) {
     event.preventDefault();
     event.stopPropagation();
     return false;
