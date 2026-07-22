@@ -398,6 +398,22 @@ pub(crate) mod files {
         ))
     }
 
+    /// List a secret's attachments (blobs under `attachments/<secret>/`).
+    pub(crate) async fn list_attachments(
+        State(state): State<Arc<WebState>>,
+        Path(name): Path<String>,
+        Query(q): Query<VaultQuery>,
+    ) -> Result<Json<Vec<crate::blob::models::FileInfo>>, ApiError> {
+        Ok(Json(
+            crate::secret::attachments::list_attachments(
+                files_backend(&state)?,
+                q.vault(&state),
+                &name,
+            )
+            .await?,
+        ))
+    }
+
     pub(crate) async fn upload_file(
         State(state): State<Arc<WebState>>,
         Query(q): Query<VaultQuery>,
@@ -449,7 +465,18 @@ pub(crate) mod files {
         let vault = q.vault(&state);
         let backend = files_backend(&state)?;
         let info = backend.get_file_info(vault, &name).await?;
-        let bytes = backend.download_file(vault, &name, None).await?;
+        // Same transparent decryption as `xv file download`: content flagged
+        // `xv_encrypted: age` (secret attachments, `xv file upload --encrypt`)
+        // is decrypted with the vault's attachment key; everything else passes
+        // through untouched.
+        let bytes = crate::secret::attachments::download_decrypted(
+            state.backend.secrets(),
+            backend,
+            vault,
+            &name,
+            None,
+        )
+        .await?;
         // Escape \ then " so an untrusted filename can't break out of the
         // quoted-string and forge extra header parameters. CRLF is already
         // rejected by HeaderValue parsing.
@@ -570,6 +597,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn secret_attachments_list_and_decrypt_on_download() {
+        use crate::secret::attachments;
+
+        let state = testutil::test_state();
+        let files = state.backend.files().unwrap();
+        // One encrypted attachment for db-cert + an unrelated plain file that
+        // must not leak into the attachment listing.
+        attachments::upload_encrypted(
+            state.backend.secrets(),
+            files,
+            "default",
+            crate::blob::models::FileUploadRequest {
+                name: attachments::attachment_blob_name("db-cert", "cert.pem"),
+                content: b"BEGIN CERT".to_vec(),
+                content_type: Some("application/x-pem-file".to_string()),
+                groups: Vec::new(),
+                metadata: std::collections::HashMap::new(),
+                tags: std::collections::HashMap::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        files
+            .upload_file(
+                "default",
+                crate::blob::models::FileUploadRequest {
+                    name: "notes.txt".to_string(),
+                    content: b"plain".to_vec(),
+                    content_type: None,
+                    groups: Vec::new(),
+                    metadata: std::collections::HashMap::new(),
+                    tags: std::collections::HashMap::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let app = crate::web::build_router(state);
+
+        let (status, json_body) =
+            get_json(app.clone(), "GET", "/api/secrets/db-cert/attachments", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body.as_array().unwrap().len(), 1);
+        assert_eq!(json_body[0]["name"], "attachments/db-cert/cert.pem");
+
+        // No attachments → empty list, not an error.
+        let (status, json_body) =
+            get_json(app.clone(), "GET", "/api/secrets/other/attachments", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body.as_array().unwrap().len(), 0);
+
+        // Downloading the attachment returns plaintext, not age ciphertext.
+        let res = app
+            .oneshot(
+                Request::get("/api/files/attachments%2Fdb-cert%2Fcert.pem")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"BEGIN CERT");
     }
 
     #[tokio::test]

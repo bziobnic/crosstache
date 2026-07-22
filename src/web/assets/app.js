@@ -872,6 +872,8 @@ async function openDrawer(name) {
   $('#record-section').hidden = true;
   $('#value-section').hidden = false;
   $('#record-fields').innerHTML = '';
+  $('#attachments-section').hidden = true;
+  $('#attachments-list').innerHTML = '';
   $('#save').disabled = false;
   $('#type-picker-label').hidden = !!name; // type is chosen at creation only
   $('#type-picker').value = '';
@@ -898,6 +900,8 @@ async function openDrawer(name) {
         not_before: meta.not_before || null,
       };
       if (isRecordMeta(meta)) await openRecord(name, meta, tags, generation);
+      if (generation !== drawerGeneration) return;
+      await loadAttachments(name, generation);
       if (generation !== drawerGeneration) return;
     } catch (e) {
       if (generation !== drawerGeneration) return;
@@ -943,6 +947,43 @@ async function openRecord(name, meta, tags, generation) {
   // Whole-value reveal/copy would expose the raw envelope JSON.
   $('#reveal').hidden = $('#copy').hidden = true;
   renderRecordFields(recordState.typeName, secretFields, metaFields, false);
+}
+
+// Non-fatal: a failed attachment listing toasts but still opens the drawer —
+// the secret's own metadata is already loaded and editable.
+async function loadAttachments(name, generation) {
+  if (!ctx.capabilities.files) return;
+  let attachments;
+  try {
+    attachments = await api('GET', `/api/secrets/${encodeURIComponent(name)}/attachments${vaultQS(currentVault)}`);
+  } catch (e) {
+    if (generation !== drawerGeneration) return;
+    toast(`could not load attachments: ${e.message}`, true);
+    return;
+  }
+  if (generation !== drawerGeneration || !attachments.length) return;
+  const list = $('#attachments-list');
+  list.innerHTML = '';
+  for (const f of attachments) {
+    const base = f.name.slice(f.name.lastIndexOf('/') + 1);
+    const li = document.createElement('li');
+    const link = document.createElement('a');
+    link.className = 'attachment-link';
+    link.href = `/api/files/${encodeURIComponent(f.name)}${vaultQS(currentVault)}`;
+    link.download = base;
+    link.appendChild(icon('file'));
+    const label = document.createElement('span');
+    label.textContent = base;
+    link.appendChild(label);
+    link.onclick = (event) => { event.preventDefault(); downloadFile(f.name, base); };
+    li.appendChild(link);
+    const size = document.createElement('span');
+    size.className = 'attachment-size';
+    size.textContent = fmtSize(f.size);
+    li.appendChild(size);
+    list.appendChild(li);
+  }
+  $('#attachments-section').hidden = false;
 }
 
 $('#close-drawer').onclick = closeDrawer;
@@ -1355,13 +1396,13 @@ $('#bulk-delete-secrets').onclick = () => bulkDelete('secrets').catch(fail);
 $('#bulk-delete-files').onclick = () => bulkDelete('files').catch(fail);
 $('#bulk-move-secrets').onclick = () => bulkMoveSecrets().catch(fail);
 
-async function downloadFile(name) {
+async function downloadFile(name, saveAs = name) {
   try {
     const res = await api('GET', `/api/files/${encodeURIComponent(name)}${vaultQS(currentVault)}`, undefined, true);
     const blob = await res.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = name;
+    a.download = saveAs;
     a.click();
     URL.revokeObjectURL(a.href);
   } catch (e) { fail(e); }
