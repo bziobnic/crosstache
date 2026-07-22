@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStore, draftReducer } from './store.js';
@@ -17,7 +18,13 @@ class Element {
     this.innerHTML = '';
     this.dataset = {};
     this.children = [];
-    this.classList = { add() {}, remove() {}, toggle() {} };
+    this.classes = new Set();
+    this.classList = {
+      add: (name) => this.classes.add(name),
+      remove: (name) => this.classes.delete(name),
+      toggle: (name, enabled) => (enabled ? this.classes.add(name) : this.classes.delete(name)),
+      contains: (name) => this.classes.has(name),
+    };
     this.listeners = new Map();
   }
 
@@ -94,6 +101,7 @@ async function mountRouteUi({ failSave = false, tauriEvents = null } = {}) {
   return {
     document,
     elements,
+    store,
     confirmations,
     async openDirty() {
       const invoker = elements.get('#new-secret');
@@ -141,6 +149,41 @@ test('drawer routes guard cancel, Escape, backdrop, tabs, vault changes, and com
     await ui.elements.get('#new-secret').onclick({ currentTarget: ui.elements.get('#new-secret') });
     assert.equal(ui.elements.get('#drawer').hidden, false);
     assert.equal(ui.confirmations.length, 6);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('pending saves deactivate the backdrop and preserve save-control disabled states', async () => {
+  const ui = await mountRouteUi();
+  try {
+    await ui.openDirty();
+    const backdrop = ui.elements.get('#drawer-backdrop');
+    const save = ui.elements.get('#save');
+    const remove = ui.elements.get('#delete');
+    save.disabled = true;
+    remove.disabled = true;
+
+    ui.store.dispatch({ type: 'draft/save-pending', value: true });
+    assert.equal(backdrop.dataset.pending, 'true');
+    assert.equal(backdrop.classList.contains('pending-disabled'), true);
+    assert.equal(backdrop.onclick(), false);
+    assert.equal(ui.confirmations.length, 0);
+    assert.equal(save.disabled, true);
+    assert.equal(remove.disabled, true);
+
+    ui.store.dispatch({ type: 'draft/save-pending', value: false });
+    assert.equal(backdrop.dataset.pending, 'false');
+    assert.equal(backdrop.classList.contains('pending-disabled'), false);
+    assert.equal(save.disabled, true);
+    assert.equal(remove.disabled, true);
+    await backdrop.onclick();
+    assert.equal(ui.confirmations.length, 1);
+    assert.equal(ui.elements.get('#drawer').hidden, true);
+    assert.match(
+      fs.readFileSync(path.join(__dirname, 'style.css'), 'utf8'),
+      /\.drawer-backdrop\.pending-disabled\s*\{[^}]*pointer-events:\s*none/,
+    );
   } finally {
     ui.restore();
   }

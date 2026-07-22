@@ -508,11 +508,26 @@ function drawerDraft() {
   };
 }
 
+function syncPendingDisabled(control, pending) {
+  if (pending) {
+    if (control.dataset.pendingDisabled === undefined) {
+      control.dataset.pendingDisabled = String(control.disabled);
+    }
+    control.disabled = true;
+  } else if (control.dataset.pendingDisabled !== undefined) {
+    control.disabled = control.dataset.pendingDisabled === 'true';
+    delete control.dataset.pendingDisabled;
+  }
+}
+
 function syncDraftControls() {
   const pending = store.snapshot().savePending;
-  for (const selector of ['#close-drawer', '#drawer-backdrop', '#new-secret', '#tab-secrets', '#tab-files', '#vault-select']) {
-    $(selector).disabled = pending;
+  for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#vault-select', '#save', '#delete']) {
+    syncPendingDisabled($(selector), pending);
   }
+  const backdrop = $('#drawer-backdrop');
+  backdrop.dataset.pending = String(pending);
+  backdrop.classList.toggle('pending-disabled', pending);
   $('#drawer').setAttribute('aria-busy', String(pending));
 }
 
@@ -1006,7 +1021,10 @@ async function openRecord(name, meta, tags, generation) {
 }
 
 $('#close-drawer').onclick = () => requestDrawerClose();
-$('#drawer-backdrop').onclick = () => requestDrawerClose();
+$('#drawer-backdrop').onclick = () => {
+  if (store.snapshot().savePending) return false;
+  return requestDrawerClose();
+};
 $('#secret-form').addEventListener?.('input', updateDraft);
 $('#secret-form').addEventListener?.('change', updateDraft);
 document.addEventListener?.('keydown', (event) => {
@@ -1184,8 +1202,8 @@ $('#delete').onclick = async () => {
   const btn = $('#delete');
   if (btn.disabled || store.snapshot().savePending) return;
   if (!armConfirmation(btn, 'Really delete?')) return;
-  beginPendingAction(btn, 'Deleting…');
   setSavePending(true);
+  beginPendingAction(btn, 'Deleting…');
   const generation = drawerGeneration;
   const selection = editing;
   const vault = currentVault;
