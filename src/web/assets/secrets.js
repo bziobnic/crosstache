@@ -45,16 +45,94 @@ function setListLoadStatus(kind, state) {
   $(`#${singular}-list-summary`).textContent = summary;
 }
 
-function toast(msg, isError = false) {
+function toast(msg) {
   const t = $('#toast');
-  t.replaceChildren(icon(isError ? 'alert' : 'check'), document.createTextNode(msg));
-  t.className = `toast ${isError ? 'error' : 'success'}`;
-  t.setAttribute('role', isError ? 'alert' : 'status');
+  t.replaceChildren(icon('check'), document.createTextNode(msg));
+  t.className = 'toast success';
+  t.setAttribute('role', 'status');
   t.hidden = false;
   clearTimeout(t._timer);
   t._timer = setTimeout(() => { t.hidden = true; }, 4000);
 }
-const fail = (e) => toast(e.message, true);
+function isAborted(error) {
+  return error?.name === 'AbortError';
+}
+
+function errorCopy(error) {
+  return {
+    message: error?.message || 'The request could not be completed.',
+    hint: error?.hint || '',
+    field: error?.field || null,
+  };
+}
+
+function clearError(surface) {
+  const panel = $(surface);
+  panel.hidden = true;
+  delete panel.dataset.source;
+  panel.querySelector('.error-message').textContent = '';
+  panel.querySelector('.error-hint').textContent = '';
+  panel.querySelector('.error-retry')?.setAttribute('hidden', '');
+}
+
+function showError(surface, error, retry) {
+  if (isAborted(error)) return;
+  const panel = $(surface);
+  const { message, hint } = errorCopy(error);
+  panel.querySelector('.error-message').textContent = message;
+  panel.querySelector('.error-hint').textContent = hint;
+  const retryButton = panel.querySelector('.error-retry');
+  if (retryButton) {
+    retryButton.hidden = !retry;
+    retryButton.onclick = async () => {
+      clearError(surface);
+      await retry();
+    };
+  }
+  panel.hidden = false;
+}
+
+function showListError(kind, error) {
+  const surface = `#${kind === 'secrets' ? 'secret' : 'file'}-error`;
+  $(surface).dataset.source = 'action';
+  showError(surface, error);
+}
+
+function showListLoadError(kind, error) {
+  const surface = `#${kind === 'secrets' ? 'secret' : 'file'}-error`;
+  const panel = $(surface);
+  panel.dataset.source = 'load';
+  showError(surface, error, () => (
+    kind === 'secrets' ? loadSecrets(currentVault) : loadFiles(currentVault)
+  ));
+}
+
+function clearListLoadError(kind) {
+  const panel = $(`#${kind === 'secrets' ? 'secret' : 'file'}-error`);
+  if (panel.dataset.source === 'load') clearError(`#${panel.id}`);
+}
+
+function showFormError(error) {
+  if (isAborted(error)) return;
+  showError('#secret-form-error', error);
+  const field = errorCopy(error).field;
+  const input = field && $('#secret-form').elements[field];
+  input?.focus?.();
+}
+
+function clearFormError() {
+  clearError('#secret-form-error');
+}
+
+for (const panel of document.querySelectorAll('.error-panel')) {
+  panel.querySelector('.error-dismiss').onclick = () => clearError(`#${panel.id}`);
+}
+
+function fail(error) {
+  if (isAborted(error)) return;
+  if (!$('#drawer').hidden) showFormError(error);
+  else showListError(activeTab, error);
+}
 
 function resetConfirmation(button, label) {
   clearTimeout(button._confirmTimer);
@@ -784,14 +862,16 @@ async function loadSecrets(vault) {
     if (generation !== secretLoadGeneration) return false;
     secrets = loadedSecrets;
   } catch (e) {
-    if (generation !== secretLoadGeneration) return false;
+    if (generation !== secretLoadGeneration || isAborted(e)) return false;
     secretsState = 'failed';
     secrets = [];
     setListLoadStatus('secrets', 'failed');
     showListState($('#secrets-table tbody'), 'secrets', 'failed', secretSelection.enabled ? 6 : 5);
-    throw e;
+    showListLoadError('secrets', e);
+    return false;
   }
   secretsState = 'ready';
+  clearListLoadError('secrets');
   renderSecrets();
   return true;
 }
@@ -915,6 +995,7 @@ async function openDrawer(name, invoker = document.activeElement) {
 async function openDrawerNow(name, invoker) {
   const generation = ++drawerGeneration;
   $('#drawer').hidden = true;
+  clearFormError();
   resetConfirmation($('#delete'), 'Delete');
   clearDrawerState();
   editing = name;
@@ -964,7 +1045,7 @@ async function openDrawerNow(name, invoker) {
       if (generation !== drawerGeneration) return;
       // Without the fetched metadata a save would send enabled:true and no
       // custom tags — silently mutating the secret. Don't open the drawer.
-      fail(e);
+      showListError('secrets', e);
       clearDrawerState();
       return;
     }
@@ -1004,7 +1085,7 @@ async function openRecord(name, meta, tags, generation) {
     // Whole-value Reveal/Copy stay visible here (unlike the valid-record
     // path below) because they're the only diagnostic escape hatch for
     // inspecting a corrupt envelope.
-    toast(`record envelope is invalid: ${e.message}`, true);
+    showFormError(new Error('The record data is invalid and cannot be edited safely.'));
     $('#save').disabled = true;
     return;
   }
@@ -1077,7 +1158,7 @@ $('#reveal').onclick = async () => {
     renderProtectedControl($('#secret-form').elements.value, $('#reveal'), state);
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
-    fail(e);
+    showFormError(e);
   }
 };
 
@@ -1093,7 +1174,7 @@ $('#copy').onclick = async () => {
     toast('copied');
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
-    fail(e);
+    showFormError(e);
   }
 };
 
@@ -1172,7 +1253,7 @@ $('#secret-form').onsubmit = async (ev) => {
     await loadSecrets(currentVault);
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
-    fail(e);
+    showFormError(e);
   } finally {
     setSavePending(false);
   }
@@ -1196,7 +1277,7 @@ $('#delete').onclick = async () => {
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     resetConfirmation(btn, 'Delete');
-    fail(e);
+    showFormError(e);
   } finally {
     setSavePending(false);
   }
@@ -1237,14 +1318,16 @@ async function loadFiles(vault) {
     if (generation !== fileLoadGeneration) return false;
     files = loadedFiles;
   } catch (e) {
-    if (generation !== fileLoadGeneration) return false;
+    if (generation !== fileLoadGeneration || isAborted(e)) return false;
     filesState = 'failed';
     files = [];
     setListLoadStatus('files', 'failed');
     showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 5 : 4);
-    throw e;
+    showListLoadError('files', e);
+    return false;
   }
   filesState = 'ready';
+  clearListLoadError('files');
   renderFiles();
   return true;
 }
@@ -1339,7 +1422,7 @@ async function runBounded(items, limit, operation) {
   return results;
 }
 
-function reportBulkResults(verb, results) {
+function reportBulkResults(kind, verb, results) {
   const succeeded = results.filter((result) => result.ok).length;
   const failures = results.filter((result) => !result.ok);
   if (!failures.length) {
@@ -1349,7 +1432,7 @@ function reportBulkResults(verb, results) {
   const details = failures
     .map(({ item, error }) => `${item}: ${error.message}`)
     .join('; ');
-  toast(`${verb} ${succeeded}; ${failures.length} failed — ${details}`, true);
+  showListError(kind, new Error(`${verb} ${succeeded}; ${failures.length} failed — ${details}`));
 }
 
 function setBulkPending(kind, pending, label) {
@@ -1406,7 +1489,7 @@ async function bulkDelete(kind) {
   if (vault !== currentVault) return;
   if (!selectionIsCurrent || generation !== state.generation) return;
   setBulkPending(kind, false, '');
-  reportBulkResults('Deleted', results);
+  reportBulkResults(kind, 'Deleted', results);
 }
 
 async function bulkMoveSecrets() {
@@ -1415,7 +1498,7 @@ async function bulkMoveSecrets() {
   if (!items.length || state.pending) return;
   const folder = $('#secret-move-folder').value.trim();
   if (!folder) {
-    toast('enter a destination folder', true);
+    showListError('secrets', { message: 'Enter a destination folder.', field: 'folder' });
     return;
   }
 
@@ -1452,7 +1535,7 @@ async function bulkMoveSecrets() {
   resetConfirmation(moveButton, 'Move');
   updateSelectionControls('secrets');
   renderSecrets();
-  reportBulkResults('Moved', results);
+  reportBulkResults('secrets', 'Moved', results);
 }
 
 $('#select-secrets').onclick = () => setSelectionMode('secrets', true);

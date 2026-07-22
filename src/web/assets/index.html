@@ -56,6 +56,11 @@
       <button id="bulk-delete-secrets" class="button danger" type="button" data-default-label="Delete">Delete</button>
       <button id="cancel-secret-selection" class="button ghost" type="button">Cancel</button>
     </div>
+    <div id="secret-error" class="error-panel" role="alert" hidden>
+      <div><strong>Secrets need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+    </div>
     <div class="data-surface">
       <table id="secrets-table">
         <colgroup><col class="selection-col" hidden><col class="column-secret-name"><col class="column-secret-folder"><col class="column-groups"><col class="column-note"><col class="column-secret-updated"></colgroup>
@@ -84,6 +89,11 @@
       <button id="bulk-delete-files" class="button danger" type="button" data-default-label="Delete">Delete</button>
       <button id="cancel-file-selection" class="button ghost" type="button">Cancel</button>
     </div>
+    <div id="file-error" class="error-panel" role="alert" hidden>
+      <div><strong>Files need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+    </div>
     <div id="dropzone">
       <div class="dropzone-content">
         <span class="dropzone-icon"><svg class="icon" aria-hidden="true"><use href="#icon-upload"></use></svg></span>
@@ -110,6 +120,10 @@
   </div>
   <form id="secret-form" autocomplete="off">
     <div class="drawer-body">
+      <div id="secret-form-error" class="error-panel" role="alert" hidden>
+        <div><strong>Couldn’t save secret</strong><span class="error-message"></span><small class="error-hint"></small></div>
+        <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+      </div>
       <label class="form-field"><span class="field-label">Name <span class="field-hint">Required</span></span><input name="name" required></label>
       <label id="type-picker-label" class="form-field" hidden><span class="field-label">Type</span><select id="type-picker"></select></label>
       <div id="value-section">

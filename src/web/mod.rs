@@ -16,6 +16,7 @@ use crate::error::{CrosstacheError, Result};
 
 pub(crate) mod api;
 pub(crate) mod auth;
+pub(crate) mod errors;
 #[cfg(test)]
 pub(crate) mod testutil;
 

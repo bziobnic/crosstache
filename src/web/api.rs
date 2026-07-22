@@ -22,11 +22,12 @@ use super::WebState;
 
 pub(crate) enum ApiError {
     App(CrosstacheError),
-    /// Ad-hoc status/message for handler-level validation errors that don't
-    /// map to a `CrosstacheError` variant. Constructed starting in Task 4's
-    /// secret handlers (request parsing/validation).
-    #[allow(dead_code)]
-    Status(StatusCode, String),
+    Backend(BackendError),
+    Validation {
+        status: StatusCode,
+        message: &'static str,
+        field: Option<&'static str>,
+    },
 }
 
 impl From<CrosstacheError> for ApiError {
@@ -37,29 +38,37 @@ impl From<CrosstacheError> for ApiError {
 
 impl From<BackendError> for ApiError {
     fn from(e: BackendError) -> Self {
-        Self::App(e.into())
+        Self::Backend(e)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, msg) = match self {
-            ApiError::Status(s, m) => (s, m),
-            ApiError::App(e) => {
-                use CrosstacheError::*;
-                let status = match &e {
-                    SecretNotFound { .. } | VaultNotFound { .. } => StatusCode::NOT_FOUND,
-                    PermissionDenied(_) => StatusCode::FORBIDDEN,
-                    AuthenticationError(_) => StatusCode::UNAUTHORIZED,
-                    Conflict(_) => StatusCode::CONFLICT,
-                    RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-                    InvalidArgument(_) => StatusCode::BAD_REQUEST,
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                };
-                (status, e.to_string())
-            }
+        let (status, error) = match self {
+            ApiError::App(error) => super::errors::crosstache_error(error),
+            ApiError::Backend(error) => super::errors::backend_error(error),
+            ApiError::Validation {
+                status,
+                message,
+                field,
+            } => (
+                status,
+                super::errors::ApiErrorBody::validation(message, field),
+            ),
         };
-        (status, Json(json!({ "error": msg }))).into_response()
+        (status, Json(super::errors::ApiErrorEnvelope { error })).into_response()
+    }
+}
+
+fn validation_error(
+    status: StatusCode,
+    message: &'static str,
+    field: Option<&'static str>,
+) -> ApiError {
+    ApiError::Validation {
+        status,
+        message,
+        field,
     }
 }
 
@@ -216,14 +225,21 @@ fn str_field(v: Option<String>) -> FieldUpdate<String> {
     }
 }
 
-fn date_field(v: Option<String>) -> Result<FieldUpdate<DateTime<Utc>>, ApiError> {
+fn date_field(
+    v: Option<String>,
+    field: &'static str,
+) -> Result<FieldUpdate<DateTime<Utc>>, ApiError> {
     match v {
         None => Ok(FieldUpdate::Unchanged),
         Some(s) if s.is_empty() => Ok(FieldUpdate::Clear),
         Some(s) => DateTime::parse_from_rfc3339(&s)
             .map(|d| FieldUpdate::Set(d.with_timezone(&Utc)))
-            .map_err(|e| {
-                ApiError::Status(StatusCode::BAD_REQUEST, format!("bad timestamp '{s}': {e}"))
+            .map_err(|_| {
+                validation_error(
+                    StatusCode::BAD_REQUEST,
+                    "Enter a valid timestamp.",
+                    Some(field),
+                )
             }),
     }
 }
@@ -240,8 +256,8 @@ pub(crate) async fn patch_secret(
         value: None,
         content_type: None,
         enabled: body.enabled,
-        expires_on: date_field(body.expires_on)?,
-        not_before: date_field(body.not_before)?,
+        expires_on: date_field(body.expires_on, "expires_on")?,
+        not_before: date_field(body.not_before, "not_before")?,
         tags: body.tags,
         groups: body.groups,
         note: str_field(body.note),
@@ -277,13 +293,10 @@ pub(crate) async fn delete_secret(
 /// outright.
 fn reject_reserved_attachment_key(name: &str) -> Result<(), ApiError> {
     if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
-        return Err(ApiError::Status(
+        return Err(validation_error(
             StatusCode::BAD_REQUEST,
-            format!(
-                "'{name}' is the attachment encryption key for this vault; writing, deleting, \
-                 or renaming it would make all attachments unreadable. Use the CLI \
-                 (`xv set` / `xv delete --force` / `xv mv`) if you really mean to."
-            ),
+            "The attachment encryption key cannot be changed from the web interface.",
+            Some("name"),
         ));
     }
     Ok(())
@@ -334,9 +347,10 @@ pub(crate) async fn move_secret(
                 .await?;
             Ok(Json(props))
         }
-        _ => Err(ApiError::Status(
+        _ => Err(validation_error(
             StatusCode::BAD_REQUEST,
-            "provide exactly one of new_name or folder".into(),
+            "Provide either a new name or a destination folder.",
+            Some("name"),
         )),
     }
 }
@@ -369,9 +383,10 @@ pub(crate) mod files {
 
     fn files_backend(state: &WebState) -> Result<&dyn FileBackend, ApiError> {
         state.backend.files().ok_or_else(|| {
-            ApiError::Status(
+            validation_error(
                 StatusCode::NOT_IMPLEMENTED,
-                format!("the {} backend has no file storage", state.backend.name()),
+                "This backend does not provide file storage.",
+                None,
             )
         })
     }
@@ -419,23 +434,33 @@ pub(crate) mod files {
         Query(q): Query<VaultQuery>,
         mut multipart: Multipart,
     ) -> Result<Json<crate::blob::models::FileInfo>, ApiError> {
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|e| ApiError::Status(StatusCode::BAD_REQUEST, format!("bad multipart: {e}")))?
-        {
+        while let Some(field) = multipart.next_field().await.map_err(|_| {
+            validation_error(
+                StatusCode::BAD_REQUEST,
+                "The upload could not be read.",
+                Some("file"),
+            )
+        })? {
             if field.name() != Some("file") {
                 continue;
             }
             let name = field.file_name().map(str::to_string).ok_or_else(|| {
-                ApiError::Status(StatusCode::BAD_REQUEST, "file part needs a filename".into())
+                validation_error(
+                    StatusCode::BAD_REQUEST,
+                    "Choose a file with a name.",
+                    Some("file"),
+                )
             })?;
             let content_type = field.content_type().map(str::to_string);
             let content = field
                 .bytes()
                 .await
-                .map_err(|e| {
-                    ApiError::Status(StatusCode::BAD_REQUEST, format!("read upload: {e}"))
+                .map_err(|_| {
+                    validation_error(
+                        StatusCode::BAD_REQUEST,
+                        "The upload could not be read.",
+                        Some("file"),
+                    )
                 })?
                 .to_vec();
             let request = FileUploadRequest {
@@ -451,9 +476,10 @@ pub(crate) mod files {
                 .await?;
             return Ok(Json(info));
         }
-        Err(ApiError::Status(
+        Err(validation_error(
             StatusCode::BAD_REQUEST,
-            "multipart body needs a 'file' part".into(),
+            "Choose a file to upload.",
+            Some("file"),
         ))
     }
 
@@ -729,6 +755,17 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = get_json(app.clone(), "GET", "/api/secrets/db-pass-2", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_secret_has_stable_error() {
+        let app = crate::web::build_router(testutil::test_state());
+        let (status, json) = get_json(app, "GET", "/api/secrets/missing", None).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["code"], "xv-secret-not-found");
+        assert_eq!(json["error"]["message"], "Secret 'missing' was not found.");
+        assert!(json["error"]["hint"].as_str().unwrap().contains("Refresh"));
     }
 
     #[tokio::test]
