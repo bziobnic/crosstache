@@ -1,6 +1,7 @@
 import * as XvUiModel from './ui-model.js';
+import { guardNavigation } from './dialogs.js';
 
-export function mountSecrets({ api, token }) {
+export function mountSecrets({ api, store, dialogs, token }) {
 
 const $ = (sel) => document.querySelector(sel);
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -484,6 +485,79 @@ let types = []; // resolved record types from /api/types
 // { typeName, secretFields: {name: value}, metaFields: {name: value} }
 let recordState = null;
 let plainSecretState = null;
+let drawerInvoker = null;
+
+function drawerDraft() {
+  const form = $('#secret-form');
+  const fields = form.elements;
+  const recordFields = {};
+  for (const input of form.querySelectorAll('input[data-field-name]')) {
+    recordFields[input.dataset.fieldName] = input.dataset.fieldKind === 'secret'
+      ? input._protectedState.value
+      : input.value;
+  }
+  return {
+    name: fields.name.value,
+    value: plainSecretState ? plainSecretState.value : fields.value.value,
+    folder: fields.folder.value,
+    groups: fields.groups.value,
+    note: fields.note.value,
+    expires_on: fields.expires_on.value,
+    type: $('#type-picker').value,
+    record: recordState ? { type: recordState.typeName, fields: recordFields } : null,
+  };
+}
+
+function syncDraftControls() {
+  const pending = store.snapshot().savePending;
+  for (const selector of ['#close-drawer', '#drawer-backdrop', '#new-secret', '#tab-secrets', '#tab-files', '#vault-select']) {
+    $(selector).disabled = pending;
+  }
+  $('#drawer').setAttribute('aria-busy', String(pending));
+}
+
+function setSavePending(value) {
+  store.dispatch({ type: 'draft/save-pending', value });
+}
+
+function beginDraft() {
+  store.dispatch({ type: 'draft/open', draft: drawerDraft() });
+}
+
+function updateDraft() {
+  if (!$('#drawer').hidden && store.snapshot().draft) {
+    store.dispatch({ type: 'draft/change', draft: drawerDraft() });
+  }
+}
+
+async function allowNavigation() {
+  return await guardNavigation({
+    draft: store.snapshot().draft,
+    savePending: store.snapshot().savePending,
+    confirmDiscard: () => dialogs.confirmDiscard(),
+  });
+}
+
+function closeDrawer({ restoreFocus = false } = {}) {
+  drawerGeneration++;
+  resetConfirmation($('#delete'), 'Delete');
+  $('#drawer').hidden = true;
+  $('#drawer-backdrop').hidden = true;
+  clearDrawerState();
+  store.dispatch({ type: 'draft/close' });
+  const invoker = drawerInvoker;
+  drawerInvoker = null;
+  if (restoreFocus && typeof invoker?.focus === 'function') invoker.focus();
+}
+
+async function requestDrawerClose(afterClose) {
+  if (!(await allowNavigation())) return false;
+  if (!$('#drawer').hidden) closeDrawer({ restoreFocus: true });
+  if (afterClose) await afterClose();
+  return true;
+}
+
+store.subscribe(syncDraftControls);
 
 function setRevealLabel(button, label) {
   if (button.id === 'reveal') button.replaceChildren(icon('eye'), label);
@@ -640,6 +714,7 @@ async function init() {
       recordState = { typeName: picker.value, secretFields: {}, metaFields: {} };
       renderRecordFields(picker.value, {}, {}, true);
     }
+    updateDraft();
   };
   const { vaults } = await api('GET', '/api/vaults');
   const sel = $('#vault-select');
@@ -650,14 +725,16 @@ async function init() {
     opt.selected = v.name === currentVault;
     sel.appendChild(opt);
   }
-  sel.onchange = () => {
-    currentVault = sel.value;
+  sel.onchange = async () => {
+    const nextVault = sel.value;
+    if (!(await requestDrawerClose())) {
+      sel.value = currentVault;
+      return;
+    }
+    currentVault = nextVault;
     const vault = currentVault;
     secretLoadGeneration++;
     fileLoadGeneration++;
-    // Close the drawer: anything open in it belongs to the previous vault,
-    // and saving/deleting it against the new vault would hit the wrong secret.
-    closeDrawer();
     clearSelection('secrets');
     clearSelection('files');
     expandedSecretFolders.clear();
@@ -797,7 +874,7 @@ function secretRow(s, grouped = false) {
 }
 
 $('#search').oninput = renderSecrets;
-$('#new-secret').onclick = () => openDrawer(null);
+$('#new-secret').onclick = (event) => openDrawer(null, event.currentTarget);
 
 function isCurrentDrawer(generation, selection) {
   return generation === drawerGeneration && selection === editing;
@@ -810,14 +887,12 @@ function clearDrawerState() {
   plainSecretState = null;
 }
 
-function closeDrawer() {
-  drawerGeneration++;
-  resetConfirmation($('#delete'), 'Delete');
-  $('#drawer').hidden = true;
-  clearDrawerState();
+async function openDrawer(name, invoker = document.activeElement) {
+  if (!$('#drawer').hidden && !(await requestDrawerClose())) return;
+  return openDrawerNow(name, invoker);
 }
 
-async function openDrawer(name) {
+async function openDrawerNow(name, invoker) {
   const generation = ++drawerGeneration;
   $('#drawer').hidden = true;
   resetConfirmation($('#delete'), 'Delete');
@@ -875,6 +950,9 @@ async function openDrawer(name) {
     }
   }
   $('#drawer').hidden = false;
+  $('#drawer-backdrop').hidden = false;
+  drawerInvoker = invoker;
+  beginDraft();
 }
 
 // Fetches the envelope so secret fields are editable. Values live in JS
@@ -911,7 +989,35 @@ async function openRecord(name, meta, tags, generation) {
   renderRecordFields(recordState.typeName, secretFields, metaFields, false);
 }
 
-$('#close-drawer').onclick = closeDrawer;
+$('#close-drawer').onclick = () => requestDrawerClose();
+$('#drawer-backdrop').onclick = () => requestDrawerClose();
+$('#secret-form').addEventListener?.('input', updateDraft);
+$('#secret-form').addEventListener?.('change', updateDraft);
+document.addEventListener?.('keydown', (event) => {
+  if (event.key === 'Escape' && !$('#drawer').hidden) {
+    event.preventDefault();
+    requestDrawerClose();
+  }
+});
+
+globalThis.addEventListener?.('beforeunload', (event) => {
+  const allowed = guardNavigation({
+    draft: store.snapshot().draft,
+    savePending: store.snapshot().savePending,
+    confirmDiscard: () => false,
+  });
+  if (allowed === false) {
+    event.preventDefault();
+    event.returnValue = '';
+  }
+});
+
+const tauriEvents = globalThis.__TAURI__?.event;
+if (tauriEvents?.listen) {
+  tauriEvents.listen('xv://window-close-requested', () => requestDrawerClose(async () => {
+    await tauriEvents.emit('xv://window-close-approved');
+  }));
+}
 
 async function loadPlainSecretValue(generation, selection) {
   const state = plainSecretState;
@@ -963,6 +1069,7 @@ $('#copy').onclick = async () => {
 
 $('#secret-form').onsubmit = async (ev) => {
   ev.preventDefault();
+  if (store.snapshot().savePending) return;
   const generation = drawerGeneration;
   let selection = editing;
   const f = ev.target.elements;
@@ -971,6 +1078,7 @@ $('#secret-form').onsubmit = async (ev) => {
   const groups = f.groups.value.split(',').map(s => s.trim()).filter(Boolean);
   const expiresPut = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : null;
   const expiresPatch = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : '';
+  setSavePending(true);
   try {
     if (selection && name !== selection) {
       await api('POST', `/api/secrets/${encodeURIComponent(selection)}/move${vaultQS(currentVault)}`, { new_name: name });
@@ -1035,14 +1143,17 @@ $('#secret-form').onsubmit = async (ev) => {
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     fail(e);
+  } finally {
+    setSavePending(false);
   }
 };
 
 $('#delete').onclick = async () => {
   const btn = $('#delete');
-  if (btn.disabled) return;
+  if (btn.disabled || store.snapshot().savePending) return;
   if (!armConfirmation(btn, 'Really delete?')) return;
   beginPendingAction(btn, 'Deleting…');
+  setSavePending(true);
   const generation = drawerGeneration;
   const selection = editing;
   const vault = currentVault;
@@ -1056,6 +1167,8 @@ $('#delete').onclick = async () => {
     if (!isCurrentDrawer(generation, selection)) return;
     resetConfirmation(btn, 'Delete');
     fail(e);
+  } finally {
+    setSavePending(false);
   }
 };
 
@@ -1063,9 +1176,10 @@ $('#delete').onclick = async () => {
 $('#tab-secrets').onclick = () => switchTab('secrets');
 $('#tab-files').onclick = () => switchTab('files');
 let activeTab = 'secrets';
-function switchTab(which) {
+async function switchTab(which) {
   if (authRecoveryActive) return;
   if (which !== activeTab) {
+    if (!(await requestDrawerClose())) return;
     clearSelection('secrets');
     clearSelection('files');
     activeTab = which;

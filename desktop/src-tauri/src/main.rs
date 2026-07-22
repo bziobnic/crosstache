@@ -1,7 +1,40 @@
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crosstache::backend::BackendRegistry;
-use tauri::Manager;
+use tauri::{Emitter, Listener, Manager};
+
+#[derive(Debug, PartialEq, Eq)]
+enum CloseDecision {
+    Allow,
+    AskPage,
+    DenyWhileSaving,
+}
+
+fn close_decision(save_pending: bool, approved: bool) -> CloseDecision {
+    if save_pending {
+        CloseDecision::DenyWhileSaving
+    } else if approved {
+        CloseDecision::Allow
+    } else {
+        CloseDecision::AskPage
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{close_decision, CloseDecision};
+
+    #[test]
+    fn close_decision_allows_an_approved_close_and_asks_the_page_otherwise() {
+        assert_eq!(close_decision(false, true), CloseDecision::Allow);
+        assert_eq!(close_decision(false, false), CloseDecision::AskPage);
+        assert_eq!(close_decision(true, false), CloseDecision::DenyWhileSaving);
+    }
+}
 
 fn project_directory() -> Result<Option<PathBuf>, String> {
     let mut args = std::env::args_os().skip(1);
@@ -61,6 +94,27 @@ fn main() {
             let window = app
                 .get_webview_window("main")
                 .ok_or("main window was not created")?;
+            let close_approved = Arc::new(AtomicBool::new(false));
+            let approval_window = window.clone();
+            let approval_flag = close_approved.clone();
+            window.listen("xv://window-close-approved", move |_| {
+                approval_flag.store(true, Ordering::Release);
+                let _ = approval_window.close();
+            });
+            let close_window = window.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let approved = close_approved.swap(false, Ordering::AcqRel);
+                    match close_decision(false, approved) {
+                        CloseDecision::Allow => {}
+                        CloseDecision::AskPage => {
+                            api.prevent_close();
+                            let _ = close_window.emit("xv://window-close-requested", ());
+                        }
+                        CloseDecision::DenyWhileSaving => api.prevent_close(),
+                    }
+                }
+            });
             let error_window = window.clone();
 
             tauri::async_runtime::spawn(async move {

@@ -1,5 +1,5 @@
 import { createApiClient } from './api-client.js';
-import { createStore } from './store.js';
+import { createStore, draftReducer } from './store.js';
 import { createDialogManager } from './dialogs.js';
 import { announce } from './accessibility.js';
 import { mountSecrets } from './secrets.js';
@@ -17,7 +17,7 @@ const api = createApiClient({
   token,
   onInflight: (inflight) => { document.getElementById('progress').hidden = inflight === 0; },
 });
-const store = createStore({}, (state) => state);
+const store = createStore({ draft: null, savePending: false }, draftReducer);
 const dialogs = createDialogManager(document);
 const preferences = createPreferenceClient(api);
 
