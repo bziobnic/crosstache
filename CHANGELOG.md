@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.27.1 — Azure attachment upload fix (2026-07-21)
 
 ### Fixed
 
