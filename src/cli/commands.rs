@@ -582,6 +582,42 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Attach an encrypted file to a secret (stored age-encrypted; readable
+    /// only with vault access)
+    #[cfg(feature = "file-ops")]
+    Attach {
+        /// Secret name
+        secret: String,
+        /// Local file path
+        file: String,
+        /// Attachment name (defaults to the file's basename)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List a secret's attachments, or download one with --get
+    #[cfg(feature = "file-ops")]
+    Attachments {
+        /// Secret name
+        secret: String,
+        /// Download this attachment (decrypted)
+        #[arg(long)]
+        get: Option<String>,
+        /// Output path for --get (defaults to the attachment name in the
+        /// current directory)
+        #[arg(short, long, requires = "get")]
+        output: Option<String>,
+    },
+    /// Remove an attachment from a secret
+    #[cfg(feature = "file-ops")]
+    Detach {
+        /// Secret name
+        secret: String,
+        /// Attachment name
+        name: String,
+        /// Skip confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Show version history of a secret
     History {
         /// Secret name
@@ -1860,6 +1896,22 @@ impl Cli {
                 )
                 .await
             }
+            #[cfg(feature = "file-ops")]
+            Commands::Attach { secret, file, name } => {
+                crate::cli::attach_ops::execute_attach(secret, file, name, config).await
+            }
+            #[cfg(feature = "file-ops")]
+            Commands::Attachments {
+                secret,
+                get,
+                output,
+            } => crate::cli::attach_ops::execute_attachments(secret, get, output, config).await,
+            #[cfg(feature = "file-ops")]
+            Commands::Detach {
+                secret,
+                name,
+                force,
+            } => crate::cli::attach_ops::execute_detach(secret, name, force, config).await,
             Commands::History { name } => {
                 crate::cli::secret_ops::execute_secret_history_direct(&name, config, registry).await
             }

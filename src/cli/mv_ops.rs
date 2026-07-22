@@ -8,7 +8,7 @@
 use crate::backend::BackendRegistry;
 use crate::cli::helpers::{resolve_vault_for_trait, use_trait_path};
 use crate::cli::ls_view::{display_name, qualified_display_name};
-use crate::cli::secret_ops::invalidate_trait_secret_cache;
+use crate::cli::secret_ops::{confirm_reserved_key_write, invalidate_trait_secret_cache};
 use crate::config::Config;
 use crate::error::{CrosstacheError, Result};
 use crate::secret::manager::{FieldUpdate, SecretSummary, SecretUpdateRequest};
@@ -311,6 +311,7 @@ pub(crate) async fn execute_mv(
                             dest_folder,
                             dest_name,
                             dry_run,
+                            yes,
                         )
                         .await
                     }
@@ -347,6 +348,7 @@ pub(crate) async fn execute_mv(
                 &src_path,
                 &dst_path,
                 dry_run,
+                yes,
             )
             .await;
         }
@@ -435,6 +437,7 @@ pub(crate) async fn execute_mv(
                 dest_folder,
                 dest_name,
                 dry_run,
+                yes,
             )
             .await
         }
@@ -477,6 +480,7 @@ async fn execute_cross_vault_alias_mv(
     src_path: &str,
     dst_path: &str,
     dry_run: bool,
+    yes: bool,
 ) -> Result<()> {
     let plan = parse_mv(src_path, dst_path)?;
     let (src_folder, src_name, dest_folder, dest_name) = match plan {
@@ -561,6 +565,15 @@ async fn execute_cross_vault_alias_mv(
         return Ok(());
     }
 
+    // Moving the reserved attachment-encryption-key secret out of its source
+    // vault displaces it there — see the same-vault `execute_secret_mv`
+    // guard above. Cross-vault `mv` has no `--force` (mirrors same-vault),
+    // so always prompt.
+    if !confirm_reserved_key_write(&found.name, yes, "Moving", "--yes")? {
+        output::info("Aborted; secret not moved.");
+        return Ok(());
+    }
+
     let source_secret = src_backend
         .secrets()
         .get_secret(&src_entry.vault, &found.name, true)
@@ -618,6 +631,7 @@ async fn execute_secret_mv(
     dest_folder: Option<String>,
     dest_name: String,
     dry_run: bool,
+    yes: bool,
 ) -> Result<()> {
     let src_folder_norm = norm_folder(src_folder.as_deref());
 
@@ -662,6 +676,17 @@ async fn execute_secret_mv(
         };
         println!("{source} -> {dest_qualified}");
         output::info("1 secret would move (dry run)");
+        return Ok(());
+    }
+
+    // Renaming the reserved attachment-encryption-key secret away from its
+    // well-known name displaces it — `xv attach`/`xv attachments` look it up
+    // by that literal name, so every attachment in the vault becomes
+    // unreadable. `mv` has no --force/--yes for a single-secret rename, so
+    // always prompt.
+    if dest_name != src_name && !confirm_reserved_key_write(&found.name, yes, "Renaming", "--yes")?
+    {
+        output::info("Aborted; secret not moved.");
         return Ok(());
     }
 

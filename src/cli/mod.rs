@@ -3,6 +3,8 @@
 //! This module contains all command-line interface related functionality,
 //! including command definitions, argument parsing, and command execution.
 
+#[cfg(feature = "file-ops")]
+pub(crate) mod attach_ops;
 pub mod commands;
 pub(crate) mod config_ops;
 #[cfg(feature = "file-ops")]

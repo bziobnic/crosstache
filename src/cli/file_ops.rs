@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 /// so routing through the trait needs no handler-body changes.
 pub(crate) struct FileOps<'a> {
     files: &'a dyn FileBackend,
+    secrets: &'a dyn crate::backend::secret::SecretBackend,
     vault: &'a str,
     /// Registry name of the backend that owns `vault` — the cache-key
     /// identifier (`CacheKey::FileList { backend, .. }`).
@@ -36,12 +37,14 @@ pub(crate) struct FileOps<'a> {
 impl<'a> FileOps<'a> {
     fn new(
         files: &'a dyn FileBackend,
+        secrets: &'a dyn crate::backend::secret::SecretBackend,
         vault: &'a str,
         backend_name: &'a str,
         kind: BackendKind,
     ) -> Self {
         Self {
             files,
+            secrets,
             vault,
             backend_name,
             kind,
@@ -64,10 +67,29 @@ impl<'a> FileOps<'a> {
         request: FileDownloadRequest,
         reporter: &dyn ProgressReporter,
     ) -> Result<Vec<u8>> {
-        self.files
-            .download_file(self.vault, &request.name, Some(reporter))
-            .await
-            .map_err(CrosstacheError::from)
+        crate::secret::attachments::download_decrypted(
+            self.secrets,
+            self.files,
+            self.vault,
+            &request.name,
+            Some(reporter),
+        )
+        .await
+    }
+
+    async fn upload_file_encrypted(
+        &self,
+        request: FileUploadRequest,
+        reporter: &dyn ProgressReporter,
+    ) -> Result<FileInfo> {
+        crate::secret::attachments::upload_encrypted(
+            self.secrets,
+            self.files,
+            self.vault,
+            request,
+            Some(reporter),
+        )
+        .await
     }
 
     async fn list_files(&self, request: FileListRequest) -> Result<Vec<FileInfo>> {
@@ -117,7 +139,9 @@ async fn resolve_file_backend(
 }
 
 /// Actionable capability-gate error for a backend without file storage.
-fn file_storage_unsupported_error(backend: &dyn crate::backend::Backend) -> CrosstacheError {
+pub(crate) fn file_storage_unsupported_error(
+    backend: &dyn crate::backend::Backend,
+) -> CrosstacheError {
     use crate::backend::BackendKind;
     let hint = match backend.kind() {
         BackendKind::Azure => "set a storage account (AZURE_STORAGE_ACCOUNT or [azure].storage_account) and run 'xv init'",
@@ -148,7 +172,13 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
     let files = backend
         .files()
         .expect("resolve_file_backend guarantees files() is Some");
-    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
+    let blob_manager = FileOps::new(
+        files,
+        backend.secrets(),
+        &vault,
+        &backend_name,
+        backend.kind(),
+    );
 
     match command {
         FileCommands::Upload {
@@ -162,7 +192,14 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
             tag,
             content_type,
             continue_on_error,
+            encrypt,
         } => {
+            // ponytail: --encrypt is single-file only; extend to multi/recursive when needed
+            if encrypt && (recursive || files.len() > 1) {
+                return Err(CrosstacheError::invalid_argument(
+                    "--encrypt currently supports single-file uploads only",
+                ));
+            }
             // Handle recursive directory upload
             if recursive {
                 // Validate that --name and --content-type are not used with --recursive
@@ -199,6 +236,7 @@ pub(crate) async fn execute_file_command(command: FileCommands, config: Config) 
                     metadata,
                     tag,
                     content_type,
+                    encrypt,
                     &config,
                 )
                 .await?;
@@ -407,7 +445,13 @@ pub(crate) async fn execute_file_info_from_root(file_name: &str, config: &Config
     let files = backend
         .files()
         .expect("resolve_file_backend guarantees file storage");
-    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
+    let blob_manager = FileOps::new(
+        files,
+        backend.secrets(),
+        &vault,
+        &backend_name,
+        backend.kind(),
+    );
 
     execute_file_info(&blob_manager, file_name, config).await
 }
@@ -474,6 +518,7 @@ async fn execute_file_upload(
     metadata: Vec<(String, String)>,
     tags: Vec<(String, String)>,
     content_type: Option<String>,
+    encrypt: bool,
     config: &Config,
 ) -> Result<()> {
     use crate::blob::models::FileUploadRequest;
@@ -541,9 +586,15 @@ async fn execute_file_upload(
     let reporter = progress::create_file_reporter(file_size, threshold, tty);
     reporter.set_message(format!("Uploading '{remote_name}'..."));
 
-    let file_info = blob_manager
-        .upload_file(upload_request, reporter.as_ref())
-        .await?;
+    let file_info = if encrypt {
+        blob_manager
+            .upload_file_encrypted(upload_request, reporter.as_ref())
+            .await?
+    } else {
+        blob_manager
+            .upload_file(upload_request, reporter.as_ref())
+            .await?
+    };
     output::success(&format!("Successfully uploaded file '{}'", file_info.name));
     println!("   Size: {} bytes", file_info.size);
     println!("   Content-Type: {}", file_info.content_type);
@@ -1295,7 +1346,8 @@ async fn execute_file_upload_multiple(
             group.clone(),
             metadata.clone(),
             tag.clone(),
-            None, // content_type is not allowed for multiple files
+            None,  // content_type is not allowed for multiple files
+            false, // --encrypt is single-file only
             config,
         )
         .await
@@ -1784,6 +1836,48 @@ struct FileSyncSummary {
     dry_run: bool,
 }
 
+/// Remove encrypted secret attachments from `remote`, returning their blob
+/// names. Sync only speaks plaintext (see
+/// [`crate::secret::attachments::is_encrypted_attachment`]); this keeps it
+/// out of the `attachments/` namespace entirely, in every sync direction and
+/// for `--delete`.
+fn strip_encrypted_attachments(
+    remote: &mut std::collections::HashMap<String, crate::blob::models::FileInfo>,
+) -> Vec<String> {
+    let removed: Vec<String> = remote
+        .iter()
+        .filter(|(name, info)| {
+            crate::secret::attachments::is_encrypted_attachment(name, &info.metadata)
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in &removed {
+        remote.remove(name);
+    }
+    removed
+}
+
+/// Local-side counterpart of [`strip_encrypted_attachments`]: local files
+/// have no `xv-encrypted` metadata to check, so this matches on the
+/// `attachments/` name prefix alone (same convention, see
+/// [`crate::secret::attachments::is_encrypted_attachment`]).
+fn strip_encrypted_attachments_local(
+    local_by_blob: &mut std::collections::HashMap<String, FileUploadInfo>,
+    local_meta: &mut std::collections::HashMap<String, (u64, chrono::DateTime<chrono::Utc>)>,
+) -> Vec<String> {
+    let empty = std::collections::HashMap::new();
+    let removed: Vec<String> = local_by_blob
+        .keys()
+        .filter(|name| crate::secret::attachments::is_encrypted_attachment(name, &empty))
+        .cloned()
+        .collect();
+    for name in &removed {
+        local_by_blob.remove(name);
+        local_meta.remove(name);
+    }
+    removed
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn file_sync_delete_remote_not_local(
     blob_manager: &FileOps<'_>,
@@ -2003,6 +2097,23 @@ async fn execute_file_sync(
     let mut remote_by_name: HashMap<String, crate::blob::models::FileInfo> = HashMap::new();
     for f in remote_list {
         remote_by_name.insert(f.name.clone(), f);
+    }
+
+    // Encrypted secret attachments are ciphertext sync doesn't understand —
+    // plain sync would decrypt them to disk on download, or clobber the
+    // ciphertext with an unflagged plaintext re-upload. Drop them from both
+    // sides up front so every direction (up/down/both) and --delete skip
+    // them uniformly.
+    let local_skipped = strip_encrypted_attachments_local(&mut local_by_blob, &mut local_meta);
+    let remote_skipped = strip_encrypted_attachments(&mut remote_by_name);
+    let skipped_names: HashSet<&String> =
+        local_skipped.iter().chain(remote_skipped.iter()).collect();
+    if !skipped_names.is_empty() {
+        output::warn(&format!(
+            "sync: skipped {} encrypted attachment blob(s) under 'attachments/' — encrypted \
+             sync isn't supported yet; use `xv attach` / `xv attachments --get` instead",
+            skipped_names.len()
+        ));
     }
 
     let local_names: HashSet<String> = local_by_blob.keys().cloned().collect();
@@ -2330,6 +2441,9 @@ async fn execute_file_sync(
                 for f in remote_after {
                     remote_map_after.insert(f.name.clone(), f);
                 }
+                // Never let --delete consider encrypted attachments, even
+                // ones this rescan just picked back up.
+                strip_encrypted_attachments(&mut remote_map_after);
 
                 file_sync_delete_remote_not_local(
                     blob_manager,
@@ -2418,7 +2532,13 @@ pub(crate) async fn execute_file_upload_quick(
     let files = backend
         .files()
         .expect("resolve_file_backend guarantees file storage");
-    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
+    let blob_manager = FileOps::new(
+        files,
+        backend.secrets(),
+        &vault,
+        &backend_name,
+        backend.kind(),
+    );
 
     // Convert parameters to match FileCommands::Upload format
     let groups_vec = groups
@@ -2444,6 +2564,7 @@ pub(crate) async fn execute_file_upload_quick(
         metadata_map,
         Vec::new(),
         None,
+        false, // no --encrypt flag on the quick-upload path
         config,
     )
     .await
@@ -2460,7 +2581,13 @@ pub(crate) async fn execute_file_download_quick(
     let files = backend
         .files()
         .expect("resolve_file_backend guarantees file storage");
-    let blob_manager = FileOps::new(files, &vault, &backend_name, backend.kind());
+    let blob_manager = FileOps::new(
+        files,
+        backend.secrets(),
+        &vault,
+        &backend_name,
+        backend.kind(),
+    );
 
     let final_output_path = resolve_single_download_path(name, output.as_deref())?;
     execute_file_download(
@@ -2581,5 +2708,83 @@ mod tests {
         let name =
             path_to_blob_name(std::path::Path::new("docs/readme.md"), Some("release/")).unwrap();
         assert_eq!(name, "release/docs/readme.md");
+    }
+
+    // --- sync skip-filter: encrypted attachments never sync as plaintext ---
+
+    fn remote_file(name: &str, encrypted: bool) -> crate::blob::models::FileInfo {
+        let mut metadata = std::collections::HashMap::new();
+        if encrypted {
+            metadata.insert("xv-encrypted".to_string(), "age".to_string());
+        }
+        crate::blob::models::FileInfo {
+            name: name.to_string(),
+            size: 1,
+            content_type: "application/octet-stream".to_string(),
+            last_modified: chrono::Utc::now(),
+            etag: String::new(),
+            groups: Vec::new(),
+            metadata,
+            tags: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn strip_encrypted_attachments_removes_by_prefix_and_flag() {
+        let mut remote = std::collections::HashMap::new();
+        remote.insert(
+            "attachments/db/cert.pem".to_string(),
+            remote_file("attachments/db/cert.pem", false),
+        );
+        remote.insert(
+            "docs/readme.md".to_string(),
+            remote_file("docs/readme.md", true), // flagged, outside the reserved prefix
+        );
+        remote.insert(
+            "docs/plain.txt".to_string(),
+            remote_file("docs/plain.txt", false),
+        );
+
+        let removed = strip_encrypted_attachments(&mut remote);
+
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"attachments/db/cert.pem".to_string()));
+        assert!(removed.contains(&"docs/readme.md".to_string()));
+        assert_eq!(remote.len(), 1);
+        assert!(remote.contains_key("docs/plain.txt"));
+    }
+
+    #[test]
+    fn strip_encrypted_attachments_local_matches_reserved_prefix_only() {
+        let mut local_by_blob = std::collections::HashMap::new();
+        local_by_blob.insert(
+            "attachments/db/cert.pem".to_string(),
+            FileUploadInfo {
+                local_path: PathBuf::from("/tmp/cert.pem"),
+                _relative_path: "cert.pem".to_string(),
+                blob_name: "attachments/db/cert.pem".to_string(),
+            },
+        );
+        local_by_blob.insert(
+            "docs/plain.txt".to_string(),
+            FileUploadInfo {
+                local_path: PathBuf::from("/tmp/plain.txt"),
+                _relative_path: "plain.txt".to_string(),
+                blob_name: "docs/plain.txt".to_string(),
+            },
+        );
+        let mut local_meta = std::collections::HashMap::new();
+        local_meta.insert(
+            "attachments/db/cert.pem".to_string(),
+            (1u64, chrono::Utc::now()),
+        );
+        local_meta.insert("docs/plain.txt".to_string(), (1u64, chrono::Utc::now()));
+
+        let removed = strip_encrypted_attachments_local(&mut local_by_blob, &mut local_meta);
+
+        assert_eq!(removed, vec!["attachments/db/cert.pem".to_string()]);
+        assert!(!local_by_blob.contains_key("attachments/db/cert.pem"));
+        assert!(!local_meta.contains_key("attachments/db/cert.pem"));
+        assert!(local_by_blob.contains_key("docs/plain.txt"));
     }
 }

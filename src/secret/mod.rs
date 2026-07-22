@@ -3,6 +3,7 @@
 //! This module provides functionality for managing secrets in Azure Key Vault,
 //! including name sanitization, group management, and advanced secret operations.
 
+pub mod attachments;
 pub mod manager;
 pub mod models;
 pub mod name_manager;

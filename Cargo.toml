@@ -146,6 +146,16 @@ panic = "abort"
 [profile.dev]
 debug = true
 
+# At opt-level 0 the clap-derive command-tree build (`Cli::command()` and the
+# per-enum `augment_subcommands` chain) transiently uses ~1.9MB of stack, and
+# libtest runs each #[test] on a 2MB thread — unit tests that call
+# `Cli::try_parse_from` overflow once the subcommand tree grows a few more
+# variants. opt-level 1 makes rustc reuse stack slots, collapsing that usage.
+# The shipped binary is unaffected either way: `main` parses on the 8MB main
+# thread, and release builds optimize fully.
+[profile.test]
+opt-level = 1
+
 # cargo-release configuration for GitHub-only releases
 [package.metadata.release]
 publish = false           # Don't publish to crates.io

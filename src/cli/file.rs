@@ -38,6 +38,11 @@ pub enum FileCommands {
         /// Continue on error when uploading multiple files
         #[arg(long)]
         continue_on_error: bool,
+        /// Encrypt the file client-side with the vault's attachment key
+        /// before upload (readable only with vault access). Single-file
+        /// uploads only.
+        #[arg(long)]
+        encrypt: bool,
     },
     /// Download one or more files from blob storage
     Download {

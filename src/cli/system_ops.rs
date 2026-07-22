@@ -748,6 +748,19 @@ async fn save_generated_secret(
     let mut meta = meta.clone();
     crate::cli::secret_ops::apply_profile_write_defaults(&mut meta, config).await?;
 
+    // `xv gen --save` has no `--force`/override flag at all, so this always
+    // prompts (or refuses outright in a non-interactive session) — same
+    // guard as `xv set`, see `confirm_reserved_key_write`.
+    if !crate::cli::secret_ops::confirm_reserved_key_write(
+        name,
+        false,
+        "Overwriting",
+        "an interactive terminal (xv gen --save has no override flag)",
+    )? {
+        output::info("Aborted; secret not saved.");
+        return Ok(());
+    }
+
     let request = meta.to_secret_request(name, zeroize::Zeroizing::new(value.to_string()))?;
 
     // Trait path: any backend exposed through the registry (local, aws, and

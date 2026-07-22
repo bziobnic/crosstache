@@ -4,7 +4,7 @@ use crate::backend::BackendCapabilities;
 use crate::backend::{BackendKind, BackendRef, BackendRegistry};
 use crate::cli::commands::{CharsetType, SecretWriteArgs, ShareCommands};
 use crate::cli::helpers::{
-    confirm_destructive, copy_to_clipboard, generate_random_value, mask_secrets,
+    confirm_destructive, confirm_proceed, copy_to_clipboard, generate_random_value, mask_secrets,
     resolve_vault_for_trait, schedule_clipboard_clear, share_unsupported_error, use_trait_path,
 };
 use crate::config::Config;
@@ -501,6 +501,15 @@ pub(crate) async fn execute_secret_set_direct(
                 )
                 .await?;
             let name = &name;
+            if !confirm_reserved_key_write(
+                name,
+                false,
+                "Overwriting",
+                "an interactive terminal (xv set has no override flag)",
+            )? {
+                output::info("Aborted; secret not set.");
+                return Ok(());
+            }
             let request = build_record_set_request(
                 name,
                 value.clone(),
@@ -536,6 +545,15 @@ pub(crate) async fn execute_secret_set_direct(
                 )
                 .await?;
             let name = &name;
+            if !confirm_reserved_key_write(
+                name,
+                false,
+                "Overwriting",
+                "an interactive terminal (xv set has no override flag)",
+            )? {
+                output::info("Aborted; secret not set.");
+                return Ok(());
+            }
             let secret_value = if let Some(v) = value.clone() {
                 v
             } else if stdin {
@@ -610,6 +628,17 @@ pub(crate) async fn execute_secret_set_direct(
                             continue;
                         }
                     };
+                // Bulk set has no per-item confirmation flow (unlike the
+                // single-secret path above), so the reserved attachment key
+                // is refused outright rather than prompted for.
+                if is_reserved_attachment_key(&resolved_key) {
+                    output::warn(&format!(
+                        "  ✗ {resolved_key}: reserved for attachment encryption; use 'xv set {resolved_key}' \
+                         (single-secret form) to overwrite it interactively"
+                    ));
+                    error_count += 1;
+                    continue;
+                }
                 // Build each request via the shared helper so bulk set applies
                 // the same write-time metadata (--group/--note/--folder/--tag)
                 // as the single-secret path. (--expires/--not-before are rejected
@@ -1042,11 +1071,53 @@ pub(crate) fn invalidate_trait_secret_cache(config: &Config, backend_name: &str,
     cache_manager.invalidate(&trait_secret_cache_key(backend_name, vault_name));
 }
 
+/// Extra confirmation gate for any CLI write that targets the reserved
+/// attachment-encryption-key secret (`xv-attachment-key`) — overwriting,
+/// retyping, or renaming it makes every attachment in the vault permanently
+/// unreadable. Only `delete` warned about this before; `set`, `update`,
+/// `rollback`, and `mv` displaced/overwrote the key silently. No-op (returns
+/// `Ok(true)` without prompting) for every other secret name.
+///
+/// `action` is a gerund phrase describing the write, e.g. "Overwriting",
+/// "Renaming"; `force` follows each caller's own skip-confirmation flag (or
+/// `false` — always prompt — where the caller has none). `flag_hint` names
+/// that flag for the non-interactive refusal message (`confirm_proceed`'s
+/// "Re-run with {flag_hint} to confirm") — must match what `force` actually
+/// is, since `set` has no override flag at all and `mv` uses `--yes`, not
+/// `--force`.
+/// True if `name` is the reserved attachment-encryption-key secret. Bulk set
+/// has no per-item confirmation flow, so it uses this to refuse outright
+/// instead of going through [`confirm_reserved_key_write`]'s prompt.
+fn is_reserved_attachment_key(name: &str) -> bool {
+    name == crate::secret::attachments::ATTACHMENT_KEY_SECRET
+}
+
+pub(crate) fn confirm_reserved_key_write(
+    name: &str,
+    force: bool,
+    action: &str,
+    flag_hint: &str,
+) -> Result<bool> {
+    if name != crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+        return Ok(true);
+    }
+    confirm_proceed(
+        force,
+        &format!(
+            "{action} '{name}' — the attachment encryption key for this vault — will make ALL \
+             attachments in this vault unreadable. Continue?"
+        ),
+        flag_hint,
+    )
+}
+
 fn filter_secret_summaries_for_display(
     mut secrets: Vec<crate::secret::manager::SecretSummary>,
     group: Option<&str>,
     all: bool,
 ) -> Vec<crate::secret::manager::SecretSummary> {
+    // The attachment key is infrastructure, not a user secret.
+    secrets.retain(|s| s.name != crate::secret::attachments::ATTACHMENT_KEY_SECRET);
     if !all {
         secrets.retain(|s| s.enabled);
     }
@@ -2653,22 +2724,69 @@ pub(crate) async fn execute_secret_delete_direct(
                 output::info(&format!("No secrets found in group '{group_name}'"));
                 return Ok(());
             }
+            // Exclude reserved-key entries from the prompt count (they're refused below anyway)
+            let deletable_count = secrets
+                .iter()
+                .filter(|s| !is_reserved_attachment_key(&s.name))
+                .count();
             if !confirm_destructive(
                 force,
                 &format!(
                     "Delete {} secret(s) in group '{group_name}'?",
-                    secrets.len()
+                    deletable_count
                 ),
             )? {
                 output::info("Aborted; no secrets deleted.");
                 return Ok(());
             }
             for s in &secrets {
+                // Group delete has no per-item confirmation (unlike the
+                // single-secret path below, which prompts specifically for
+                // the reserved key), so refuse outright rather than sweep it
+                // up silently — mirrors bulk `xv set`'s `is_reserved_attachment_key`
+                // refusal.
+                if is_reserved_attachment_key(&s.name) {
+                    output::warn(&format!(
+                        "  ✗ {}: reserved for attachment encryption; use 'xv delete {}' \
+                         (single-secret form) to delete it interactively",
+                        s.name, s.name
+                    ));
+                    continue;
+                }
                 backend
                     .secrets()
                     .delete_secret(&vault_name, &s.name)
                     .await?;
                 output::success(&format!("Deleted '{}'", s.name));
+                #[cfg(feature = "file-ops")]
+                if s.name.contains('/') || s.name.contains('\\') {
+                    // A path separator can't safely address the
+                    // attachments/<name>/ prefix without risking a
+                    // cross-secret cascade — skip rather than guess.
+                    output::warn(&format!(
+                        "'{}' contains a path separator; skipping attachment cascade",
+                        s.name
+                    ));
+                } else if let Some(files) = backend.files() {
+                    match crate::secret::attachments::delete_attachments(
+                        files,
+                        &vault_name,
+                        &s.name,
+                    )
+                    .await
+                    {
+                        Ok(n) if n > 0 => {
+                            output::info(&format!("Deleted {n} attachment(s) of '{}'", s.name));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            output::warn(&format!(
+                                "failed to delete attachments of '{}': {e}",
+                                s.name
+                            ));
+                        }
+                    }
+                }
             }
             invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
         } else if let Some(secret_name) = name {
@@ -2682,7 +2800,52 @@ pub(crate) async fn execute_secret_delete_direct(
                     crate::workspace::TargetMode::Write,
                 )
                 .await?;
-            if !confirm_destructive(force, &format!("Delete secret '{resolved_name}'?"))? {
+            // Attachments cascade: count first so the confirmation is honest.
+            // A resolved name containing a path separator can't safely
+            // address the attachments/<name>/ prefix (risk of cross-secret
+            // cascade — see delete-cascade path traversal finding), so skip
+            // listing/cascading under it and warn instead of guessing.
+            #[cfg(feature = "file-ops")]
+            let attachment_count = if resolved_name.contains('/') || resolved_name.contains('\\') {
+                output::warn(&format!(
+                    "'{resolved_name}' contains a path separator; skipping attachment cascade"
+                ));
+                0
+            } else {
+                match backend.files() {
+                    Some(files) => match crate::secret::attachments::list_attachments(
+                        files,
+                        &vault_name,
+                        &resolved_name,
+                    )
+                    .await
+                    {
+                        Ok(a) => a.len(),
+                        Err(e) => {
+                            // Listing failure must not block deletion, but it
+                            // must not be silent either.
+                            output::warn(&format!(
+                                "could not list attachments of '{resolved_name}' before delete: {e}"
+                            ));
+                            0
+                        }
+                    },
+                    None => 0,
+                }
+            };
+            #[cfg(not(feature = "file-ops"))]
+            let attachment_count = 0;
+            let prompt = if resolved_name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
+                format!(
+                    "'{resolved_name}' is the attachment encryption key for vault '{vault_name}'. \
+                     Deleting it makes ALL attachments in this vault permanently unreadable. Delete anyway?"
+                )
+            } else if attachment_count > 0 {
+                format!("Delete secret '{resolved_name}' and its {attachment_count} attachment(s)?")
+            } else {
+                format!("Delete secret '{resolved_name}'?")
+            };
+            if !confirm_destructive(force, &prompt)? {
                 output::info("Aborted; secret not deleted.");
                 return Ok(());
             }
@@ -2691,7 +2854,22 @@ pub(crate) async fn execute_secret_delete_direct(
                 .delete_secret(&vault_name, &resolved_name)
                 .await?;
             output::success(&format!("Successfully deleted secret '{resolved_name}'"));
+            // Invalidate before the (possibly-failing) attachment cascade so
+            // a cascade error can never leave a stale cached secret list
+            // behind — the secret delete above already committed.
             invalidate_trait_secret_cache(&config, &backend_name, &vault_name);
+            #[cfg(feature = "file-ops")]
+            if attachment_count > 0 {
+                if let Some(files) = backend.files() {
+                    let n = crate::secret::attachments::delete_attachments(
+                        files,
+                        &vault_name,
+                        &resolved_name,
+                    )
+                    .await?;
+                    output::info(&format!("Deleted {n} attachment(s)"));
+                }
+            }
         } else {
             return Err(CrosstacheError::invalid_argument(
                 "Either secret name or --group must be specified",
@@ -2836,6 +3014,10 @@ pub(crate) async fn execute_secret_rollback_direct(
     }
 
     let name = resolved_name.as_str();
+    if !confirm_reserved_key_write(name, force, "Rolling back", "--force")? {
+        output::info("Aborted; no rollback performed.");
+        return Ok(());
+    }
     if !confirm_destructive(
         force,
         &format!("Roll back secret '{name}' to version {version}?"),
@@ -3817,6 +3999,10 @@ pub(crate) async fn execute_secret_update_direct(
             )
             .await?;
         let name = resolved_name.as_str();
+        if !confirm_reserved_key_write(name, yes, "Updating", "--yes")? {
+            output::info("Aborted; secret not updated.");
+            return Ok(());
+        }
         let local_registry = BackendRegistry::new(resolved_backend);
         let reg = &local_registry;
 
@@ -5280,6 +5466,15 @@ async fn execute_secret_rotate(
         }
     }
 
+    // Rotating the reserved attachment-encryption-key secret replaces its
+    // value with freshly generated garbage, making ALL attachments in this
+    // vault unreadable — the generic confirmation above doesn't say that,
+    // and with `--force` it wouldn't say anything at all.
+    if !confirm_reserved_key_write(name, force, "Rotating", "--force")? {
+        output::info("Aborted; secret not rotated.");
+        return Ok(());
+    }
+
     // Generate the new value
     let new_value = generate_random_value(length, charset, custom_generator)?;
 
@@ -6641,6 +6836,14 @@ async fn execute_secret_copy(
 
     // Determine target name (use new_name if provided, otherwise use original)
     let target_name = new_name.as_deref().unwrap_or(name);
+
+    // A copy (or `xv move`, which calls this) landing on the reserved
+    // attachment key would silently replace this vault's attachment
+    // identity — same guard as `xv mv`'s rename path.
+    if !confirm_reserved_key_write(target_name, force, "Copying to", "--force")? {
+        output::info("Aborted; secret not copied.");
+        return Ok(());
+    }
 
     println!(
         "Copying secret '{}' from vault '{}' to vault '{}' as '{}'...",
@@ -8368,6 +8571,76 @@ mod tests {
         assert!(
             buggy.is_empty(),
             "demonstrates the pre-fix bug: filtering after alias-prefixing loses the match"
+        );
+    }
+
+    #[test]
+    fn reserved_attachment_key_is_hidden_from_listings() {
+        fn summary(name: &str) -> crate::secret::manager::SecretSummary {
+            crate::secret::manager::SecretSummary {
+                name: name.to_string(),
+                original_name: name.to_string(),
+                note: None,
+                folder: None,
+                groups: None,
+                updated_on: String::new(),
+                enabled: true,
+                content_type: String::new(),
+                tags: std::collections::HashMap::new(),
+            }
+        }
+        let secrets = vec![
+            summary("normal"),
+            summary(crate::secret::attachments::ATTACHMENT_KEY_SECRET),
+        ];
+        let out = filter_secret_summaries_for_display(secrets, None, true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "normal");
+    }
+
+    #[test]
+    fn bulk_set_refuses_reserved_key_name() {
+        assert!(is_reserved_attachment_key(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET
+        ));
+        assert!(!is_reserved_attachment_key("normal-secret"));
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_is_a_noop_for_other_secrets() {
+        // No TTY in the test process, so a real prompt would error out
+        // (`confirm_proceed`'s non-interactive-session refusal); a
+        // non-reserved name must never reach that path at all.
+        assert!(
+            confirm_reserved_key_write("normal-secret", false, "Overwriting", "--force").unwrap()
+        );
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_skips_prompt_when_forced() {
+        assert!(confirm_reserved_key_write(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET,
+            true,
+            "Overwriting",
+            "--force"
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn confirm_reserved_key_write_refuses_unattended_without_force() {
+        // Not a TTY here, so `confirm_proceed(false, ..)` can't prompt — it
+        // must refuse loudly rather than silently defaulting either way.
+        let err = confirm_reserved_key_write(
+            crate::secret::attachments::ATTACHMENT_KEY_SECRET,
+            false,
+            "Overwriting",
+            "--force",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("attachment encryption key"),
+            "{err}"
         );
     }
 }
