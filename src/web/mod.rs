@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use axum::response::Html;
+use axum::extract::Path;
+use axum::http::{header::CONTENT_TYPE, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use rand::Rng;
@@ -17,10 +19,49 @@ pub(crate) mod auth;
 #[cfg(test)]
 pub(crate) mod testutil;
 
+#[cfg(test)]
 const INDEX_HTML: &str = include_str!("assets/index.html");
+#[cfg(test)]
 const UI_MODEL_JS: &str = include_str!("assets/ui-model.js");
-const APP_JS: &str = include_str!("assets/app.js");
+#[cfg(test)]
+const APP_JS: &str = concat!(
+    include_str!("assets/app.js"),
+    include_str!("assets/secrets.js"),
+);
+#[cfg(test)]
 const STYLE_CSS: &str = include_str!("assets/style.css");
+
+fn asset(path: &str) -> Option<(&'static str, &'static str)> {
+    match path {
+        "/app.js" => Some(("application/javascript", include_str!("assets/app.js"))),
+        "/api-client.js" => Some((
+            "application/javascript",
+            include_str!("assets/api-client.js"),
+        )),
+        "/store.js" => Some(("application/javascript", include_str!("assets/store.js"))),
+        "/dialogs.js" => Some(("application/javascript", include_str!("assets/dialogs.js"))),
+        "/accessibility.js" => Some((
+            "application/javascript",
+            include_str!("assets/accessibility.js"),
+        )),
+        "/secrets.js" => Some(("application/javascript", include_str!("assets/secrets.js"))),
+        "/preferences.js" => Some((
+            "application/javascript",
+            include_str!("assets/preferences.js"),
+        )),
+        "/ui-model.js" => Some(("application/javascript", include_str!("assets/ui-model.js"))),
+        "/style.css" => Some(("text/css", include_str!("assets/style.css"))),
+        _ => None,
+    }
+}
+
+async fn get_asset(Path(path): Path<String>) -> Response {
+    let path = format!("/{path}");
+    match asset(&path) {
+        Some((content_type, body)) => ([(CONTENT_TYPE, content_type)], body).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
 
 /// Shared state for all handlers.
 pub(crate) struct WebState {
@@ -114,29 +155,11 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .layer(axum::middleware::from_fn(auth::no_store));
 
     Router::new()
-        .route("/", get(|| async { Html(INDEX_HTML) }))
         .route(
-            "/ui-model.js",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-                    UI_MODEL_JS,
-                )
-            }),
+            "/",
+            get(|| async { Html(include_str!("assets/index.html")) }),
         )
-        .route(
-            "/app.js",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-                    APP_JS,
-                )
-            }),
-        )
-        .route(
-            "/style.css",
-            get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS) }),
-        )
+        .route("/{*path}", get(get_asset))
         .nest("/api", api)
         .with_state(state)
 }
@@ -228,6 +251,21 @@ mod tests {
             assert_eq!(res.status(), StatusCode::OK, "{path}");
             let got = res.headers()["content-type"].to_str().unwrap().to_string();
             assert_eq!(got, ct, "{path}");
+        }
+    }
+
+    #[test]
+    fn ui_serves_native_module_graph() {
+        assert!(INDEX_HTML.contains("<script type=\"module\" src=\"/app.js\"></script>"));
+        for path in [
+            "/api-client.js",
+            "/store.js",
+            "/dialogs.js",
+            "/accessibility.js",
+            "/secrets.js",
+            "/preferences.js",
+        ] {
+            assert!(asset(path).is_some(), "missing {path}");
         }
     }
 

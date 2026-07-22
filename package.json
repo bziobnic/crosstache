@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": { "test:unit": "node --test src/web/assets/*.test.js" }
+}
