@@ -18,9 +18,11 @@ use crate::secret::manager::SecretRequest;
 
 /// Reserved per-vault secret holding the age identity for attachments.
 pub const ATTACHMENT_KEY_SECRET: &str = "xv-attachment-key";
-/// File-metadata key marking client-side-encrypted content.
+/// File-metadata key marking client-side-encrypted content. Underscore, not
+/// hyphen: Azure Blob metadata keys must be valid C# identifiers, and a
+/// hyphenated key fails the whole upload with 400 InvalidMetadata.
 #[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
-pub const ENC_METADATA_KEY: &str = "xv-encrypted";
+pub const ENC_METADATA_KEY: &str = "xv_encrypted";
 /// File-metadata value for age encryption.
 #[allow(dead_code)] // Consumed by attachment CLI/encryption tasks (Tasks 2-4)
 pub const ENC_METADATA_VALUE: &str = "age";
@@ -47,7 +49,7 @@ pub fn attachment_blob_name(secret_name: &str, attachment: &str) -> String {
 
 /// True if a blob is a client-side-encrypted attachment: reserved-namespace
 /// name convention (anything under `attachments/`) OR explicit
-/// `xv-encrypted: age` metadata flag. `metadata` may be empty (e.g. for a
+/// `xv_encrypted: age` metadata flag. `metadata` may be empty (e.g. for a
 /// local file that hasn't been uploaded yet) — the name check alone still
 /// catches the reserved namespace.
 ///
@@ -160,7 +162,7 @@ use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
 use crate::utils::progress::ProgressReporter;
 
 /// Age-encrypt `request.content` with the vault's attachment key (created on
-/// first use) and upload the ciphertext, flagged `xv-encrypted: age`.
+/// first use) and upload the ciphertext, flagged `xv_encrypted: age`.
 #[cfg(feature = "file-ops")]
 pub async fn upload_encrypted(
     secrets: &dyn SecretBackend,
@@ -182,7 +184,7 @@ pub async fn upload_encrypted(
 }
 
 /// Download a file, transparently decrypting it when it carries the
-/// `xv-encrypted: age` metadata flag. Unflagged files (including user-supplied
+/// `xv_encrypted: age` metadata flag. Unflagged files (including user-supplied
 /// `.age` files encrypted with foreign keys) pass through untouched.
 #[cfg(feature = "file-ops")]
 pub async fn download_decrypted(
@@ -683,6 +685,20 @@ mod tests {
         assert!(!is_valid_path_component(".."));
         assert!(is_valid_path_component("db-cert"));
         assert!(is_valid_path_component("normal_name.txt"));
+    }
+
+    #[test]
+    fn enc_metadata_key_is_a_valid_azure_metadata_identifier() {
+        // Azure Blob metadata keys travel as `x-ms-meta-<key>` headers and
+        // must be valid C# identifiers; a hyphen makes every upload fail
+        // with 400 InvalidMetadata.
+        let mut chars = ENC_METADATA_KEY.chars();
+        let first = chars.next().expect("key must be non-empty");
+        assert!(first.is_ascii_alphabetic() || first == '_');
+        assert!(
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "ENC_METADATA_KEY '{ENC_METADATA_KEY}' contains characters Azure rejects in metadata keys"
+        );
     }
 
     #[test]

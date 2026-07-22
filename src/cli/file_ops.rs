@@ -1858,7 +1858,7 @@ fn strip_encrypted_attachments(
 }
 
 /// Local-side counterpart of [`strip_encrypted_attachments`]: local files
-/// have no `xv-encrypted` metadata to check, so this matches on the
+/// have no `xv_encrypted` metadata to check, so this matches on the
 /// `attachments/` name prefix alone (same convention, see
 /// [`crate::secret::attachments::is_encrypted_attachment`]).
 fn strip_encrypted_attachments_local(
@@ -2715,7 +2715,10 @@ mod tests {
     fn remote_file(name: &str, encrypted: bool) -> crate::blob::models::FileInfo {
         let mut metadata = std::collections::HashMap::new();
         if encrypted {
-            metadata.insert("xv-encrypted".to_string(), "age".to_string());
+            metadata.insert(
+                crate::secret::attachments::ENC_METADATA_KEY.to_string(),
+                crate::secret::attachments::ENC_METADATA_VALUE.to_string(),
+            );
         }
         crate::blob::models::FileInfo {
             name: name.to_string(),

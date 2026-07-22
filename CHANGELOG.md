@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `xv attach` and `xv file upload --encrypt` failed on Azure with a 400 error:
+  the `xv-encrypted` metadata flag is not a valid Azure blob metadata key
+  (hyphens are rejected). The flag is now `xv_encrypted`.
+
 ## v0.27.0 — Secret file attachments (2026-07-21)
 
 ### Added
