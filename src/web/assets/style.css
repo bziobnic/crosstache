@@ -177,7 +177,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:0; b
   box-shadow:-12px 0 36px rgb(18 30 22 / 16%); }
 .drawer-backdrop { position:fixed; z-index:19; inset:0; margin:0; padding:0; border:0; border-radius:0;
   background:rgb(18 30 22 / 24%); }
-.drawer-backdrop.pending-disabled { pointer-events:none; }
+.drawer-backdrop.pending-disabled { cursor:wait; background:rgb(18 30 22 / 32%); }
 .drawer-header { padding:1.4rem 1.5rem 1.1rem; border-bottom:1px solid var(--color-border); }
 .drawer-header h2 { margin:.25rem 0 .15rem; font-size:1.35rem; letter-spacing:-.035em; }
 .drawer-header p { margin:0; color:var(--color-text-muted); font-size:.78rem; }

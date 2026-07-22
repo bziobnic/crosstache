@@ -167,7 +167,9 @@ test('pending saves deactivate the backdrop and preserve save-control disabled s
     ui.store.dispatch({ type: 'draft/save-pending', value: true });
     assert.equal(backdrop.dataset.pending, 'true');
     assert.equal(backdrop.classList.contains('pending-disabled'), true);
-    assert.equal(backdrop.onclick(), false);
+    const consumed = [];
+    assert.equal(backdrop.onclick({ preventDefault: () => consumed.push('prevented'), stopPropagation: () => consumed.push('stopped') }), false);
+    assert.deepEqual(consumed, ['prevented', 'stopped']);
     assert.equal(ui.confirmations.length, 0);
     assert.equal(save.disabled, true);
     assert.equal(remove.disabled, true);
@@ -180,9 +182,9 @@ test('pending saves deactivate the backdrop and preserve save-control disabled s
     await backdrop.onclick();
     assert.equal(ui.confirmations.length, 1);
     assert.equal(ui.elements.get('#drawer').hidden, true);
-    assert.match(
+    assert.doesNotMatch(
       fs.readFileSync(path.join(__dirname, 'style.css'), 'utf8'),
-      /\.drawer-backdrop\.pending-disabled\s*\{[^}]*pointer-events:\s*none/,
+      /\.drawer-backdrop\.pending-disabled\s*\{[^}]*pointer-events/,
     );
   } finally {
     ui.restore();

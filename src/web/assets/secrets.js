@@ -1021,8 +1021,12 @@ async function openRecord(name, meta, tags, generation) {
 }
 
 $('#close-drawer').onclick = () => requestDrawerClose();
-$('#drawer-backdrop').onclick = () => {
-  if (store.snapshot().savePending) return false;
+$('#drawer-backdrop').onclick = (event) => {
+  if (store.snapshot().savePending) {
+    event.preventDefault();
+    event.stopPropagation();
+    return false;
+  }
   return requestDrawerClose();
 };
 $('#secret-form').addEventListener?.('input', updateDraft);
