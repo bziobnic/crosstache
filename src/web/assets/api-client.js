@@ -1,7 +1,7 @@
-export function createApiClient({ token, onInflight, fetchImpl = globalThis.fetch }) {
+export function createApiClient({ token, onInflight, fetchImpl = globalThis.fetch, xhrFactory = () => new XMLHttpRequest() }) {
   let inflight = 0;
 
-  return async function api(method, path, body, raw = false) {
+  const api = async function api(method, path, body, raw = false) {
     inflight++;
     onInflight?.(inflight);
     try {
@@ -28,4 +28,6 @@ export function createApiClient({ token, onInflight, fetchImpl = globalThis.fetc
       onInflight?.(inflight);
     }
   };
+  api.createXhr = () => xhrFactory();
+  return api;
 }

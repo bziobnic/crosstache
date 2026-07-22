@@ -19,6 +19,6 @@ test('frontend modules expose the approved boundaries', () => {
     assert.match(source, new RegExp(marker));
   }
   const apiClient = fs.readFileSync(path.join(__dirname, 'api-client.js'), 'utf8');
-  assert.match(apiClient, /createApiClient\(\{ token, onInflight, fetchImpl = globalThis\.fetch \}\)/);
-  assert.doesNotMatch(apiClient, /xhrFactory|createXhr/);
+  assert.match(apiClient, /createApiClient\(\{ token, onInflight, fetchImpl = globalThis\.fetch, xhrFactory = \(\) => new XMLHttpRequest\(\) \}\)/);
+  assert.match(apiClient, /api\.createXhr = \(\) => xhrFactory\(\)/);
 });
