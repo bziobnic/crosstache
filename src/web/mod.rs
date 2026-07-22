@@ -523,7 +523,10 @@ mod tests {
     #[test]
     fn ui_hides_and_clears_drawer_while_selection_loads() {
         assert!(APP_JS.contains(
-            "async function openDrawer(name) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
+            "async function openDrawer(name, invoker = document.activeElement) {\n  if (!$('#drawer').hidden && !(await requestDrawerClose())) return;\n  return openDrawerNow(name, invoker);"
+        ));
+        assert!(APP_JS.contains(
+            "async function openDrawerNow(name, invoker) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
         ));
         assert!(APP_JS.contains("function clearDrawerState()"));
     }
@@ -734,6 +737,9 @@ mod tests {
             "class=\"column-file-type sortable\"",
             "aria-label=\"Vault content\"",
             "aria-labelledby=\"drawer-title\"",
+            "role=\"dialog\"",
+            "aria-modal=\"true\"",
+            "id=\"drawer-backdrop\" class=\"drawer-backdrop\" aria-hidden=\"true\" tabindex=\"-1\"",
         ] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
         }

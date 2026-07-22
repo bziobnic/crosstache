@@ -518,6 +518,10 @@ function syncDraftControls() {
 
 function setSavePending(value) {
   store.dispatch({ type: 'draft/save-pending', value });
+  const eventApi = globalThis.__TAURI__?.event;
+  if (eventApi?.emit) {
+    Promise.resolve(eventApi.emit('xv://save-pending-changed', Boolean(value))).catch(() => {});
+  }
 }
 
 function beginDraft() {
@@ -528,6 +532,17 @@ function updateDraft() {
   if (!$('#drawer').hidden && store.snapshot().draft) {
     store.dispatch({ type: 'draft/change', draft: drawerDraft() });
   }
+}
+
+function drawerFocusable() {
+  return [...$('#drawer').querySelectorAll('button:not([disabled]):not([hidden]), input:not([disabled]):not([hidden]), select:not([disabled]):not([hidden]), textarea:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"])')]
+    .filter((element) => !element.disabled && !element.hidden);
+}
+
+function focusDrawerInitial() {
+  const name = $('#secret-form').elements.name;
+  if (typeof name?.focus === 'function') name.focus();
+  else $('#drawer').focus();
 }
 
 async function allowNavigation() {
@@ -953,6 +968,7 @@ async function openDrawerNow(name, invoker) {
   $('#drawer-backdrop').hidden = false;
   drawerInvoker = invoker;
   beginDraft();
+  focusDrawerInitial();
 }
 
 // Fetches the envelope so secret fields are editable. Values live in JS
@@ -994,9 +1010,25 @@ $('#drawer-backdrop').onclick = () => requestDrawerClose();
 $('#secret-form').addEventListener?.('input', updateDraft);
 $('#secret-form').addEventListener?.('change', updateDraft);
 document.addEventListener?.('keydown', (event) => {
-  if (event.key === 'Escape' && !$('#drawer').hidden) {
+  if ($('#drawer').hidden) return;
+  if (event.key === 'Escape') {
     event.preventDefault();
     requestDrawerClose();
+    return;
+  }
+  if (event.key === 'Tab') {
+    const focusable = drawerFocusable();
+    if (!focusable.length) {
+      event.preventDefault();
+      $('#drawer').focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if ((!event.shiftKey && document.activeElement === last) || (event.shiftKey && document.activeElement === first)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
   }
 });
 
