@@ -93,6 +93,10 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .route(
             "/files/{name}",
             get(api::files::download_file).delete(api::files::delete_file),
+        )
+        .route(
+            "/secrets/{name}/attachments",
+            get(api::files::list_attachments),
         );
 
     let api = api
@@ -498,6 +502,15 @@ mod tests {
         ] {
             assert!(INDEX_HTML.contains(&format!("id=\"{id}\"")), "{id}");
         }
+    }
+
+    #[test]
+    fn ui_secret_drawer_lists_attachments_as_links() {
+        assert!(INDEX_HTML.contains("id=\"attachments-section\""));
+        assert!(INDEX_HTML.contains("id=\"attachments-list\""));
+        assert!(APP_JS.contains("/attachments${vaultQS(currentVault)}"));
+        assert!(APP_JS.contains("downloadFile(f.name, base)"));
+        assert!(STYLE_CSS.contains(".attachment-link"));
     }
 
     #[test]

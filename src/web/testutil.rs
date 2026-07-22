@@ -29,10 +29,14 @@ pub(crate) mod stub {
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
 
+    /// Stored file entry: (content, content_type, metadata).
+    #[cfg(feature = "file-ops")]
+    type StoredFile = (Vec<u8>, String, HashMap<String, String>);
+
     pub(crate) struct StubBackend {
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         #[cfg(feature = "file-ops")]
-        pub files: Mutex<HashMap<String, (Vec<u8>, String)>>,
+        pub files: Mutex<HashMap<String, StoredFile>>,
     }
 
     impl StubBackend {
@@ -258,10 +262,11 @@ pub(crate) mod stub {
                     .content_type
                     .as_deref()
                     .unwrap_or("application/octet-stream"),
+                request.metadata.clone(),
             );
             self.files.lock().unwrap().insert(
                 request.name.clone(),
-                (request.content, info.content_type.clone()),
+                (request.content, info.content_type.clone(), request.metadata),
             );
             Ok(info)
         }
@@ -276,7 +281,7 @@ pub(crate) mod stub {
                 .lock()
                 .unwrap()
                 .get(name)
-                .map(|(b, _)| b.clone())
+                .map(|(b, _, _)| b.clone())
                 .ok_or_else(|| BackendError::NotFound {
                     name: name.to_string(),
                     suggestion: None,
@@ -294,7 +299,7 @@ pub(crate) mod stub {
                 .unwrap()
                 .iter()
                 .filter(|(n, _)| request.prefix.as_deref().is_none_or(|p| n.starts_with(p)))
-                .map(|(n, (b, ct))| file_info(n, b.len() as u64, ct))
+                .map(|(n, (b, ct, m))| file_info(n, b.len() as u64, ct, m.clone()))
                 .collect())
         }
 
@@ -319,7 +324,7 @@ pub(crate) mod stub {
                 .lock()
                 .unwrap()
                 .get(name)
-                .map(|(b, ct)| file_info(name, b.len() as u64, ct))
+                .map(|(b, ct, m)| file_info(name, b.len() as u64, ct, m.clone()))
                 .ok_or_else(|| BackendError::NotFound {
                     name: name.to_string(),
                     suggestion: None,
@@ -328,7 +333,12 @@ pub(crate) mod stub {
     }
 
     #[cfg(feature = "file-ops")]
-    fn file_info(name: &str, size: u64, content_type: &str) -> crate::blob::models::FileInfo {
+    fn file_info(
+        name: &str,
+        size: u64,
+        content_type: &str,
+        metadata: HashMap<String, String>,
+    ) -> crate::blob::models::FileInfo {
         crate::blob::models::FileInfo {
             name: name.to_string(),
             size,
@@ -336,7 +346,7 @@ pub(crate) mod stub {
             last_modified: chrono::Utc::now(),
             etag: String::new(),
             groups: Vec::new(),
-            metadata: std::collections::HashMap::new(),
+            metadata,
             tags: std::collections::HashMap::new(),
         }
     }
