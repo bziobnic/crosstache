@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.28.0 — Web UI attachment links (2026-07-22)
+
+### Added
+
+- The web UI's secret detail drawer now lists a secret's attachments as
+  clickable links (base filename + size) that download through the
+  authenticated session, backed by a new `GET /api/secrets/{name}/attachments`
+  endpoint.
+
+### Fixed
+
+- Web UI file downloads now decrypt age-encrypted content flagged
+  `xv_encrypted` — parity with `xv file download`. Previously the UI served
+  attachment ciphertext; unflagged files (including foreign `.age` files)
+  still pass through untouched.
+
 ## v0.27.1 — Azure attachment upload fix (2026-07-21)
 
 ### Fixed
