@@ -5,12 +5,14 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStore, draftReducer } from './store.js';
 import { createDialogManager } from './dialogs.js';
+import { ApiError } from './api-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 class Element {
   constructor(id, document) {
-    this.id = id;
+    this.key = id;
+    this.id = id.startsWith('#') ? id.slice(1) : id;
     this.document = document;
     this.hidden = false;
     this.disabled = false;
@@ -35,7 +37,7 @@ class Element {
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   querySelectorAll() { return []; }
-  querySelector() { return this.document.element('nested'); }
+  querySelector(selector) { return this.document.element(`${this.key} ${selector}`); }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
   dispatch(type, event = {}) { return this.listeners.get(type)?.({ preventDefault() {}, target: this, ...event }); }
   focus() { this.document.activeElement = this; }
@@ -78,23 +80,26 @@ function createDocument() {
     document.element('#close-drawer'),
     document.element('#save'),
   ];
+  for (const selector of ['#secret-error', '#file-error', '#secret-form-error']) {
+    document.element(selector).hidden = true;
+  }
   return { document, elements };
 }
 
-async function mountRouteUi({ failSave = false, tauriEvents = null } = {}) {
+async function mountRouteUi({ failSave = false, apiImpl = null, tauriEvents = null } = {}) {
   const { document, elements } = createDocument();
   const previous = new Map(['document', 'navigator', '__TAURI__'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   Object.defineProperty(globalThis, 'document', { configurable: true, value: document });
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async () => {} } } });
   if (tauriEvents) Object.defineProperty(globalThis, '__TAURI__', { configurable: true, value: { event: tauriEvents } });
-  const api = async (_method, path) => {
+  const api = apiImpl || (async (_method, path) => {
     if (failSave && _method === 'PUT') throw new Error('save failed');
     if (path === '/api/context') return { vault: 'one', backend: 'test', capabilities: { files: false } };
     if (path === '/api/types') return { types: [] };
     if (path === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
     if (path.startsWith('/api/secrets')) return [];
     return [];
-  };
+  });
   const confirmations = [];
   const { mountSecrets } = await import(`${pathToFileURL(path.join(__dirname, 'secrets.js')).href}?routes=${Date.now()}`);
   const store = createStore({ draft: null, savePending: false }, draftReducer);
@@ -229,5 +234,112 @@ test('page clears native save-pending state after save completion and failure', 
     } finally {
       ui.restore();
     }
+  }
+});
+
+test('list failures persist with Retry and retry replaces the failed list state', async () => {
+  let listCalls = 0;
+  const ui = await mountRouteUi({
+    apiImpl: async (_method, path) => {
+      if (path === '/api/context') return { vault: 'one', backend: 'test', capabilities: { files: false } };
+      if (path === '/api/types') return { types: [] };
+      if (path === '/api/vaults') return { vaults: [{ name: 'one' }] };
+      if (path.startsWith('/api/secrets')) {
+        listCalls++;
+        if (listCalls === 1) throw new ApiError({ status: 503, code: 'xv-network', message: 'Backend unavailable', hint: 'Retry now' });
+        return [];
+      }
+      return [];
+    },
+  });
+  try {
+    const panel = ui.elements.get('#secret-error');
+    assert.equal(panel.hidden, false);
+    assert.equal(panel.querySelector('.error-message').textContent, 'Backend unavailable');
+    await panel.querySelector('.error-retry').onclick();
+    assert.equal(panel.hidden, true);
+    assert.equal(listCalls, 2);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('form failures preserve the dirty draft and focus the named field', async () => {
+  const error = new ApiError({ status: 400, code: 'xv-invalid-request', message: 'Name is invalid', field: 'name' });
+  const ui = await mountRouteUi({
+    apiImpl: async (method, path) => {
+      if (path === '/api/context') return { vault: 'one', backend: 'test', capabilities: { files: false } };
+      if (path === '/api/types') return { types: [] };
+      if (path === '/api/vaults') return { vaults: [{ name: 'one' }] };
+      if (method === 'PUT') throw error;
+      if (path.startsWith('/api/secrets')) return [];
+      return [];
+    },
+  });
+  try {
+    const invoker = ui.elements.get('#new-secret');
+    await invoker.onclick({ currentTarget: invoker });
+    const form = ui.elements.get('#secret-form');
+    form.elements.name.value = 'bad name';
+    form.elements.value.value = 'draft secret';
+    form.elements.value.oninput();
+    await form.onsubmit({ preventDefault() {}, target: form });
+    assert.equal(form.elements.value.value, 'draft secret');
+    assert.equal(ui.elements.get('#secret-form-error').hidden, false);
+    assert.equal(ui.document.activeElement, form.elements.name);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('aborted and stale list failures leave the current list surface unchanged', async () => {
+  let listCalls = 0;
+  let rejectStale;
+  const stale = new Promise((_, reject) => { rejectStale = reject; });
+  const ui = await mountRouteUi({
+    apiImpl: async (_method, path) => {
+      if (path === '/api/context') return { vault: 'one', backend: 'test', capabilities: { files: false } };
+      if (path === '/api/types') return { types: [] };
+      if (path === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
+      if (path.startsWith('/api/secrets')) {
+        listCalls++;
+        if (listCalls === 2) return stale;
+        return [];
+      }
+      return [];
+    },
+  });
+  try {
+    const picker = ui.elements.get('#vault-select');
+    picker.value = 'two';
+    await picker.onchange();
+    picker.value = 'one';
+    await picker.onchange();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(listCalls, 3);
+    rejectStale(new ApiError({ status: 503, code: 'xv-network', message: 'stale failure' }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(
+      ui.elements.get('#secret-error').hidden,
+      true,
+      ui.elements.get('#secret-error').querySelector('.error-message').textContent,
+    );
+
+    const abortUi = await mountRouteUi({
+      apiImpl: async (_method, path) => {
+        if (path === '/api/context') return { vault: 'one', backend: 'test', capabilities: { files: false } };
+        if (path === '/api/types') return { types: [] };
+        if (path === '/api/vaults') return { vaults: [{ name: 'one' }] };
+        if (path.startsWith('/api/secrets')) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        return [];
+      },
+    });
+    try {
+      assert.equal(abortUi.elements.get('#secret-error').hidden, true);
+    } finally {
+      abortUi.restore();
+    }
+  } finally {
+    ui.restore();
   }
 });

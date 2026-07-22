@@ -3,11 +3,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::Path;
+use axum::body::{to_bytes, Body};
+use axum::extract::{Path, Request};
 use axum::http::{header::CONTENT_TYPE, StatusCode};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use rand::Rng;
 
 use crate::backend::{Backend, BackendRegistry};
@@ -62,6 +64,59 @@ async fn get_asset(Path(path): Path<String>) -> Response {
         Some((content_type, body)) => ([(CONTENT_TYPE, content_type)], body).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// Ensures every API failure has the safe, stable error envelope. Axum
+/// extractor, body-limit, middleware, and fallback rejections otherwise emit
+/// framework-generated text that may be unstable or reveal request details.
+pub(crate) async fn normalize_api_errors(req: Request, next: Next) -> Response {
+    let is_api = req.uri().path() == "/api" || req.uri().path().starts_with("/api/");
+    let response = next.run(req).await;
+    if !is_api || response.status().is_success() {
+        return response;
+    }
+
+    let (parts, body) = response.into_parts();
+    let status = parts.status;
+    if let Ok(bytes) = to_bytes(body, 64 * 1024).await {
+        if is_api_error_envelope(&bytes) {
+            return Response::from_parts(parts, Body::from(bytes));
+        }
+    }
+
+    let mut response = (
+        status,
+        Json(errors::ApiErrorEnvelope {
+            error: errors::status_error(status),
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+fn is_api_error_envelope(bytes: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(error) = body.get("error").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    error
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && error
+            .get("hint")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
 }
 
 /// Shared state for all handlers.
@@ -163,6 +218,7 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .route("/{*path}", get(get_asset))
         .nest("/api", api)
         .with_state(state)
+        .layer(axum::middleware::from_fn(normalize_api_errors))
 }
 
 /// Bind the embedded web UI and return it without starting the accept loop.
@@ -491,11 +547,24 @@ mod tests {
         ] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
         }
-        assert!(APP_JS.contains("t.className = `toast ${isError ? 'error' : 'success'}`"));
-        assert!(APP_JS.contains("t.replaceChildren(icon(isError ? 'alert' : 'check')"));
+        for marker in [
+            "id=\"secret-error\" class=\"error-panel\" role=\"alert\"",
+            "id=\"file-error\" class=\"error-panel\" role=\"alert\"",
+            "id=\"secret-form-error\" class=\"error-panel\" role=\"alert\"",
+            "function showFormError(error)",
+            "function showListLoadError(kind, error)",
+        ] {
+            assert!(
+                INDEX_HTML.contains(marker) || APP_JS.contains(marker),
+                "missing {marker}"
+            );
+        }
+        assert!(!APP_JS.contains("toast(e.message, true)"));
+        assert!(!APP_JS.contains("isError ? 'error' : 'success'"));
         assert!(STYLE_CSS.contains(".bulk-toolbar {"));
         assert!(STYLE_CSS.contains(".dropzone-content {"));
         assert!(STYLE_CSS.contains(".toast.success {"));
+        assert!(STYLE_CSS.contains(".error-panel {"));
         assert!(
             !STYLE_CSS.contains("#toast {"),
             "legacy toast id styles override the unified toast component"

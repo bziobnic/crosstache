@@ -588,6 +588,51 @@ mod tests {
         (status, json)
     }
 
+    async fn raw_api_response(
+        app: axum::Router,
+        method: &str,
+        path: &str,
+        body: &'static str,
+        content_type: Option<&str>,
+        authorization: Option<&str>,
+    ) -> axum::response::Response {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "127.0.0.1:1");
+        if let Some(content_type) = content_type {
+            req = req.header(header::CONTENT_TYPE, content_type);
+        }
+        if let Some(authorization) = authorization {
+            req = req.header(header::AUTHORIZATION, authorization);
+        }
+        app.oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn assert_api_error(
+        response: axum::response::Response,
+        expected_status: StatusCode,
+        expected_code: &str,
+        forbidden_text: Option<&str>,
+    ) {
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        if let Some(forbidden_text) = forbidden_text {
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(forbidden_text),
+                "error envelope leaked request or framework text: {forbidden_text}"
+            );
+        }
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"]["code"], expected_code);
+        assert!(json["error"]["message"].is_string());
+        assert!(json["error"]["hint"].is_string());
+    }
+
     #[tokio::test]
     async fn context_reports_backend_and_capabilities() {
         let app = crate::web::build_router(testutil::test_state());
@@ -693,6 +738,129 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&bytes[..], b"BEGIN CERT");
+    }
+
+    #[tokio::test]
+    async fn api_normalizes_auth_and_router_failures_to_safe_envelopes() {
+        let app = crate::web::build_router(testutil::test_state());
+        assert_api_error(
+            raw_api_response(app.clone(), "GET", "/api/context", "", None, None).await,
+            StatusCode::UNAUTHORIZED,
+            "xv-auth-required",
+            None,
+        )
+        .await;
+        assert_api_error(
+            raw_api_response(
+                app.clone(),
+                "GET",
+                "/api/context",
+                "",
+                None,
+                Some("Bearer wrong-token"),
+            )
+            .await,
+            StatusCode::UNAUTHORIZED,
+            "xv-auth-required",
+            Some("wrong-token"),
+        )
+        .await;
+        assert_api_error(
+            raw_api_response(
+                app.clone(),
+                "PUT",
+                "/api/secrets/new-secret",
+                "{\"value\":\"malformed-json-marker\"",
+                Some("application/json"),
+                Some("Bearer test-token"),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "xv-invalid-request",
+            Some("malformed-json-marker"),
+        )
+        .await;
+        let query_app = axum::Router::new()
+            .route(
+                "/api/query",
+                axum::routing::get(
+                    |_q: axum::extract::Query<std::collections::HashMap<String, u8>>| async {},
+                ),
+            )
+            .layer(axum::middleware::from_fn(crate::web::normalize_api_errors))
+            .layer(axum::middleware::from_fn(crate::web::auth::no_store));
+        assert_api_error(
+            raw_api_response(
+                query_app,
+                "GET",
+                "/api/query?limit=not-a-number",
+                "",
+                None,
+                None,
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "xv-invalid-request",
+            Some("not-a-number"),
+        )
+        .await;
+        assert_api_error(
+            raw_api_response(
+                app.clone(),
+                "POST",
+                "/api/files",
+                "not a multipart body",
+                Some("text/plain"),
+                Some("Bearer test-token"),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "xv-invalid-request",
+            Some("not a multipart body"),
+        )
+        .await;
+        assert_api_error(
+            raw_api_response(
+                app,
+                "GET",
+                "/api/not-a-route",
+                "",
+                None,
+                Some("Bearer test-token"),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "xv-api-route-not-found",
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api_normalizes_body_limit_rejections_without_a_large_allocation() {
+        let app = axum::Router::new()
+            .route(
+                "/api/limited",
+                axum::routing::post(|_: axum::Json<serde_json::Value>| async {}),
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(1))
+            .layer(axum::middleware::from_fn(crate::web::normalize_api_errors))
+            .layer(axum::middleware::from_fn(crate::web::auth::no_store));
+        assert_api_error(
+            raw_api_response(
+                app,
+                "POST",
+                "/api/limited",
+                "{}",
+                Some("application/json"),
+                None,
+            )
+            .await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "xv-request-too-large",
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]

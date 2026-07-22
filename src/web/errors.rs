@@ -33,6 +33,58 @@ impl ApiErrorBody {
     }
 }
 
+pub(crate) fn status_error(status: StatusCode) -> ApiErrorBody {
+    let (code, message, hint) = match status {
+        StatusCode::UNAUTHORIZED => (
+            "xv-auth-required",
+            "Authentication is required.",
+            "Reopen the current session link and try again.",
+        ),
+        StatusCode::FORBIDDEN => (
+            "xv-access-forbidden",
+            "This request is not allowed.",
+            "Use the local session link and try again.",
+        ),
+        StatusCode::NOT_FOUND => (
+            "xv-api-route-not-found",
+            "The requested API route was not found.",
+            "Refresh the application and try again.",
+        ),
+        StatusCode::METHOD_NOT_ALLOWED => (
+            "xv-api-method-not-allowed",
+            "This API route does not support that request method.",
+            "Refresh the application and try again.",
+        ),
+        StatusCode::PAYLOAD_TOO_LARGE => (
+            "xv-request-too-large",
+            "The request is too large to process.",
+            "Choose a smaller upload and try again.",
+        ),
+        StatusCode::BAD_REQUEST | StatusCode::UNSUPPORTED_MEDIA_TYPE => (
+            "xv-invalid-request",
+            "The request could not be understood.",
+            "Correct the request and try again.",
+        ),
+        StatusCode::TOO_MANY_REQUESTS => (
+            "xv-rate-limited",
+            "The service is rate limiting requests.",
+            "Wait a moment, then try again.",
+        ),
+        _ => (
+            "xv-internal-error",
+            "The request could not be completed.",
+            "Try again. If the problem continues, check the application logs.",
+        ),
+    };
+    ApiErrorBody {
+        code,
+        message: message.into(),
+        hint,
+        field: None,
+        details: None,
+    }
+}
+
 pub(crate) fn crosstache_error(error: CrosstacheError) -> (StatusCode, ApiErrorBody) {
     use CrosstacheError::*;
 
