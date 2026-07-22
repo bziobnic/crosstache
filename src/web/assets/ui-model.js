@@ -1,11 +1,5 @@
-'use strict';
-(function expose(root, factory) {
-  const model = factory();
-  if (typeof module === 'object' && module.exports) module.exports = model;
-  else root.XvUiModel = model;
-}(typeof globalThis === 'undefined' ? this : globalThis, () => {
-  const PROTECTED_MASK = '***************';
-  const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+const PROTECTED_MASK = '***************';
+const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
 
   function formatDate(value) {
     if (!value) return '';
@@ -88,7 +82,6 @@
     resized[index + 1] = pairTotal - left;
     return resized;
   }
-  return { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
-    protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
-    sortedCopy, normalizeWidths, resizeAdjacentWidths };
-}));
+export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
+  protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
+  sortedCopy, normalizeWidths, resizeAdjacentWidths };

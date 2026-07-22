@@ -1,14 +1,15 @@
-'use strict';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
+import * as model from './ui-model.js';
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const model = require('./ui-model.js');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function loadProtectedRenderer() {
-  const appPath = path.join(__dirname, 'app.js');
+  const appPath = path.join(__dirname, 'secrets.js');
   const appSource = fs.readFileSync(appPath, 'utf8');
   const start = appSource.indexOf('function setRevealLabel');
   const end = appSource.indexOf('// Same rule as the TUI', start);
