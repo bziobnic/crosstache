@@ -102,7 +102,7 @@
   </section>
 </main>
 
-<aside id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden>
+<div id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden>
   <div class="drawer-header">
     <span id="drawer-kicker" class="eyebrow">Create secret</span>
     <h2 id="drawer-title">New secret</h2>
@@ -141,8 +141,16 @@
       <button type="submit" id="save" class="button primary">Save changes</button>
     </div>
   </form>
-</aside>
+</div>
 <div id="drawer-backdrop" class="drawer-backdrop" aria-hidden="true" tabindex="-1" hidden></div>
+<section id="discard-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-title" aria-describedby="discard-message" tabindex="-1" hidden>
+  <h2 id="discard-title">Discard changes?</h2>
+  <p id="discard-message">Your unsaved changes will be lost.</p>
+  <div class="confirmation-actions">
+    <button type="button" id="keep-editing" class="button secondary">Keep editing</button>
+    <button type="button" id="discard-changes" class="button danger">Discard changes</button>
+  </div>
+</section>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <svg id="xv-icon-sprite" class="icon-sprite" aria-hidden="true">

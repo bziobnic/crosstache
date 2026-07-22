@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStore, draftReducer } from './store.js';
+import { createDialogManager } from './dialogs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -29,6 +30,7 @@ class Element {
   }
 
   setAttribute() {}
+  removeAttribute() {}
   appendChild(child) { this.children.push(child); return child; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
@@ -96,7 +98,9 @@ async function mountRouteUi({ failSave = false, tauriEvents = null } = {}) {
   const confirmations = [];
   const { mountSecrets } = await import(`${pathToFileURL(path.join(__dirname, 'secrets.js')).href}?routes=${Date.now()}`);
   const store = createStore({ draft: null, savePending: false }, draftReducer);
-  mountSecrets({ api, store, dialogs: { confirmDiscard: () => { confirmations.push(true); return true; } }, token: 'test' });
+  const dialogs = createDialogManager(document);
+  dialogs.confirmDiscard = () => { confirmations.push(true); return true; };
+  mountSecrets({ api, store, dialogs, token: 'test' });
   await new Promise((resolve) => setTimeout(resolve, 0));
   return {
     document,

@@ -178,6 +178,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:0; b
 .drawer-backdrop { position:fixed; z-index:19; inset:0; margin:0; padding:0; border:0; border-radius:0;
   background:rgb(18 30 22 / 24%); }
 .drawer-backdrop.pending-disabled { cursor:wait; background:rgb(18 30 22 / 32%); }
+.confirmation-dialog { position:fixed; z-index:21; top:50%; left:50%; width:min(24rem, calc(100vw - 2rem));
+  padding:1.25rem; transform:translate(-50%, -50%); border:1px solid var(--color-border); border-radius:var(--radius-surface);
+  color:var(--color-text); background:var(--color-surface); box-shadow:var(--shadow-raised); }
+.confirmation-dialog h2 { margin:0; font-size:1.1rem; }
+.confirmation-dialog p { margin:.5rem 0 1rem; color:var(--color-text-muted); }
+.confirmation-actions { display:flex; justify-content:flex-end; gap:.5rem; }
 .drawer-header { padding:1.4rem 1.5rem 1.1rem; border-bottom:1px solid var(--color-border); }
 .drawer-header h2 { margin:.25rem 0 .15rem; font-size:1.35rem; letter-spacing:-.035em; }
 .drawer-header p { margin:0; color:var(--color-text-muted); font-size:.78rem; }

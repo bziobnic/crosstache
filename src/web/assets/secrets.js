@@ -549,17 +549,6 @@ function updateDraft() {
   }
 }
 
-function drawerFocusable() {
-  return [...$('#drawer').querySelectorAll('button:not([disabled]):not([hidden]), input:not([disabled]):not([hidden]), select:not([disabled]):not([hidden]), textarea:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"])')]
-    .filter((element) => !element.disabled && !element.hidden);
-}
-
-function focusDrawerInitial() {
-  const name = $('#secret-form').elements.name;
-  if (typeof name?.focus === 'function') name.focus();
-  else $('#drawer').focus();
-}
-
 async function allowNavigation() {
   return await guardNavigation({
     draft: store.snapshot().draft,
@@ -571,13 +560,14 @@ async function allowNavigation() {
 function closeDrawer({ restoreFocus = false } = {}) {
   drawerGeneration++;
   resetConfirmation($('#delete'), 'Delete');
-  $('#drawer').hidden = true;
+  if (typeof dialogs.closeModal === 'function') dialogs.closeModal($('#drawer'));
+  else $('#drawer').hidden = true;
   $('#drawer-backdrop').hidden = true;
   clearDrawerState();
   store.dispatch({ type: 'draft/close' });
   const invoker = drawerInvoker;
   drawerInvoker = null;
-  if (restoreFocus && typeof invoker?.focus === 'function') invoker.focus();
+  if (restoreFocus && typeof dialogs.closeModal !== 'function' && typeof invoker?.focus === 'function') invoker.focus();
 }
 
 async function requestDrawerClose(afterClose) {
@@ -979,11 +969,19 @@ async function openDrawerNow(name, invoker) {
       return;
     }
   }
-  $('#drawer').hidden = false;
   $('#drawer-backdrop').hidden = false;
   drawerInvoker = invoker;
   beginDraft();
-  focusDrawerInitial();
+  if (typeof dialogs.openModal === 'function') {
+    dialogs.openModal($('#drawer'), {
+      initialFocus: f.elements.name,
+      invoker,
+      onEscape: () => requestDrawerClose(),
+    });
+  } else {
+    $('#drawer').hidden = false;
+    f.elements.name.focus?.();
+  }
 }
 
 // Fetches the envelope so secret fields are editable. Values live in JS
@@ -1031,28 +1029,6 @@ $('#drawer-backdrop').onclick = (event) => {
 };
 $('#secret-form').addEventListener?.('input', updateDraft);
 $('#secret-form').addEventListener?.('change', updateDraft);
-document.addEventListener?.('keydown', (event) => {
-  if ($('#drawer').hidden) return;
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    requestDrawerClose();
-    return;
-  }
-  if (event.key === 'Tab') {
-    const focusable = drawerFocusable();
-    if (!focusable.length) {
-      event.preventDefault();
-      $('#drawer').focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if ((!event.shiftKey && document.activeElement === last) || (event.shiftKey && document.activeElement === first)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    }
-  }
-});
 
 globalThis.addEventListener?.('beforeunload', (event) => {
   const allowed = guardNavigation({

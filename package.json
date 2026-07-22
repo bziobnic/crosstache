@@ -1,5 +1,11 @@
 {
   "private": true,
   "type": "module",
-  "scripts": { "test:unit": "node --test src/web/assets/*.test.js" }
+  "scripts": {
+    "test:unit": "node --test src/web/assets/*.test.js"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1"
+  }
 }
