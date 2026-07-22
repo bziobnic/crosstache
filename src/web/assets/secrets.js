@@ -1,6 +1,6 @@
 import * as XvUiModel from './ui-model.js';
 
-export function mountSecrets({ api }) {
+export function mountSecrets({ api, token }) {
 
 const $ = (sel) => document.querySelector(sel);
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -602,7 +602,7 @@ function showAuthRecovery() {
 }
 
 async function init() {
-  if (!TOKEN) {
+  if (!token) {
     showAuthRecovery();
     return;
   }
