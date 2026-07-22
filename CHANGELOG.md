@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.27.0 — Secret file attachments (2026-07-21)
 
 ### Added
 
