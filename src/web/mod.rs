@@ -750,6 +750,30 @@ mod tests {
     }
 
     #[test]
+    fn ui_exposes_semantic_scoped_folder_navigation() {
+        for marker in [
+            "id=\"secrets-folder-tree\" class=\"folder-tree\" role=\"tree\"",
+            "id=\"files-folder-tree\" class=\"folder-tree\" role=\"tree\"",
+            "id=\"secrets-folder-sheet\" class=\"folder-sheet\" role=\"dialog\"",
+            "id=\"files-folder-sheet\" class=\"folder-sheet\" role=\"dialog\"",
+            "id=\"secrets-folders-expand-all\"",
+            "id=\"secrets-folders-collapse-all\"",
+            "id=\"files-folders-expand-all\"",
+            "id=\"files-folders-collapse-all\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(UI_MODEL_JS.contains("function renderFolderTree({"));
+        assert!(UI_MODEL_JS.contains("button.setAttribute('role', 'treeitem')"));
+        assert!(UI_MODEL_JS.contains("button.setAttribute('aria-expanded'"));
+        assert!(UI_MODEL_JS.contains("button.setAttribute('aria-selected'"));
+        assert!(UI_MODEL_JS.contains("function folderPreferenceKey({ backend, vault, surface })"));
+        assert!(APP_JS.contains("function renderFolderNavigation(kind, allItems, visibleItems)"));
+        assert!(APP_JS.contains("surface: kind"));
+        assert!(STYLE_CSS.contains(".folder-tree-item[aria-selected=\"true\"]"));
+    }
+
+    #[test]
     fn ui_selection_uses_visible_items_and_mixed_header_state() {
         assert!(APP_JS.contains("function syncSelectionUi(kind, visibleIds)"));
         assert!(APP_JS.contains("selectAll.indeterminate = selectedVisible > 0 && !allVisible"));
@@ -871,10 +895,9 @@ mod tests {
         );
         assert!(APP_JS.contains("icon('secret')"));
         assert!(APP_JS.contains("icon('file')"));
-        assert!(APP_JS.contains("icon(open ? 'chevron-down' : 'chevron-right')"));
-        assert!(APP_JS.contains("content.className = 'folder-cell-content'"));
-        assert!(STYLE_CSS.contains(".folder-cell-content { display:flex;"));
-        assert!(!STYLE_CSS.contains(".folder-cell { display:flex;"));
+        assert!(UI_MODEL_JS.contains("disclosure.className = 'folder-tree-disclosure'"));
+        assert!(STYLE_CSS.contains(".folder-tree { display:grid;"));
+        assert!(STYLE_CSS.contains(".folder-tree-disclosure {"));
     }
 
     #[test]
@@ -1031,9 +1054,12 @@ mod tests {
     }
 
     #[test]
-    fn ui_sorts_before_grouping() {
+    fn ui_sorts_filtered_folder_rows() {
         assert!(APP_JS.contains("const sorted = sortedTableItems('secrets', visible);"));
-        assert!(APP_JS.contains("const sorted = sortedTableItems('files', files);"));
-        assert!(APP_JS.contains("for (const name of [...groups.keys()].sort())"));
+        assert!(APP_JS.contains("const sorted = sortedTableItems('files', visible);"));
+        assert!(
+            APP_JS.contains("for (const secret of sorted) tbody.appendChild(secretRow(secret));")
+        );
+        assert!(APP_JS.contains("for (const file of sorted) tbody.appendChild(fileRow(file));"));
     }
 }

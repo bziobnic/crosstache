@@ -245,7 +245,9 @@ test('a pending workspace switch blocks reverse-order scoped actions and stale d
 
   await page.evaluate(() => {
     document.querySelector('#new-secret').click();
-    document.querySelector('[aria-label="Edit secret reverse-edit"]').click();
+    // Selection mode replaces the edit action with a select action, so an
+    // edit entry point may intentionally be absent while bulk controls exist.
+    document.querySelector('[aria-label="Edit secret reverse-edit"]')?.click();
     document.querySelector('#bulk-delete-secrets').click();
     document.querySelector('#bulk-move-secrets').click();
     document.querySelector('#undo-delete').click();

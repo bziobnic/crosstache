@@ -51,6 +51,9 @@ class Element {
         if (selector === 'input[data-field-kind="secret"]' && child.dataset?.fieldKind === 'secret') {
           matches.push(child);
         }
+        if (selector === '[role="treeitem"]' && child.getAttribute?.('role') === 'treeitem') {
+          matches.push(child);
+        }
         visit(child);
       }
     };
@@ -160,13 +163,21 @@ async function mountRouteUi({
   preferences = null,
   withContextRail = false,
   guardNavigation = async () => true,
+  storageValues = new Map(),
 } = {}) {
   const { document, elements } = createDocument();
-  const previous = new Map(['document', 'navigator', '__TAURI__', 'addEventListener', 'removeEventListener']
+  const previous = new Map(['document', 'navigator', 'localStorage', '__TAURI__', 'addEventListener', 'removeEventListener']
     .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const windowListeners = new Map();
   Object.defineProperty(globalThis, 'document', { configurable: true, value: document });
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard } });
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key) => storageValues.get(key) ?? null,
+      setItem: (key, value) => storageValues.set(key, value),
+    },
+  });
   Object.defineProperty(globalThis, 'addEventListener', {
     configurable: true,
     value: (type, listener) => windowListeners.set(type, listener),
@@ -339,6 +350,77 @@ test('workspace selector has one pending owner across every switch outcome and o
     assert.equal(selector.disabled, false, 'guard cancellation never locks the selector');
   } finally {
     guarded.restore();
+  }
+});
+
+test('mounted folder navigation filters rows and restores expansion without leaking selection across workspaces', async () => {
+  const primary = routedContext('primary', 'one');
+  const stage = routedContext('stage', 'two');
+  const primarySecrets = [
+    { name: 'prod-secret', folder: 'apps/prod' },
+    ...Array.from({ length: 50 }, (_, index) => ({ name: `loose-${index}`, folder: null })),
+  ];
+  const stageSecrets = [{ name: 'stage-secret', folder: 'other/nested' }];
+  const api = async (method, requestPath, body) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (method === 'POST' && requestPath === '/api/workspaces/activate') {
+      return body.alias === 'stage'
+        ? { context: stage, secrets: stageSecrets }
+        : { context: primary, secrets: primarySecrets };
+    }
+    if (requestPath === '/api/types') return { types: [] };
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return primarySecrets;
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
+  try {
+    const treeitems = () => ui.findAll('#secrets-folder-tree', (element) => (
+      element.getAttribute?.('role') === 'treeitem'
+    ));
+    const item = (id) => treeitems().find((element) => element.dataset.folderId === id);
+
+    assert.equal(item('apps').getAttribute('aria-expanded'), 'false', '51 items start collapsed');
+    item('apps').focus();
+    item('apps').onkeydown({ key: 'ArrowRight', preventDefault() {} });
+    assert.equal(item('apps').getAttribute('aria-expanded'), 'true');
+    assert.ok(item('apps/prod'), 'nested child becomes visible');
+
+    item('apps').onclick();
+    const visiblePrimaryRows = ui.findAll('#secrets-table tbody', (element) => (
+      element.getAttribute?.('aria-label')?.startsWith('Edit secret ')
+    ));
+    assert.deepEqual(
+      visiblePrimaryRows.map((element) => element.getAttribute('aria-label')),
+      ['Edit secret prod-secret'],
+    );
+    assert.equal(item('apps').getAttribute('aria-selected'), 'true');
+    assert.match(ui.elements.get('#secret-list-summary').textContent, /^1 of 51 secrets/);
+
+    ui.store.dispatch({
+      type: 'context/switch-succeeded',
+      context: {
+        ...primary,
+        workspace: { ...primary.workspace, alias: 'same-vault-alias' },
+      },
+      secrets: primarySecrets,
+    });
+    assert.equal(
+      item('__all__').getAttribute('aria-selected'),
+      'true',
+      'selection resets even when a different workspace alias targets the same backend and vault',
+    );
+
+    assert.equal(await ui.contextRail.switchTo('stage'), true);
+    assert.equal(item('__all__').getAttribute('aria-selected'), 'true');
+    assert.equal(item('other').getAttribute('aria-expanded'), 'true', 'small workspace expands');
+    assert.equal(item('apps'), undefined, 'prior workspace folders are absent');
+
+    assert.equal(await ui.contextRail.switchTo('primary'), true);
+    assert.equal(item('__all__').getAttribute('aria-selected'), 'true', 'folder selection resets');
+    assert.equal(item('apps').getAttribute('aria-expanded'), 'true', 'scoped expansion restores');
+    assert.ok(item('apps/prod'));
+  } finally {
+    ui.restore();
   }
 });
 

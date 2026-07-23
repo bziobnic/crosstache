@@ -425,11 +425,133 @@ function showListState(tbody, kind, state, cols) {
   tbody.appendChild(tr);
 }
 
-// Expanded folder groups per table. In-memory only: cleared on vault
-// switch, deliberately NOT cleared on save/delete re-renders so an open
-// folder stays open.
-const expandedSecretFolders = new Set();
-const expandedFileFolders = new Set();
+const secretFolderNavigation = XvUiModel.createFolderNavigationState(globalThis.localStorage);
+const fileFolderNavigation = XvUiModel.createFolderNavigationState(globalThis.localStorage);
+const folderNavigationFocus = {
+  secrets: { desktop: '__all__', mobile: '__all__' },
+  files: { desktop: '__all__', mobile: '__all__' },
+};
+
+function navigationFor(kind) {
+  return kind === 'secrets' ? secretFolderNavigation : fileFolderNavigation;
+}
+
+function folderOf(kind, item) {
+  if (kind === 'secrets') return XvUiModel.normalizeFolderPath(item.folder);
+  const name = item.name || '';
+  return XvUiModel.normalizeFolderPath(
+    name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '',
+  );
+}
+
+function folderModelItems(kind, items) {
+  return items.map((item) => ({ ...item, folder: folderOf(kind, item) }));
+}
+
+function expandableFolderIds(items) {
+  const ids = [];
+  const visit = (nodes) => {
+    for (const node of nodes) {
+      if (node.children.length) ids.push(node.id);
+      visit(node.children);
+    }
+  };
+  visit(XvUiModel.buildFolderTree(items));
+  return ids;
+}
+
+function folderNodeCount(items) {
+  let count = 0;
+  const visit = (nodes) => {
+    for (const node of nodes) {
+      if (node.id !== '__unfiled__') count++;
+      visit(node.children);
+    }
+  };
+  visit(XvUiModel.buildFolderTree(items));
+  return count;
+}
+
+function folderScope(kind) {
+  const backend = typeof ctx?.backend === 'string' ? ctx.backend : ctx?.backend?.name;
+  return { backend: backend || '', vault: currentVault || '', surface: kind };
+}
+
+function renderFolderNavigation(kind, allItems, visibleItems) {
+  const navigation = navigationFor(kind);
+  const modelItems = folderModelItems(kind, allItems);
+  const modelVisibleItems = folderModelItems(kind, visibleItems);
+  navigation.sync(folderScope(kind), {
+    total: allItems.length,
+    expandableIds: expandableFolderIds(modelItems),
+  });
+  const renderOne = (mobile) => {
+    const mode = mobile ? 'mobile' : 'desktop';
+    const container = $(`#${kind}${mobile ? '-mobile' : ''}-folder-tree`);
+    const snapshot = navigation.snapshot();
+    XvUiModel.renderFolderTree({
+      document,
+      container,
+      items: modelItems,
+      visibleItems: modelVisibleItems,
+      expanded: navigation.expanded,
+      selected: snapshot.selected,
+      focusedId: folderNavigationFocus[kind][mode],
+      onFocus: (id) => { folderNavigationFocus[kind][mode] = id; },
+      onSelect: (id) => {
+        navigation.select(id);
+        renderSelectionKind(kind);
+        if (mobile) dialogs.closeModal($(`#${kind}-folder-sheet`));
+      },
+      onToggle: (id, expanded) => {
+        folderNavigationFocus[kind][mode] = id;
+        navigation.toggle(id, expanded);
+        renderSelectionKind(kind);
+        const next = [...container.querySelectorAll('[role="treeitem"]')]
+          .find((candidate) => candidate.dataset.folderId === id);
+        next?.focus();
+      },
+    });
+  };
+  renderOne(false);
+  renderOne(true);
+}
+
+function setAllFolderExpansion(kind, expanded) {
+  const navigation = navigationFor(kind);
+  if (expanded) navigation.expandAll();
+  else navigation.collapseAll();
+  renderSelectionKind(kind);
+}
+
+function initFolderNavigationControls() {
+  for (const kind of ['secrets', 'files']) {
+    for (const id of [
+      `${kind}-folders-expand-all`,
+      `${kind}-mobile-folders-expand-all`,
+      `${kind}-mobile-sheet-expand-all`,
+    ]) {
+      $(`#${id}`).onclick = () => setAllFolderExpansion(kind, true);
+    }
+    for (const id of [
+      `${kind}-folders-collapse-all`,
+      `${kind}-mobile-folders-collapse-all`,
+      `${kind}-mobile-sheet-collapse-all`,
+    ]) {
+      $(`#${id}`).onclick = () => setAllFolderExpansion(kind, false);
+    }
+    const opener = $(`#${kind}-folder-filter-open`);
+    const sheet = $(`#${kind}-folder-sheet`);
+    const close = $(`#${kind}-folder-sheet-close`);
+    const dismiss = () => dialogs.closeModal(sheet);
+    opener.onclick = () => dialogs.openModal(sheet, {
+      initialFocus: sheet.querySelector('[role="treeitem"]') || close,
+      invoker: opener,
+      onEscape: dismiss,
+    });
+    close.onclick = dismiss;
+  }
+}
 
 const tableSort = {
   secrets: { key: 'name', direction: 'asc' },
@@ -669,78 +791,6 @@ function toggleSelected(kind, id) {
   else state.ids.add(id);
   resetBulkConfirmation(kind);
   renderSelectionKind(kind);
-}
-
-// Renders `items` into `tbody` as collapsible folder groups (sorted,
-// listed first) followed by loose items (folderOf(item) === '').
-// forceExpand shows every group open without mutating `expanded` —
-// used while a search filter is active.
-function renderGrouped(tbody, items, folderOf, expanded, cols, renderRow, forceExpand, rerender) {
-  const groups = new Map();
-  const loose = [];
-  const rendered = [];
-  for (const it of items) {
-    const f = folderOf(it);
-    if (f) {
-      if (!groups.has(f)) groups.set(f, []);
-      groups.get(f).push(it);
-    } else {
-      loose.push(it);
-    }
-  }
-  for (const name of [...groups.keys()].sort()) {
-    const rows = groups.get(name);
-    const open = forceExpand || expanded.has(name);
-    const tr = document.createElement('tr');
-    tr.className = 'folder-row';
-    const td = document.createElement('td');
-    td.colSpan = cols;
-    td.className = 'folder-cell';
-    const content = document.createElement('div');
-    content.className = 'folder-cell-content';
-    content.appendChild(icon(open ? 'chevron-down' : 'chevron-right'));
-    content.appendChild(icon('folder'));
-    const label = document.createElement('span');
-    label.className = 'folder-name';
-    label.textContent = name;
-    const count = document.createElement('span');
-    count.className = 'folder-count';
-    count.textContent = `${rows.length} ${rows.length === 1 ? 'item' : 'items'}`;
-    content.append(label, count);
-    td.appendChild(content);
-    td.setAttribute('aria-expanded', String(open));
-    if (forceExpand) {
-      tr.classList.add('static');
-    } else {
-      const toggle = () => {
-        if (expanded.has(name)) expanded.delete(name);
-        else expanded.add(name);
-        rerender();
-      };
-      td.tabIndex = 0;
-      td.setAttribute('role', 'button');
-      tr.onclick = toggle;
-      td.onkeydown = (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          if (e.key === ' ') e.preventDefault();
-          toggle();
-        }
-      };
-    }
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-    if (open) {
-      for (const it of rows) {
-        rendered.push(it);
-        tbody.appendChild(renderRow(it, true));
-      }
-    }
-  }
-  for (const it of loose) {
-    rendered.push(it);
-    tbody.appendChild(renderRow(it, false));
-  }
-  return rendered;
 }
 
 // ---- state ----
@@ -1144,8 +1194,10 @@ store.subscribe((snapshot, event) => {
   fileLoadGeneration++;
   clearSelection('secrets');
   clearSelection('files');
-  expandedSecretFolders.clear();
-  expandedFileFolders.clear();
+  secretFolderNavigation.select(null);
+  fileFolderNavigation.select(null);
+  folderNavigationFocus.secrets = { desktop: '__all__', mobile: '__all__' };
+  folderNavigationFocus.files = { desktop: '__all__', mobile: '__all__' };
   applyContextCapabilities();
   clearListLoadError('secrets');
   renderSecrets();
@@ -1399,8 +1451,10 @@ async function init() {
       fileLoadGeneration++;
       clearSelection('secrets');
       clearSelection('files');
-      expandedSecretFolders.clear();
-      expandedFileFolders.clear();
+      secretFolderNavigation.select(null);
+      fileFolderNavigation.select(null);
+      folderNavigationFocus.secrets = { desktop: '__all__', mobile: '__all__' };
+      folderNavigationFocus.files = { desktop: '__all__', mobile: '__all__' };
       loadSecrets(selectedVault).catch(fail);
       if (ctx.capabilities.files) loadFiles(selectedVault).catch(fail);
       if (activeTab === 'trash') loadDeleted(selectedVault).catch(fail);
@@ -1447,30 +1501,27 @@ function renderSecrets() {
   const filter = $('#search').value.toLowerCase();
   const tbody = $('#secrets-table tbody');
   tbody.innerHTML = '';
-  const visible = secrets.filter((s) => {
+  const searchVisible = secrets.filter((s) => {
     if (!filter) return true;
     const name = s.original_name || s.name;
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
     return hay.includes(filter);
   });
+  renderFolderNavigation('secrets', secrets, searchVisible);
+  const selectedFolder = secretFolderNavigation.snapshot().selected;
+  const visible = searchVisible.filter((secret) => (
+    XvUiModel.itemMatchesFolder(secret, selectedFolder)
+  ));
   const sorted = sortedTableItems('secrets', visible);
-  const secretFolders = new Set(visible.map((secret) => secret.folder).filter(Boolean));
-  setListSummary('secrets', visible.length, secrets.length, secretFolders.size);
-  // While filtering, collapse state is ignored so matches are never
-  // hidden inside a collapsed folder; empty groups drop out because
-  // their rows are filtered before grouping.
-  const cols = secretSelection.enabled ? 6 : 5;
-  const rendered = renderGrouped(
-    tbody,
-    sorted,
-    (s) => s.folder || '',
-    expandedSecretFolders,
-    cols,
-    secretRow,
-    !!filter,
-    renderSecrets,
+  setListSummary(
+    'secrets',
+    visible.length,
+    secrets.length,
+    folderNodeCount(folderModelItems('secrets', secrets)),
   );
-  syncSelectionUi('secrets', rendered.map((s) => s.original_name || s.name));
+  const cols = secretSelection.enabled ? 6 : 5;
+  for (const secret of sorted) tbody.appendChild(secretRow(secret));
+  syncSelectionUi('secrets', sorted.map((secret) => secret.original_name || secret.name));
   if (!tbody.children.length) {
     showListState(tbody, 'secrets', secrets.length ? 'filtered' : 'empty', cols);
   }
@@ -1502,14 +1553,13 @@ function itemNameCell(kind, name, activate, accessibleLabel) {
   return td;
 }
 
-function secretRow(s, grouped = false) {
+function secretRow(s) {
   const name = s.original_name || s.name;
   const activate = () => {
     if (secretSelection.enabled) toggleSelected('secrets', name);
     else openDrawer(name);
   };
   const tr = document.createElement('tr');
-  if (grouped) tr.classList.add('folder-child');
   if (secretSelection.ids.has(name)) tr.classList.add('selected-row');
   if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
   for (const [index, cell] of [name, s.folder, s.groups, s.note, XvUiModel.formatDate(s.updated_on)].entries()) {
@@ -2158,13 +2208,22 @@ function renderFiles() {
   if (filesState !== 'ready') return;
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
-  const dirOf = (f) => (f.name.includes('/') ? f.name.slice(0, f.name.lastIndexOf('/')) : '');
-  const fileFolders = new Set(files.map(dirOf).filter(Boolean));
-  setListSummary('files', files.length, files.length, fileFolders.size);
+  renderFolderNavigation('files', files, files);
+  const selectedFolder = fileFolderNavigation.snapshot().selected;
+  const visible = files.filter((file) => XvUiModel.itemMatchesFolder(
+    { folder: folderOf('files', file) },
+    selectedFolder,
+  ));
+  setListSummary(
+    'files',
+    visible.length,
+    files.length,
+    folderNodeCount(folderModelItems('files', files)),
+  );
   const cols = fileSelection.enabled ? 5 : 4;
-  const sorted = sortedTableItems('files', files);
-  const rendered = renderGrouped(tbody, sorted, dirOf, expandedFileFolders, cols, fileRow, false, renderFiles);
-  syncSelectionUi('files', rendered.map((f) => f.name));
+  const sorted = sortedTableItems('files', visible);
+  for (const file of sorted) tbody.appendChild(fileRow(file));
+  syncSelectionUi('files', sorted.map((file) => file.name));
   if (!tbody.children.length) showListState(tbody, 'files', 'empty', cols);
 }
 
@@ -2189,10 +2248,9 @@ function fileNameCell(name) {
   return td;
 }
 
-function fileRow(f, grouped = false) {
+function fileRow(f) {
   const name = f.name;
   const tr = document.createElement('tr');
-  if (grouped) tr.classList.add('folder-child');
   if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
   for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, XvUiModel.formatDate(f.last_modified)].entries()) {
@@ -2445,5 +2503,6 @@ $('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
 initColumnResizing();
 initSorting();
+initFolderNavigationControls();
 init().catch(fail);
 }
