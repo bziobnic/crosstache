@@ -14,6 +14,13 @@ type FileMode = libc::mode_t;
 #[cfg(not(unix))]
 type FileMode = u32;
 
+#[derive(Clone, Copy)]
+enum FileOpenBehavior {
+    Replace,
+    Exclusive,
+    Lock,
+}
+
 /// Write bytes to a file with mode 0o600 (owner read/write only).
 /// Refuses to follow symlinks on Unix (O_NOFOLLOW).
 pub fn write_private(
@@ -92,13 +99,26 @@ pub async fn write_sensitive_file_async(path: &Path, content: &[u8]) -> std::io:
 /// path. Other platforms perform the strongest std-only equivalent by rejecting
 /// reparse/symlink metadata for every existing component before opening.
 pub fn write_file_no_follow(path: &Path, content: &[u8], overwrite: bool) -> Result<std::fs::File> {
-    write_file_no_follow_with_mode(path, content, overwrite, 0o666, 0o777)
+    let behavior = if overwrite {
+        FileOpenBehavior::Replace
+    } else {
+        FileOpenBehavior::Exclusive
+    };
+    write_file_no_follow_with_mode(path, content, behavior, 0o666, 0o777)
+}
+
+/// Open or create an empty private lock file without following symlinks.
+///
+/// Missing parent directories are created owner-only (0700 on Unix), and the
+/// lock file itself is created owner-only (0600 on Unix).
+pub fn open_private_lock_file_no_follow(path: &Path) -> Result<std::fs::File> {
+    write_file_no_follow_with_mode(path, &[], FileOpenBehavior::Lock, 0o600, 0o700)
 }
 
 fn write_file_no_follow_with_mode(
     path: &Path,
     content: &[u8],
-    overwrite: bool,
+    behavior: FileOpenBehavior,
     file_mode: FileMode,
     directory_mode: FileMode,
 ) -> Result<std::fs::File> {
@@ -230,19 +250,31 @@ fn write_file_no_follow_with_mode(
         let c_name = CString::new(file_name.as_bytes()).map_err(|_| {
             CrosstacheError::invalid_argument("Download destination contains a NUL byte")
         })?;
-        let create_mode = if overwrite {
-            libc::O_TRUNC
-        } else {
-            libc::O_EXCL
+        let (access_mode, create_mode) = match behavior {
+            FileOpenBehavior::Replace => (libc::O_WRONLY, libc::O_TRUNC),
+            FileOpenBehavior::Exclusive => (libc::O_WRONLY, libc::O_EXCL),
+            FileOpenBehavior::Lock => (libc::O_RDWR, libc::O_EXCL),
         };
-        let fd = unsafe {
+        let mut fd = unsafe {
             libc::openat(
                 directory.as_raw_fd(),
                 c_name.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | create_mode | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                access_mode | libc::O_CREAT | create_mode | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 libc::c_uint::from(file_mode),
             )
         };
+        if fd < 0
+            && matches!(behavior, FileOpenBehavior::Lock)
+            && std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists
+        {
+            fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    c_name.as_ptr(),
+                    libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+        }
         if fd < 0 {
             return Err(CrosstacheError::config(format!(
                 "Refusing unsafe download destination '{}': {}",
@@ -313,10 +345,16 @@ fn write_file_no_follow_with_mode(
         }
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true);
-        if overwrite {
-            options.truncate(true);
-        } else {
-            options.create_new(true);
+        match behavior {
+            FileOpenBehavior::Replace => {
+                options.truncate(true);
+            }
+            FileOpenBehavior::Exclusive => {
+                options.create_new(true);
+            }
+            FileOpenBehavior::Lock => {
+                options.read(true);
+            }
         }
         let mut file = options.open(&absolute).map_err(|e| {
             CrosstacheError::config(format!("Failed to open {}: {e}", absolute.display()))
@@ -347,8 +385,13 @@ pub fn atomic_write_file_no_follow(path: &Path, content: &[u8], private: bool) -
     };
 
     let result = (|| {
-        let file =
-            write_file_no_follow_with_mode(&temp_path, content, false, file_mode, directory_mode)?;
+        let file = write_file_no_follow_with_mode(
+            &temp_path,
+            content,
+            FileOpenBehavior::Exclusive,
+            file_mode,
+            directory_mode,
+        )?;
         file.sync_all().map_err(|e| {
             CrosstacheError::config(format!(
                 "Failed to flush temporary file '{}': {e}",

@@ -328,6 +328,14 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .layer(axum::middleware::from_fn(normalize_api_errors))
 }
 
+fn folder_token_service_for_config(
+    config_path: &std::path::Path,
+) -> Result<folder_tokens::FolderTokenService> {
+    folder_tokens::FolderTokenService::load_or_create(&folder_tokens::folder_token_key_path_for(
+        config_path,
+    ))
+}
+
 /// Bind the embedded web UI and return it without starting the accept loop.
 pub async fn prepare_web(
     config: Config,
@@ -338,9 +346,7 @@ pub async fn prepare_web(
     let preference_path = preferences::preference_path_for(&config_path);
     let preference_store =
         preferences::PreferenceStore::new(preference_path, config.clipboard_timeout);
-    let folder_tokens = folder_tokens::FolderTokenService::load_or_create(
-        &folder_tokens::folder_token_key_path_for(&config_path),
-    )?;
+    let folder_tokens = folder_token_service_for_config(&config_path)?;
     let cwd = std::env::current_dir()?;
     let effective = crate::config::project::resolve_effective_backend_config(&config, &cwd).await?;
     effective.config.validate()?;
@@ -419,6 +425,34 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[test]
+    fn prepare_web_token_setup_supports_a_fresh_xdg_config_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root
+            .path()
+            .join("xdg-config")
+            .join("xv")
+            .join("config.toml");
+
+        folder_token_service_for_config(&config_path).unwrap();
+
+        let key_path = folder_tokens::folder_token_key_path_for(&config_path);
+        assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(key_path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
 
     #[tokio::test]
     async fn serves_index_and_assets() {

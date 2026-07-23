@@ -17,6 +17,7 @@ use sha2::Sha256;
 
 use super::{api::ApiError, WebState};
 use crate::error::{CrosstacheError, Result};
+use crate::utils::helpers::open_private_lock_file_no_follow;
 
 const KEY_BYTES: usize = 32;
 const TOKEN_DOMAIN: &[u8] = b"xv-folder-token-v1";
@@ -176,18 +177,12 @@ fn lock_key_path(path: &Path) -> Result<File> {
         ".{}.lock",
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let lock = options
-        .open(&lock_path)
-        .map_err(|error| key_io_error("open lock for", path, error))?;
+    let lock = open_private_lock_file_no_follow(&lock_path).map_err(|error| {
+        CrosstacheError::config(format!(
+            "Failed to open lock for folder-token key '{}': {error}",
+            path.display()
+        ))
+    })?;
     let metadata = lock
         .metadata()
         .map_err(|error| key_io_error("inspect lock for", path, error))?;
@@ -363,6 +358,40 @@ mod tests {
     }
 
     #[test]
+    fn first_run_creates_missing_private_config_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("fresh-xdg").join("xv").join("config.toml");
+        let key_path = super::folder_token_key_path_for(&config_path);
+
+        let service = FolderTokenService::load_or_create(&key_path).unwrap();
+        let scope = service.scope_token("local", "default", "secrets");
+
+        assert_eq!(service.folder_token(&scope, "apps").len(), 43);
+        assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(key_path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let lock_path = key_path.with_file_name(".ui-folder-token.key.lock");
+            assert_eq!(
+                std::fs::metadata(lock_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
     fn concurrent_first_creation_uses_exactly_one_stable_key() {
         let directory = tempfile::tempdir().unwrap();
         let path = Arc::new(directory.path().join("ui-folder-token.key"));
@@ -420,6 +449,27 @@ mod tests {
 
         assert!(super::read_key_file_no_follow(&link).is_err());
         assert!(FolderTokenService::load_or_create(&link).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_run_rejects_an_attacker_controlled_symlink_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let attacker = root.path().join("attacker");
+        std::fs::create_dir(&attacker).unwrap();
+        std::fs::create_dir(attacker.join("xv")).unwrap();
+        let linked_parent = root.path().join("fresh-xdg");
+        symlink(&attacker, &linked_parent).unwrap();
+        let key_path = linked_parent.join("xv").join("ui-folder-token.key");
+
+        assert!(FolderTokenService::load_or_create(&key_path).is_err());
+        assert!(!attacker.join("xv").join("ui-folder-token.key").exists());
+        assert!(!attacker
+            .join("xv")
+            .join(".ui-folder-token.key.lock")
+            .exists());
     }
 
     #[tokio::test]
