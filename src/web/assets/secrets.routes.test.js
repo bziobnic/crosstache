@@ -372,6 +372,249 @@ test('workspace selector has one pending owner across every switch outcome and o
   }
 });
 
+test('failed and cancelled workspace activation preserve both current-scope stale refresh owners', async () => {
+  const primary = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const stage = {
+    ...routedContext('stage', 'two'),
+    capabilities: { ...routedContext('stage', 'two').capabilities, files: true },
+  };
+  const activations = [];
+  let failSecretRefresh = false;
+  let failFileRefresh = false;
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (method === 'POST' && requestPath === '/api/workspaces/activate') {
+      const activation = {};
+      activation.promise = new Promise((resolve, reject) => {
+        activation.resolve = resolve;
+        activation.reject = reject;
+      });
+      activations.push(activation);
+      return activation.promise;
+    }
+    if (requestPath === '/api/types') return { types: [] };
+    if (method === 'GET' && requestPath.startsWith('/api/secrets?')) {
+      if (failSecretRefresh) {
+        failSecretRefresh = false;
+        throw new ApiError({
+          status: 503,
+          code: 'xv-offline',
+          message: 'Current secrets are stale',
+          hint: 'Retry.',
+        });
+      }
+      return [];
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/files?')) {
+      if (failFileRefresh) {
+        failFileRefresh = false;
+        throw new ApiError({
+          status: 503,
+          code: 'xv-offline',
+          message: 'Current files are stale',
+          hint: 'Retry.',
+        });
+      }
+      return [];
+    }
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
+  const pendingSwitches = [];
+  try {
+    failSecretRefresh = true;
+    await ui.elements.get('#refresh-secrets').onclick();
+    failFileRefresh = true;
+    await ui.elements.get('#refresh-files').onclick();
+    const secretPanel = ui.elements.get('#secret-refresh-error');
+    const filePanel = ui.elements.get('#file-refresh-error');
+    const secretRetry = secretPanel.querySelector('.error-retry');
+    const fileRetry = filePanel.querySelector('.error-retry');
+    const originalSecretRetry = secretRetry.onclick;
+    const originalFileRetry = fileRetry.onclick;
+
+    const failed = ui.contextRail.switchTo('stage');
+    pendingSwitches.push(failed);
+    await settleUntil(() => activations[0]);
+    assert.equal(secretPanel.hidden, false, 'pending activation retains the current secret warning');
+    assert.equal(filePanel.hidden, false, 'pending activation retains the current file warning');
+    assert.equal(secretRetry.onclick, originalSecretRetry);
+    assert.equal(fileRetry.onclick, originalFileRetry);
+    activations[0].reject(new Error('activation failed'));
+    assert.equal(await failed, false);
+    assert.equal(secretPanel.hidden, false);
+    assert.equal(filePanel.hidden, false);
+    assert.equal(secretRetry.onclick, originalSecretRetry);
+    assert.equal(fileRetry.onclick, originalFileRetry);
+
+    const cancelled = ui.contextRail.switchTo('stage');
+    pendingSwitches.push(cancelled);
+    await settleUntil(() => activations[1]);
+    ui.store.dispatch({ type: 'mutation/pending', value: true });
+    ui.store.dispatch({ type: 'mutation/pending', value: false });
+    activations[1].resolve({ context: stage, secrets: [] });
+    assert.equal(await cancelled, false);
+    assert.equal(secretPanel.hidden, false);
+    assert.equal(filePanel.hidden, false);
+    assert.equal(secretRetry.onclick, originalSecretRetry);
+    assert.equal(fileRetry.onclick, originalFileRetry);
+
+    assert.equal(await originalSecretRetry(), false);
+    assert.equal(await originalFileRetry(), false);
+    assert.equal(secretPanel.hidden, true);
+    assert.equal(filePanel.hidden, true);
+  } finally {
+    for (const activation of activations) activation.resolve?.({ context: stage, secrets: [] });
+    await Promise.allSettled(pendingSwitches);
+    ui.restore();
+  }
+});
+
+test('current-context refresh settles after activation failure and remains retryable without loading limbo', async () => {
+  const primary = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const activation = {};
+  activation.promise = new Promise((resolve, reject) => {
+    activation.resolve = resolve;
+    activation.reject = reject;
+  });
+  const refresh = {};
+  refresh.promise = new Promise((resolve, reject) => {
+    refresh.resolve = resolve;
+    refresh.reject = reject;
+  });
+  let secretListCalls = 0;
+  let activationStarted = false;
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (method === 'POST' && requestPath === '/api/workspaces/activate') {
+      activationStarted = true;
+      return activation.promise;
+    }
+    if (requestPath === '/api/types') return { types: [] };
+    if (method === 'GET' && requestPath.startsWith('/api/secrets?')) {
+      secretListCalls++;
+      if (secretListCalls === 2) return refresh.promise;
+      return [{ name: 'existing' }];
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/files?')) return [];
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
+  let switching;
+  try {
+    const refreshing = ui.elements.get('#refresh-secrets').onclick();
+    switching = ui.contextRail.switchTo('stage');
+    await settleUntil(() => activationStarted);
+    activation.reject(new Error('activation failed'));
+    assert.equal(await switching, false);
+
+    refresh.reject(new ApiError({
+      status: 503,
+      code: 'xv-offline',
+      message: 'Refresh settled after failed activation',
+      hint: 'Retry.',
+    }));
+    assert.equal(await refreshing, false);
+
+    const panel = ui.elements.get('#secret-refresh-error');
+    assert.equal(panel.hidden, false);
+    assert.match(panel.querySelector('.error-message').textContent, /Refresh settled after failed activation/);
+    assert.match(ui.elements.get('#secret-list-summary').textContent, /^1 secret/);
+    assert.ok(ui.find('#secrets-table tbody', (element) => (
+      element.getAttribute?.('aria-label') === 'Edit secret existing'
+    )));
+
+    await panel.querySelector('.error-retry').onclick();
+    assert.equal(panel.hidden, true);
+    assert.equal(secretListCalls, 3);
+    assert.match(ui.elements.get('#secret-list-summary').textContent, /^1 secret/);
+  } finally {
+    refresh.resolve([]);
+    activation.resolve({ context: primary, secrets: [] });
+    ui.restore();
+  }
+});
+
+test('successful workspace commit clears both refresh owners before new-scope files settle', async () => {
+  const primary = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const stage = {
+    ...routedContext('stage', 'two'),
+    capabilities: { ...routedContext('stage', 'two').capabilities, files: true },
+  };
+  const activation = deferred();
+  const stageFiles = deferred();
+  let failSecretRefresh = false;
+  let failFileRefresh = false;
+  let stageFileStarted = false;
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (method === 'POST' && requestPath === '/api/workspaces/activate') return activation.promise;
+    if (requestPath === '/api/types') return { types: [] };
+    if (method === 'GET' && requestPath.startsWith('/api/secrets?')) {
+      if (failSecretRefresh) {
+        failSecretRefresh = false;
+        throw new ApiError({ status: 503, code: 'xv-offline', message: 'Stale secrets' });
+      }
+      return [];
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/files?')) {
+      const vault = new URLSearchParams(requestPath.split('?')[1] || '').get('vault');
+      if (failFileRefresh) {
+        failFileRefresh = false;
+        throw new ApiError({ status: 503, code: 'xv-offline', message: 'Stale files' });
+      }
+      if (vault === 'two') {
+        stageFileStarted = true;
+        return stageFiles.promise;
+      }
+      return [];
+    }
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
+  let switching;
+  try {
+    failSecretRefresh = true;
+    await ui.elements.get('#refresh-secrets').onclick();
+    failFileRefresh = true;
+    await ui.elements.get('#refresh-files').onclick();
+    const secretPanel = ui.elements.get('#secret-refresh-error');
+    const filePanel = ui.elements.get('#file-refresh-error');
+    const secretRetry = secretPanel.querySelector('.error-retry');
+    const fileRetry = filePanel.querySelector('.error-retry');
+
+    switching = ui.contextRail.switchTo('stage');
+    await Promise.resolve();
+    assert.equal(secretPanel.hidden, false, 'pending activation keeps current warning visible');
+    assert.equal(filePanel.hidden, false, 'pending activation keeps current warning visible');
+    activation.resolve({ context: stage, secrets: [] });
+    assert.equal(await switching, true);
+    await settleUntil(() => stageFileStarted);
+
+    assert.equal(secretPanel.hidden, true);
+    assert.equal(filePanel.hidden, true);
+    assert.equal(secretRetry.onclick, null);
+    assert.equal(fileRetry.onclick, null);
+    assert.equal(secretRetry.disabled, false);
+    assert.equal(fileRetry.disabled, false);
+  } finally {
+    stageFiles.resolve([]);
+    activation.resolve({ context: stage, secrets: [] });
+    await Promise.allSettled(switching ? [switching] : []);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    ui.restore();
+  }
+});
+
 test('mounted folder navigation filters rows and restores expansion without leaking selection across workspaces', async () => {
   const primary = routedContext('primary', 'one');
   const stage = routedContext('stage', 'two');

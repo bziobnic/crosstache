@@ -1448,7 +1448,7 @@ async function requestDrawerClose(afterClose) {
 }
 
 store.subscribe((snapshot, event) => {
-  if (event.type === 'context/switch-started' || event.type === 'context/switch-succeeded') {
+  if (event.type === 'context/switch-succeeded') {
     clearRefreshOwnersForScopeTransition();
   }
   syncDraftControls();

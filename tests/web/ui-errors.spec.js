@@ -310,12 +310,142 @@ test('dismissed stale retry clears handlers and ignores its late failure', async
   await expect(refresh).toBeHidden();
 });
 
+test('failed workspace activation preserves both current-scope stale refresh owners', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+
+  let failOldSecrets = true;
+  let failOldFiles = true;
+  let releaseActivation;
+  let markActivationStarted;
+  const activationGate = new Promise((resolve) => { releaseActivation = resolve; });
+  const activationStarted = new Promise((resolve) => { markActivationStarted = resolve; });
+  await page.route('**/api/secrets?**', async (route) => {
+    if (route.request().method() === 'GET' && failOldSecrets) {
+      failOldSecrets = false;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        json: { error: { code: 'xv-offline', message: 'Current secrets are stale.', hint: 'Retry.' } },
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.route('**/api/files?**', async (route) => {
+    if (route.request().method() === 'GET' && failOldFiles) {
+      failOldFiles = false;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        json: { error: { code: 'xv-offline', message: 'Current files are stale.', hint: 'Retry.' } },
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.route('**/api/workspaces/activate', async (route) => {
+    markActivationStarted();
+    await activationGate;
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      json: { error: { code: 'xv-backend-unavailable', message: 'Activation failed.', hint: 'Retry later.' } },
+    });
+  });
+
+  await page.getByRole('button', { name: 'Refresh secrets' }).click();
+  await page.getByRole('tab', { name: 'Files' }).click();
+  await page.getByRole('button', { name: 'Refresh files' }).click();
+  const secretPanel = page.locator('#secret-refresh-error');
+  const filePanel = page.locator('#file-refresh-error');
+  expect(await secretPanel.evaluate((panel) => panel.hidden)).toBe(false);
+  await expect(filePanel).toBeVisible();
+
+  await page.locator('#workspace-select').selectOption('sandbox');
+  await activationStarted;
+  await expect(page.locator('main')).toHaveAttribute('inert', '');
+  expect(await secretPanel.evaluate((panel) => panel.hidden)).toBe(false);
+  expect(await filePanel.evaluate((panel) => panel.hidden)).toBe(false);
+  expect(await page.evaluate(() => [
+    document.querySelector('#secret-refresh-error .error-retry').onclick !== null,
+    document.querySelector('#file-refresh-error .error-retry').onclick !== null,
+  ])).toEqual([true, true]);
+
+  releaseActivation();
+  await expect(page.locator('#context-error')).toContainText('Activation failed');
+  expect(await secretPanel.evaluate((panel) => panel.hidden)).toBe(false);
+  expect(await filePanel.evaluate((panel) => panel.hidden)).toBe(false);
+  expect(await page.evaluate(() => [
+    document.querySelector('#secret-refresh-error .error-retry').onclick !== null,
+    document.querySelector('#file-refresh-error .error-retry').onclick !== null,
+  ])).toEqual([true, true]);
+
+  await page.evaluate(async () => Promise.all([
+    document.querySelector('#secret-refresh-error .error-retry').onclick(),
+    document.querySelector('#file-refresh-error .error-retry').onclick(),
+  ]));
+  await expect.poll(() => secretPanel.evaluate((panel) => panel.hidden)).toBe(true);
+  await expect.poll(() => filePanel.evaluate((panel) => panel.hidden)).toBe(true);
+});
+
+test('in-flight current refresh settles and retries after workspace activation failure', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+
+  let secretRefreshRequests = 0;
+  let releaseRefresh;
+  let markRefreshStarted;
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  const refreshStarted = new Promise((resolve) => { markRefreshStarted = resolve; });
+  await page.route('**/api/secrets?**', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+    secretRefreshRequests++;
+    if (secretRefreshRequests === 1) {
+      markRefreshStarted();
+      await refreshGate;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        json: { error: { code: 'xv-offline', message: 'Refresh settled after activation failure.', hint: 'Retry.' } },
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.route('**/api/workspaces/activate', async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      json: { error: { code: 'xv-backend-unavailable', message: 'Activation failed.', hint: 'Retry later.' } },
+    });
+  });
+
+  await page.getByRole('button', { name: 'Refresh secrets' }).click();
+  await refreshStarted;
+  await page.locator('#workspace-select').selectOption('sandbox');
+  await expect(page.locator('#context-error')).toContainText('Activation failed');
+  releaseRefresh();
+
+  const panel = page.locator('#secret-refresh-error');
+  await expect(panel).toContainText('Refresh settled after activation failure');
+  await expect(page.locator('#secret-item-count')).not.toContainText('Loading');
+  await panel.getByRole('button', { name: 'Retry' }).click();
+  await expect(panel).toBeHidden();
+  expect(secretRefreshRequests).toBe(2);
+});
+
 test('workspace transition clears both refresh owners before delayed new-scope files settle', async ({ page, baseURL }) => {
   await page.goto(baseURL);
 
   let failOldSecrets = true;
   let failOldFiles = true;
   let sandboxFileRequests = 0;
+  let releaseActivation;
+  let markActivationStarted;
+  const activationGate = new Promise((resolve) => { releaseActivation = resolve; });
+  const activationStarted = new Promise((resolve) => { markActivationStarted = resolve; });
   let releaseSandboxFiles;
   let markSandboxFilesStarted;
   const sandboxFilesGate = new Promise((resolve) => { releaseSandboxFiles = resolve; });
@@ -359,6 +489,11 @@ test('workspace transition clears both refresh owners before delayed new-scope f
     }
     await route.continue();
   });
+  await page.route('**/api/workspaces/activate', async (route) => {
+    markActivationStarted();
+    await activationGate;
+    await route.continue();
+  });
 
   await page.getByRole('button', { name: 'Refresh secrets' }).click();
   await expect(page.locator('#secret-refresh-error')).toBeVisible();
@@ -375,6 +510,11 @@ test('workspace transition clears both refresh owners before delayed new-scope f
   });
 
   await page.locator('#workspace-select').selectOption('sandbox');
+  await activationStarted;
+  await expect(page.locator('main')).toHaveAttribute('inert', '');
+  expect(await page.locator('#secret-refresh-error').evaluate((panel) => panel.hidden)).toBe(false);
+  expect(await page.locator('#file-refresh-error').evaluate((panel) => panel.hidden)).toBe(false);
+  releaseActivation();
   await sandboxFilesStarted;
 
   await expect(page.locator('#context-line')).toContainText('local / sandbox');

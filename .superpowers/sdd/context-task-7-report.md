@@ -44,10 +44,11 @@ workspace activation, and bulk operations.
   dismissal. Added store coverage for caps, terminal observability, double
   terminals, durable dismissal, owner replacement, handler cleanup, and
   generation invalidation.
-- Scope transitions now synchronously abort and invalidate both list loads,
-  release both refresh owners, clear diagnostics and handlers, and restore
-  Retry controls to an enabled baseline before any new-scope load starts. This
-  applies to workspace/context events and the legacy vault selector.
+- Committed scope transitions synchronously abort and invalidate both list
+  loads, release both refresh owners, clear diagnostics and handlers, and
+  restore Retry controls to an enabled baseline before any new-scope load
+  starts. This applies at workspace/context commit and to the legacy vault
+  selector's immediate commit.
 - List retry closures capture the original vault and cloned scope that failed;
   they never retarget through the current vault. A delayed new-vault file-load
   unit test proves both stale refresh owners are already inert before the new
@@ -61,6 +62,20 @@ workspace activation, and bulk operations.
   plus inert saved old-scope retry closures. It is committed as browser
   coverage but could not be executed because the previously reported browser
   approval/usage quota remains exhausted.
+- A pending workspace activation no longer clears or aborts current-scope list
+  state. Existing secret and file stale warnings, diagnostics, generations, and
+  retry handlers remain owned while the context-scoped UI is inert. Failed and
+  activity-revision-cancelled activation restores normal interactivity with
+  those exact owners intact.
+- Current-scope refreshes continue settling while activation is pending. A unit
+  race rejects activation before the old-scope refresh fails, then proves the
+  retained snapshot never enters loading limbo and the resulting stale warning
+  retries successfully. Successful activation still clears both owners at the
+  atomic commit before its delayed new-scope file load settles.
+- Added browser coverage for failed activation owner preservation, in-flight
+  refresh recovery after activation failure, pending owner preservation, and
+  successful commit cleanup. Unit coverage additionally exercises explicit
+  activation cancellation.
 
 ## TDD evidence
 
@@ -76,6 +91,10 @@ RED was observed before implementation:
   details.
 - The browser cancellation assertion failed until cancelled bulk confirmation
   published a terminal `cancelled` status.
+- The transition lifecycle tests failed while `context/switch-started` cleared
+  both refresh panels and invalidated the in-flight current-scope refresh.
+  Moving cleanup exclusively to `context/switch-succeeded` made the failure,
+  cancellation, in-flight recovery, and successful commit cases pass.
 
 Each focused suite was rerun GREEN before broad verification.
 
@@ -84,8 +103,8 @@ Each focused suite was rerun GREEN before broad verification.
 - `cargo fmt --check` — PASS
 - `cargo clippy --features ui --all-targets -- -D warnings` — PASS
 - `cargo test --features ui web:: --lib` — PASS, 143 tests
-- `cargo test --test e2e_record_types` — PASS, 71 tests
-- `node --test src/web/assets/*.test.js` — PASS, 121 tests
+- `cargo test --features ui --test e2e_record_types` — PASS, 71 tests
+- `node --test src/web/assets/*.test.js` — PASS, 124 tests
 - `PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-errors.spec.js`
   — PASS, 6 remediation tests
 - The complete four-file Playwright plan gate passed 31 tests before the review
@@ -100,7 +119,8 @@ Each focused suite was rerun GREEN before broad verification.
 The record-type test target emitted its existing non-fatal dead-code warnings;
 the strict all-target clippy gate remained warning-free.
 
-The remediation raises the JavaScript total to 121 tests. The focused error
-suite now contains 7 tests; its first 6 tests passed before browser execution
-became unavailable, and the new seventh workspace-transition test remains
-unexecuted solely because of the external browser quota.
+The remediation raises the JavaScript total to 124 tests. The focused error
+suite now contains 9 tests; its first 6 tests passed before browser execution
+became unavailable, and the 3 new transition lifecycle tests remain unexecuted
+solely because of the external browser quota. Playwright discovery and syntax
+validation pass for all 9.
