@@ -585,7 +585,7 @@ function deferredPreferences() {
   };
 }
 
-function recordSecretApi() {
+function recordSecretApi(values = { 'a-b': 'first-record-value', 'a b': 'second-record-value' }) {
   return async (method, path) => {
     if (path === '/api/context') {
       return { vault: 'one', backend: 'test', capabilities: { files: true, soft_delete: false } };
@@ -601,7 +601,7 @@ function recordSecretApi() {
       };
     }
     if (method === 'POST' && path.startsWith('/api/secrets/existing/value?')) {
-      return { value: JSON.stringify({ 'a-b': 'first-record-value', 'a b': 'second-record-value' }) };
+      return { value: JSON.stringify(values) };
     }
     if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: 'existing' }];
     if (path.startsWith('/api/files')) return [];
@@ -739,12 +739,11 @@ test('an older clipboard expiry cannot clear or announce over a newer same-field
     await ui.elements.get('#copy').onclick();
     clock.advanceOneSecond();
     clock.advanceOneSecond();
-    await ui.elements.get('#copy').onclick();
-    assert.equal(ui.elements.get('#protected-value-status').textContent, 'Value copied. Clipboard clears in 2 seconds.');
-
+    const newerCopy = ui.elements.get('#copy').onclick();
+    await Promise.resolve();
     oldRead.resolve('identical-value');
-    await Promise.resolve();
-    await Promise.resolve();
+    await newerCopy;
+    await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(clipboardValue, 'identical-value');
     assert.equal(ui.elements.get('#protected-value-status').textContent, 'Value copied. Clipboard clears in 2 seconds.');
 
@@ -809,6 +808,143 @@ test('stale clipboard expiry never overwrites reopened or overlapping field stat
     pendingRead.resolve('first-record-value');
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(status.textContent, reopenedStatus);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('global clipboard ownership protects an identical newer copy from another field', async () => {
+  let clipboardValue = '';
+  const staleRead = deferred();
+  let firstRead = true;
+  const clipboard = {
+    readText: async () => (firstRead ? (firstRead = false, staleRead.promise) : clipboardValue),
+    writeText: async (value) => { clipboardValue = value; },
+  };
+  const clock = exposureClock();
+  const ui = await mountRouteUi({
+    apiImpl: recordSecretApi({ 'a-b': 'identical-value', 'a b': 'identical-value' }),
+    clipboard,
+    clock,
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    const copyA = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Copy a-b');
+    const copyB = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Copy a b');
+    await copyA.onclick();
+    clock.advanceOneSecond();
+    clock.advanceOneSecond();
+
+    const newerCopy = copyB.onclick();
+    await Promise.resolve();
+    staleRead.resolve('identical-value');
+    await newerCopy;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const status = ui.elements.get('#protected-value-status');
+    assert.equal(clipboardValue, 'identical-value');
+    assert.equal(status.textContent, 'a b copied. Clipboard clears in 2 seconds.');
+    clock.advanceOneSecond();
+    assert.equal(clipboardValue, 'identical-value');
+    clock.advanceOneSecond();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(clipboardValue, '');
+    assert.equal(status.textContent, 'a b clipboard cleared.');
+  } finally {
+    ui.restore();
+  }
+});
+
+test('global clipboard ownership protects an identical copy after close and reopen', async () => {
+  let clipboardValue = '';
+  const staleRead = deferred();
+  let firstRead = true;
+  const clipboard = {
+    readText: async () => (firstRead ? (firstRead = false, staleRead.promise) : clipboardValue),
+    writeText: async (value) => { clipboardValue = value; },
+  };
+  const clock = exposureClock();
+  const ui = await mountRouteUi({
+    apiImpl: existingSecretApi('identical-value'),
+    clipboard,
+    clock,
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    await ui.elements.get('#copy').onclick();
+    clock.advanceOneSecond();
+    clock.advanceOneSecond();
+    await ui.elements.get('#close-drawer').onclick();
+    await openExistingSecret(ui, 'existing');
+
+    const newerCopy = ui.elements.get('#copy').onclick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    staleRead.resolve('identical-value');
+    await newerCopy;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const status = ui.elements.get('#protected-value-status');
+    assert.equal(clipboardValue, 'identical-value');
+    assert.equal(status.textContent, 'Value copied. Clipboard clears in 2 seconds.');
+    clock.advanceOneSecond();
+    assert.equal(clipboardValue, 'identical-value');
+    clock.advanceOneSecond();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(clipboardValue, '');
+    assert.equal(status.textContent, 'Value clipboard cleared.');
+  } finally {
+    ui.restore();
+  }
+});
+
+test('global clipboard handoff serializes a newer copy behind an in-flight clear write', async () => {
+  let clipboardValue = '';
+  const clearWrite = deferred();
+  let delayClear = true;
+  const clipboard = {
+    readText: async () => clipboardValue,
+    writeText: async (value) => {
+      if (value === '' && delayClear) {
+        delayClear = false;
+        await clearWrite.promise;
+      }
+      clipboardValue = value;
+    },
+  };
+  const clock = exposureClock();
+  const ui = await mountRouteUi({
+    apiImpl: recordSecretApi({ 'a-b': 'identical-value', 'a b': 'identical-value' }),
+    clipboard,
+    clock,
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    const copyA = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Copy a-b');
+    const copyB = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Copy a b');
+    await copyA.onclick();
+    clock.advanceOneSecond();
+    clock.advanceOneSecond();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const newerCopy = copyB.onclick();
+    await Promise.resolve();
+    clearWrite.resolve();
+    await newerCopy;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const status = ui.elements.get('#protected-value-status');
+    assert.equal(clipboardValue, 'identical-value');
+    assert.equal(status.textContent, 'a b copied. Clipboard clears in 2 seconds.');
+    clock.advanceOneSecond();
+    assert.equal(clipboardValue, 'identical-value');
+    clock.advanceOneSecond();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(clipboardValue, '');
+    assert.equal(status.textContent, 'a b clipboard cleared.');
   } finally {
     ui.restore();
   }

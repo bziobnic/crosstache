@@ -750,7 +750,10 @@ let recordState = null;
 let plainSecretState = null;
 let drawerInvoker = null;
 const revealTimers = new Map();
-const clipboardTimers = new Map();
+let clipboardExposure = null;
+let clipboardOperation = Promise.resolve();
+let latestClipboardGeneration = 0;
+let nextClipboardGeneration = 0;
 let exposureLifecycleEpoch = 0;
 let nextExposureToken = 0;
 let protectedStatusOwner = null;
@@ -885,44 +888,92 @@ function forgetProtectedValues() {
   setProtectedValueStatus(document, '');
 }
 
-function startClipboardTimer({ field, state, expected, seconds, scope }) {
-  clipboardTimers.get(state)?.timer.cancel();
-  clipboardTimers.delete(state);
+function queueClipboardOperation(operation) {
+  const result = clipboardOperation.then(operation, operation);
+  clipboardOperation = result.catch(() => {});
+  return result;
+}
+
+function ownsClipboardExposure(exposure) {
+  return clipboardExposure === exposure
+    && latestClipboardGeneration === exposure.generation;
+}
+
+function expireClipboardExposure(exposure) {
+  return queueClipboardOperation(async () => {
+    const cleared = await clearClipboardIfUnchanged({
+      clipboard,
+      expected: exposure.expected,
+      isCurrent: () => ownsClipboardExposure(exposure),
+    });
+    if (!ownsClipboardExposure(exposure)) return false;
+    clipboardExposure = null;
+    setScopedProtectedStatus(exposure.statusOwner, cleared
+      ? `${exposure.field} clipboard cleared.`
+      : `${exposure.field} clipboard clearing could not be confirmed.`);
+    return cleared;
+  });
+}
+
+function armClipboardExposure({ field, state, expected, seconds, scope, generation }) {
+  clipboardExposure?.timer?.cancel();
   const exposure = {
     field,
     state,
     expected,
     scope,
-    token: ++nextExposureToken,
-    statusOwner: claimProtectedStatus(scope),
+    generation,
+    statusOwner: latestClipboardGeneration === generation
+      ? claimProtectedStatus(scope)
+      : { token: -1, scope },
     timer: null,
   };
-  const expire = async () => {
-    const cleared = await clearClipboardIfUnchanged({
-      clipboard,
-      expected,
-      isCurrent: () => clipboardTimers.get(state)?.token === exposure.token,
-    });
-    if (clipboardTimers.get(state)?.token !== exposure.token) return;
-    clipboardTimers.delete(state);
-    setScopedProtectedStatus(exposure.statusOwner, cleared
-      ? `${field} clipboard cleared.`
-      : `${field} clipboard clearing could not be confirmed.`);
-  };
+  clipboardExposure = exposure;
   if (seconds === 0) {
-    clipboardTimers.set(state, exposure);
-    void expire();
-    return;
+    void expireClipboardExposure(exposure);
+    return exposure;
   }
   exposure.timer = createExposureTimer({
     seconds,
     clock: exposureClock,
     onTick: (remaining) => {
+      if (!ownsClipboardExposure(exposure)) return;
       setScopedProtectedStatus(exposure.statusOwner, `${field} copied. Clipboard clears in ${secondsLabel(remaining)}.`);
     },
-    onExpire: expire,
+    onExpire: () => { void expireClipboardExposure(exposure); },
   });
-  clipboardTimers.set(state, exposure);
+  return exposure;
+}
+
+function recoverClipboardExposure(generation) {
+  if (latestClipboardGeneration !== generation) return;
+  if (!clipboardExposure) {
+    latestClipboardGeneration = 0;
+    return;
+  }
+  latestClipboardGeneration = clipboardExposure.generation;
+  clipboardExposure.timer?.cancel();
+  clipboardExposure.timer = null;
+  void expireClipboardExposure(clipboardExposure);
+}
+
+async function copyProtectedValue({ field, state, expected, seconds, scope, isCurrent }) {
+  const generation = ++nextClipboardGeneration;
+  latestClipboardGeneration = generation;
+  try {
+    const result = await queueClipboardOperation(async () => {
+      if (latestClipboardGeneration !== generation) return 'superseded';
+      if (!isCurrent()) return 'aborted';
+      await clipboard.writeText(expected);
+      armClipboardExposure({ field, state, expected, seconds, scope, generation });
+      return 'written';
+    });
+    if (result === 'aborted') recoverClipboardExposure(generation);
+    return result === 'written';
+  } catch (error) {
+    recoverClipboardExposure(generation);
+    throw error;
+  }
 }
 
 function drawerDraft() {
@@ -1124,11 +1175,14 @@ function fieldRow(name, kind, value, required) {
         const seconds = await exposureTimeoutSeconds();
         if (!recordExposureIsCurrent({ scope, record, state, input, revision })) return;
         const expected = state.value ?? '';
-        await clipboard.writeText(expected);
-        const timerScope = recordExposureIsCurrent({ scope, record, state, input, revision })
-          ? scope
-          : { ...scope, lifecycleEpoch: -1 };
-        startClipboardTimer({ field: name, state, expected, seconds, scope: timerScope });
+        await copyProtectedValue({
+          field: name,
+          state,
+          expected,
+          seconds,
+          scope,
+          isCurrent: () => recordExposureIsCurrent({ scope, record, state, input, revision }),
+        });
       }
       catch (e) { fail(e); }
     };
@@ -1773,11 +1827,14 @@ $('#copy').onclick = async () => {
     if (value === null || !plainExposureIsCurrent({ scope, generation, selection, state, revision })) return;
     const seconds = await exposureTimeoutSeconds();
     if (!plainExposureIsCurrent({ scope, generation, selection, state, revision })) return;
-    await clipboard.writeText(value);
-    const timerScope = plainExposureIsCurrent({ scope, generation, selection, state, revision })
-      ? scope
-      : { ...scope, lifecycleEpoch: -1 };
-    startClipboardTimer({ field: 'Value', state, expected: value, seconds, scope: timerScope });
+    await copyProtectedValue({
+      field: 'Value',
+      state,
+      expected: value,
+      seconds,
+      scope,
+      isCurrent: () => plainExposureIsCurrent({ scope, generation, selection, state, revision }),
+    });
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     showFormError(e);
