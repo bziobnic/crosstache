@@ -659,8 +659,10 @@ mod tests {
 
     #[test]
     fn ui_bulk_deletes_require_confirmation() {
-        assert!(APP_JS.contains("await confirmSecretDeletion(items)"));
-        assert!(APP_JS.contains("armConfirmation(button, `Delete ${items.length} files?`)"));
+        assert!(
+            APP_JS.contains("await confirmDeletion(kind === 'secrets' ? 'secret' : 'file', items)")
+        );
+        assert!(APP_JS.contains("recoverable: kind === 'secret'"));
     }
 
     #[test]

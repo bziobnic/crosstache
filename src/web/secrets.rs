@@ -49,11 +49,32 @@ pub(crate) async fn purge(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::http::StatusCode;
     use serde_json::json;
 
+    use crate::backend::local::LocalBackend;
+    use crate::config::settings::LocalConfig;
     use crate::web::api::tests::get_json;
     use crate::web::testutil;
+
+    fn real_local_state(temp: &tempfile::TempDir) -> Arc<crate::web::WebState> {
+        let backend = LocalBackend::new(Some(&LocalConfig {
+            store_path: Some(temp.path().join("store").to_string_lossy().into_owned()),
+            key_file: Some(temp.path().join("key.txt").to_string_lossy().into_owned()),
+            default_vault: Some("default".to_string()),
+            encrypt_metadata: None,
+            opaque_filenames: None,
+        }))
+        .unwrap();
+        Arc::new(crate::web::WebState {
+            backend: Arc::new(backend),
+            token: "test-token".to_string(),
+            vault: "default".to_string(),
+            types: crate::records::builtin_types(),
+        })
+    }
 
     #[tokio::test]
     async fn deleted_secret_can_be_listed_restored_and_is_then_absent_from_purge() {
@@ -129,5 +150,56 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (_, deleted) = get_json(app, "GET", "/api/secrets/deleted", None).await;
         assert!(deleted.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_local_purge_after_restore_returns_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = crate::web::build_router(real_local_state(&temp));
+        let _ = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/restored",
+            Some(json!({ "value": "v1" })),
+        )
+        .await;
+        let _ = get_json(app.clone(), "DELETE", "/api/secrets/restored", None).await;
+        let _ = get_json(app.clone(), "POST", "/api/secrets/restored/restore", None).await;
+
+        let (status, error) = get_json(app, "DELETE", "/api/secrets/restored/purge", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["error"]["code"], "xv-secret-not-found");
+    }
+
+    #[tokio::test]
+    async fn real_local_purge_preserves_recreated_active_version_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = real_local_state(&temp);
+        let app = crate::web::build_router(state.clone());
+        for value in ["old", "live-v1", "live-v2"] {
+            let _ = get_json(
+                app.clone(),
+                "PUT",
+                "/api/secrets/recreated",
+                Some(json!({ "value": value })),
+            )
+            .await;
+            if value == "old" {
+                let _ = get_json(app.clone(), "DELETE", "/api/secrets/recreated", None).await;
+            }
+        }
+
+        let (status, _) = get_json(app, "DELETE", "/api/secrets/recreated/purge", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let history = state
+            .backend
+            .secrets()
+            .get_secret_version("default", "recreated", "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            history.value.as_ref().map(|value| value.as_str()),
+            Some("live-v1")
+        );
     }
 }

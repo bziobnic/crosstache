@@ -55,3 +55,47 @@ test('delete Undo, Trash conflict, and typed-name purge are safe and persistent'
   await purgeButton.click();
   await expect(page.getByRole('row', { name: /recover-me/ })).toHaveCount(0);
 });
+
+test('persistent Undo is inaccessible while a confirmation modal is open', async ({ page, appUrl }) => {
+  await page.goto(appUrl);
+  await createSecret(page, 'first-delete', 'first value');
+  await deleteSecret(page, 'first-delete');
+  await expect(page.locator('#action-notice')).toContainText('moved to Trash');
+
+  await createSecret(page, 'second-delete', 'second value');
+  await page.getByRole('button', { name: 'Edit secret second-delete' }).click();
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+
+  await expect(page.getByRole('dialog', { name: 'Delete secret?' })).toBeVisible();
+  await expect(page.locator('main')).toHaveAttribute('inert', '');
+  const undo = page.locator('#undo-delete');
+  await expect.poll(() => undo.evaluate((element) => element.closest('[inert]')?.tagName)).toBe('MAIN');
+  expect(await undo.evaluate((element) => {
+    element.focus();
+    return document.activeElement === element;
+  })).toBe(false);
+  await page.getByRole('dialog', { name: 'Delete secret?' }).getByRole('button', { name: 'Cancel' }).click();
+});
+
+test('file deletion identifies the exact context and warns that recovery is unavailable', async ({ page, appUrl }) => {
+  await page.goto(appUrl);
+  await page.getByRole('tab', { name: 'Files' }).click();
+  await page.locator('#file-input').setInputFiles({
+    name: 'delete-me.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('delete me'),
+  });
+  await expect(page.getByRole('link', { name: 'delete-me.txt' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select file delete-me.txt' }).check();
+  await page.locator('#bulk-delete-files').click();
+
+  const confirmation = page.getByRole('dialog', { name: 'Delete file?' });
+  await expect(confirmation).toContainText('local');
+  await expect(confirmation).toContainText('playwright');
+  await expect(confirmation).toContainText('delete-me.txt');
+  await expect(confirmation).toContainText('Recovery is unavailable for files on local.');
+  await confirmation.getByRole('button', { name: 'Delete file' }).click();
+  await expect(page.getByRole('row', { name: /delete-me\.txt/ })).toHaveCount(0);
+});

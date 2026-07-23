@@ -36,6 +36,22 @@ test('hard-delete confirmation and notice explicitly say recovery is unavailable
   assert.equal(notice.canUndo, false);
 });
 
+test('file-delete confirmation names context and targets and warns that files cannot be recovered', () => {
+  const names = ['one.txt', 'two.txt', 'three.txt', 'four.txt', 'five.txt', 'six.txt', 'seven.txt'];
+  const confirmation = deleteConfirmationModel({
+    backend: 'local',
+    vault: 'playwright',
+    names,
+    recoverable: false,
+    kind: 'file',
+  });
+
+  assert.equal(confirmation.message, 'Delete 7 files from local vault playwright?');
+  assert.deepEqual(confirmation.visibleNames, names.slice(0, 5));
+  assert.equal(confirmation.overflow, 2);
+  assert.equal(confirmation.recovery, 'Recovery is unavailable for files on local.');
+});
+
 test('recoverable deletion notice remains actionable with Undo', () => {
   const notice = deletionNoticeModel(['one', 'two'], true);
   assert.equal(notice.canUndo, true);

@@ -134,6 +134,12 @@
     </div>
     <div id="trash-list-summary" class="list-summary" aria-live="polite">Deleted secrets remain recoverable until purged.</div>
   </section>
+
+  <section id="action-notice" class="action-notice" role="status" aria-live="polite" hidden>
+    <span class="action-notice-message"></span>
+    <button type="button" id="undo-delete" class="button secondary">Undo</button>
+    <button type="button" id="dismiss-action-notice" class="button ghost" aria-label="Dismiss notification">Dismiss</button>
+  </section>
 </main>
 
 <div id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden>
@@ -210,12 +216,6 @@
     <button type="button" id="cancel-purge" class="button secondary">Cancel</button>
     <button type="button" id="confirm-purge" class="button danger" disabled>Permanently purge</button>
   </div>
-</section>
-
-<section id="action-notice" class="action-notice" role="status" aria-live="polite" hidden>
-  <span class="action-notice-message"></span>
-  <button type="button" id="undo-delete" class="button secondary">Undo</button>
-  <button type="button" id="dismiss-action-notice" class="button ghost" aria-label="Dismiss notification">Dismiss</button>
 </section>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

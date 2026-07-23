@@ -1756,23 +1756,49 @@ impl SecretBackend for LocalSecretBackend {
         }
         let _lock = lock_vault(&vault_dir)?;
 
+        let trash_entries = self.trash_entries_for(vault, name)?;
+        if trash_entries.is_empty() {
+            return Err(BackendError::NotFound {
+                name: format!("{name} (deleted)"),
+                suggestion: Some("Secret is not in the trash".into()),
+            });
+        }
+
+        // A same-name active secret may have been recreated after deletion.
+        // Purging the old trash must not erase that live secret's versions.
+        let mut active_stems = vec![self.active_stem(name)];
+        if self.opaque_filenames {
+            active_stems.push(encode_name(name));
+        }
+        let has_active = active_stems.iter().try_fold(false, |found, stem| {
+            Ok::<_, BackendError>(
+                found
+                    || age_path(&self.store_path, vault, stem)?.exists()
+                    || meta_path(&self.store_path, vault, stem)?.exists(),
+            )
+        })?;
+
         // Permanently remove every trash entry for this name (opaque + legacy
         // stems, suffixed and unsuffixed).
-        for (_, tdir) in self.trash_entries_for(vault, name)? {
+        for (_, tdir) in trash_entries {
             fs::remove_dir_all(&tdir)
                 .map_err(|e| BackendError::Internal(format!("purge trash: {e}")))?;
         }
 
-        // Also remove any .versions/ for that secret, under both stems.
-        let mut version_stems = vec![self.active_stem(name)];
-        if self.opaque_filenames {
-            version_stems.push(encode_name(name));
-        }
-        for stem in version_stems {
-            let vdir = versions_dir(&self.store_path, vault, &stem)?;
-            if vdir.exists() {
-                fs::remove_dir_all(&vdir)
-                    .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+        // With no active same-name secret, versions belong only to the
+        // deleted secret and are purged with it. Otherwise preserve the
+        // shared version namespace for the active value.
+        if !has_active {
+            let mut version_stems = vec![self.active_stem(name)];
+            if self.opaque_filenames {
+                version_stems.push(encode_name(name));
+            }
+            for stem in version_stems {
+                let vdir = versions_dir(&self.store_path, vault, &stem)?;
+                if vdir.exists() {
+                    fs::remove_dir_all(&vdir)
+                        .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+                }
             }
         }
 
@@ -2369,6 +2395,74 @@ mod tests {
 
         // Should not exist
         assert!(!backend.secret_exists("default", "purge-me").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn purge_after_restore_is_not_found_and_preserves_restored_history() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("stale-purge", "v1"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("stale-purge", "v2"))
+            .await
+            .unwrap();
+        backend
+            .delete_secret("default", "stale-purge")
+            .await
+            .unwrap();
+        backend
+            .restore_secret("default", "stale-purge")
+            .await
+            .unwrap();
+
+        let error = backend
+            .purge_secret("default", "stale-purge")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::NotFound { .. }));
+        let history = backend
+            .get_secret_version("default", "stale-purge", "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(&*history.value.unwrap(), "v1");
+    }
+
+    #[tokio::test]
+    async fn purge_old_trash_preserves_same_name_active_secret_and_versions() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("recreated", "old"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "recreated").await.unwrap();
+        backend
+            .set_secret("default", make_request("recreated", "live-v1"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("recreated", "live-v2"))
+            .await
+            .unwrap();
+
+        backend.purge_secret("default", "recreated").await.unwrap();
+
+        let active = backend
+            .get_secret("default", "recreated", true)
+            .await
+            .unwrap();
+        assert_eq!(&*active.value.unwrap(), "live-v2");
+        let history = backend
+            .get_secret_version("default", "recreated", "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(&*history.value.unwrap(), "live-v1");
+        assert!(backend
+            .list_deleted_secrets("default")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

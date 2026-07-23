@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
+import { buildLocalConfig, waitForUiUrl } from './fixture-support.js';
 
 const workspace = path.resolve(import.meta.dirname, '../..');
 
@@ -16,18 +17,7 @@ function run(command, args, options) {
 
 function startUi(binary, environment) {
   const child = spawn(binary, ['ui', '--no-open'], { cwd: workspace, env: environment });
-  const url = new Promise((resolve, reject) => {
-    let output = '';
-    const capture = (chunk) => {
-      output += chunk;
-      const match = output.match(/xv ui listening at (http:\/\/127\.0\.0\.1:\d+\/\?token=[^\s]+)/);
-      if (match) resolve(match[1]);
-    };
-    child.stdout.on('data', capture);
-    child.stderr.on('data', capture);
-    child.once('error', reject);
-    child.once('exit', (code) => reject(new Error(`xv ui exited with ${code}: ${output}`)));
-  });
+  const url = waitForUiUrl(child);
   return { child, url };
 }
 
@@ -39,7 +29,11 @@ export const test = base.extend({
     const store = path.join(home, 'store');
     const xvConfigHome = path.join(configHome, 'xv');
     await mkdir(xvConfigHome, { recursive: true });
-    const config = `backend = "local"\n\n[local]\nstore_path = "${store}"\nkey_file = "${path.join(home, 'key.txt')}"\ndefault_vault = "playwright"\n`;
+    const config = buildLocalConfig({
+      store,
+      keyFile: path.join(home, 'key.txt'),
+      vault: 'playwright',
+    });
     await writeFile(path.join(xvConfigHome, 'xv.conf'), config);
 
     const target = path.join(workspace, 'target', 'debug', 'xv');
@@ -59,8 +53,10 @@ export const test = base.extend({
     try {
       await use(await server.url);
     } finally {
-      server.child.kill('SIGTERM');
-      await once(server.child, 'exit').catch(() => {});
+      if (server.child.exitCode === null && server.child.signalCode === null) {
+        server.child.kill('SIGTERM');
+        await once(server.child, 'exit').catch(() => {});
+      }
       await rm(home, { recursive: true, force: true });
     }
   },

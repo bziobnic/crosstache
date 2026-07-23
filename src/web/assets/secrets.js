@@ -1,16 +1,18 @@
 import * as XvUiModel from './ui-model.js';
 import { guardNavigation } from './dialogs.js';
 
-export function deleteConfirmationModel({ backend, vault, names, recoverable }) {
+export function deleteConfirmationModel({ backend, vault, names, recoverable, kind = 'secret' }) {
   const targets = [...names];
   const count = targets.length;
+  const plural = kind === 'file' ? 'files' : 'secrets';
+  const noun = count === 1 ? kind : plural;
   return {
     visibleNames: targets.slice(0, 5),
     overflow: Math.max(0, count - 5),
-    message: `Delete ${count} ${count === 1 ? 'secret' : 'secrets'} from ${backend} vault ${vault}?`,
+    message: `Delete ${count} ${noun} from ${backend} vault ${vault}?`,
     recovery: recoverable
-      ? 'Deleted secrets can be restored from Trash.'
-      : `Recovery is unavailable on ${backend}.`,
+      ? `Deleted ${plural} can be restored from Trash.`
+      : `Recovery is unavailable for ${plural} on ${backend}.`,
   };
 }
 
@@ -79,17 +81,19 @@ function toast(msg) {
   t._timer = setTimeout(() => { t.hidden = true; }, 4000);
 }
 
-function confirmSecretDeletion(names) {
+function confirmDeletion(kind, names) {
   const dialog = $('#delete-confirmation');
   const cancel = $('#cancel-delete');
   const confirm = $('#confirm-delete');
+  const plural = kind === 'file' ? 'files' : 'secrets';
   const model = deleteConfirmationModel({
     backend: ctx.backend,
     vault: currentVault,
     names,
-    recoverable: !!ctx.capabilities.soft_delete,
+    recoverable: kind === 'secret' && !!ctx.capabilities.soft_delete,
+    kind,
   });
-  $('#delete-confirmation-title').textContent = names.length === 1 ? 'Delete secret?' : 'Delete secrets?';
+  $('#delete-confirmation-title').textContent = names.length === 1 ? `Delete ${kind}?` : `Delete ${plural}?`;
   $('#delete-confirmation-message').textContent = model.message;
   $('#delete-recovery').textContent = model.recovery;
   $('#delete-targets').replaceChildren(...model.visibleNames.map((name) => {
@@ -100,7 +104,7 @@ function confirmSecretDeletion(names) {
   const overflow = $('#delete-overflow');
   overflow.hidden = model.overflow === 0;
   overflow.textContent = model.overflow ? `and ${model.overflow} more` : '';
-  confirm.textContent = names.length === 1 ? 'Delete secret' : `Delete ${names.length} secrets`;
+  confirm.textContent = names.length === 1 ? `Delete ${kind}` : `Delete ${names.length} ${plural}`;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -1544,7 +1548,7 @@ $('#delete').onclick = async () => {
   const btn = $('#delete');
   if (btn.disabled || store.snapshot().savePending) return;
   const selection = editing;
-  if (!selection || !(await confirmSecretDeletion([selection]))) return;
+  if (!selection || !(await confirmDeletion('secret', [selection]))) return;
   setSavePending(true);
   beginPendingAction(btn, 'Deleting…');
   const generation = drawerGeneration;
@@ -1762,12 +1766,7 @@ async function bulkDelete(kind) {
   const state = selectionState(kind);
   const items = [...state.ids];
   if (!items.length || state.pending) return;
-  const button = selectionElements(kind).deleteButton;
-  if (kind === 'secrets') {
-    if (!(await confirmSecretDeletion(items))) return;
-  } else if (!armConfirmation(button, `Delete ${items.length} files?`)) {
-    return;
-  }
+  if (!(await confirmDeletion(kind === 'secrets' ? 'secret' : 'file', items))) return;
 
   const generation = state.generation;
   const vault = currentVault;
