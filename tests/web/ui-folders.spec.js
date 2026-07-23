@@ -57,6 +57,7 @@ test('desktop folder tree filters descendants, supports keyboard navigation, and
   await page.keyboard.press('Enter');
 
   await expect(apps).toHaveAttribute('aria-selected', 'true');
+  await expect(apps).toBeFocused();
   await expect(page.getByRole('button', { name: 'Edit secret prod-secret' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edit secret stage-secret' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edit secret loose-0' })).toHaveCount(0);
@@ -76,6 +77,108 @@ test('desktop folder tree filters descendants, supports keyboard navigation, and
   await expect(treeitem(tree, /^apps,/)).toHaveAttribute('aria-expanded', 'true');
   await expect(treeitem(tree, /^prod,/)).toBeVisible();
   await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
+test('typed folder identities stay unique and opaque while rerenders keep one focused selection', async ({ page, baseURL }) => {
+  await routeFolderFixtures(page, {
+    secretsByVault: {
+      playwright: [
+        { name: 'reserved-all', folder: '__all__' },
+        { name: 'reserved-unfiled', folder: '__unfiled__' },
+        { name: 'spaced', folder: ' apps / prod ' },
+        { name: 'nested', folder: 'apps/prod' },
+        { name: 'unfiled', folder: null },
+      ],
+    },
+  });
+  await page.goto(baseURL);
+
+  const tree = page.getByRole('tree', { name: 'Secret folders' });
+  const items = tree.getByRole('treeitem');
+  const ids = await items.evaluateAll((nodes) => nodes.map((node) => node.dataset.folderId));
+  expect(new Set(ids).size).toBe(ids.length);
+  await expect(treeitem(tree, /^__all__,/)).toBeVisible();
+  await expect(treeitem(tree, /^__unfiled__,/)).toBeVisible();
+  await expect(treeitem(tree, /^Unfiled,/)).toBeVisible();
+
+  const apps = treeitem(tree, /^apps,/);
+  await treeitem(tree, /^prod,/).focus();
+  await page.keyboard.press('Enter');
+  await expect(treeitem(tree, /^prod,/)).toBeFocused();
+  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(1);
+  await expect(tree.locator('[tabindex="0"]')).toHaveCount(1);
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  await expect(apps).toBeFocused();
+  await expect(apps).toHaveAttribute('aria-selected', 'true');
+  await expect(tree.locator('[aria-selected="true"]')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Edit secret nested' })).toBeVisible();
+
+  const disclosure = apps.locator('.folder-tree-disclosure');
+  await disclosure.click();
+  await expect(apps).toHaveAttribute('aria-expanded', 'true');
+  await expect(apps).toHaveAttribute('aria-selected', 'true');
+  const persisted = await page.evaluate(() => JSON.stringify(
+    Object.entries(localStorage).filter(([key]) => key.startsWith('xv.ui.folder-expansion')),
+  ));
+  for (const source of ['local', 'playwright', 'apps', 'prod', '__all__', '__unfiled__']) {
+    expect(persisted).not.toContain(source);
+  }
+  await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
+test('pointer disclosure toggles only its branch', async ({ page, baseURL }) => {
+  await routeFolderFixtures(page, {
+    secretsByVault: {
+      playwright: [{ name: 'prod-secret', folder: 'apps/prod' }],
+    },
+  });
+  await page.goto(baseURL);
+  const tree = page.getByRole('tree', { name: 'Secret folders' });
+  const apps = treeitem(tree, /^apps,/);
+  const all = treeitem(tree, /^All items,/);
+
+  await expect(apps).toHaveAttribute('aria-expanded', 'true');
+  await apps.locator('.folder-tree-disclosure').click();
+  await expect(apps).toHaveAttribute('aria-expanded', 'false');
+  await expect(all).toHaveAttribute('aria-selected', 'true');
+  await apps.locator('.folder-tree-disclosure').dispatchEvent('click', { pointerType: 'touch' });
+  await expect(apps).toHaveAttribute('aria-expanded', 'true');
+  await expect(all).toHaveAttribute('aria-selected', 'true');
+});
+
+test('48rem layouts show full identifiers and ten-level trees keep increasing indentation', async ({ page, baseURL }) => {
+  const deepFolder = 'a/b/c/d/e/f/g/h/i/j';
+  await routeFolderFixtures(page, {
+    secretsByVault: {
+      playwright: [{
+        name: 'a-very-long-primary-identifier-that-must-wrap-without-truncation',
+        folder: deepFolder,
+      }],
+    },
+  });
+  await page.setViewportSize({ width: 768, height: 900 });
+  await page.goto(baseURL);
+  const primary = page.locator('#secrets-table .item-name-content strong');
+  await expect(primary).toHaveCSS('white-space', 'normal');
+  await expect(primary).toHaveCSS('overflow', 'visible');
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect(primary).toHaveCSS('white-space', 'normal');
+  await expect(primary).toHaveCSS('overflow', 'visible');
+
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await page.locator('#secrets-folders-expand-all').click();
+  const tree = page.getByRole('tree', { name: 'Secret folders' });
+  const deepest = treeitem(tree, /^j,/);
+  await expect(deepest).toHaveAttribute('aria-level', '10');
+  await expect(deepest).toHaveCSS('--folder-depth', '9');
+  const eighthPadding = parseFloat(await treeitem(tree, /^h,/).evaluate(
+    (element) => getComputedStyle(element).paddingInlineStart,
+  ));
+  const tenthPadding = parseFloat(await deepest.evaluate(
+    (element) => getComputedStyle(element).paddingInlineStart,
+  ));
+  expect(tenthPadding).toBeGreaterThan(eighthPadding);
 });
 
 test('mobile filter sheets reuse folder models for secrets and files with visible controls', async ({ page, baseURL }) => {

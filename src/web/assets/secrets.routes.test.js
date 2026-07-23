@@ -24,6 +24,11 @@ class Element {
     this.dataset = {};
     this.children = [];
     this.attributes = new Map();
+    const styles = new Map();
+    this.style = {
+      setProperty: (name, value) => styles.set(name, String(value)),
+      getPropertyValue: (name) => styles.get(name) || '',
+    };
     this.classes = new Set();
     this.classList = {
       add: (name) => this.classes.add(name),
@@ -64,6 +69,10 @@ class Element {
   addEventListener(type, listener) { this.listeners.set(type, listener); }
   dispatch(type, event = {}) { return this.listeners.get(type)?.({ preventDefault() {}, target: this, ...event }); }
   focus() { this.document.activeElement = this; }
+  contains(target) {
+    if (this === target) return true;
+    return this.children.some((child) => child?.contains?.(target));
+  }
 }
 
 function createDocument() {
@@ -377,13 +386,15 @@ test('mounted folder navigation filters rows and restores expansion without leak
     const treeitems = () => ui.findAll('#secrets-folder-tree', (element) => (
       element.getAttribute?.('role') === 'treeitem'
     ));
-    const item = (id) => treeitems().find((element) => element.dataset.folderId === id);
+    const item = (label) => treeitems().find((element) => (
+      element.getAttribute('aria-label')?.startsWith(`${label},`)
+    ));
 
     assert.equal(item('apps').getAttribute('aria-expanded'), 'false', '51 items start collapsed');
     item('apps').focus();
     item('apps').onkeydown({ key: 'ArrowRight', preventDefault() {} });
     assert.equal(item('apps').getAttribute('aria-expanded'), 'true');
-    assert.ok(item('apps/prod'), 'nested child becomes visible');
+    assert.ok(item('prod'), 'nested child becomes visible');
 
     item('apps').onclick();
     const visiblePrimaryRows = ui.findAll('#secrets-table tbody', (element) => (
@@ -405,20 +416,20 @@ test('mounted folder navigation filters rows and restores expansion without leak
       secrets: primarySecrets,
     });
     assert.equal(
-      item('__all__').getAttribute('aria-selected'),
+      item('All items').getAttribute('aria-selected'),
       'true',
       'selection resets even when a different workspace alias targets the same backend and vault',
     );
 
     assert.equal(await ui.contextRail.switchTo('stage'), true);
-    assert.equal(item('__all__').getAttribute('aria-selected'), 'true');
+    assert.equal(item('All items').getAttribute('aria-selected'), 'true');
     assert.equal(item('other').getAttribute('aria-expanded'), 'true', 'small workspace expands');
     assert.equal(item('apps'), undefined, 'prior workspace folders are absent');
 
     assert.equal(await ui.contextRail.switchTo('primary'), true);
-    assert.equal(item('__all__').getAttribute('aria-selected'), 'true', 'folder selection resets');
+    assert.equal(item('All items').getAttribute('aria-selected'), 'true', 'folder selection resets');
     assert.equal(item('apps').getAttribute('aria-expanded'), 'true', 'scoped expansion restores');
-    assert.ok(item('apps/prod'));
+    assert.ok(item('prod'));
   } finally {
     ui.restore();
   }

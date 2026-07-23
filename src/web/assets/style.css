@@ -143,16 +143,13 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transpa
 .folder-actions .button { flex:1; white-space:nowrap; }
 .folder-tree { display:grid; gap:.125rem; padding:.45rem; }
 .folder-tree-item { width:100%; min-height:2.25rem; display:grid;
-  grid-template-columns:.8rem minmax(0, 1fr) auto; align-items:center; gap:.35rem;
-  padding:.35rem .45rem; border-color:transparent; background:transparent; box-shadow:none; text-align:left; }
-.folder-tree-item[data-level="2"] { padding-inline-start:1.2rem; }
-.folder-tree-item[data-level="3"] { padding-inline-start:2rem; }
-.folder-tree-item[data-level="4"] { padding-inline-start:2.8rem; }
-.folder-tree-item[data-level="5"] { padding-inline-start:3.6rem; }
-.folder-tree-item[data-level="6"] { padding-inline-start:4.4rem; }
+  grid-template-columns:1.5rem minmax(0, 1fr) auto; align-items:center; gap:.35rem;
+  padding:.35rem .45rem; padding-inline-start:calc(.45rem + (var(--folder-depth, 0) * .8rem));
+  border-color:transparent; background:transparent; box-shadow:none; text-align:left; }
 .folder-tree-item:hover { border-color:transparent; background:var(--color-surface-subtle); }
 .folder-tree-item[aria-selected="true"] { color:var(--color-accent-hover); background:var(--color-accent-quiet); font-weight:720; }
-.folder-tree-disclosure { color:var(--color-text-muted); }
+.folder-tree-disclosure { min-width:1.5rem; min-height:1.5rem; display:grid; place-items:center;
+  color:var(--color-text-muted); cursor:pointer; touch-action:manipulation; }
 .folder-tree-label { min-width:0; overflow-wrap:anywhere; }
 .folder-tree-count { color:var(--color-text-muted); font-size:.65rem; font-weight:550; white-space:nowrap; }
 .folder-mobile-controls { display:none; align-items:center; gap:.35rem; margin-bottom:.75rem; }
@@ -394,6 +391,7 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .folder-sidebar { display:none; }
   .folder-mobile-controls { display:flex; }
   .column-note { display:none; }
+  .item-name-content strong { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
 }
 @media (max-width: 34rem) {
   .app-header-inner { min-height:3.75rem; flex-wrap:wrap; gap:.55rem; }
@@ -406,7 +404,6 @@ button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkis
   .column-groups, .column-file-type { display:none; }
   .column-file-size, .column-file-type, .column-file-modified { display:none; }
   .data-surface th, .data-surface td { padding-inline:.65rem; }
-  .item-name-content strong { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
   .list-summary { justify-content:flex-start; }
   #drawer { width:100vw; border-left:0; }
   .drawer-footer { padding-inline:1rem; }

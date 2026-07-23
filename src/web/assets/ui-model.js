@@ -85,7 +85,42 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
 
   function normalizeFolderPath(value) {
     if (typeof value !== 'string') return '';
-    return value.split('/').map((segment) => segment.trim()).filter(Boolean).join('/');
+    return value.split('/').filter((segment) => segment !== '').join('/');
+  }
+
+  function opaqueHash(value) {
+    let hash = 0xcbf29ce484222325n;
+    for (const character of String(value)) {
+      hash ^= BigInt(character.codePointAt(0));
+      hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+    }
+    return hash.toString(16).padStart(16, '0');
+  }
+
+  const FOLDER_ALL = Object.freeze({ kind: 'all', opaque: 'a' });
+  const FOLDER_UNFILED = Object.freeze({ kind: 'unfiled', opaque: 'u' });
+
+  function folderIdentity(path) {
+    const normalized = normalizeFolderPath(path);
+    if (normalized === '') return FOLDER_UNFILED;
+    return Object.freeze({
+      kind: 'folder',
+      path: normalized,
+      opaque: `f-${opaqueHash(normalized)}`,
+    });
+  }
+
+  function folderIdentityKey(identity) {
+    if (identity?.kind === 'all') return FOLDER_ALL.opaque;
+    if (identity?.kind === 'unfiled') return FOLDER_UNFILED.opaque;
+    if (identity?.kind === 'folder' && typeof identity.opaque === 'string') return identity.opaque;
+    return '';
+  }
+
+  function sameFolderIdentity(left, right) {
+    if (left?.kind !== right?.kind) return false;
+    if (left?.kind === 'folder') return left.path === right.path;
+    return left?.kind === 'all' || left?.kind === 'unfiled';
   }
 
   function buildFolderTree(items) {
@@ -101,10 +136,10 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
       let siblings = roots;
       let parentPath = '';
       for (const segment of path.split('/')) {
-        const id = parentPath ? `${parentPath}/${segment}` : segment;
+        const folderPath = parentPath ? `${parentPath}/${segment}` : segment;
         if (!siblings.has(segment)) {
           siblings.set(segment, {
-            id,
+            id: folderIdentity(folderPath),
             label: segment,
             directCount: 0,
             totalCount: 0,
@@ -114,12 +149,12 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         }
         const node = siblings.get(segment);
         node.totalCount++;
-        if (id === path) {
+        if (folderPath === path) {
           node.directCount++;
           node.items.push(item);
         }
         siblings = node.children;
-        parentPath = id;
+        parentPath = folderPath;
       }
     }
 
@@ -133,7 +168,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     const tree = finalize(roots);
     if (unfiledItems.length) {
       tree.unshift({
-        id: '__unfiled__',
+        id: FOLDER_UNFILED,
         label: 'Unfiled',
         directCount: unfiledItems.length,
         totalCount: unfiledItems.length,
@@ -150,19 +185,47 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   }
 
   function folderPreferenceKey({ backend, vault, surface }) {
-    return ['xv.ui.folder-expansion.v2', backend, vault, surface]
+    const scope = JSON.stringify([
+      String(backend || ''),
+      String(vault || ''),
+      String(surface || ''),
+    ]);
+    return `xv.ui.folder-expansion.v3:${opaqueHash(scope)}`;
+  }
+
+  function cleanupLegacyFolderExpansion(storage, scope) {
+    if (typeof storage?.removeItem !== 'function') return;
+    const legacyScoped = ['xv.ui.folder-expansion.v2', scope?.backend, scope?.vault, scope?.surface]
       .map((part, index) => index === 0 ? part : encodeURIComponent(String(part || '')))
       .join(':');
+    const legacyKeys = new Set([
+      legacyScoped,
+      'xv.ui.folder-expansion.v1',
+      'folder_expansion',
+    ]);
+    if (Number.isInteger(storage.length) && typeof storage.key === 'function') {
+      for (let index = 0; index < storage.length; index++) {
+        const key = storage.key(index);
+        if (key?.startsWith('xv.ui.folder-expansion.v2:')) legacyKeys.add(key);
+      }
+    }
+    for (const key of legacyKeys) {
+      try { storage.removeItem(key); } catch (_) { /* storage cleanup is best effort */ }
+    }
   }
 
   function loadFolderExpansion(storage, scope) {
     if (typeof storage?.getItem !== 'function') return null;
     try {
+      cleanupLegacyFolderExpansion(storage, scope);
       const serialized = storage.getItem(folderPreferenceKey(scope));
       if (serialized === null) return null;
       const parsed = JSON.parse(serialized);
-      if (!Array.isArray(parsed) || parsed.some((id) => typeof id !== 'string' || !id)) return null;
-      return [...new Set(parsed)];
+      if (parsed?.version !== 3 || !Array.isArray(parsed.expanded)
+        || parsed.expanded.some((id) => typeof id !== 'string' || !/^f-[a-f0-9]{16}$/.test(id))) {
+        return null;
+      }
+      return [...new Set(parsed.expanded)];
     } catch (_) {
       return null;
     }
@@ -171,10 +234,16 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   function saveFolderExpansion(storage, scope, expanded) {
     if (typeof storage?.setItem !== 'function') return false;
     try {
-      const ids = [...expanded]
-        .filter((id) => typeof id === 'string' && id)
+      cleanupLegacyFolderExpansion(storage, scope);
+      const identities = expanded instanceof Map ? expanded.values() : expanded;
+      const ids = [...identities]
+        .map(folderIdentityKey)
+        .filter((id) => /^f-[a-f0-9]{16}$/.test(id))
         .sort((left, right) => collator.compare(left, right));
-      storage.setItem(folderPreferenceKey(scope), JSON.stringify(ids));
+      storage.setItem(folderPreferenceKey(scope), JSON.stringify({
+        version: 3,
+        expanded: ids,
+      }));
       return true;
     } catch (_) {
       return false;
@@ -184,55 +253,86 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   function createFolderNavigationState(storage) {
     let scope = null;
     let scopeKey = null;
-    let selected = null;
+    let selected = FOLDER_ALL;
+    let folderIds = [];
     let expandableIds = [];
-    const expanded = new Set();
+    const expanded = new Map();
 
     const persist = () => scope && saveFolderExpansion(storage, scope, expanded);
     return Object.freeze({
-      sync(nextScope, { total, expandableIds: nextExpandableIds }) {
+      sync(nextScope, {
+        total,
+        folderIds: nextFolderIds = null,
+        expandableIds: nextExpandableIds,
+      }) {
         const nextKey = folderPreferenceKey(nextScope);
         expandableIds = [...nextExpandableIds];
+        folderIds = [...(nextFolderIds || nextExpandableIds)];
+        const availableFolders = new Map(
+          folderIds.map((id) => [folderIdentityKey(id), id]),
+        );
+        const availableExpandable = new Map(
+          expandableIds.map((id) => [folderIdentityKey(id), id]),
+        );
         if (nextKey === scopeKey) {
-          const available = new Set(expandableIds);
-          for (const id of [...expanded]) {
-            if (!available.has(id)) expanded.delete(id);
+          for (const key of [...expanded.keys()]) {
+            if (!availableExpandable.has(key)) expanded.delete(key);
           }
-          return;
+          if (!sameFolderIdentity(selected, FOLDER_ALL)
+            && !availableFolders.has(folderIdentityKey(selected))) {
+            selected = FOLDER_ALL;
+          }
+          return selected;
         }
         scope = { ...nextScope };
         scopeKey = nextKey;
-        selected = null;
+        selected = FOLDER_ALL;
         expanded.clear();
         const saved = loadFolderExpansion(storage, scope);
         const initial = initialExpansion({ total, saved });
-        const initialIds = initial === 'all' ? expandableIds : (Array.isArray(initial) ? initial : []);
-        const available = new Set(expandableIds);
-        for (const id of initialIds) {
-          if (available.has(id)) expanded.add(id);
+        const initialKeys = initial === 'all'
+          ? [...availableExpandable.keys()]
+          : (Array.isArray(initial) ? initial : []);
+        for (const key of initialKeys) {
+          if (availableExpandable.has(key)) expanded.set(key, availableExpandable.get(key));
         }
+        return selected;
       },
       select(id) {
-        selected = id || null;
+        selected = id?.kind ? id : FOLDER_ALL;
+        return selected;
       },
-      toggle(id, value = !expanded.has(id)) {
-        if (value) expanded.add(id);
-        else expanded.delete(id);
+      toggle(id, value = !expanded.has(folderIdentityKey(id))) {
+        const key = folderIdentityKey(id);
+        if (value) expanded.set(key, id);
+        else {
+          expanded.delete(key);
+          if (selected?.kind === 'folder' && id?.kind === 'folder'
+            && selected.path.startsWith(`${id.path}/`)) {
+            selected = id;
+          }
+        }
         persist();
+        return selected;
       },
       expandAll() {
         expanded.clear();
-        for (const id of expandableIds) expanded.add(id);
+        for (const id of expandableIds) expanded.set(folderIdentityKey(id), id);
         persist();
+        return selected;
       },
       collapseAll() {
         expanded.clear();
+        selected = FOLDER_ALL;
         persist();
+        return selected;
       },
       snapshot() {
         return {
           selected,
-          expanded: [...expanded].sort((left, right) => collator.compare(left, right)),
+          expanded: [...expanded.values()].sort((left, right) => (
+            collator.compare(left.path || '', right.path || '')
+          )),
         };
       },
       expanded,
@@ -240,25 +340,54 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   }
 
   function itemMatchesFolder(item, selected) {
-    if (!selected) return true;
+    if (!selected || selected.kind === 'all') return true;
     const folder = normalizeFolderPath(item?.folder);
-    if (selected === '__unfiled__') return folder === '';
-    const target = normalizeFolderPath(selected);
+    if (selected.kind === 'unfiled') return folder === '';
+    if (selected.kind !== 'folder') return false;
+    const target = selected.path;
     return folder === target || folder.startsWith(`${target}/`);
   }
 
   function treeCountMap(nodes, counts = new Map()) {
     for (const node of nodes) {
-      counts.set(node.id, node.totalCount);
+      counts.set(folderIdentityKey(node.id), node.totalCount);
       treeCountMap(node.children, counts);
     }
     return counts;
   }
 
+  function buildFolderViewModel(items, visibleItems = items, {
+    buildTree = buildFolderTree,
+  } = {}) {
+    const tree = buildTree(items);
+    const visibleTree = buildTree(visibleItems);
+    const folderIds = [];
+    const expandableIds = [];
+    let folderCount = 0;
+    const visit = (nodes) => {
+      for (const node of nodes) {
+        folderIds.push(node.id);
+        if (node.id.kind === 'folder') folderCount++;
+        if (node.children.length) expandableIds.push(node.id);
+        visit(node.children);
+      }
+    };
+    visit(tree);
+    return Object.freeze({
+      tree,
+      visibleCounts: treeCountMap(visibleTree),
+      folderIds: Object.freeze(folderIds),
+      expandableIds: Object.freeze(expandableIds),
+      folderCount,
+      totalCount: items.length,
+      visibleCount: visibleItems.length,
+    });
+  }
+
   function flattenFolderTree(nodes, expanded, level = 1, parentId = null, rows = []) {
     for (const node of nodes) {
       rows.push({ ...node, level, parentId });
-      if (node.children.length && expanded.has(node.id)) {
+      if (node.children.length && expanded.has(folderIdentityKey(node.id))) {
         flattenFolderTree(node.children, expanded, level + 1, node.id, rows);
       }
     }
@@ -270,6 +399,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     container,
     items,
     visibleItems = items,
+    viewModel = null,
     expanded,
     selected,
     focusedId,
@@ -277,25 +407,35 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     onToggle,
     onFocus,
   }) {
-    const tree = buildFolderTree(items);
-    const visibleCounts = treeCountMap(buildFolderTree(visibleItems));
+    const folderView = viewModel || buildFolderViewModel(items, visibleItems);
+    const tree = folderView.tree;
+    const visibleCounts = folderView.visibleCounts;
     const rows = [{
-      id: '__all__',
+      id: FOLDER_ALL,
       label: 'All items',
       level: 1,
       parentId: null,
-      totalCount: items.length,
+      totalCount: folderView.totalCount,
       children: [],
     }, ...flattenFolderTree(tree, expanded)];
     const visibleIds = rows.map((row) => row.id);
-    let rovingId = visibleIds.includes(focusedId)
+    const visibleKeys = new Set(visibleIds.map(folderIdentityKey));
+    const effectiveSelected = visibleKeys.has(folderIdentityKey(selected))
+      ? selected
+      : FOLDER_ALL;
+    let rovingId = visibleKeys.has(folderIdentityKey(focusedId))
       ? focusedId
-      : (visibleIds.includes(selected) ? selected : '__all__');
+      : effectiveSelected;
     const buttons = [];
+    const hadTreeFocus = Boolean(container.contains?.(document.activeElement));
+    const previousFocusKey = hadTreeFocus
+      ? document.activeElement?.dataset?.folderId
+      : '';
 
     container.setAttribute('role', 'tree');
     const focusItem = (id) => {
-      const button = buttons.find((candidate) => candidate.dataset.folderId === id);
+      const key = folderIdentityKey(id);
+      const button = buttons.find((candidate) => candidate.dataset.folderId === key);
       if (!button) return;
       rovingId = id;
       for (const candidate of buttons) {
@@ -307,33 +447,45 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
 
     for (const row of rows) {
       const button = document.createElement('button');
-      const visibleCount = row.id === '__all__'
-        ? visibleItems.length
-        : (visibleCounts.get(row.id) || 0);
+      const rowKey = folderIdentityKey(row.id);
+      const visibleCount = row.id.kind === 'all'
+        ? folderView.visibleCount
+        : (visibleCounts.get(rowKey) || 0);
       const countLabel = visibleCount === row.totalCount
         ? `${row.totalCount} ${row.totalCount === 1 ? 'item' : 'items'}`
         : `${visibleCount} visible of ${row.totalCount} total`;
       button.type = 'button';
       button.className = 'folder-tree-item';
-      button.dataset.folderId = row.id;
+      button.dataset.folderId = rowKey;
       button.dataset.level = String(row.level);
+      button.style.setProperty('--folder-depth', String(row.level - 1));
       button.setAttribute('role', 'treeitem');
       button.setAttribute('aria-level', String(row.level));
       button.setAttribute('aria-selected', String(
-        row.id === (selected || '__all__'),
+        sameFolderIdentity(row.id, effectiveSelected),
       ));
       button.setAttribute('aria-label', `${row.label}, ${countLabel}`);
-      button.tabIndex = row.id === rovingId ? 0 : -1;
+      button.tabIndex = sameFolderIdentity(row.id, rovingId) ? 0 : -1;
       if (row.children.length) {
-        button.setAttribute('aria-expanded', String(expanded.has(row.id)));
+        button.setAttribute('aria-expanded', String(expanded.has(rowKey)));
       }
 
       const disclosure = document.createElement('span');
       disclosure.className = 'folder-tree-disclosure';
       disclosure.textContent = row.children.length
-        ? (expanded.has(row.id) ? '▾' : '▸')
+        ? (expanded.has(rowKey) ? '▾' : '▸')
         : '';
       disclosure.setAttribute('aria-hidden', 'true');
+      if (row.children.length) {
+        disclosure.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onToggle?.(row.id, !expanded.has(rowKey));
+          const replacement = [...container.querySelectorAll('[role="treeitem"]')]
+            .find((candidate) => candidate.dataset.folderId === rowKey);
+          replacement?.focus();
+        };
+      }
       const label = document.createElement('span');
       label.className = 'folder-tree-label';
       label.textContent = row.label;
@@ -348,7 +500,12 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         }
         onFocus?.(row.id);
       };
-      button.onclick = () => onSelect?.(row.id === '__all__' ? null : row.id);
+      button.onclick = () => {
+        if (onSelect?.(row.id) === false) return;
+        const replacement = [...container.querySelectorAll('[role="treeitem"]')]
+          .find((candidate) => candidate.dataset.folderId === rowKey);
+        replacement?.focus();
+      };
       button.onkeydown = (event) => {
         const index = buttons.indexOf(button);
         let destination = null;
@@ -357,32 +514,46 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         if (event.key === 'Home') destination = buttons[0];
         if (event.key === 'End') destination = buttons.at(-1);
         if (event.key === 'ArrowRight' && row.children.length) {
-          if (!expanded.has(row.id)) onToggle?.(row.id, true);
+          if (!expanded.has(rowKey)) onToggle?.(row.id, true);
           else destination = buttons[index + 1];
         }
         if (event.key === 'ArrowLeft') {
-          if (row.children.length && expanded.has(row.id)) onToggle?.(row.id, false);
+          if (row.children.length && expanded.has(rowKey)) onToggle?.(row.id, false);
           else if (row.parentId) destination = buttons.find(
-            (candidate) => candidate.dataset.folderId === row.parentId,
+            (candidate) => candidate.dataset.folderId === folderIdentityKey(row.parentId),
           );
         }
         if (event.key === 'Enter' || event.key === ' ') {
-          onSelect?.(row.id === '__all__' ? null : row.id);
+          onSelect?.(row.id);
         } else if (!destination
           && !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
           return;
         }
         event.preventDefault();
-        if (destination) focusItem(destination.dataset.folderId);
+        if (destination) {
+          const destinationRow = rows.find(
+            (candidate) => folderIdentityKey(candidate.id) === destination.dataset.folderId,
+          );
+          if (destinationRow) focusItem(destinationRow.id);
+        } else if (event.key === 'Enter' || event.key === ' ') {
+          const replacement = [...container.querySelectorAll('[role="treeitem"]')]
+            .find((candidate) => candidate.dataset.folderId === rowKey);
+          replacement?.focus();
+        }
       };
       buttons.push(button);
     }
     container.replaceChildren(...buttons);
+    if (hadTreeFocus) {
+      const replacement = rows.find((row) => folderIdentityKey(row.id) === previousFocusKey);
+      focusItem(replacement?.id || rovingId);
+    }
     return Object.freeze({ visibleIds, focusedId: () => rovingId });
   }
 export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
   protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
   sortedCopy, normalizeWidths, resizeAdjacentWidths, normalizeFolderPath,
-  buildFolderTree, initialExpansion, folderPreferenceKey, loadFolderExpansion,
+  FOLDER_ALL, FOLDER_UNFILED, folderIdentity, folderIdentityKey, sameFolderIdentity,
+  buildFolderTree, buildFolderViewModel, initialExpansion, folderPreferenceKey, loadFolderExpansion,
   saveFolderExpansion, createFolderNavigationState, itemMatchesFolder,
   flattenFolderTree, renderFolderTree };

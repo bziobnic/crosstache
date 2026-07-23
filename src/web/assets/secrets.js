@@ -428,8 +428,8 @@ function showListState(tbody, kind, state, cols) {
 const secretFolderNavigation = XvUiModel.createFolderNavigationState(globalThis.localStorage);
 const fileFolderNavigation = XvUiModel.createFolderNavigationState(globalThis.localStorage);
 const folderNavigationFocus = {
-  secrets: { desktop: '__all__', mobile: '__all__' },
-  files: { desktop: '__all__', mobile: '__all__' },
+  secrets: { desktop: XvUiModel.FOLDER_ALL, mobile: XvUiModel.FOLDER_ALL },
+  files: { desktop: XvUiModel.FOLDER_ALL, mobile: XvUiModel.FOLDER_ALL },
 };
 
 function navigationFor(kind) {
@@ -448,30 +448,6 @@ function folderModelItems(kind, items) {
   return items.map((item) => ({ ...item, folder: folderOf(kind, item) }));
 }
 
-function expandableFolderIds(items) {
-  const ids = [];
-  const visit = (nodes) => {
-    for (const node of nodes) {
-      if (node.children.length) ids.push(node.id);
-      visit(node.children);
-    }
-  };
-  visit(XvUiModel.buildFolderTree(items));
-  return ids;
-}
-
-function folderNodeCount(items) {
-  let count = 0;
-  const visit = (nodes) => {
-    for (const node of nodes) {
-      if (node.id !== '__unfiled__') count++;
-      visit(node.children);
-    }
-  };
-  visit(XvUiModel.buildFolderTree(items));
-  return count;
-}
-
 function folderScope(kind) {
   const backend = typeof ctx?.backend === 'string' ? ctx.backend : ctx?.backend?.name;
   return { backend: backend || '', vault: currentVault || '', surface: kind };
@@ -481,9 +457,11 @@ function renderFolderNavigation(kind, allItems, visibleItems) {
   const navigation = navigationFor(kind);
   const modelItems = folderModelItems(kind, allItems);
   const modelVisibleItems = folderModelItems(kind, visibleItems);
+  const viewModel = XvUiModel.buildFolderViewModel(modelItems, modelVisibleItems);
   navigation.sync(folderScope(kind), {
     total: allItems.length,
-    expandableIds: expandableFolderIds(modelItems),
+    folderIds: viewModel.folderIds,
+    expandableIds: viewModel.expandableIds,
   });
   const renderOne = (mobile) => {
     const mode = mobile ? 'mobile' : 'desktop';
@@ -494,33 +472,43 @@ function renderFolderNavigation(kind, allItems, visibleItems) {
       container,
       items: modelItems,
       visibleItems: modelVisibleItems,
+      viewModel,
       expanded: navigation.expanded,
       selected: snapshot.selected,
       focusedId: folderNavigationFocus[kind][mode],
       onFocus: (id) => { folderNavigationFocus[kind][mode] = id; },
       onSelect: (id) => {
+        folderNavigationFocus[kind][mode] = id;
         navigation.select(id);
         renderSelectionKind(kind);
-        if (mobile) dialogs.closeModal($(`#${kind}-folder-sheet`));
+        if (mobile) {
+          dialogs.closeModal($(`#${kind}-folder-sheet`));
+          return false;
+        }
+        return true;
       },
       onToggle: (id, expanded) => {
         folderNavigationFocus[kind][mode] = id;
         navigation.toggle(id, expanded);
         renderSelectionKind(kind);
-        const next = [...container.querySelectorAll('[role="treeitem"]')]
-          .find((candidate) => candidate.dataset.folderId === id);
-        next?.focus();
       },
     });
   };
   renderOne(false);
   renderOne(true);
+  return viewModel.folderCount;
 }
 
 function setAllFolderExpansion(kind, expanded) {
   const navigation = navigationFor(kind);
   if (expanded) navigation.expandAll();
-  else navigation.collapseAll();
+  else {
+    navigation.collapseAll();
+    folderNavigationFocus[kind] = {
+      desktop: XvUiModel.FOLDER_ALL,
+      mobile: XvUiModel.FOLDER_ALL,
+    };
+  }
   renderSelectionKind(kind);
 }
 
@@ -1194,10 +1182,16 @@ store.subscribe((snapshot, event) => {
   fileLoadGeneration++;
   clearSelection('secrets');
   clearSelection('files');
-  secretFolderNavigation.select(null);
-  fileFolderNavigation.select(null);
-  folderNavigationFocus.secrets = { desktop: '__all__', mobile: '__all__' };
-  folderNavigationFocus.files = { desktop: '__all__', mobile: '__all__' };
+  secretFolderNavigation.select(XvUiModel.FOLDER_ALL);
+  fileFolderNavigation.select(XvUiModel.FOLDER_ALL);
+  folderNavigationFocus.secrets = {
+    desktop: XvUiModel.FOLDER_ALL,
+    mobile: XvUiModel.FOLDER_ALL,
+  };
+  folderNavigationFocus.files = {
+    desktop: XvUiModel.FOLDER_ALL,
+    mobile: XvUiModel.FOLDER_ALL,
+  };
   applyContextCapabilities();
   clearListLoadError('secrets');
   renderSecrets();
@@ -1451,10 +1445,16 @@ async function init() {
       fileLoadGeneration++;
       clearSelection('secrets');
       clearSelection('files');
-      secretFolderNavigation.select(null);
-      fileFolderNavigation.select(null);
-      folderNavigationFocus.secrets = { desktop: '__all__', mobile: '__all__' };
-      folderNavigationFocus.files = { desktop: '__all__', mobile: '__all__' };
+      secretFolderNavigation.select(XvUiModel.FOLDER_ALL);
+      fileFolderNavigation.select(XvUiModel.FOLDER_ALL);
+      folderNavigationFocus.secrets = {
+        desktop: XvUiModel.FOLDER_ALL,
+        mobile: XvUiModel.FOLDER_ALL,
+      };
+      folderNavigationFocus.files = {
+        desktop: XvUiModel.FOLDER_ALL,
+        mobile: XvUiModel.FOLDER_ALL,
+      };
       loadSecrets(selectedVault).catch(fail);
       if (ctx.capabilities.files) loadFiles(selectedVault).catch(fail);
       if (activeTab === 'trash') loadDeleted(selectedVault).catch(fail);
@@ -1507,7 +1507,7 @@ function renderSecrets() {
     const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
     return hay.includes(filter);
   });
-  renderFolderNavigation('secrets', secrets, searchVisible);
+  const folderCount = renderFolderNavigation('secrets', secrets, searchVisible);
   const selectedFolder = secretFolderNavigation.snapshot().selected;
   const visible = searchVisible.filter((secret) => (
     XvUiModel.itemMatchesFolder(secret, selectedFolder)
@@ -1517,7 +1517,7 @@ function renderSecrets() {
     'secrets',
     visible.length,
     secrets.length,
-    folderNodeCount(folderModelItems('secrets', secrets)),
+    folderCount,
   );
   const cols = secretSelection.enabled ? 6 : 5;
   for (const secret of sorted) tbody.appendChild(secretRow(secret));
@@ -2208,7 +2208,7 @@ function renderFiles() {
   if (filesState !== 'ready') return;
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
-  renderFolderNavigation('files', files, files);
+  const folderCount = renderFolderNavigation('files', files, files);
   const selectedFolder = fileFolderNavigation.snapshot().selected;
   const visible = files.filter((file) => XvUiModel.itemMatchesFolder(
     { folder: folderOf('files', file) },
@@ -2218,7 +2218,7 @@ function renderFiles() {
     'files',
     visible.length,
     files.length,
-    folderNodeCount(folderModelItems('files', files)),
+    folderCount,
   );
   const cols = fileSelection.enabled ? 5 : 4;
   const sorted = sortedTableItems('files', visible);
