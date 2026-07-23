@@ -268,7 +268,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     let scope = null;
     let scopeKey = null;
     let tokenIndex = null;
-    let hydratedScopeToken = null;
+    let hydratedTokenIndex = null;
     let selected = FOLDER_ALL;
     let folderIds = [];
     let expandableIds = [];
@@ -299,7 +299,8 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         const sameScope = nextKey === scopeKey;
         tokenIndex = nextTokenIndex;
         if (sameScope) {
-          if (tokenIndex && hydratedScopeToken !== tokenIndex.scopeToken) {
+          let reconciledExpansion = false;
+          if (tokenIndex && hydratedTokenIndex !== tokenIndex) {
             const saved = loadFolderExpansion(storage, tokenIndex);
             if (saved !== null) {
               expanded.clear();
@@ -308,19 +309,20 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
                 const key = folderIdentityKey(identity);
                 if (availableExpandable.has(key)) {
                   expanded.set(key, availableExpandable.get(key));
+                } else {
+                  reconciledExpansion = true;
                 }
               }
             }
-            hydratedScopeToken = tokenIndex.scopeToken;
+            hydratedTokenIndex = tokenIndex;
           }
-          let pruned = false;
           for (const key of [...expanded.keys()]) {
             if (!availableExpandable.has(key)) {
               expanded.delete(key);
-              pruned = true;
+              reconciledExpansion = true;
             }
           }
-          if (pruned) persist();
+          if (reconciledExpansion) persist();
           if (!sameFolderIdentity(selected, FOLDER_ALL)
             && !availableFolders.has(folderIdentityKey(selected))) {
             selected = FOLDER_ALL;
@@ -329,7 +331,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         }
         scope = { ...nextScope };
         scopeKey = nextKey;
-        hydratedScopeToken = tokenIndex?.scopeToken || null;
+        hydratedTokenIndex = tokenIndex;
         selected = FOLDER_ALL;
         expanded.clear();
         const saved = tokenIndex ? loadFolderExpansion(storage, tokenIndex) : null;

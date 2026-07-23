@@ -6,10 +6,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStore, draftReducer } from './store.js';
 import { createDialogManager } from './dialogs.js';
 import { ApiError } from './api-client.js';
-import { PROTECTED_MASK } from './ui-model.js';
+import * as XvUiModel from './ui-model.js';
 import { mountContextRail } from './context.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const { PROTECTED_MASK } = XvUiModel;
 
 class Element {
   constructor(id, document) {
@@ -185,6 +186,9 @@ async function mountRouteUi({
     value: {
       getItem: (key) => storageValues.get(key) ?? null,
       setItem: (key, value) => storageValues.set(key, value),
+      removeItem: (key) => storageValues.delete(key),
+      get length() { return storageValues.size; },
+      key: (index) => [...storageValues.keys()][index] ?? null,
     },
   });
   Object.defineProperty(globalThis, 'addEventListener', {
@@ -449,6 +453,146 @@ test('mounted folder navigation filters rows and restores expansion without leak
   }
 });
 
+test('empty list refresh persists pruning and cleans legacy folder state before a later re-add', async () => {
+  const context = routedContext('primary', 'one');
+  const apps = XvUiModel.folderIdentity('apps');
+  const prod = XvUiModel.folderIdentity('apps/prod');
+  const populated = [
+    { name: 'prod-secret', folder: prod.path },
+    ...Array.from({ length: 50 }, (_, index) => ({ name: `loose-${index}`, folder: null })),
+  ];
+  let listed = populated;
+  const tokenBodies = [];
+  const storageValues = new Map();
+  const api = async (method, requestPath, body) => {
+    if (method === 'GET' && requestPath === '/api/context') return context;
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return listed;
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      tokenBodies.push(body);
+      return {
+        version: 1,
+        scope_token: 'S'.repeat(43),
+        folders: body.folders.map((folder, index) => ({
+          path: folder,
+          token: String.fromCharCode(65 + index).repeat(43),
+        })),
+      };
+    }
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, storageValues });
+  try {
+    const item = (label) => ui.findAll('#secrets-folder-tree', (element) => (
+      element.getAttribute?.('role') === 'treeitem'
+      && element.getAttribute('aria-label')?.startsWith(`${label},`)
+    ))[0];
+    item('apps').onkeydown({ key: 'ArrowRight', preventDefault() {} });
+    const v4Key = [...storageValues.keys()].find((key) => (
+      key.startsWith('xv.ui.folder-expansion.v4:')
+    ));
+    assert.ok(v4Key);
+    assert.match(storageValues.get(v4Key), /A{43}/);
+    storageValues.set('xv.ui.folder-expansion.v1', 'true');
+    storageValues.set('xv.ui.folder-expansion.v2:raw:scope:secrets', '["apps"]');
+    storageValues.set('xv.ui.folder-expansion.v3:oldhash', '{"version":3}');
+
+    listed = [{ name: 'unfiled-only', folder: null }];
+    ui.elements.get('#vault-select').value = 'one';
+    await ui.elements.get('#vault-select').onchange();
+    await settleUntil(() => tokenBodies.length === 2 && !item('apps'));
+
+    assert.deepEqual(tokenBodies[1], { surface: 'secrets', folders: [] });
+    assert.deepEqual(JSON.parse(storageValues.get(v4Key)), { version: 4, expanded: [] });
+    assert.equal(
+      [...storageValues.keys()].some((key) => /^xv\.ui\.folder-expansion\.v[1-3]/.test(key)),
+      false,
+    );
+
+    const tokenIndex = XvUiModel.createFolderTokenIndex({
+      version: 1,
+      scope_token: 'S'.repeat(43),
+      folders: [
+        { path: apps.path, token: 'A'.repeat(43) },
+        { path: prod.path, token: 'B'.repeat(43) },
+      ],
+    });
+    const fresh = XvUiModel.createFolderNavigationState(globalThis.localStorage);
+    fresh.sync({ backend: 'local', vault: 'one', surface: 'secrets' }, {
+      total: 51,
+      folderIds: [apps, prod],
+      expandableIds: [apps],
+      tokenIndex,
+    });
+    assert.deepEqual(fresh.snapshot().expanded, []);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('stale empty-folder token response cannot hydrate a switched workspace', async () => {
+  const primary = routedContext('primary', 'one');
+  const stage = routedContext('stage', 'two');
+  let listed = [
+    { name: 'prod-secret', folder: 'apps/prod' },
+    ...Array.from({ length: 50 }, (_, index) => ({ name: `loose-${index}`, folder: null })),
+  ];
+  let emptyTokenRequest;
+  const api = async (method, requestPath, body) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') {
+      return { vaults: [{ name: 'one' }, { name: 'two' }] };
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return listed;
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      if (body.folders.length === 0) {
+        return new Promise((resolve) => { emptyTokenRequest = { resolve }; });
+      }
+      const stageScope = requestPath.includes('vault=two');
+      return {
+        version: 1,
+        scope_token: (stageScope ? 'T' : 'S').repeat(43),
+        folders: body.folders.map((folder, index) => ({
+          path: folder,
+          token: String.fromCharCode(65 + index).repeat(43),
+        })),
+      };
+    }
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    listed = [];
+    ui.elements.get('#vault-select').value = 'one';
+    ui.elements.get('#vault-select').onchange();
+    await settleUntil(() => emptyTokenRequest);
+
+    ui.store.dispatch({
+      type: 'context/switch-succeeded',
+      context: stage,
+      secrets: [{ name: 'nested', folder: 'other/nested' }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    emptyTokenRequest.resolve({
+      version: 1,
+      scope_token: 'S'.repeat(43),
+      folders: [],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const labels = ui.findAll('#secrets-folder-tree', (element) => (
+      element.getAttribute?.('role') === 'treeitem'
+    )).map((element) => element.getAttribute('aria-label'));
+    assert.ok(labels.some((label) => label.startsWith('other,')));
+    assert.equal(labels.some((label) => label.startsWith('apps,')), false);
+    assert.equal(ui.elements.get('#secret-list-summary').textContent.includes('1 secret'), true);
+  } finally {
+    ui.restore();
+  }
+});
+
 async function openExistingSecret(ui, name) {
   const button = ui.find('#secrets-table tbody', (element) => (
     element.getAttribute?.('aria-label') === `Edit secret ${name}`
@@ -642,12 +786,13 @@ test('aborted and stale list failures leave the current list surface unchanged',
   try {
     const picker = ui.elements.get('#vault-select');
     picker.value = 'two';
-    await picker.onchange();
+    const staleLoad = picker.onchange();
     picker.value = 'one';
     await picker.onchange();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(listCalls, 3);
     rejectStale(new ApiError({ status: 503, code: 'xv-network', message: 'stale failure' }));
+    await staleLoad;
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(
       ui.elements.get('#secret-error').hidden,

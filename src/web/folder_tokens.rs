@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -7,6 +9,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use fs2::FileExt;
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -35,36 +38,21 @@ impl FolderTokenService {
     }
 
     pub(crate) fn load_or_create(path: &Path) -> Result<Self> {
-        if std::fs::symlink_metadata(path)
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(CrosstacheError::config(format!(
-                "Refusing symlinked folder-token key '{}'",
-                path.display(),
-            )));
-        }
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
+        let _lock = lock_key_path(path)?;
+        let key = match open_key_file_no_follow(path) {
+            Ok(file) => read_key_from_file(file, path)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let service = Self::random();
-                crate::utils::helpers::atomic_write_file_no_follow(path, &service.key, true)?;
-                std::fs::read(path)?
+                match create_key_file_exclusive(path, &service.key) {
+                    Ok(()) => read_key_file_no_follow(path)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        read_key_file_no_follow(path)?
+                    }
+                    Err(error) => return Err(key_io_error("create", path, error)),
+                }
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(key_io_error("open", path, error)),
         };
-        let key: [u8; KEY_BYTES] = bytes.try_into().map_err(|bytes: Vec<u8>| {
-            CrosstacheError::config(format!(
-                "Folder-token key '{}' must contain exactly {KEY_BYTES} bytes, found {}",
-                path.display(),
-                bytes.len(),
-            ))
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
         Ok(Self::from_key(key))
     }
 
@@ -88,6 +76,125 @@ impl FolderTokenService {
     pub(crate) fn folder_token(&self, scope_token: &str, path: &str) -> String {
         self.token("folder", &[scope_token, path])
     }
+}
+
+fn key_io_error(action: &str, path: &Path, error: std::io::Error) -> CrosstacheError {
+    CrosstacheError::config(format!(
+        "Failed to {action} folder-token key '{}': {error}",
+        path.display()
+    ))
+}
+
+fn open_key_file_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    options.open(path)
+}
+
+fn read_key_from_file(mut file: File, path: &Path) -> Result<[u8; KEY_BYTES]> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| key_io_error("inspect", path, error))?;
+    validate_private_regular_file(&metadata, path, "Folder-token key")?;
+    if metadata.len() != KEY_BYTES as u64 {
+        return Err(CrosstacheError::config(format!(
+            "Folder-token key '{}' must contain exactly {KEY_BYTES} bytes, found {}",
+            path.display(),
+            metadata.len()
+        )));
+    }
+    let mut key = [0u8; KEY_BYTES];
+    file.read_exact(&mut key)
+        .map_err(|error| key_io_error("read", path, error))?;
+    let mut extra = [0u8; 1];
+    if file
+        .read(&mut extra)
+        .map_err(|error| key_io_error("read", path, error))?
+        != 0
+    {
+        return Err(CrosstacheError::config(format!(
+            "Folder-token key '{}' changed while it was being read",
+            path.display()
+        )));
+    }
+    Ok(key)
+}
+
+fn validate_private_regular_file(
+    metadata: &std::fs::Metadata,
+    path: &Path,
+    label: &str,
+) -> Result<()> {
+    if !metadata.file_type().is_file() {
+        return Err(CrosstacheError::config(format!(
+            "{label} '{}' must be a regular file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(CrosstacheError::config(format!(
+                "{label} '{}' must be owner-only (mode 600), found {:03o}",
+                path.display(),
+                mode & 0o777
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn read_key_file_no_follow(path: &Path) -> Result<[u8; KEY_BYTES]> {
+    let file = open_key_file_no_follow(path).map_err(|error| key_io_error("open", path, error))?;
+    read_key_from_file(file, path)
+}
+
+fn create_key_file_exclusive(path: &Path, key: &[u8; KEY_BYTES]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(key)?;
+    file.sync_all()
+}
+
+fn lock_key_path(path: &Path) -> Result<File> {
+    let lock_path = path.with_file_name(format!(
+        ".{}.lock",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let lock = options
+        .open(&lock_path)
+        .map_err(|error| key_io_error("open lock for", path, error))?;
+    let metadata = lock
+        .metadata()
+        .map_err(|error| key_io_error("inspect lock for", path, error))?;
+    validate_private_regular_file(&metadata, &lock_path, "Folder-token lock")?;
+    lock.lock_exclusive()
+        .map_err(|error| key_io_error("lock", path, error))?;
+    Ok(lock)
 }
 
 pub(crate) fn folder_token_key_path_for(config_path: &Path) -> PathBuf {
@@ -186,6 +293,7 @@ mod tests {
     use base64::Engine;
     use serde_json::json;
     use std::path::Path;
+    use std::sync::{Arc, Barrier};
     use tower::ServiceExt;
 
     use sha2::{Digest, Sha256};
@@ -252,6 +360,66 @@ mod tests {
             super::folder_token_key_path_for(Path::new("/tmp/xv/xv.conf")),
             Path::new("/tmp/xv/ui-folder-token.key"),
         );
+    }
+
+    #[test]
+    fn concurrent_first_creation_uses_exactly_one_stable_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = Arc::new(directory.path().join("ui-folder-token.key"));
+        let barrier = Arc::new(Barrier::new(12));
+        let workers: Vec<_> = (0..12)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let service = FolderTokenService::load_or_create(&path).unwrap();
+                    let scope = service.scope_token("local", "payments", "secrets");
+                    service.folder_token(&scope, "apps/prod")
+                })
+            })
+            .collect();
+        let tokens: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+
+        assert!(tokens.iter().all(|token| token == &tokens[0]));
+        assert_eq!(std::fs::read(path.as_ref()).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn partial_and_insecure_existing_key_files_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("partial.key");
+        std::fs::write(&partial, [0x11; 7]).unwrap();
+        assert!(FolderTokenService::load_or_create(&partial).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let insecure = directory.path().join("insecure.key");
+            std::fs::write(&insecure, [0x22; 32]).unwrap();
+            std::fs::set_permissions(&insecure, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(FolderTokenService::load_or_create(&insecure).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_reader_rejects_a_symlink_at_the_actual_open() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.key");
+        let link = directory.path().join("ui-folder-token.key");
+        std::fs::write(&target, [0x33; 32]).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(super::read_key_file_no_follow(&link).is_err());
+        assert!(FolderTokenService::load_or_create(&link).is_err());
     }
 
     #[tokio::test]

@@ -464,7 +464,6 @@ function folderPaths(kind, items) {
 
 function requestFolderTokenIndex(kind, items, scope) {
   const folders = folderPaths(kind, items);
-  if (!folders.length) return null;
   return api(
     'POST',
     `/api/folder-tokens${vaultQS(scope.vault, scope)}`,
@@ -1224,7 +1223,7 @@ store.subscribe((snapshot, event) => {
   renderSecrets();
   const generation = secretLoadGeneration;
   const scope = captureOperationScope();
-  requestFolderTokenIndex('secrets', secrets, scope)?.then((tokenIndex) => {
+  requestFolderTokenIndex('secrets', secrets, scope).then((tokenIndex) => {
     if (!tokenIndex || generation !== secretLoadGeneration || !scopeMatchesCurrent(scope)) return;
     folderTokenIndexes.secrets = tokenIndex;
     renderSecrets();
@@ -1491,9 +1490,10 @@ async function init() {
         desktop: XvUiModel.FOLDER_ALL,
         mobile: XvUiModel.FOLDER_ALL,
       };
-      loadSecrets(selectedVault).catch(fail);
-      if (ctx.capabilities.files) loadFiles(selectedVault).catch(fail);
-      if (activeTab === 'trash') loadDeleted(selectedVault).catch(fail);
+      const loads = [loadSecrets(selectedVault).catch(fail)];
+      if (ctx.capabilities.files) loads.push(loadFiles(selectedVault).catch(fail));
+      if (activeTab === 'trash') loads.push(loadDeleted(selectedVault).catch(fail));
+      await Promise.all(loads);
     };
   }
   const vault = currentVault;
@@ -1519,8 +1519,7 @@ async function loadSecrets(vault, scope = captureOperationScope()) {
     if (generation !== secretLoadGeneration) return false;
     let tokenIndex = null;
     try {
-      const tokenRequest = requestFolderTokenIndex('secrets', loadedSecrets, scope);
-      if (tokenRequest) tokenIndex = await tokenRequest;
+      tokenIndex = await requestFolderTokenIndex('secrets', loadedSecrets, scope);
     } catch (_) {
       tokenIndex = null;
     }
@@ -2237,8 +2236,7 @@ async function loadFiles(vault, scope = captureOperationScope()) {
     if (generation !== fileLoadGeneration) return false;
     let tokenIndex = null;
     try {
-      const tokenRequest = requestFolderTokenIndex('files', loadedFiles, scope);
-      if (tokenRequest) tokenIndex = await tokenRequest;
+      tokenIndex = await requestFolderTokenIndex('files', loadedFiles, scope);
     } catch (_) {
       tokenIndex = null;
     }
