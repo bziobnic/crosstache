@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures.js';
 
 async function createSecret(page, name, value) {
-  await page.getByRole('button', { name: 'New secret' }).click();
+  await page.locator('#new-secret').click();
   const form = page.locator('#secret-form');
   await form.locator('input[name="name"]').fill(name);
   await form.locator('textarea[name="value"]').fill(value);

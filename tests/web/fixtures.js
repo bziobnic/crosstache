@@ -37,9 +37,10 @@ export const test = base.extend({
     const configHome = path.join(home, 'config');
     const dataHome = path.join(home, 'data');
     const store = path.join(home, 'store');
-    await mkdir(configHome, { recursive: true });
+    const xvConfigHome = path.join(configHome, 'xv');
+    await mkdir(xvConfigHome, { recursive: true });
     const config = `backend = "local"\n\n[local]\nstore_path = "${store}"\nkey_file = "${path.join(home, 'key.txt')}"\ndefault_vault = "playwright"\n`;
-    await writeFile(path.join(configHome, 'xv.conf'), config);
+    await writeFile(path.join(xvConfigHome, 'xv.conf'), config);
 
     const target = path.join(workspace, 'target', 'debug', 'xv');
     await run('cargo', ['build', '--features', 'ui'], { cwd: workspace, stdio: 'inherit' });
