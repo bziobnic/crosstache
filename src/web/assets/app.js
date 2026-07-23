@@ -28,6 +28,7 @@ if (navigator.webdriver) {
 }
 const api = createApiClient({
   token,
+  onOperation: (event) => store.dispatch({ type: 'operation/status', ...event }),
   onInflight: (inflight) => {
     const progress = document.getElementById('progress');
     progress.hidden = inflight === 0;

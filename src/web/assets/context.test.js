@@ -212,6 +212,20 @@ test('mounted switch commits context and list together after the guard', async (
     'local-stage / sandbox · checkout · stage');
 });
 
+test('workspace activation emits exact operation lifecycle statuses with one operation ID', async () => {
+  const fixture = await mounted();
+  const events = [];
+  fixture.store.subscribe((_snapshot, event) => {
+    if (event.type === 'operation/status') events.push(event);
+  });
+
+  await fixture.rail.switchTo('stage');
+
+  assert.deepEqual(events.map(({ status }) => status), ['started', 'succeeded']);
+  assert.equal(events[0].operationId, events[1].operationId);
+  assert.match(events[0].operationId, /^context-switch-/);
+});
+
 test('dirty draft rejection and save lock preserve the current context', async () => {
   let guardCalls = 0;
   let activationCalls = 0;

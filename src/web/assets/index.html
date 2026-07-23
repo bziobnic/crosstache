@@ -76,6 +76,7 @@
     </div>
     <div class="toolbar">
       <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search by name, folder, group, or note"></label>
+      <button id="refresh-secrets" class="button secondary" type="button" aria-label="Refresh secrets">Refresh</button>
       <button id="select-secrets" class="button secondary" type="button">Select</button>
       <button id="new-secret" class="button primary" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New secret</button>
     </div>
@@ -95,6 +96,7 @@
     <div id="secret-error" class="error-panel" role="alert" hidden>
       <div><strong>Secrets need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
       <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button secondary error-copy" type="button" hidden>Copy details</button>
       <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
     </div>
     <div id="secrets-workspace" class="vault-workspace">
@@ -148,6 +150,7 @@
     <div id="file-error" class="error-panel" role="alert" hidden>
       <div><strong>Files need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
       <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button secondary error-copy" type="button" hidden>Copy details</button>
       <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
     </div>
     <div id="dropzone">

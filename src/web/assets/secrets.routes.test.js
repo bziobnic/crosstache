@@ -768,15 +768,17 @@ test('form failures preserve the dirty draft and focus the named field', async (
 
 test('aborted and stale list failures leave the current list surface unchanged', async () => {
   let listCalls = 0;
+  const listSignals = [];
   let rejectStale;
   const stale = new Promise((_, reject) => { rejectStale = reject; });
   const ui = await mountRouteUi({
-    apiImpl: async (_method, path) => {
+    apiImpl: async (_method, path, _body, _raw, options) => {
       if (path === '/api/context') return { vault: 'one', backend: 'test', capabilities: { files: false } };
       if (path === '/api/types') return { types: [] };
       if (path === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
       if (path.startsWith('/api/secrets')) {
         listCalls++;
+        listSignals.push(options?.signal);
         if (listCalls === 2) return stale;
         return [];
       }
@@ -791,6 +793,7 @@ test('aborted and stale list failures leave the current list surface unchanged',
     await picker.onchange();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(listCalls, 3);
+    assert.equal(listSignals[1].aborted, true);
     rejectStale(new ApiError({ status: 503, code: 'xv-network', message: 'stale failure' }));
     await staleLoad;
     await new Promise((resolve) => setTimeout(resolve, 0));

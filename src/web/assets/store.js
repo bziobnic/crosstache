@@ -25,8 +25,57 @@ export function isDraftDirty(draft) {
   return JSON.stringify(draft.baseline) !== JSON.stringify(draft.working);
 }
 
+const OPERATION_STATUSES = new Set([
+  'started',
+  'succeeded',
+  'partially-succeeded',
+  'cancelled',
+  'failed',
+]);
+
+export function operationEvent(operationId, status, diagnostic) {
+  if (!OPERATION_STATUSES.has(status)) throw new TypeError(`Unsupported operation status: ${status}`);
+  return {
+    type: 'operation/status',
+    operationId,
+    status,
+    ...(diagnostic ? { diagnostic: safeDiagnostic(diagnostic) } : {}),
+  };
+}
+
+export function operationResultStatus(results) {
+  const succeeded = results.filter(({ ok }) => ok).length;
+  if (succeeded === results.length) return 'succeeded';
+  return succeeded === 0 ? 'failed' : 'partially-succeeded';
+}
+
+export function safeDiagnostic(input = {}) {
+  const diagnostic = {
+    code: typeof input.code === 'string' ? input.code : 'xv-request-failed',
+    message: typeof input.message === 'string' ? input.message : 'The request could not be completed.',
+    hint: typeof input.hint === 'string' ? input.hint : '',
+    backend: typeof input.backend === 'string' ? input.backend : '',
+    vault: typeof input.vault === 'string' ? input.vault : '',
+    failedNames: Array.isArray(input.failedNames)
+      ? input.failedNames.filter((name) => typeof name === 'string')
+      : [],
+  };
+  return diagnostic;
+}
+
 export function draftReducer(state, event) {
   switch (event.type) {
+    case 'operation/status':
+      return {
+        ...state,
+        operations: {
+          ...(state.operations || {}),
+          [event.operationId]: {
+            status: event.status,
+            ...(event.diagnostic ? { diagnostic: safeDiagnostic(event.diagnostic) } : {}),
+          },
+        },
+      };
     case 'context/loaded':
       return { ...state, context: structuredClone(event.context), contextError: null };
     case 'context/load-failed':

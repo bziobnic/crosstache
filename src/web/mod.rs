@@ -622,7 +622,10 @@ mod tests {
             .split_once("function renderSecrets()")
             .unwrap()
             .0;
-        assert!(secret_load.contains("secrets = [];\n  setListLoadStatus('secrets', 'loading');"));
+        assert!(secret_load.contains("if (!hasSuccessfulSecretsSnapshot) {"));
+        assert!(secret_load.contains("secrets = [];\n    setListLoadStatus('secrets', 'loading');"));
+        assert!(secret_load
+            .contains("secretsState = hasSuccessfulSecretsSnapshot ? 'ready' : 'failed';"));
         assert!(
             secret_load
                 .find("if (generation !== secretLoadGeneration) return false;")
@@ -640,7 +643,8 @@ mod tests {
             .split_once("function renderFiles()")
             .unwrap()
             .0;
-        assert!(file_load.contains("files = [];\n  setListLoadStatus('files', 'loading');"));
+        assert!(file_load.contains("if (!hasSuccessfulFilesSnapshot) {"));
+        assert!(file_load.contains("files = [];\n    setListLoadStatus('files', 'loading');"));
         assert!(
             file_load
                 .find("if (generation !== fileLoadGeneration) return false;")
@@ -866,7 +870,7 @@ mod tests {
     #[test]
     fn ui_bulk_actions_are_bounded_and_reuse_item_routes() {
         assert!(APP_JS.contains("async function runBounded(items, limit, operation)"));
-        assert!(APP_JS.contains("runBounded(items, 4"));
+        assert!(APP_JS.contains("runBounded(targets, 4"));
         assert!(APP_JS.contains("api('DELETE', `/api/secrets/"));
         assert!(APP_JS.contains("api('DELETE', `/api/files/"));
         assert!(APP_JS.contains("/move${vaultQS(vault, operationScope)}`, { folder }"));
@@ -914,7 +918,8 @@ mod tests {
     fn ui_preserves_failed_file_load_state_during_bulk_recovery() {
         assert!(APP_JS.contains("let filesState = 'ready';"));
         assert!(APP_JS.contains("filesState = 'loading';"));
-        assert!(APP_JS.contains("filesState = 'failed';"));
+        assert!(APP_JS.contains("filesState = hasSuccessfulFilesSnapshot ? 'ready' : 'failed';"));
+        assert!(APP_JS.contains("if (!hasSuccessfulFilesSnapshot) {"));
         assert!(APP_JS.contains("function renderFiles() {\n  if (filesState !== 'ready') return;"));
     }
 

@@ -331,10 +331,10 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 11%, transpa
 .action-notice.error { border-color:color-mix(in srgb, var(--color-danger) 42%, var(--color-border)); }
 .trash-actions { display:flex; align-items:center; gap:.4rem; overflow:visible; }
 #trash-table th:last-child, #trash-table td:last-child { width:13rem; }
-.error-panel { display:flex; align-items:flex-start; justify-content:space-between; gap:.75rem; margin-bottom:.75rem; padding:.75rem;
+.error-panel { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:.75rem; margin-bottom:.75rem; padding:.75rem;
   border:1px solid color-mix(in srgb, var(--color-danger) 42%, var(--color-border)); border-radius:var(--radius-control);
   color:var(--color-danger); background:var(--color-danger-quiet); }
-.error-panel > div { display:grid; gap:.2rem; }
+.error-panel > div { flex:1 1 16rem; display:grid; gap:.2rem; }
 .error-panel .error-message { color:var(--color-text); }
 .error-panel .error-hint { color:var(--color-text-muted); }
 .settings-status { margin-bottom:1rem; }

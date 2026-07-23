@@ -2,6 +2,7 @@ import * as XvUiModel from './ui-model.js';
 import { guardNavigation } from './dialogs.js';
 import { setProtectedValueStatus } from './accessibility.js';
 import { contextQuery, formatContextLine } from './context.js';
+import { operationEvent, operationResultStatus, safeDiagnostic } from './store.js';
 
 export function createExposureTimer({ seconds, onTick, onExpire, clock = globalThis }) {
   const duration = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -265,23 +266,52 @@ function clearError(surface) {
   panel.querySelector('.error-message').textContent = '';
   panel.querySelector('.error-hint').textContent = '';
   panel.querySelector('.error-retry')?.setAttribute('hidden', '');
+  panel.querySelector('.error-copy')?.setAttribute('hidden', '');
 }
 
 function showError(surface, error, retry) {
   if (isAborted(error)) return;
   const panel = $(surface);
   const { message, hint } = errorCopy(error);
+  panel.querySelector('.error-copy')?.setAttribute('hidden', '');
   panel.querySelector('.error-message').textContent = message;
   panel.querySelector('.error-hint').textContent = hint;
   const retryButton = panel.querySelector('.error-retry');
   if (retryButton) {
+    retryButton.textContent = 'Retry';
     retryButton.hidden = !retry;
     retryButton.onclick = async () => {
-      clearError(surface);
-      await retry();
+      retryButton.disabled = true;
+      try {
+        await retry();
+      } finally {
+        retryButton.disabled = false;
+      }
     };
   }
   panel.hidden = false;
+}
+
+function diagnosticsScope(scope, failures) {
+  return safeDiagnostic({
+    code: failures[0]?.error?.code || 'xv-partial-failure',
+    message: `${failures.length} item${failures.length === 1 ? '' : 's'} failed.`,
+    hint: failures[0]?.error?.hint || 'Retry the failed items.',
+    backend: scope.backend,
+    vault: scope.vault,
+    failedNames: failures.map(({ item }) => item),
+  });
+}
+
+function diagnosticText(diagnostic) {
+  return [
+    `code: ${diagnostic.code}`,
+    `message: ${diagnostic.message}`,
+    diagnostic.hint && `hint: ${diagnostic.hint}`,
+    `backend: ${diagnostic.backend}`,
+    `vault: ${diagnostic.vault}`,
+    `failed names: ${diagnostic.failedNames.join(', ')}`,
+  ].filter(Boolean).join('\n');
 }
 
 function showListError(kind, error) {
@@ -296,7 +326,12 @@ function showListLoadError(kind, error) {
   const surface = `#${kind === 'secrets' ? 'secret' : 'file'}-error`;
   const panel = $(surface);
   panel.dataset.source = 'load';
-  showError(surface, error, () => (
+  const stale = kind === 'secrets' ? hasSuccessfulSecretsSnapshot : hasSuccessfulFilesSnapshot;
+  const copy = errorCopy(error);
+  showError(surface, {
+    ...copy,
+    message: stale ? `Stale — ${copy.message}` : copy.message,
+  }, () => (
     kind === 'secrets' ? loadSecrets(currentVault) : loadFiles(currentVault)
   ));
 }
@@ -1367,10 +1402,16 @@ store.subscribe((snapshot, event) => {
     }
   }
   if (event.type !== 'context/switch-succeeded') return;
+  secretLoadController?.abort();
+  fileLoadController?.abort();
   ctx = snapshot.context;
   currentVault = ctx.vault;
   secrets = snapshot.initialSecrets;
   secretsState = 'ready';
+  hasSuccessfulSecretsSnapshot = true;
+  files = [];
+  filesState = 'ready';
+  hasSuccessfulFilesSnapshot = false;
   secretLoadGeneration++;
   fileLoadGeneration++;
   folderTokenIndexes.secrets = null;
@@ -1651,6 +1692,10 @@ async function init() {
         return;
       }
       currentVault = nextVault;
+      secretLoadController?.abort();
+      fileLoadController?.abort();
+      hasSuccessfulSecretsSnapshot = false;
+      hasSuccessfulFilesSnapshot = false;
       const selectedVault = currentVault;
       secretLoadGeneration++;
       fileLoadGeneration++;
@@ -1685,15 +1730,27 @@ async function init() {
 // clobber the failed placeholder) while the fetch is in flight.
 let secretsState = 'ready';
 let secretLoadGeneration = 0;
+let secretLoadController = null;
+let hasSuccessfulSecretsSnapshot = false;
 async function loadSecrets(vault, scope = captureOperationScope()) {
   const generation = ++secretLoadGeneration;
+  secretLoadController?.abort();
+  secretLoadController = new AbortController();
   folderTokenIndexes.secrets = null;
   secretsState = 'loading';
-  secrets = [];
-  setListLoadStatus('secrets', 'loading');
-  showListState($('#secrets-table tbody'), 'secrets', 'loading', secretSelection.enabled ? 6 : 5);
+  if (!hasSuccessfulSecretsSnapshot) {
+    secrets = [];
+    setListLoadStatus('secrets', 'loading');
+    showListState($('#secrets-table tbody'), 'secrets', 'loading', secretSelection.enabled ? 6 : 5);
+  }
   try {
-    const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault, scope)}`);
+    const loadedSecrets = await api(
+      'GET',
+      `/api/secrets${vaultQS(vault, scope)}`,
+      undefined,
+      false,
+      { signal: secretLoadController.signal },
+    );
     if (generation !== secretLoadGeneration) return false;
     let tokenIndex = null;
     try {
@@ -1706,18 +1763,23 @@ async function loadSecrets(vault, scope = captureOperationScope()) {
     secrets = loadedSecrets;
   } catch (e) {
     if (generation !== secretLoadGeneration || isAborted(e)) return false;
-    secretsState = 'failed';
-    secrets = [];
-    setListLoadStatus('secrets', 'failed');
-    showListState($('#secrets-table tbody'), 'secrets', 'failed', secretSelection.enabled ? 6 : 5);
+    secretsState = hasSuccessfulSecretsSnapshot ? 'ready' : 'failed';
+    if (!hasSuccessfulSecretsSnapshot) {
+      secrets = [];
+      setListLoadStatus('secrets', 'failed');
+      showListState($('#secrets-table tbody'), 'secrets', 'failed', secretSelection.enabled ? 6 : 5);
+    }
     showListLoadError('secrets', e);
     return false;
   }
   secretsState = 'ready';
+  hasSuccessfulSecretsSnapshot = true;
   clearListLoadError('secrets');
   renderSecrets();
   return true;
 }
+
+$('#refresh-secrets').onclick = () => loadSecrets(currentVault, captureOperationScope());
 
 function renderSecrets() {
   if (secretsState !== 'ready') return; // keep the loading/failed placeholder
@@ -2844,17 +2906,29 @@ async function switchTab(which) {
 let files = [];
 let filesState = 'ready';
 let fileLoadGeneration = 0;
+let fileLoadController = null;
+let hasSuccessfulFilesSnapshot = false;
 
 async function loadFiles(vault, scope = captureOperationScope()) {
   const generation = ++fileLoadGeneration;
+  fileLoadController?.abort();
+  fileLoadController = new AbortController();
   if (!ctx.capabilities.files) return false;
   folderTokenIndexes.files = null;
   filesState = 'loading';
-  files = [];
-  setListLoadStatus('files', 'loading');
-  showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 5 : 4);
+  if (!hasSuccessfulFilesSnapshot) {
+    files = [];
+    setListLoadStatus('files', 'loading');
+    showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 5 : 4);
+  }
   try {
-    const loadedFiles = await api('GET', `/api/files${vaultQS(vault, scope)}`);
+    const loadedFiles = await api(
+      'GET',
+      `/api/files${vaultQS(vault, scope)}`,
+      undefined,
+      false,
+      { signal: fileLoadController.signal },
+    );
     if (generation !== fileLoadGeneration) return false;
     let tokenIndex = null;
     try {
@@ -2867,14 +2941,17 @@ async function loadFiles(vault, scope = captureOperationScope()) {
     files = loadedFiles;
   } catch (e) {
     if (generation !== fileLoadGeneration || isAborted(e)) return false;
-    filesState = 'failed';
-    files = [];
-    setListLoadStatus('files', 'failed');
-    showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 5 : 4);
+    filesState = hasSuccessfulFilesSnapshot ? 'ready' : 'failed';
+    if (!hasSuccessfulFilesSnapshot) {
+      files = [];
+      setListLoadStatus('files', 'failed');
+      showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 5 : 4);
+    }
     showListLoadError('files', e);
     return false;
   }
   filesState = 'ready';
+  hasSuccessfulFilesSnapshot = true;
   clearListLoadError('files');
   renderFiles();
   return true;
@@ -2978,21 +3055,69 @@ async function runBounded(items, limit, operation) {
   return results;
 }
 
-function reportBulkResults(kind, verb, results, scope) {
+let nextBulkOperationId = 0;
+
+function setBulkOperationStatus(operationId, status, diagnostic) {
+  store.dispatch(operationEvent(operationId, status, diagnostic));
+}
+
+function reportBulkResults(kind, verb, results, scope, retryFailed) {
   const succeeded = results.filter((result) => result.ok).length;
   const failures = results.filter((result) => !result.ok);
   const contextLine = formatContextLine(scope);
   if (!failures.length) {
+    const surface = `#${kind === 'secrets' ? 'secret' : 'file'}-error`;
+    if ($(surface).dataset.source === 'bulk') clearError(surface);
     toast(`${verb} ${succeeded} item${succeeded === 1 ? '' : 's'} in ${contextLine}`);
     return;
   }
-  const details = failures
-    .map(({ item, error }) => `${item}: ${error.message}`)
-    .join('; ');
-  showListError(
-    kind,
-    new Error(`${verb} ${succeeded} in ${contextLine}; ${failures.length} failed — ${details}`),
-  );
+  const diagnostic = diagnosticsScope(scope, failures);
+  const surface = `#${kind === 'secrets' ? 'secret' : 'file'}-error`;
+  const panel = $(surface);
+  panel.dataset.source = 'bulk';
+  showError(surface, {
+    message: `${verb} ${succeeded} in ${contextLine}; ${failures.length} failed — ${diagnostic.failedNames.join(', ')}`,
+    hint: diagnostic.hint,
+  });
+  const retryButton = panel.querySelector('.error-retry');
+  retryButton.hidden = !retryFailed;
+  retryButton.textContent = 'Retry failed';
+  retryButton.onclick = async () => {
+    if (!scopeMatchesCurrent(scope)) {
+      panel.querySelector('.error-hint').textContent =
+        `Switch back to ${formatContextLine(scope)} to retry these exact items.`;
+      return;
+    }
+    retryButton.disabled = true;
+    const operationId = `bulk-${++nextBulkOperationId}`;
+    setBulkOperationStatus(operationId, 'started');
+    try {
+      const retried = await retryFailed([...diagnostic.failedNames]);
+      const remaining = retried.filter((result) => !result.ok);
+      setBulkOperationStatus(
+        operationId,
+        operationResultStatus(retried),
+        remaining.length ? diagnosticsScope(scope, remaining) : null,
+      );
+      reportBulkResults(kind, verb, retried, scope, retryFailed);
+    } catch (error) {
+      const failed = diagnostic.failedNames.map((item) => ({ item, ok: false, error }));
+      setBulkOperationStatus(operationId, 'failed', diagnosticsScope(scope, failed));
+      reportBulkResults(kind, verb, failed, scope, retryFailed);
+    } finally {
+      retryButton.disabled = false;
+    }
+  };
+  const copyButton = panel.querySelector('.error-copy');
+  copyButton.hidden = false;
+  copyButton.onclick = async () => {
+    try {
+      await clipboard?.writeText?.(diagnosticText(diagnostic));
+    } catch (_) {
+      panel.querySelector('.error-hint').textContent =
+        'Copy was blocked. The safe details remain visible here.';
+    }
+  };
 }
 
 function setBulkPending(kind, pending, label) {
@@ -3018,21 +3143,33 @@ async function bulkDelete(kind) {
   const operationScope = captureOperationScope();
   if (!canStartScopedAction(operationScope)) return;
   const vault = operationScope.vault;
+  const operationId = `bulk-${++nextBulkOperationId}`;
+  setBulkOperationStatus(operationId, 'started');
   beginScopedMutation();
   try {
     if (!(await confirmDeletion(
       kind === 'secrets' ? 'secret' : 'file',
       items,
       operationScope,
-    )) || !scopeMatchesCurrent(operationScope)) return;
+    )) || !scopeMatchesCurrent(operationScope)) {
+      setBulkOperationStatus(operationId, 'cancelled');
+      return;
+    }
     const generation = state.generation;
     setBulkPending(kind, true, 'Deleting…');
-    const results = await runBounded(items, 4, (item) => {
+    const deleteItems = (targets) => runBounded(targets, 4, (item) => {
       if (kind === 'secrets') {
         return api('DELETE', `/api/secrets/${encodeURIComponent(item)}${vaultQS(vault, operationScope)}`);
       }
       return api('DELETE', `/api/files/${encodeURIComponent(item)}${vaultQS(vault, operationScope)}`);
     });
+    const results = await deleteItems(items);
+    const failures = results.filter((result) => !result.ok);
+    setBulkOperationStatus(
+      operationId,
+      operationResultStatus(results),
+      failures.length ? diagnosticsScope(operationScope, failures) : null,
+    );
     if (!scopeMatchesCurrent(operationScope)) return;
 
     const selectionIsCurrent = generation === state.generation;
@@ -3057,10 +3194,18 @@ async function bulkDelete(kind) {
         operationScope,
       );
       if (results.some((result) => !result.ok)) {
-        reportBulkResults(kind, 'Deleted', results, operationScope);
+        reportBulkResults(kind, 'Deleted', results, operationScope, async (failedNames) => {
+          const retried = await deleteItems(failedNames);
+          if (scopeMatchesCurrent(operationScope)) await loadSecrets(vault, operationScope);
+          return retried;
+        });
       }
     } else {
-      reportBulkResults(kind, 'Deleted', results, operationScope);
+      reportBulkResults(kind, 'Deleted', results, operationScope, async (failedNames) => {
+        const retried = await deleteItems(failedNames);
+        if (scopeMatchesCurrent(operationScope)) await loadFiles(vault, operationScope);
+        return retried;
+      });
     }
   } finally {
     endScopedMutation();
@@ -3090,9 +3235,18 @@ async function bulkMoveSecrets() {
   beginPendingAction(moveButton, 'Moving…');
   renderSecrets();
   try {
-    const results = await runBounded(items, 4, (item) => (
+    const operationId = `bulk-${++nextBulkOperationId}`;
+    setBulkOperationStatus(operationId, 'started');
+    const moveItems = (targets) => runBounded(targets, 4, (item) => (
       api('POST', `/api/secrets/${encodeURIComponent(item)}/move${vaultQS(vault, operationScope)}`, { folder })
     ));
+    const results = await moveItems(items);
+    const failures = results.filter((result) => !result.ok);
+    setBulkOperationStatus(
+      operationId,
+      operationResultStatus(results),
+      failures.length ? diagnosticsScope(operationScope, failures) : null,
+    );
     if (!scopeMatchesCurrent(operationScope)) return;
 
     const selectionIsCurrent = generation === state.generation;
@@ -3114,7 +3268,11 @@ async function bulkMoveSecrets() {
     resetConfirmation(moveButton, 'Move');
     updateSelectionControls('secrets');
     renderSecrets();
-    reportBulkResults('secrets', 'Moved', results, operationScope);
+    reportBulkResults('secrets', 'Moved', results, operationScope, async (failedNames) => {
+      const retried = await moveItems(failedNames);
+      if (scopeMatchesCurrent(operationScope)) await loadSecrets(vault, operationScope);
+      return retried;
+    });
   } finally {
     endScopedMutation();
   }

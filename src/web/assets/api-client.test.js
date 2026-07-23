@@ -47,3 +47,44 @@ test('API client forwards an abort signal without changing authentication', asyn
   assert.equal(options.signal, controller.signal);
   assert.equal(options.headers.Authorization, 'Bearer session-token');
 });
+
+test('API client emits exact lifecycle statuses with stable operation IDs', async () => {
+  const events = [];
+  const client = createApiClient({
+    token: 'session-token',
+    onOperation: (event) => events.push(event),
+    fetchImpl: async () => ({ ok: true, text: async () => '[]' }),
+  });
+
+  await client('GET', '/api/secrets');
+
+  assert.deepEqual(events.map(({ status }) => status), ['started', 'succeeded']);
+  assert.equal(events[0].operationId, events[1].operationId);
+  assert.match(events[0].operationId, /^request-/);
+});
+
+test('API client emits cancelled for aborts without leaking the request', async () => {
+  const events = [];
+  const secretMarker = 'must-not-leak';
+  const controller = new AbortController();
+  const client = createApiClient({
+    token: 'session-token',
+    onOperation: (event) => events.push(event),
+    fetchImpl: async () => {
+      controller.abort();
+      throw Object.assign(new Error(`network failure ${secretMarker}`), { name: 'AbortError' });
+    },
+  });
+
+  await assert.rejects(
+    client('POST', '/api/secrets/private', {
+      value: secretMarker,
+      note: secretMarker,
+      headers: { Authorization: secretMarker },
+    }, false, { signal: controller.signal }),
+    { name: 'AbortError' },
+  );
+
+  assert.deepEqual(events.map(({ status }) => status), ['started', 'cancelled']);
+  assert.doesNotMatch(JSON.stringify(events), new RegExp(secretMarker));
+});

@@ -46,6 +46,17 @@ standalone Undo notice, post-Undo restored list, populated/error Trash, purge,
 file-delete confirmation, and plain/record protected-value states. Serious and
 critical violations fail the test and report the owning rule and locator.
 
+`tests/web/ui-errors.spec.js` covers recoverable failure states. It verifies
+that a failed refresh keeps the last successful rows visible and marks them
+Stale with Retry, and that partial bulk results remain available with Retry
+failed and Copy details until resolved or dismissed. Copied diagnostics are
+restricted to the structured error code, safe message and hint, backend,
+vault, and failed item names; secret values, notes, authorization material,
+and request headers are never included. The browser test also asserts the
+operation lifecycle vocabulary (`started`, `succeeded`,
+`partially-succeeded`, `cancelled`, and `failed`) and runs axe against stale
+and partial-result surfaces.
+
 Install the test-only JavaScript dependencies and a worktree-local Chromium:
 
 ```bash
@@ -58,6 +69,7 @@ Run the focused accessibility gate or the complete browser suite:
 ```bash
 PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npm run test:a11y
 PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npm run test:browser
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-errors.spec.js
 ```
 
 The fixture builds `xv --features ui`, launches `xv ui --no-open`, and exposes

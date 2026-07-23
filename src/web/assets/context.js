@@ -1,3 +1,5 @@
+import { operationEvent } from './store.js';
+
 const SOURCE_LABELS = Object.freeze({
   cli: 'Command line',
   environment: 'Environment',
@@ -117,6 +119,7 @@ export function mountContextRail({
   const byId = (id) => document.getElementById(id);
   const selector = byId('workspace-select');
   let generation = 0;
+  let nextOperationId = 0;
   let controller = null;
   let scopedActivityRevision = 0;
 
@@ -227,8 +230,10 @@ export function mountContextRail({
     }
 
     const requestGeneration = ++generation;
+    const operationId = `context-switch-${++nextOperationId}`;
     controller?.abort();
     controller = new AbortController();
+    store.dispatch(operationEvent(operationId, 'started'));
     store.dispatch({ type: 'context/switch-started', alias });
     const activationRevision = scopedActivityRevision;
     try {
@@ -244,13 +249,17 @@ export function mountContextRail({
         request,
         { signal: controller.signal },
       );
-      if (requestGeneration !== generation) return false;
+      if (requestGeneration !== generation) {
+        store.dispatch(operationEvent(operationId, 'cancelled'));
+        return false;
+      }
       const latest = store.snapshot();
       if (!latest.contextSwitchPending
         || latest.savePending
         || latest.scopedMutationPending
         || scopedActivityRevision !== activationRevision) {
         store.dispatch({ type: 'context/switch-cancelled' });
+        store.dispatch(operationEvent(operationId, 'cancelled'));
         return false;
       }
       if (!activated?.context || !Array.isArray(activated?.secrets)) {
@@ -261,10 +270,20 @@ export function mountContextRail({
         context: activated.context,
         secrets: activated.secrets,
       });
+      store.dispatch(operationEvent(operationId, 'succeeded'));
       return true;
     } catch (error) {
-      if (requestGeneration !== generation || isAbort(error)) return false;
+      if (requestGeneration !== generation || isAbort(error)) {
+        store.dispatch(operationEvent(operationId, 'cancelled'));
+        return false;
+      }
       store.dispatch({ type: 'context/switch-failed', error: errorCopy(error) });
+      store.dispatch(operationEvent(operationId, 'failed', {
+        code: error?.code,
+        ...errorCopy(error),
+        backend: entry.backend,
+        vault: entry.vault,
+      }));
       return false;
     }
   }

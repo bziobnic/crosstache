@@ -10,12 +10,21 @@ export class ApiError extends Error {
   }
 }
 
-export function createApiClient({ token, onInflight, fetchImpl = globalThis.fetch, xhrFactory = () => new XMLHttpRequest() }) {
+export function createApiClient({
+  token,
+  onInflight,
+  onOperation,
+  fetchImpl = globalThis.fetch,
+  xhrFactory = () => new XMLHttpRequest(),
+}) {
   let inflight = 0;
+  let nextOperationId = 0;
 
   const api = async function api(method, path, body, raw = false, requestOptions = {}) {
+    const operationId = requestOptions.operationId || `request-${++nextOperationId}`;
     inflight++;
     onInflight?.(inflight);
+    onOperation?.({ operationId, status: 'started' });
     try {
       const opts = {
         method,
@@ -42,9 +51,20 @@ export function createApiClient({ token, onInflight, fetchImpl = globalThis.fetc
           details: body.details,
         });
       }
-      if (raw) return res;
+      if (raw) {
+        onOperation?.({ operationId, status: 'succeeded' });
+        return res;
+      }
       const text = await res.text();
-      return text ? JSON.parse(text) : null;
+      const result = text ? JSON.parse(text) : null;
+      onOperation?.({ operationId, status: 'succeeded' });
+      return result;
+    } catch (error) {
+      onOperation?.({
+        operationId,
+        status: error?.name === 'AbortError' ? 'cancelled' : 'failed',
+      });
+      throw error;
     } finally {
       inflight--;
       onInflight?.(inflight);
