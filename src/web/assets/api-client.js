@@ -13,11 +13,15 @@ export class ApiError extends Error {
 export function createApiClient({ token, onInflight, fetchImpl = globalThis.fetch, xhrFactory = () => new XMLHttpRequest() }) {
   let inflight = 0;
 
-  const api = async function api(method, path, body, raw = false) {
+  const api = async function api(method, path, body, raw = false, requestOptions = {}) {
     inflight++;
     onInflight?.(inflight);
     try {
-      const opts = { method, headers: { Authorization: `Bearer ${token}` } };
+      const opts = {
+        method,
+        headers: { Authorization: `Bearer ${token}` },
+        signal: requestOptions.signal,
+      };
       if (body instanceof FormData) {
         opts.body = body;
       } else if (body !== undefined) {

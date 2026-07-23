@@ -7,21 +7,47 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div id="progress" hidden></div>
+<div id="progress" role="status" aria-live="polite" hidden>
+  <span>Working in <strong id="progress-context" data-context-copy></strong></span>
+</div>
+<aside id="context-rail" class="context-rail" aria-label="Effective context">
+  <div class="brand" aria-label="Crosstache Vault">
+    <span class="brand-mark" aria-hidden="true">xv</span>
+    <span class="brand-name">Crosstache Vault</span>
+  </div>
+  <section class="context-primary" aria-labelledby="context-heading">
+    <span id="context-heading" class="context-kicker">Effective context</span>
+    <strong id="context-line"></strong>
+    <span id="context-backend-kind" class="context-kind"></span>
+  </section>
+  <div id="vault-context" class="vault-context">
+    <span id="backend-badge" class="sr-only"></span>
+    <label class="workspace-picker">
+      <span>Workspace</span>
+      <select id="workspace-select" title="Current workspace" aria-describedby="context-line"></select>
+    </label>
+  </div>
+  <div class="context-status">
+    <span id="context-connection" class="connection-state"></span>
+    <span id="context-capabilities"></span>
+  </div>
+  <div id="context-error" class="context-error" role="alert" hidden>
+    <span id="context-error-message"></span>
+  </div>
+  <details id="context-details" class="context-details" tabindex="-1">
+    <summary>Context details</summary>
+    <dl id="context-details-list"></dl>
+  </details>
+  <nav class="context-actions" aria-label="Application">
+    <button id="commands-open" type="button">Commands <kbd>⌘K</kbd></button>
+    <button id="help-open" type="button">Help</button>
+    <button id="settings-open" type="button">Settings</button>
+    <button id="theme-toggle" type="button">Theme: system</button>
+  </nav>
+  <span id="context-version" class="context-version"></span>
+</aside>
 <header id="app-header" class="app-header">
   <div class="app-header-inner">
-    <div class="brand" aria-label="Crosstache Vault">
-      <span class="brand-mark" aria-hidden="true">xv</span>
-      <span class="brand-name">Crosstache Vault</span>
-    </div>
-    <div id="vault-context" class="vault-context">
-      <span id="backend-badge" class="backend-badge"></span>
-      <label class="vault-picker">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span class="sr-only">Current vault</span>
-        <select id="vault-select" title="Current vault"></select>
-      </label>
-    </div>
     <nav id="vault-tabs" class="tab-list" role="tablist" aria-label="Vault content">
       <button id="tab-secrets" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="secrets-view">Secrets</button>
       <button id="tab-files" class="tab" type="button" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
@@ -55,6 +81,7 @@
     </div>
     <div id="secret-bulk-bar" class="bulk-toolbar" hidden>
       <span id="secret-selection-count" aria-live="polite">0 selected</span>
+      <small data-context-copy></small>
       <input id="secret-move-folder" placeholder="destination folder" aria-label="Destination folder">
       <button id="bulk-move-secrets" class="button primary" type="button">Move</button>
       <button id="bulk-delete-secrets" class="button danger" type="button" data-default-label="Delete">Delete</button>
@@ -90,6 +117,7 @@
     </div>
     <div id="file-bulk-bar" class="bulk-toolbar" hidden>
       <span id="file-selection-count" aria-live="polite">0 selected</span>
+      <small data-context-copy></small>
       <button id="bulk-delete-files" class="button danger" type="button" data-default-label="Delete">Delete</button>
       <button id="cancel-file-selection" class="button ghost" type="button">Cancel</button>
     </div>
@@ -101,7 +129,7 @@
     <div id="dropzone">
       <div class="dropzone-content">
         <span class="dropzone-icon"><svg class="icon" aria-hidden="true"><use href="#icon-upload"></use></svg></span>
-        <span><strong>Drop files here to upload</strong><small>or <button id="browse-files" class="linkish" type="button">browse from your computer</button></small></span>
+        <span><strong>Drop files here to upload</strong><small>or <button id="browse-files" class="linkish" type="button">browse from your computer</button></small><small id="dropzone-context" data-context-copy></small></span>
         <input id="file-input" type="file" multiple hidden>
       </div>
     </div>
@@ -140,6 +168,7 @@
 
   <section id="action-notice" class="action-notice" role="status" aria-live="polite" hidden>
     <span class="action-notice-message"></span>
+    <small data-context-copy></small>
     <button type="button" id="undo-delete" class="button secondary">Undo</button>
     <button type="button" id="dismiss-action-notice" class="button ghost" aria-label="Dismiss notification">Dismiss</button>
   </section>
@@ -149,7 +178,8 @@
   <div class="drawer-header">
     <span id="drawer-kicker" class="eyebrow">Create secret</span>
     <h2 id="drawer-title">New secret</h2>
-    <p>Values remain concealed until explicitly revealed.</p>
+    <p id="drawer-context" data-context-copy></p>
+    <small>Values remain concealed until explicitly revealed.</small>
   </div>
   <form id="secret-form" autocomplete="off">
     <div class="drawer-body">
@@ -196,6 +226,7 @@
 <section id="discard-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-title" aria-describedby="discard-message" tabindex="-1" hidden>
   <h2 id="discard-title">Discard changes?</h2>
   <p id="discard-message">Your unsaved changes will be lost.</p>
+  <p class="confirmation-context" data-context-copy></p>
   <div class="confirmation-actions">
     <button type="button" id="keep-editing" class="button secondary">Keep editing</button>
     <button type="button" id="discard-changes" class="button danger">Discard changes</button>
@@ -205,6 +236,7 @@
 <section id="delete-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-confirmation-title" aria-describedby="delete-confirmation-message delete-recovery" tabindex="-1" hidden>
   <h2 id="delete-confirmation-title">Delete secret?</h2>
   <p id="delete-confirmation-message"></p>
+  <p class="confirmation-context" data-context-copy></p>
   <ul id="delete-targets" class="confirmation-targets"></ul>
   <p id="delete-overflow" class="confirmation-overflow" hidden></p>
   <p id="delete-recovery"></p>
@@ -217,6 +249,7 @@
 <section id="purge-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="purge-title" aria-describedby="purge-message" tabindex="-1" hidden>
   <h2 id="purge-title">Permanently purge secret?</h2>
   <p id="purge-message">This permanently removes the secret and cannot be undone.</p>
+  <p class="confirmation-context" data-context-copy></p>
   <label class="form-field"><span id="purge-input-label" class="field-label">Type the secret name to confirm</span><input id="purge-name" autocomplete="off"></label>
   <div class="confirmation-actions">
     <button type="button" id="cancel-purge" class="button secondary">Cancel</button>

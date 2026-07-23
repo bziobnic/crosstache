@@ -16,8 +16,8 @@ function run(command, args, options) {
   });
 }
 
-function startUi(binary, environment) {
-  const child = spawn(binary, ['ui', '--no-open'], { cwd: workspace, env: environment });
+function startUi(binary, environment, cwd = workspace) {
+  const child = spawn(binary, ['ui', '--no-open'], { cwd, env: environment });
   const url = waitForUiUrl(child);
   return { child, url };
 }
@@ -41,6 +41,15 @@ export const test = base.extend({
       vault: 'playwright',
     });
     await writeFile(path.join(xvConfigHome, 'xv.conf'), config);
+    await writeFile(path.join(home, '.xv.toml'), `default_env = "browser"
+
+[env.browser]
+backend = "local"
+vaults = [
+  { vault = "playwright", alias = "playwright", default = true },
+  { vault = "sandbox", alias = "sandbox" },
+]
+`);
 
     const environment = {
       PATH: process.env.PATH,
@@ -53,7 +62,7 @@ export const test = base.extend({
       NO_COLOR: '1',
       FORCE_COLOR: '0',
     };
-    const server = startUi(binary, environment);
+    const server = startUi(binary, environment, home);
     try {
       await use({ baseURL: await server.url, vault: 'playwright' });
     } finally {

@@ -27,6 +27,26 @@ export function isDraftDirty(draft) {
 
 export function draftReducer(state, event) {
   switch (event.type) {
+    case 'context/loaded':
+      return { ...state, context: structuredClone(event.context), contextError: null };
+    case 'context/load-failed':
+      return { ...state, contextError: structuredClone(event.error) };
+    case 'context/switch-started':
+      return { ...state, contextSwitchPending: true, contextError: null };
+    case 'context/switch-succeeded':
+      return {
+        ...state,
+        context: structuredClone(event.context),
+        initialSecrets: structuredClone(event.secrets),
+        contextSwitchPending: false,
+        contextError: null,
+      };
+    case 'context/switch-failed':
+      return {
+        ...state,
+        contextSwitchPending: false,
+        contextError: structuredClone(event.error),
+      };
     case 'draft/open': {
       const baseline = normalizeSecretDraft(event.draft);
       return { ...state, draft: { baseline, working: structuredClone(baseline) }, savePending: false };

@@ -38,10 +38,13 @@ async function createAndOpenSecret(page, name, value) {
 }
 
 async function seedRecord(page, name) {
-  await expect.poll(() => page.locator('#vault-select').inputValue()).not.toBe('');
+  await expect.poll(() => page.locator('#workspace-select').inputValue()).not.toBe('');
   const response = await page.evaluate(async (recordName) => {
     const token = sessionStorage.getItem('xv.ui.token');
-    const vault = document.querySelector('#vault-select').value;
+    const context = await fetch('/api/context', {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then((result) => result.json());
+    const vault = context.vault;
     const result = await fetch(`/api/secrets/${encodeURIComponent(recordName)}?vault=${encodeURIComponent(vault)}`, {
       method: 'PUT',
       headers: {

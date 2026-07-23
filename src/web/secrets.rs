@@ -13,10 +13,10 @@ pub(crate) async fn list_deleted(
     State(state): State<Arc<WebState>>,
     Query(query): Query<VaultQuery>,
 ) -> Result<Json<Vec<DeletedSecretSummary>>, ApiError> {
-    let deleted = state
-        .backend
+    let (backend, context) = state.active_target();
+    let deleted = backend
         .secrets()
-        .list_deleted_secrets(query.vault(&state))
+        .list_deleted_secrets(query.vault(&context.vault))
         .await?;
     Ok(Json(deleted))
 }
@@ -26,10 +26,10 @@ pub(crate) async fn restore(
     Path(name): Path<String>,
     Query(query): Query<VaultQuery>,
 ) -> Result<Json<SecretProperties>, ApiError> {
-    let restored = state
-        .backend
+    let (backend, context) = state.active_target();
+    let restored = backend
         .secrets()
-        .restore_secret(query.vault(&state), &name)
+        .restore_secret(query.vault(&context.vault), &name)
         .await?;
     Ok(Json(restored))
 }
@@ -39,10 +39,10 @@ pub(crate) async fn purge(
     Path(name): Path<String>,
     Query(query): Query<VaultQuery>,
 ) -> Result<StatusCode, ApiError> {
-    state
-        .backend
+    let (backend, context) = state.active_target();
+    backend
         .secrets()
-        .purge_secret(query.vault(&state), &name)
+        .purge_secret(query.vault(&context.vault), &name)
         .await?;
     Ok(StatusCode::OK)
 }
@@ -69,17 +69,16 @@ mod tests {
         }))
         .unwrap();
         let backend: Arc<dyn crate::backend::Backend> = Arc::new(backend);
-        Arc::new(crate::web::WebState {
-            context: testutil::test_context(backend.as_ref(), "default", 30),
+        let context = testutil::test_context(backend.as_ref(), "default", 30);
+        let registry = Arc::new(crate::backend::BackendRegistry::new(backend.clone()));
+        Arc::new(crate::web::WebState::new(
             backend,
-            token: "test-token".to_string(),
-            vault: "default".to_string(),
-            types: crate::records::builtin_types(),
-            preferences: crate::web::preferences::PreferenceStore::new(
-                temp.path().join("ui.json"),
-                30,
-            ),
-        })
+            context,
+            "test-token".to_string(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(temp.path().join("ui.json"), 30),
+            registry,
+        ))
     }
 
     #[tokio::test]
@@ -198,7 +197,7 @@ mod tests {
         let (status, _) = get_json(app, "DELETE", "/api/secrets/recreated/purge", None).await;
         assert_eq!(status, StatusCode::OK);
         let history = state
-            .backend
+            .active_backend()
             .secrets()
             .get_secret_version("default", "recreated", "v1", true)
             .await

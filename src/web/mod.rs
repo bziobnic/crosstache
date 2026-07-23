@@ -1,7 +1,7 @@
 //! Embedded localhost web UI. Feature-gated on `ui`.
 //! See `docs/superpowers/specs/2026-07-08-web-ui-design.md`.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{Path, Request};
@@ -32,6 +32,7 @@ const UI_MODEL_JS: &str = include_str!("assets/ui-model.js");
 #[cfg(test)]
 const APP_JS: &str = concat!(
     include_str!("assets/app.js"),
+    include_str!("assets/context.js"),
     include_str!("assets/secrets.js"),
 );
 #[cfg(test)]
@@ -46,6 +47,7 @@ fn asset(path: &str) -> Option<(&'static str, &'static str)> {
         )),
         "/store.js" => Some(("application/javascript", include_str!("assets/store.js"))),
         "/dialogs.js" => Some(("application/javascript", include_str!("assets/dialogs.js"))),
+        "/context.js" => Some(("application/javascript", include_str!("assets/context.js"))),
         "/accessibility.js" => Some((
             "application/javascript",
             include_str!("assets/accessibility.js"),
@@ -124,16 +126,64 @@ fn is_api_error_envelope(bytes: &[u8]) -> bool {
 
 /// Shared state for all handlers.
 pub(crate) struct WebState {
-    pub backend: Arc<dyn Backend>,
-    pub(crate) context: context::EffectiveUiContext,
     pub token: String,
-    /// Default vault, resolved once at startup. Requests may override per-call.
-    pub vault: String,
     /// Record types (builtin + [types.*] config), resolved once at startup.
     pub types: Vec<crate::records::RecordType>,
     /// Versioned presentation-only preferences. This store is independent of
     /// backend and vault state and never receives secret data.
     pub(crate) preferences: preferences::PreferenceStore,
+    pub(crate) registry: Arc<BackendRegistry>,
+    active: RwLock<ActiveWebTarget>,
+}
+
+#[derive(Clone)]
+struct ActiveWebTarget {
+    backend: Arc<dyn Backend>,
+    context: context::EffectiveUiContext,
+}
+
+impl WebState {
+    pub(crate) fn new(
+        backend: Arc<dyn Backend>,
+        context: context::EffectiveUiContext,
+        token: String,
+        types: Vec<crate::records::RecordType>,
+        preferences: preferences::PreferenceStore,
+        registry: Arc<BackendRegistry>,
+    ) -> Self {
+        Self {
+            token,
+            types,
+            preferences,
+            registry,
+            active: RwLock::new(ActiveWebTarget { backend, context }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_backend(&self) -> Arc<dyn Backend> {
+        self.active_target().0
+    }
+
+    pub(crate) fn active_context(&self) -> context::EffectiveUiContext {
+        self.active_target().1
+    }
+
+    pub(crate) fn active_target(&self) -> (Arc<dyn Backend>, context::EffectiveUiContext) {
+        let active = self
+            .active
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (active.backend.clone(), active.context.clone())
+    }
+
+    pub(crate) fn activate(&self, backend: Arc<dyn Backend>, context: context::EffectiveUiContext) {
+        *self
+            .active
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            ActiveWebTarget { backend, context };
+    }
 }
 
 /// A bound web UI server that has not started accepting requests yet.
@@ -175,6 +225,8 @@ impl PreparedWebServer {
 pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
         .route("/context", get(context::get_context))
+        .route("/context/activate", post(context::activate_context))
+        .route("/workspaces/activate", post(context::activate_workspace))
         .route("/vaults", get(api::list_vaults))
         .route("/types", get(api::list_types))
         .route(
@@ -250,10 +302,17 @@ pub async fn prepare_web(
     let cwd = std::env::current_dir()?;
     let effective = crate::config::project::resolve_effective_backend_config(&config, &cwd).await?;
     effective.config.validate()?;
-    let registry =
-        BackendRegistry::from_config(&effective.config).map_err(CrosstacheError::from)?;
+    let mut backend_names = vec!["azure".to_string(), "local".to_string(), "aws".to_string()];
+    for name in effective.config.named_backends.keys() {
+        if !backend_names.contains(name) {
+            backend_names.push(name.clone());
+        }
+    }
+    let registry = Arc::new(
+        BackendRegistry::with_lazy(&effective.config, &backend_names)
+            .map_err(CrosstacheError::from)?,
+    );
     let resolved = context::resolve_ui_context_from_effective(&effective, &registry, &cwd).await?;
-    let vault = resolved.context.vault.clone();
     let backend = resolved.backend;
     // Fail loud at startup on a broken [types.*] block, matching the CLI's
     // eager type-resolution paths.
@@ -263,14 +322,14 @@ pub async fn prepare_web(
     rand::rng().fill_bytes(&mut buf);
     let token = hex::encode(buf);
 
-    let state = Arc::new(WebState {
+    let state = Arc::new(WebState::new(
         backend,
-        context: resolved.context,
-        token: token.clone(),
-        vault,
+        resolved.context,
+        token.clone(),
         types,
-        preferences: preference_store,
-    });
+        preference_store,
+        registry,
+    ));
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))

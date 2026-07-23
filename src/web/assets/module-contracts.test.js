@@ -11,6 +11,7 @@ test('frontend modules expose the approved boundaries', () => {
     'api-client.js': 'export function createApiClient',
     'store.js': 'export function createStore',
     'dialogs.js': 'export function createDialogManager',
+    'context.js': 'export function mountContextRail',
     'preferences.js': 'export function createPreferenceClient',
     'secrets.js': 'export function mountSecrets',
   };

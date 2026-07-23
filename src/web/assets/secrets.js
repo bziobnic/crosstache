@@ -1,6 +1,7 @@
 import * as XvUiModel from './ui-model.js';
 import { guardNavigation } from './dialogs.js';
 import { setProtectedValueStatus } from './accessibility.js';
+import { formatContextLine } from './context.js';
 
 export function createExposureTimer({ seconds, onTick, onExpire, clock = globalThis }) {
   const duration = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -84,6 +85,7 @@ export function mountSecrets({
   store,
   dialogs,
   preferences = null,
+  contextRail = null,
   token,
   exposureClock = globalThis,
   clipboard = globalThis.navigator?.clipboard,
@@ -146,9 +148,10 @@ function confirmDeletion(kind, names) {
   const cancel = $('#cancel-delete');
   const confirm = $('#confirm-delete');
   const plural = kind === 'file' ? 'files' : 'secrets';
+  const scope = store.snapshot().context || ctx;
   const model = deleteConfirmationModel({
-    backend: ctx.backend,
-    vault: currentVault,
+    backend: scope.backend,
+    vault: scope.vault,
     names,
     recoverable: kind === 'secret' && !!ctx.capabilities.soft_delete,
     kind,
@@ -1018,7 +1021,7 @@ function syncPendingDisabled(control, pending) {
 
 function syncDraftControls() {
   const pending = store.snapshot().savePending;
-  for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash', '#vault-select', '#save', '#delete']) {
+  for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash', '#workspace-select', '#save', '#delete']) {
     syncPendingDisabled($(selector), pending);
   }
   const backdrop = $('#drawer-backdrop');
@@ -1033,6 +1036,10 @@ function setSavePending(value) {
   if (eventApi?.emit) {
     Promise.resolve(eventApi.emit('xv://save-pending-changed', Boolean(value))).catch(() => {});
   }
+}
+
+function currentContextLine() {
+  return formatContextLine(store.snapshot().context || ctx);
 }
 
 function beginDraft() {
@@ -1076,7 +1083,26 @@ async function requestDrawerClose(afterClose) {
   return true;
 }
 
-store.subscribe(syncDraftControls);
+store.subscribe((snapshot, event) => {
+  syncDraftControls();
+  if (event.type === 'context/switch-started' && !$('#drawer').hidden) closeDrawer();
+  if (event.type !== 'context/switch-succeeded') return;
+  ctx = snapshot.context;
+  currentVault = ctx.vault;
+  secrets = snapshot.initialSecrets;
+  secretsState = 'ready';
+  secretLoadGeneration++;
+  fileLoadGeneration++;
+  clearSelection('secrets');
+  clearSelection('files');
+  expandedSecretFolders.clear();
+  expandedFileFolders.clear();
+  applyContextCapabilities();
+  clearListLoadError('secrets');
+  renderSecrets();
+  if (ctx.capabilities.files) loadFiles(currentVault).catch(fail);
+  if (activeTab === 'trash') loadDeleted(currentVault).catch(fail);
+});
 
 function setRevealLabel(button, label) {
   if (button.id === 'reveal') {
@@ -1246,6 +1272,7 @@ const vaultQS = (vault) => `?vault=${encodeURIComponent(vault)}`;
 let authRecoveryActive = false;
 function showAuthRecovery() {
   authRecoveryActive = true;
+  $('#context-rail').hidden = true;
   $('#vault-context').hidden = true;
   $('#vault-tabs').hidden = true;
   $('#secrets-view').hidden = true;
@@ -1254,13 +1281,19 @@ function showAuthRecovery() {
   $('#auth-recovery').hidden = false;
 }
 
+function applyContextCapabilities() {
+  $('#backend-badge').textContent = ctx.backend;
+  $('#tab-files').hidden = !ctx.capabilities.files;
+  $('#tab-trash').hidden = !ctx.capabilities.soft_delete;
+}
+
 async function init() {
   if (!token) {
     showAuthRecovery();
     return;
   }
   try {
-    ctx = await api('GET', '/api/context');
+    ctx = contextRail ? await contextRail.ready : await api('GET', '/api/context');
   } catch (e) {
     if (e.status === 401) {
       showAuthRecovery();
@@ -1269,9 +1302,7 @@ async function init() {
     throw e;
   }
   currentVault = ctx.vault;
-  $('#backend-badge').textContent = ctx.backend;
-  $('#tab-files').hidden = !ctx.capabilities.files;
-  $('#tab-trash').hidden = !ctx.capabilities.soft_delete;
+  applyContextCapabilities();
   ({ types } = await api('GET', '/api/types'));
   const picker = $('#type-picker');
   picker.innerHTML = '';
@@ -1296,33 +1327,35 @@ async function init() {
     }
     updateDraft();
   };
-  const { vaults } = await api('GET', '/api/vaults');
-  const sel = $('#vault-select');
-  sel.innerHTML = '';
-  for (const v of vaults) {
-    const opt = document.createElement('option');
-    opt.value = opt.textContent = v.name;
-    opt.selected = v.name === currentVault;
-    sel.appendChild(opt);
-  }
-  sel.onchange = async () => {
-    const nextVault = sel.value;
-    if (!(await requestDrawerClose())) {
-      sel.value = currentVault;
-      return;
+  if (!contextRail) {
+    const { vaults } = await api('GET', '/api/vaults');
+    const legacySelector = $('#vault-select');
+    legacySelector.innerHTML = '';
+    for (const vaultEntry of vaults) {
+      const option = document.createElement('option');
+      option.value = option.textContent = vaultEntry.name;
+      option.selected = vaultEntry.name === currentVault;
+      legacySelector.appendChild(option);
     }
-    currentVault = nextVault;
-    const vault = currentVault;
-    secretLoadGeneration++;
-    fileLoadGeneration++;
-    clearSelection('secrets');
-    clearSelection('files');
-    expandedSecretFolders.clear();
-    expandedFileFolders.clear();
-    loadSecrets(vault).catch(fail);
-    if (ctx.capabilities.files) loadFiles(vault).catch(fail);
-    if (activeTab === 'trash') loadDeleted(vault).catch(fail);
-  };
+    legacySelector.onchange = async () => {
+      const nextVault = legacySelector.value;
+      if (!(await requestDrawerClose())) {
+        legacySelector.value = currentVault;
+        return;
+      }
+      currentVault = nextVault;
+      const selectedVault = currentVault;
+      secretLoadGeneration++;
+      fileLoadGeneration++;
+      clearSelection('secrets');
+      clearSelection('files');
+      expandedSecretFolders.clear();
+      expandedFileFolders.clear();
+      loadSecrets(selectedVault).catch(fail);
+      if (ctx.capabilities.files) loadFiles(selectedVault).catch(fail);
+      if (activeTab === 'trash') loadDeleted(selectedVault).catch(fail);
+    };
+  }
   const vault = currentVault;
   if (!(await loadSecrets(vault))) return;
   if (ctx.capabilities.files) await loadFiles(vault);
@@ -1585,7 +1618,8 @@ function confirmPurge(name) {
   const cancel = $('#cancel-purge');
   const confirm = $('#confirm-purge');
   $('#purge-title').textContent = `Permanently purge ${name}?`;
-  $('#purge-message').textContent = `Permanently purging ${name} from ${ctx.backend} vault ${currentVault} cannot be undone.`;
+  const scope = store.snapshot().context || ctx;
+  $('#purge-message').textContent = `Permanently purging ${name} from ${scope.backend} vault ${scope.vault} cannot be undone.`;
   $('#purge-input-label').textContent = `Type ${name} to confirm`;
   input.setAttribute('aria-label', `Type ${name} to confirm`);
   input.value = '';
@@ -1652,6 +1686,7 @@ async function openDrawerNow(name, invoker) {
   };
   $('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret';
   $('#drawer-title').textContent = name || 'New secret';
+  $('#drawer-context').textContent = currentContextLine();
   $('#save').textContent = name ? 'Save changes' : 'Create secret';
   f.elements.name.value = name || '';
   f.elements.name.readOnly = false;
@@ -2269,15 +2304,23 @@ async function downloadFile(name) {
 }
 
 async function uploadFiles(fileList) {
-  for (const file of fileList) {
-    const form = new FormData();
-    form.append('file', file, file.name);
-    try {
-      await api('POST', `/api/files${vaultQS(currentVault)}`, form);
-      toast(`uploaded ${file.name}`);
-    } catch (e) { fail(e); }
+  if (store.snapshot().savePending) return;
+  const uploadVault = currentVault;
+  const uploadScope = currentContextLine();
+  setSavePending(true);
+  try {
+    for (const file of fileList) {
+      const form = new FormData();
+      form.append('file', file, file.name);
+      try {
+        await api('POST', `/api/files${vaultQS(uploadVault)}`, form);
+        toast(`Uploaded ${file.name} to ${uploadScope}`);
+      } catch (e) { fail(e); }
+    }
+    if (uploadVault === currentVault) await loadFiles(uploadVault);
+  } finally {
+    setSavePending(false);
   }
-  await loadFiles(currentVault);
 }
 
 const dz = $('#dropzone');

@@ -30,3 +30,20 @@ test('API client creates XHRs through its injected factory', () => {
   assert.equal(client.createXhr(), sentinel);
   assert.equal(calls, 1);
 });
+
+test('API client forwards an abort signal without changing authentication', async () => {
+  const controller = new AbortController();
+  let options;
+  const client = createApiClient({
+    token: 'session-token',
+    fetchImpl: async (_path, requestOptions) => {
+      options = requestOptions;
+      return { ok: true, text: async () => '' };
+    },
+  });
+
+  await client('GET', '/api/context', undefined, false, { signal: controller.signal });
+
+  assert.equal(options.signal, controller.signal);
+  assert.equal(options.headers.Authorization, 'Bearer session-token');
+});

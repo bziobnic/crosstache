@@ -1,0 +1,260 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { createStore } from './store.js';
+import { contextDetails, formatContextLine, mountContextRail } from './context.js';
+
+const primary = Object.freeze({
+  backend: 'az-prod',
+  backend_kind: 'azure',
+  vault: 'payments',
+  workspace: {
+    alias: 'work',
+    entries: [
+      { alias: 'work', backend: 'az-prod', vault: 'payments', default: true },
+      { alias: 'stage', backend: 'local-stage', vault: 'sandbox', default: false },
+    ],
+  },
+  project: { name: 'checkout', path: '/work/checkout' },
+  environment: { name: 'prod' },
+  sources: {
+    backend: 'project-environment',
+    vault: 'workspace-entry',
+    workspace: 'project-environment',
+    project: 'project',
+    environment: 'project',
+  },
+  connection: { state: 'connected', message: null },
+  capabilities: { files: false, soft_delete: true, purge: false },
+  version: '1.2.3',
+});
+
+const stage = Object.freeze({
+  ...primary,
+  backend: 'local-stage',
+  backend_kind: 'local',
+  vault: 'sandbox',
+  workspace: { ...primary.workspace, alias: 'stage' },
+  environment: { name: 'stage' },
+  connection: { state: 'unavailable', message: 'The selected backend is unavailable.' },
+  capabilities: { files: true, soft_delete: false, purge: false },
+});
+
+test('context line keeps backend and vault unambiguous', () => {
+  assert.equal(formatContextLine({
+    backend: { name: 'az-prod' },
+    vault: { name: 'payments' },
+    project: { name: 'checkout' },
+    environment: { name: 'prod' },
+  }), 'az-prod / payments · checkout · prod');
+  assert.equal(formatContextLine(primary), 'az-prod / payments · checkout · prod');
+});
+
+test('context details disclose provenance, capability limits, connection, and version', () => {
+  const details = contextDetails(primary);
+  assert.deepEqual(details.values, [
+    { label: 'Backend', value: 'az-prod (azure)', source: 'Project environment' },
+    { label: 'Vault', value: 'payments', source: 'Workspace entry' },
+    { label: 'Workspace', value: 'work', source: 'Project environment' },
+    { label: 'Project', value: 'checkout', source: 'Project' },
+    { label: 'Environment', value: 'prod', source: 'Project' },
+  ]);
+  assert.equal(details.connection, 'Connected');
+  assert.deepEqual(details.limitations, ['File storage unavailable', 'Permanent purge unavailable']);
+  assert.equal(details.version, '1.2.3');
+});
+
+class FakeElement {
+  constructor() {
+    this.value = '';
+    this.textContent = '';
+    this.hidden = false;
+    this.disabled = false;
+    this.innerHTML = '';
+    this.children = [];
+    this.dataset = {};
+    this.listeners = new Map();
+    this.attributes = new Map();
+  }
+
+  appendChild(child) { this.children.push(child); }
+  replaceChildren(...children) { this.children = children; }
+  addEventListener(type, listener) { this.listeners.set(type, listener); }
+  removeEventListener(type) { this.listeners.delete(type); }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  removeAttribute(name) { this.attributes.delete(name); }
+  async change(value) {
+    this.value = value;
+    await this.listeners.get('change')?.({ currentTarget: this });
+  }
+}
+
+function fakeDocument() {
+  const elements = new Map([
+    ['context-line', new FakeElement()],
+    ['context-backend-kind', new FakeElement()],
+    ['context-connection', new FakeElement()],
+    ['context-capabilities', new FakeElement()],
+    ['context-details-list', new FakeElement()],
+    ['workspace-select', new FakeElement()],
+    ['context-error', new FakeElement()],
+    ['context-error-message', new FakeElement()],
+    ['context-version', new FakeElement()],
+  ]);
+  return {
+    elements,
+    getElementById(id) { return elements.get(id) ?? null; },
+    createElement() { return new FakeElement(); },
+    querySelectorAll() { return []; },
+  };
+}
+
+function reducer(state, event) {
+  switch (event.type) {
+    case 'context/loaded':
+      return { ...state, context: event.context };
+    case 'context/switch-started':
+      return { ...state, contextSwitchPending: true };
+    case 'context/switch-succeeded':
+      return {
+        ...state,
+        context: event.context,
+        initialSecrets: event.secrets,
+        contextSwitchPending: false,
+        contextError: null,
+      };
+    case 'context/switch-failed':
+      return { ...state, contextSwitchPending: false, contextError: event.error };
+    case 'draft/save-pending':
+      return { ...state, savePending: Boolean(event.value) };
+    default:
+      return state;
+  }
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+async function mounted({ api, guardNavigation = async () => true, initial = primary } = {}) {
+  const document = fakeDocument();
+  const store = createStore({
+    context: null,
+    initialSecrets: null,
+    contextSwitchPending: false,
+    contextError: null,
+    draft: null,
+    savePending: false,
+  }, reducer);
+  const calls = [];
+  const request = api ?? (async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (method === 'GET') return initial;
+    if (path === '/api/context/activate') return { context: stage };
+    return { secrets: [{ name: 'stage-only' }] };
+  });
+  const rail = mountContextRail({ store, api: request, guardNavigation, document });
+  await rail.ready;
+  return { document, store, calls, rail };
+}
+
+test('mounted switch commits context and list together after the guard', async () => {
+  const order = [];
+  const api = async (method) => {
+    order.push(method);
+    if (method === 'GET') return primary;
+    return order.filter((item) => item === 'POST').length === 1
+      ? { context: stage }
+      : { secrets: [{ name: 'stage-only' }] };
+  };
+  const fixture = await mounted({
+    api,
+    guardNavigation: async () => { order.push('guard'); return true; },
+  });
+
+  await fixture.rail.switchTo('stage');
+
+  assert.deepEqual(order, ['GET', 'guard', 'POST', 'POST']);
+  assert.equal(fixture.store.snapshot().context.backend, 'local-stage');
+  assert.deepEqual(fixture.store.snapshot().initialSecrets, [{ name: 'stage-only' }]);
+  assert.equal(fixture.document.getElementById('context-line').textContent,
+    'local-stage / sandbox · checkout · stage');
+});
+
+test('dirty draft rejection and save lock preserve the current context', async () => {
+  let guardCalls = 0;
+  let activationCalls = 0;
+  const fixture = await mounted({
+    guardNavigation: async () => { guardCalls++; return false; },
+    api: async (method) => {
+      if (method === 'GET') return primary;
+      activationCalls++;
+      return activationCalls === 1 ? { context: stage } : { secrets: [] };
+    },
+  });
+  const select = fixture.document.getElementById('workspace-select');
+
+  select.value = 'stage';
+  await fixture.rail.switchTo('stage');
+  assert.equal(fixture.store.snapshot().context.backend, 'az-prod');
+  assert.equal(select.value, 'work');
+  assert.equal(activationCalls, 0);
+
+  fixture.store.dispatch({ type: 'draft/save-pending', value: true });
+  await fixture.rail.switchTo('stage');
+  assert.equal(guardCalls, 1);
+  assert.equal(activationCalls, 0);
+  assert.equal(fixture.store.snapshot().context.backend, 'az-prod');
+});
+
+test('obsolete out-of-order switch cannot replace the latest context', async () => {
+  const first = deferred();
+  const second = deferred();
+  let activation = 0;
+  const fixture = await mounted({
+    api: async (method, path, body) => {
+      if (method === 'GET') return primary;
+      if (path === '/api/context/activate') {
+        return { context: body.alias === 'work' ? primary : stage };
+      }
+      activation++;
+      return activation === 1 ? first.promise : second.promise;
+    },
+  });
+
+  const firstSwitch = fixture.rail.switchTo('stage');
+  while (activation < 1) await Promise.resolve();
+  const secondSwitch = fixture.rail.switchTo('work');
+  while (activation < 2) await Promise.resolve();
+  second.resolve({ secrets: [{ name: 'current' }] });
+  await secondSwitch;
+  first.resolve({ secrets: [{ name: 'stale' }] });
+  await firstSwitch;
+
+  assert.equal(fixture.store.snapshot().context.backend, 'az-prod');
+  assert.deepEqual(fixture.store.snapshot().initialSecrets, [{ name: 'current' }]);
+});
+
+for (const missing of ['context', 'secrets']) {
+  test(`a partial activation missing ${missing} rolls back to the prior snapshot`, async () => {
+    const fixture = await mounted({
+      api: async (method, path) => {
+        if (method === 'GET') return primary;
+        if (path === '/api/context/activate') {
+          return missing === 'context' ? {} : { context: stage };
+        }
+        return missing === 'secrets' ? {} : { secrets: [] };
+      },
+    });
+
+    await fixture.rail.switchTo('stage');
+
+    assert.equal(fixture.store.snapshot().context.backend, 'az-prod');
+    assert.equal(fixture.store.snapshot().initialSecrets, null);
+    assert.equal(fixture.store.snapshot().contextSwitchPending, false);
+    assert.match(fixture.store.snapshot().contextError.message, /activation/i);
+  });
+}

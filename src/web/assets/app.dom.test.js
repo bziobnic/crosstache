@@ -95,6 +95,9 @@ function bootstrapDocument() {
     setAttribute() {},
     replaceChildren() {},
     appendChild() {},
+    addEventListener() {},
+    removeEventListener() {},
+    querySelector() { return { textContent: '', hidden: false, setAttribute() {} }; },
   });
   const get = (selector) => {
     if (!elements.has(selector)) elements.set(selector, element());

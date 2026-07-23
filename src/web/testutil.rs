@@ -19,14 +19,15 @@ fn test_state_with_token_and_preferences(
 ) -> Arc<WebState> {
     let backend: Arc<dyn crate::backend::Backend> = Arc::new(stub::StubBackend::new());
     let context = test_context(backend.as_ref(), "default", clipboard_timeout);
-    Arc::new(WebState {
+    let registry = Arc::new(crate::backend::BackendRegistry::new(backend.clone()));
+    Arc::new(WebState::new(
         backend,
         context,
-        token: token.to_string(),
-        vault: "default".to_string(),
-        types: crate::records::builtin_types(),
-        preferences: super::preferences::PreferenceStore::new(path, clipboard_timeout),
-    })
+        token.to_string(),
+        crate::records::builtin_types(),
+        super::preferences::PreferenceStore::new(path, clipboard_timeout),
+        registry,
+    ))
 }
 
 pub(crate) fn test_context(
@@ -102,6 +103,7 @@ pub(crate) mod stub {
         name: &'static str,
         capabilities: BackendCapabilities,
         health_error: Option<&'static str>,
+        list_error: Option<&'static str>,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         pub deleted: Mutex<HashMap<String, SecretRequest>>,
         #[cfg(feature = "file-ops")]
@@ -136,6 +138,7 @@ pub(crate) mod stub {
                 name,
                 capabilities,
                 health_error: None,
+                list_error: None,
                 secrets: Mutex::new(HashMap::new()),
                 deleted: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
@@ -146,6 +149,12 @@ pub(crate) mod stub {
         pub(crate) fn with_health_error(name: &'static str, health_error: &'static str) -> Self {
             let mut backend = Self::with_capabilities(name, BackendCapabilities::default());
             backend.health_error = Some(health_error);
+            backend
+        }
+
+        pub(crate) fn with_list_error(name: &'static str, list_error: &'static str) -> Self {
+            let mut backend = Self::with_capabilities(name, BackendCapabilities::default());
+            backend.list_error = Some(list_error);
             backend
         }
     }
@@ -258,6 +267,9 @@ pub(crate) mod stub {
             _vault: &str,
             group_filter: Option<&str>,
         ) -> Result<Vec<SecretSummary>, BackendError> {
+            if let Some(message) = self.list_error {
+                return Err(BackendError::Internal(message.into()));
+            }
             let secrets = self.secrets.lock().unwrap();
             let summaries = secrets
                 .values()

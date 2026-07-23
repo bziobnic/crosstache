@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, BackendCapabilities, BackendKind, BackendRegistry};
 use crate::config::project::{
@@ -117,7 +117,85 @@ pub(crate) struct ResolvedUiContext {
 pub(crate) async fn get_context(
     State(state): State<Arc<super::WebState>>,
 ) -> Json<EffectiveUiContext> {
-    Json(state.context.clone())
+    Json(state.active_context())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ActivateContextRequest {
+    alias: String,
+    backend: String,
+    vault: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ActivateContextResponse {
+    context: EffectiveUiContext,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ActivateWorkspaceResponse {
+    secrets: Vec<crate::secret::manager::SecretSummary>,
+}
+
+async fn resolve_activation_candidate(
+    state: &super::WebState,
+    request: &ActivateContextRequest,
+) -> std::result::Result<(Arc<dyn Backend>, EffectiveUiContext), super::api::ApiError> {
+    let current = state.active_context();
+    let entry = current
+        .workspace
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.alias == request.alias
+                && entry.backend == request.backend
+                && entry.vault == request.vault
+        })
+        .cloned()
+        .ok_or(super::api::ApiError::Validation {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: "Choose an attached workspace entry.",
+            field: Some("workspace"),
+        })?;
+    let backend = state.registry.materialize(&entry.backend)?;
+    let connection = match backend.health_check().await {
+        Ok(()) => ConnectionSummary {
+            state: "connected".into(),
+            message: None,
+        },
+        Err(_) => ConnectionSummary {
+            state: "unavailable".into(),
+            message: Some("The selected backend is unavailable.".into()),
+        },
+    };
+    let mut context = current;
+    context.backend = entry.backend.clone();
+    context.backend_kind = backend.kind();
+    context.vault = entry.vault.clone();
+    context.workspace.alias = entry.alias.clone();
+    context.sources.backend = ContextSource::WorkspaceEntry;
+    context.sources.vault = ContextSource::WorkspaceEntry;
+    context.connection = connection;
+    context.capabilities = CapabilitySummary::from(backend.capabilities());
+    Ok((backend, context))
+}
+
+pub(crate) async fn activate_context(
+    State(state): State<Arc<super::WebState>>,
+    Json(request): Json<ActivateContextRequest>,
+) -> std::result::Result<Json<ActivateContextResponse>, super::api::ApiError> {
+    let (_, context) = resolve_activation_candidate(&state, &request).await?;
+    Ok(Json(ActivateContextResponse { context }))
+}
+
+pub(crate) async fn activate_workspace(
+    State(state): State<Arc<super::WebState>>,
+    Json(request): Json<ActivateContextRequest>,
+) -> std::result::Result<Json<ActivateWorkspaceResponse>, super::api::ApiError> {
+    let (backend, context) = resolve_activation_candidate(&state, &request).await?;
+    let secrets = backend.secrets().list_secrets(&context.vault, None).await?;
+    state.activate(backend, context.clone());
+    Ok(Json(ActivateWorkspaceResponse { secrets }))
 }
 
 struct ProjectResolution {
@@ -610,6 +688,108 @@ vaults = [
     }
 
     #[tokio::test]
+    async fn activation_routes_keep_context_display_safe_and_publish_after_the_list() {
+        let app = crate::web::build_router(crate::web::testutil::test_state());
+        let request = json!({
+            "alias": "default",
+            "backend": "stub",
+            "vault": "default"
+        });
+        let (status, body) = crate::web::api::tests::get_json(
+            app.clone(),
+            "POST",
+            "/api/context/activate",
+            Some(request.clone()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["context"]["backend"], "stub");
+        assert_eq!(body["context"]["vault"], "default");
+        assert!(body.get("secrets").is_none());
+        assert!(!body.to_string().contains("\"name\":"));
+
+        let (status, body) = crate::web::api::tests::get_json(
+            app,
+            "POST",
+            "/api/workspaces/activate",
+            Some(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["secrets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn activation_list_failure_preserves_the_previous_routed_target() {
+        use std::sync::Arc;
+
+        use crate::web::testutil::stub::StubBackend;
+
+        let primary: Arc<dyn crate::backend::Backend> = Arc::new(StubBackend::with_capabilities(
+            "primary",
+            Default::default(),
+        ));
+        let failing: Arc<dyn crate::backend::Backend> = Arc::new(StubBackend::with_list_error(
+            "stage",
+            "safe fixture failure",
+        ));
+        let registry = Arc::new(BackendRegistry::for_test(
+            "primary",
+            vec![("primary", primary.clone()), ("stage", failing)],
+        ));
+        let mut context = crate::web::testutil::test_context(primary.as_ref(), "payments", 30);
+        context.workspace.configured = true;
+        context.workspace.alias = "work".into();
+        context.workspace.entries = vec![
+            super::WorkspaceEntrySummary {
+                alias: "work".into(),
+                backend: "primary".into(),
+                vault: "payments".into(),
+                default: true,
+            },
+            super::WorkspaceEntrySummary {
+                alias: "stage".into(),
+                backend: "stage".into(),
+                vault: "sandbox".into(),
+                default: false,
+            },
+        ];
+        let root = tempfile::tempdir().expect("preferences");
+        let state = Arc::new(crate::web::WebState::new(
+            primary,
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(root.path().join("ui.json"), 30),
+            registry,
+        ));
+        let app = crate::web::build_router(state);
+
+        let (status, _) = crate::web::api::tests::get_json(
+            app.clone(),
+            "POST",
+            "/api/workspaces/activate",
+            Some(json!({"alias":"stage","backend":"stage","vault":"sandbox"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let (_, context) =
+            crate::web::api::tests::get_json(app.clone(), "GET", "/api/context", None).await;
+        assert_eq!(context["backend"], "primary");
+        assert_eq!(context["vault"], "payments");
+        let (status, _) = crate::web::api::tests::get_json(
+            app,
+            "PUT",
+            "/api/secrets/still-primary",
+            Some(json!({"value":"not persisted in context"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn capabilities_come_from_workspace_backend_not_registry_default() {
         use std::sync::Arc;
 
@@ -931,17 +1111,16 @@ vaults = [
         assert_eq!(resolved.backend.name(), "local");
         assert_eq!(global_backend.secrets.lock().unwrap().len(), 0);
 
-        let state = Arc::new(crate::web::WebState {
-            backend: resolved.backend,
-            context: resolved.context,
-            token: "test-token".into(),
-            vault: "desktop-vault".into(),
-            types: crate::records::builtin_types(),
-            preferences: crate::web::preferences::PreferenceStore::new(
-                root.path().join("ui.json"),
-                30,
-            ),
-        });
+        let routed_backend = resolved.backend;
+        let routed_registry = Arc::new(BackendRegistry::new(routed_backend.clone()));
+        let state = Arc::new(crate::web::WebState::new(
+            routed_backend,
+            resolved.context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(root.path().join("ui.json"), 30),
+            routed_registry,
+        ));
         let app = crate::web::build_router(state);
         let (status, _) = crate::web::api::tests::get_json(
             app.clone(),

@@ -24,11 +24,17 @@ function modalDocument() {
     listeners: new Map(),
     header: null,
     main: null,
-    querySelectorAll(selector) { return selector === 'header, main' ? [this.header, this.main] : []; },
+    contextRail: null,
+    querySelectorAll(selector) {
+      return selector === 'header, main, #context-rail'
+        ? [this.header, this.main, this.contextRail]
+        : [];
+    },
     addEventListener(type, listener) { this.listeners.set(type, listener); },
   };
   document.header = new DialogElement(document);
   document.main = new DialogElement(document);
+  document.contextRail = new DialogElement(document);
   return document;
 }
 
@@ -57,6 +63,7 @@ test('modal manager keeps the page unavailable until the nested modal closes', (
   assert.equal(manager.topModal(), sheet);
   assert.equal(document.main.getAttribute('aria-hidden'), 'true');
   assert.equal(document.header.getAttribute('aria-hidden'), 'true');
+  assert.equal(document.contextRail.getAttribute('aria-hidden'), 'true');
 
   manager.openModal(confirmation, { initialFocus: keepEditing, invoker: keepEditing });
   assert.equal(sheet.getAttribute('aria-hidden'), 'true');
@@ -70,6 +77,7 @@ test('modal manager keeps the page unavailable until the nested modal closes', (
   assert.equal(manager.topModal(), null);
   assert.equal(document.activeElement, invoker);
   assert.equal(document.main.getAttribute('aria-hidden'), null);
+  assert.equal(document.contextRail.getAttribute('aria-hidden'), null);
 });
 
 test('modal manager cycles Tab and delegates Escape to the top modal', () => {
