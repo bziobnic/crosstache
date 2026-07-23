@@ -1,4 +1,12 @@
-import { test, expect } from './fixtures.js';
+import { test, expect, expectNoSeriousOrCriticalAxeViolations } from './fixtures.js';
+
+async function expectPlainValueControlsOutsideLabel(page) {
+  const reveal = page.getByRole('button', { name: 'Reveal value', exact: true });
+  const copy = page.getByRole('button', { name: 'Copy value', exact: true });
+  await expect(reveal).toHaveAttribute('aria-describedby', 'value-protection-state protected-value-status');
+  await expect(copy).toHaveAttribute('aria-describedby', 'value-protection-state protected-value-status');
+  await expect(page.locator('#value-section label button')).toHaveCount(0);
+}
 
 async function installClipboard(page) {
   await page.addInitScript(() => {
@@ -53,48 +61,52 @@ async function seedRecord(page, name) {
   await page.getByRole('button', { name: `Edit secret ${name}` }).click();
 }
 
-test('copy countdown clears only an unchanged clipboard without announcing the value', async ({ page, appUrl }) => {
+test('copy countdown clears only an unchanged clipboard without announcing the value', async ({ page, baseURL }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.stack || error.message));
   await installClipboard(page);
-  await page.goto(appUrl);
+  await page.goto(baseURL);
   await page.waitForTimeout(100);
   expect(pageErrors).toEqual([]);
   await createAndOpenSecret(page, 'copy-lifecycle', 'never-announce-this');
+  await expectPlainValueControlsOutsideLabel(page);
   await page.clock.install();
 
   const status = page.locator('#protected-value-status');
-  await page.getByRole('button', { name: 'Copy', exact: true }).click();
+  await page.getByRole('button', { name: 'Copy value', exact: true }).click();
   await expect(status).toHaveText('Value copied. Clipboard clears in 30 seconds.');
   await expect(status).not.toContainText('never-announce-this');
+  await expectNoSeriousOrCriticalAxeViolations(page);
   await page.evaluate(() => window.__testClipboard.set('newer-content'));
   await page.clock.runFor(30_000);
   await expect(status).toHaveText('Value clipboard clearing could not be confirmed.');
   await expect.poll(() => page.evaluate(() => window.__testClipboard.get())).toBe('newer-content');
 
-  await page.getByRole('button', { name: 'Copy', exact: true }).click();
+  await page.getByRole('button', { name: 'Copy value', exact: true }).click();
   await page.clock.runFor(30_000);
   await expect(status).toHaveText('Value clipboard cleared.');
   await expect.poll(() => page.evaluate(() => window.__testClipboard.get())).toBe('');
 });
 
-test('reveal inactivity resets and hides on timeout, visibility, blur, close, and save', async ({ page, appUrl }) => {
+test('reveal inactivity resets and hides on timeout, visibility, blur, close, and save', async ({ page, baseURL }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.stack || error.message));
   await installClipboard(page);
-  await page.goto(appUrl);
+  await page.goto(baseURL);
   await page.waitForTimeout(100);
   expect(pageErrors).toEqual([]);
   await createAndOpenSecret(page, 'reveal-lifecycle', 'short-lived-value');
+  await expectPlainValueControlsOutsideLabel(page);
   await page.clock.install();
 
   const value = page.locator('#secret-form textarea[name="value"]');
-  const reveal = page.getByRole('button', { name: 'Reveal', exact: true });
+  const reveal = page.getByRole('button', { name: 'Reveal value', exact: true });
   const status = page.locator('#protected-value-status');
   await reveal.click();
   await expect(value).toHaveValue('short-lived-value');
   await expect(status).toHaveText('Value revealed. Hides in 30 seconds.');
   await expect(status).not.toContainText('short-lived-value');
+  await expectNoSeriousOrCriticalAxeViolations(page);
   await page.clock.runFor(29_000);
   await value.dispatchEvent('pointerdown');
   await page.clock.runFor(29_000);
@@ -122,19 +134,20 @@ test('reveal inactivity resets and hides on timeout, visibility, blur, close, an
   await expect(value).toHaveValue('');
 
   await page.getByRole('button', { name: 'Edit secret reveal-lifecycle' }).click();
-  await page.getByRole('button', { name: 'Reveal', exact: true }).click();
+  await page.getByRole('button', { name: 'Reveal value', exact: true }).click();
   await page.getByRole('button', { name: 'Save changes' }).click();
   await expect(page.locator('#drawer')).toBeHidden();
   await expect(value).toHaveValue('');
 });
 
-test('record protected fields have unique descriptions and announce field-specific countdowns', async ({ page, appUrl }) => {
+test('record protected fields have unique descriptions and announce field-specific countdowns', async ({ page, baseURL }) => {
   await installClipboard(page);
-  await page.goto(appUrl);
+  await page.goto(baseURL);
   await seedRecord(page, 'record-accessibility');
 
   const inputs = page.locator('#record-fields input[data-field-kind="secret"]');
   await expect(inputs).toHaveCount(2);
+  await expect(page.locator('#record-fields label button')).toHaveCount(0);
   const descriptions = await inputs.evaluateAll((elements) => elements.map((input) => {
     const describedBy = input.getAttribute('aria-describedby');
     return { describedBy, descriptionId: describedBy.split(' ')[0] };
@@ -142,6 +155,13 @@ test('record protected fields have unique descriptions and announce field-specif
   expect(new Set(descriptions.map(({ descriptionId }) => descriptionId)).size).toBe(2);
   for (const { describedBy, descriptionId } of descriptions) {
     expect(describedBy).toBe(`${descriptionId} protected-value-status`);
+  }
+
+  for (const name of ['password', 'connection-string']) {
+    const input = page.locator(`#record-fields input[data-field-name="${name}"]`);
+    const describedBy = await input.getAttribute('aria-describedby');
+    await expect(page.getByRole('button', { name: `Reveal ${name}`, exact: true })).toHaveAttribute('aria-describedby', describedBy);
+    await expect(page.getByRole('button', { name: `Copy ${name}`, exact: true })).toHaveAttribute('aria-describedby', describedBy);
   }
 
   await page.getByRole('button', { name: 'Reveal password', exact: true }).click();
@@ -152,4 +172,5 @@ test('record protected fields have unique descriptions and announce field-specif
   await expect(field).toHaveValue('first-browser-value');
   const stateId = (await field.getAttribute('aria-describedby')).split(' ')[0];
   await expect(page.locator(`#${stateId}`)).toContainText(/revealed/);
+  await expectNoSeriousOrCriticalAxeViolations(page);
 });

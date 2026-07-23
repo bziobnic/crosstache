@@ -161,14 +161,15 @@
       <label class="form-field"><span class="field-label">Name <span class="field-hint">Required</span></span><input name="name" required></label>
       <label id="type-picker-label" class="form-field" hidden><span class="field-label">Type</span><select id="type-picker"></select></label>
       <div id="value-section">
-        <label class="form-field"><span class="field-label">Value <span class="field-hint">Protected</span></span>
-          <textarea name="value" rows="4" aria-describedby="value-protection-state protected-value-status" placeholder="Leave blank to keep the current value"></textarea>
+        <div class="form-field">
+          <label class="field-label" for="secret-value">Value <span class="field-hint">Protected</span></label>
+          <textarea id="secret-value" name="value" rows="4" aria-describedby="value-protection-state protected-value-status" placeholder="Leave blank to keep the current value"></textarea>
           <span id="value-protection-state" class="sr-only">Protected value is hidden.</span>
           <span class="field-actions">
-            <button type="button" id="reveal" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg>Reveal</button>
-            <button type="button" id="copy" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy</button>
+            <button type="button" id="reveal" class="button secondary" aria-label="Reveal value" aria-controls="secret-value" aria-describedby="value-protection-state protected-value-status"><svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg>Reveal</button>
+            <button type="button" id="copy" class="button secondary" aria-label="Copy value" aria-controls="secret-value" aria-describedby="value-protection-state protected-value-status"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy</button>
           </span>
-        </label>
+        </div>
       </div>
       <div id="record-section" hidden>
         <div id="record-type"></div>

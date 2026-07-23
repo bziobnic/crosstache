@@ -1,4 +1,5 @@
 import { test as base, expect } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -22,7 +23,12 @@ function startUi(binary, environment) {
 }
 
 export const test = base.extend({
-  appUrl: async ({}, use) => {
+  binary: [async ({}, use) => {
+    const target = path.join(workspace, 'target', 'debug', 'xv');
+    await run('cargo', ['build', '--features', 'ui'], { cwd: workspace, stdio: 'inherit' });
+    await use(target);
+  }, { scope: 'worker' }],
+  appContext: async ({ binary }, use) => {
     const home = await mkdtemp(path.join(tmpdir(), 'xv-playwright-'));
     const configHome = path.join(home, 'config');
     const dataHome = path.join(home, 'data');
@@ -36,8 +42,6 @@ export const test = base.extend({
     });
     await writeFile(path.join(xvConfigHome, 'xv.conf'), config);
 
-    const target = path.join(workspace, 'target', 'debug', 'xv');
-    await run('cargo', ['build', '--features', 'ui'], { cwd: workspace, stdio: 'inherit' });
     const environment = {
       PATH: process.env.PATH,
       HOME: home,
@@ -49,9 +53,9 @@ export const test = base.extend({
       NO_COLOR: '1',
       FORCE_COLOR: '0',
     };
-    const server = startUi(target, environment);
+    const server = startUi(binary, environment);
     try {
-      await use(await server.url);
+      await use({ baseURL: await server.url, vault: 'playwright' });
     } finally {
       if (server.child.exitCode === null && server.child.signalCode === null) {
         server.child.kill('SIGTERM');
@@ -60,6 +64,13 @@ export const test = base.extend({
       await rm(home, { recursive: true, force: true });
     }
   },
+  baseURL: async ({ appContext }, use) => use(appContext.baseURL),
+  vault: async ({ appContext }, use) => use(appContext.vault),
 });
+
+export async function expectNoSeriousOrCriticalAxeViolations(page) {
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations.filter(({ impact }) => ['serious', 'critical'].includes(impact))).toEqual([]);
+}
 
 export { expect };

@@ -37,6 +37,46 @@ Hermetic tests live in:
 - `tests/config_command_tests.rs` — `xv config` command surface
 - `tests/tui_view_tests.rs` — TUI rendering snapshots (feature-gated)
 
+## Hermetic browser and accessibility tests
+
+The embedded UI has Playwright coverage for keyboard/dialog behavior, Trash
+and purge safety, and protected-value reveal/copy lifecycles. Every
+representative state is checked with axe; serious and critical violations fail
+the test and report the owning rule and locator.
+
+Install the test-only JavaScript dependencies and a worktree-local Chromium:
+
+```bash
+npm ci
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright install chromium
+```
+
+Run the focused accessibility gate or the complete browser suite:
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npm run test:a11y
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npm run test:browser
+```
+
+The fixture builds `xv --features ui`, launches `xv ui --no-open`, and exposes
+the generated `baseURL` and `vault` to each test. Each app process receives an
+explicit environment with a temporary `HOME`, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, local backend store and key paths, `XV_BACKEND=local`, and
+`XV_NO_PARENT_CONFIG=1`. It cannot inherit a real Crosstache configuration or
+vault, and its temporary tree is removed during teardown. Protected-value
+tests install an in-page fake clipboard before navigation; they never read or
+write the host clipboard.
+
+The complete safety/accessibility phase gate is:
+
+```bash
+cargo fmt --check
+cargo clippy --features ui --all-targets -- -D warnings
+cargo test --features ui web:: --lib
+node --test src/web/assets/*.test.js
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-accessibility.spec.js tests/web/ui-trash.spec.js tests/web/ui-protected-values.spec.js
+```
+
 ## Live integration (Azure required) — manual / weekly
 
 Tests in `tests/e2e_integration_tests.rs` are `#[ignore]`'d by default.

@@ -794,7 +794,11 @@ mod tests {
         ] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
         }
-        assert!(APP_JS.contains("label.className = 'form-field'"));
+        assert!(APP_JS.contains("field.className = 'form-field'"));
+        assert!(APP_JS.contains("label.className = 'field-label'"));
+        assert!(APP_JS.contains("label.htmlFor = inputId"));
+        assert!(APP_JS.contains("field.append(label, input, protection, row)"));
+        assert!(!APP_JS.contains("label.append(input, protection, row)"));
         assert!(APP_JS
             .contains("$('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret'"));
         assert!(STYLE_CSS.contains(".drawer-footer {"));

@@ -480,8 +480,14 @@ function dataColumns(kind) {
   return [...document.querySelectorAll(`#${kind}-table colgroup col:not(.selection-col)`)];
 }
 function applyColumnWidths(kind, widths) {
-  TABLE_WIDTHS[kind].widths = widths;
+  const config = TABLE_WIDTHS[kind];
+  config.widths = widths;
   dataColumns(kind).forEach((column, index) => { column.style.width = `${widths[index]}%`; });
+  document.querySelectorAll(`#${kind}-table .column-resizer`).forEach((handle, index) => {
+    handle.setAttribute('aria-valuemin', String(config.minimums[index]));
+    handle.setAttribute('aria-valuemax', String(widths[index] + widths[index + 1] - config.minimums[index + 1]));
+    handle.setAttribute('aria-valuenow', String(widths[index]));
+  });
 }
 function saveColumnWidths(kind) {
   const config = TABLE_WIDTHS[kind];
@@ -758,6 +764,7 @@ let exposureLifecycleEpoch = 0;
 let nextExposureToken = 0;
 let protectedStatusOwner = null;
 let nextProtectionDescriptionId = 0;
+let nextRecordFieldId = 0;
 
 function secondsLabel(seconds) {
   return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
@@ -1109,10 +1116,13 @@ function recordExposureIsCurrent({ scope, record, state, input, revision }) {
 }
 
 function fieldRow(name, kind, value, required) {
+  const field = document.createElement('div');
+  field.className = 'form-field';
   const label = document.createElement('label');
-  label.className = 'form-field';
+  const inputId = `record-field-${++nextRecordFieldId}`;
+  label.className = 'field-label';
+  label.htmlFor = inputId;
   const heading = document.createElement('span');
-  heading.className = 'field-label';
   heading.append(name);
   if (required || kind === 'secret') {
     const hint = document.createElement('span');
@@ -1122,6 +1132,7 @@ function fieldRow(name, kind, value, required) {
   }
   label.appendChild(heading);
   const input = document.createElement('input');
+  input.id = inputId;
   input.dataset.fieldName = name;
   input.dataset.fieldKind = kind;
   if (required) input.required = true;
@@ -1142,6 +1153,8 @@ function fieldRow(name, kind, value, required) {
     rev.className = 'button secondary';
     rev.dataset.protectedField = name;
     rev.setAttribute('aria-label', `Reveal ${name}`);
+    rev.setAttribute('aria-controls', inputId);
+    rev.setAttribute('aria-describedby', `${protection.id} protected-value-status`);
     renderProtectedControl(input, rev, state);
     rev.onclick = async () => {
       if (state.masked) {
@@ -1166,6 +1179,8 @@ function fieldRow(name, kind, value, required) {
     cp.type = 'button';
     cp.className = 'button secondary';
     cp.setAttribute('aria-label', `Copy ${name}`);
+    cp.setAttribute('aria-controls', inputId);
+    cp.setAttribute('aria-describedby', `${protection.id} protected-value-status`);
     cp.textContent = 'Copy';
     cp.onclick = async () => {
       try {
@@ -1187,12 +1202,12 @@ function fieldRow(name, kind, value, required) {
       catch (e) { fail(e); }
     };
     row.append(rev, cp);
-    label.append(input, protection, row);
+    field.append(label, input, protection, row);
   } else {
     input.value = value || '';
-    label.append(input);
+    field.append(label, input);
   }
-  return label;
+  return field;
 }
 
 // One input per field: declared fields in CLI prompt order (non-primary
