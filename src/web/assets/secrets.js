@@ -1030,7 +1030,7 @@ function syncPendingDisabled(control, pending) {
 function syncDraftControls() {
   const snapshot = store.snapshot();
   const pending = Boolean(snapshot.savePending || snapshot.contextSwitchPending);
-  for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash', '#workspace-select', '#save', '#delete']) {
+  for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash', '#save', '#delete']) {
     syncPendingDisabled($(selector), pending);
   }
   const backdrop = $('#drawer-backdrop');

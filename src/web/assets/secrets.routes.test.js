@@ -7,6 +7,7 @@ import { createStore, draftReducer } from './store.js';
 import { createDialogManager } from './dialogs.js';
 import { ApiError } from './api-client.js';
 import { PROTECTED_MASK } from './ui-model.js';
+import { mountContextRail } from './context.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -88,6 +89,8 @@ function createDocument() {
     dispatch(type, event = {}) { return document.listeners.get(type)?.({ preventDefault() {}, ...event }); },
   };
   const form = document.element('#secret-form');
+  document.element('#drawer').hidden = true;
+  document.element('#drawer-backdrop').hidden = true;
   form.elements = Object.fromEntries(['name', 'value', 'folder', 'groups', 'note', 'expires_on']
     .map((name) => [name, document.element(`#field-${name}`)]));
   form.reset = () => {
@@ -155,6 +158,8 @@ async function mountRouteUi({
   clipboard = { readText: async () => '', writeText: async () => {} },
   clock = globalThis,
   preferences = null,
+  withContextRail = false,
+  guardNavigation = async () => true,
 } = {}) {
   const { document, elements } = createDocument();
   const previous = new Map(['document', 'navigator', '__TAURI__', 'addEventListener', 'removeEventListener']
@@ -181,15 +186,35 @@ async function mountRouteUi({
   });
   const confirmations = [];
   const { mountSecrets } = await import(`${pathToFileURL(path.join(__dirname, 'secrets.js')).href}?routes=${Date.now()}`);
-  const store = createStore({ draft: null, savePending: false }, draftReducer);
+  const store = createStore({
+    context: null,
+    initialSecrets: null,
+    contextSwitchPending: false,
+    scopedMutationPending: false,
+    contextError: null,
+    draft: null,
+    savePending: false,
+  }, draftReducer);
   const dialogs = createDialogManager(document);
   dialogs.confirmDiscard = () => { confirmations.push(true); return true; };
-  mountSecrets({ api, store, dialogs, preferences, token: 'test', exposureClock: clock });
+  const contextRail = withContextRail
+    ? mountContextRail({ store, api, guardNavigation, document })
+    : null;
+  mountSecrets({
+    api,
+    store,
+    dialogs,
+    preferences,
+    token: 'test',
+    exposureClock: clock,
+    contextRail,
+  });
   await new Promise((resolve) => setTimeout(resolve, 0));
   return {
     document,
     elements,
     store,
+    contextRail,
     confirmations,
     dispatchWindow(type, event = {}) { return windowListeners.get(type)?.(event); },
     find(selector, predicate) { return findElement(document.element(selector), predicate); },
@@ -209,6 +234,113 @@ async function mountRouteUi({
     },
   };
 }
+
+function routedContext(alias, vault) {
+  return {
+    backend: 'local',
+    backend_kind: 'local',
+    vault,
+    workspace: {
+      alias,
+      entries: [
+        { alias: 'primary', backend: 'local', vault: 'one', default: true },
+        { alias: 'stage', backend: 'local', vault: 'two', default: false },
+      ],
+    },
+    project: null,
+    environment: null,
+    sources: {},
+    connection: { state: 'connected', message: null },
+    capabilities: {
+      secrets: true,
+      files: false,
+      soft_delete: true,
+      restore: true,
+      purge: true,
+    },
+    version: 'test',
+  };
+}
+
+async function settleUntil(predicate) {
+  for (let attempt = 0; attempt < 20 && !predicate(); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.ok(predicate(), 'expected asynchronous action to start');
+}
+
+test('workspace selector has one pending owner across every switch outcome and operation lock', { timeout: 10_000 }, async () => {
+  const primary = routedContext('primary', 'one');
+  const stage = routedContext('stage', 'two');
+  const activations = [];
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (method === 'POST' && requestPath === '/api/workspaces/activate') {
+      const activation = {};
+      activation.promise = new Promise((resolve, reject) => {
+        activation.resolve = resolve;
+        activation.reject = reject;
+      });
+      activations.push(activation);
+      return activation.promise;
+    }
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath.startsWith('/api/secrets')) return [];
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
+  try {
+    const selector = ui.elements.get('#workspace-select');
+    assert.equal(selector.disabled, false);
+
+    const succeeded = ui.contextRail.switchTo('stage');
+    await settleUntil(() => activations[0]);
+    assert.equal(selector.disabled, true);
+    activations[0].resolve({ context: stage, secrets: [] });
+    assert.equal(await succeeded, true);
+    assert.equal(selector.disabled, false, 'activation success unlocks the selector');
+
+    const failed = ui.contextRail.switchTo('primary');
+    await settleUntil(() => activations[1]);
+    assert.equal(selector.disabled, true);
+    activations[1].reject(new Error('activation failed'));
+    assert.equal(await failed, false);
+    assert.equal(selector.disabled, false, 'activation failure unlocks the selector');
+
+    const cancelled = ui.contextRail.switchTo('primary');
+    await settleUntil(() => activations[2]);
+    ui.store.dispatch({ type: 'mutation/pending', value: true });
+    ui.store.dispatch({ type: 'mutation/pending', value: false });
+    activations[2].resolve({ context: primary, secrets: [] });
+    assert.equal(await cancelled, false);
+    assert.equal(selector.disabled, false, 'activity-revision cancellation unlocks the selector');
+
+    for (const [event, value] of [
+      ['draft/save-pending', true],
+      ['draft/save-pending', false],
+      ['mutation/pending', true],
+      ['mutation/pending', false],
+    ]) {
+      ui.store.dispatch({ type: event, value });
+      assert.equal(selector.disabled, value, `${event}=${value}`);
+    }
+  } finally {
+    ui.restore();
+  }
+
+  const guarded = await mountRouteUi({
+    apiImpl: api,
+    withContextRail: true,
+    guardNavigation: async () => false,
+  });
+  try {
+    const selector = guarded.elements.get('#workspace-select');
+    assert.equal(await guarded.contextRail.switchTo('stage'), false);
+    assert.equal(selector.disabled, false, 'guard cancellation never locks the selector');
+  } finally {
+    guarded.restore();
+  }
+});
 
 async function openExistingSecret(ui, name) {
   const button = ui.find('#secrets-table tbody', (element) => (
