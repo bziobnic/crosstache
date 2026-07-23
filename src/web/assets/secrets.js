@@ -41,10 +41,11 @@ export function createExposureTimer({ seconds, onTick, onExpire, clock = globalT
   return Object.freeze({ cancel, reset, remaining: () => remaining });
 }
 
-export async function clearClipboardIfUnchanged({ clipboard, expected }) {
+export async function clearClipboardIfUnchanged({ clipboard, expected, isCurrent = () => true }) {
   try {
     if (typeof clipboard?.readText !== 'function' || typeof clipboard?.writeText !== 'function') return false;
-    if (await clipboard.readText() !== expected) return false;
+    const current = await clipboard.readText();
+    if (!isCurrent() || current !== expected) return false;
     await clipboard.writeText('');
     return true;
   } catch (_) {
@@ -750,6 +751,10 @@ let plainSecretState = null;
 let drawerInvoker = null;
 const revealTimers = new Map();
 const clipboardTimers = new Map();
+let exposureLifecycleEpoch = 0;
+let nextExposureToken = 0;
+let protectedStatusOwner = null;
+let nextProtectionDescriptionId = 0;
 
 function secondsLabel(seconds) {
   return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
@@ -767,6 +772,27 @@ function updateProtectionDescription(input, state) {
   if (description) description.textContent = `Protected value is ${state.masked ? 'hidden' : 'revealed'}.`;
 }
 
+function captureExposureScope() {
+  return { drawerGeneration, lifecycleEpoch: exposureLifecycleEpoch };
+}
+
+function isExposureScopeCurrent(scope) {
+  return scope.drawerGeneration === drawerGeneration
+    && scope.lifecycleEpoch === exposureLifecycleEpoch
+    && !$('#drawer').hidden;
+}
+
+function claimProtectedStatus(scope) {
+  const token = ++nextExposureToken;
+  if (isExposureScopeCurrent(scope)) protectedStatusOwner = token;
+  return { token, scope };
+}
+
+function setScopedProtectedStatus(owner, message) {
+  if (protectedStatusOwner !== owner.token || !isExposureScopeCurrent(owner.scope)) return;
+  setProtectedValueStatus(document, message);
+}
+
 function stopRevealTimer(state) {
   const exposure = revealTimers.get(state);
   exposure?.timer.cancel();
@@ -774,32 +800,51 @@ function stopRevealTimer(state) {
   return exposure;
 }
 
-function hideProtectedField(state, { announceStatus = true } = {}) {
+function hideProtectedField(state, { announceStatus = true, claimStatus = false } = {}) {
   const exposure = stopRevealTimer(state);
   if (!exposure) return;
   XvUiModel.hideProtected(state);
   renderProtectedControl(exposure.input, exposure.button, state);
-  if (announceStatus) setProtectedValueStatus(document, `${exposure.field} hidden.`);
+  if (claimStatus) exposure.statusOwner = claimProtectedStatus(exposure.scope);
+  if (announceStatus) setScopedProtectedStatus(exposure.statusOwner, `${exposure.field} hidden.`);
 }
 
-function hideAllProtectedFields(announceStatus = true) {
-  for (const state of [...revealTimers.keys()]) hideProtectedField(state, { announceStatus });
+function invalidateExposureLifecycle({ announceHidden = true, clearStatus = false } = {}) {
+  const fields = [...revealTimers.values()].map(({ field }) => field);
+  exposureLifecycleEpoch++;
+  for (const state of [...revealTimers.keys()]) hideProtectedField(state, { announceStatus: false });
+  protectedStatusOwner = null;
+  if (clearStatus) {
+    setProtectedValueStatus(document, '');
+  } else if (announceHidden && fields.length) {
+    const owner = claimProtectedStatus(captureExposureScope());
+    setScopedProtectedStatus(owner, `${fields.at(-1)} hidden.`);
+  }
 }
 
-function startRevealTimer({ field, input, button, state, seconds }) {
+function startRevealTimer({ field, input, button, state, seconds, scope }) {
   stopRevealTimer(state);
   if (seconds === 0) {
     XvUiModel.hideProtected(state);
     renderProtectedControl(input, button, state);
-    setProtectedValueStatus(document, `${field} hidden.`);
+    const owner = claimProtectedStatus(scope);
+    setScopedProtectedStatus(owner, `${field} hidden.`);
     return;
   }
-  const exposure = { field, input, button, state, timer: null };
+  const exposure = {
+    field,
+    input,
+    button,
+    state,
+    scope,
+    statusOwner: claimProtectedStatus(scope),
+    timer: null,
+  };
   exposure.timer = createExposureTimer({
     seconds,
     clock: exposureClock,
     onTick: (remaining) => {
-      setProtectedValueStatus(document, `${field} revealed. Hides in ${secondsLabel(remaining)}.`);
+      setScopedProtectedStatus(exposure.statusOwner, `${field} revealed. Hides in ${secondsLabel(remaining)}.`);
     },
     onExpire: () => hideProtectedField(state),
   });
@@ -807,7 +852,10 @@ function startRevealTimer({ field, input, button, state, seconds }) {
 }
 
 function resetRevealTimer(state) {
-  revealTimers.get(state)?.timer.reset();
+  const exposure = revealTimers.get(state);
+  if (!exposure) return;
+  exposure.statusOwner = claimProtectedStatus(exposure.scope);
+  exposure.timer.reset();
 }
 
 function bindProtectedInteractions(input, state) {
@@ -817,7 +865,6 @@ function bindProtectedInteractions(input, state) {
 }
 
 function forgetProtectedValues() {
-  hideAllProtectedFields(false);
   const states = [];
   if (plainSecretState) states.push(plainSecretState);
   for (const input of $('#record-fields').querySelectorAll('input[data-field-kind="secret"]')) {
@@ -838,30 +885,44 @@ function forgetProtectedValues() {
   setProtectedValueStatus(document, '');
 }
 
-function startClipboardTimer({ field, state, expected, seconds }) {
-  clipboardTimers.get(state)?.cancel();
+function startClipboardTimer({ field, state, expected, seconds, scope }) {
+  clipboardTimers.get(state)?.timer.cancel();
   clipboardTimers.delete(state);
-  let timer = null;
+  const exposure = {
+    field,
+    state,
+    expected,
+    scope,
+    token: ++nextExposureToken,
+    statusOwner: claimProtectedStatus(scope),
+    timer: null,
+  };
   const expire = async () => {
-    if (clipboardTimers.get(state) === timer) clipboardTimers.delete(state);
-    const cleared = await clearClipboardIfUnchanged({ clipboard, expected });
-    setProtectedValueStatus(document, cleared
+    const cleared = await clearClipboardIfUnchanged({
+      clipboard,
+      expected,
+      isCurrent: () => clipboardTimers.get(state)?.token === exposure.token,
+    });
+    if (clipboardTimers.get(state)?.token !== exposure.token) return;
+    clipboardTimers.delete(state);
+    setScopedProtectedStatus(exposure.statusOwner, cleared
       ? `${field} clipboard cleared.`
       : `${field} clipboard clearing could not be confirmed.`);
   };
   if (seconds === 0) {
+    clipboardTimers.set(state, exposure);
     void expire();
     return;
   }
-  timer = createExposureTimer({
+  exposure.timer = createExposureTimer({
     seconds,
     clock: exposureClock,
     onTick: (remaining) => {
-      setProtectedValueStatus(document, `${field} copied. Clipboard clears in ${secondsLabel(remaining)}.`);
+      setScopedProtectedStatus(exposure.statusOwner, `${field} copied. Clipboard clears in ${secondsLabel(remaining)}.`);
     },
     onExpire: expire,
   });
-  clipboardTimers.set(state, timer);
+  clipboardTimers.set(state, exposure);
 }
 
 function drawerDraft() {
@@ -937,6 +998,7 @@ async function allowNavigation() {
 function closeDrawer({ restoreFocus = false } = {}) {
   drawerGeneration++;
   resetConfirmation($('#delete'), 'Delete');
+  invalidateExposureLifecycle({ announceHidden: false, clearStatus: true });
   forgetProtectedValues();
   if (typeof dialogs.closeModal === 'function') dialogs.closeModal($('#drawer'));
   else $('#drawer').hidden = true;
@@ -949,6 +1011,7 @@ function closeDrawer({ restoreFocus = false } = {}) {
 }
 
 async function requestDrawerClose(afterClose) {
+  invalidateExposureLifecycle();
   if (!(await allowNavigation())) return false;
   if (!$('#drawer').hidden) closeDrawer({ restoreFocus: true });
   if (afterClose) await afterClose();
@@ -959,7 +1022,10 @@ store.subscribe(syncDraftControls);
 
 function setRevealLabel(button, label) {
   if (button.id === 'reveal') button.replaceChildren(icon('eye'), label);
-  else button.textContent = label;
+  else {
+    button.textContent = label;
+    if (button.dataset.protectedField) button.setAttribute('aria-label', `${label} ${button.dataset.protectedField}`);
+  }
 }
 
 function renderProtectedControl(input, button, state) {
@@ -982,6 +1048,13 @@ function parseEnvelope(raw) {
     if (typeof v !== 'string') throw new Error(`field '${k}' is not a string`);
   }
   return obj;
+}
+
+function recordExposureIsCurrent({ scope, record, state, input, revision }) {
+  return isExposureScopeCurrent(scope)
+    && recordState === record
+    && input._protectedState === state
+    && state.revision === revision;
 }
 
 function fieldRow(name, kind, value, required) {
@@ -1007,23 +1080,29 @@ function fieldRow(name, kind, value, required) {
     input.autocomplete = 'new-password';
     const protection = document.createElement('span');
     protection.className = 'sr-only';
-    protection.id = `protected-field-${String(name).replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-state`;
+    protection.id = `protected-field-state-${++nextProtectionDescriptionId}`;
     protection.textContent = 'Protected value is hidden.';
     input._protectionDescription = protection;
-    input.setAttribute('aria-describedby', protection.id);
+    input.setAttribute('aria-describedby', `${protection.id} protected-value-status`);
     const row = document.createElement('span');
     row.className = 'field-actions';
     const rev = document.createElement('button');
     rev.type = 'button';
     rev.className = 'button secondary';
+    rev.dataset.protectedField = name;
+    rev.setAttribute('aria-label', `Reveal ${name}`);
     renderProtectedControl(input, rev, state);
     rev.onclick = async () => {
       if (state.masked) {
+        const scope = captureExposureScope();
+        const record = recordState;
+        const revision = state.revision;
         const seconds = await exposureTimeoutSeconds();
+        if (!recordExposureIsCurrent({ scope, record, state, input, revision })) return;
         XvUiModel.revealProtected(state);
-        startRevealTimer({ field: name, input, button: rev, state, seconds });
+        startRevealTimer({ field: name, input, button: rev, state, seconds, scope });
       } else {
-        hideProtectedField(state);
+        hideProtectedField(state, { claimStatus: true });
       }
       renderProtectedControl(input, rev, state);
     };
@@ -1035,13 +1114,21 @@ function fieldRow(name, kind, value, required) {
     const cp = document.createElement('button');
     cp.type = 'button';
     cp.className = 'button secondary';
+    cp.setAttribute('aria-label', `Copy ${name}`);
     cp.textContent = 'Copy';
     cp.onclick = async () => {
       try {
+        const scope = captureExposureScope();
+        const record = recordState;
+        const revision = state.revision;
         const seconds = await exposureTimeoutSeconds();
+        if (!recordExposureIsCurrent({ scope, record, state, input, revision })) return;
         const expected = state.value ?? '';
         await clipboard.writeText(expected);
-        startClipboardTimer({ field: name, state, expected, seconds });
+        const timerScope = recordExposureIsCurrent({ scope, record, state, input, revision })
+          ? scope
+          : { ...scope, lifecycleEpoch: -1 };
+        startClipboardTimer({ field: name, state, expected, seconds, scope: timerScope });
       }
       catch (e) { fail(e); }
     };
@@ -1603,9 +1690,9 @@ for (const eventName of ['focus', 'pointerdown', 'keydown']) {
   });
 }
 document.addEventListener?.('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') hideAllProtectedFields();
+  if (document.visibilityState === 'hidden') invalidateExposureLifecycle();
 });
-globalThis.addEventListener?.('blur', () => hideAllProtectedFields());
+globalThis.addEventListener?.('blur', () => invalidateExposureLifecycle());
 
 globalThis.addEventListener?.('beforeunload', (event) => {
   const allowed = guardNavigation({
@@ -1636,19 +1723,25 @@ async function loadPlainSecretValue(generation, selection) {
   return value;
 }
 
+function plainExposureIsCurrent({ scope, generation, selection, state, revision }) {
+  return isExposureScopeCurrent(scope)
+    && isCurrentDrawer(generation, selection)
+    && state === plainSecretState
+    && state.revision === revision;
+}
+
 $('#reveal').onclick = async () => {
   const generation = drawerGeneration;
   const selection = editing;
   try {
     const state = plainSecretState;
-    const transition = state.revision;
+    const revision = state.revision;
+    const scope = captureExposureScope();
     if (state.masked) {
       const value = await loadPlainSecretValue(generation, selection);
-      if (!isCurrentDrawer(generation, selection) || state !== plainSecretState
-        || state.revision !== transition || value === null) return;
+      if (value === null || !plainExposureIsCurrent({ scope, generation, selection, state, revision })) return;
       const seconds = await exposureTimeoutSeconds();
-      if (!isCurrentDrawer(generation, selection) || state !== plainSecretState
-        || state.revision !== transition) return;
+      if (!plainExposureIsCurrent({ scope, generation, selection, state, revision })) return;
       XvUiModel.revealProtected(state, value);
       startRevealTimer({
         field: 'Value',
@@ -1656,9 +1749,10 @@ $('#reveal').onclick = async () => {
         button: $('#reveal'),
         state,
         seconds,
+        scope,
       });
     } else {
-      hideProtectedField(state);
+      hideProtectedField(state, { claimStatus: true });
     }
     if (!isCurrentDrawer(generation, selection)) return;
     renderProtectedControl($('#secret-form').elements.value, $('#reveal'), state);
@@ -1673,13 +1767,17 @@ $('#copy').onclick = async () => {
   const selection = editing;
   try {
     const state = plainSecretState;
+    const revision = state.revision;
+    const scope = captureExposureScope();
     const value = await loadPlainSecretValue(generation, selection);
-    if (!isCurrentDrawer(generation, selection) || state !== plainSecretState || value === null) return;
+    if (value === null || !plainExposureIsCurrent({ scope, generation, selection, state, revision })) return;
     const seconds = await exposureTimeoutSeconds();
-    if (!isCurrentDrawer(generation, selection) || state !== plainSecretState) return;
+    if (!plainExposureIsCurrent({ scope, generation, selection, state, revision })) return;
     await clipboard.writeText(value);
-    if (!isCurrentDrawer(generation, selection)) return;
-    startClipboardTimer({ field: 'Value', state, expected: value, seconds });
+    const timerScope = plainExposureIsCurrent({ scope, generation, selection, state, revision })
+      ? scope
+      : { ...scope, lifecycleEpoch: -1 };
+    startClipboardTimer({ field: 'Value', state, expected: value, seconds, scope: timerScope });
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     showFormError(e);
@@ -1694,6 +1792,7 @@ $('#secret-form').onsubmit = async (ev) => {
   const f = ev.target.elements;
   const name = f.name.value.trim();
   if (!name) return;
+  invalidateExposureLifecycle();
   const groups = f.groups.value.split(',').map(s => s.trim()).filter(Boolean);
   const expiresPut = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : null;
   const expiresPatch = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : '';

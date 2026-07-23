@@ -42,7 +42,20 @@ class Element {
   appendChild(child) { this.children.push(child); return child; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
-  querySelectorAll() { return []; }
+  querySelectorAll(selector) {
+    const matches = [];
+    const visit = (element) => {
+      for (const child of element.children || []) {
+        if (typeof child !== 'object') continue;
+        if (selector === 'input[data-field-kind="secret"]' && child.dataset?.fieldKind === 'secret') {
+          matches.push(child);
+        }
+        visit(child);
+      }
+    };
+    visit(this);
+    return matches;
+  }
   querySelector(selector) { return this.document.element(`${this.key} ${selector}`); }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
   dispatch(type, event = {}) { return this.listeners.get(type)?.({ preventDefault() {}, target: this, ...event }); }
@@ -123,6 +136,18 @@ function findElement(root, predicate) {
   return null;
 }
 
+function findElements(root, predicate) {
+  const matches = [];
+  const visit = (element) => {
+    if (predicate(element)) matches.push(element);
+    for (const child of element.children || []) {
+      if (typeof child === 'object') visit(child);
+    }
+  };
+  visit(root);
+  return matches;
+}
+
 async function mountRouteUi({
   failSave = false,
   apiImpl = null,
@@ -168,6 +193,7 @@ async function mountRouteUi({
     confirmations,
     dispatchWindow(type, event = {}) { return windowListeners.get(type)?.(event); },
     find(selector, predicate) { return findElement(document.element(selector), predicate); },
+    findAll(selector, predicate) { return findElements(document.element(selector), predicate); },
     async openDirty() {
       const invoker = elements.get('#new-secret');
       document.activeElement = invoker;
@@ -532,6 +558,257 @@ test('mounted copy countdown names the field and preserves newer clipboard conte
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(clipboardValue, 'newer-content');
     assert.equal(status.textContent, 'Value clipboard clearing could not be confirmed.');
+  } finally {
+    ui.restore();
+  }
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((finish) => { resolve = finish; });
+  return { promise, resolve };
+}
+
+function deferredPreferences() {
+  const gate = deferred();
+  return {
+    gate,
+    client: {
+      load: () => gate.promise,
+      get: (_key, fallback) => gate.value ?? fallback,
+      snapshot: () => ({ exposure_timeout_seconds: gate.value ?? 2 }),
+    },
+    resolve(value = 2) {
+      gate.value = value;
+      gate.resolve({ exposure_timeout_seconds: value });
+    },
+  };
+}
+
+function recordSecretApi() {
+  return async (method, path) => {
+    if (path === '/api/context') {
+      return { vault: 'one', backend: 'test', capabilities: { files: true, soft_delete: false } };
+    }
+    if (path === '/api/types') return { types: [] };
+    if (path === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
+    if (method === 'GET' && path.startsWith('/api/secrets/existing?')) {
+      return {
+        tags: { 'xv-type': 'collision' },
+        content_type: 'application/vnd.xv.record',
+        enabled: true,
+        not_before: null,
+      };
+    }
+    if (method === 'POST' && path.startsWith('/api/secrets/existing/value?')) {
+      return { value: JSON.stringify({ 'a-b': 'first-record-value', 'a b': 'second-record-value' }) };
+    }
+    if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: 'existing' }];
+    if (path.startsWith('/api/files')) return [];
+    return [];
+  };
+}
+
+test('pending plain and record reveals cannot resume after blur or document hiding', async () => {
+  const plainValue = deferred();
+  const plainApi = existingSecretApi();
+  const plain = await mountRouteUi({
+    apiImpl: async (method, path) => (
+      method === 'POST' && path.startsWith('/api/secrets/existing/value?')
+        ? plainValue.promise
+        : plainApi(method, path)
+    ),
+    preferences: twoSecondPreferences(),
+    clock: exposureClock(),
+  });
+  try {
+    await openExistingSecret(plain, 'existing');
+    const revealing = plain.elements.get('#reveal').onclick();
+    await Promise.resolve();
+    plain.dispatchWindow('blur');
+    plainValue.resolve({ value: 'top-secret' });
+    await revealing;
+    assert.equal(plain.elements.get('#field-value').value, PROTECTED_MASK);
+  } finally {
+    plain.restore();
+  }
+
+  const recordPreferences = deferredPreferences();
+  const record = await mountRouteUi({
+    apiImpl: recordSecretApi(),
+    preferences: recordPreferences.client,
+    clock: exposureClock(),
+  });
+  try {
+    await openExistingSecret(record, 'existing');
+    const reveal = record.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Reveal a-b');
+    assert.ok(reveal, 'record reveal control is field-specific');
+    const revealing = reveal.onclick();
+    record.document.visibilityState = 'hidden';
+    record.document.dispatch('visibilitychange');
+    recordPreferences.resolve();
+    await revealing;
+    const input = record.find('#record-fields', (element) => element.dataset?.fieldName === 'a-b');
+    assert.equal(input.value, PROTECTED_MASK);
+  } finally {
+    record.restore();
+  }
+});
+
+test('deferred record reveal and copy never resume after close, vault switch, or tab switch', async () => {
+  for (const operation of ['reveal', 'copy']) {
+    for (const contextChange of ['close', 'vault', 'tab']) {
+      const preferences = deferredPreferences();
+      const writes = [];
+      const ui = await mountRouteUi({
+        apiImpl: recordSecretApi(),
+        preferences: preferences.client,
+        clipboard: { readText: async () => '', writeText: async (value) => { writes.push(value); } },
+        clock: exposureClock(),
+      });
+      try {
+        await openExistingSecret(ui, 'existing');
+        const controlName = `${operation === 'reveal' ? 'Reveal' : 'Copy'} a-b`;
+        const control = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === controlName);
+        assert.ok(control, `record ${operation} control is field-specific`);
+        const pending = control.onclick();
+        if (contextChange === 'close') await ui.elements.get('#close-drawer').onclick();
+        if (contextChange === 'vault') {
+          ui.elements.get('#vault-select').value = 'two';
+          await ui.elements.get('#vault-select').onchange();
+        }
+        if (contextChange === 'tab') await ui.elements.get('#tab-files').onclick();
+        preferences.resolve();
+        await pending;
+        assert.deepEqual(writes, [], `${operation} did not copy after ${contextChange}`);
+        const input = ui.find('#record-fields', (element) => element.dataset?.fieldName === 'a-b');
+        if (input) assert.equal(input.value, PROTECTED_MASK, `${operation} stayed masked after ${contextChange}`);
+      } finally {
+        ui.restore();
+      }
+    }
+  }
+});
+
+test('record fields have collision-free descriptions and field-specific timer status', async () => {
+  const ui = await mountRouteUi({
+    apiImpl: recordSecretApi(),
+    preferences: twoSecondPreferences(),
+    clock: exposureClock(),
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    const inputs = ui.findAll('#record-fields', (element) => element.dataset?.fieldKind === 'secret');
+    assert.equal(inputs.length, 2);
+    const descriptionIds = inputs.map((input) => input._protectionDescription.id);
+    assert.equal(new Set(descriptionIds).size, 2);
+    for (const input of inputs) {
+      assert.equal(
+        input.getAttribute('aria-describedby'),
+        `${input._protectionDescription.id} protected-value-status`,
+      );
+    }
+
+    const reveal = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Reveal a-b');
+    await reveal.onclick();
+    const status = ui.elements.get('#protected-value-status');
+    assert.equal(status.textContent, 'a-b revealed. Hides in 2 seconds.');
+    assert.doesNotMatch(status.textContent, /first-record-value/);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('an older clipboard expiry cannot clear or announce over a newer same-field copy', async () => {
+  let clipboardValue = '';
+  let reads = 0;
+  const oldRead = deferred();
+  const clipboard = {
+    readText: async () => (++reads === 1 ? oldRead.promise : clipboardValue),
+    writeText: async (value) => { clipboardValue = value; },
+  };
+  const clock = exposureClock();
+  const ui = await mountRouteUi({
+    apiImpl: existingSecretApi('identical-value'),
+    clipboard,
+    clock,
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    await ui.elements.get('#copy').onclick();
+    clock.advanceOneSecond();
+    clock.advanceOneSecond();
+    await ui.elements.get('#copy').onclick();
+    assert.equal(ui.elements.get('#protected-value-status').textContent, 'Value copied. Clipboard clears in 2 seconds.');
+
+    oldRead.resolve('identical-value');
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(clipboardValue, 'identical-value');
+    assert.equal(ui.elements.get('#protected-value-status').textContent, 'Value copied. Clipboard clears in 2 seconds.');
+
+    clock.advanceOneSecond();
+    clock.advanceOneSecond();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(clipboardValue, '');
+    assert.equal(ui.elements.get('#protected-value-status').textContent, 'Value clipboard cleared.');
+  } finally {
+    ui.restore();
+  }
+});
+
+test('stale clipboard expiry never overwrites reopened or overlapping field status', async () => {
+  let clipboardValue = '';
+  let pendingRead = deferred();
+  let delayNextRead = true;
+  const clipboard = {
+    readText: async () => {
+      if (delayNextRead) {
+        delayNextRead = false;
+        return pendingRead.promise;
+      }
+      return clipboardValue;
+    },
+    writeText: async (value) => { clipboardValue = value; },
+  };
+  const clock = exposureClock();
+  const ui = await mountRouteUi({
+    apiImpl: recordSecretApi(),
+    clipboard,
+    clock,
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    const copyA = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Copy a-b');
+    const revealB = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Reveal a b');
+    await copyA.onclick();
+    clock.advanceOneSecond();
+    clock.advanceOneSecond();
+    await revealB.onclick();
+    const status = ui.elements.get('#protected-value-status');
+    assert.equal(status.textContent, 'a b revealed. Hides in 2 seconds.');
+    pendingRead.resolve('first-record-value');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(status.textContent, 'a b revealed. Hides in 2 seconds.');
+
+    await ui.elements.get('#close-drawer').onclick();
+    await openExistingSecret(ui, 'existing');
+    pendingRead = deferred();
+    delayNextRead = true;
+    const staleCopy = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Copy a-b');
+    await staleCopy.onclick();
+    clock.advanceOneSecond();
+    clock.advanceOneSecond();
+    await ui.elements.get('#close-drawer').onclick();
+    await openExistingSecret(ui, 'existing');
+    const reopenedReveal = ui.find('#record-fields', (element) => element.getAttribute?.('aria-label') === 'Reveal a b');
+    await reopenedReveal.onclick();
+    const reopenedStatus = status.textContent;
+    pendingRead.resolve('first-record-value');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(status.textContent, reopenedStatus);
   } finally {
     ui.restore();
   }

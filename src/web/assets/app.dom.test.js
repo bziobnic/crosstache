@@ -57,8 +57,10 @@ class RevealButton {
     this.id = id;
     this.textContent = '';
     this.children = [];
+    this.dataset = {};
   }
 
+  setAttribute() {}
   replaceChildren(...children) { this.children = children; }
 }
 

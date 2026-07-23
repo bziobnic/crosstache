@@ -29,6 +29,30 @@ async function createAndOpenSecret(page, name, value) {
   await edit.click();
 }
 
+async function seedRecord(page, name) {
+  await expect.poll(() => page.locator('#vault-select').inputValue()).not.toBe('');
+  const response = await page.evaluate(async (recordName) => {
+    const token = sessionStorage.getItem('xv.ui.token');
+    const vault = document.querySelector('#vault-select').value;
+    const result = await fetch(`/api/secrets/${encodeURIComponent(recordName)}?vault=${encodeURIComponent(vault)}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        value: JSON.stringify({ password: 'first-browser-value', 'connection-string': 'second-browser-value' }),
+        content_type: 'application/vnd.xv.record',
+        tags: { 'xv-type': 'database' },
+      }),
+    });
+    return { ok: result.ok, body: await result.text() };
+  }, name);
+  expect(response.ok, response.body).toBe(true);
+  await page.reload();
+  await page.getByRole('button', { name: `Edit secret ${name}` }).click();
+}
+
 test('copy countdown clears only an unchanged clipboard without announcing the value', async ({ page, appUrl }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.stack || error.message));
@@ -102,4 +126,30 @@ test('reveal inactivity resets and hides on timeout, visibility, blur, close, an
   await page.getByRole('button', { name: 'Save changes' }).click();
   await expect(page.locator('#drawer')).toBeHidden();
   await expect(value).toHaveValue('');
+});
+
+test('record protected fields have unique descriptions and announce field-specific countdowns', async ({ page, appUrl }) => {
+  await installClipboard(page);
+  await page.goto(appUrl);
+  await seedRecord(page, 'record-accessibility');
+
+  const inputs = page.locator('#record-fields input[data-field-kind="secret"]');
+  await expect(inputs).toHaveCount(2);
+  const descriptions = await inputs.evaluateAll((elements) => elements.map((input) => {
+    const describedBy = input.getAttribute('aria-describedby');
+    return { describedBy, descriptionId: describedBy.split(' ')[0] };
+  }));
+  expect(new Set(descriptions.map(({ descriptionId }) => descriptionId)).size).toBe(2);
+  for (const { describedBy, descriptionId } of descriptions) {
+    expect(describedBy).toBe(`${descriptionId} protected-value-status`);
+  }
+
+  await page.getByRole('button', { name: 'Reveal password', exact: true }).click();
+  const status = page.locator('#protected-value-status');
+  await expect(status).toHaveText('password revealed. Hides in 30 seconds.');
+  await expect(status).not.toContainText('first-browser-value');
+  const field = page.locator('#record-fields input[data-field-name="password"]');
+  await expect(field).toHaveValue('first-browser-value');
+  const stateId = (await field.getAttribute('aria-describedby')).split(' ')[0];
+  await expect(page.locator(`#${stateId}`)).toContainText(/revealed/);
 });

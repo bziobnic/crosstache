@@ -511,8 +511,9 @@ mod tests {
         assert!(APP_JS.contains("let plainSecretState = null;"));
         assert!(APP_JS.contains("async function loadPlainSecretValue(generation, selection)"));
         assert!(APP_JS.contains("XvUiModel.loadProtected(state"));
-        assert!(APP_JS.contains("const transition = state.revision;"));
-        assert!(APP_JS.contains("state.revision !== transition"));
+        assert!(APP_JS.contains("const revision = state.revision;"));
+        assert!(APP_JS.contains("state.revision === revision"));
+        assert!(APP_JS.contains("isExposureScopeCurrent(scope)"));
         assert!(APP_JS.contains("else if (plainSecretState?.dirty"));
         assert!(!APP_JS.contains("value: XvUiModel.PROTECTED_MASK"));
     }

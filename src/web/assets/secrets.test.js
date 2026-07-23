@@ -78,6 +78,27 @@ test('clipboard clearing is unconfirmed when read or clear access fails', async 
   }), false);
 });
 
+test('clipboard clearing revalidates ownership after an asynchronous read', async () => {
+  let releaseRead;
+  const read = new Promise((resolve) => { releaseRead = resolve; });
+  const writes = [];
+  let owner = 1;
+  const clearing = clearClipboardIfUnchanged({
+    clipboard: {
+      readText: async () => read,
+      writeText: async (value) => { writes.push(value); },
+    },
+    expected: 'same-value',
+    isCurrent: () => owner === 1,
+  });
+
+  await Promise.resolve();
+  owner = 2;
+  releaseRead('same-value');
+  assert.equal(await clearing, false);
+  assert.deepEqual(writes, []);
+});
+
 test('delete confirmation identifies backend, vault, five targets, overflow, and recovery', () => {
   const model = deleteConfirmationModel({
     backend: 'azure',
