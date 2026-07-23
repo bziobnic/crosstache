@@ -309,3 +309,89 @@ test('dismissed stale retry clears handlers and ignores its late failure', async
   await page.waitForTimeout(200);
   await expect(refresh).toBeHidden();
 });
+
+test('workspace transition clears both refresh owners before delayed new-scope files settle', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+
+  let failOldSecrets = true;
+  let failOldFiles = true;
+  let sandboxFileRequests = 0;
+  let releaseSandboxFiles;
+  let markSandboxFilesStarted;
+  const sandboxFilesGate = new Promise((resolve) => { releaseSandboxFiles = resolve; });
+  const sandboxFilesStarted = new Promise((resolve) => { markSandboxFilesStarted = resolve; });
+
+  await page.route('**/api/secrets?**', async (route) => {
+    const url = new URL(route.request().url());
+    if (
+      route.request().method() === 'GET'
+      && url.searchParams.get('vault') === 'playwright'
+      && failOldSecrets
+    ) {
+      failOldSecrets = false;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        json: { error: { code: 'xv-offline', message: 'Old secret refresh failed.', hint: 'Retry.' } },
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.route('**/api/files?**', async (route) => {
+    const url = new URL(route.request().url());
+    const vault = url.searchParams.get('vault');
+    if (route.request().method() === 'GET' && vault === 'playwright' && failOldFiles) {
+      failOldFiles = false;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        json: { error: { code: 'xv-offline', message: 'Old file refresh failed.', hint: 'Retry.' } },
+      });
+      return;
+    }
+    if (route.request().method() === 'GET' && vault === 'sandbox') {
+      sandboxFileRequests++;
+      markSandboxFilesStarted();
+      await sandboxFilesGate;
+      await route.fulfill({ status: 200, contentType: 'application/json', json: [] });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.getByRole('button', { name: 'Refresh secrets' }).click();
+  await expect(page.locator('#secret-refresh-error')).toBeVisible();
+  await page.getByRole('tab', { name: 'Files' }).click();
+  await page.getByRole('button', { name: 'Refresh files' }).click();
+  await expect(page.locator('#file-refresh-error')).toBeVisible();
+
+  await page.evaluate(() => {
+    const secretRetry = document.querySelector('#secret-refresh-error .error-retry');
+    const fileRetry = document.querySelector('#file-refresh-error .error-retry');
+    globalThis.__staleRefreshRetries = [secretRetry.onclick, fileRetry.onclick];
+    secretRetry.disabled = true;
+    fileRetry.disabled = true;
+  });
+
+  await page.locator('#workspace-select').selectOption('sandbox');
+  await sandboxFilesStarted;
+
+  await expect(page.locator('#context-line')).toContainText('local / sandbox');
+  await expect(page.locator('#secret-refresh-error')).toBeHidden();
+  await expect(page.locator('#file-refresh-error')).toBeHidden();
+  expect(await page.evaluate(() => (
+    [...document.querySelectorAll(
+      '#secret-refresh-error button, #file-refresh-error button',
+    )].every((button) => button.onclick === null && button.disabled === false)
+  ))).toBe(true);
+
+  const requestsBeforeStaleRetries = sandboxFileRequests;
+  expect(await page.evaluate(async () => Promise.all(
+    globalThis.__staleRefreshRetries.map((retry) => retry()),
+  ))).toEqual([false, false]);
+  expect(sandboxFileRequests).toBe(requestsBeforeStaleRetries);
+
+  releaseSandboxFiles();
+  await expect(page.locator('#file-list-summary')).toContainText('Files remain encrypted');
+});

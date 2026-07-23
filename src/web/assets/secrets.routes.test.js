@@ -828,6 +828,104 @@ test('aborted and stale list failures leave the current list surface unchanged',
   }
 });
 
+test('legacy vault transition clears both refresh owners before delayed new-scope files settle', async () => {
+  const delayedFiles = deferred();
+  const secretVaultCalls = [];
+  const fileVaultCalls = [];
+  let failSecretRefresh = false;
+  let failFileRefresh = false;
+  let delayNextVaultFiles = false;
+  const vaultFrom = (requestPath) => new URLSearchParams(requestPath.split('?')[1] || '').get('vault');
+  const ui = await mountRouteUi({
+    apiImpl: async (method, requestPath) => {
+      if (requestPath === '/api/context') {
+        return {
+          vault: 'one',
+          backend: 'test',
+          capabilities: { files: true, soft_delete: false },
+        };
+      }
+      if (requestPath === '/api/types') return { types: [] };
+      if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
+      if (method === 'GET' && requestPath.startsWith('/api/secrets?')) {
+        const vault = vaultFrom(requestPath);
+        secretVaultCalls.push(vault);
+        if (vault === 'one' && failSecretRefresh) {
+          failSecretRefresh = false;
+          throw new ApiError({
+            status: 503,
+            code: 'xv-network',
+            message: 'Old secret refresh failed',
+            hint: 'Retry.',
+          });
+        }
+        return [];
+      }
+      if (method === 'GET' && requestPath.startsWith('/api/files?')) {
+        const vault = vaultFrom(requestPath);
+        fileVaultCalls.push(vault);
+        if (vault === 'one' && failFileRefresh) {
+          failFileRefresh = false;
+          throw new ApiError({
+            status: 503,
+            code: 'xv-network',
+            message: 'Old file refresh failed',
+            hint: 'Retry.',
+          });
+        }
+        if (vault === 'two' && delayNextVaultFiles) return delayedFiles.promise;
+        return [];
+      }
+      return [];
+    },
+  });
+  try {
+    failSecretRefresh = true;
+    await ui.elements.get('#refresh-secrets').onclick();
+    failFileRefresh = true;
+    await ui.elements.get('#refresh-files').onclick();
+
+    const secretPanel = ui.elements.get('#secret-refresh-error');
+    const filePanel = ui.elements.get('#file-refresh-error');
+    const secretRetry = secretPanel.querySelector('.error-retry');
+    const fileRetry = filePanel.querySelector('.error-retry');
+    const staleSecretHandler = secretRetry.onclick;
+    const staleFileHandler = fileRetry.onclick;
+    assert.equal(secretPanel.hidden, false);
+    assert.equal(filePanel.hidden, false);
+
+    secretRetry.disabled = true;
+    fileRetry.disabled = true;
+    delayNextVaultFiles = true;
+    const picker = ui.elements.get('#vault-select');
+    picker.value = 'two';
+    const switching = picker.onchange();
+    await settleUntil(() => fileVaultCalls.includes('two'));
+
+    assert.equal(secretPanel.hidden, true);
+    assert.equal(filePanel.hidden, true);
+    assert.equal(secretRetry.onclick, null);
+    assert.equal(fileRetry.onclick, null);
+    assert.equal(secretRetry.disabled, false);
+    assert.equal(fileRetry.disabled, false);
+
+    const secretCallsBeforeStaleRetry = secretVaultCalls.length;
+    const fileCallsBeforeStaleRetry = fileVaultCalls.length;
+    assert.equal(await staleSecretHandler(), false);
+    assert.equal(await staleFileHandler(), false);
+    assert.equal(secretVaultCalls.length, secretCallsBeforeStaleRetry);
+    assert.equal(fileVaultCalls.length, fileCallsBeforeStaleRetry);
+
+    delayedFiles.resolve([]);
+    await switching;
+    assert.equal(secretVaultCalls.at(-1), 'two');
+    assert.equal(fileVaultCalls.at(-1), 'two');
+  } finally {
+    delayedFiles.resolve([]);
+    ui.restore();
+  }
+});
+
 function existingSecretApi(value = 'top-secret') {
   return async (method, path) => {
     if (path === '/api/context') {

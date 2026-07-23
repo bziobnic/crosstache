@@ -8,6 +8,7 @@ import {
   operationEvent,
   operationResultStatus,
   createOwnerRegistry,
+  bindOwnedRetry,
   MAX_OPERATION_TOMBSTONES,
   MAX_ROUTINE_OPERATION_HISTORY,
   safeDiagnostic,
@@ -145,4 +146,54 @@ test('owner replacement clears handlers and invalidates late generations without
   assert.equal(registry.isCurrent('secret-action', second), true);
   registry.clear('secret-action', second);
   assert.equal(registry.has('secret-action'), false);
+});
+
+test('overlapping retry generations cannot inherit, unlock, duplicate, or publish over the owner', async () => {
+  const registry = createOwnerRegistry();
+  const button = { disabled: false, onclick: null };
+  let releaseA;
+  let releaseB;
+  const gateA = new Promise((resolve) => { releaseA = resolve; });
+  const gateB = new Promise((resolve) => { releaseB = resolve; });
+  const published = [];
+  let callsA = 0;
+  let callsB = 0;
+
+  const generationA = registry.replace('surface');
+  bindOwnedRetry({
+    registry,
+    key: 'surface',
+    generation: generationA,
+    button,
+    retry: async () => { callsA++; await gateA; return 'A'; },
+    publish: (value) => published.push(value),
+  });
+  const pendingA = button.onclick();
+  assert.equal(button.disabled, true);
+
+  const generationB = registry.replace('surface');
+  bindOwnedRetry({
+    registry,
+    key: 'surface',
+    generation: generationB,
+    button,
+    retry: async () => { callsB++; await gateB; return 'B'; },
+    publish: (value) => published.push(value),
+  });
+  assert.equal(button.disabled, false);
+  const pendingB = button.onclick();
+  await button.onclick();
+  assert.equal(callsB, 1);
+  assert.equal(button.disabled, true);
+
+  releaseA();
+  await pendingA;
+  assert.equal(button.disabled, true);
+  assert.deepEqual(published, []);
+
+  releaseB();
+  await pendingB;
+  assert.equal(button.disabled, false);
+  assert.deepEqual(published, ['B']);
+  assert.equal(callsA, 1);
 });

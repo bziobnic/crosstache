@@ -106,6 +106,34 @@ export function createOwnerRegistry() {
   });
 }
 
+export function bindOwnedRetry({
+  registry,
+  key,
+  generation,
+  button,
+  retry,
+  publish = () => {},
+  reject = () => {},
+}) {
+  button.disabled = false;
+  button.onclick = async () => {
+    if (button.disabled || !registry.isCurrent(key, generation)) return false;
+    button.disabled = true;
+    try {
+      const result = await retry();
+      if (!registry.isCurrent(key, generation)) return false;
+      await publish(result);
+      return true;
+    } catch (error) {
+      if (!registry.isCurrent(key, generation)) return false;
+      await reject(error);
+      return false;
+    } finally {
+      if (registry.isCurrent(key, generation)) button.disabled = false;
+    }
+  };
+}
+
 function boundedOperations(operations) {
   const routineTerminals = Object.entries(operations)
     .filter(([, operation]) => (

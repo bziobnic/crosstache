@@ -3,6 +3,7 @@ import { guardNavigation } from './dialogs.js';
 import { setProtectedValueStatus } from './accessibility.js';
 import { contextQuery, formatContextLine } from './context.js';
 import {
+  bindOwnedRetry,
   createOwnerRegistry,
   operationEvent,
   operationResultStatus,
@@ -268,7 +269,10 @@ function errorCopy(error) {
 function resetErrorHandlers(panel) {
   for (const selector of ['.error-retry', '.error-copy', '.error-dismiss']) {
     const button = panel.querySelector(selector);
-    if (button) button.onclick = null;
+    if (button) {
+      button.onclick = null;
+      button.disabled = false;
+    }
   }
 }
 
@@ -306,15 +310,18 @@ function showError(surface, error, retry, owner = {}) {
   if (retryButton) {
     retryButton.textContent = 'Retry';
     retryButton.hidden = !retry;
-    retryButton.onclick = async () => {
-      if (!errorOwners.isCurrent(surface, generation)) return;
-      retryButton.disabled = true;
-      try {
-        await retry({ surface, generation });
-      } finally {
-        retryButton.disabled = false;
-      }
-    };
+    if (retry) {
+      bindOwnedRetry({
+        registry: errorOwners,
+        key: surface,
+        generation,
+        button: retryButton,
+        retry: () => retry({ surface, generation }),
+      });
+    } else {
+      retryButton.disabled = false;
+      retryButton.onclick = null;
+    }
   }
   const dismiss = panel.querySelector('.error-dismiss');
   if (dismiss) dismiss.onclick = () => clearError(surface, generation);
@@ -353,24 +360,45 @@ function showListError(kind, error) {
 }
 
 function showListLoadError(kind, error) {
+  // Keep the two-argument compatibility signature while requiring load callers
+  // to pass the immutable target that actually failed.
+  const vault = arguments[2];
+  const scope = arguments[3];
+  return showScopedListLoadError(kind, error, vault, scope);
+}
+
+function showScopedListLoadError(kind, error, vault, scope) {
   const surface = `#${kind === 'secrets' ? 'secret' : 'file'}-refresh-error`;
   const panel = $(surface);
   panel.dataset.source = 'load';
   const stale = kind === 'secrets' ? hasSuccessfulSecretsSnapshot : hasSuccessfulFilesSnapshot;
   const copy = errorCopy(error);
+  const retryVault = vault;
+  const retryScope = Object.freeze(structuredClone(scope));
   showError(surface, {
     ...copy,
     message: stale ? `Stale — ${copy.message}` : copy.message,
   }, (owner) => (
     kind === 'secrets'
-      ? loadSecrets(currentVault, captureOperationScope(), owner)
-      : loadFiles(currentVault, captureOperationScope(), owner)
+      ? loadSecrets(retryVault, retryScope, owner)
+      : loadFiles(retryVault, retryScope, owner)
   ));
 }
 
 function clearListLoadError(kind) {
   const panel = $(`#${kind === 'secrets' ? 'secret' : 'file'}-refresh-error`);
   if (panel.dataset.source === 'load') clearError(`#${panel.id}`);
+}
+
+function clearRefreshOwnersForScopeTransition() {
+  secretLoadController?.abort();
+  fileLoadController?.abort();
+  secretLoadController = null;
+  fileLoadController = null;
+  secretLoadGeneration++;
+  fileLoadGeneration++;
+  clearError('#secret-refresh-error');
+  clearError('#file-refresh-error');
 }
 
 function showFormError(error) {
@@ -1420,6 +1448,9 @@ async function requestDrawerClose(afterClose) {
 }
 
 store.subscribe((snapshot, event) => {
+  if (event.type === 'context/switch-started' || event.type === 'context/switch-succeeded') {
+    clearRefreshOwnersForScopeTransition();
+  }
   syncDraftControls();
   if (snapshot.contextSwitchPending) {
     if (!$('#drawer').hidden) closeDrawer();
@@ -1429,8 +1460,6 @@ store.subscribe((snapshot, event) => {
     }
   }
   if (event.type !== 'context/switch-succeeded') return;
-  secretLoadController?.abort();
-  fileLoadController?.abort();
   ctx = snapshot.context;
   currentVault = ctx.vault;
   secrets = snapshot.initialSecrets;
@@ -1439,8 +1468,6 @@ store.subscribe((snapshot, event) => {
   files = [];
   filesState = 'ready';
   hasSuccessfulFilesSnapshot = false;
-  secretLoadGeneration++;
-  fileLoadGeneration++;
   folderTokenIndexes.secrets = null;
   folderTokenIndexes.files = null;
   clearSelection('secrets');
@@ -1718,14 +1745,11 @@ async function init() {
         legacySelector.value = currentVault;
         return;
       }
+      clearRefreshOwnersForScopeTransition();
       currentVault = nextVault;
-      secretLoadController?.abort();
-      fileLoadController?.abort();
       hasSuccessfulSecretsSnapshot = false;
       hasSuccessfulFilesSnapshot = false;
       const selectedVault = currentVault;
-      secretLoadGeneration++;
-      fileLoadGeneration++;
       folderTokenIndexes.secrets = null;
       folderTokenIndexes.files = null;
       clearSelection('secrets');
@@ -1797,7 +1821,7 @@ async function loadSecrets(vault, scope = captureOperationScope(), errorOwner = 
       showListState($('#secrets-table tbody'), 'secrets', 'failed', secretSelection.enabled ? 6 : 5);
     }
     if (!errorOwner || errorOwners.isCurrent(errorOwner.surface, errorOwner.generation)) {
-      showListLoadError('secrets', e);
+      showListLoadError('secrets', e, vault, scope);
     }
     return false;
   }
@@ -2979,7 +3003,7 @@ async function loadFiles(vault, scope = captureOperationScope(), errorOwner = nu
       showListState($('#files-table tbody'), 'files', 'failed', fileSelection.enabled ? 5 : 4);
     }
     if (!errorOwner || errorOwners.isCurrent(errorOwner.surface, errorOwner.generation)) {
-      showListLoadError('files', e);
+      showListLoadError('files', e, vault, scope);
     }
     return false;
   }
@@ -2991,6 +3015,8 @@ async function loadFiles(vault, scope = captureOperationScope(), errorOwner = nu
   renderFiles();
   return true;
 }
+
+$('#refresh-files').onclick = () => loadFiles(currentVault, captureOperationScope());
 
 function renderFiles() {
   if (filesState !== 'ready') return;
@@ -3123,42 +3149,51 @@ function reportBulkResults(kind, verb, results, scope, retryFailed, operationId)
   const retryButton = panel.querySelector('.error-retry');
   retryButton.hidden = !retryFailed;
   retryButton.textContent = 'Retry failed';
-  retryButton.onclick = async () => {
-    if (!scopeMatchesCurrent(scope)) {
-      panel.querySelector('.error-hint').textContent =
-        `Switch back to ${formatContextLine(scope)} to retry these exact items.`;
-      return;
-    }
-    retryButton.disabled = true;
-    const operationId = `bulk-${++nextBulkOperationId}`;
-    setBulkOperationStatus(operationId, 'started');
-    try {
-      const retried = await retryFailed([...diagnostic.failedNames]);
-      const remaining = retried.filter((result) => !result.ok);
-      const ownerIsCurrent = errorOwners.isCurrent(surface, ownerGeneration);
-      setBulkOperationStatus(
-        operationId,
-        operationResultStatus(retried),
-        remaining.length ? diagnosticsScope(scope, remaining) : null,
-        ownerIsCurrent && remaining.length > 0,
-      );
-      if (!ownerIsCurrent) return;
+  bindOwnedRetry({
+    registry: errorOwners,
+    key: surface,
+    generation: ownerGeneration,
+    button: retryButton,
+    retry: async () => {
+      if (!scopeMatchesCurrent(scope)) {
+        panel.querySelector('.error-hint').textContent =
+          `Switch back to ${formatContextLine(scope)} to retry these exact items.`;
+        return { operationId: null, retried: null };
+      }
+      const operationId = `bulk-${++nextBulkOperationId}`;
+      setBulkOperationStatus(operationId, 'started');
+      try {
+        const retried = await retryFailed([...diagnostic.failedNames]);
+        const remaining = retried.filter((result) => !result.ok);
+        const ownerIsCurrent = errorOwners.isCurrent(surface, ownerGeneration);
+        setBulkOperationStatus(
+          operationId,
+          operationResultStatus(retried),
+          remaining.length ? diagnosticsScope(scope, remaining) : null,
+          ownerIsCurrent && remaining.length > 0,
+        );
+        return { operationId, retried };
+      } catch (error) {
+        const failed = diagnostic.failedNames.map((item) => ({ item, ok: false, error }));
+        const ownerIsCurrent = errorOwners.isCurrent(surface, ownerGeneration);
+        setBulkOperationStatus(
+          operationId,
+          'failed',
+          diagnosticsScope(scope, failed),
+          ownerIsCurrent,
+        );
+        throw Object.assign(error, { operationId, failed });
+      }
+    },
+    publish: ({ operationId, retried }) => {
+      if (!operationId || !retried) return;
       reportBulkResults(kind, verb, retried, scope, retryFailed, operationId);
-    } catch (error) {
-      const failed = diagnostic.failedNames.map((item) => ({ item, ok: false, error }));
-      const ownerIsCurrent = errorOwners.isCurrent(surface, ownerGeneration);
-      setBulkOperationStatus(
-        operationId,
-        'failed',
-        diagnosticsScope(scope, failed),
-        ownerIsCurrent,
-      );
-      if (!ownerIsCurrent) return;
-      reportBulkResults(kind, verb, failed, scope, retryFailed, operationId);
-    } finally {
-      retryButton.disabled = false;
-    }
-  };
+    },
+    reject: (error) => {
+      if (!error.operationId || !error.failed) return;
+      reportBulkResults(kind, verb, error.failed, scope, retryFailed, error.operationId);
+    },
+  });
   const copyButton = panel.querySelector('.error-copy');
   copyButton.hidden = false;
   copyButton.onclick = async () => {
