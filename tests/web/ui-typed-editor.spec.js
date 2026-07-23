@@ -658,6 +658,163 @@ test('delayed conversion apply locks its full form and reconciles the immutable 
   await expect.poll(() => listRefreshes).toBeGreaterThan(0);
 });
 
+for (const errorCase of [
+  {
+    name: 'source revision',
+    field: 'source_revision',
+    expectedSelector: '#conversion-preview',
+  },
+  {
+    name: 'target',
+    field: 'target',
+    expectedSelector: '#conversion-target',
+  },
+  {
+    name: 'confirmation',
+    field: 'confirm_lossy',
+    expectedSelector: '#conversion-preview',
+  },
+  {
+    name: 'supplied protected field',
+    field: 'supplied_fields.password',
+    expectedSelector: '#conversion-required-fields input[data-conversion-field="password"]',
+  },
+]) {
+  test(`delayed apply ${errorCase.name} errors restore controls before durable focus mapping`, async ({ page, baseURL }) => {
+    const secretName = `apply-error-${errorCase.field.replaceAll(/[^a-z]+/g, '-')}`;
+    await page.goto(baseURL);
+    await putSecret(page, secretName, { value: 'conversion-source' });
+    await page.reload();
+    await page.getByRole('button', { name: `Edit secret ${secretName}` }).click();
+    await page.route(`**/api/secrets/${secretName}/conversion/preview?**`, async (route) => {
+      const body = route.request().postDataJSON();
+      if (!body.supplied_fields?.password) {
+        return route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: {
+              code: 'xv-invalid-argument',
+              message: 'Password is required.',
+              field: 'supplied_fields.password',
+            },
+          }),
+        });
+      }
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          dropped: [],
+          exposed: [],
+          renamed: [],
+          requires_confirmation: false,
+          source_revision: 'error-revision',
+        }),
+      });
+    });
+    let releaseApplyError;
+    await page.route(`**/api/secrets/${secretName}/conversion?**`, async (route) => {
+      await new Promise((resolve) => { releaseApplyError = async () => {
+        await route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: {
+              code: 'xv-conversion-rejected',
+              message: `${errorCase.name} rejected.`,
+              hint: 'Correct the highlighted conversion field and preview again.',
+              field: errorCase.field,
+            },
+          }),
+        });
+        resolve();
+      }; });
+    });
+
+    await page.getByRole('button', { name: 'Convert type' }).click();
+    await page.getByLabel('Conversion target').selectOption('login');
+    await page.getByRole('button', { name: 'Preview conversion' }).click();
+    const originalPassword =
+      page.locator('#conversion-required-fields input[data-conversion-field="password"]');
+    await originalPassword.fill('must-not-survive-apply-error');
+    await page.getByRole('button', { name: 'Preview conversion' }).click();
+    await page.evaluate(() => {
+      window.__originalApplyErrorPassword = document.querySelector(
+        '#conversion-required-fields input[data-conversion-field="password"]',
+      );
+    });
+    await page.getByRole('button', { name: 'Confirm conversion' }).click();
+    await expect.poll(() => typeof releaseApplyError).toBe('function');
+    await page.evaluate(() => {
+      window.__applyErrorFocusEvents = [];
+      document.addEventListener('focusin', (event) => {
+        window.__applyErrorFocusEvents.push({
+          id: event.target.id,
+          conversionField: event.target.dataset?.conversionField || '',
+          focusedDisabled: Boolean(event.target.disabled),
+          workflowInert: document.querySelector('#conversion-workflow').hasAttribute('inert'),
+          targetDisabled: document.querySelector('#conversion-target').disabled,
+        });
+      });
+      const target = document.querySelector('#conversion-target');
+      target.value = 'api-key';
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    await releaseApplyError();
+    const mapped = page.locator(errorCase.expectedSelector);
+    await expect(mapped).toBeVisible();
+    await expect(mapped).toBeEnabled();
+    await expect(mapped).toBeFocused();
+    await expect(mapped).toHaveAttribute('aria-invalid', 'true');
+    await expect(mapped).toHaveAttribute('aria-describedby', /secret-form-error/);
+    await expect(page.locator('#conversion-workflow')).not.toHaveAttribute('inert', '');
+    await expect(page.getByLabel('Conversion target')).toBeEnabled();
+    await expect(page.getByLabel('Conversion target')).toHaveValue('login');
+
+    const mappedFocus = await page.evaluate(({ field, selector }) => {
+      const target = document.querySelector(selector);
+      return window.__applyErrorFocusEvents.find((event) => (
+        field.startsWith('supplied_fields.')
+          ? event.conversionField === field.slice('supplied_fields.'.length)
+          : event.id === target.id
+      ));
+    }, { field: errorCase.field, selector: errorCase.expectedSelector });
+    expect(mappedFocus).toEqual(expect.objectContaining({
+      focusedDisabled: false,
+      workflowInert: false,
+      targetDisabled: false,
+    }));
+
+    if (errorCase.field === 'supplied_fields.password') {
+      expect(await page.evaluate(() => ({
+        connected: window.__originalApplyErrorPassword.isConnected,
+        value: window.__originalApplyErrorPassword.value,
+        protectedValue: window.__originalApplyErrorPassword._protectedState.value,
+        hasStoredValue: window.__originalApplyErrorPassword._protectedState.hasStoredValue,
+      }))).toEqual({
+        connected: false,
+        value: '',
+        protectedValue: null,
+        hasStoredValue: false,
+      });
+      await expect(mapped).toHaveAttribute('data-field-kind', 'secret');
+      expect(await mapped.evaluate((input) => ({
+        value: input.value,
+        protectedValue: input._protectedState.value,
+        hasStoredValue: input._protectedState.hasStoredValue,
+      }))).toEqual({
+        value: '',
+        protectedValue: '',
+        hasStoredValue: false,
+      });
+      expect(await page.evaluate(
+        () => window.__xvTestStoreSnapshot().draft.working.conversion.supplied_fields,
+      )).toEqual({});
+    }
+  });
+}
+
 test('rename and conversion fields participate in drawer and context navigation guards', async ({ page, baseURL }) => {
   await page.goto(baseURL);
   await putSecret(page, 'workflow-draft', { value: 'workflow-value' });

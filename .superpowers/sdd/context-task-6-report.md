@@ -75,6 +75,19 @@ Task 5 conversion and atomic rename contracts.
     intermediate draft write after activation begins because that draft is
     immediately closed; this avoids misclassifying cleanup as new scoped
     activity while still removing the draft and protected values.
+14. A third review remediation added delayed apply-error cases for
+    `source_revision`, `target`, `confirm_lossy`, and
+    `supplied_fields.password`. Focus-event assertions first failed because
+    errors were mapped while the conversion workflow remained inert and the
+    supplied protected control had already been detached.
+15. Apply failures now scrub and record the structured error, restore pending
+    state, revalidate the current drawer and scope, then map the durable error.
+    Revision and confirmation errors focus the actionable Preview control;
+    target errors focus the target selector. A supplied-field error recreates
+    an empty correctly typed protected control without restoring its value.
+    Recovery resets to the immutable preview target even after a scripted
+    pending edit attempt. The detached original remains scrubbed and the
+    central draft retains no protected supplied value.
 
 ## Verification
 
@@ -86,8 +99,8 @@ Task 5 conversion and atomic rename contracts.
 - `cargo fmt -- --check`: **passed**
 - `cargo check --features ui`: **passed**
 - `git diff --check`: **passed**
-- `npx playwright test tests/web/ui-typed-editor.spec.js`: **11 passed**
-- `npx playwright test`: **34 passed**
+- `npx playwright test tests/web/ui-typed-editor.spec.js`: **15 passed**
+- `npx playwright test`: **38 passed**
 - Axe scans in new-secret metadata controls, open conversion preview, and
   rename-error states: **no serious or critical violations**
 

@@ -315,7 +315,7 @@ function showFormError(error) {
     target_type: '#conversion-target',
     supplied_fields: '#conversion-required-fields input',
     source_revision: '#conversion-preview',
-    confirm_lossy: '#conversion-confirm',
+    confirm_lossy: '#conversion-preview',
     new_name: '#rename-name',
   };
   const suppliedField = field?.startsWith('supplied_fields.')
@@ -2040,8 +2040,7 @@ function conversionRequestSnapshot() {
   });
 }
 
-function conversionTargetDefinition(name) {
-  const targetType = $('#conversion-target').value;
+function conversionTargetDefinition(name, targetType = $('#conversion-target').value) {
   return types.find((type) => type.name === targetType)
     ?.fields?.find((field) => field.name === name) || null;
 }
@@ -2052,14 +2051,18 @@ function sameOperationScope(left, right) {
     && left?.vault === right?.vault;
 }
 
-function conversionOperationIsCurrent(operation) {
-  return operation.operationGeneration === conversionOperationGeneration
-    && operation.lifecycleEpoch === conversionLifecycleEpoch
-    && operation.drawerGeneration === drawerGeneration
+function conversionDrawerIsCurrent(operation) {
+  return operation.drawerGeneration === drawerGeneration
     && operation.selection === editing
     && !$('#drawer').hidden
     && sameOperationScope(operation.scope, drawerScope)
     && scopeMatchesCurrent(operation.scope);
+}
+
+function conversionOperationIsCurrent(operation) {
+  return operation.operationGeneration === conversionOperationGeneration
+    && operation.lifecycleEpoch === conversionLifecycleEpoch
+    && conversionDrawerIsCurrent(operation);
 }
 
 function clearConversionPreview({ clearSummary = true } = {}) {
@@ -2216,12 +2219,12 @@ function conversionProtectedField(name, definition) {
   return input;
 }
 
-function ensureConversionField(name) {
+function ensureConversionField(name, targetType = $('#conversion-target').value) {
   const required = $('#conversion-required-fields');
   const existing = [...required.querySelectorAll('input[data-conversion-field]')]
     .find((input) => input.dataset.conversionField === name);
   if (existing) return existing;
-  const definition = conversionTargetDefinition(name);
+  const definition = conversionTargetDefinition(name, targetType);
   if (definition?.kind === 'secret') {
     const input = conversionProtectedField(name, definition);
     required.appendChild(conversionFieldStates.get(name).row);
@@ -2332,6 +2335,7 @@ async function confirmConversion() {
   beginScopedMutation();
   setSavePending(true);
   clearFormError();
+  let applyError = null;
   try {
     await api(
       'POST',
@@ -2350,12 +2354,25 @@ async function confirmConversion() {
     if (conversionOperationIsCurrent(operation)) {
       clearConversionPreview();
       clearConversionFields();
-      showFormError(error);
-      updateDraft();
+      applyError = error;
     }
   } finally {
     setSavePending(false);
     endScopedMutation();
+  }
+  if (applyError && conversionDrawerIsCurrent(operation)) {
+    const recoveryTargetType = preview.request.target.kind === 'typed'
+      ? preview.request.target.target_type
+      : '';
+    $('#conversion-target').value = recoveryTargetType;
+    if (applyError?.field?.startsWith('supplied_fields.')) {
+      ensureConversionField(
+        applyError.field.slice('supplied_fields.'.length),
+        recoveryTargetType,
+      );
+    }
+    updateDraft();
+    showFormError(applyError);
   }
 }
 
