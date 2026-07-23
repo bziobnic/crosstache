@@ -141,6 +141,8 @@ impl Backend for AwsBackend {
 fn aws_capabilities(has_file_storage: bool) -> BackendCapabilities {
     BackendCapabilities {
         has_atomic_record_conversion: false,
+        has_conditional_record_conversion: false,
+        has_atomic_rename: false,
         has_enable_disable: false,
         has_vaults: true,
         has_file_storage,
@@ -173,6 +175,8 @@ mod capability_tests {
         let capabilities = aws_capabilities(false);
 
         assert!(!capabilities.has_atomic_record_conversion);
+        assert!(!capabilities.has_conditional_record_conversion);
+        assert!(!capabilities.has_atomic_rename);
         assert!(!capabilities.has_enable_disable);
     }
 }

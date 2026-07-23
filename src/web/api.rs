@@ -258,6 +258,7 @@ pub(crate) async fn patch_secret(
     reject_reserved_attachment_key(&name)?;
     let request = SecretUpdateRequest {
         name: name.clone(),
+        expected_revision: None,
         value: None,
         content_type: None,
         enabled: body.enabled,
@@ -336,6 +337,7 @@ pub(crate) async fn move_secret(
         (None, Some(folder)) => {
             let request = SecretUpdateRequest {
                 name: name.clone(),
+                expected_revision: None,
                 value: None,
                 content_type: None,
                 enabled: None,

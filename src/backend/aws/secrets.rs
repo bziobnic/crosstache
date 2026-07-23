@@ -461,34 +461,9 @@ impl AwsSecretBackend {
     }
 }
 
-#[cfg(test)]
-mod atomic_create_tests {
-    use super::*;
-
-    #[test]
-    fn atomic_create_conflict_never_enters_the_update_path() {
-        let error =
-            update_after_create_conflict(false, BackendError::Conflict("destination".into()))
-                .unwrap_err();
-        assert!(matches!(error, BackendError::Conflict(_)));
-    }
-
-    #[test]
-    fn ordinary_set_keeps_its_existing_upsert_contract() {
-        assert!(
-            update_after_create_conflict(true, BackendError::Conflict("destination".into()))
-                .unwrap()
-        );
-    }
-}
-
 #[async_trait::async_trait]
 impl SecretBackend for AwsSecretBackend {
     // Required methods — real impls added in Tasks 13-22.
-
-    fn supports_atomic_rename(&self) -> bool {
-        true
-    }
 
     async fn set_secret(
         &self,
@@ -1106,5 +1081,26 @@ impl SecretBackend for AwsSecretBackend {
             .await
             .map_err(|e| super::errors::from_rotate(name, &aws_full_name, e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod atomic_create_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_create_conflict_never_enters_the_update_path() {
+        let error =
+            update_after_create_conflict(false, BackendError::Conflict("destination".into()))
+                .unwrap_err();
+        assert!(matches!(error, BackendError::Conflict(_)));
+    }
+
+    #[test]
+    fn ordinary_set_keeps_its_existing_upsert_contract() {
+        assert!(
+            update_after_create_conflict(true, BackendError::Conflict("destination".into()))
+                .unwrap()
+        );
     }
 }

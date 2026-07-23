@@ -13,6 +13,15 @@ use crate::secret::manager::{
 
 use super::error::BackendError;
 
+/// A secret value/metadata snapshot paired with an opaque, non-reusable
+/// provider revision. The revision is a compare-and-swap token only: callers
+/// must not infer ordering or expose provider internals from it.
+#[derive(Debug, Clone)]
+pub struct SecretSnapshot {
+    pub properties: SecretProperties,
+    pub revision: String,
+}
+
 /// Trait for secret management operations.
 ///
 /// All backends must implement the required methods. Optional methods
@@ -63,6 +72,39 @@ pub trait SecretBackend: Send + Sync {
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError>;
 
+    /// Whether the backend can atomically compare an opaque source revision
+    /// and commit a complete secret update.
+    fn supports_conditional_update(&self) -> bool {
+        false
+    }
+
+    /// Read one complete secret generation and its opaque revision.
+    async fn get_secret_snapshot(
+        &self,
+        _vault: &str,
+        _name: &str,
+        _include_value: bool,
+    ) -> Result<SecretSnapshot, BackendError> {
+        Err(BackendError::Unsupported(
+            "conditional secret snapshots".into(),
+        ))
+    }
+
+    /// Commit an update only while `expected_revision` still names the active
+    /// generation. The comparison and update must share one provider commit
+    /// point.
+    async fn update_secret_if_revision(
+        &self,
+        _vault: &str,
+        _name: &str,
+        _expected_revision: &str,
+        _request: SecretUpdateRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        Err(BackendError::Unsupported(
+            "conditional secret update".into(),
+        ))
+    }
+
     /// Create a secret only if the destination is still absent at the
     /// provider's commit point. Implementations must never update or replace
     /// an existing secret. Backends without a conditional-create primitive
@@ -78,60 +120,36 @@ pub trait SecretBackend: Send + Sync {
         ))
     }
 
-    /// Whether this backend has a provider-enforced no-overwrite commit point
-    /// for rename. False means rename must fail before reading the source.
+    /// Whether this backend can atomically guard the source revision, guard
+    /// destination absence, create the complete destination, and remove the
+    /// source as one recoverable transaction.
     fn supports_atomic_rename(&self) -> bool {
         false
     }
 
-    /// Rename a secret: read value + metadata, create it under `new_name`
-    /// (tags, groups, note, folder, content type, expiry ride along), then
-    /// delete the old name via the backend's normal delete (soft delete /
-    /// recovery window / trash). Version history does not carry over.
-    ///
-    /// If the new secret is created but deleting the original fails, this
-    /// returns [`BackendError::RenameIncomplete`] and deliberately does NOT
-    /// roll back the new secret — no secret material may be lost.
-    ///
-    /// The destination-exists guard is an early preflight for useful errors.
-    /// [`create_secret_if_absent`](Self::create_secret_if_absent) is the
-    /// authoritative no-overwrite commit point and must reject a destination
-    /// introduced after the preflight.
+    /// Rename only if the source revision is still current. Implementations
+    /// must preserve the source and destination when either CAS guard fails.
+    async fn rename_secret_if_revision(
+        &self,
+        _vault: &str,
+        _name: &str,
+        _new_name: &str,
+        _expected_revision: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        Err(BackendError::Unsupported("atomic secret rename".into()))
+    }
+
+    /// Rename a secret. Backends must override this only when the entire
+    /// source/destination mutation is atomic and recoverable. The default
+    /// refuses the old read-create-delete emulation because it can copy a
+    /// stale source or strand two live names.
     async fn rename_secret(
         &self,
-        vault: &str,
-        name: &str,
-        new_name: &str,
+        _vault: &str,
+        _name: &str,
+        _new_name: &str,
     ) -> Result<SecretProperties, BackendError> {
-        if !self.supports_atomic_rename() {
-            return Err(BackendError::Unsupported(
-                "atomic create-if-absent required for rename".into(),
-            ));
-        }
-        if new_name == name {
-            return Err(BackendError::InvalidArgument(format!(
-                "secret is already named '{name}'"
-            )));
-        }
-        if self.secret_exists(vault, new_name).await? {
-            return Err(BackendError::Conflict(format!(
-                "secret '{new_name}' already exists in vault '{vault}' — delete it first or pick another name"
-            )));
-        }
-
-        let current = self.get_secret(vault, name, true).await?;
-        let request = rename_request_from_properties(new_name, &current)?;
-        let created = self.create_secret_if_absent(vault, request).await?;
-
-        if let Err(cause) = self.delete_secret(vault, name).await {
-            return Err(BackendError::RenameIncomplete {
-                source: name.to_string(),
-                destination: new_name.to_string(),
-                vault: vault.to_string(),
-                cause: Box::new(cause),
-            });
-        }
-        Ok(created)
+        Err(BackendError::Unsupported("atomic secret rename".into()))
     }
 
     // -----------------------------------------------------------------------
@@ -297,24 +315,12 @@ mod tests {
     /// `rename_secret` (set/get/delete/exists); everything else Unsupported.
     struct StubBackend {
         secrets: Mutex<HashMap<String, SecretRequest>>,
-        fail_delete: bool,
-        introduce_destination_before_create: bool,
     }
 
     impl StubBackend {
-        fn new(fail_delete: bool) -> Self {
+        fn new() -> Self {
             Self {
                 secrets: Mutex::new(HashMap::new()),
-                fail_delete,
-                introduce_destination_before_create: false,
-            }
-        }
-
-        fn with_destination_race() -> Self {
-            Self {
-                secrets: Mutex::new(HashMap::new()),
-                fail_delete: false,
-                introduce_destination_before_create: true,
             }
         }
     }
@@ -354,10 +360,6 @@ mod tests {
 
     #[async_trait]
     impl SecretBackend for StubBackend {
-        fn supports_atomic_rename(&self) -> bool {
-            true
-        }
-
         async fn set_secret(
             &self,
             _vault: &str,
@@ -377,15 +379,6 @@ mod tests {
             request: SecretRequest,
         ) -> Result<SecretProperties, BackendError> {
             let mut secrets = self.secrets.lock().unwrap();
-            if self.introduce_destination_before_create {
-                secrets.insert(
-                    request.name.clone(),
-                    SecretRequest {
-                        value: Zeroizing::new("concurrent-value".into()),
-                        ..seeded_request(&request.name)
-                    },
-                );
-            }
             if secrets.contains_key(&request.name) {
                 return Err(BackendError::Conflict(format!(
                     "secret '{}' already exists",
@@ -433,9 +426,6 @@ mod tests {
         }
 
         async fn delete_secret(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
-            if self.fail_delete {
-                return Err(BackendError::Network("simulated outage".into()));
-            }
             self.secrets
                 .lock()
                 .unwrap()
@@ -475,127 +465,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rename_moves_value_and_metadata() {
-        let backend = StubBackend::new(false);
+    async fn default_rename_refuses_before_reading_or_mutating() {
+        let backend = StubBackend::new();
         backend
             .set_secret("v", seeded_request("old-name"))
             .await
             .unwrap();
 
-        let created = backend
+        let error = backend
             .rename_secret("v", "old-name", "new-name")
             .await
-            .unwrap();
-        assert_eq!(created.name, "new-name");
+            .unwrap_err();
 
-        let got = backend.get_secret("v", "new-name", true).await.unwrap();
-        assert_eq!(got.value.as_ref().map(|v| v.as_str()), Some("the-value"));
-        assert_eq!(
-            got.tags.get("groups").map(String::as_str),
-            Some("team-a,team-b")
-        );
-        assert_eq!(got.tags.get("note").map(String::as_str), Some("ride along"));
-        assert_eq!(got.tags.get("folder").map(String::as_str), Some("proj/db"));
-        assert_eq!(got.tags.get("custom").map(String::as_str), Some("kept"));
-        // original_name is regenerated for the new name, not copied.
-        assert_eq!(
-            got.tags.get("original_name").map(String::as_str),
-            Some("new-name")
-        );
-        assert_eq!(got.content_type, "text/plain");
-
+        assert!(matches!(error, BackendError::Unsupported(_)), "{error:?}");
+        assert!(backend.get_secret("v", "old-name", true).await.is_ok());
         assert!(matches!(
-            backend.get_secret("v", "old-name", false).await,
+            backend.get_secret("v", "new-name", false).await,
             Err(BackendError::NotFound { .. })
         ));
     }
 
     #[tokio::test]
-    async fn rename_to_existing_name_is_a_conflict_and_mutates_nothing() {
-        let backend = StubBackend::new(false);
-        backend.set_secret("v", seeded_request("a")).await.unwrap();
-        backend.set_secret("v", seeded_request("b")).await.unwrap();
-
-        let err = backend.rename_secret("v", "a", "b").await.unwrap_err();
-        assert!(matches!(err, BackendError::Conflict(_)), "{err:?}");
-        // Both still present and untouched.
-        assert!(backend.get_secret("v", "a", true).await.is_ok());
-        assert!(backend.get_secret("v", "b", true).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn rename_destination_race_preserves_concurrent_value_and_source() {
-        let backend = StubBackend::with_destination_race();
-        backend
-            .set_secret("v", seeded_request("source"))
-            .await
-            .unwrap();
-
+    async fn default_revision_guarded_rename_is_explicitly_unsupported() {
+        let backend = StubBackend::new();
         let error = backend
-            .rename_secret("v", "source", "destination")
+            .rename_secret_if_revision("v", "old-name", "new-name", "revision")
             .await
             .unwrap_err();
-
-        assert!(matches!(error, BackendError::Conflict(_)), "{error:?}");
-        let source = backend.get_secret("v", "source", true).await.unwrap();
-        let destination = backend.get_secret("v", "destination", true).await.unwrap();
-        assert_eq!(
-            source.value.as_ref().map(|value| value.as_str()),
-            Some("the-value")
-        );
-        assert_eq!(
-            destination.value.as_ref().map(|value| value.as_str()),
-            Some("concurrent-value")
-        );
-    }
-
-    #[tokio::test]
-    async fn rename_to_same_name_is_invalid_argument() {
-        let backend = StubBackend::new(false);
-        backend.set_secret("v", seeded_request("a")).await.unwrap();
-        let err = backend.rename_secret("v", "a", "a").await.unwrap_err();
-        assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn rename_of_missing_secret_is_not_found() {
-        let backend = StubBackend::new(false);
-        let err = backend
-            .rename_secret("v", "ghost", "new")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, BackendError::NotFound { .. }), "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn rename_partial_failure_reports_rename_incomplete_with_both_copies() {
-        let backend = StubBackend::new(true); // delete always fails
-        backend
-            .set_secret("v", seeded_request("old-name"))
-            .await
-            .unwrap();
-
-        let err = backend
-            .rename_secret("v", "old-name", "new-name")
-            .await
-            .unwrap_err();
-        match err {
-            BackendError::RenameIncomplete {
-                source,
-                destination,
-                vault,
-                cause,
-            } => {
-                assert_eq!(source, "old-name");
-                assert_eq!(destination, "new-name");
-                assert_eq!(vault, "v");
-                assert!(matches!(*cause, BackendError::Network(_)), "{cause:?}");
-            }
-            other => panic!("wrong error: {other:?}"),
-        }
-        // Both copies survive — the new secret is never rolled back.
-        assert!(backend.get_secret("v", "old-name", true).await.is_ok());
-        assert!(backend.get_secret("v", "new-name", true).await.is_ok());
+        assert!(matches!(error, BackendError::Unsupported(_)), "{error:?}");
     }
 
     #[test]

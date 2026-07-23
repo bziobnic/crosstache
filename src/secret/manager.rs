@@ -128,6 +128,10 @@ pub struct SecretAttributesUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretUpdateRequest {
     pub name: String,
+    /// Internal compare-and-swap token. This is never accepted from serialized
+    /// CLI/API input; only conditional backend entry points populate it.
+    #[serde(skip)]
+    pub expected_revision: Option<String>,
     pub value: Option<Zeroizing<String>>,
     pub content_type: Option<String>,
     pub enabled: Option<bool>,

@@ -142,6 +142,12 @@ impl NameCharset {
 pub struct BackendCapabilities {
     /// One backend call can atomically replace a secret value and all conversion metadata.
     pub has_atomic_record_conversion: bool,
+    /// Backend can compare an opaque source revision and commit the complete
+    /// conversion update at the same provider commit point.
+    pub has_conditional_record_conversion: bool,
+    /// Backend can atomically guard source revision and destination absence
+    /// while moving a complete secret.
+    pub has_atomic_rename: bool,
     /// Backend supports preserving/changing the enabled flag.
     pub has_enable_disable: bool,
     /// Multi-vault/namespace support.
@@ -193,6 +199,8 @@ impl Default for BackendCapabilities {
     fn default() -> Self {
         Self {
             has_atomic_record_conversion: false,
+            has_conditional_record_conversion: false,
+            has_atomic_rename: false,
             has_enable_disable: false,
             has_vaults: false,
             has_file_storage: false,

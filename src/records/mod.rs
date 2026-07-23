@@ -200,6 +200,8 @@ mod tag_budget_tests {
     fn caps(max_tags: Option<usize>, max_tag_value_len: Option<usize>) -> BackendCapabilities {
         BackendCapabilities {
             has_atomic_record_conversion: false,
+            has_conditional_record_conversion: false,
+            has_atomic_rename: false,
             has_enable_disable: false,
             has_vaults: true,
             has_file_storage: false,

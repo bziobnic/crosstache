@@ -12,7 +12,7 @@ pub(crate) struct ApiErrorBody {
     pub(crate) code: &'static str,
     pub(crate) message: String,
     pub(crate) hint: &'static str,
-    pub(crate) field: Option<&'static str>,
+    pub(crate) field: Option<String>,
     pub(crate) details: Option<Value>,
 }
 
@@ -26,14 +26,14 @@ impl ApiErrorBody {
         code: &'static str,
         message: impl Into<String>,
         hint: &'static str,
-        field: Option<&'static str>,
+        field: Option<&str>,
         details: Option<Value>,
     ) -> Self {
         Self {
             code,
             message: message.into(),
             hint,
-            field,
+            field: field.map(str::to_string),
             details,
         }
     }

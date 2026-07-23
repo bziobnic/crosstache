@@ -496,6 +496,7 @@ mod build_patched_tags_tests {
     fn base_request(name: &str) -> SecretUpdateRequest {
         SecretUpdateRequest {
             name: name.to_string(),
+            expected_revision: None,
             value: None,
             content_type: None,
             enabled: None,
@@ -797,6 +798,7 @@ mod atomic_conversion_update_tests {
         let expires = Utc.with_ymd_and_hms(2030, 1, 2, 0, 0, 0).unwrap();
         let request = SecretUpdateRequest {
             name: "secret".into(),
+            expected_revision: None,
             value: Some(Zeroizing::new("converted-envelope".into())),
             content_type: Some("application/vnd.xv.record+json".into()),
             enabled: Some(false),

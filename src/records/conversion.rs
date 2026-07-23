@@ -556,7 +556,9 @@ fn prepare_common(
 /// Reject conversion before reading values, printing impact, or prompting
 /// when the backend cannot commit the complete value+metadata shape atomically.
 pub fn validate_conversion_backend(backend: &dyn Backend) -> Result<()> {
-    if !backend.capabilities().has_atomic_record_conversion {
+    if !backend.capabilities().has_conditional_record_conversion
+        || !backend.secrets().supports_conditional_update()
+    {
         return Err(CrosstacheError::config(
             "backend does not support atomic record conversion; no changes were written",
         ));
@@ -569,6 +571,7 @@ pub async fn apply_conversion(
     backend: &dyn Backend,
     vault: &str,
     name: &str,
+    expected_revision: &str,
     preview: ConversionPreview,
 ) -> Result<SecretProperties> {
     validate_conversion_backend(backend)?;
@@ -674,6 +677,7 @@ pub async fn apply_conversion(
         .unwrap_or(FieldUpdate::Clear);
     let request = SecretUpdateRequest {
         name: name.to_string(),
+        expected_revision: None,
         value: Some(Zeroizing::new(preview.prepared.value)),
         content_type: Some(preview.prepared.content_type),
         enabled: caps
@@ -691,7 +695,7 @@ pub async fn apply_conversion(
 
     backend
         .secrets()
-        .update_secret(vault, name, request)
+        .update_secret_if_revision(vault, name, expected_revision, request)
         .await
         .map_err(Into::into)
 }
@@ -788,6 +792,7 @@ mod tests {
     #[derive(Clone)]
     struct RecordingBackend {
         updates: Arc<Mutex<Vec<SecretUpdateRequest>>>,
+        conditional_revisions: Arc<Mutex<Vec<String>>>,
         fail_update: bool,
         caps: BackendCapabilities,
         kind: BackendKind,
@@ -797,10 +802,12 @@ mod tests {
         fn supported() -> Self {
             Self {
                 updates: Arc::new(Mutex::new(Vec::new())),
+                conditional_revisions: Arc::new(Mutex::new(Vec::new())),
                 fail_update: false,
                 kind: BackendKind::Local,
                 caps: BackendCapabilities {
                     has_atomic_record_conversion: true,
+                    has_conditional_record_conversion: true,
                     has_enable_disable: true,
                     has_groups: true,
                     has_folders: true,
@@ -819,6 +826,10 @@ mod tests {
 
     #[async_trait]
     impl SecretBackend for RecordingBackend {
+        fn supports_conditional_update(&self) -> bool {
+            self.caps.has_conditional_record_conversion
+        }
+
         async fn set_secret(
             &self,
             _vault: &str,
@@ -874,6 +885,20 @@ mod tests {
             } else {
                 Ok(plain("updated"))
             }
+        }
+
+        async fn update_secret_if_revision(
+            &self,
+            vault: &str,
+            name: &str,
+            expected_revision: &str,
+            request: SecretUpdateRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            self.conditional_revisions
+                .lock()
+                .unwrap()
+                .push(expected_revision.to_string());
+            self.update_secret(vault, name, request).await
         }
     }
 
@@ -1144,7 +1169,7 @@ mod tests {
         let preview =
             preview_conversion(&source, std::slice::from_ref(&target), confirmed).unwrap();
         let backend = RecordingBackend::supported();
-        apply_conversion(&backend, "vault", "secret", preview)
+        apply_conversion(&backend, "vault", "secret", "revision", preview)
             .await
             .unwrap();
 
@@ -1168,7 +1193,7 @@ mod tests {
         .unwrap();
         assert!(!preview.requires_confirmation);
         let backend = RecordingBackend::supported();
-        apply_conversion(&backend, "vault", "secret", preview)
+        apply_conversion(&backend, "vault", "secret", "revision", preview)
             .await
             .unwrap();
 
@@ -1178,6 +1203,28 @@ mod tests {
         let envelope = parse_envelope(request.value.as_deref().unwrap()).unwrap();
         assert_eq!(envelope["token"], "metadata-token");
         assert!(!request.tags.as_ref().unwrap().contains_key("f.token"));
+    }
+
+    #[tokio::test]
+    async fn apply_uses_the_preview_revision_as_the_atomic_commit_guard() {
+        let target = custom_type("evolving", FieldKind::Secret);
+        let source = custom_record("evolving", FieldKind::Metadata);
+        let preview = preview_conversion(
+            &source,
+            std::slice::from_ref(&target),
+            ConversionRequest::to_type("evolving"),
+        )
+        .unwrap();
+        let backend = RecordingBackend::supported();
+
+        apply_conversion(&backend, "vault", "secret", "opaque-revision", preview)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            backend.conditional_revisions.lock().unwrap().as_slice(),
+            ["opaque-revision"]
+        );
     }
 
     #[test]
@@ -1326,7 +1373,7 @@ mod tests {
         .unwrap();
         let backend = RecordingBackend::supported();
 
-        apply_conversion(&backend, "vault", "secret", preview)
+        apply_conversion(&backend, "vault", "secret", "revision", preview)
             .await
             .unwrap();
 
@@ -1361,7 +1408,7 @@ mod tests {
         let mut backend = RecordingBackend::supported();
         backend.fail_update = true;
 
-        let error = apply_conversion(&backend, "vault", "secret", preview)
+        let error = apply_conversion(&backend, "vault", "secret", "revision", preview)
             .await
             .unwrap_err();
 
@@ -1383,7 +1430,7 @@ mod tests {
         let mut backend = RecordingBackend::supported();
         backend.caps.max_tags = Some(1);
 
-        let error = apply_conversion(&backend, "vault", "secret", preview)
+        let error = apply_conversion(&backend, "vault", "secret", "revision", preview)
             .await
             .unwrap_err();
 
@@ -1404,7 +1451,7 @@ mod tests {
         let mut backend = RecordingBackend::supported();
         backend.caps.has_folders = false;
 
-        let error = apply_conversion(&backend, "vault", "secret", preview)
+        let error = apply_conversion(&backend, "vault", "secret", "revision", preview)
             .await
             .unwrap_err();
 
@@ -1422,9 +1469,9 @@ mod tests {
         .unwrap();
         let mut backend = RecordingBackend::supported();
         backend.kind = BackendKind::Aws;
-        backend.caps.has_atomic_record_conversion = false;
+        backend.caps.has_conditional_record_conversion = false;
         backend.caps.has_enable_disable = false;
-        let error = apply_conversion(&backend, "vault", "secret", preview)
+        let error = apply_conversion(&backend, "vault", "secret", "revision", preview)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("atomic"));
@@ -1457,7 +1504,7 @@ mod tests {
             let mut backend = RecordingBackend::supported();
             backend.caps.has_enable_disable = false;
 
-            apply_conversion(&backend, "vault", "secret", preview)
+            apply_conversion(&backend, "vault", "secret", "revision", preview)
                 .await
                 .unwrap();
 
@@ -1477,7 +1524,7 @@ mod tests {
         .unwrap();
         let backend = RecordingBackend::supported();
 
-        let result = apply_conversion(&backend, "vault", "secret", preview)
+        let result = apply_conversion(&backend, "vault", "secret", "revision", preview)
             .await
             .unwrap();
 

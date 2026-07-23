@@ -694,6 +694,7 @@ async fn execute_secret_mv(
     if dest_folder_norm != current_folder_norm {
         let request = SecretUpdateRequest {
             name: src_name.clone(),
+            expected_revision: None,
             value: None,
             content_type: None,
             enabled: None,
@@ -831,6 +832,7 @@ async fn execute_folder_mv(
     for (old, new, name, new_folder) in &moves {
         let request = SecretUpdateRequest {
             name: name.clone(),
+            expected_revision: None,
             value: None,
             content_type: None,
             enabled: None,
@@ -1039,6 +1041,7 @@ async fn execute_filter_mv(
     for (old, new, name) in &moves {
         let request = SecretUpdateRequest {
             name: name.clone(),
+            expected_revision: None,
             value: None,
             content_type: None,
             enabled: None,
@@ -1429,6 +1432,8 @@ mod tests {
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
                 has_atomic_record_conversion: false,
+                has_conditional_record_conversion: false,
+                has_atomic_rename: false,
                 has_enable_disable: false,
                 has_vaults: true,
                 has_file_storage: false,
@@ -1579,6 +1584,8 @@ mod tests {
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
                 has_atomic_record_conversion: false,
+                has_conditional_record_conversion: false,
+                has_atomic_rename: false,
                 has_enable_disable: false,
                 has_vaults: true,
                 has_file_storage: true,

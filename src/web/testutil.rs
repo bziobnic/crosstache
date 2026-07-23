@@ -91,6 +91,7 @@ pub(crate) mod stub {
     use async_trait::async_trait;
 
     use crate::backend::error::BackendError;
+    use crate::backend::secret::SecretSnapshot;
     use crate::backend::{Backend, BackendCapabilities, BackendKind, SecretBackend};
     use crate::secret::manager::{
         DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
@@ -108,7 +109,9 @@ pub(crate) mod stub {
         list_delay: Option<Duration>,
         delete_error: Option<&'static str>,
         update_error: Option<&'static str>,
+        conversion_cas_race_value: Option<&'static str>,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
+        revisions: Mutex<HashMap<String, String>>,
         pub deleted: Mutex<HashMap<String, SecretRequest>>,
         #[cfg(feature = "file-ops")]
         pub files: Mutex<HashMap<String, StoredFile>>,
@@ -127,6 +130,9 @@ pub(crate) mod stub {
                     has_restore: true,
                     has_purge: true,
                     has_scheduled_purge: false,
+                    has_atomic_record_conversion: true,
+                    has_conditional_record_conversion: true,
+                    has_atomic_rename: true,
                     #[cfg(feature = "file-ops")]
                     has_file_storage: true,
                     ..Default::default()
@@ -146,7 +152,9 @@ pub(crate) mod stub {
                 list_delay: None,
                 delete_error: None,
                 update_error: None,
+                conversion_cas_race_value: None,
                 secrets: Mutex::new(HashMap::new()),
+                revisions: Mutex::new(HashMap::new()),
                 deleted: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
                 files: Mutex::new(HashMap::new()),
@@ -172,7 +180,13 @@ pub(crate) mod stub {
         }
 
         pub(crate) fn with_delete_error(name: &'static str, delete_error: &'static str) -> Self {
-            let mut backend = Self::with_capabilities(name, BackendCapabilities::default());
+            let mut backend = Self::with_capabilities(
+                name,
+                BackendCapabilities {
+                    has_atomic_rename: true,
+                    ..BackendCapabilities::default()
+                },
+            );
             backend.delete_error = Some(delete_error);
             backend
         }
@@ -184,6 +198,13 @@ pub(crate) mod stub {
         ) -> Self {
             let mut backend = Self::with_capabilities(name, capabilities);
             backend.update_error = Some(update_error);
+            backend
+        }
+
+        pub(crate) fn with_conversion_cas_race(name: &'static str, value: &'static str) -> Self {
+            let mut backend = Self::new();
+            backend.name = name;
+            backend.conversion_cas_race_value = Some(value);
             backend
         }
     }
@@ -251,8 +272,12 @@ pub(crate) mod stub {
 
     #[async_trait]
     impl SecretBackend for StubBackend {
+        fn supports_conditional_update(&self) -> bool {
+            self.capabilities.has_conditional_record_conversion
+        }
+
         fn supports_atomic_rename(&self) -> bool {
-            true
+            self.capabilities.has_atomic_rename
         }
 
         async fn set_secret(
@@ -265,6 +290,10 @@ pub(crate) mod stub {
                 .lock()
                 .unwrap()
                 .insert(request.name.clone(), request);
+            self.revisions
+                .lock()
+                .unwrap()
+                .insert(props.name.clone(), uuid::Uuid::new_v4().to_string());
             Ok(props)
         }
 
@@ -282,7 +311,31 @@ pub(crate) mod stub {
             }
             let props = props_from_request(&request, false);
             secrets.insert(request.name.clone(), request);
+            self.revisions
+                .lock()
+                .unwrap()
+                .insert(props.name.clone(), uuid::Uuid::new_v4().to_string());
             Ok(props)
+        }
+
+        async fn get_secret_snapshot(
+            &self,
+            vault: &str,
+            name: &str,
+            include_value: bool,
+        ) -> Result<SecretSnapshot, BackendError> {
+            let properties = self.get_secret(vault, name, include_value).await?;
+            let revision = self
+                .revisions
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| BackendError::Internal("missing test revision".into()))?;
+            Ok(SecretSnapshot {
+                properties,
+                revision,
+            })
         }
 
         async fn get_secret(
@@ -364,6 +417,7 @@ pub(crate) mod stub {
                 .lock()
                 .unwrap()
                 .insert(name.to_string(), request);
+            self.revisions.lock().unwrap().remove(name);
             Ok(())
         }
 
@@ -386,6 +440,10 @@ pub(crate) mod stub {
             })?;
             let props = props_from_request(&request, false);
             secrets.insert(name.to_string(), request);
+            self.revisions
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), uuid::Uuid::new_v4().to_string());
             Ok(props)
         }
 
@@ -459,7 +517,106 @@ pub(crate) mod stub {
 
             let props = props_from_request(&current, false);
             secrets.insert(name.to_string(), current);
+            self.revisions
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), uuid::Uuid::new_v4().to_string());
             Ok(props)
+        }
+
+        async fn update_secret_if_revision(
+            &self,
+            vault: &str,
+            name: &str,
+            expected_revision: &str,
+            request: SecretUpdateRequest,
+        ) -> Result<SecretProperties, BackendError> {
+            if let Some(value) = self.conversion_cas_race_value {
+                let mut secrets = self.secrets.lock().unwrap();
+                let current = secrets
+                    .get_mut(name)
+                    .ok_or_else(|| BackendError::NotFound {
+                        name: name.to_string(),
+                        suggestion: None,
+                    })?;
+                current.value = zeroize::Zeroizing::new(value.to_string());
+                self.revisions
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), uuid::Uuid::new_v4().to_string());
+            }
+            if self
+                .revisions
+                .lock()
+                .unwrap()
+                .get(name)
+                .is_none_or(|current| current != expected_revision)
+            {
+                return Err(BackendError::Conflict(format!(
+                    "secret '{name}' changed since it was read"
+                )));
+            }
+            self.update_secret(vault, name, request).await
+        }
+
+        async fn rename_secret_if_revision(
+            &self,
+            _vault: &str,
+            name: &str,
+            new_name: &str,
+            expected_revision: &str,
+        ) -> Result<SecretProperties, BackendError> {
+            if self
+                .revisions
+                .lock()
+                .unwrap()
+                .get(name)
+                .is_none_or(|current| current != expected_revision)
+            {
+                return Err(BackendError::Conflict(format!(
+                    "secret '{name}' changed since it was read"
+                )));
+            }
+            let mut secrets = self.secrets.lock().unwrap();
+            if secrets.contains_key(new_name) {
+                return Err(BackendError::Conflict(format!(
+                    "secret '{new_name}' already exists"
+                )));
+            }
+            if let Some(message) = self.delete_error {
+                return Err(BackendError::Internal(message.into()));
+            }
+            let mut request = secrets.remove(name).ok_or_else(|| BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            })?;
+            request.name = new_name.to_string();
+            let props = props_from_request(&request, false);
+            secrets.insert(new_name.to_string(), request);
+            let mut revisions = self.revisions.lock().unwrap();
+            revisions.remove(name);
+            revisions.insert(new_name.to_string(), uuid::Uuid::new_v4().to_string());
+            Ok(props)
+        }
+
+        async fn rename_secret(
+            &self,
+            vault: &str,
+            name: &str,
+            new_name: &str,
+        ) -> Result<SecretProperties, BackendError> {
+            let revision = self
+                .revisions
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                })?;
+            self.rename_secret_if_revision(vault, name, new_name, &revision)
+                .await
         }
 
         async fn secret_exists(&self, _vault: &str, name: &str) -> Result<bool, BackendError> {

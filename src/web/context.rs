@@ -86,6 +86,8 @@ pub(crate) struct CapabilitySummary {
     pub(crate) audit: bool,
     pub(crate) rotation: bool,
     pub(crate) conversion: bool,
+    pub(crate) conditional_conversion: bool,
+    pub(crate) atomic_rename: bool,
     pub(crate) metadata: bool,
 }
 
@@ -423,7 +425,9 @@ impl From<BackendCapabilities> for CapabilitySummary {
             rbac: capabilities.has_rbac,
             audit: capabilities.has_audit,
             rotation: capabilities.has_secret_rotation,
-            conversion: capabilities.has_atomic_record_conversion,
+            conversion: capabilities.has_conditional_record_conversion,
+            conditional_conversion: capabilities.has_conditional_record_conversion,
+            atomic_rename: capabilities.has_atomic_rename,
             metadata: true,
         }
     }
@@ -666,6 +670,8 @@ vaults = [
         assert_eq!(json["workspace"]["alias"], "default");
         assert_eq!(json["sources"]["vault"], "built-in");
         assert_eq!(json["connection"]["state"], "connected");
+        assert_eq!(json["capabilities"]["conditional_conversion"], true);
+        assert_eq!(json["capabilities"]["atomic_rename"], true);
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
     }
 
@@ -1033,6 +1039,8 @@ vaults = [
         assert_eq!(context.backend, "limited");
         assert!(!context.capabilities.folders);
         assert!(!context.capabilities.groups);
+        assert!(!context.capabilities.conditional_conversion);
+        assert!(!context.capabilities.atomic_rename);
     }
 
     #[tokio::test]

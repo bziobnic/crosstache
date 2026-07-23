@@ -8,98 +8,111 @@ Implemented scoped conversion preview/apply and rename APIs:
 - `POST /api/secrets/{name}/conversion`
 - `POST /api/secrets/{name}/rename`
 
-Conversion routes resolve the exact attached workspace alias/backend/vault on
-every request, reject unsupported atomic-conversion backends before reading a
-secret, and delegate preview/apply to the shared Task 4 conversion service.
-Preview responses are value-free and include a source version. Apply requires
-that preview version, rejects stale sources with
-`xv-conversion-source-changed`, and returns redacted updated properties plus a
-value-free summary. Actual field loss or protected-to-metadata exposure
-requires explicit confirmation and returns
-`xv-conversion-confirmation-required` otherwise.
+All three routes bind each request to its exact attached workspace
+alias/backend/vault. Effective UI context now advertises the guarantees the
+routes actually require: conditional record conversion and atomic rename.
+Backends that cannot provide those guarantees fail closed before source data is
+read or mutated.
 
-Conversion and rename bodies deny unknown fields. Conversion input bounds the
-body, target/type names, supplied-field count, individual values, and total
-supplied bytes. Rename accepts only `new_name`, bounds the body/name, validates
-the source and destination against the exact backend's name capabilities,
-rejects self-renames, preflights destination collisions with `field: "name"`,
-and never returns a secret value.
+## Review remediation
 
-Malformed envelopes, unknown types/fields, missing required fields, tag
-budgets, backend capability limits, body limits, backend failures, rename
-collisions, and partial rename failures use stable value-free API envelopes.
-All routes retain the existing authentication, localhost-origin, no-store, and
-global structured-error middleware.
+### Opaque revision-guarded conversion
 
-## Conflict-safe rename contract
+Conversion preview reads one `SecretSnapshot` containing properties plus a
+backend-issued opaque revision. Apply requires that `source_revision` and
+commits with `update_secret_if_revision`; it never performs an unconditional
+update after a version-label comparison.
 
-The inherited rename implementation had a destination TOCTOU: its
-exists-then-`set_secret` sequence could overwrite a destination created between
-the check and provider write.
+The Local backend persists UUID revisions and publishes a new revision for
+create, update, rollback, restore, delete/recreate, and rename. This prevents
+ABA mistakes such as delete/recreate returning to the same display version.
+Tests inject a write between the route snapshot and commit and prove that the
+newer value survives.
 
-`SecretBackend` now exposes a provider-enforced `create_secret_if_absent`
-primitive and an explicit `supports_atomic_rename` preflight. Rename refuses to
-read the source when that capability is unavailable and commits only through
-the no-overwrite primitive:
+AWS and Azure advertise conditional conversion as unsupported. The shared
+conversion service requires both the advertised capability and the backend
+trait primitive before it reads the source.
 
-- Local checks and creates under one same-name mutation lock. A deterministic
-  two-instance test proves exactly one concurrent creator wins.
-- AWS uses native `CreateSecret`; a `ResourceExistsException` stays a conflict
-  and cannot fall through into the ordinary set/upsert path.
-- Azure remains explicitly unsupported because its current `SetSecret`
-  primitive is unconditional and cannot meet the no-overwrite contract.
+### Source-safe atomic rename
 
-A deterministic trait race injects the destination after the initial preflight
-and proves the concurrent destination value and original source both survive.
-Delete-after-create failure still maps to `xv-rename-incomplete` and
-deliberately preserves both copies.
+The unsafe trait default read/create/delete rename was removed. Both rename
+entry points now return `Unsupported` unless a backend implements an atomic,
+revision-guarded primitive.
+
+Local rename holds the vault mutation lock across source-revision and
+destination-absence checks. It uses a durable rename journal and backups to
+activate the destination and soft-delete the source as one recoverable
+transaction. On an injected partial failure or restart at each visible stage,
+recovery restores the source, removes the partial destination, repairs the
+opaque index, and leaves no observable partial rename.
+
+AWS and Azure explicitly advertise atomic rename as unsupported. Their
+integration contracts assert that rename fails closed, preserves the source,
+and creates no destination.
+
+The web route passes the preview revision into the atomic rename primitive.
+It also lists the reserved attachment namespace before mutation and rejects
+any attached secret with `xv-attachments-block-rename`, preventing orphaned
+attachments.
+
+### Strict conversion contract and safe responses
+
+Conversion supports typed targets and a strict record-to-plain form:
+
+```json
+{"target":{"kind":"plain"}}
+```
+
+The compatibility typed form remains accepted. Request DTOs deny unknown
+fields, enforce bounded bodies and supplied fields, and report actionable
+field paths such as `target_type`, `source_revision`, and
+`supplied_fields.account`. Content-Type parsing accepts case-insensitive
+`application/json` and `application/*+json` media types with optional
+parameters.
+
+Preview and apply preserve the shared conversion service's loss and sensitivity
+confirmation rules. Every conversion and rename response strips the value and
+all tags, including record type, field-shape, public-value, and protected-field
+markers. Stable API errors likewise contain no values or backend internals.
 
 ## TDD evidence
 
-Observed RED before implementation for:
+The remediation was implemented in red/green slices covering:
 
-1. conversion preview/apply routes returning 405;
-2. rename routes returning 405;
-3. the missing atomic create-if-absent trait primitive;
-4. Local rename becoming explicitly unsupported until its atomic primitive
-   was implemented;
-5. stale conversion preview lacking a source version; and
-6. route-specific body bounds being bypassed by the outer upload body limit.
+1. stale conversion after an intervening write;
+2. delete/recreate with the same display version;
+3. fresh revisions after rollback and restore;
+4. source changes and destination creation before rename commit;
+5. partial rename failure and crash recovery at all visible stages;
+6. record-to-plain preview/apply and confirmation;
+7. response tag redaction;
+8. attached-secret rename rejection;
+9. exact Effective UI context capabilities; and
+10. dynamic validation fields and vendor JSON media types.
 
-Each slice was made GREEN before the next behavior was added. Coverage includes
-loss and sensitivity confirmation, supplied-value redaction, missing required
-fields, unknown/unrelated fields, malformed envelopes, tag budget rejection,
-unsupported conversion before read, stale source preservation, bounded
-requests, backend error redaction, source missing, destination collision,
-self-rename, partial rename failure, attached-workspace isolation, and
-concurrent cross-tab statelessness.
+The final full-suite gate also exposed a pre-existing real-home dependency in
+the native-rotation capability test. The test now supplies temporary local
+store and key paths and passes without touching real Crosstache state.
 
 ## Verification
 
-- `cargo test --features ui web:: --lib` — 130 passed.
-- Hermetic `cargo test --features ui --lib` — 1021 passed, 1 ignored.
-- Focused web secrets — 20 passed.
-- Backend rename trait — 8 passed.
-- Local rename — 2 passed.
-- Local concurrent atomic create — 1 passed.
-- `cargo test --features aws --lib backend::aws::capability_tests` — 1 passed.
-- `cargo test --features aws --lib backend::aws::secrets::atomic_create_tests`
-  — 2 passed.
+- `cargo test --features ui --lib --quiet` — 1,031 passed, 1 ignored.
+- `cargo test --features ui web::secrets::tests --lib` — 26 passed.
+- `cargo test --features ui records::conversion::tests --lib` — 27 passed.
+- `cargo test --features ui backend::secret::tests --lib` — 4 passed.
+- `cargo test --features ui --test e2e_record_types` — 71 passed.
+- `cargo test --features ui --test cli_integration_tests` — 23 passed.
+- `cargo test --features ui --test e2e_local_backend` — 89 passed.
 - `node --test src/web/assets/*.test.js` — 105 passed.
 - `cargo check --features ui --all-targets` — passed.
 - `cargo clippy --features ui --all-targets -- -D warnings` — passed.
-- Desktop `cargo check --all-targets` — passed.
-- Desktop `cargo clippy --all-targets -- -D warnings` — passed.
+- `cargo check --features "ui aws" --all-targets` — passed.
+- `cargo clippy --features "ui aws" --all-targets -- -D warnings` — passed.
+- `cargo check -p xv-desktop --all-targets` — passed.
+- `cargo clippy -p xv-desktop --all-targets -- -D warnings` — passed.
 - `cargo fmt --all -- --check` — passed.
 - `git diff --check` — passed.
 
-The first full library run used the real HOME and hit an existing test's
-attempt to chmod the user's local store. The isolated HOME/XDG rerun passed
-completely and did not read or mutate real Crosstache state.
-
-AWS smithy operation-error integration mocks are currently unavailable on this
-host: without `SSL_CERT_FILE` they fail loading native roots; with the system
-certificate bundle both the new probe and the pre-existing
-`set_secret_update_path_when_already_exists` test fail identically in the
-smithy orchestrator phase. AWS feature compilation and deterministic
-provider-decision tests pass; no failing integration test was added.
+Authenticated Azure and LocalStack tests remain ignored unless their documented
+external services and credentials are enabled; both compile in the applicable
+all-target feature gates.

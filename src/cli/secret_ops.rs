@@ -3576,6 +3576,7 @@ async fn apply_record_field_changes(
 
     let request = crate::secret::manager::SecretUpdateRequest {
         name: name.to_string(),
+        expected_revision: None,
         value: new_value,
         content_type,
         enabled: enabled_override,
@@ -3674,7 +3675,11 @@ async fn execute_record_type_conversion(
     backend_name: &str,
 ) -> Result<()> {
     crate::records::validate_conversion_backend(backend)?;
-    let secret = backend.secrets().get_secret(vault_name, name, true).await?;
+    let snapshot = backend
+        .secrets()
+        .get_secret_snapshot(vault_name, name, true)
+        .await?;
+    let secret = snapshot.properties;
     let types = config.resolve_record_types().await?;
     let mut request = crate::records::ConversionRequest::to_type(type_name);
     request.confirm_lossy = yes;
@@ -3693,7 +3698,9 @@ async fn execute_record_type_conversion(
         confirmed.confirm_lossy = true;
         preview = crate::records::preview_conversion(&secret, &types, confirmed)?;
     }
-    let props = crate::records::apply_conversion(backend, vault_name, name, preview).await?;
+    let props =
+        crate::records::apply_conversion(backend, vault_name, name, &snapshot.revision, preview)
+            .await?;
     output::success(&format!(
         "Successfully converted '{}' to type '{}'",
         props.original_name, type_name
@@ -3715,11 +3722,12 @@ async fn execute_record_untype(
     backend_name: &str,
 ) -> Result<()> {
     crate::records::validate_conversion_backend(reg.active())?;
-    let secret = reg
+    let snapshot = reg
         .active()
         .secrets()
-        .get_secret(vault_name, name, true)
+        .get_secret_snapshot(vault_name, name, true)
         .await?;
+    let secret = snapshot.properties;
     if !crate::records::is_record(&secret.content_type) {
         return Err(CrosstacheError::config(format!(
             "secret '{name}' is not a typed record; nothing to untype."
@@ -3743,7 +3751,14 @@ async fn execute_record_untype(
         confirmed.confirm_lossy = true;
         preview = crate::records::preview_conversion(&secret, &types, confirmed)?;
     }
-    let props = crate::records::apply_conversion(reg.active(), vault_name, name, preview).await?;
+    let props = crate::records::apply_conversion(
+        reg.active(),
+        vault_name,
+        name,
+        &snapshot.revision,
+        preview,
+    )
+    .await?;
     output::success(&format!(
         "Successfully untyped '{}' (was type '{type_name}')",
         props.original_name
@@ -4141,6 +4156,7 @@ pub(crate) async fn execute_secret_update_direct(
         if has_other_updates || !renaming {
             let request = crate::secret::manager::SecretUpdateRequest {
                 name: name.to_string(),
+                expected_revision: None,
                 value: resolved_value,
                 content_type: None,
                 enabled,
@@ -7341,6 +7357,8 @@ mod tests {
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
                 has_atomic_record_conversion: false,
+                has_conditional_record_conversion: false,
+                has_atomic_rename: false,
                 has_enable_disable: false,
                 has_vaults: self.kind == BackendKind::Local,
                 has_file_storage: false,
@@ -7636,6 +7654,25 @@ mod tests {
         let config = Config {
             backend: Some("local".to_string()),
             default_vault: String::new(),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: Some(
+                    temp_context_dir
+                        .path()
+                        .join("store")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                key_file: Some(
+                    temp_context_dir
+                        .path()
+                        .join("key.txt")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                default_vault: Some("default".to_string()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
             ..Default::default()
         };
 

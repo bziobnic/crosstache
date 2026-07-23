@@ -478,6 +478,7 @@ async fn update_secret_enabled_flag_is_unsupported() {
 
     let request = SecretUpdateRequest {
         name: "db-password".to_string(),
+        expected_revision: None,
         value: None,
         content_type: None,
         enabled: Some(false),
@@ -592,6 +593,7 @@ async fn update_secret_with_value_writes_value_and_content_type_tag() {
 
     let request = SecretUpdateRequest {
         name: "cred".to_string(),
+        expected_revision: None,
         value: Some(Zeroizing::new(r#"{"password":"hunter2"}"#.to_string())),
         content_type: Some("application/vnd.xv.record".to_string()),
         enabled: None,
@@ -671,6 +673,7 @@ async fn update_secret_untype_replace_tags_removes_dropped_keys() {
 
     let request = SecretUpdateRequest {
         name: "cred".to_string(),
+        expected_revision: None,
         value: None,
         content_type: Some(String::new()),
         enabled: None,
