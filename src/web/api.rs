@@ -72,26 +72,6 @@ fn validation_error(
     }
 }
 
-pub(crate) async fn get_context(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
-    let caps = state.backend.capabilities();
-    Json(json!({
-        "backend": state.backend.name(),
-        "vault": state.vault,
-        "capabilities": {
-            "vaults": caps.has_vaults,
-            "files": caps.has_file_storage,
-            "folders": caps.has_folders,
-            "groups": caps.has_groups,
-            "notes": caps.has_notes,
-            "expiry": caps.has_expiry,
-            "soft_delete": caps.has_soft_delete,
-            "restore": caps.has_restore,
-            "purge": caps.has_purge,
-            "scheduled_purge": caps.has_scheduled_purge,
-        }
-    }))
-}
-
 pub(crate) async fn list_vaults(
     State(state): State<Arc<WebState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {

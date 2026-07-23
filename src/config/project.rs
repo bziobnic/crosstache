@@ -245,13 +245,47 @@ pub fn resolve_env<'a>(
     cfg: &'a ProjectConfig,
     cli_flag: Option<&str>,
 ) -> Result<Option<(&'a str, &'a EnvProfile)>> {
-    let candidate: Option<String> = if let Ok(env_var) = std::env::var("XV_ENV") {
-        Some(env_var)
-    } else if let Some(flag) = cli_flag {
-        Some(flag.to_string())
-    } else {
-        cfg.default_env.clone()
-    };
+    Ok(resolve_env_with_source(cfg, cli_flag)?.map(|resolved| (resolved.name, resolved.profile)))
+}
+
+/// The layer which selected an active project environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnvironmentSelectionSource {
+    Environment,
+    Cli,
+    Project,
+}
+
+/// Display-safe active-environment resolution with provenance.
+///
+/// This shares the exact selection and validation rules used by
+/// [`resolve_env`] while retaining which non-secret layer supplied the name.
+pub(crate) struct ResolvedEnvironment<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) profile: &'a EnvProfile,
+    pub(crate) source: EnvironmentSelectionSource,
+}
+
+pub(crate) fn resolve_env_with_source<'a>(
+    cfg: &'a ProjectConfig,
+    cli_flag: Option<&str>,
+) -> Result<Option<ResolvedEnvironment<'a>>> {
+    let (candidate, source): (Option<String>, Option<EnvironmentSelectionSource>) =
+        if let Ok(env_var) = std::env::var("XV_ENV") {
+            (Some(env_var), Some(EnvironmentSelectionSource::Environment))
+        } else if let Some(flag) = cli_flag {
+            (
+                Some(flag.to_string()),
+                Some(EnvironmentSelectionSource::Cli),
+            )
+        } else {
+            (
+                cfg.default_env.clone(),
+                cfg.default_env
+                    .as_ref()
+                    .map(|_| EnvironmentSelectionSource::Project),
+            )
+        };
 
     let candidate = match candidate {
         Some(c) => c,
@@ -271,7 +305,11 @@ pub fn resolve_env<'a>(
     };
 
     if let Some((k, v)) = cfg.envs.get_key_value(&candidate) {
-        Ok(Some((k.as_str(), v)))
+        Ok(Some(ResolvedEnvironment {
+            name: k.as_str(),
+            profile: v,
+            source: source.expect("a selected environment always has a source"),
+        }))
     } else if cfg.envs.is_empty() {
         // An explicit --env/XV_ENV name (or a stale default_env) against
         // a file that defines zero environments — give the clearer
@@ -548,6 +586,10 @@ resource_group = "rg"
             .expect("must resolve")
             .expect("expected an active profile");
         assert_eq!(name, "dev");
+        assert_eq!(
+            resolve_env_with_source(&cfg, None).unwrap().unwrap().source,
+            EnvironmentSelectionSource::Project
+        );
     }
 
     #[test]
@@ -565,6 +607,13 @@ resource_group = "rg"
             .expect("must resolve")
             .expect("expected an active profile");
         assert_eq!(name, "prod");
+        assert_eq!(
+            resolve_env_with_source(&cfg, Some("prod"))
+                .unwrap()
+                .unwrap()
+                .source,
+            EnvironmentSelectionSource::Cli
+        );
     }
 
     #[test]
@@ -583,6 +632,13 @@ resource_group = "rg"
             .expect("must resolve")
             .expect("expected an active profile");
         assert_eq!(name, "staging");
+        assert_eq!(
+            resolve_env_with_source(&cfg, Some("prod"))
+                .unwrap()
+                .unwrap()
+                .source,
+            EnvironmentSelectionSource::Environment
+        );
         std::env::remove_var("XV_ENV");
     }
 

@@ -17,13 +17,61 @@ fn test_state_with_token_and_preferences(
     path: PathBuf,
     clipboard_timeout: u64,
 ) -> Arc<WebState> {
+    let backend: Arc<dyn crate::backend::Backend> = Arc::new(stub::StubBackend::new());
+    let context = test_context(backend.as_ref(), "default", clipboard_timeout);
     Arc::new(WebState {
-        backend: Arc::new(stub::StubBackend::new()),
+        backend,
+        context,
         token: token.to_string(),
         vault: "default".to_string(),
         types: crate::records::builtin_types(),
         preferences: super::preferences::PreferenceStore::new(path, clipboard_timeout),
     })
+}
+
+pub(crate) fn test_context(
+    backend: &dyn crate::backend::Backend,
+    vault: &str,
+    clipboard_timeout: u64,
+) -> super::context::EffectiveUiContext {
+    use super::context::{
+        CapabilitySummary, ConnectionSummary, ContextSource, ContextSources, EffectiveUiContext,
+        SecuritySummary, WorkspaceEntrySummary, WorkspaceSummary,
+    };
+
+    EffectiveUiContext {
+        backend: backend.name().to_string(),
+        backend_kind: backend.kind(),
+        vault: vault.to_string(),
+        workspace: WorkspaceSummary {
+            alias: vault.to_string(),
+            configured: false,
+            entries: vec![WorkspaceEntrySummary {
+                alias: vault.to_string(),
+                backend: backend.name().to_string(),
+                vault: vault.to_string(),
+                default: true,
+            }],
+        },
+        project: None,
+        environment: None,
+        sources: ContextSources {
+            backend: ContextSource::BuiltIn,
+            vault: ContextSource::BuiltIn,
+            workspace: ContextSource::BuiltIn,
+            project: ContextSource::BuiltIn,
+            environment: ContextSource::BuiltIn,
+        },
+        connection: ConnectionSummary {
+            state: "connected".into(),
+            message: None,
+        },
+        capabilities: CapabilitySummary::from(backend.capabilities()),
+        security: SecuritySummary {
+            clipboard_timeout_seconds: clipboard_timeout,
+        },
+        version: env!("CARGO_PKG_VERSION"),
+    }
 }
 
 pub(crate) fn test_state_with_preferences(path: PathBuf, clipboard_timeout: u64) -> Arc<WebState> {
@@ -51,6 +99,9 @@ pub(crate) mod stub {
     type StoredFile = (Vec<u8>, String, HashMap<String, String>);
 
     pub(crate) struct StubBackend {
+        name: &'static str,
+        capabilities: BackendCapabilities,
+        health_error: Option<&'static str>,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         pub deleted: Mutex<HashMap<String, SecretRequest>>,
         #[cfg(feature = "file-ops")]
@@ -59,37 +110,56 @@ pub(crate) mod stub {
 
     impl StubBackend {
         pub fn new() -> Self {
+            Self::with_capabilities(
+                "stub",
+                BackendCapabilities {
+                    has_folders: true,
+                    has_groups: true,
+                    has_notes: true,
+                    has_expiry: true,
+                    has_soft_delete: true,
+                    has_restore: true,
+                    has_purge: true,
+                    has_scheduled_purge: false,
+                    #[cfg(feature = "file-ops")]
+                    has_file_storage: true,
+                    ..Default::default()
+                },
+            )
+        }
+
+        pub(crate) fn with_capabilities(
+            name: &'static str,
+            capabilities: BackendCapabilities,
+        ) -> Self {
             Self {
+                name,
+                capabilities,
+                health_error: None,
                 secrets: Mutex::new(HashMap::new()),
                 deleted: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
                 files: Mutex::new(HashMap::new()),
             }
         }
+
+        pub(crate) fn with_health_error(name: &'static str, health_error: &'static str) -> Self {
+            let mut backend = Self::with_capabilities(name, BackendCapabilities::default());
+            backend.health_error = Some(health_error);
+            backend
+        }
     }
 
     #[async_trait]
     impl Backend for StubBackend {
         fn name(&self) -> &'static str {
-            "stub"
+            self.name
         }
         fn kind(&self) -> BackendKind {
             BackendKind::Local
         }
         fn capabilities(&self) -> BackendCapabilities {
-            BackendCapabilities {
-                has_folders: true,
-                has_groups: true,
-                has_notes: true,
-                has_expiry: true,
-                has_soft_delete: true,
-                has_restore: true,
-                has_purge: true,
-                has_scheduled_purge: false,
-                #[cfg(feature = "file-ops")]
-                has_file_storage: true,
-                ..Default::default()
-            }
+            self.capabilities.clone()
         }
         fn secrets(&self) -> &dyn SecretBackend {
             self
@@ -99,7 +169,10 @@ pub(crate) mod stub {
             Some(self)
         }
         async fn health_check(&self) -> Result<(), BackendError> {
-            Ok(())
+            match self.health_error {
+                Some(message) => Err(BackendError::Internal(message.into())),
+                None => Ok(()),
+            }
         }
     }
 

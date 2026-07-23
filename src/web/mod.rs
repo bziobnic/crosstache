@@ -18,6 +18,7 @@ use crate::error::{CrosstacheError, Result};
 
 pub(crate) mod api;
 pub(crate) mod auth;
+mod context;
 pub(crate) mod errors;
 mod preferences;
 mod secrets;
@@ -124,6 +125,7 @@ fn is_api_error_envelope(bytes: &[u8]) -> bool {
 /// Shared state for all handlers.
 pub(crate) struct WebState {
     pub backend: Arc<dyn Backend>,
+    pub(crate) context: context::EffectiveUiContext,
     pub token: String,
     /// Default vault, resolved once at startup. Requests may override per-call.
     pub vault: String,
@@ -172,7 +174,7 @@ impl PreparedWebServer {
 
 pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
-        .route("/context", get(api::get_context))
+        .route("/context", get(context::get_context))
         .route("/vaults", get(api::list_vaults))
         .route("/types", get(api::list_types))
         .route(
@@ -248,8 +250,10 @@ pub async fn prepare_web(
     let registry = registry.ok_or_else(|| {
         CrosstacheError::config("backend initialization failed; `xv ui` needs a working backend")
     })?;
-    let vault = crate::cli::helpers::resolve_vault_for_trait(&config, Some(registry)).await?;
-    let backend = registry.active_arc();
+    let cwd = std::env::current_dir()?;
+    let resolved = context::resolve_ui_context_and_backend(&config, registry, &cwd).await?;
+    let vault = resolved.context.vault.clone();
+    let backend = resolved.backend;
     // Fail loud at startup on a broken [types.*] block, matching the CLI's
     // eager type-resolution paths.
     let types = config.resolve_record_types().await?;
@@ -260,6 +264,7 @@ pub async fn prepare_web(
 
     let state = Arc::new(WebState {
         backend,
+        context: resolved.context,
         token: token.clone(),
         vault,
         types,

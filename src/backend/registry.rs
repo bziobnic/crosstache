@@ -61,6 +61,21 @@ impl std::fmt::Debug for BackendRegistry {
 }
 
 impl BackendRegistry {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        default: &'static str,
+        backends: Vec<(&'static str, Arc<dyn Backend>)>,
+    ) -> Self {
+        Self {
+            backends: backends.into_iter().collect(),
+            default,
+            azure_auth: None,
+            lazy_config: None,
+            lazy_names: Vec::new(),
+            lazy_cache: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
     /// Build a registry from the loaded [`Config`].
     ///
     /// The active backend is determined by `config.backend` (defaulting to

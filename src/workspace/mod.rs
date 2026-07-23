@@ -379,7 +379,7 @@ async fn resolve_configured_workspace_from(
 /// Core of [`resolve_workspace`]: the configured workspace, or the degenerate
 /// workspace-of-one when none is configured. Parameterized over `cwd`/context
 /// for the same testability reason as [`resolve_configured_workspace_from`].
-async fn resolve_workspace_from(
+pub(crate) async fn resolve_workspace_from(
     config: &Config,
     cwd: Option<&std::path::Path>,
     context_manager: &crate::config::ContextManager,

@@ -68,8 +68,10 @@ mod tests {
             opaque_filenames: None,
         }))
         .unwrap();
+        let backend: Arc<dyn crate::backend::Backend> = Arc::new(backend);
         Arc::new(crate::web::WebState {
-            backend: Arc::new(backend),
+            context: testutil::test_context(backend.as_ref(), "default", 30),
+            backend,
             token: "test-token".to_string(),
             vault: "default".to_string(),
             types: crate::records::builtin_types(),
