@@ -3673,6 +3673,7 @@ async fn execute_record_type_conversion(
     backend: &dyn crate::backend::Backend,
     backend_name: &str,
 ) -> Result<()> {
+    crate::records::validate_conversion_backend(backend)?;
     let secret = backend.secrets().get_secret(vault_name, name, true).await?;
     let types = config.resolve_record_types().await?;
     let mut request = crate::records::ConversionRequest::to_type(type_name);
@@ -3713,6 +3714,7 @@ async fn execute_record_untype(
     reg: &BackendRegistry,
     backend_name: &str,
 ) -> Result<()> {
+    crate::records::validate_conversion_backend(reg.active())?;
     let secret = reg
         .active()
         .secrets()
@@ -7646,6 +7648,22 @@ mod tests {
             "unexpected error: {msg}"
         );
         assert!(msg.contains("local"), "should name the backend: {msg}");
+    }
+
+    #[tokio::test]
+    async fn record_conversion_preflights_atomic_capability_before_read_or_prompt() {
+        let backend = TestBackend::aws();
+        let config = Config::default();
+
+        let error = execute_record_type_conversion(
+            "cred", "api-key", false, "default", &config, &backend, "aws",
+        )
+        .await
+        .expect_err("AWS conversion must fail before reading or prompting");
+        let message = error.to_string();
+        assert!(message.contains("atomic record conversion"), "{message}");
+        assert!(!message.contains("test backend"), "{message}");
+        assert!(!message.contains("--yes"), "{message}");
     }
 
     /// When `--backend local` is requested but backend init failed (registry

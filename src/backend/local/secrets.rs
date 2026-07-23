@@ -11,7 +11,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -101,6 +100,45 @@ fn meta_path(store_path: &Path, vault: &str, stem: &str) -> Result<PathBuf, Back
 /// Version-archive directory for a given filename `stem`.
 fn versions_dir(store_path: &Path, vault: &str, stem: &str) -> Result<PathBuf, BackendError> {
     Ok(secrets_dir(store_path, vault)?.join(".versions").join(stem))
+}
+
+fn transactions_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
+    Ok(secrets_dir(store_path, vault)?.join(".transactions"))
+}
+
+#[derive(Debug)]
+struct UpdateTransactionPaths {
+    dir: PathBuf,
+    journal: PathBuf,
+    old_age: PathBuf,
+    old_meta: PathBuf,
+    new_age: PathBuf,
+    new_meta: PathBuf,
+}
+
+impl UpdateTransactionPaths {
+    fn new(store_path: &Path, vault: &str, stem: &str) -> Result<Self, BackendError> {
+        let dir = transactions_dir(store_path, vault)?;
+        Ok(Self {
+            journal: dir.join(format!("{stem}.journal.json")),
+            old_age: dir.join(format!("{stem}.old.age")),
+            old_meta: dir.join(format!("{stem}.old.meta")),
+            new_age: dir.join(format!("{stem}.new.age")),
+            new_meta: dir.join(format!("{stem}.new.meta")),
+            dir,
+        })
+    }
+
+    fn data_files(&self) -> [&Path; 4] {
+        [&self.old_age, &self.old_meta, &self.new_age, &self.new_meta]
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateJournal {
+    version: u8,
+    stem: String,
+    old_version: String,
 }
 
 /// Whether a version-archive directory exists and contains at least one entry.
@@ -395,6 +433,58 @@ fn write_meta(path: &Path, meta: &SecretMeta, crypto_opts: MetaCrypto) -> Result
         .map_err(|e| BackendError::Internal(format!("write meta {}: {e}", path.display())))
 }
 
+fn sync_file(path: &Path) -> Result<(), BackendError> {
+    fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| BackendError::Internal(format!("sync file {}: {e}", path.display())))
+}
+
+fn sync_directory(path: &Path) -> Result<(), BackendError> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| {
+                BackendError::Internal(format!("sync directory {}: {e}", path.display()))
+            })?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn durable_write_private(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
+    write_private(path, bytes)
+        .map_err(|e| BackendError::Internal(format!("write durable {}: {e}", path.display())))?;
+    sync_file(path)?;
+    let parent = path.parent().ok_or_else(|| {
+        BackendError::Internal(format!("durable path {} has no parent", path.display()))
+    })?;
+    sync_directory(parent)
+}
+
+fn durable_replace_from(path: &Path, destination: &Path) -> Result<(), BackendError> {
+    let bytes = fs::read(path)
+        .map_err(|e| BackendError::Internal(format!("read backup {}: {e}", path.display())))?;
+    let temp = temp_path_for(destination)?;
+    durable_write_private(&temp, &bytes)?;
+    fs::rename(&temp, destination).map_err(|e| {
+        BackendError::Internal(format!(
+            "restore generation {} -> {}: {e}",
+            temp.display(),
+            destination.display()
+        ))
+    })?;
+    sync_directory(destination.parent().ok_or_else(|| {
+        BackendError::Internal(format!(
+            "active path {} has no parent",
+            destination.display()
+        ))
+    })?)
+}
+
 fn temp_path_for(path: &Path) -> Result<PathBuf, BackendError> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -505,6 +595,28 @@ fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
     Ok(lock_file)
 }
 
+/// Acquire a shared vault lock for a complete active-generation read.
+fn lock_vault_shared(vault_dir: &Path) -> Result<fs::File, BackendError> {
+    let lock_path = vault_dir.join(".lock");
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| BackendError::Internal(format!("open lock: {e}")))?;
+    fs2::FileExt::lock_shared(&lock_file)
+        .map_err(|e| BackendError::Internal(format!("vault read lock failed: {e}")))?;
+    Ok(lock_file)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+enum UpdateInterruption {
+    None,
+    Rollback(BackendError),
+    SimulatedCrash(BackendError),
+}
+
 // ---------------------------------------------------------------------------
 // LocalSecretBackend
 // ---------------------------------------------------------------------------
@@ -540,7 +652,6 @@ pub struct LocalSecretBackend {
     /// HMAC key for opaque stems, derived from `identity`. `None` when
     /// `opaque_filenames` is off, so the legacy path never computes it.
     index_key: Option<[u8; 32]>,
-    transaction_fail_after: AtomicU8,
 }
 
 impl LocalSecretBackend {
@@ -565,22 +676,180 @@ impl LocalSecretBackend {
             encrypt_metadata,
             opaque_filenames,
             index_key,
-            transaction_fail_after: AtomicU8::new(0),
         }
     }
 
     #[cfg(test)]
-    fn inject_update_failure_after(&self, stage: u8) {
-        self.transaction_fail_after.store(stage, Ordering::SeqCst);
+    fn update_interruption(&self, stage: u8) -> UpdateInterruption {
+        tests::run_update_hook(&self.store_path, stage)
     }
 
-    fn update_failpoint(&self, stage: u8) -> Result<(), BackendError> {
-        if self.transaction_fail_after.load(Ordering::SeqCst) == stage {
+    #[cfg(not(test))]
+    fn update_interruption(&self, _stage: u8) -> UpdateInterruption {
+        UpdateInterruption::None
+    }
+
+    fn transaction_stems_for_name(&self, name: &str) -> Vec<String> {
+        let active = self.active_stem(name);
+        if self.opaque_filenames {
+            let legacy = encode_name(name);
+            if legacy != active {
+                return vec![active, legacy];
+            }
+        }
+        vec![active]
+    }
+
+    fn has_pending_update_for_name(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        self.transaction_stems_for_name(name)
+            .into_iter()
+            .try_fold(false, |pending, stem| {
+                Ok(pending
+                    || UpdateTransactionPaths::new(&self.store_path, vault, &stem)?
+                        .journal
+                        .exists())
+            })
+    }
+
+    /// Roll back one journaled update. Caller holds the exclusive vault lock.
+    ///
+    /// Backups are copied, not moved, so recovery is idempotent if the process
+    /// itself stops between restoring the value and metadata. The journal is
+    /// removed last, after active files and cleanup are synced.
+    fn recover_update_for_stem_locked(&self, vault: &str, stem: &str) -> Result<(), BackendError> {
+        let paths = UpdateTransactionPaths::new(&self.store_path, vault, stem)?;
+        if !paths.journal.exists() {
+            return Ok(());
+        }
+        let journal_bytes = fs::read(&paths.journal).map_err(|e| {
+            BackendError::Internal(format!(
+                "read update journal {}: {e}",
+                paths.journal.display()
+            ))
+        })?;
+        let journal: UpdateJournal = serde_json::from_slice(&journal_bytes).map_err(|e| {
+            BackendError::Internal(format!(
+                "parse update journal {}: {e}",
+                paths.journal.display()
+            ))
+        })?;
+        if journal.version != 1 || journal.stem != stem {
             return Err(BackendError::Internal(format!(
-                "injected local update failure after stage {stage}"
+                "invalid update journal {}",
+                paths.journal.display()
             )));
         }
+        if !paths.old_age.exists() || !paths.old_meta.exists() {
+            return Err(BackendError::Internal(format!(
+                "incomplete update recovery data for stem '{stem}'"
+            )));
+        }
+
+        let active_age = age_path(&self.store_path, vault, stem)?;
+        let active_meta = meta_path(&self.store_path, vault, stem)?;
+        durable_replace_from(&paths.old_age, &active_age)?;
+        durable_replace_from(&paths.old_meta, &active_meta)?;
+
+        let archive_dir = versions_dir(&self.store_path, vault, stem)?;
+        for archive in [
+            archive_dir.join(format!("{}.age", journal.old_version)),
+            archive_dir.join(format!("{}.meta.json", journal.old_version)),
+        ] {
+            if archive.exists() {
+                fs::remove_file(&archive).map_err(|e| {
+                    BackendError::Internal(format!(
+                        "remove partial archive {}: {e}",
+                        archive.display()
+                    ))
+                })?;
+            }
+        }
+        if archive_dir.exists() {
+            sync_directory(&archive_dir)?;
+        }
+        self.cleanup_update_transaction_locked(&paths)
+    }
+
+    /// Recover every possible layout stem for a named secret. Caller holds the
+    /// exclusive vault lock.
+    fn recover_pending_update_for_name_locked(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<(), BackendError> {
+        for stem in self.transaction_stems_for_name(name) {
+            self.recover_update_for_stem_locked(vault, &stem)?;
+        }
         Ok(())
+    }
+
+    fn cleanup_update_transaction_locked(
+        &self,
+        paths: &UpdateTransactionPaths,
+    ) -> Result<(), BackendError> {
+        for path in paths.data_files() {
+            if path.exists() {
+                fs::remove_file(path).map_err(|e| {
+                    BackendError::Internal(format!(
+                        "remove transaction file {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            }
+        }
+        if paths.journal.exists() {
+            fs::remove_file(&paths.journal).map_err(|e| {
+                BackendError::Internal(format!(
+                    "remove update journal {}: {e}",
+                    paths.journal.display()
+                ))
+            })?;
+        }
+        if paths.dir.exists() {
+            sync_directory(&paths.dir)?;
+        }
+        sync_directory(paths.dir.parent().ok_or_else(|| {
+            BackendError::Internal(format!(
+                "transaction directory {} has no parent",
+                paths.dir.display()
+            ))
+        })?)
+    }
+
+    /// Commit cleanup after the complete new generation and its archive are
+    /// durable. Removing and syncing the journal is the commit point; any
+    /// later crash may leave harmless staging residue, but readers can trust
+    /// the already-synced active pair. A future update removes that residue.
+    fn finish_update_transaction_locked(
+        &self,
+        paths: &UpdateTransactionPaths,
+    ) -> Result<(), BackendError> {
+        if paths.journal.exists() {
+            fs::remove_file(&paths.journal).map_err(|e| {
+                BackendError::Internal(format!(
+                    "remove committed update journal {}: {e}",
+                    paths.journal.display()
+                ))
+            })?;
+            sync_directory(&paths.dir)?;
+        }
+        for path in paths.data_files() {
+            if path.exists() {
+                fs::remove_file(path).map_err(|e| {
+                    BackendError::Internal(format!(
+                        "remove committed transaction file {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            }
+        }
+        sync_directory(&paths.dir)?;
+        sync_directory(paths.dir.parent().ok_or_else(|| {
+            BackendError::Internal(format!(
+                "transaction directory {} has no parent",
+                paths.dir.display()
+            ))
+        })?)
     }
 
     // -----------------------------------------------------------------------
@@ -1261,50 +1530,67 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
-        // Resolve the on-disk stem (opaque, or legacy via the read-only
-        // back-compat fallback). Reads never create or upgrade legacy files.
-        let stem = self.resolve_active_stem(vault, name)?;
-        let mp = meta_path(&self.store_path, vault, &stem)?;
-        if !mp.exists() {
-            return Err(BackendError::NotFound {
-                name: name.to_string(),
-                suggestion: None,
-            });
-        }
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        loop {
+            // Hold one shared lock across both files. A writer cannot activate
+            // either half of a new generation until this complete read ends.
+            let read_lock = lock_vault_shared(&vault_dir)?;
+            if self.has_pending_update_for_name(vault, name)? {
+                // Recovery mutates active files, so never attempt an in-place
+                // lock upgrade. Drop shared, take exclusive, recover
+                // idempotently, then restart with a fresh shared lock.
+                drop(read_lock);
+                let write_lock = lock_vault(&vault_dir)?;
+                self.recover_pending_update_for_name_locked(vault, name)?;
+                drop(write_lock);
+                continue;
+            }
 
-        // Reject symlinks to prevent attackers from redirecting reads to
-        // arbitrary files on the filesystem.
-        if fs::symlink_metadata(&mp)
-            .map(|m| m.is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(BackendError::Internal(format!(
-                "refusing to read metadata file: {} is a symlink",
-                mp.display()
-            )));
-        }
+            // Resolve the on-disk stem (opaque, or legacy via the read-only
+            // back-compat fallback). Reads never create or upgrade legacy files.
+            let stem = self.resolve_active_stem(vault, name)?;
+            let mp = meta_path(&self.store_path, vault, &stem)?;
+            if !mp.exists() {
+                return Err(BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                });
+            }
 
-        let meta = read_meta(&mp, &self.identity)?;
-
-        let value = if include_value {
-            let ap = age_path(&self.store_path, vault, &stem)?;
-
-            if fs::symlink_metadata(&ap)
+            // Reject symlinks to prevent attackers from redirecting reads to
+            // arbitrary files on the filesystem.
+            if fs::symlink_metadata(&mp)
                 .map(|m| m.is_symlink())
                 .unwrap_or(false)
             {
                 return Err(BackendError::Internal(format!(
-                    "refusing to decrypt secret file: {} is a symlink",
-                    ap.display()
+                    "refusing to read metadata file: {} is a symlink",
+                    mp.display()
                 )));
             }
 
-            Some(crypto::decrypt_from_file(&ap, &self.identity)?)
-        } else {
-            None
-        };
+            let meta = read_meta(&mp, &self.identity)?;
 
-        Ok(meta_to_properties(&meta, value))
+            let value = if include_value {
+                let ap = age_path(&self.store_path, vault, &stem)?;
+
+                if fs::symlink_metadata(&ap)
+                    .map(|m| m.is_symlink())
+                    .unwrap_or(false)
+                {
+                    return Err(BackendError::Internal(format!(
+                        "refusing to decrypt secret file: {} is a symlink",
+                        ap.display()
+                    )));
+                }
+
+                Some(crypto::decrypt_from_file(&ap, &self.identity)?)
+            } else {
+                None
+            };
+
+            return Ok(meta_to_properties(&meta, value));
+        }
     }
 
     async fn get_secret_version(
@@ -1476,6 +1762,11 @@ impl SecretBackend for LocalSecretBackend {
         let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         let _lock = lock_vault(&vault_dir)?;
 
+        // A previous process may have stopped after activating only one half
+        // of a generation. Recover under the exclusive lock before inspecting
+        // or migrating the active layout.
+        self.recover_pending_update_for_name_locked(vault, name)?;
+
         // Migrate any legacy layout before the transaction starts, so a later
         // migration failure can never leave a successfully converted mixed state.
         self.ensure_opaque_layout(vault, name)?;
@@ -1547,37 +1838,85 @@ impl SecretBackend for LocalSecretBackend {
             let old_age = fs::read(&ap).map_err(|e| {
                 BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
             })?;
-            let ap_tmp = temp_path_for(&ap)?;
-            let mp_tmp = temp_path_for(&mp)?;
-            crypto::encrypt_to_file(&ap_tmp, new_value.as_bytes(), &self.recipients)?;
-            write_meta(&mp_tmp, &meta, crypto_opts)?;
+            let old_meta_bytes = fs::read(&mp).map_err(|e| {
+                BackendError::Internal(format!("read existing meta {}: {e}", mp.display()))
+            })?;
+            let transaction = UpdateTransactionPaths::new(&self.store_path, vault, &stem)?;
+            create_private_dir(&transaction.dir).map_err(|e| {
+                BackendError::Internal(format!(
+                    "create transaction directory {}: {e}",
+                    transaction.dir.display()
+                ))
+            })?;
+            // No journal means any files here are residue from staging before
+            // the transaction became visible. They cannot describe an active
+            // mutation and are safe to replace.
+            self.cleanup_update_transaction_locked(&transaction)?;
+            create_private_dir(&transaction.dir).map_err(|e| {
+                BackendError::Internal(format!(
+                    "create transaction directory {}: {e}",
+                    transaction.dir.display()
+                ))
+            })?;
 
-            let archive_dir = versions_dir(&self.store_path, vault, &stem)?;
-            let archive_age = archive_dir.join(format!("{}.age", old_meta.version));
-            let archive_meta = archive_dir.join(format!("{}.meta.json", old_meta.version));
+            durable_write_private(&transaction.old_age, &old_age)?;
+            durable_write_private(&transaction.old_meta, &old_meta_bytes)?;
+            crypto::encrypt_to_file(&transaction.new_age, new_value.as_bytes(), &self.recipients)?;
+            sync_file(&transaction.new_age)?;
+            write_meta(&transaction.new_meta, &meta, crypto_opts)?;
+            sync_file(&transaction.new_meta)?;
+            sync_directory(&transaction.dir)?;
+
+            let journal = UpdateJournal {
+                version: 1,
+                stem: stem.clone(),
+                old_version: old_meta.version.clone(),
+            };
+            let journal_bytes = serde_json::to_vec_pretty(&journal)
+                .map_err(|e| BackendError::Internal(format!("serialize update journal: {e}")))?;
+            // The marker is durable before the first active rename. From this
+            // point, a reader can always restore the complete old generation.
+            durable_write_private(&transaction.journal, &journal_bytes)?;
+
             let rollback = |cause: BackendError| -> Result<SecretProperties, BackendError> {
-                write_private(&ap, &old_age)
-                    .map_err(|e| BackendError::Internal(format!("rollback active value: {e}")))?;
-                write_meta(&mp, &old_meta, crypto_opts)?;
-                let _ = fs::remove_file(&archive_age);
-                let _ = fs::remove_file(&archive_meta);
-                let _ = fs::remove_file(&ap_tmp);
-                let _ = fs::remove_file(&mp_tmp);
-                Err(cause)
+                match self.recover_update_for_stem_locked(vault, &stem) {
+                    Ok(()) => Err(cause),
+                    Err(recovery) => Err(BackendError::Internal(format!(
+                        "{cause}; update recovery also failed: {recovery}"
+                    ))),
+                }
             };
 
-            if let Err(error) = fs::rename(&ap_tmp, &ap)
+            match self.update_interruption(0) {
+                UpdateInterruption::None => {}
+                UpdateInterruption::Rollback(error) => return rollback(error),
+                UpdateInterruption::SimulatedCrash(error) => return Err(error),
+            }
+
+            if let Err(error) = fs::rename(&transaction.new_age, &ap)
                 .map_err(|e| BackendError::Internal(format!("activate age {}: {e}", ap.display())))
-                .and_then(|_| self.update_failpoint(1))
             {
                 return rollback(error);
             }
-            if let Err(error) = fs::rename(&mp_tmp, &mp)
+            sync_directory(ap.parent().expect("active value has parent"))?;
+            match self.update_interruption(1) {
+                UpdateInterruption::None => {}
+                UpdateInterruption::Rollback(error) => return rollback(error),
+                UpdateInterruption::SimulatedCrash(error) => return Err(error),
+            }
+
+            if let Err(error) = fs::rename(&transaction.new_meta, &mp)
                 .map_err(|e| BackendError::Internal(format!("activate meta {}: {e}", mp.display())))
-                .and_then(|_| self.update_failpoint(2))
             {
                 return rollback(error);
             }
+            sync_directory(mp.parent().expect("active metadata has parent"))?;
+            match self.update_interruption(2) {
+                UpdateInterruption::None => {}
+                UpdateInterruption::Rollback(error) => return rollback(error),
+                UpdateInterruption::SimulatedCrash(error) => return Err(error),
+            }
+
             if let Err(error) = archive_snapshot(
                 &self.store_path,
                 vault,
@@ -1586,11 +1925,20 @@ impl SecretBackend for LocalSecretBackend {
                 &old_age,
                 &old_meta,
                 crypto_opts,
-            )
-            .and_then(|_| self.update_failpoint(3))
-            {
+            ) {
                 return rollback(error);
             }
+            let archive_dir = versions_dir(&self.store_path, vault, &stem)?;
+            sync_file(&archive_dir.join(format!("{}.age", old_meta.version)))?;
+            sync_file(&archive_dir.join(format!("{}.meta.json", old_meta.version)))?;
+            sync_directory(&archive_dir)?;
+            match self.update_interruption(3) {
+                UpdateInterruption::None => {}
+                UpdateInterruption::Rollback(error) => return rollback(error),
+                UpdateInterruption::SimulatedCrash(error) => return Err(error),
+            }
+
+            self.finish_update_transaction_locked(&transaction)?;
         } else {
             write_meta(&mp, &meta, crypto_opts)?;
         }
@@ -1903,7 +2251,118 @@ mod tests {
     use crate::backend::local::crypto::generate_keypair;
     use crate::records::{RECORD_CONTENT_TYPE, TYPE_TAG};
     use crate::secret::manager::FieldUpdate;
+    use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    #[derive(Clone)]
+    enum UpdateTestHook {
+        Failure(u8),
+        Crash(u8),
+        Pause {
+            stage: u8,
+            state: Arc<(Mutex<PauseState>, Condvar)>,
+        },
+    }
+
+    #[derive(Default)]
+    struct PauseState {
+        reached: bool,
+        resumed: bool,
+    }
+
+    struct UpdatePause {
+        state: Arc<(Mutex<PauseState>, Condvar)>,
+    }
+
+    impl UpdatePause {
+        fn wait_until_reached(&self) {
+            let (mutex, condition) = &*self.state;
+            let mut state = mutex.lock().unwrap();
+            while !state.reached {
+                state = condition.wait(state).unwrap();
+            }
+        }
+
+        fn resume(self) {
+            let (mutex, condition) = &*self.state;
+            let mut state = mutex.lock().unwrap();
+            state.resumed = true;
+            condition.notify_all();
+        }
+    }
+
+    fn update_hooks() -> &'static Mutex<HashMap<PathBuf, UpdateTestHook>> {
+        static HOOKS: OnceLock<Mutex<HashMap<PathBuf, UpdateTestHook>>> = OnceLock::new();
+        HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn install_update_failure(store_path: &Path, stage: u8) {
+        update_hooks()
+            .lock()
+            .unwrap()
+            .insert(store_path.to_path_buf(), UpdateTestHook::Failure(stage));
+    }
+
+    fn install_update_crash(store_path: &Path, stage: u8) {
+        update_hooks()
+            .lock()
+            .unwrap()
+            .insert(store_path.to_path_buf(), UpdateTestHook::Crash(stage));
+    }
+
+    fn install_update_pause(store_path: &Path, stage: u8) -> UpdatePause {
+        let state = Arc::new((Mutex::new(PauseState::default()), Condvar::new()));
+        update_hooks().lock().unwrap().insert(
+            store_path.to_path_buf(),
+            UpdateTestHook::Pause {
+                stage,
+                state: Arc::clone(&state),
+            },
+        );
+        UpdatePause { state }
+    }
+
+    pub(super) fn run_update_hook(store_path: &Path, stage: u8) -> UpdateInterruption {
+        let hook = {
+            let mut hooks = update_hooks().lock().unwrap();
+            let matches = match hooks.get(store_path) {
+                Some(UpdateTestHook::Failure(expected)) | Some(UpdateTestHook::Crash(expected)) => {
+                    *expected == stage
+                }
+                Some(UpdateTestHook::Pause {
+                    stage: expected, ..
+                }) => *expected == stage,
+                None => false,
+            };
+            matches.then(|| hooks.remove(store_path).expect("matched hook exists"))
+        };
+        match hook {
+            Some(UpdateTestHook::Failure(_)) => {
+                UpdateInterruption::Rollback(BackendError::Internal(format!(
+                    "injected local update failure after stage {stage}"
+                )))
+            }
+            Some(UpdateTestHook::Crash(_)) => UpdateInterruption::SimulatedCrash(
+                BackendError::Internal(format!("simulated crash after local update stage {stage}")),
+            ),
+            Some(UpdateTestHook::Pause { state, .. }) => {
+                let (mutex, condition) = &*state;
+                let mut pause = mutex.lock().unwrap();
+                pause.reached = true;
+                condition.notify_all();
+                while !pause.resumed {
+                    pause = condition.wait(pause).unwrap();
+                }
+                UpdateInterruption::None
+            }
+            None => UpdateInterruption::None,
+        }
+    }
+
+    fn has_pending_update_journal(backend: &LocalSecretBackend, vault: &str, name: &str) -> bool {
+        backend.has_pending_update_for_name(vault, name).unwrap()
+    }
 
     /// Create a test backend with a temp dir and return it along with the temp dir.
     /// Metadata encryption is off (matches the default).
@@ -2707,7 +3166,7 @@ mod tests {
                 .set_secret("default", make_request("atomic", "old-value"))
                 .await
                 .unwrap();
-            backend.inject_update_failure_after(stage);
+            install_update_failure(&backend.store_path, stage);
             let request = SecretUpdateRequest {
                 name: "atomic".into(),
                 value: Some(Zeroizing::new("new-value".into())),
@@ -2747,6 +3206,23 @@ mod tests {
         }
     }
 
+    fn conversion_update_request() -> SecretUpdateRequest {
+        SecretUpdateRequest {
+            name: "atomic".into(),
+            value: Some(Zeroizing::new("new-value".into())),
+            content_type: Some(RECORD_CONTENT_TYPE.into()),
+            enabled: Some(false),
+            expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+            not_before: crate::secret::manager::FieldUpdate::Unchanged,
+            tags: Some(HashMap::from([(TYPE_TAG.into(), "api-key".into())])),
+            groups: Some(vec!["new-group".into()]),
+            note: crate::secret::manager::FieldUpdate::Set("new-note".into()),
+            folder: crate::secret::manager::FieldUpdate::Set("new/folder".into()),
+            replace_tags: true,
+            replace_groups: true,
+        }
+    }
+
     #[tokio::test]
     async fn conversion_update_failures_roll_back_plain_store() {
         assert_update_failure_rolls_back(false).await;
@@ -2755,6 +3231,180 @@ mod tests {
     #[tokio::test]
     async fn conversion_update_failures_roll_back_opaque_store() {
         assert_update_failure_rolls_back(true).await;
+    }
+
+    async fn assert_reader_blocks_until_complete_generation_is_visible(opaque: bool) {
+        let (backend, _tmp) = if opaque {
+            test_backend_opaque()
+        } else {
+            test_backend()
+        };
+        let backend = Arc::new(backend);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        let pause = install_update_pause(&backend.store_path, 1);
+        let update_backend = Arc::clone(&backend);
+        let updater = tokio::spawn(async move {
+            update_backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+        });
+        pause.wait_until_reached();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let read_backend = Arc::clone(&backend);
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(read_backend.get_secret("default", "atomic", true));
+            result_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            result_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "reader observed the half-activated value/metadata pair"
+        );
+
+        pause.resume();
+        updater.await.unwrap().unwrap();
+        let observed = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        reader.join().unwrap();
+        assert_eq!(
+            observed.value.as_deref().map(|v| v.as_str()),
+            Some("new-value")
+        );
+        assert_eq!(observed.content_type, RECORD_CONTENT_TYPE);
+        assert_eq!(
+            observed.tags.get(TYPE_TAG).map(String::as_str),
+            Some("api-key")
+        );
+        assert_eq!(observed.version, "v2");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reader_blocks_across_plain_store_generation_activation() {
+        assert_reader_blocks_until_complete_generation_is_visible(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reader_blocks_across_opaque_store_generation_activation() {
+        assert_reader_blocks_until_complete_generation_is_visible(true).await;
+    }
+
+    async fn assert_restart_recovers_crashed_conversion(opaque: bool) {
+        for stage in 1..=3 {
+            let (backend, tmp) = if opaque {
+                test_backend_opaque()
+            } else {
+                test_backend()
+            };
+            backend
+                .set_secret("default", make_request("atomic", "old-value"))
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, stage);
+            let error = backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("simulated crash"), "{error}");
+            assert!(has_pending_update_journal(&backend, "default", "atomic"));
+            drop(backend);
+
+            let restarted = if opaque {
+                reopen_opaque(&tmp, false)
+            } else {
+                test_backend_reopen(&tmp, false)
+            };
+            let recovered = restarted
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.value.as_deref().map(|v| v.as_str()),
+                Some("old-value"),
+                "stage {stage}"
+            );
+            assert_eq!(recovered.version, "v1", "stage {stage}");
+            assert_eq!(recovered.content_type, "text/plain", "stage {stage}");
+            assert!(!recovered.tags.contains_key(TYPE_TAG), "stage {stage}");
+            assert!(
+                !has_pending_update_journal(&restarted, "default", "atomic"),
+                "stage {stage}"
+            );
+            assert_eq!(
+                restarted
+                    .list_versions("default", "atomic")
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "stage {stage}"
+            );
+        }
+    }
+
+    async fn assert_journal_is_durable_before_first_activation(opaque: bool) {
+        let (backend, _tmp) = if opaque {
+            test_backend_opaque()
+        } else {
+            test_backend()
+        };
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, 0);
+        let error = backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("simulated crash"), "{error}");
+        assert!(has_pending_update_journal(&backend, "default", "atomic"));
+
+        let stem = backend.resolve_active_stem("default", "atomic").unwrap();
+        let active_meta = read_meta(
+            &meta_path(&backend.store_path, "default", &stem).unwrap(),
+            &backend.identity,
+        )
+        .unwrap();
+        let active_value = crypto::decrypt_from_file(
+            &age_path(&backend.store_path, "default", &stem).unwrap(),
+            &backend.identity,
+        )
+        .unwrap();
+        assert_eq!(active_meta.version, "v1");
+        assert_eq!(active_meta.content_type, "text/plain");
+        assert_eq!(&*active_value, "old-value");
+    }
+
+    #[tokio::test]
+    async fn plain_store_journal_is_durable_before_first_activation() {
+        assert_journal_is_durable_before_first_activation(false).await;
+    }
+
+    #[tokio::test]
+    async fn opaque_store_journal_is_durable_before_first_activation() {
+        assert_journal_is_durable_before_first_activation(true).await;
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_plain_store_crash_markers_at_every_stage() {
+        assert_restart_recovers_crashed_conversion(false).await;
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_opaque_store_crash_markers_at_every_stage() {
+        assert_restart_recovers_crashed_conversion(true).await;
     }
 
     /// An update request that changes nothing — base for tri-state tests.

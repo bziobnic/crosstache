@@ -326,6 +326,13 @@ fn preview_to_type(
     let mut used_source = std::collections::BTreeSet::new();
 
     for target_field in &target.fields {
+        if request.supplied_fields.contains_key(&target_field.name) {
+            // An explicit value has new provenance. It intentionally replaces
+            // the same-named source field, so the old value is neither
+            // retained nor interpreted as crossing a sensitivity boundary.
+            used_source.insert(target_field.name.clone());
+            continue;
+        }
         if let Some(value) = source.fields.get(&target_field.name) {
             all_target_fields.insert(target_field.name.clone(), value.clone());
             retained.push(target_field.name.clone());
@@ -380,6 +387,9 @@ fn preview_to_type(
     let mut sensitivity_changes = Vec::new();
     let mut exposed = Vec::new();
     for field in &target.fields {
+        if !retained.iter().any(|name| name == &field.name) {
+            continue;
+        }
         let Some(source_kind) = source.kinds.get(&field.name) else {
             continue;
         };
@@ -397,7 +407,6 @@ fn preview_to_type(
     }
     sensitivity_changes.sort();
     exposed.sort();
-    let no_op = same_type && all_target_fields == source.fields;
 
     finish_typed_preview(
         secret,
@@ -410,7 +419,7 @@ fn preview_to_type(
         sensitivity_changes,
         exposed,
         request.confirm_lossy,
-        no_op,
+        same_type,
         false,
     )
 }
@@ -427,7 +436,7 @@ fn finish_typed_preview(
     sensitivity_changes: Vec<String>,
     exposed: Vec<String>,
     confirm_lossy: bool,
-    no_op: bool,
+    same_type_candidate: bool,
     allow_missing_required: bool,
 ) -> Result<ConversionPreview> {
     let primary = target.primary();
@@ -481,8 +490,19 @@ fn finish_typed_preview(
         RECORD_CONTENT_TYPE.to_string(),
         tags,
         confirm_lossy,
-        no_op,
+        false,
     );
+    let mut current_tags = secret.tags.clone();
+    let (current_groups, current_note, current_folder) = split_denormalized_tags(&mut current_tags);
+    let no_op = same_type_candidate
+        && secret.content_type == RECORD_CONTENT_TYPE
+        && secret.value.as_deref().map(|value| value.as_str()) == Some(prepared.value.as_str())
+        && current_tags == prepared.tags
+        && current_groups == prepared.groups
+        && current_note == prepared.note
+        && current_folder == prepared.folder;
+    let mut prepared = prepared;
+    prepared.no_op = no_op;
     let requires_confirmation = (!dropped.is_empty() || !exposed.is_empty()) && !confirm_lossy;
 
     Ok(ConversionPreview {
@@ -533,6 +553,17 @@ fn prepare_common(
     }
 }
 
+/// Reject conversion before reading values, printing impact, or prompting
+/// when the backend cannot commit the complete value+metadata shape atomically.
+pub fn validate_conversion_backend(backend: &dyn Backend) -> Result<()> {
+    if !backend.capabilities().has_atomic_record_conversion {
+        return Err(CrosstacheError::config(
+            "backend does not support atomic record conversion; no changes were written",
+        ));
+    }
+    Ok(())
+}
+
 /// Apply a prepared conversion as one backend update.
 pub async fn apply_conversion(
     backend: &dyn Backend,
@@ -540,6 +571,7 @@ pub async fn apply_conversion(
     name: &str,
     preview: ConversionPreview,
 ) -> Result<SecretProperties> {
+    validate_conversion_backend(backend)?;
     if preview.requires_confirmation
         || ((!preview.dropped.is_empty() || !preview.exposed.is_empty())
             && !preview.prepared.confirm_lossy)
@@ -564,11 +596,6 @@ pub async fn apply_conversion(
     }
 
     let caps = backend.capabilities();
-    if !caps.has_atomic_record_conversion {
-        return Err(CrosstacheError::config(
-            "backend does not support atomic record conversion; no changes were written",
-        ));
-    }
     if preview.prepared.groups.is_some() && !caps.has_groups {
         return Err(CrosstacheError::config(
             "backend does not support preserving secret groups during conversion",
@@ -1097,6 +1124,115 @@ mod tests {
         let json = serde_json::to_string(&preview).unwrap();
         assert!(json.contains("token: metadata -> secret"), "{json}");
         assert!(!json.contains("metadata-token"), "{json}");
+    }
+
+    #[tokio::test]
+    async fn same_type_schema_downgrade_is_not_a_no_op_and_rewrites_storage() {
+        let target = custom_type("evolving", FieldKind::Metadata);
+        let source = custom_record("evolving", FieldKind::Secret);
+        let preview = preview_conversion(
+            &source,
+            std::slice::from_ref(&target),
+            ConversionRequest::to_type("evolving"),
+        )
+        .unwrap();
+        assert!(preview.requires_confirmation);
+        assert_eq!(preview.exposed, vec!["token"]);
+
+        let mut confirmed = ConversionRequest::to_type("evolving");
+        confirmed.confirm_lossy = true;
+        let preview =
+            preview_conversion(&source, std::slice::from_ref(&target), confirmed).unwrap();
+        let backend = RecordingBackend::supported();
+        apply_conversion(&backend, "vault", "secret", preview)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.update_count(), 1);
+        let updates = backend.updates.lock().unwrap();
+        let request = &updates[0];
+        let envelope = parse_envelope(request.value.as_deref().unwrap()).unwrap();
+        assert!(!envelope.contains_key("token"));
+        assert_eq!(request.tags.as_ref().unwrap()["f.token"], "private-token");
+    }
+
+    #[tokio::test]
+    async fn same_type_schema_upgrade_is_not_a_no_op_and_rewrites_storage() {
+        let target = custom_type("evolving", FieldKind::Secret);
+        let source = custom_record("evolving", FieldKind::Metadata);
+        let preview = preview_conversion(
+            &source,
+            std::slice::from_ref(&target),
+            ConversionRequest::to_type("evolving"),
+        )
+        .unwrap();
+        assert!(!preview.requires_confirmation);
+        let backend = RecordingBackend::supported();
+        apply_conversion(&backend, "vault", "secret", preview)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.update_count(), 1);
+        let updates = backend.updates.lock().unwrap();
+        let request = &updates[0];
+        let envelope = parse_envelope(request.value.as_deref().unwrap()).unwrap();
+        assert_eq!(envelope["token"], "metadata-token");
+        assert!(!request.tags.as_ref().unwrap().contains_key("f.token"));
+    }
+
+    #[test]
+    fn supplied_metadata_override_has_new_provenance_not_source_exposure() {
+        let source_type = custom_type("secure", FieldKind::Secret);
+        let target = custom_type("visible", FieldKind::Metadata);
+        let mut request = ConversionRequest::to_type("visible");
+        request
+            .supplied_fields
+            .insert("token".into(), "replacement-metadata".into());
+        let preview = preview_conversion(
+            &custom_record("secure", FieldKind::Secret),
+            &[source_type, target],
+            request,
+        )
+        .unwrap();
+
+        assert!(!preview.retained.contains(&"token".to_string()));
+        assert!(!preview.dropped.contains(&"token".to_string()));
+        assert!(preview.sensitivity_changes.is_empty());
+        assert!(preview.exposed.is_empty());
+        assert!(!preview.requires_confirmation);
+        assert_eq!(
+            preview.target_metadata_fields["token"],
+            "replacement-metadata"
+        );
+        let serialized = serde_json::to_string(&preview).unwrap();
+        assert!(!serialized.contains("private-token"), "{serialized}");
+        assert!(!serialized.contains("replacement-metadata"), "{serialized}");
+    }
+
+    #[test]
+    fn supplied_secret_override_has_new_provenance_not_source_upgrade() {
+        let source_type = custom_type("visible", FieldKind::Metadata);
+        let target = custom_type("secure", FieldKind::Secret);
+        let mut request = ConversionRequest::to_type("secure");
+        request
+            .supplied_fields
+            .insert("token".into(), "replacement-secret".into());
+        let preview = preview_conversion(
+            &custom_record("visible", FieldKind::Metadata),
+            &[source_type, target],
+            request,
+        )
+        .unwrap();
+
+        assert!(!preview.retained.contains(&"token".to_string()));
+        assert!(!preview.dropped.contains(&"token".to_string()));
+        assert!(preview.sensitivity_changes.is_empty());
+        assert!(preview.exposed.is_empty());
+        assert!(!preview.requires_confirmation);
+        assert_eq!(preview.target_secret_fields["token"], "replacement-secret");
+        let serialized = serde_json::to_string(&preview).unwrap();
+        assert!(!serialized.contains("metadata-token"), "{serialized}");
+        assert!(!serialized.contains("replacement-secret"), "{serialized}");
     }
 
     #[test]
