@@ -609,7 +609,28 @@ test('secret expiry and enabled filters distinguish missing expired and active m
   assert.deepEqual(model.filterSecrets(fixtures, { enabled: false }, options).map(x => x.name), ['expired']);
 });
 
-test('file filters compose folder MIME type and upload status without mutating rows', () => {
+test('expiry filtering compares canonical instants at timezone and equality boundaries', () => {
+  const fixtures = [
+    { name: 'equal', expires_on: '2030-01-01T00:00:00Z' },
+    { name: 'after', expires_on: '2030-01-01T00:00:00.001Z' },
+    { name: 'none', expires_on: null },
+  ];
+  const options = { now: new Date('2030-01-01T14:00:00+14:00') };
+  assert.deepEqual(
+    model.filterSecrets(fixtures, { expiry: 'expired' }, options).map(x => x.name),
+    ['equal'],
+  );
+  assert.deepEqual(
+    model.filterSecrets(fixtures, { expiry: 'expiring' }, options).map(x => x.name),
+    ['after'],
+  );
+  assert.deepEqual(
+    model.filterSecrets(fixtures, { expiry: 'none' }, options).map(x => x.name),
+    ['none'],
+  );
+});
+
+test('file filters compose real persisted folder and MIME metadata without mutating rows', () => {
   const fixtures = [
     { name: 'prod/report.pdf', content_type: 'application/pdf', upload_status: 'completed' },
     { name: 'prod/draft.txt', content_type: 'text/plain', upload_status: 'failed' },
@@ -619,10 +640,20 @@ test('file filters compose folder MIME type and upload status without mutating r
   const result = model.filterFiles(fixtures, {
     folder: 'prod',
     type: 'APPLICATION/PDF',
-    uploadStatus: 'completed',
   });
   assert.deepEqual(result.map((item) => item.name), ['prod/report.pdf']);
   assert.deepEqual(fixtures, before);
+});
+
+test('file filters do not fabricate an upload lifecycle for persisted FileInfo rows', () => {
+  const fixtures = [
+    { name: 'one.pdf', content_type: 'application/pdf' },
+    { name: 'two.txt', content_type: 'text/plain' },
+  ];
+  assert.deepEqual(
+    model.filterFiles(fixtures, { uploadStatus: 'completed' }),
+    fixtures,
+  );
 });
 
 test('blank filter values are inactive and group matching is token exact', () => {

@@ -951,6 +951,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn secret_list_exposes_canonical_expiry_without_value_disclosure() {
+        let app = crate::web::build_router(testutil::test_state());
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/expiring",
+            Some(json!({
+                "value": "must-not-leak",
+                "expires_on": "2030-01-02T03:04:05Z"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, rows) = get_json(app, "GET", "/api/secrets", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "expiring")
+            .unwrap();
+        assert_eq!(row["expires_on"], "2030-01-02T03:04:05Z");
+        assert!(row.get("value").is_none());
+        assert!(!rows.to_string().contains("must-not-leak"));
+    }
+
+    #[tokio::test]
     async fn missing_secret_has_stable_error() {
         let app = crate::web::build_router(testutil::test_state());
         let (status, json) = get_json(app, "GET", "/api/secrets/missing", None).await;
@@ -1228,6 +1256,10 @@ pub(crate) mod tests {
         let (status, json_body) = get_json(app.clone(), "GET", "/api/files", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json_body[0]["name"], "notes.txt");
+        assert!(
+            json_body[0].get("upload_status").is_none(),
+            "persisted FileInfo has no truthful upload lifecycle state"
+        );
 
         // download
         let res = app

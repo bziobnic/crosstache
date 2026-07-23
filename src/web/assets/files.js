@@ -28,6 +28,7 @@ export function mountFilterControls({
   filters,
   labels,
   keys,
+  dynamicKeys = [],
   onChange,
   folderValue,
   clearFolder,
@@ -38,6 +39,10 @@ export function mountFilterControls({
   ]));
   const chips = document.querySelector(`#${surface}-filter-chips`);
   const clearAll = document.querySelector(`#${surface}-filters-clear`);
+  const dynamic = new Set(dynamicKeys);
+  const baseOptions = new Map(
+    [...controls].map(([key, control]) => [key, [...(control.children || [])]]),
+  );
 
   function readControl(key, control) {
     if (key !== 'enabled') return control.value;
@@ -87,6 +92,18 @@ export function mountFilterControls({
 
   return Object.freeze({
     render,
+    reset() {
+      for (const [key, control] of controls) {
+        filters[key] = inactiveValue(key);
+        control.value = '';
+        if (dynamic.has(key)) {
+          control.replaceChildren(...baseOptions.get(key));
+        }
+      }
+      chips.replaceChildren();
+      chips.hidden = true;
+      clearAll.hidden = true;
+    },
     setOptions(key, values) {
       const control = controls.get(key);
       if (control) syncFilterOptions(control, values, filters[key] || '');

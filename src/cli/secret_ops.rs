@@ -7449,6 +7449,7 @@ mod tests {
             groups: groups.map(str::to_string),
             updated_on: "2026-04-28".to_string(),
             enabled,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }
@@ -7785,6 +7786,7 @@ mod tests {
                 groups: groups.map(str::to_string),
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             }
@@ -8039,6 +8041,7 @@ mod tests {
                 groups: None,
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             }
@@ -8427,6 +8430,7 @@ mod tests {
             groups: None,
             updated_on: "2026-07-01 00:00:00 UTC".to_string(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         };
@@ -8451,6 +8455,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         };
@@ -8545,6 +8550,7 @@ mod tests {
                 groups: None,
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             }

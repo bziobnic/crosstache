@@ -424,7 +424,8 @@ pub(crate) mod stub {
                     folder: req.folder.clone(),
                     groups,
                     updated_on: String::new(),
-                    enabled: true,
+                    enabled: req.enabled.unwrap_or(true),
+                    expires_on: req.expires_on,
                     content_type: req.content_type.clone().unwrap_or_default(),
                     tags: req.tags.clone().unwrap_or_default(),
                 })

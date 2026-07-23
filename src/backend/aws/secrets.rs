@@ -696,6 +696,7 @@ impl SecretBackend for AwsSecretBackend {
                     groups: groups_val,
                     updated_on: String::new(),
                     enabled: true,
+                    expires_on: None,
                     content_type: String::new(),
                     tags: tags_val,
                 });

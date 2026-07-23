@@ -179,6 +179,10 @@ pub struct SecretSummary {
     pub updated_on: String,
     #[tabled(skip)]
     pub enabled: bool,
+    /// Canonical display-safe expiry metadata for list/filter consumers.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub expires_on: Option<DateTime<Utc>>,
     #[tabled(skip)]
     pub content_type: String,
     /// Full tag map, used to derive record-types metadata (`xv-type`,
@@ -1053,6 +1057,7 @@ impl SecretOperations for AzureSecretOperations {
                                 groups: group,
                                 updated_on: updated,
                                 enabled,
+                                expires_on: secret_details.expires_on,
                                 content_type: secret_details.content_type,
                                 tags: secret_details.tags,
                             }
@@ -1069,6 +1074,7 @@ impl SecretOperations for AzureSecretOperations {
                                 groups: None,
                                 updated_on: updated,
                                 enabled,
+                                expires_on: None,
                                 content_type: "text/plain".to_string(),
                                 tags: HashMap::new(),
                             }

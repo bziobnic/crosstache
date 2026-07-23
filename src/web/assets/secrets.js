@@ -522,12 +522,12 @@ function showListState(tbody, kind, state, cols) {
     secrets: {
       failed: ['Couldn’t load secrets', 'The current vault could not be read.'],
       empty: ['No secrets yet', 'Create the first secret in this vault.'],
-      filtered: ['No matching secrets', 'Try a different name, folder, group, or note.'],
+      filtered: ['No matching secrets', 'Try a different name, folder, group, or record type.'],
     },
     files: {
       failed: ['Couldn’t load files', 'The current vault could not be read.'],
       empty: ['No files yet', 'Upload the first encrypted file to this vault.'],
-      filtered: ['No matching files', 'Try a different name, folder, type, or status.'],
+      filtered: ['No matching files', 'Try a different name, folder, or type.'],
     },
   };
   const [title, description] = copy[kind][state];
@@ -564,7 +564,7 @@ const folderNavigationFocus = {
 const folderTokenIndexes = { secrets: null, files: null };
 const listFilters = {
   secrets: { group: '', type: '', expiry: '', enabled: null },
-  files: { type: '', uploadStatus: '' },
+  files: { type: '' },
 };
 
 function navigationFor(kind) {
@@ -720,6 +720,7 @@ const filterControls = {
     surface: 'secret',
     filters: listFilters.secrets,
     keys: ['group', 'type', 'expiry', 'enabled'],
+    dynamicKeys: ['group', 'type'],
     labels: {
       folder: 'Folder',
       group: 'Group',
@@ -735,11 +736,11 @@ const filterControls = {
     document,
     surface: 'file',
     filters: listFilters.files,
-    keys: ['type', 'uploadStatus'],
+    keys: ['type'],
+    dynamicKeys: ['type'],
     labels: {
       folder: 'Folder',
       type: 'Type',
-      uploadStatus: 'Upload status',
     },
     onChange: () => renderFiles(),
     folderValue: () => selectedFolderLabel('files'),
@@ -1535,9 +1536,14 @@ store.subscribe((snapshot, event) => {
     }
   }
   if (event.type !== 'context/switch-succeeded') return;
+  resetListDiscoveryState();
   ctx = snapshot.context;
   currentVault = ctx.vault;
   secrets = snapshot.initialSecrets;
+  secretSearchIndex = buildMetadataIndex({
+    secrets,
+    folders: folderPaths('secrets', secrets),
+  });
   secretsState = 'ready';
   hasSuccessfulSecretsSnapshot = true;
   files = [];
@@ -1821,7 +1827,10 @@ async function init() {
         return;
       }
       clearRefreshOwnersForScopeTransition();
+      resetListDiscoveryState();
       currentVault = nextVault;
+      secrets = [];
+      files = [];
       hasSuccessfulSecretsSnapshot = false;
       hasSuccessfulFilesSnapshot = false;
       const selectedVault = currentVault;
@@ -3058,6 +3067,17 @@ let filesState = 'ready';
 let fileLoadGeneration = 0;
 let fileLoadController = null;
 let hasSuccessfulFilesSnapshot = false;
+
+function resetListDiscoveryState() {
+  $('#search').value = '';
+  $('#file-search').value = '';
+  $('#secret-search-clear').hidden = true;
+  $('#file-search-clear').hidden = true;
+  filterControls.secrets.reset();
+  filterControls.files.reset();
+  secretSearchIndex = buildMetadataIndex();
+  fileSearchIndex = buildMetadataIndex();
+}
 
 async function loadFiles(vault, scope = captureOperationScope(), errorOwner = null) {
   const generation = ++fileLoadGeneration;

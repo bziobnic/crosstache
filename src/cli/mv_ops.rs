@@ -1189,6 +1189,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }
@@ -1237,6 +1238,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }
@@ -1342,6 +1344,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }

@@ -33,6 +33,31 @@ function treeitem(tree, name) {
   return tree.getByRole('treeitem', { name });
 }
 
+test('no-results guidance names only searchable fields on secrets and files', async ({ page, baseURL }) => {
+  await routeFolderFixtures(page, {
+    secretsByVault: {
+      playwright: [{ name: 'visible-secret', note: 'not-searchable' }],
+    },
+    filesByVault: {
+      playwright: [{ name: 'visible.pdf', size: 12, content_type: 'application/pdf', last_modified: '2026-07-22T00:00:00Z' }],
+    },
+  });
+  await page.goto(baseURL);
+
+  await page.locator('#search').fill('no-secret-match');
+  await expect(page.locator('#secrets-table tbody')).toContainText(
+    'Try a different name, folder, group, or record type.',
+  );
+  await expect(page.locator('#secrets-table tbody')).not.toContainText('note');
+
+  await page.locator('#tab-files').click();
+  await page.locator('#file-search').fill('no-file-match');
+  await expect(page.locator('#files-table tbody')).toContainText(
+    'Try a different name, folder, or type.',
+  );
+  await expect(page.locator('#files-table tbody')).not.toContainText('status');
+});
+
 test('desktop folder tree filters descendants, supports keyboard navigation, and restores scoped expansion', async ({ page, baseURL }) => {
   await routeFolderFixtures(page, {
     secretsByVault: {

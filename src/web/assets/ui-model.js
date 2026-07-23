@@ -221,15 +221,9 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   function filterFiles(items, filters = {}) {
     const folder = normalizeFilterValue(filters.folder);
     const type = normalizeFilterValue(filters.type);
-    const uploadStatus = normalizeFilterValue(
-      filters.uploadStatus ?? filters.upload_status,
-    );
     return (items || []).filter((item) => (
       (!folder || normalizeFilterValue(fileFolder(item)) === folder)
       && (!type || normalizeFilterValue(item?.content_type) === type)
-      && (!uploadStatus || normalizeFilterValue(
-        item?.upload_status ?? item?.status,
-      ) === uploadStatus)
     ));
   }
 

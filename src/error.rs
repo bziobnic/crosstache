@@ -1065,6 +1065,7 @@ mod tests {
                     "groups",
                     "updated_on",
                     "enabled",
+                    "expires_on",
                     "content_type",
                 ],
                 allowed_value_like_fields: &[],

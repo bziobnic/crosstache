@@ -106,4 +106,13 @@ test('production markup exposes local search clears and labelled filter controls
     assert.match(html, new RegExp(`id="${surface}-filters-clear"`));
   }
   assert.doesNotMatch(html, /placeholder="[^"]*note/i);
+  assert.doesNotMatch(html, /id="file-filter-uploadStatus"/);
+});
+
+test('no-results guidance names only fields that are actually searchable', () => {
+  const source = fs.readFileSync(new URL('./secrets.js', import.meta.url), 'utf8');
+  assert.match(source, /Try a different name, folder, group, or record type\./);
+  assert.match(source, /Try a different name, folder, or type\./);
+  assert.doesNotMatch(source, /Try a different[^.]*note/i);
+  assert.doesNotMatch(source, /Try a different[^.]*status/i);
 });

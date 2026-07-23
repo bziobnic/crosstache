@@ -715,7 +715,7 @@ test('mounted local search and composable filters stay metadata-only and expose 
       note: 'needle-private-note',
       tags: { 'xv-type': 'login' },
       enabled: true,
-      expires_on: '2035-01-01T00:00:00Z',
+      expires_on: '2999-01-01T00:00:00Z',
     },
     {
       name: 'disabled-database',
@@ -723,6 +723,14 @@ test('mounted local search and composable filters stay metadata-only and expose 
       groups: ['ops'],
       tags: { 'xv-type': 'database' },
       enabled: false,
+    },
+    {
+      name: 'expired-login',
+      folder: 'prod',
+      groups: ['ops'],
+      tags: { 'xv-type': 'login' },
+      enabled: true,
+      expires_on: '2000-01-01T00:00:00Z',
     },
   ];
   const fileRows = [
@@ -755,7 +763,7 @@ test('mounted local search and composable filters stay metadata-only and expose 
     const enabled = ui.elements.get('#secret-filter-enabled');
     enabled.value = 'false';
     enabled.onchange();
-    assert.equal(ui.elements.get('#secret-item-count').textContent, '1 / 2 secrets');
+    assert.equal(ui.elements.get('#secret-item-count').textContent, '1 / 3 secrets');
     assert.deepEqual(visibleNames('secrets', 'Edit secret '), ['Edit secret disabled-database']);
     const statusChip = ui.find('#secret-filter-chips', (element) => (
       element.getAttribute?.('aria-label') === 'Remove Status: disabled filter'
@@ -764,8 +772,26 @@ test('mounted local search and composable filters stay metadata-only and expose 
     statusChip.onclick();
     assert.deepEqual(visibleNames('secrets', 'Edit secret '), [
       'Edit secret disabled-database',
+      'Edit secret expired-login',
       'Edit secret prod-login',
     ]);
+
+    const expiry = ui.elements.get('#secret-filter-expiry');
+    for (const [value, expected] of [
+      ['expired', 'expired-login'],
+      ['expiring', 'prod-login'],
+      ['none', 'disabled-database'],
+    ]) {
+      expiry.value = value;
+      expiry.onchange();
+      assert.deepEqual(
+        visibleNames('secrets', 'Edit secret '),
+        [`Edit secret ${expected}`],
+        `${value} uses the canonical list-row expires_on field`,
+      );
+    }
+    expiry.value = '';
+    expiry.onchange();
 
     await ui.elements.get('#tab-files').onclick();
     const fileSearch = ui.elements.get('#file-search');
@@ -776,6 +802,130 @@ test('mounted local search and composable filters stay metadata-only and expose 
     )).map((element) => element.textContent), ['prod/report.pdf']);
     assert.equal(ui.elements.get('#file-search-clear').hidden, false);
   } finally {
+    ui.restore();
+  }
+});
+
+test('committed workspace transitions scrub discovery state while failed transitions preserve it', async () => {
+  const primary = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const stage = {
+    ...routedContext('stage', 'two'),
+    capabilities: { ...routedContext('stage', 'two').capabilities, files: true },
+  };
+  const primaryRows = [{
+    name: 'primary-only',
+    folder: 'private-folder',
+    groups: ['private-group'],
+    enabled: true,
+  }];
+  let failNextActivation = false;
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return primary;
+    if (requestPath === '/api/types') return { types: [] };
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return primaryRows;
+    if (method === 'GET' && requestPath.startsWith('/api/files')) return [];
+    if (method === 'POST' && requestPath === '/api/workspaces/activate') {
+      if (failNextActivation) throw new Error('activation failed');
+      return { context: stage, secrets: [] };
+    }
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api, withContextRail: true });
+  try {
+    const search = ui.elements.get('#search');
+    const group = ui.elements.get('#secret-filter-group');
+    search.value = 'primary-only';
+    search.oninput();
+    group.value = 'private-group';
+    group.onchange();
+    assert.equal(ui.elements.get('#secret-filter-chips').hidden, false);
+
+    assert.equal(await ui.contextRail.switchTo('stage'), true);
+    assert.equal(search.value, '');
+    assert.equal(group.value, '');
+    assert.equal(ui.elements.get('#secret-filter-chips').hidden, true);
+    assert.equal(ui.elements.get('#secret-filters-clear').hidden, true);
+    assert.equal(
+      group.children.some((option) => option?.textContent === 'private-group'),
+      false,
+      'dynamic options from the prior workspace are removed',
+    );
+
+    search.value = 'primary-only';
+    search.oninput();
+    assert.equal(
+      ui.find('#secrets-table tbody', (element) => (
+        element.getAttribute?.('aria-label') === 'Edit secret primary-only'
+      )),
+      null,
+      'the prior workspace index cannot resolve into the new empty snapshot',
+    );
+
+    search.value = 'keep-on-failure';
+    search.oninput();
+    const enabled = ui.elements.get('#secret-filter-enabled');
+    enabled.value = 'false';
+    enabled.onchange();
+    failNextActivation = true;
+    assert.equal(await ui.contextRail.switchTo('primary'), false);
+    assert.equal(search.value, 'keep-on-failure');
+    assert.equal(enabled.value, 'false');
+    assert.equal(ui.elements.get('#secret-filter-chips').hidden, false);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('committed legacy vault changes scrub discovery state before loading the new vault', async () => {
+  const context = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const vaultTwo = deferred();
+  let vaultTwoStarted = false;
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return context;
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') {
+      return { vaults: [{ name: 'one' }, { name: 'two' }] };
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) {
+      if (requestPath.includes('vault=two')) {
+        vaultTwoStarted = true;
+        return vaultTwo.promise;
+      }
+      return [{
+        name: 'vault-one-only',
+        groups: ['vault-one-group'],
+        enabled: true,
+      }];
+    }
+    if (method === 'GET' && requestPath.startsWith('/api/files')) return [];
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    const search = ui.elements.get('#search');
+    const group = ui.elements.get('#secret-filter-group');
+    search.value = 'vault-one-only';
+    search.oninput();
+    group.value = 'vault-one-group';
+    group.onchange();
+
+    const picker = ui.elements.get('#vault-select');
+    picker.value = 'two';
+    const transition = picker.onchange();
+    await settleUntil(() => vaultTwoStarted);
+    assert.equal(search.value, '');
+    assert.equal(group.value, '');
+    assert.equal(ui.elements.get('#secret-filter-chips').hidden, true);
+    vaultTwo.resolve([]);
+    await transition;
+  } finally {
+    vaultTwo.resolve([]);
     ui.restore();
   }
 });
