@@ -3675,11 +3675,7 @@ async fn execute_record_type_conversion(
     backend_name: &str,
 ) -> Result<()> {
     crate::records::validate_conversion_backend(backend)?;
-    let snapshot = backend
-        .secrets()
-        .get_secret_snapshot(vault_name, name, true)
-        .await?;
-    let secret = snapshot.properties;
+    let secret = backend.secrets().get_secret(vault_name, name, true).await?;
     let types = config.resolve_record_types().await?;
     let mut request = crate::records::ConversionRequest::to_type(type_name);
     request.confirm_lossy = yes;
@@ -3698,9 +3694,7 @@ async fn execute_record_type_conversion(
         confirmed.confirm_lossy = true;
         preview = crate::records::preview_conversion(&secret, &types, confirmed)?;
     }
-    let props =
-        crate::records::apply_conversion(backend, vault_name, name, &snapshot.revision, preview)
-            .await?;
+    let props = crate::records::apply_atomic_conversion(backend, vault_name, name, preview).await?;
     output::success(&format!(
         "Successfully converted '{}' to type '{}'",
         props.original_name, type_name
@@ -3722,12 +3716,11 @@ async fn execute_record_untype(
     backend_name: &str,
 ) -> Result<()> {
     crate::records::validate_conversion_backend(reg.active())?;
-    let snapshot = reg
+    let secret = reg
         .active()
         .secrets()
-        .get_secret_snapshot(vault_name, name, true)
+        .get_secret(vault_name, name, true)
         .await?;
-    let secret = snapshot.properties;
     if !crate::records::is_record(&secret.content_type) {
         return Err(CrosstacheError::config(format!(
             "secret '{name}' is not a typed record; nothing to untype."
@@ -3751,14 +3744,8 @@ async fn execute_record_untype(
         confirmed.confirm_lossy = true;
         preview = crate::records::preview_conversion(&secret, &types, confirmed)?;
     }
-    let props = crate::records::apply_conversion(
-        reg.active(),
-        vault_name,
-        name,
-        &snapshot.revision,
-        preview,
-    )
-    .await?;
+    let props =
+        crate::records::apply_atomic_conversion(reg.active(), vault_name, name, preview).await?;
     output::success(&format!(
         "Successfully untyped '{}' (was type '{type_name}')",
         props.original_name
@@ -3931,6 +3918,9 @@ pub(crate) async fn execute_secret_update_direct(
         }
         let local_registry = BackendRegistry::new(resolved_backend);
         let reg = &local_registry;
+        if rename.is_some() {
+            crate::cli::mv_ops::validate_atomic_rename_backend(reg.active())?;
+        }
 
         // A bare `xv update NAME` — no value, no --stdin, and no other
         // update flag — prompts for the new value, matching the `value`

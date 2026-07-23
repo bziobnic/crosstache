@@ -13,7 +13,8 @@ pub mod types;
 // unused from the `xv` binary target until then.
 #[allow(unused_imports)]
 pub use conversion::{
-    apply_conversion, preview_conversion, validate_conversion_backend, ConversionPreview,
+    apply_atomic_conversion, apply_conversion, preview_conversion,
+    validate_conditional_conversion_backend, validate_conversion_backend, ConversionPreview,
     ConversionRequest, ConversionTarget,
 };
 #[allow(unused_imports)]

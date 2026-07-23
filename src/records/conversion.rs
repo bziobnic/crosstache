@@ -556,9 +556,7 @@ fn prepare_common(
 /// Reject conversion before reading values, printing impact, or prompting
 /// when the backend cannot commit the complete value+metadata shape atomically.
 pub fn validate_conversion_backend(backend: &dyn Backend) -> Result<()> {
-    if !backend.capabilities().has_conditional_record_conversion
-        || !backend.secrets().supports_conditional_update()
-    {
+    if !backend.capabilities().has_atomic_record_conversion {
         return Err(CrosstacheError::config(
             "backend does not support atomic record conversion; no changes were written",
         ));
@@ -566,15 +564,30 @@ pub fn validate_conversion_backend(backend: &dyn Backend) -> Result<()> {
     Ok(())
 }
 
-/// Apply a prepared conversion as one backend update.
-pub async fn apply_conversion(
-    backend: &dyn Backend,
-    vault: &str,
-    name: &str,
-    expected_revision: &str,
-    preview: ConversionPreview,
-) -> Result<SecretProperties> {
+/// Web preview/apply additionally requires a provider CAS primitive.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
+pub fn validate_conditional_conversion_backend(backend: &dyn Backend) -> Result<()> {
     validate_conversion_backend(backend)?;
+    if !backend.capabilities().has_conditional_record_conversion
+        || !backend.secrets().supports_conditional_update()
+    {
+        return Err(CrosstacheError::config(
+            "backend does not support conditional record conversion; no changes were written",
+        ));
+    }
+    Ok(())
+}
+
+enum ConversionCommit {
+    NoOp(SecretProperties),
+    Update(SecretUpdateRequest),
+}
+
+fn prepare_conversion_commit(
+    backend: &dyn Backend,
+    name: &str,
+    preview: ConversionPreview,
+) -> Result<ConversionCommit> {
     if preview.requires_confirmation
         || ((!preview.dropped.is_empty() || !preview.exposed.is_empty())
             && !preview.prepared.confirm_lossy)
@@ -595,7 +608,7 @@ pub async fn apply_conversion(
         )));
     }
     if preview.prepared.no_op {
-        return Ok(preview.prepared.original);
+        return Ok(ConversionCommit::NoOp(preview.prepared.original));
     }
 
     let caps = backend.capabilities();
@@ -675,7 +688,7 @@ pub async fn apply_conversion(
         .clone()
         .map(FieldUpdate::Set)
         .unwrap_or(FieldUpdate::Clear);
-    let request = SecretUpdateRequest {
+    Ok(ConversionCommit::Update(SecretUpdateRequest {
         name: name.to_string(),
         expected_revision: None,
         value: Some(Zeroizing::new(preview.prepared.value)),
@@ -691,13 +704,50 @@ pub async fn apply_conversion(
         folder,
         replace_tags: true,
         replace_groups: true,
-    };
+    }))
+}
 
-    backend
-        .secrets()
-        .update_secret_if_revision(vault, name, expected_revision, request)
-        .await
-        .map_err(Into::into)
+/// Apply a prepared conversion with an opaque provider revision guard.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
+pub async fn apply_conversion(
+    backend: &dyn Backend,
+    vault: &str,
+    name: &str,
+    expected_revision: &str,
+    preview: ConversionPreview,
+) -> Result<SecretProperties> {
+    validate_conditional_conversion_backend(backend)?;
+    match prepare_conversion_commit(backend, name, preview)? {
+        ConversionCommit::NoOp(_) => backend
+            .secrets()
+            .validate_secret_revision(vault, name, expected_revision)
+            .await
+            .map_err(Into::into),
+        ConversionCommit::Update(request) => backend
+            .secrets()
+            .update_secret_if_revision(vault, name, expected_revision, request)
+            .await
+            .map_err(Into::into),
+    }
+}
+
+/// Apply a prepared conversion through one complete atomic backend update.
+/// This is the CLI Task 4 contract and does not require compare-and-swap.
+pub async fn apply_atomic_conversion(
+    backend: &dyn Backend,
+    vault: &str,
+    name: &str,
+    preview: ConversionPreview,
+) -> Result<SecretProperties> {
+    validate_conversion_backend(backend)?;
+    match prepare_conversion_commit(backend, name, preview)? {
+        ConversionCommit::NoOp(properties) => Ok(properties),
+        ConversionCommit::Update(request) => backend
+            .secrets()
+            .update_secret(vault, name, request)
+            .await
+            .map_err(Into::into),
+    }
 }
 
 #[cfg(test)]
@@ -899,6 +949,19 @@ mod tests {
                 .unwrap()
                 .push(expected_revision.to_string());
             self.update_secret(vault, name, request).await
+        }
+
+        async fn validate_secret_revision(
+            &self,
+            _vault: &str,
+            _name: &str,
+            expected_revision: &str,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            self.conditional_revisions
+                .lock()
+                .unwrap()
+                .push(expected_revision.to_string());
+            Ok(login_record())
         }
     }
 
@@ -1469,6 +1532,7 @@ mod tests {
         .unwrap();
         let mut backend = RecordingBackend::supported();
         backend.kind = BackendKind::Aws;
+        backend.caps.has_atomic_record_conversion = false;
         backend.caps.has_conditional_record_conversion = false;
         backend.caps.has_enable_disable = false;
         let error = apply_conversion(&backend, "vault", "secret", "revision", preview)
@@ -1476,6 +1540,36 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("atomic"));
         assert_eq!(backend.update_count(), 0);
+    }
+
+    #[test]
+    fn complete_atomic_conversion_does_not_require_conditional_cas() {
+        let mut backend = RecordingBackend::supported();
+        backend.kind = BackendKind::Azure;
+        backend.caps.has_conditional_record_conversion = false;
+
+        validate_conversion_backend(&backend)
+            .expect("CLI conversion only requires one complete atomic update");
+    }
+
+    #[tokio::test]
+    async fn azure_complete_atomic_conversion_uses_one_unconditional_update() {
+        let mut backend = RecordingBackend::supported();
+        backend.kind = BackendKind::Azure;
+        backend.caps.has_conditional_record_conversion = false;
+        let preview = preview_conversion(
+            &plain("azure-token"),
+            &builtin_types(),
+            ConversionRequest::to_type("api-key"),
+        )
+        .unwrap();
+
+        apply_atomic_conversion(&backend, "vault", "secret", preview)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.update_count(), 1);
+        assert!(backend.conditional_revisions.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1530,5 +1624,9 @@ mod tests {
 
         assert_eq!(result.content_type, RECORD_CONTENT_TYPE);
         assert_eq!(backend.update_count(), 0);
+        assert_eq!(
+            backend.conditional_revisions.lock().unwrap().as_slice(),
+            ["revision"]
+        );
     }
 }

@@ -180,7 +180,7 @@ impl Backend for AzureBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
-            has_atomic_record_conversion: false,
+            has_atomic_record_conversion: true,
             has_conditional_record_conversion: false,
             has_atomic_rename: false,
             has_enable_disable: true,
@@ -279,6 +279,7 @@ mod tests {
             .expect("default Azure backend should construct for capability inspection");
 
         assert!(backend.capabilities().has_audit);
+        assert!(backend.capabilities().has_atomic_record_conversion);
         assert!(!backend.capabilities().has_conditional_record_conversion);
         assert!(!backend.capabilities().has_atomic_rename);
         assert!(backend.audit().is_some());

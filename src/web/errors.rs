@@ -270,6 +270,24 @@ pub(crate) fn backend_error(error: BackendError) -> (StatusCode, ApiErrorBody) {
             "The requested change conflicts with existing data.",
             "Refresh the vault and choose a different name or retry the change.",
         ),
+        SourceRevisionConflict { .. } => generic(
+            StatusCode::CONFLICT,
+            "xv-source-revision-conflict",
+            "The secret changed after it was read.",
+            "Refresh the secret and retry the change.",
+        ),
+        DestinationExists { .. } => generic(
+            StatusCode::CONFLICT,
+            "xv-destination-exists",
+            "A secret with the destination name already exists.",
+            "Choose a different destination name.",
+        ),
+        AttachmentsPresent { .. } => generic(
+            StatusCode::CONFLICT,
+            "xv-attachments-block-rename",
+            "This secret has attachments and cannot be renamed safely.",
+            "Remove the attachments first, or keep the current secret name.",
+        ),
         RateLimited { .. } => generic(
             StatusCode::TOO_MANY_REQUESTS,
             "xv-rate-limited",

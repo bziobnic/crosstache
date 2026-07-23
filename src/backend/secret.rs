@@ -17,6 +17,7 @@ use super::error::BackendError;
 /// provider revision. The revision is a compare-and-swap token only: callers
 /// must not infer ordering or expose provider internals from it.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
 pub struct SecretSnapshot {
     pub properties: SecretProperties,
     pub revision: String,
@@ -102,6 +103,20 @@ pub trait SecretBackend: Send + Sync {
     ) -> Result<SecretProperties, BackendError> {
         Err(BackendError::Unsupported(
             "conditional secret update".into(),
+        ))
+    }
+
+    /// Atomically validate that `expected_revision` still names the active
+    /// generation without creating a new secret version. This is the commit
+    /// point for conversions whose prepared result is otherwise a no-op.
+    async fn validate_secret_revision(
+        &self,
+        _vault: &str,
+        _name: &str,
+        _expected_revision: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        Err(BackendError::Unsupported(
+            "conditional secret revision validation".into(),
         ))
     }
 

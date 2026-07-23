@@ -10,8 +10,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    apply_conversion, preview_conversion, validate_conversion_backend, ConversionPreview,
-    ConversionRequest,
+    apply_conversion, preview_conversion, validate_conditional_conversion_backend,
+    ConversionPreview, ConversionRequest,
 };
 use crate::secret::manager::{DeletedSecretSummary, SecretProperties};
 
@@ -222,7 +222,7 @@ fn redact_conversion_properties(properties: &mut SecretProperties) {
 }
 
 fn conversion_backend_preflight(backend: &dyn crate::backend::Backend) -> Result<(), ApiError> {
-    validate_conversion_backend(backend).map_err(|_| {
+    validate_conditional_conversion_backend(backend).map_err(|_| {
         structured_error(
             StatusCode::NOT_IMPLEMENTED,
             "xv-operation-unsupported",
@@ -402,6 +402,27 @@ fn validate_secret_name(
 
 fn rename_backend_error(error: crate::backend::error::BackendError) -> ApiError {
     match error {
+        crate::backend::error::BackendError::SourceRevisionConflict { .. } => structured_error(
+            StatusCode::CONFLICT,
+            "xv-rename-source-changed",
+            "The source secret changed before the rename could commit.",
+            "Refresh the secret and retry the rename.",
+            Some("source_revision"),
+        ),
+        crate::backend::error::BackendError::DestinationExists { .. } => structured_error(
+            StatusCode::CONFLICT,
+            "xv-rename-destination-exists",
+            "A secret with the new name already exists.",
+            "Choose a different name and try again.",
+            Some("name"),
+        ),
+        crate::backend::error::BackendError::AttachmentsPresent { .. } => structured_error(
+            StatusCode::CONFLICT,
+            "xv-attachments-block-rename",
+            "This secret has attachments and cannot be renamed safely.",
+            "Remove the attachments first, or keep the current secret name.",
+            Some("name"),
+        ),
         crate::backend::error::BackendError::Conflict(_) => structured_error(
             StatusCode::CONFLICT,
             "xv-conflict",
@@ -484,7 +505,7 @@ pub(crate) async fn rename(
     {
         return Err(structured_error(
             StatusCode::CONFLICT,
-            "xv-conflict",
+            "xv-rename-destination-exists",
             "A secret with the new name already exists.",
             "Choose a different name and try again.",
             Some("name"),
@@ -1080,6 +1101,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_type_no_op_apply_still_rejects_a_revision_race() {
+        let backend = Arc::new(testutil::stub::StubBackend::with_conversion_cas_race(
+            "same-type-race",
+            r#"{"username":"newer","password":"newer"}"#,
+        ));
+        let app =
+            crate::web::build_router(state_with_types(backend, crate::records::builtin_types()));
+        put_login_record(app.clone(), "login").await;
+        let (_, preview) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({"target_type":"login"})),
+        )
+        .await;
+
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/login/conversion",
+            Some(json!({
+                "target_type":"login",
+                "source_revision":preview["source_revision"]
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error["error"]["code"], "xv-conversion-source-changed");
+        assert_eq!(error["error"]["field"], "source_revision");
+    }
+
+    #[tokio::test]
     async fn conversion_revision_rejects_delete_recreate_with_the_same_version_label() {
         let temp = tempfile::tempdir().unwrap();
         let app = crate::web::build_router(real_local_state(&temp));
@@ -1536,6 +1590,45 @@ mod tests {
         let (_, destination) = get_json(app, "POST", "/api/secrets/destination/value", None).await;
         assert!(source.to_string().contains("source-value"));
         assert!(destination.to_string().contains("destination-value"));
+    }
+
+    #[tokio::test]
+    async fn rename_source_revision_and_destination_conflicts_have_distinct_codes() {
+        let source_race_backend = Arc::new(testutil::stub::StubBackend::with_rename_source_race(
+            "rename-source-race",
+        ));
+        let source_race_app = crate::web::build_router(state_with_types(
+            source_race_backend,
+            crate::records::builtin_types(),
+        ));
+        put_plain_secret(source_race_app.clone(), "source", "value").await;
+        let (source_status, source_error) = get_json(
+            source_race_app,
+            "POST",
+            "/api/secrets/source/rename",
+            Some(json!({"new_name":"destination"})),
+        )
+        .await;
+        assert_eq!(source_status, StatusCode::CONFLICT);
+        assert_eq!(source_error["error"]["code"], "xv-rename-source-changed");
+        assert_eq!(source_error["error"]["field"], "source_revision");
+
+        let destination_app = crate::web::build_router(testutil::test_state());
+        put_plain_secret(destination_app.clone(), "source", "source-value").await;
+        put_plain_secret(destination_app.clone(), "destination", "destination-value").await;
+        let (destination_status, destination_error) = get_json(
+            destination_app,
+            "POST",
+            "/api/secrets/source/rename",
+            Some(json!({"new_name":"destination"})),
+        )
+        .await;
+        assert_eq!(destination_status, StatusCode::CONFLICT);
+        assert_eq!(
+            destination_error["error"]["code"],
+            "xv-rename-destination-exists"
+        );
+        assert_eq!(destination_error["error"]["field"], "name");
     }
 
     #[tokio::test]

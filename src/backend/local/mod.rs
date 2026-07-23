@@ -392,4 +392,113 @@ mod tests {
             .unwrap();
         assert!(list.is_empty());
     }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attachment_upload_racing_rename_never_orphans_the_old_namespace() {
+        use crate::blob::models::{FileListRequest, FileUploadRequest};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Barrier;
+
+        let tmp = TempDir::new().unwrap();
+        let backend = Arc::new(LocalBackend::new(Some(&make_config(&tmp))).unwrap());
+        backend
+            .secrets()
+            .set_secret(
+                "default",
+                crate::secret::manager::SecretRequest {
+                    name: "source".into(),
+                    value: zeroize::Zeroizing::new("value".into()),
+                    content_type: None,
+                    enabled: None,
+                    expires_on: None,
+                    not_before: None,
+                    tags: None,
+                    groups: None,
+                    note: None,
+                    folder: None,
+                },
+            )
+            .await
+            .unwrap();
+        let snapshot = backend
+            .secrets()
+            .get_secret_snapshot("default", "source", false)
+            .await
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let rename_backend = Arc::clone(&backend);
+        let rename_barrier = Arc::clone(&barrier);
+        let rename = tokio::spawn(async move {
+            rename_barrier.wait().await;
+            rename_backend
+                .secrets()
+                .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+                .await
+        });
+
+        let upload_backend = Arc::clone(&backend);
+        let upload_barrier = Arc::clone(&barrier);
+        let upload = tokio::spawn(async move {
+            upload_barrier.wait().await;
+            upload_backend
+                .files()
+                .unwrap()
+                .upload_file(
+                    "default",
+                    FileUploadRequest {
+                        name: crate::secret::attachments::attachment_blob_name(
+                            "source",
+                            "proof.txt",
+                        ),
+                        content: b"encrypted-attachment".to_vec(),
+                        content_type: Some("application/octet-stream".into()),
+                        groups: Vec::new(),
+                        metadata: HashMap::new(),
+                        tags: HashMap::new(),
+                    },
+                    None,
+                )
+                .await
+        });
+
+        barrier.wait().await;
+        let rename_result = rename.await.unwrap();
+        let upload_result = upload.await.unwrap();
+        assert_ne!(
+            rename_result.is_ok(),
+            upload_result.is_ok(),
+            "exactly one operation may win: {rename_result:?} / {upload_result:?}"
+        );
+
+        let old_attachments = backend
+            .files()
+            .unwrap()
+            .list_files(
+                "default",
+                FileListRequest {
+                    prefix: Some(crate::secret::attachments::attachment_prefix("source")),
+                    groups: None,
+                    limit: None,
+                    delimiter: None,
+                },
+            )
+            .await
+            .unwrap();
+        if rename_result.is_ok() {
+            assert!(
+                old_attachments.is_empty(),
+                "rename success must never leave an old-name attachment namespace"
+            );
+        } else {
+            assert_eq!(old_attachments.len(), 1);
+            assert!(backend
+                .secrets()
+                .secret_exists("default", "source")
+                .await
+                .unwrap());
+        }
+    }
 }

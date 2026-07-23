@@ -110,6 +110,7 @@ pub(crate) mod stub {
         delete_error: Option<&'static str>,
         update_error: Option<&'static str>,
         conversion_cas_race_value: Option<&'static str>,
+        rename_source_race: bool,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         revisions: Mutex<HashMap<String, String>>,
         pub deleted: Mutex<HashMap<String, SecretRequest>>,
@@ -153,6 +154,7 @@ pub(crate) mod stub {
                 delete_error: None,
                 update_error: None,
                 conversion_cas_race_value: None,
+                rename_source_race: false,
                 secrets: Mutex::new(HashMap::new()),
                 revisions: Mutex::new(HashMap::new()),
                 deleted: Mutex::new(HashMap::new()),
@@ -205,6 +207,13 @@ pub(crate) mod stub {
             let mut backend = Self::new();
             backend.name = name;
             backend.conversion_cas_race_value = Some(value);
+            backend
+        }
+
+        pub(crate) fn with_rename_source_race(name: &'static str) -> Self {
+            let mut backend = Self::new();
+            backend.name = name;
+            backend.rename_source_race = true;
             backend
         }
     }
@@ -552,11 +561,45 @@ pub(crate) mod stub {
                 .get(name)
                 .is_none_or(|current| current != expected_revision)
             {
-                return Err(BackendError::Conflict(format!(
-                    "secret '{name}' changed since it was read"
-                )));
+                return Err(BackendError::SourceRevisionConflict {
+                    name: name.to_string(),
+                });
             }
             self.update_secret(vault, name, request).await
+        }
+
+        async fn validate_secret_revision(
+            &self,
+            vault: &str,
+            name: &str,
+            expected_revision: &str,
+        ) -> Result<SecretProperties, BackendError> {
+            if let Some(value) = self.conversion_cas_race_value {
+                let mut secrets = self.secrets.lock().unwrap();
+                let current = secrets
+                    .get_mut(name)
+                    .ok_or_else(|| BackendError::NotFound {
+                        name: name.to_string(),
+                        suggestion: None,
+                    })?;
+                current.value = zeroize::Zeroizing::new(value.to_string());
+                self.revisions
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), uuid::Uuid::new_v4().to_string());
+            }
+            if self
+                .revisions
+                .lock()
+                .unwrap()
+                .get(name)
+                .is_none_or(|current| current != expected_revision)
+            {
+                return Err(BackendError::SourceRevisionConflict {
+                    name: name.to_string(),
+                });
+            }
+            self.get_secret(vault, name, false).await
         }
 
         async fn rename_secret_if_revision(
@@ -566,6 +609,12 @@ pub(crate) mod stub {
             new_name: &str,
             expected_revision: &str,
         ) -> Result<SecretProperties, BackendError> {
+            if self.rename_source_race {
+                self.revisions
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), uuid::Uuid::new_v4().to_string());
+            }
             if self
                 .revisions
                 .lock()
@@ -573,15 +622,15 @@ pub(crate) mod stub {
                 .get(name)
                 .is_none_or(|current| current != expected_revision)
             {
-                return Err(BackendError::Conflict(format!(
-                    "secret '{name}' changed since it was read"
-                )));
+                return Err(BackendError::SourceRevisionConflict {
+                    name: name.to_string(),
+                });
             }
             let mut secrets = self.secrets.lock().unwrap();
             if secrets.contains_key(new_name) {
-                return Err(BackendError::Conflict(format!(
-                    "secret '{new_name}' already exists"
-                )));
+                return Err(BackendError::DestinationExists {
+                    name: new_name.to_string(),
+                });
             }
             if let Some(message) = self.delete_error {
                 return Err(BackendError::Internal(message.into()));

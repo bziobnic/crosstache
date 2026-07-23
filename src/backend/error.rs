@@ -50,6 +50,18 @@ pub enum BackendError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// The source generation changed after the caller took its snapshot.
+    #[error("secret '{name}' changed since it was read")]
+    SourceRevisionConflict { name: String },
+
+    /// A rename/create destination exists at the provider commit point.
+    #[error("destination secret '{name}' already exists")]
+    DestinationExists { name: String },
+
+    /// A rename was blocked because the source has attached files.
+    #[error("secret '{name}' has attachments and cannot be renamed")]
+    AttachmentsPresent { name: String },
+
     /// The backend rate-limited the request.
     #[error("rate limited — retry after {retry_after_secs:?}s")]
     RateLimited { retry_after_secs: Option<u64> },
@@ -94,6 +106,15 @@ impl From<BackendError> for CrosstacheError {
             }
             BackendError::InvalidArgument(msg) => CrosstacheError::InvalidArgument(msg),
             BackendError::Conflict(msg) => CrosstacheError::Conflict(msg),
+            BackendError::SourceRevisionConflict { name } => {
+                CrosstacheError::Conflict(format!("secret '{name}' changed since it was read"))
+            }
+            BackendError::DestinationExists { name } => {
+                CrosstacheError::Conflict(format!("destination secret '{name}' already exists"))
+            }
+            BackendError::AttachmentsPresent { name } => CrosstacheError::Conflict(format!(
+                "secret '{name}' has attachments and cannot be renamed"
+            )),
             BackendError::RateLimited { retry_after_secs } => {
                 let detail = match retry_after_secs {
                     Some(secs) => format!("rate limited — retry after {secs}s"),

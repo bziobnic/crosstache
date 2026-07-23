@@ -88,6 +88,13 @@ impl LocalFileBackend {
             recipients,
         }
     }
+
+    fn attachment_secret_name(name: &str) -> Option<&str> {
+        name.strip_prefix("attachments/")
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(secret, _)| secret)
+            .filter(|secret| !secret.is_empty())
+    }
 }
 
 #[async_trait]
@@ -98,6 +105,25 @@ impl FileBackend for LocalFileBackend {
         request: FileUploadRequest,
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        if !vault_dir.exists() {
+            create_private_dir(&vault_dir)
+                .map_err(|e| BackendError::Internal(format!("mkdir vault files root: {e}")))?;
+        }
+        let _lock = super::secrets::lock_vault(&vault_dir)?;
+        if let Some(secret_name) = Self::attachment_secret_name(&request.name) {
+            if !super::secrets::active_secret_exists_by_metadata_locked(
+                &self.store_path,
+                &self.identity,
+                vault,
+                secret_name,
+            )? {
+                return Err(BackendError::NotFound {
+                    name: secret_name.to_string(),
+                    suggestion: None,
+                });
+            }
+        }
         let fdir = files_dir(&self.store_path, vault)?;
         create_private_dir(&fdir)
             .map_err(|e| BackendError::Internal(format!("mkdir files: {e}")))?;
@@ -134,6 +160,14 @@ impl FileBackend for LocalFileBackend {
         name: &str,
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<Vec<u8>, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        if !vault_dir.exists() {
+            return Err(BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            });
+        }
+        let _lock = super::secrets::lock_vault_shared(&vault_dir)?;
         let ap = file_age_path(&self.store_path, vault, name)?;
         if !ap.exists() {
             return Err(BackendError::NotFound {
@@ -150,6 +184,11 @@ impl FileBackend for LocalFileBackend {
         vault: &str,
         request: FileListRequest,
     ) -> Result<Vec<FileInfo>, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        if !vault_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let _lock = super::secrets::lock_vault_shared(&vault_dir)?;
         let fdir = files_dir(&self.store_path, vault)?;
         if !fdir.exists() {
             return Ok(Vec::new());
@@ -199,6 +238,14 @@ impl FileBackend for LocalFileBackend {
     }
 
     async fn delete_file(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        if !vault_dir.exists() {
+            return Err(BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            });
+        }
+        let _lock = super::secrets::lock_vault(&vault_dir)?;
         let ap = file_age_path(&self.store_path, vault, name)?;
         let mp = file_meta_path(&self.store_path, vault, name)?;
 
@@ -222,6 +269,14 @@ impl FileBackend for LocalFileBackend {
     }
 
     async fn get_file_info(&self, vault: &str, name: &str) -> Result<FileInfo, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        if !vault_dir.exists() {
+            return Err(BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            });
+        }
+        let _lock = super::secrets::lock_vault_shared(&vault_dir)?;
         let mp = file_meta_path(&self.store_path, vault, name)?;
         if !mp.exists() {
             return Err(BackendError::NotFound {

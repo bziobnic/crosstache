@@ -162,6 +162,7 @@ struct UpdateJournal {
 struct RenameTransactionPaths {
     dir: PathBuf,
     journal: PathBuf,
+    journal_temp: PathBuf,
     source_age: PathBuf,
     source_meta: PathBuf,
     destination_age: PathBuf,
@@ -173,6 +174,7 @@ impl RenameTransactionPaths {
         let dir = transactions_dir(store_path, vault)?.join(format!("rename-{id}"));
         Ok(Self {
             journal: dir.join("journal.json"),
+            journal_temp: dir.join("journal.tmp"),
             source_age: dir.join("source.age"),
             source_meta: dir.join("source.meta"),
             destination_age: dir.join("destination.age"),
@@ -185,8 +187,6 @@ impl RenameTransactionPaths {
 #[derive(Debug, Serialize, Deserialize)]
 struct RenameJournal {
     version: u8,
-    source: String,
-    destination: String,
     source_stem: String,
     destination_stem: String,
     deleted_at_millis: u128,
@@ -655,7 +655,7 @@ fn archive_current(store_path: &Path, vault: &str, stem: &str) -> Result<u32, Ba
 }
 
 /// Acquire an exclusive file lock on the vault directory to prevent concurrent mutations.
-fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
+pub(crate) fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
     let lock_path = vault_dir.join(".lock");
     let lock_file = fs::OpenOptions::new()
         .create(true)
@@ -670,7 +670,7 @@ fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
 }
 
 /// Acquire a shared vault lock for a complete active-generation read.
-fn lock_vault_shared(vault_dir: &Path) -> Result<fs::File, BackendError> {
+pub(crate) fn lock_vault_shared(vault_dir: &Path) -> Result<fs::File, BackendError> {
     let lock_path = vault_dir.join(".lock");
     let lock_file = fs::OpenOptions::new()
         .create(true)
@@ -682,6 +682,36 @@ fn lock_vault_shared(vault_dir: &Path) -> Result<fs::File, BackendError> {
     fs2::FileExt::lock_shared(&lock_file)
         .map_err(|e| BackendError::Internal(format!("vault read lock failed: {e}")))?;
     Ok(lock_file)
+}
+
+pub(crate) fn active_secret_exists_by_metadata_locked(
+    store_path: &Path,
+    identity: &age::x25519::Identity,
+    vault: &str,
+    name: &str,
+) -> Result<bool, BackendError> {
+    let secrets = secrets_dir(store_path, vault)?;
+    if !secrets.exists() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(&secrets)
+        .map_err(|e| BackendError::Internal(format!("read secrets dir: {e}")))?
+        .flatten()
+    {
+        let path = entry.path();
+        if !path.is_file()
+            || !path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .is_some_and(|file| file.ends_with(".meta.json"))
+        {
+            continue;
+        }
+        if read_meta(&path, identity)?.name == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1017,6 +1047,7 @@ impl LocalSecretBackend {
                     dir.display()
                 ))
             })?;
+            sync_directory(&transactions_dir(&self.store_path, vault)?)?;
             return Ok(());
         }
         let journal: RenameJournal =
@@ -1029,6 +1060,7 @@ impl LocalSecretBackend {
         let paths = RenameTransactionPaths {
             dir: dir.to_path_buf(),
             journal: journal_path,
+            journal_temp: dir.join("journal.tmp"),
             source_age: dir.join("source.age"),
             source_meta: dir.join("source.meta"),
             destination_age: dir.join("destination.age"),
@@ -1036,11 +1068,33 @@ impl LocalSecretBackend {
         };
         let source_age = age_path(&self.store_path, vault, &journal.source_stem)?;
         let source_meta = meta_path(&self.store_path, vault, &journal.source_stem)?;
+        let source_properties = paths
+            .source_meta
+            .exists()
+            .then(|| read_meta(&paths.source_meta, &self.identity))
+            .transpose()?;
+        let destination_properties = if paths.destination_meta.exists() {
+            Some(read_meta(&paths.destination_meta, &self.identity)?)
+        } else {
+            let active_destination = meta_path(&self.store_path, vault, &journal.destination_stem)?;
+            active_destination
+                .exists()
+                .then(|| read_meta(&active_destination, &self.identity))
+                .transpose()?
+        };
         if paths.source_age.exists() {
             durable_replace_from(&paths.source_age, &source_age)?;
         }
-        if paths.source_meta.exists() {
-            durable_replace_from(&paths.source_meta, &source_meta)?;
+        if let Some(source_properties) = source_properties.as_ref() {
+            write_meta(
+                &source_meta,
+                source_properties,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
+            sync_file(&source_meta)?;
         }
 
         for destination in [
@@ -1059,7 +1113,7 @@ impl LocalSecretBackend {
         let trash = trash_entry_dir(
             &self.store_path,
             vault,
-            &self.active_stem(&journal.source),
+            &journal.source_stem,
             journal.deleted_at_millis,
         )?;
         if trash.exists() {
@@ -1070,8 +1124,12 @@ impl LocalSecretBackend {
                 ))
             })?;
         }
-        self.ensure_opaque_layout(vault, &journal.source)?;
-        self.ensure_opaque_layout(vault, &journal.destination)?;
+        if let Some(source_properties) = source_properties {
+            self.ensure_opaque_layout(vault, &source_properties.name)?;
+        }
+        if let Some(destination_properties) = destination_properties {
+            self.ensure_opaque_layout(vault, &destination_properties.name)?;
+        }
         fs::remove_dir_all(dir).map_err(|e| {
             BackendError::Internal(format!(
                 "remove recovered rename transaction {}: {e}",
@@ -1185,6 +1243,36 @@ impl LocalSecretBackend {
             ))
         })?;
         let interruption = self.update_interruption(11);
+        if !matches!(interruption, UpdateInterruption::None) {
+            return Ok(interruption);
+        }
+        sync_directory(&paths.dir)?;
+        Ok(UpdateInterruption::None)
+    }
+
+    fn publish_rename_journal_locked(
+        &self,
+        paths: &RenameTransactionPaths,
+        journal_bytes: &[u8],
+    ) -> Result<UpdateInterruption, BackendError> {
+        write_private(&paths.journal_temp, journal_bytes).map_err(|e| {
+            BackendError::Internal(format!(
+                "write temporary rename journal {}: {e}",
+                paths.journal_temp.display()
+            ))
+        })?;
+        sync_file(&paths.journal_temp)?;
+        let interruption = self.update_interruption(90);
+        if !matches!(interruption, UpdateInterruption::None) {
+            return Ok(interruption);
+        }
+        fs::rename(&paths.journal_temp, &paths.journal).map_err(|e| {
+            BackendError::Internal(format!(
+                "publish rename journal {}: {e}",
+                paths.journal.display()
+            ))
+        })?;
+        let interruption = self.update_interruption(91);
         if !matches!(interruption, UpdateInterruption::None) {
             return Ok(interruption);
         }
@@ -1898,6 +1986,7 @@ impl LocalSecretBackend {
     /// Read a complete active generation while the caller holds the exclusive
     /// vault lock. Legacy metadata is assigned and durably persists a fresh
     /// revision before the snapshot is returned.
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
     fn get_secret_snapshot_locked(
         &self,
         vault: &str,
@@ -1986,18 +2075,25 @@ impl LocalSecretBackend {
             sync_file(&source_meta_path)?;
         }
         if expected_revision.is_some_and(|expected| source_meta.revision != expected) {
-            return Err(BackendError::Conflict(format!(
-                "secret '{name}' changed since it was read"
-            )));
+            return Err(BackendError::SourceRevisionConflict {
+                name: name.to_string(),
+            });
         }
 
         let destination_stem = self.active_stem(new_name);
         let destination_age = age_path(&self.store_path, vault, &destination_stem)?;
         let destination_meta_path = meta_path(&self.store_path, vault, &destination_stem)?;
         if destination_age.exists() || destination_meta_path.exists() {
-            return Err(BackendError::Conflict(format!(
-                "secret '{new_name}' already exists in vault '{vault}'"
-            )));
+            return Err(BackendError::DestinationExists {
+                name: new_name.to_string(),
+            });
+        }
+
+        #[cfg(feature = "file-ops")]
+        if self.has_attachments_locked(vault, name)? {
+            return Err(BackendError::AttachmentsPresent {
+                name: name.to_string(),
+            });
         }
 
         let mut deleted_at_millis = SystemTime::now()
@@ -2034,7 +2130,19 @@ impl LocalSecretBackend {
             ))
         })?;
         durable_write_private(&transaction.source_age, &source_age_bytes)?;
-        durable_write_private(&transaction.source_meta, &source_meta_bytes)?;
+        if self.opaque_filenames {
+            write_meta(
+                &transaction.source_meta,
+                &source_meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: true,
+                },
+            )?;
+            sync_file(&transaction.source_meta)?;
+        } else {
+            durable_write_private(&transaction.source_meta, &source_meta_bytes)?;
+        }
         durable_write_private(&transaction.destination_age, &source_age_bytes)?;
 
         let now = Utc::now();
@@ -2050,24 +2158,31 @@ impl LocalSecretBackend {
             &destination_meta,
             MetaCrypto {
                 recipients: &self.recipients,
-                encrypt: self.encrypt_metadata,
+                encrypt: self.encrypt_metadata || self.opaque_filenames,
             },
         )?;
         sync_file(&transaction.destination_meta)?;
         let journal = RenameJournal {
             version: 1,
-            source: name.to_string(),
-            destination: new_name.to_string(),
             source_stem,
             destination_stem,
             deleted_at_millis,
         };
-        durable_write_private(
-            &transaction.journal,
-            &serde_json::to_vec_pretty(&journal)
-                .map_err(|e| BackendError::Internal(format!("serialize rename journal: {e}")))?,
-        )?;
-        sync_directory(&transaction.dir)?;
+        let journal_bytes = serde_json::to_vec_pretty(&journal)
+            .map_err(|e| BackendError::Internal(format!("serialize rename journal: {e}")))?;
+        match self.publish_rename_journal_locked(&transaction, &journal_bytes)? {
+            UpdateInterruption::None => {}
+            UpdateInterruption::Rollback(error) => {
+                fs::remove_dir_all(&transaction.dir).map_err(|cleanup| {
+                    BackendError::Internal(format!(
+                        "{error}; clean unpublished rename transaction: {cleanup}"
+                    ))
+                })?;
+                sync_directory(&transactions_dir(&self.store_path, vault)?)?;
+                return Err(error);
+            }
+            UpdateInterruption::SimulatedCrash(error) => return Err(error),
+        }
 
         let rollback = |cause: BackendError| -> Result<SecretProperties, BackendError> {
             match self.recover_rename_transaction_locked(vault, &transaction.dir) {
@@ -2126,6 +2241,42 @@ impl LocalSecretBackend {
         sync_directory(&transactions_dir(&self.store_path, vault)?)?;
         Ok(meta_to_properties(&destination_meta, None))
     }
+
+    #[cfg(feature = "file-ops")]
+    fn has_attachments_locked(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        let files = paths::files_dir(&self.store_path, vault)?;
+        if !files.exists() {
+            return Ok(false);
+        }
+        let prefix = crate::secret::attachments::attachment_prefix(name);
+        for entry in fs::read_dir(&files)
+            .map_err(|e| BackendError::Internal(format!("read files dir: {e}")))?
+            .flatten()
+        {
+            let path = entry.path();
+            if !path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .is_some_and(|file| file.ends_with(".meta.json"))
+            {
+                continue;
+            }
+            let bytes = fs::read(&path).map_err(|e| {
+                BackendError::Internal(format!("read file metadata {}: {e}", path.display()))
+            })?;
+            let info: crate::blob::models::FileInfo =
+                serde_json::from_slice(&bytes).map_err(|e| {
+                    BackendError::Internal(format!(
+                        "parse file metadata {} while checking attachments: {e}",
+                        path.display()
+                    ))
+                })?;
+            if info.name.starts_with(&prefix) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -2173,6 +2324,22 @@ impl SecretBackend for LocalSecretBackend {
     ) -> Result<SecretProperties, BackendError> {
         request.expected_revision = Some(expected_revision.to_string());
         self.update_secret(vault, name, request).await
+    }
+
+    async fn validate_secret_revision(
+        &self,
+        vault: &str,
+        name: &str,
+        expected_revision: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        let _lock = self.mutation_lock_for_name(vault, name)?;
+        let snapshot = self.get_secret_snapshot_locked(vault, name, false)?;
+        if snapshot.revision != expected_revision {
+            return Err(BackendError::SourceRevisionConflict {
+                name: name.to_string(),
+            });
+        }
+        Ok(snapshot.properties)
     }
 
     async fn rename_secret_if_revision(
@@ -2332,11 +2499,11 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>, BackendError> {
-        let _read_lock = self.read_lock_for_vault(vault)?;
         let sdir = secrets_dir(&self.store_path, vault)?;
         if !sdir.exists() {
             return Ok(Vec::new());
         }
+        let _read_lock = self.read_lock_for_vault(vault)?;
 
         let mut results = Vec::new();
         let push_meta = |meta: &SecretMeta, results: &mut Vec<SecretSummary>| {
@@ -2454,9 +2621,9 @@ impl SecretBackend for LocalSecretBackend {
             .as_deref()
             .is_some_and(|expected| meta.revision != expected)
         {
-            return Err(BackendError::Conflict(format!(
-                "secret '{name}' changed since it was read"
-            )));
+            return Err(BackendError::SourceRevisionConflict {
+                name: name.to_string(),
+            });
         }
         let old_meta = meta.clone();
         let now = Utc::now();
@@ -3567,6 +3734,15 @@ mod tests {
             .unwrap();
         assert_eq!(alpha.len(), 1);
         assert_eq!(alpha[0].name, "secret-a");
+    }
+
+    #[tokio::test]
+    async fn list_secrets_treats_an_unmaterialized_workspace_vault_as_empty() {
+        let (backend, _tmp) = test_backend();
+
+        let secrets = backend.list_secrets("workspace-only", None).await.unwrap();
+
+        assert!(secrets.is_empty());
     }
 
     #[tokio::test]
@@ -5354,6 +5530,31 @@ mod tests {
         }
     }
 
+    fn assert_no_name_in_tree_contents(root: &Path, name: &str) {
+        let encoded = encode_name(name);
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in fs::read_dir(&path).unwrap().flatten() {
+                    stack.push(entry.path());
+                }
+                continue;
+            }
+            let bytes = fs::read(&path).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                !text.contains(name),
+                "raw name {name:?} leaked in {}",
+                path.display()
+            );
+            assert!(
+                !text.contains(&encoded),
+                "encoded name {encoded:?} leaked in {}",
+                path.display()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn opaque_off_is_byte_for_byte_legacy_layout() {
         let (backend, tmp) = test_backend(); // opaque off
@@ -6245,7 +6446,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, BackendError::Conflict(_)), "{error:?}");
+        assert!(
+            matches!(error, BackendError::SourceRevisionConflict { .. }),
+            "{error:?}"
+        );
         let current = backend
             .get_secret("default", "cas-secret", true)
             .await
@@ -6351,7 +6555,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, BackendError::Conflict(_)), "{error:?}");
+        assert!(
+            matches!(error, BackendError::SourceRevisionConflict { .. }),
+            "{error:?}"
+        );
         assert!(!backend
             .secret_exists("default", "destination")
             .await
@@ -6384,7 +6591,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, BackendError::Conflict(_)), "{error:?}");
+        assert!(
+            matches!(error, BackendError::DestinationExists { .. }),
+            "{error:?}"
+        );
         let destination = backend
             .get_secret("default", "destination", true)
             .await
@@ -6430,6 +6640,118 @@ mod tests {
                 "stage {stage}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn rename_journal_is_published_from_a_durable_temp_file() {
+        for (stage, expected_file) in [(90, "journal.tmp"), (91, "journal.json")] {
+            let (backend, tmp) = test_backend();
+            backend
+                .set_secret("default", make_request("source", "source-value"))
+                .await
+                .unwrap();
+            let snapshot = backend
+                .get_secret_snapshot("default", "source", false)
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, stage);
+
+            backend
+                .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+                .await
+                .expect_err("injected publication crash must stop rename");
+
+            let transactions = transactions_dir(tmp.path(), "default").unwrap();
+            let rename_dir = fs::read_dir(&transactions)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| path.is_dir())
+                .expect("rename transaction must remain for restart recovery");
+            assert!(
+                rename_dir.join(expected_file).exists(),
+                "stage {stage} must leave {expected_file}"
+            );
+            if stage == 90 {
+                assert!(!rename_dir.join("journal.json").exists());
+            }
+
+            let reopened = test_backend_reopen(&tmp, false);
+            let source = reopened
+                .get_secret("default", "source", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                source.value.as_deref().map(|v| v.as_str()),
+                Some("source-value")
+            );
+            assert!(!reopened
+                .secret_exists("default", "destination")
+                .await
+                .unwrap());
+            assert!(
+                reopened
+                    .rename_transaction_dirs("default")
+                    .unwrap()
+                    .is_empty(),
+                "restart must clean the temporary or recover the published journal"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_rename_journal_temp_is_ignored_and_cleaned_on_restart() {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "source-value"))
+            .await
+            .unwrap();
+        let transaction =
+            RenameTransactionPaths::new(tmp.path(), "default", "partial-publication").unwrap();
+        fs::create_dir_all(&transaction.dir).unwrap();
+        fs::write(transaction.dir.join("journal.tmp"), b"{").unwrap();
+        fs::write(&transaction.source_age, b"partial").unwrap();
+
+        let reopened = test_backend_reopen(&tmp, false);
+        let source = reopened
+            .get_secret("default", "source", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.value.as_deref().map(|v| v.as_str()),
+            Some("source-value")
+        );
+        assert!(!transaction.dir.exists());
+    }
+
+    #[tokio::test]
+    async fn opaque_rename_crash_artifacts_contain_no_source_or_destination_names() {
+        let (backend, tmp) = test_backend_opaque();
+        let source_name = "plain source / credential";
+        let destination_name = "plain destination / credential";
+        backend
+            .set_secret(
+                "default",
+                make_request(source_name, "do-not-leak-the-value-either"),
+            )
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", source_name, false)
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, 100);
+
+        backend
+            .rename_secret_if_revision("default", source_name, destination_name, &snapshot.revision)
+            .await
+            .expect_err("injected crash must preserve transaction artifacts");
+
+        let transactions = transactions_dir(tmp.path(), "default").unwrap();
+        assert_no_name_leak(&transactions, source_name);
+        assert_no_name_leak(&transactions, destination_name);
+        assert_no_name_in_tree_contents(&transactions, source_name);
+        assert_no_name_in_tree_contents(&transactions, destination_name);
     }
 
     #[tokio::test]
