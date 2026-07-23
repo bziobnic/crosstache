@@ -79,6 +79,14 @@ pub trait SecretBackend: Send + Sync {
         false
     }
 
+    /// Whether the backend can atomically validate an opaque source revision
+    /// without writing a new version. Conditional conversion requires this in
+    /// addition to conditional update support because a conversion may be a
+    /// no-op.
+    fn supports_revision_validation(&self) -> bool {
+        false
+    }
+
     /// Read one complete secret generation and its opaque revision.
     async fn get_secret_snapshot(
         &self,

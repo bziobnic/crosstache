@@ -160,14 +160,49 @@ The final full-suite gate also exposed a pre-existing real-home dependency in
 the native-rotation capability test. The test now supplies temporary local
 store and key paths and passes without touching real Crosstache state.
 
+## Third review remediation
+
+The final review found three contract edges. Each was first reproduced with a
+failing regression, then closed at the backend boundary.
+
+### Complete attachment namespace exclusion
+
+Local rename now checks both the source and destination attachment namespaces
+while holding the same vault lock used for the rename transaction. This blocks
+renaming into a destination whose secret was deleted while its persisted
+attachment namespace remains. The route regression creates that exact state
+and verifies the structured `xv-attachments-block-rename` rejection, unchanged
+source value, absent destination secret, and untouched source and destination
+attachment namespaces.
+
+The persisted-attachment guard no longer depends on the `file-ops` feature.
+Only the file API remains feature-gated; rename always scans persisted metadata
+using a minimal local metadata shape. A `--no-default-features --features ui`
+regression writes persisted attachment metadata directly and proves rename is
+blocked even when the file API is not compiled.
+
+### Explicit conditional-conversion contract
+
+Backends must now explicitly advertise atomic, no-write revision validation in
+addition to conditional update support before web conversion is available.
+The conversion preflight and Effective UI context use the same predicates, so
+the displayed capability cannot exceed the route's actual guarantee.
+
+An update-CAS-only backend deliberately leaves the default revision validator
+in place. Its negative tests prove conversion is rejected during capability
+preflight, before any source read, and that the UI does not advertise
+conditional conversion.
+
 ## Verification
 
-- `cargo test --features ui --lib` — 1,041 passed, 1 ignored.
-- `cargo test --features ui web::secrets::tests --lib` — 28 passed.
-- `cargo test --features ui records::conversion::tests --lib` — 29 passed.
+- `cargo test --features ui --lib` — 1,045 passed, 1 ignored.
+- `cargo test --no-default-features --features ui --lib --quiet` — 980 passed,
+  1 ignored.
+- `cargo test --features ui --lib web::secrets::tests` — 30 passed.
+- `cargo test --features ui --lib records::conversion::tests` — 30 passed.
 - Rename-journal durability regressions — 2 passed.
 - Opaque rename artifact privacy regression — passed.
-- Attachment/rename namespace regressions — 18 passed.
+- Attachment/rename namespace regressions — passed.
 - Local file backend unit tests — 9 passed.
 - CLI move unit tests — 15 passed.
 - `cargo test --features ui --test e2e_record_types` — 71 passed.
@@ -178,6 +213,7 @@ store and key paths and passes without touching real Crosstache state.
 - `npm run test:browser` — 23 passed.
 - `cargo check --features ui --all-targets` — passed.
 - `cargo clippy --features ui --all-targets -- -D warnings` — passed.
+- `cargo check --no-default-features --features ui --lib --bins` — passed.
 - `cargo check --all-features --all-targets` — passed.
 - `cargo clippy --all-features --all-targets -- -D warnings` — passed.
 - `cargo check -p xv-desktop --all-targets` — passed.
@@ -189,6 +225,12 @@ The default-feature-only clippy command still reports the branch's six
 pre-existing dead-code findings in context/project/workspace resolution code.
 The follow-up conversion changes add no warnings to that baseline; the UI and
 all-feature lint gates are clean.
+
+The no-default-feature all-target clippy command reaches an existing ungated
+`tests/file_commands_tests.rs` integration target that imports feature-gated
+CLI variants. Its lib/bin form reports 16 existing feature-off dead-code
+findings. The no-default UI library test and check gates pass, and the new
+attachment and capability code adds no feature-off dead code.
 
 Authenticated Azure and LocalStack tests remain ignored unless their documented
 external services and credentials are enabled; both compile in the applicable

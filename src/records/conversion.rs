@@ -570,6 +570,7 @@ pub fn validate_conditional_conversion_backend(backend: &dyn Backend) -> Result<
     validate_conversion_backend(backend)?;
     if !backend.capabilities().has_conditional_record_conversion
         || !backend.secrets().supports_conditional_update()
+        || !backend.secrets().supports_revision_validation()
     {
         return Err(CrosstacheError::config(
             "backend does not support conditional record conversion; no changes were written",
@@ -880,6 +881,10 @@ mod tests {
             self.caps.has_conditional_record_conversion
         }
 
+        fn supports_revision_validation(&self) -> bool {
+            true
+        }
+
         async fn set_secret(
             &self,
             _vault: &str,
@@ -977,6 +982,104 @@ mod tests {
 
         fn capabilities(&self) -> BackendCapabilities {
             self.caps.clone()
+        }
+
+        fn secrets(&self) -> &dyn SecretBackend {
+            self
+        }
+
+        async fn health_check(&self) -> std::result::Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    struct UpdateCasOnlyBackend;
+
+    #[async_trait]
+    impl SecretBackend for UpdateCasOnlyBackend {
+        fn supports_conditional_update(&self) -> bool {
+            true
+        }
+
+        async fn set_secret(
+            &self,
+            _vault: &str,
+            _request: SecretRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("conditional preflight must fail before source reads or writes")
+        }
+
+        async fn get_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("conditional preflight must fail before source reads")
+        }
+
+        async fn get_secret_version(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _version: &str,
+            _include_value: bool,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("conditional preflight must fail before source reads")
+        }
+
+        async fn list_secrets(
+            &self,
+            _vault: &str,
+            _group_filter: Option<&str>,
+        ) -> std::result::Result<Vec<SecretSummary>, BackendError> {
+            unreachable!("conditional preflight must fail before source reads")
+        }
+
+        async fn delete_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+        ) -> std::result::Result<(), BackendError> {
+            unreachable!("conditional preflight must fail before writes")
+        }
+
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _request: SecretUpdateRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("conditional preflight must fail before writes")
+        }
+
+        async fn update_secret_if_revision(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _expected_revision: &str,
+            _request: SecretUpdateRequest,
+        ) -> std::result::Result<SecretProperties, BackendError> {
+            unreachable!("conditional preflight must fail before update CAS")
+        }
+    }
+
+    #[async_trait]
+    impl Backend for UpdateCasOnlyBackend {
+        fn name(&self) -> &'static str {
+            "update-cas-only"
+        }
+
+        fn kind(&self) -> BackendKind {
+            BackendKind::Local
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                has_atomic_record_conversion: true,
+                has_conditional_record_conversion: true,
+                ..BackendCapabilities::default()
+            }
         }
 
         fn secrets(&self) -> &dyn SecretBackend {
@@ -1550,6 +1653,18 @@ mod tests {
 
         validate_conversion_backend(&backend)
             .expect("CLI conversion only requires one complete atomic update");
+    }
+
+    #[test]
+    fn conditional_conversion_requires_explicit_revision_validation_support() {
+        let backend = UpdateCasOnlyBackend;
+        assert!(backend.secrets().supports_conditional_update());
+        assert!(!backend.secrets().supports_revision_validation());
+
+        let error = validate_conditional_conversion_backend(&backend)
+            .expect_err("update CAS alone cannot safely commit a no-op conversion");
+
+        assert!(error.to_string().contains("conditional"));
     }
 
     #[tokio::test]

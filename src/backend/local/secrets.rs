@@ -63,6 +63,11 @@ pub struct SecretMeta {
     pub revision: String,
 }
 
+#[derive(Deserialize)]
+struct PersistedFileMetadata {
+    name: String,
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -684,6 +689,7 @@ pub(crate) fn lock_vault_shared(vault_dir: &Path) -> Result<fs::File, BackendErr
     Ok(lock_file)
 }
 
+#[cfg(feature = "file-ops")]
 pub(crate) fn active_secret_exists_by_metadata_locked(
     store_path: &Path,
     identity: &age::x25519::Identity,
@@ -2089,11 +2095,12 @@ impl LocalSecretBackend {
             });
         }
 
-        #[cfg(feature = "file-ops")]
-        if self.has_attachments_locked(vault, name)? {
-            return Err(BackendError::AttachmentsPresent {
-                name: name.to_string(),
-            });
+        for attachment_name in [name, new_name] {
+            if self.has_attachments_locked(vault, attachment_name)? {
+                return Err(BackendError::AttachmentsPresent {
+                    name: attachment_name.to_string(),
+                });
+            }
         }
 
         let mut deleted_at_millis = SystemTime::now()
@@ -2242,7 +2249,6 @@ impl LocalSecretBackend {
         Ok(meta_to_properties(&destination_meta, None))
     }
 
-    #[cfg(feature = "file-ops")]
     fn has_attachments_locked(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
         let files = paths::files_dir(&self.store_path, vault)?;
         if !files.exists() {
@@ -2264,13 +2270,12 @@ impl LocalSecretBackend {
             let bytes = fs::read(&path).map_err(|e| {
                 BackendError::Internal(format!("read file metadata {}: {e}", path.display()))
             })?;
-            let info: crate::blob::models::FileInfo =
-                serde_json::from_slice(&bytes).map_err(|e| {
-                    BackendError::Internal(format!(
-                        "parse file metadata {} while checking attachments: {e}",
-                        path.display()
-                    ))
-                })?;
+            let info: PersistedFileMetadata = serde_json::from_slice(&bytes).map_err(|e| {
+                BackendError::Internal(format!(
+                    "parse file metadata {} while checking attachments: {e}",
+                    path.display()
+                ))
+            })?;
             if info.name.starts_with(&prefix) {
                 return Ok(true);
             }
@@ -2282,6 +2287,10 @@ impl LocalSecretBackend {
 #[async_trait]
 impl SecretBackend for LocalSecretBackend {
     fn supports_conditional_update(&self) -> bool {
+        true
+    }
+
+    fn supports_revision_validation(&self) -> bool {
         true
     }
 
@@ -6604,6 +6613,42 @@ mod tests {
             Some("concurrent-value")
         );
         assert!(backend.secret_exists("default", "source").await.unwrap());
+    }
+
+    #[cfg(not(feature = "file-ops"))]
+    #[tokio::test]
+    async fn persisted_attachment_metadata_blocks_rename_without_the_file_api() {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "source-value"))
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", "source", false)
+            .await
+            .unwrap();
+        let files = tmp.path().join("vaults/default/files");
+        create_private_dir(&files).unwrap();
+        write_private(
+            files.join("persisted.meta.json"),
+            br#"{"name":"attachments/source/proof.txt"}"#,
+        )
+        .unwrap();
+
+        let error = backend
+            .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, BackendError::AttachmentsPresent { ref name } if name == "source"),
+            "{error:?}"
+        );
+        assert!(backend.secret_exists("default", "source").await.unwrap());
+        assert!(!backend
+            .secret_exists("default", "destination")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

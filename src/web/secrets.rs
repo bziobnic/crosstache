@@ -888,6 +888,102 @@ mod tests {
         assert_eq!(backend.files.lock().unwrap().len(), 1);
     }
 
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn rename_rejects_a_persisted_destination_attachment_after_its_secret_is_deleted() {
+        use std::collections::HashMap;
+
+        use crate::blob::models::{FileListRequest, FileUploadRequest};
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = real_local_state(&temp);
+        let backend = state.base_backend();
+        let app = crate::web::build_router(state);
+
+        put_plain_secret(app.clone(), "destination", "destination-value").await;
+        backend
+            .files()
+            .unwrap()
+            .upload_file(
+                "default",
+                FileUploadRequest {
+                    name: crate::secret::attachments::attachment_blob_name(
+                        "destination",
+                        "proof.txt",
+                    ),
+                    content: b"encrypted-destination-attachment".to_vec(),
+                    content_type: Some("application/octet-stream".into()),
+                    groups: Vec::new(),
+                    metadata: HashMap::new(),
+                    tags: HashMap::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        backend
+            .secrets()
+            .delete_secret("default", "destination")
+            .await
+            .unwrap();
+        put_plain_secret(app.clone(), "source", "source-value").await;
+
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/source/rename",
+            Some(json!({"new_name":"destination"})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error["error"]["code"], "xv-attachments-block-rename");
+        let source = backend
+            .secrets()
+            .get_secret("default", "source", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.value.as_deref().map(|value| value.as_str()),
+            Some("source-value")
+        );
+        assert!(!backend
+            .secrets()
+            .secret_exists("default", "destination")
+            .await
+            .unwrap());
+        let source_attachments = backend
+            .files()
+            .unwrap()
+            .list_files(
+                "default",
+                FileListRequest {
+                    prefix: Some(crate::secret::attachments::attachment_prefix("source")),
+                    groups: None,
+                    limit: None,
+                    delimiter: None,
+                },
+            )
+            .await
+            .unwrap();
+        let destination_attachments = backend
+            .files()
+            .unwrap()
+            .list_files(
+                "default",
+                FileListRequest {
+                    prefix: Some(crate::secret::attachments::attachment_prefix("destination")),
+                    groups: None,
+                    limit: None,
+                    delimiter: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(source_attachments.is_empty());
+        assert_eq!(destination_attachments.len(), 1);
+    }
+
     #[tokio::test]
     async fn conversion_apply_requires_stable_confirmation_and_returns_safe_summary() {
         let temp = tempfile::tempdir().unwrap();
@@ -1274,6 +1370,24 @@ mod tests {
             Some(json!({"target_type":"api-key"})),
         )
         .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(error["error"]["code"], "xv-operation-unsupported");
+    }
+
+    #[tokio::test]
+    async fn update_cas_without_revision_validation_is_rejected_before_source_read() {
+        let backend = Arc::new(testutil::stub::StubBackend::new().without_revision_validation());
+        let app =
+            crate::web::build_router(state_with_types(backend, crate::records::builtin_types()));
+
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/missing/conversion/preview",
+            Some(json!({"target_type":"api-key"})),
+        )
+        .await;
+
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
         assert_eq!(error["error"]["code"], "xv-operation-unsupported");
     }

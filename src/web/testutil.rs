@@ -67,7 +67,7 @@ pub(crate) fn test_context(
             state: "connected".into(),
             message: None,
         },
-        capabilities: CapabilitySummary::from(backend.capabilities()),
+        capabilities: CapabilitySummary::from_backend(backend),
         security: SecuritySummary {
             clipboard_timeout_seconds: clipboard_timeout,
         },
@@ -110,6 +110,7 @@ pub(crate) mod stub {
         delete_error: Option<&'static str>,
         update_error: Option<&'static str>,
         conversion_cas_race_value: Option<&'static str>,
+        revision_validation_supported: bool,
         rename_source_race: bool,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         revisions: Mutex<HashMap<String, String>>,
@@ -145,6 +146,7 @@ pub(crate) mod stub {
             name: &'static str,
             capabilities: BackendCapabilities,
         ) -> Self {
+            let revision_validation_supported = capabilities.has_conditional_record_conversion;
             Self {
                 name,
                 capabilities,
@@ -154,6 +156,7 @@ pub(crate) mod stub {
                 delete_error: None,
                 update_error: None,
                 conversion_cas_race_value: None,
+                revision_validation_supported,
                 rename_source_race: false,
                 secrets: Mutex::new(HashMap::new()),
                 revisions: Mutex::new(HashMap::new()),
@@ -215,6 +218,11 @@ pub(crate) mod stub {
             backend.name = name;
             backend.rename_source_race = true;
             backend
+        }
+
+        pub(crate) fn without_revision_validation(mut self) -> Self {
+            self.revision_validation_supported = false;
+            self
         }
     }
 
@@ -283,6 +291,10 @@ pub(crate) mod stub {
     impl SecretBackend for StubBackend {
         fn supports_conditional_update(&self) -> bool {
             self.capabilities.has_conditional_record_conversion
+        }
+
+        fn supports_revision_validation(&self) -> bool {
+            self.revision_validation_supported
         }
 
         fn supports_atomic_rename(&self) -> bool {

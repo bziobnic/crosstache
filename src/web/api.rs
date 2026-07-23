@@ -826,21 +826,24 @@ pub(crate) mod tests {
             Some("not-a-number"),
         )
         .await;
-        assert_api_error(
-            raw_api_response(
-                app.clone(),
-                "POST",
-                "/api/files",
-                "not a multipart body",
-                Some("text/plain"),
-                Some("Bearer test-token"),
+        #[cfg(feature = "file-ops")]
+        {
+            assert_api_error(
+                raw_api_response(
+                    app.clone(),
+                    "POST",
+                    "/api/files",
+                    "not a multipart body",
+                    Some("text/plain"),
+                    Some("Bearer test-token"),
+                )
+                .await,
+                StatusCode::BAD_REQUEST,
+                "xv-invalid-request",
+                Some("not a multipart body"),
             )
-            .await,
-            StatusCode::BAD_REQUEST,
-            "xv-invalid-request",
-            Some("not a multipart body"),
-        )
-        .await;
+            .await;
+        }
         assert_api_error(
             raw_api_response(
                 app,

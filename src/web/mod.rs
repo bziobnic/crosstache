@@ -218,7 +218,7 @@ impl WebState {
         context.workspace.alias = entry.alias.clone();
         context.sources.backend = context::ContextSource::WorkspaceEntry;
         context.sources.vault = context::ContextSource::WorkspaceEntry;
-        context.capabilities = context::CapabilitySummary::from(backend.capabilities());
+        context.capabilities = context::CapabilitySummary::from_backend(backend.as_ref());
         Ok(ScopedWebTarget { backend, context })
     }
 }

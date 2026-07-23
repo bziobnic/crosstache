@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{Backend, BackendCapabilities, BackendKind, BackendRegistry};
+use crate::backend::{Backend, BackendKind, BackendRegistry};
 use crate::config::project::{
     find_project_config, resolve_effective_backend_config, resolve_env_with_source,
     BackendSelectionSource, EnvProfile, EnvironmentSelectionSource, ProjectConfig,
@@ -271,7 +271,7 @@ pub(crate) async fn resolve_ui_context_from_effective(
             message: Some("The selected backend is unavailable.".into()),
         },
     };
-    let capabilities = CapabilitySummary::from(target.backend.capabilities());
+    let capabilities = CapabilitySummary::from_backend(target.backend.as_ref());
     let project_summary = project.as_ref().map(project_summary);
     let environment_summary = profile.as_ref().map(|profile| EnvironmentSummary {
         name: profile.name.to_string(),
@@ -406,8 +406,12 @@ fn default_entry_config<'a>(
         .find(|entry| entry.resolved_alias() == default.alias)
 }
 
-impl From<BackendCapabilities> for CapabilitySummary {
-    fn from(capabilities: BackendCapabilities) -> Self {
+impl CapabilitySummary {
+    pub(crate) fn from_backend(backend: &dyn Backend) -> Self {
+        let capabilities = backend.capabilities();
+        let conditional_conversion = capabilities.has_conditional_record_conversion
+            && backend.secrets().supports_conditional_update()
+            && backend.secrets().supports_revision_validation();
         Self {
             secrets: true,
             vaults: capabilities.has_vaults,
@@ -425,8 +429,8 @@ impl From<BackendCapabilities> for CapabilitySummary {
             rbac: capabilities.has_rbac,
             audit: capabilities.has_audit,
             rotation: capabilities.has_secret_rotation,
-            conversion: capabilities.has_conditional_record_conversion,
-            conditional_conversion: capabilities.has_conditional_record_conversion,
+            conversion: conditional_conversion,
+            conditional_conversion,
             atomic_rename: capabilities.has_atomic_rename,
             metadata: true,
         }
@@ -442,6 +446,15 @@ mod tests {
     use http_body_util::BodyExt;
     use serde_json::json;
     use tower::ServiceExt;
+
+    #[test]
+    fn conditional_conversion_is_not_advertised_without_revision_validation() {
+        let backend = crate::web::testutil::stub::StubBackend::new().without_revision_validation();
+        let context = crate::web::testutil::test_context(&backend, "default", 30);
+
+        assert!(!context.capabilities.conversion);
+        assert!(!context.capabilities.conditional_conversion);
+    }
 
     use crate::backend::BackendRegistry;
     use crate::config::settings::{Config, LocalConfig, NamedBackendEntry};
