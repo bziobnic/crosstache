@@ -110,6 +110,7 @@ fn transactions_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendEr
 struct UpdateTransactionPaths {
     dir: PathBuf,
     journal: PathBuf,
+    journal_temp: PathBuf,
     old_age: PathBuf,
     old_meta: PathBuf,
     new_age: PathBuf,
@@ -121,6 +122,7 @@ impl UpdateTransactionPaths {
         let dir = transactions_dir(store_path, vault)?;
         Ok(Self {
             journal: dir.join(format!("{stem}.journal.json")),
+            journal_temp: dir.join(format!("{stem}.journal.tmp")),
             old_age: dir.join(format!("{stem}.old.age")),
             old_meta: dir.join(format!("{stem}.old.meta")),
             new_age: dir.join(format!("{stem}.new.age")),
@@ -131,6 +133,17 @@ impl UpdateTransactionPaths {
 
     fn data_files(&self) -> [&Path; 4] {
         [&self.old_age, &self.old_meta, &self.new_age, &self.new_meta]
+    }
+
+    fn artifacts(&self) -> [&Path; 6] {
+        [
+            &self.journal,
+            &self.journal_temp,
+            &self.old_age,
+            &self.old_meta,
+            &self.new_age,
+            &self.new_meta,
+        ]
     }
 }
 
@@ -452,6 +465,8 @@ fn sync_directory(path: &Path) -> Result<(), BackendError> {
     }
     #[cfg(not(unix))]
     let _ = path;
+    #[cfg(test)]
+    tests::record_directory_sync(path);
     Ok(())
 }
 
@@ -498,6 +513,25 @@ fn temp_path_for(path: &Path) -> Result<PathBuf, BackendError> {
     Ok(path.with_file_name(format!(".{name}.tmp.{pid}.{ts}")))
 }
 
+fn create_versions_dir_durable(vdir: &Path) -> Result<(), BackendError> {
+    fs::create_dir_all(vdir).map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+    sync_directory(vdir)?;
+    let versions_parent = vdir.parent().ok_or_else(|| {
+        BackendError::Internal(format!(
+            "versions directory {} has no parent",
+            vdir.display()
+        ))
+    })?;
+    sync_directory(versions_parent)?;
+    let secrets_parent = versions_parent.parent().ok_or_else(|| {
+        BackendError::Internal(format!(
+            "versions parent {} has no parent",
+            versions_parent.display()
+        ))
+    })?;
+    sync_directory(secrets_parent)
+}
+
 fn archive_snapshot(
     store_path: &Path,
     vault: &str,
@@ -508,8 +542,7 @@ fn archive_snapshot(
     crypto_opts: MetaCrypto,
 ) -> Result<(), BackendError> {
     let vdir = versions_dir(store_path, vault, stem)?;
-    fs::create_dir_all(&vdir)
-        .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+    create_versions_dir_durable(&vdir)?;
 
     let age_dest = vdir.join(format!("{version}.age"));
     let meta_dest = vdir.join(format!("{version}.meta.json"));
@@ -565,8 +598,7 @@ fn archive_current(store_path: &Path, vault: &str, stem: &str) -> Result<u32, Ba
 
     let ver = next_version(store_path, vault, stem)?;
     let vdir = versions_dir(store_path, vault, stem)?;
-    fs::create_dir_all(&vdir)
-        .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+    create_versions_dir_durable(&vdir)?;
 
     if ap.exists() {
         let dest = vdir.join(format!("v{ver}.age"));
@@ -700,6 +732,7 @@ impl LocalSecretBackend {
         vec![active]
     }
 
+    #[cfg(test)]
     fn has_pending_update_for_name(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
         self.transaction_stems_for_name(name)
             .into_iter()
@@ -711,15 +744,110 @@ impl LocalSecretBackend {
             })
     }
 
+    fn has_update_artifacts_for_name(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        self.transaction_stems_for_name(name)
+            .into_iter()
+            .try_fold(false, |found, stem| {
+                let paths = UpdateTransactionPaths::new(&self.store_path, vault, &stem)?;
+                Ok(found || paths.artifacts().iter().any(|path| path.exists()))
+            })
+    }
+
+    fn transaction_artifact_stems(&self, vault: &str) -> Result<Vec<String>, BackendError> {
+        let dir = transactions_dir(&self.store_path, vault)?;
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let suffixes = [
+            ".journal.json",
+            ".journal.tmp",
+            ".old.age",
+            ".old.meta",
+            ".new.age",
+            ".new.meta",
+        ];
+        let mut stems = Vec::new();
+        for entry in fs::read_dir(&dir)
+            .map_err(|e| BackendError::Internal(format!("read transactions dir: {e}")))?
+        {
+            let entry = entry
+                .map_err(|e| BackendError::Internal(format!("read transaction entry: {e}")))?;
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = suffixes
+                .iter()
+                .find_map(|suffix| file_name.strip_suffix(suffix))
+            {
+                stems.push(stem.to_string());
+            }
+        }
+        stems.sort();
+        stems.dedup();
+        Ok(stems)
+    }
+
+    fn has_any_update_artifacts(&self, vault: &str) -> Result<bool, BackendError> {
+        Ok(!self.transaction_artifact_stems(vault)?.is_empty())
+    }
+
+    fn recovery_interruption(&self, stage: u8) -> Result<(), BackendError> {
+        match self.update_interruption(stage) {
+            UpdateInterruption::None => Ok(()),
+            UpdateInterruption::Rollback(error) | UpdateInterruption::SimulatedCrash(error) => {
+                Err(error)
+            }
+        }
+    }
+
+    fn remove_transaction_file(path: &Path, label: &str) -> Result<bool, BackendError> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(path).map_err(|e| {
+            BackendError::Internal(format!("remove {label} {}: {e}", path.display()))
+        })?;
+        Ok(true)
+    }
+
+    /// Remove files that never became part of a published transaction, or
+    /// residue left after a durably committed update/rollback. Caller holds the
+    /// exclusive vault lock and has established that no final journal exists.
+    fn cleanup_unjournaled_transaction_locked(
+        &self,
+        paths: &UpdateTransactionPaths,
+    ) -> Result<(), BackendError> {
+        if paths.journal.exists() {
+            return Err(BackendError::Internal(format!(
+                "refusing to clean live update journal {}",
+                paths.journal.display()
+            )));
+        }
+        Self::remove_transaction_file(&paths.journal_temp, "temporary update journal")?;
+        for path in paths.data_files() {
+            Self::remove_transaction_file(path, "transaction file")?;
+        }
+        if paths.dir.exists() {
+            sync_directory(&paths.dir)?;
+            sync_directory(paths.dir.parent().ok_or_else(|| {
+                BackendError::Internal(format!(
+                    "transaction directory {} has no parent",
+                    paths.dir.display()
+                ))
+            })?)?;
+        }
+        Ok(())
+    }
+
     /// Roll back one journaled update. Caller holds the exclusive vault lock.
     ///
     /// Backups are copied, not moved, so recovery is idempotent if the process
-    /// itself stops between restoring the value and metadata. The journal is
-    /// removed last, after active files and cleanup are synced.
+    /// itself stops between restoring the value and metadata. Active/archive
+    /// rollback is synced before journal removal; removing and syncing the
+    /// journal is the rollback commit point. Backup/staging cleanup happens
+    /// only after that durable absence.
     fn recover_update_for_stem_locked(&self, vault: &str, stem: &str) -> Result<(), BackendError> {
         let paths = UpdateTransactionPaths::new(&self.store_path, vault, stem)?;
         if !paths.journal.exists() {
-            return Ok(());
+            return self.cleanup_unjournaled_transaction_locked(&paths);
         }
         let journal_bytes = fs::read(&paths.journal).map_err(|e| {
             BackendError::Internal(format!(
@@ -749,25 +877,46 @@ impl LocalSecretBackend {
         let active_meta = meta_path(&self.store_path, vault, stem)?;
         durable_replace_from(&paths.old_age, &active_age)?;
         durable_replace_from(&paths.old_meta, &active_meta)?;
+        self.recovery_interruption(20)?;
 
         let archive_dir = versions_dir(&self.store_path, vault, stem)?;
-        for archive in [
-            archive_dir.join(format!("{}.age", journal.old_version)),
-            archive_dir.join(format!("{}.meta.json", journal.old_version)),
-        ] {
-            if archive.exists() {
-                fs::remove_file(&archive).map_err(|e| {
-                    BackendError::Internal(format!(
-                        "remove partial archive {}: {e}",
-                        archive.display()
-                    ))
-                })?;
-            }
+        let archive_age = archive_dir.join(format!("{}.age", journal.old_version));
+        let archive_meta = archive_dir.join(format!("{}.meta.json", journal.old_version));
+        if Self::remove_transaction_file(&archive_age, "partial archive")? {
+            self.recovery_interruption(21)?;
+        }
+        if Self::remove_transaction_file(&archive_meta, "partial archive")? {
+            self.recovery_interruption(22)?;
         }
         if archive_dir.exists() {
             sync_directory(&archive_dir)?;
         }
-        self.cleanup_update_transaction_locked(&paths)
+        self.recovery_interruption(23)?;
+
+        Self::remove_transaction_file(&paths.journal, "update journal")?;
+        self.recovery_interruption(24)?;
+        sync_directory(&paths.dir)?;
+        self.recovery_interruption(25)?;
+
+        for (path, stage) in [
+            (&paths.old_age, 26),
+            (&paths.old_meta, 27),
+            (&paths.new_age, 28),
+            (&paths.new_meta, 29),
+        ] {
+            if Self::remove_transaction_file(path, "recovered transaction file")? {
+                self.recovery_interruption(stage)?;
+            }
+        }
+        Self::remove_transaction_file(&paths.journal_temp, "temporary update journal")?;
+        sync_directory(&paths.dir)?;
+        self.recovery_interruption(30)?;
+        sync_directory(paths.dir.parent().ok_or_else(|| {
+            BackendError::Internal(format!(
+                "transaction directory {} has no parent",
+                paths.dir.display()
+            ))
+        })?)
     }
 
     /// Recover every possible layout stem for a named secret. Caller holds the
@@ -783,37 +932,76 @@ impl LocalSecretBackend {
         Ok(())
     }
 
-    fn cleanup_update_transaction_locked(
+    fn recover_all_update_artifacts_locked(&self, vault: &str) -> Result<(), BackendError> {
+        for stem in self.transaction_artifact_stems(vault)? {
+            self.recover_update_for_stem_locked(vault, &stem)?;
+        }
+        Ok(())
+    }
+
+    fn read_lock_for_name(&self, vault: &str, name: &str) -> Result<fs::File, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        loop {
+            let read_lock = lock_vault_shared(&vault_dir)?;
+            if !self.has_update_artifacts_for_name(vault, name)? {
+                return Ok(read_lock);
+            }
+            drop(read_lock);
+            let write_lock = lock_vault(&vault_dir)?;
+            self.recover_pending_update_for_name_locked(vault, name)?;
+            drop(write_lock);
+        }
+    }
+
+    fn read_lock_for_vault(&self, vault: &str) -> Result<fs::File, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        loop {
+            let read_lock = lock_vault_shared(&vault_dir)?;
+            if !self.has_any_update_artifacts(vault)? {
+                return Ok(read_lock);
+            }
+            drop(read_lock);
+            let write_lock = lock_vault(&vault_dir)?;
+            self.recover_all_update_artifacts_locked(vault)?;
+            drop(write_lock);
+        }
+    }
+
+    fn mutation_lock_for_name(&self, vault: &str, name: &str) -> Result<fs::File, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        let write_lock = lock_vault(&vault_dir)?;
+        self.recover_pending_update_for_name_locked(vault, name)?;
+        Ok(write_lock)
+    }
+
+    fn publish_update_journal_locked(
         &self,
         paths: &UpdateTransactionPaths,
-    ) -> Result<(), BackendError> {
-        for path in paths.data_files() {
-            if path.exists() {
-                fs::remove_file(path).map_err(|e| {
-                    BackendError::Internal(format!(
-                        "remove transaction file {}: {e}",
-                        path.display()
-                    ))
-                })?;
-            }
-        }
-        if paths.journal.exists() {
-            fs::remove_file(&paths.journal).map_err(|e| {
-                BackendError::Internal(format!(
-                    "remove update journal {}: {e}",
-                    paths.journal.display()
-                ))
-            })?;
-        }
-        if paths.dir.exists() {
-            sync_directory(&paths.dir)?;
-        }
-        sync_directory(paths.dir.parent().ok_or_else(|| {
+        journal_bytes: &[u8],
+    ) -> Result<UpdateInterruption, BackendError> {
+        write_private(&paths.journal_temp, journal_bytes).map_err(|e| {
             BackendError::Internal(format!(
-                "transaction directory {} has no parent",
-                paths.dir.display()
+                "write temporary update journal {}: {e}",
+                paths.journal_temp.display()
             ))
-        })?)
+        })?;
+        sync_file(&paths.journal_temp)?;
+        let interruption = self.update_interruption(10);
+        if !matches!(interruption, UpdateInterruption::None) {
+            return Ok(interruption);
+        }
+        fs::rename(&paths.journal_temp, &paths.journal).map_err(|e| {
+            BackendError::Internal(format!(
+                "publish update journal {}: {e}",
+                paths.journal.display()
+            ))
+        })?;
+        let interruption = self.update_interruption(11);
+        if !matches!(interruption, UpdateInterruption::None) {
+            return Ok(interruption);
+        }
+        sync_directory(&paths.dir)?;
+        Ok(UpdateInterruption::None)
     }
 
     /// Commit cleanup after the complete new generation and its archive are
@@ -825,31 +1013,10 @@ impl LocalSecretBackend {
         paths: &UpdateTransactionPaths,
     ) -> Result<(), BackendError> {
         if paths.journal.exists() {
-            fs::remove_file(&paths.journal).map_err(|e| {
-                BackendError::Internal(format!(
-                    "remove committed update journal {}: {e}",
-                    paths.journal.display()
-                ))
-            })?;
+            Self::remove_transaction_file(&paths.journal, "committed update journal")?;
             sync_directory(&paths.dir)?;
         }
-        for path in paths.data_files() {
-            if path.exists() {
-                fs::remove_file(path).map_err(|e| {
-                    BackendError::Internal(format!(
-                        "remove committed transaction file {}: {e}",
-                        path.display()
-                    ))
-                })?;
-            }
-        }
-        sync_directory(&paths.dir)?;
-        sync_directory(paths.dir.parent().ok_or_else(|| {
-            BackendError::Internal(format!(
-                "transaction directory {} has no parent",
-                paths.dir.display()
-            ))
-        })?)
+        self.cleanup_unjournaled_transaction_locked(paths)
     }
 
     // -----------------------------------------------------------------------
@@ -1064,6 +1231,13 @@ impl LocalSecretBackend {
                     vault_dir.display()
                 ))
             })?;
+            let vault = vault_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    BackendError::Internal(format!("invalid vault dir {}", vault_dir.display()))
+                })?;
+            self.recover_all_update_artifacts_locked(vault)?;
 
             // Walk only the secret-metadata subtrees: active + archived secrets
             // live under secrets/ (which contains .versions/), trashed secrets
@@ -1174,6 +1348,7 @@ impl LocalSecretBackend {
                 ))
             })?;
 
+            self.recover_all_update_artifacts_locked(&vault)?;
             self.migrate_vault(&vault, dry_run, &mut report)?;
         }
         Ok(report)
@@ -1341,7 +1516,7 @@ impl LocalSecretBackend {
                 suggestion: None,
             });
         }
-        let _lock = lock_vault(&vault_dir)?;
+        let _lock = self.mutation_lock_for_name(vault, name)?;
 
         // Where the active pair currently lives (opaque stem, or legacy via the
         // read fallback on an un-migrated store).
@@ -1427,14 +1602,15 @@ impl SecretBackend for LocalSecretBackend {
             });
         }
 
-        // Acquire exclusive vault lock for the duration of the mutation.
-        let _lock = lock_vault(&vault_dir)?;
+        let name = request.name.clone();
+        // Recover a stopped same-name conversion before replacing or creating
+        // any active files. The returned lock remains held for the mutation.
+        let _lock = self.mutation_lock_for_name(vault, &name)?;
 
         let sdir = secrets_dir(&store, vault)?;
         create_private_dir(&sdir)
             .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
 
-        let name = request.name.clone();
         // Resolve where an existing pair lives (opaque stem, or legacy via the
         // read fallback). A brand-new secret resolves to the active stem. The
         // trailing `ensure_opaque_layout` migrates any legacy stem to opaque.
@@ -1530,67 +1706,54 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        loop {
-            // Hold one shared lock across both files. A writer cannot activate
-            // either half of a new generation until this complete read ends.
-            let read_lock = lock_vault_shared(&vault_dir)?;
-            if self.has_pending_update_for_name(vault, name)? {
-                // Recovery mutates active files, so never attempt an in-place
-                // lock upgrade. Drop shared, take exclusive, recover
-                // idempotently, then restart with a fresh shared lock.
-                drop(read_lock);
-                let write_lock = lock_vault(&vault_dir)?;
-                self.recover_pending_update_for_name_locked(vault, name)?;
-                drop(write_lock);
-                continue;
-            }
+        // The helper may briefly drop shared and take exclusive for recovery;
+        // it returns only a fresh shared lock with no transaction artifacts.
+        let _read_lock = self.read_lock_for_name(vault, name)?;
 
-            // Resolve the on-disk stem (opaque, or legacy via the read-only
-            // back-compat fallback). Reads never create or upgrade legacy files.
-            let stem = self.resolve_active_stem(vault, name)?;
-            let mp = meta_path(&self.store_path, vault, &stem)?;
-            if !mp.exists() {
-                return Err(BackendError::NotFound {
-                    name: name.to_string(),
-                    suggestion: None,
-                });
-            }
+        // Resolve the on-disk stem (opaque, or legacy via the read-only
+        // back-compat fallback). Reads never create or upgrade legacy files.
+        let stem = self.resolve_active_stem(vault, name)?;
+        let mp = meta_path(&self.store_path, vault, &stem)?;
+        if !mp.exists() {
+            return Err(BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            });
+        }
 
-            // Reject symlinks to prevent attackers from redirecting reads to
-            // arbitrary files on the filesystem.
-            if fs::symlink_metadata(&mp)
+        // Reject symlinks to prevent attackers from redirecting reads to
+        // arbitrary files on the filesystem.
+        if fs::symlink_metadata(&mp)
+            .map(|m| m.is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(BackendError::Internal(format!(
+                "refusing to read metadata file: {} is a symlink",
+                mp.display()
+            )));
+        }
+
+        let meta = read_meta(&mp, &self.identity)?;
+
+        let value = if include_value {
+            let ap = age_path(&self.store_path, vault, &stem)?;
+
+            if fs::symlink_metadata(&ap)
                 .map(|m| m.is_symlink())
                 .unwrap_or(false)
             {
                 return Err(BackendError::Internal(format!(
-                    "refusing to read metadata file: {} is a symlink",
-                    mp.display()
+                    "refusing to decrypt secret file: {} is a symlink",
+                    ap.display()
                 )));
             }
 
-            let meta = read_meta(&mp, &self.identity)?;
+            Some(crypto::decrypt_from_file(&ap, &self.identity)?)
+        } else {
+            None
+        };
 
-            let value = if include_value {
-                let ap = age_path(&self.store_path, vault, &stem)?;
-
-                if fs::symlink_metadata(&ap)
-                    .map(|m| m.is_symlink())
-                    .unwrap_or(false)
-                {
-                    return Err(BackendError::Internal(format!(
-                        "refusing to decrypt secret file: {} is a symlink",
-                        ap.display()
-                    )));
-                }
-
-                Some(crypto::decrypt_from_file(&ap, &self.identity)?)
-            } else {
-                None
-            };
-
-            return Ok(meta_to_properties(&meta, value));
-        }
+        Ok(meta_to_properties(&meta, value))
     }
 
     async fn get_secret_version(
@@ -1600,13 +1763,30 @@ impl SecretBackend for LocalSecretBackend {
         version: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
+        let _read_lock = self.read_lock_for_name(vault, name)?;
+
         // First check if this is the current version.
         let stem = self.resolve_active_stem(vault, name)?;
         let mp = meta_path(&self.store_path, vault, &stem)?;
         if mp.exists() {
             let meta = read_meta(&mp, &self.identity)?;
             if meta.version == version {
-                return self.get_secret(vault, name, include_value).await;
+                let value = if include_value {
+                    let age_file = age_path(&self.store_path, vault, &stem)?;
+                    if fs::symlink_metadata(&age_file)
+                        .map(|metadata| metadata.is_symlink())
+                        .unwrap_or(false)
+                    {
+                        return Err(BackendError::Internal(format!(
+                            "refusing to decrypt secret file: {} is a symlink",
+                            age_file.display()
+                        )));
+                    }
+                    Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
+                } else {
+                    None
+                };
+                return Ok(meta_to_properties(&meta, value));
             }
         }
 
@@ -1658,6 +1838,7 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         group_filter: Option<&str>,
     ) -> Result<Vec<SecretSummary>, BackendError> {
+        let _read_lock = self.read_lock_for_vault(vault)?;
         let sdir = secrets_dir(&self.store_path, vault)?;
         if !sdir.exists() {
             return Ok(Vec::new());
@@ -1758,14 +1939,8 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
-        // Acquire exclusive vault lock — update_secret may call archive_current/next_version.
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        let _lock = lock_vault(&vault_dir)?;
-
-        // A previous process may have stopped after activating only one half
-        // of a generation. Recover under the exclusive lock before inspecting
-        // or migrating the active layout.
-        self.recover_pending_update_for_name_locked(vault, name)?;
+        // Acquire once and recover before inspecting the active/history pair.
+        let _lock = self.mutation_lock_for_name(vault, name)?;
 
         // Migrate any legacy layout before the transaction starts, so a later
         // migration failure can never leave a successfully converted mixed state.
@@ -1851,13 +2026,7 @@ impl SecretBackend for LocalSecretBackend {
             // No journal means any files here are residue from staging before
             // the transaction became visible. They cannot describe an active
             // mutation and are safe to replace.
-            self.cleanup_update_transaction_locked(&transaction)?;
-            create_private_dir(&transaction.dir).map_err(|e| {
-                BackendError::Internal(format!(
-                    "create transaction directory {}: {e}",
-                    transaction.dir.display()
-                ))
-            })?;
+            self.cleanup_unjournaled_transaction_locked(&transaction)?;
 
             durable_write_private(&transaction.old_age, &old_age)?;
             durable_write_private(&transaction.old_meta, &old_meta_bytes)?;
@@ -1874,10 +2043,6 @@ impl SecretBackend for LocalSecretBackend {
             };
             let journal_bytes = serde_json::to_vec_pretty(&journal)
                 .map_err(|e| BackendError::Internal(format!("serialize update journal: {e}")))?;
-            // The marker is durable before the first active rename. From this
-            // point, a reader can always restore the complete old generation.
-            durable_write_private(&transaction.journal, &journal_bytes)?;
-
             let rollback = |cause: BackendError| -> Result<SecretProperties, BackendError> {
                 match self.recover_update_for_stem_locked(vault, &stem) {
                     Ok(()) => Err(cause),
@@ -1886,6 +2051,27 @@ impl SecretBackend for LocalSecretBackend {
                     ))),
                 }
             };
+
+            // Publish via a synced temp and atomic rename. The final marker is
+            // never opened with truncate semantics.
+            match self.publish_update_journal_locked(&transaction, &journal_bytes) {
+                Ok(UpdateInterruption::None) => {}
+                Ok(UpdateInterruption::Rollback(error)) => {
+                    if transaction.journal.exists() {
+                        return rollback(error);
+                    }
+                    self.cleanup_unjournaled_transaction_locked(&transaction)?;
+                    return Err(error);
+                }
+                Ok(UpdateInterruption::SimulatedCrash(error)) => return Err(error),
+                Err(error) => {
+                    if transaction.journal.exists() {
+                        return rollback(error);
+                    }
+                    self.cleanup_unjournaled_transaction_locked(&transaction)?;
+                    return Err(error);
+                }
+            }
 
             match self.update_interruption(0) {
                 UpdateInterruption::None => {}
@@ -1955,6 +2141,7 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         name: &str,
     ) -> Result<Vec<SecretProperties>, BackendError> {
+        let _read_lock = self.read_lock_for_name(vault, name)?;
         let mut versions = Vec::new();
 
         // Collect archived versions (opaque, or legacy via read fallback)
@@ -1988,6 +2175,7 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        let _read_lock = self.read_lock_for_name(vault, name)?;
         let stem = self.resolve_active_stem(vault, name)?;
         let mp = meta_path(&self.store_path, vault, &stem)?;
         Ok(mp.exists())
@@ -1999,9 +2187,8 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         version: &str,
     ) -> Result<SecretProperties, BackendError> {
-        // Acquire exclusive vault lock — rollback calls archive_current/next_version.
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        let _lock = lock_vault(&vault_dir)?;
+        // Acquire once and recover before rollback inspects current/history.
+        let _lock = self.mutation_lock_for_name(vault, name)?;
 
         // Operate on the stem where this secret currently lives (opaque, or
         // legacy via the read fallback). `ensure_opaque_layout` migrates to
@@ -2067,7 +2254,7 @@ impl SecretBackend for LocalSecretBackend {
                 suggestion: None,
             });
         }
-        let _lock = lock_vault(&vault_dir)?;
+        let _lock = self.mutation_lock_for_name(vault, name)?;
 
         // Restore the most recent trash entry for this name (legacy un-suffixed
         // entries sort as oldest). Ties on timestamp break by path so the
@@ -2140,7 +2327,7 @@ impl SecretBackend for LocalSecretBackend {
                 suggestion: None,
             });
         }
-        let _lock = lock_vault(&vault_dir)?;
+        let _lock = self.mutation_lock_for_name(vault, name)?;
 
         let trash_entries = self.trash_entries_for(vault, name)?;
         if trash_entries.is_empty() {
@@ -2195,6 +2382,7 @@ impl SecretBackend for LocalSecretBackend {
         &self,
         vault: &str,
     ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
+        let _read_lock = self.read_lock_for_vault(vault)?;
         let tbase = trash_base_dir(&self.store_path, vault)?;
         if !tbase.exists() {
             return Ok(Vec::new());
@@ -2295,6 +2483,29 @@ mod tests {
     fn update_hooks() -> &'static Mutex<HashMap<PathBuf, UpdateTestHook>> {
         static HOOKS: OnceLock<Mutex<HashMap<PathBuf, UpdateTestHook>>> = OnceLock::new();
         HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn directory_syncs() -> &'static Mutex<Vec<PathBuf>> {
+        static SYNCS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+        SYNCS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub(super) fn record_directory_sync(path: &Path) {
+        directory_syncs().lock().unwrap().push(path.to_path_buf());
+    }
+
+    fn take_directory_syncs_under(root: &Path) -> Vec<PathBuf> {
+        let mut syncs = directory_syncs().lock().unwrap();
+        let mut matching = Vec::new();
+        syncs.retain(|path| {
+            if path.starts_with(root) {
+                matching.push(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        matching
     }
 
     fn install_update_failure(store_path: &Path, stage: u8) {
@@ -3405,6 +3616,542 @@ mod tests {
     #[tokio::test]
     async fn restart_recovers_opaque_store_crash_markers_at_every_stage() {
         assert_restart_recovers_crashed_conversion(true).await;
+    }
+
+    fn backend_for_mode(opaque: bool) -> (LocalSecretBackend, TempDir) {
+        if opaque {
+            test_backend_opaque()
+        } else {
+            test_backend()
+        }
+    }
+
+    fn reopen_for_mode(tmp: &TempDir, opaque: bool) -> LocalSecretBackend {
+        if opaque {
+            reopen_opaque(tmp, false)
+        } else {
+            test_backend_reopen(tmp, false)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum LaterMutation {
+        Set,
+        Delete,
+        Rollback,
+    }
+
+    async fn assert_crashed_update_cannot_undo_later_mutation(
+        opaque: bool,
+        mutation: LaterMutation,
+    ) {
+        let (backend, tmp) = backend_for_mode(opaque);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        if matches!(mutation, LaterMutation::Rollback) {
+            backend
+                .set_secret("default", make_request("atomic", "second-value"))
+                .await
+                .unwrap();
+        }
+
+        install_update_crash(&backend.store_path, 1);
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        assert!(has_pending_update_journal(&backend, "default", "atomic"));
+
+        match mutation {
+            LaterMutation::Set => {
+                backend
+                    .set_secret("default", make_request("atomic", "post-crash"))
+                    .await
+                    .unwrap();
+            }
+            LaterMutation::Delete => {
+                backend.delete_secret("default", "atomic").await.unwrap();
+            }
+            LaterMutation::Rollback => {
+                backend.rollback("default", "atomic", "v1").await.unwrap();
+            }
+        }
+        assert!(
+            !has_pending_update_journal(&backend, "default", "atomic"),
+            "later mutation left the old transaction able to undo it"
+        );
+        drop(backend);
+
+        let restarted = reopen_for_mode(&tmp, opaque);
+        match mutation {
+            LaterMutation::Set => {
+                let current = restarted
+                    .get_secret("default", "atomic", true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    current.value.as_deref().map(|value| value.as_str()),
+                    Some("post-crash")
+                );
+            }
+            LaterMutation::Delete => {
+                assert!(matches!(
+                    restarted.get_secret("default", "atomic", true).await,
+                    Err(BackendError::NotFound { .. })
+                ));
+            }
+            LaterMutation::Rollback => {
+                let current = restarted
+                    .get_secret("default", "atomic", true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    current.value.as_deref().map(|value| value.as_str()),
+                    Some("old-value")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_store_recovers_before_every_later_same_name_mutation() {
+        for mutation in [
+            LaterMutation::Set,
+            LaterMutation::Delete,
+            LaterMutation::Rollback,
+        ] {
+            assert_crashed_update_cannot_undo_later_mutation(false, mutation).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn opaque_store_recovers_before_every_later_same_name_mutation() {
+        for mutation in [
+            LaterMutation::Set,
+            LaterMutation::Delete,
+            LaterMutation::Rollback,
+        ] {
+            assert_crashed_update_cannot_undo_later_mutation(true, mutation).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn vault_wide_maintenance_recovers_transactions_before_scanning() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, 1);
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        backend.reencrypt_all_metadata(false).unwrap();
+        assert!(!has_pending_update_journal(&backend, "default", "atomic"));
+        let current = backend.get_secret("default", "atomic", true).await.unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+
+        let (opaque, _tmp) = test_backend_opaque();
+        opaque
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&opaque.store_path, 1);
+        opaque
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        opaque.migrate_all(false).unwrap();
+        assert!(!has_pending_update_journal(&opaque, "default", "atomic"));
+        let current = opaque.get_secret("default", "atomic", true).await.unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+    }
+
+    async fn assert_all_active_and_history_reads_wait_for_transaction(opaque: bool) {
+        let (backend, _tmp) = backend_for_mode(opaque);
+        let backend = Arc::new(backend);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+
+        let pause = install_update_pause(&backend.store_path, 1);
+        let update_backend = Arc::clone(&backend);
+        let updater = tokio::spawn(async move {
+            update_backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+        });
+        pause.wait_until_reached();
+
+        let (versions_tx, versions_rx) = mpsc::channel();
+        let versions_backend = Arc::clone(&backend);
+        let versions_reader = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            versions_tx
+                .send(runtime.block_on(versions_backend.list_versions("default", "atomic")))
+                .unwrap();
+        });
+        let (list_tx, list_rx) = mpsc::channel();
+        let list_backend = Arc::clone(&backend);
+        let list_reader = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            list_tx
+                .send(runtime.block_on(list_backend.list_secrets("default", None)))
+                .unwrap();
+        });
+        let (version_tx, version_rx) = mpsc::channel();
+        let version_backend = Arc::clone(&backend);
+        let version_reader =
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                version_tx
+                    .send(runtime.block_on(
+                        version_backend.get_secret_version("default", "atomic", "v1", true),
+                    ))
+                    .unwrap();
+            });
+
+        let early_versions = versions_rx.recv_timeout(Duration::from_millis(100)).ok();
+        let early_list = list_rx.recv_timeout(Duration::from_millis(100)).ok();
+        let early_version = version_rx.recv_timeout(Duration::from_millis(100)).ok();
+        let versions_blocked = early_versions.is_none();
+        let list_blocked = early_list.is_none();
+        let version_blocked = early_version.is_none();
+        pause.resume();
+        updater.await.unwrap().unwrap();
+
+        let versions = early_versions
+            .unwrap_or_else(|| versions_rx.recv_timeout(Duration::from_secs(2)).unwrap())
+            .unwrap();
+        let listed = early_list
+            .unwrap_or_else(|| list_rx.recv_timeout(Duration::from_secs(2)).unwrap())
+            .unwrap();
+        let version = early_version
+            .unwrap_or_else(|| version_rx.recv_timeout(Duration::from_secs(2)).unwrap())
+            .unwrap();
+        versions_reader.join().unwrap();
+        list_reader.join().unwrap();
+        version_reader.join().unwrap();
+
+        assert!(versions_blocked, "version listing bypassed the lock");
+        assert!(list_blocked, "secret listing bypassed the lock");
+        assert!(version_blocked, "version read bypassed the lock");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].content_type, RECORD_CONTENT_TYPE);
+        assert_eq!(
+            version.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+        assert_eq!(version.version, "v1");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn plain_store_all_observable_reads_wait_for_complete_transaction() {
+        assert_all_active_and_history_reads_wait_for_transaction(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn opaque_store_all_observable_reads_wait_for_complete_transaction() {
+        assert_all_active_and_history_reads_wait_for_transaction(true).await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum RecoveryRead {
+        Version,
+        Versions,
+        List,
+        Exists,
+    }
+
+    async fn assert_restart_read_recovers_before_observing(opaque: bool, read: RecoveryRead) {
+        let (backend, tmp) = backend_for_mode(opaque);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, 2);
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        drop(backend);
+
+        let restarted = reopen_for_mode(&tmp, opaque);
+        match read {
+            RecoveryRead::Version => {
+                let version = restarted
+                    .get_secret_version("default", "atomic", "v1", true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    version.value.as_deref().map(|value| value.as_str()),
+                    Some("old-value")
+                );
+            }
+            RecoveryRead::Versions => {
+                let versions = restarted.list_versions("default", "atomic").await.unwrap();
+                assert_eq!(versions.len(), 1);
+                assert_eq!(versions[0].version, "v1");
+            }
+            RecoveryRead::List => {
+                let listed = restarted.list_secrets("default", None).await.unwrap();
+                assert_eq!(listed.len(), 1);
+                assert_eq!(listed[0].content_type, "text/plain");
+            }
+            RecoveryRead::Exists => {
+                assert!(restarted.secret_exists("default", "atomic").await.unwrap());
+            }
+        }
+        assert!(
+            !has_pending_update_journal(&restarted, "default", "atomic"),
+            "read exposed state without completing recovery"
+        );
+        let current = restarted
+            .get_secret("default", "atomic", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+        assert_eq!(current.version, "v1");
+    }
+
+    #[tokio::test]
+    async fn plain_store_restart_reads_recover_before_observing_files() {
+        for read in [
+            RecoveryRead::Version,
+            RecoveryRead::Versions,
+            RecoveryRead::List,
+            RecoveryRead::Exists,
+        ] {
+            assert_restart_read_recovers_before_observing(false, read).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn opaque_store_restart_reads_recover_before_observing_files() {
+        for read in [
+            RecoveryRead::Version,
+            RecoveryRead::Versions,
+            RecoveryRead::List,
+            RecoveryRead::Exists,
+        ] {
+            assert_restart_read_recovers_before_observing(true, read).await;
+        }
+    }
+
+    async fn assert_atomic_journal_publication_survives_crashes(opaque: bool) {
+        // 10: temp journal synced, before rename. 11: final journal renamed,
+        // before the transaction-directory fsync.
+        for stage in [10, 11] {
+            let (backend, tmp) = backend_for_mode(opaque);
+            backend
+                .set_secret("default", make_request("atomic", "old-value"))
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, stage);
+            let error = backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("simulated crash"), "{error}");
+
+            let stem = backend.resolve_active_stem("default", "atomic").unwrap();
+            let transaction =
+                UpdateTransactionPaths::new(&backend.store_path, "default", &stem).unwrap();
+            let journal_temp = transaction.dir.join(format!("{stem}.journal.tmp"));
+            if stage == 10 {
+                assert!(!transaction.journal.exists());
+                assert!(journal_temp.exists());
+            } else {
+                assert!(transaction.journal.exists());
+            }
+            drop(backend);
+
+            let restarted = reopen_for_mode(&tmp, opaque);
+            let current = restarted
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                current.value.as_deref().map(|value| value.as_str()),
+                Some("old-value")
+            );
+            assert_eq!(current.version, "v1");
+            assert!(!transaction.journal.exists());
+            assert!(!journal_temp.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_store_publishes_journal_atomically() {
+        assert_atomic_journal_publication_survives_crashes(false).await;
+    }
+
+    #[tokio::test]
+    async fn opaque_store_publishes_journal_atomically() {
+        assert_atomic_journal_publication_survives_crashes(true).await;
+    }
+
+    async fn assert_invalid_partial_journal_is_ignored_and_cleaned(opaque: bool) {
+        let (backend, _tmp) = backend_for_mode(opaque);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        let stem = backend.resolve_active_stem("default", "atomic").unwrap();
+        let transaction =
+            UpdateTransactionPaths::new(&backend.store_path, "default", &stem).unwrap();
+        fs::create_dir_all(&transaction.dir).unwrap();
+        let journal_temp = transaction.dir.join(format!("{stem}.journal.tmp"));
+        fs::write(&journal_temp, b"{invalid partial journal").unwrap();
+
+        let current = backend.get_secret("default", "atomic", true).await.unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+        assert!(!journal_temp.exists());
+    }
+
+    #[tokio::test]
+    async fn partial_journal_temps_are_not_recovery_markers() {
+        assert_invalid_partial_journal_is_ignored_and_cleaned(false).await;
+        assert_invalid_partial_journal_is_ignored_and_cleaned(true).await;
+    }
+
+    async fn assert_recovery_crash_is_idempotent_at_every_cleanup_boundary(opaque: bool) {
+        // (recovery hook, update crash). The stage-3 transaction has a partial
+        // archive and consumed new-stage files; stage 0 retains all stage files.
+        let cases = [
+            (20, 3),
+            (21, 3),
+            (22, 3),
+            (23, 3),
+            (24, 3),
+            (25, 3),
+            (26, 3),
+            (27, 3),
+            (28, 0),
+            (29, 0),
+            (30, 3),
+        ];
+        for (recovery_stage, update_stage) in cases {
+            let (backend, tmp) = backend_for_mode(opaque);
+            backend
+                .set_secret("default", make_request("atomic", "old-value"))
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, update_stage);
+            backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+                .unwrap_err();
+
+            install_update_crash(&backend.store_path, recovery_stage);
+            let error = backend
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("simulated crash"),
+                "recovery stage {recovery_stage}: {error}"
+            );
+            drop(backend);
+
+            let restarted = reopen_for_mode(&tmp, opaque);
+            let recovered = restarted
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.value.as_deref().map(|value| value.as_str()),
+                Some("old-value"),
+                "recovery stage {recovery_stage}"
+            );
+            assert_eq!(recovered.version, "v1", "recovery stage {recovery_stage}");
+            restarted
+                .set_secret("default", make_request("atomic", "post-recovery"))
+                .await
+                .unwrap();
+            drop(restarted);
+
+            let final_restart = reopen_for_mode(&tmp, opaque);
+            let final_value = final_restart
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                final_value.value.as_deref().map(|value| value.as_str()),
+                Some("post-recovery"),
+                "recovery stage {recovery_stage} left rollback state live"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_store_recovery_cleanup_is_crash_idempotent() {
+        assert_recovery_crash_is_idempotent_at_every_cleanup_boundary(false).await;
+    }
+
+    #[tokio::test]
+    async fn opaque_store_recovery_cleanup_is_crash_idempotent() {
+        assert_recovery_crash_is_idempotent_at_every_cleanup_boundary(true).await;
+    }
+
+    #[tokio::test]
+    async fn new_archive_directory_chain_is_synced_before_transaction_commit() {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        take_directory_syncs_under(tmp.path());
+
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap();
+
+        let stem = backend.resolve_active_stem("default", "atomic").unwrap();
+        let leaf = versions_dir(&backend.store_path, "default", &stem).unwrap();
+        let versions_parent = leaf.parent().unwrap().to_path_buf();
+        let secrets_parent = versions_parent.parent().unwrap().to_path_buf();
+        let syncs = take_directory_syncs_under(tmp.path());
+        let leaf_position = syncs.iter().position(|path| path == &leaf).unwrap();
+        let versions_position = syncs
+            .iter()
+            .position(|path| path == &versions_parent)
+            .expect("the .versions parent must be synced");
+        let secrets_position = syncs
+            .iter()
+            .enumerate()
+            .skip(versions_position + 1)
+            .find_map(|(position, path)| (path == &secrets_parent).then_some(position))
+            .expect("the secrets ancestor must be synced");
+        assert!(leaf_position < versions_position);
+        assert!(versions_position < secrets_position);
     }
 
     /// An update request that changes nothing — base for tri-state tests.
