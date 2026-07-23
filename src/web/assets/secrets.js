@@ -1,5 +1,56 @@
 import * as XvUiModel from './ui-model.js';
 import { guardNavigation } from './dialogs.js';
+import { setProtectedValueStatus } from './accessibility.js';
+
+export function createExposureTimer({ seconds, onTick, onExpire, clock = globalThis }) {
+  const duration = Math.max(0, Math.floor(Number(seconds) || 0));
+  let remaining = duration;
+  let timerId = null;
+  let generation = 0;
+
+  function cancel() {
+    generation++;
+    if (timerId !== null) clock.clearTimeout(timerId);
+    timerId = null;
+  }
+
+  function reset() {
+    cancel();
+    remaining = duration;
+    const activeGeneration = generation;
+    onTick?.(remaining);
+    if (remaining === 0) {
+      onExpire?.();
+      return;
+    }
+    const tick = () => {
+      if (generation !== activeGeneration) return;
+      remaining--;
+      if (remaining === 0) {
+        timerId = null;
+        onExpire?.();
+        return;
+      }
+      onTick?.(remaining);
+      timerId = clock.setTimeout(tick, 1000);
+    };
+    timerId = clock.setTimeout(tick, 1000);
+  }
+
+  reset();
+  return Object.freeze({ cancel, reset, remaining: () => remaining });
+}
+
+export async function clearClipboardIfUnchanged({ clipboard, expected }) {
+  try {
+    if (typeof clipboard?.readText !== 'function' || typeof clipboard?.writeText !== 'function') return false;
+    if (await clipboard.readText() !== expected) return false;
+    await clipboard.writeText('');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 export function deleteConfirmationModel({ backend, vault, names, recoverable, kind = 'secret' }) {
   const targets = [...names];
@@ -27,7 +78,15 @@ export function canPurgeSecret(expectedName, typedName) {
   return typedName === expectedName;
 }
 
-export function mountSecrets({ api, store, dialogs, token }) {
+export function mountSecrets({
+  api,
+  store,
+  dialogs,
+  preferences = null,
+  token,
+  exposureClock = globalThis,
+  clipboard = globalThis.navigator?.clipboard,
+}) {
 
 const $ = (sel) => document.querySelector(sel);
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -249,7 +308,8 @@ function clearFormError() {
 }
 
 for (const panel of document.querySelectorAll('.error-panel')) {
-  panel.querySelector('.error-dismiss').onclick = () => clearError(`#${panel.id}`);
+  const dismiss = panel.querySelector('.error-dismiss');
+  if (dismiss) dismiss.onclick = () => clearError(`#${panel.id}`);
 }
 
 function fail(error) {
@@ -688,6 +748,121 @@ let types = []; // resolved record types from /api/types
 let recordState = null;
 let plainSecretState = null;
 let drawerInvoker = null;
+const revealTimers = new Map();
+const clipboardTimers = new Map();
+
+function secondsLabel(seconds) {
+  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
+}
+
+async function exposureTimeoutSeconds() {
+  try { await preferences?.load?.(); } catch (_) { /* preference client reports its own safe error */ }
+  const preferred = preferences?.get?.('exposure_timeout_seconds', null)
+    ?? preferences?.snapshot?.()?.exposure_timeout_seconds;
+  return Number.isSafeInteger(preferred) && preferred >= 0 ? preferred : 30;
+}
+
+function updateProtectionDescription(input, state) {
+  const description = input?._protectionDescription;
+  if (description) description.textContent = `Protected value is ${state.masked ? 'hidden' : 'revealed'}.`;
+}
+
+function stopRevealTimer(state) {
+  const exposure = revealTimers.get(state);
+  exposure?.timer.cancel();
+  revealTimers.delete(state);
+  return exposure;
+}
+
+function hideProtectedField(state, { announceStatus = true } = {}) {
+  const exposure = stopRevealTimer(state);
+  if (!exposure) return;
+  XvUiModel.hideProtected(state);
+  renderProtectedControl(exposure.input, exposure.button, state);
+  if (announceStatus) setProtectedValueStatus(document, `${exposure.field} hidden.`);
+}
+
+function hideAllProtectedFields(announceStatus = true) {
+  for (const state of [...revealTimers.keys()]) hideProtectedField(state, { announceStatus });
+}
+
+function startRevealTimer({ field, input, button, state, seconds }) {
+  stopRevealTimer(state);
+  if (seconds === 0) {
+    XvUiModel.hideProtected(state);
+    renderProtectedControl(input, button, state);
+    setProtectedValueStatus(document, `${field} hidden.`);
+    return;
+  }
+  const exposure = { field, input, button, state, timer: null };
+  exposure.timer = createExposureTimer({
+    seconds,
+    clock: exposureClock,
+    onTick: (remaining) => {
+      setProtectedValueStatus(document, `${field} revealed. Hides in ${secondsLabel(remaining)}.`);
+    },
+    onExpire: () => hideProtectedField(state),
+  });
+  revealTimers.set(state, exposure);
+}
+
+function resetRevealTimer(state) {
+  revealTimers.get(state)?.timer.reset();
+}
+
+function bindProtectedInteractions(input, state) {
+  for (const eventName of ['focus', 'pointerdown', 'keydown']) {
+    input.addEventListener?.(eventName, () => resetRevealTimer(state));
+  }
+}
+
+function forgetProtectedValues() {
+  hideAllProtectedFields(false);
+  const states = [];
+  if (plainSecretState) states.push(plainSecretState);
+  for (const input of $('#record-fields').querySelectorAll('input[data-field-kind="secret"]')) {
+    if (input._protectedState) states.push(input._protectedState);
+  }
+  for (const state of states) {
+    state.revision++;
+    state.value = null;
+    state.hasStoredValue = false;
+    state.dirty = false;
+    state.loadPromise = null;
+  }
+  if (recordState?.secretFields) {
+    for (const name of Object.keys(recordState.secretFields)) delete recordState.secretFields[name];
+  }
+  const valueInput = $('#secret-form').elements.value;
+  valueInput.value = '';
+  setProtectedValueStatus(document, '');
+}
+
+function startClipboardTimer({ field, state, expected, seconds }) {
+  clipboardTimers.get(state)?.cancel();
+  clipboardTimers.delete(state);
+  let timer = null;
+  const expire = async () => {
+    if (clipboardTimers.get(state) === timer) clipboardTimers.delete(state);
+    const cleared = await clearClipboardIfUnchanged({ clipboard, expected });
+    setProtectedValueStatus(document, cleared
+      ? `${field} clipboard cleared.`
+      : `${field} clipboard clearing could not be confirmed.`);
+  };
+  if (seconds === 0) {
+    void expire();
+    return;
+  }
+  timer = createExposureTimer({
+    seconds,
+    clock: exposureClock,
+    onTick: (remaining) => {
+      setProtectedValueStatus(document, `${field} copied. Clipboard clears in ${secondsLabel(remaining)}.`);
+    },
+    onExpire: expire,
+  });
+  clipboardTimers.set(state, timer);
+}
 
 function drawerDraft() {
   const form = $('#secret-form');
@@ -762,6 +937,7 @@ async function allowNavigation() {
 function closeDrawer({ restoreFocus = false } = {}) {
   drawerGeneration++;
   resetConfirmation($('#delete'), 'Delete');
+  forgetProtectedValues();
   if (typeof dialogs.closeModal === 'function') dialogs.closeModal($('#drawer'));
   else $('#drawer').hidden = true;
   $('#drawer-backdrop').hidden = true;
@@ -790,6 +966,7 @@ function renderProtectedControl(input, button, state) {
   input.readOnly = state.masked;
   input.value = XvUiModel.protectedDisplay(state);
   setRevealLabel(button, state.masked ? 'Reveal' : 'Hide');
+  updateProtectionDescription(input, state);
 }
 
 // Same rule as the TUI: the xv-type tag OR the exact record content type.
@@ -828,28 +1005,48 @@ function fieldRow(name, kind, value, required) {
     const state = XvUiModel.createProtectedState(value, value !== undefined);
     input._protectedState = state;
     input.autocomplete = 'new-password';
+    const protection = document.createElement('span');
+    protection.className = 'sr-only';
+    protection.id = `protected-field-${String(name).replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-state`;
+    protection.textContent = 'Protected value is hidden.';
+    input._protectionDescription = protection;
+    input.setAttribute('aria-describedby', protection.id);
     const row = document.createElement('span');
     row.className = 'field-actions';
     const rev = document.createElement('button');
     rev.type = 'button';
     rev.className = 'button secondary';
     renderProtectedControl(input, rev, state);
-    rev.onclick = () => {
-      if (state.masked) XvUiModel.revealProtected(state);
-      else XvUiModel.hideProtected(state);
+    rev.onclick = async () => {
+      if (state.masked) {
+        const seconds = await exposureTimeoutSeconds();
+        XvUiModel.revealProtected(state);
+        startRevealTimer({ field: name, input, button: rev, state, seconds });
+      } else {
+        hideProtectedField(state);
+      }
       renderProtectedControl(input, rev, state);
     };
-    input.oninput = () => XvUiModel.editProtected(state, input.value);
+    input.oninput = () => {
+      XvUiModel.editProtected(state, input.value);
+      resetRevealTimer(state);
+    };
+    bindProtectedInteractions(input, state);
     const cp = document.createElement('button');
     cp.type = 'button';
     cp.className = 'button secondary';
     cp.textContent = 'Copy';
     cp.onclick = async () => {
-      try { await navigator.clipboard.writeText(state.value ?? ''); toast('copied'); }
+      try {
+        const seconds = await exposureTimeoutSeconds();
+        const expected = state.value ?? '';
+        await clipboard.writeText(expected);
+        startClipboardTimer({ field: name, state, expected, seconds });
+      }
       catch (e) { fail(e); }
     };
     row.append(rev, cp);
-    label.append(input, row);
+    label.append(input, protection, row);
   } else {
     input.value = value || '';
     label.append(input);
@@ -1288,8 +1485,12 @@ async function openDrawerNow(name, invoker) {
   f.reset();
   f.elements.expires_on.value = '';
   plainSecretState = XvUiModel.createProtectedState(name ? null : '', !!name);
+  f.elements.value._protectionDescription = $('#value-protection-state');
   renderProtectedControl(f.elements.value, $('#reveal'), plainSecretState);
-  f.elements.value.oninput = () => XvUiModel.editProtected(plainSecretState, f.elements.value.value);
+  f.elements.value.oninput = () => {
+    XvUiModel.editProtected(plainSecretState, f.elements.value.value);
+    resetRevealTimer(plainSecretState);
+  };
   $('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret';
   $('#drawer-title').textContent = name || 'New secret';
   $('#save').textContent = name ? 'Save changes' : 'Create secret';
@@ -1299,6 +1500,7 @@ async function openDrawerNow(name, invoker) {
   $('#record-section').hidden = true;
   $('#value-section').hidden = false;
   $('#record-fields').innerHTML = '';
+  setProtectedValueStatus(document, '');
   $('#save').disabled = false;
   $('#type-picker-label').hidden = !!name; // type is chosen at creation only
   $('#type-picker').value = '';
@@ -1395,6 +1597,15 @@ $('#drawer-backdrop').onclick = (event) => {
 };
 $('#secret-form').addEventListener?.('input', updateDraft);
 $('#secret-form').addEventListener?.('change', updateDraft);
+for (const eventName of ['focus', 'pointerdown', 'keydown']) {
+  $('#secret-form').elements.value.addEventListener?.(eventName, () => {
+    if (plainSecretState) resetRevealTimer(plainSecretState);
+  });
+}
+document.addEventListener?.('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') hideAllProtectedFields();
+});
+globalThis.addEventListener?.('blur', () => hideAllProtectedFields());
 
 globalThis.addEventListener?.('beforeunload', (event) => {
   const allowed = guardNavigation({
@@ -1435,9 +1646,19 @@ $('#reveal').onclick = async () => {
       const value = await loadPlainSecretValue(generation, selection);
       if (!isCurrentDrawer(generation, selection) || state !== plainSecretState
         || state.revision !== transition || value === null) return;
+      const seconds = await exposureTimeoutSeconds();
+      if (!isCurrentDrawer(generation, selection) || state !== plainSecretState
+        || state.revision !== transition) return;
       XvUiModel.revealProtected(state, value);
+      startRevealTimer({
+        field: 'Value',
+        input: $('#secret-form').elements.value,
+        button: $('#reveal'),
+        state,
+        seconds,
+      });
     } else {
-      XvUiModel.hideProtected(state);
+      hideProtectedField(state);
     }
     if (!isCurrentDrawer(generation, selection)) return;
     renderProtectedControl($('#secret-form').elements.value, $('#reveal'), state);
@@ -1454,9 +1675,11 @@ $('#copy').onclick = async () => {
     const state = plainSecretState;
     const value = await loadPlainSecretValue(generation, selection);
     if (!isCurrentDrawer(generation, selection) || state !== plainSecretState || value === null) return;
-    await navigator.clipboard.writeText(value);
+    const seconds = await exposureTimeoutSeconds();
+    if (!isCurrentDrawer(generation, selection) || state !== plainSecretState) return;
+    await clipboard.writeText(value);
     if (!isCurrentDrawer(generation, selection)) return;
-    toast('copied');
+    startClipboardTimer({ field: 'Value', state, expected: value, seconds });
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     showFormError(e);

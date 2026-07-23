@@ -19,6 +19,7 @@ function loadProtectedRenderer() {
   const context = {
     XvUiModel: model,
     icon: (name) => ({ name }),
+    updateProtectionDescription() {},
   };
   vm.runInNewContext(
     `'use strict';\n${appSource.slice(start, end)}\nglobalThis.renderProtectedControl = renderProtectedControl;`,
@@ -101,6 +102,11 @@ function bootstrapDocument() {
     getElementById(id) { return get(`#${id}`); },
     querySelector(selector) {
       if (selector.endsWith('-table')) return { clientWidth: 100, querySelectorAll: () => [] };
+      if (selector === '#secret-form') {
+        const form = get(selector);
+        form.elements = { value: { addEventListener() {} } };
+        return form;
+      }
       return get(selector);
     },
     querySelectorAll() { return []; },

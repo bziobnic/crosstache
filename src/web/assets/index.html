@@ -157,11 +157,13 @@
         <div><strong>Couldn’t save secret</strong><span class="error-message"></span><small class="error-hint"></small></div>
         <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
       </div>
+      <div id="protected-value-status" class="protected-value-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
       <label class="form-field"><span class="field-label">Name <span class="field-hint">Required</span></span><input name="name" required></label>
       <label id="type-picker-label" class="form-field" hidden><span class="field-label">Type</span><select id="type-picker"></select></label>
       <div id="value-section">
         <label class="form-field"><span class="field-label">Value <span class="field-hint">Protected</span></span>
-          <textarea name="value" rows="4" placeholder="Leave blank to keep the current value"></textarea>
+          <textarea name="value" rows="4" aria-describedby="value-protection-state protected-value-status" placeholder="Leave blank to keep the current value"></textarea>
+          <span id="value-protection-state" class="sr-only">Protected value is hidden.</span>
           <span class="field-actions">
             <button type="button" id="reveal" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg>Reveal</button>
             <button type="button" id="copy" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy</button>

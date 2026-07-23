@@ -5,6 +5,13 @@ export function announce(document, message, priority = 'polite') {
   liveRegion.textContent = message;
 }
 
+export function setProtectedValueStatus(document, message) {
+  const liveRegion = document.getElementById('protected-value-status');
+  if (!liveRegion) return;
+  liveRegion.textContent = message;
+  liveRegion.hidden = !message;
+}
+
 export function setBackgroundInert(document, active) {
   const supportsInert = typeof HTMLElement !== 'undefined' && 'inert' in HTMLElement.prototype;
   for (const element of document.querySelectorAll('header, main')) {

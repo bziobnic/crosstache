@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStore, draftReducer } from './store.js';
 import { createDialogManager } from './dialogs.js';
 import { ApiError } from './api-client.js';
+import { PROTECTED_MASK } from './ui-model.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,9 +19,10 @@ class Element {
     this.disabled = false;
     this.value = '';
     this.textContent = '';
-    this.innerHTML = '';
+    this._innerHTML = '';
     this.dataset = {};
     this.children = [];
+    this.attributes = new Map();
     this.classes = new Set();
     this.classList = {
       add: (name) => this.classes.add(name),
@@ -31,8 +33,12 @@ class Element {
     this.listeners = new Map();
   }
 
-  setAttribute() {}
-  removeAttribute() {}
+  get innerHTML() { return this._innerHTML; }
+  set innerHTML(value) { this._innerHTML = value; if (value === '') this.children = []; }
+  get childNodes() { return this.children; }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  removeAttribute(name) { this.attributes.delete(name); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
   appendChild(child) { this.children.push(child); return child; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
@@ -83,14 +89,62 @@ function createDocument() {
   for (const selector of ['#secret-error', '#file-error', '#secret-form-error']) {
     document.element(selector).hidden = true;
   }
+  document.element('#protected-value-status').hidden = true;
   return { document, elements };
 }
 
-async function mountRouteUi({ failSave = false, apiImpl = null, tauriEvents = null } = {}) {
+function exposureClock() {
+  let nextId = 0;
+  const scheduled = new Map();
+  return {
+    setTimeout(callback, delay) {
+      const id = ++nextId;
+      scheduled.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) { scheduled.delete(id); },
+    advanceOneSecond() {
+      for (const [id, task] of [...scheduled]) {
+        if (task.delay !== 1000) continue;
+        scheduled.delete(id);
+        task.callback();
+      }
+    },
+  };
+}
+
+function findElement(root, predicate) {
+  if (predicate(root)) return root;
+  for (const child of root.children || []) {
+    if (typeof child !== 'object') continue;
+    const match = findElement(child, predicate);
+    if (match) return match;
+  }
+  return null;
+}
+
+async function mountRouteUi({
+  failSave = false,
+  apiImpl = null,
+  tauriEvents = null,
+  clipboard = { readText: async () => '', writeText: async () => {} },
+  clock = globalThis,
+  preferences = null,
+} = {}) {
   const { document, elements } = createDocument();
-  const previous = new Map(['document', 'navigator', '__TAURI__'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const previous = new Map(['document', 'navigator', '__TAURI__', 'addEventListener', 'removeEventListener']
+    .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const windowListeners = new Map();
   Object.defineProperty(globalThis, 'document', { configurable: true, value: document });
-  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async () => {} } } });
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard } });
+  Object.defineProperty(globalThis, 'addEventListener', {
+    configurable: true,
+    value: (type, listener) => windowListeners.set(type, listener),
+  });
+  Object.defineProperty(globalThis, 'removeEventListener', {
+    configurable: true,
+    value: (type) => windowListeners.delete(type),
+  });
   if (tauriEvents) Object.defineProperty(globalThis, '__TAURI__', { configurable: true, value: { event: tauriEvents } });
   const api = apiImpl || (async (_method, path) => {
     if (failSave && _method === 'PUT') throw new Error('save failed');
@@ -105,13 +159,15 @@ async function mountRouteUi({ failSave = false, apiImpl = null, tauriEvents = nu
   const store = createStore({ draft: null, savePending: false }, draftReducer);
   const dialogs = createDialogManager(document);
   dialogs.confirmDiscard = () => { confirmations.push(true); return true; };
-  mountSecrets({ api, store, dialogs, token: 'test' });
+  mountSecrets({ api, store, dialogs, preferences, token: 'test', exposureClock: clock });
   await new Promise((resolve) => setTimeout(resolve, 0));
   return {
     document,
     elements,
     store,
     confirmations,
+    dispatchWindow(type, event = {}) { return windowListeners.get(type)?.(event); },
+    find(selector, predicate) { return findElement(document.element(selector), predicate); },
     async openDirty() {
       const invoker = elements.get('#new-secret');
       document.activeElement = invoker;
@@ -126,6 +182,15 @@ async function mountRouteUi({ failSave = false, apiImpl = null, tauriEvents = nu
       }
     },
   };
+}
+
+async function openExistingSecret(ui, name) {
+  const button = ui.find('#secrets-table tbody', (element) => (
+    element.getAttribute?.('aria-label') === `Edit secret ${name}`
+  ));
+  assert.ok(button, `edit control for ${name} is rendered`);
+  button.onclick({ stopPropagation() {} });
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 test('drawer routes guard cancel, Escape, backdrop, tabs, vault changes, and competing edits', async () => {
@@ -339,6 +404,134 @@ test('aborted and stale list failures leave the current list surface unchanged',
     } finally {
       abortUi.restore();
     }
+  } finally {
+    ui.restore();
+  }
+});
+
+function existingSecretApi(value = 'top-secret') {
+  return async (method, path) => {
+    if (path === '/api/context') {
+      return { vault: 'one', backend: 'test', capabilities: { files: false, soft_delete: false } };
+    }
+    if (path === '/api/types') return { types: [] };
+    if (path === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
+    if (method === 'GET' && path.startsWith('/api/secrets/existing?')) {
+      return { tags: {}, content_type: '', enabled: true, not_before: null };
+    }
+    if (method === 'POST' && path.startsWith('/api/secrets/existing/value?')) return { value };
+    if (method === 'GET' && path.startsWith('/api/secrets?')) return [{ name: 'existing' }];
+    if (method === 'PATCH') return {};
+    return [];
+  };
+}
+
+function twoSecondPreferences() {
+  const state = { exposure_timeout_seconds: 2 };
+  return {
+    load: async () => state,
+    get: (key, fallback) => state[key] ?? fallback,
+    snapshot: () => ({ ...state }),
+  };
+}
+
+test('mounted protected fields reset inactivity and hide on timeout, visibility, and blur', async () => {
+  const clock = exposureClock();
+  const ui = await mountRouteUi({
+    apiImpl: existingSecretApi(),
+    clock,
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    const value = ui.elements.get('#field-value');
+    const status = ui.elements.get('#protected-value-status');
+    await ui.elements.get('#reveal').onclick();
+    assert.equal(value.value, 'top-secret');
+    assert.equal(status.textContent, 'Value revealed. Hides in 2 seconds.');
+    assert.doesNotMatch(status.textContent, /top-secret/);
+
+    clock.advanceOneSecond();
+    assert.equal(status.textContent, 'Value revealed. Hides in 1 second.');
+    value.dispatch('pointerdown');
+    clock.advanceOneSecond();
+    assert.equal(value.value, 'top-secret');
+    clock.advanceOneSecond();
+    assert.equal(value.value, PROTECTED_MASK);
+
+    await ui.elements.get('#reveal').onclick();
+    ui.document.visibilityState = 'hidden';
+    ui.document.dispatch('visibilitychange');
+    assert.equal(value.value, PROTECTED_MASK);
+
+    ui.document.visibilityState = 'visible';
+    await ui.elements.get('#reveal').onclick();
+    ui.dispatchWindow('blur');
+    assert.equal(value.value, PROTECTED_MASK);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('mounted drawer close, save, and context switch forget protected values and store drafts', async () => {
+  const ui = await mountRouteUi({
+    apiImpl: existingSecretApi(),
+    clock: exposureClock(),
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    const value = ui.elements.get('#field-value');
+    await openExistingSecret(ui, 'existing');
+    await ui.elements.get('#reveal').onclick();
+    await ui.elements.get('#close-drawer').onclick();
+    assert.equal(value.value, '');
+    assert.equal(ui.store.snapshot().draft, null);
+
+    await openExistingSecret(ui, 'existing');
+    await ui.elements.get('#reveal').onclick();
+    const form = ui.elements.get('#secret-form');
+    await form.onsubmit({ preventDefault() {}, target: form });
+    assert.equal(value.value, '');
+    assert.equal(ui.store.snapshot().draft, null);
+
+    await openExistingSecret(ui, 'existing');
+    await ui.elements.get('#reveal').onclick();
+    ui.elements.get('#vault-select').value = 'two';
+    await ui.elements.get('#vault-select').onchange();
+    assert.equal(value.value, '');
+    assert.equal(ui.store.snapshot().draft, null);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('mounted copy countdown names the field and preserves newer clipboard content', async () => {
+  let clipboardValue = '';
+  const clipboard = {
+    readText: async () => clipboardValue,
+    writeText: async (value) => { clipboardValue = value; },
+  };
+  const clock = exposureClock();
+  const ui = await mountRouteUi({
+    apiImpl: existingSecretApi(),
+    clipboard,
+    clock,
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    await ui.elements.get('#copy').onclick();
+    const status = ui.elements.get('#protected-value-status');
+    assert.equal(clipboardValue, 'top-secret');
+    assert.equal(status.textContent, 'Value copied. Clipboard clears in 2 seconds.');
+    assert.doesNotMatch(status.textContent, /top-secret/);
+
+    clipboardValue = 'newer-content';
+    clock.advanceOneSecond();
+    clock.advanceOneSecond();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(clipboardValue, 'newer-content');
+    assert.equal(status.textContent, 'Value clipboard clearing could not be confirmed.');
   } finally {
     ui.restore();
   }
