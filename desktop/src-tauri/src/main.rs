@@ -4,7 +4,6 @@ use std::sync::{
     Arc,
 };
 
-use crosstache::backend::BackendRegistry;
 use tauri::{Emitter, Listener, Manager};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -39,31 +38,6 @@ fn close_decision(save_pending: bool, approved: bool) -> CloseDecision {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{close_decision, CloseDecision, DesktopSavePending};
-
-    #[test]
-    fn close_decision_allows_an_approved_close_and_asks_the_page_otherwise() {
-        assert_eq!(close_decision(false, true), CloseDecision::Allow);
-        assert_eq!(close_decision(false, false), CloseDecision::AskPage);
-        assert_eq!(close_decision(true, false), CloseDecision::DenyWhileSaving);
-    }
-
-    #[test]
-    fn close_decision_denies_while_page_save_is_pending() {
-        let state = DesktopSavePending::default();
-        assert_eq!(close_decision(state.get(), false), CloseDecision::AskPage);
-        state.set_from_payload("true").unwrap();
-        assert_eq!(
-            close_decision(state.get(), true),
-            CloseDecision::DenyWhileSaving
-        );
-        state.set_from_payload("false").unwrap();
-        assert_eq!(close_decision(state.get(), true), CloseDecision::Allow);
-    }
-}
-
 fn project_directory() -> Result<Option<PathBuf>, String> {
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -94,11 +68,10 @@ async fn start_server(window: tauri::WebviewWindow) -> Result<(), String> {
         })?;
     }
 
-    let config = crosstache::config::load_config()
+    let config = crosstache::config::load_config_no_validation()
         .await
         .map_err(|e| e.to_string())?;
-    let registry = BackendRegistry::from_config(&config).map_err(|e| e.to_string())?;
-    let server = crosstache::web::prepare_web(config, Some(&registry), None)
+    let server = crosstache::web::prepare_web(config, None, None)
         .await
         .map_err(|e| e.to_string())?;
     let url = server
@@ -162,4 +135,29 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running xv desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{close_decision, CloseDecision, DesktopSavePending};
+
+    #[test]
+    fn close_decision_allows_an_approved_close_and_asks_the_page_otherwise() {
+        assert_eq!(close_decision(false, true), CloseDecision::Allow);
+        assert_eq!(close_decision(false, false), CloseDecision::AskPage);
+        assert_eq!(close_decision(true, false), CloseDecision::DenyWhileSaving);
+    }
+
+    #[test]
+    fn close_decision_denies_while_page_save_is_pending() {
+        let state = DesktopSavePending::default();
+        assert_eq!(close_decision(state.get(), false), CloseDecision::AskPage);
+        state.set_from_payload("true").unwrap();
+        assert_eq!(
+            close_decision(state.get(), true),
+            CloseDecision::DenyWhileSaving
+        );
+        state.set_from_payload("false").unwrap();
+        assert_eq!(close_decision(state.get(), true), CloseDecision::Allow);
+    }
 }

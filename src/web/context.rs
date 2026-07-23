@@ -7,8 +7,8 @@ use serde::Serialize;
 
 use crate::backend::{Backend, BackendCapabilities, BackendKind, BackendRegistry};
 use crate::config::project::{
-    find_project_config, resolve_env_with_source, EnvProfile, EnvironmentSelectionSource,
-    ProjectConfig,
+    find_project_config, resolve_effective_backend_config, resolve_env_with_source,
+    BackendSelectionSource, EnvProfile, EnvironmentSelectionSource, ProjectConfig,
 };
 use crate::config::{Config, ContextManager};
 use crate::error::{CrosstacheError, Result};
@@ -165,7 +165,17 @@ pub(crate) async fn resolve_ui_context_and_backend(
     registry: &BackendRegistry,
     cwd: &Path,
 ) -> Result<ResolvedUiContext> {
+    let effective = resolve_effective_backend_config(config, cwd).await?;
+    resolve_ui_context_from_effective(&effective, registry, cwd).await
+}
+
+pub(crate) async fn resolve_ui_context_from_effective(
+    effective: &crate::config::project::EffectiveBackendConfig,
+    registry: &BackendRegistry,
+    cwd: &Path,
+) -> Result<ResolvedUiContext> {
     let context_manager = ContextManager::load_for_cwd(cwd).await?;
+    let config = &effective.config;
     let project = find_project_config(cwd)
         .await?
         .map(|(path, config)| ProjectResolution { path, config });
@@ -182,7 +192,12 @@ pub(crate) async fn resolve_ui_context_and_backend(
         })?;
     let target =
         crate::workspace::resolve::materialize_default_entry(config, &workspace, registry)?;
-    let backend_source = backend_source(config, profile.as_ref(), &workspace, &context_manager);
+    let backend_source = backend_source(
+        effective.source,
+        profile.as_ref(),
+        &workspace,
+        &context_manager,
+    );
     let vault_source = vault_source(config, profile.as_ref(), &workspace, &context_manager);
     let connection = match target.backend.health_check().await {
         Ok(()) => ConnectionSummary {
@@ -267,7 +282,7 @@ fn project_summary(project: &ProjectResolution) -> ProjectSummary {
 }
 
 fn backend_source(
-    config: &Config,
+    effective_source: BackendSelectionSource,
     profile: Option<&ResolvedProfile<'_>>,
     workspace: &Workspace,
     context: &ContextManager,
@@ -279,16 +294,12 @@ fn backend_source(
     {
         return ContextSource::WorkspaceEntry;
     }
-    if config.cli_backend_was_arg {
-        ContextSource::Cli
-    } else if profile.is_some_and(|profile| profile.profile.backend.is_some()) {
-        ContextSource::ProjectEnvironment
-    } else if config.cli_backend.is_some() {
-        ContextSource::Environment
-    } else if config.disk_backend.is_some() {
-        ContextSource::GlobalConfig
-    } else {
-        ContextSource::BuiltIn
+    match effective_source {
+        BackendSelectionSource::Cli => ContextSource::Cli,
+        BackendSelectionSource::Environment => ContextSource::Environment,
+        BackendSelectionSource::ProjectEnvironment => ContextSource::ProjectEnvironment,
+        BackendSelectionSource::GlobalConfig => ContextSource::GlobalConfig,
+        BackendSelectionSource::BuiltIn => ContextSource::BuiltIn,
     }
 }
 
@@ -695,6 +706,7 @@ vaults = [
             // web command starts; disk_backend retains the absent source.
             backend: Some("azure".into()),
             disk_backend: None,
+            pre_flag_backend: Some("azure".into()),
             default_vault: "configured-vault".into(),
             ..Default::default()
         };
@@ -827,5 +839,188 @@ vault = "project-vault"
             from_profile.sources.vault,
             ContextSource::ProjectEnvironment
         );
+    }
+
+    #[tokio::test]
+    async fn desktop_raw_config_folds_project_backend_before_workspace_and_route_state() {
+        use std::sync::Arc;
+
+        use crate::backend::{BackendCapabilities, BackendKind};
+        use crate::web::testutil::stub::StubBackend;
+
+        let root = tempfile::tempdir().expect("temp root");
+        let cwd = root.path().join("desktop-project");
+        tokio::fs::create_dir_all(cwd.join(".xv"))
+            .await
+            .expect("fixture directories");
+        tokio::fs::write(
+            cwd.join(".xv.toml"),
+            r#"
+default_env = "dev"
+
+[env.dev]
+backend = "local"
+vault = "desktop-vault"
+vaults = [
+  { vault = "desktop-vault", alias = "work", default = true },
+]
+"#,
+        )
+        .await
+        .expect("project config");
+        tokio::fs::write(
+            cwd.join(".xv").join("context"),
+            br#"{"current":null,"recent":[],"workspace":null}"#,
+        )
+        .await
+        .expect("isolated context");
+
+        let global_backend = Arc::new(StubBackend::with_capabilities(
+            "azure",
+            BackendCapabilities {
+                has_folders: false,
+                ..Default::default()
+            },
+        ));
+        let registry = BackendRegistry::for_test(
+            "azure",
+            vec![(
+                "azure",
+                global_backend.clone() as Arc<dyn crate::backend::Backend>,
+            )],
+        );
+        let raw_config = Config {
+            backend: Some("azure".into()),
+            // Intentionally incomplete Azure configuration. Desktop must
+            // select and validate the project-local backend before trying it.
+            subscription_id: String::new(),
+            tenant_id: String::new(),
+            local: Some(LocalConfig {
+                store_path: Some(root.path().join("store").to_string_lossy().into_owned()),
+                key_file: Some(root.path().join("key").to_string_lossy().into_owned()),
+                default_vault: Some("desktop-vault".into()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+            ..Default::default()
+        };
+
+        let startup = crate::config::project::resolve_effective_backend_config(&raw_config, &cwd)
+            .await
+            .expect("effective startup config");
+        startup
+            .config
+            .validate()
+            .expect("selected local config validates before incomplete Azure");
+        let startup_registry = BackendRegistry::from_config(&startup.config)
+            .expect("selected backend registry exists");
+        assert_eq!(startup_registry.active().kind(), BackendKind::Local);
+
+        let resolved = super::resolve_ui_context_and_backend(&raw_config, &registry, &cwd)
+            .await
+            .expect("project-local context");
+
+        assert_eq!(resolved.context.backend, "local");
+        assert_eq!(resolved.context.backend_kind, BackendKind::Local);
+        assert_eq!(resolved.context.vault, "desktop-vault");
+        assert_eq!(
+            resolved.context.sources.backend,
+            ContextSource::ProjectEnvironment
+        );
+        assert!(resolved.context.capabilities.folders);
+        assert_eq!(resolved.backend.name(), "local");
+        assert_eq!(global_backend.secrets.lock().unwrap().len(), 0);
+
+        let state = Arc::new(crate::web::WebState {
+            backend: resolved.backend,
+            context: resolved.context,
+            token: "test-token".into(),
+            vault: "desktop-vault".into(),
+            types: crate::records::builtin_types(),
+            preferences: crate::web::preferences::PreferenceStore::new(
+                root.path().join("ui.json"),
+                30,
+            ),
+        });
+        let app = crate::web::build_router(state);
+        let (status, _) = crate::web::api::tests::get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/desktop-proof",
+            Some(json!({"value": "route-used-project-backend"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, secrets) = crate::web::api::tests::get_json(app, "GET", "/api/secrets", None).await;
+        assert_eq!(secrets[0]["name"], "desktop-proof");
+        assert_eq!(global_backend.secrets.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn desktop_raw_config_folds_project_backend_for_single_project_vault() {
+        use std::sync::Arc;
+
+        use crate::backend::BackendKind;
+        use crate::web::testutil::stub::StubBackend;
+
+        let root = tempfile::tempdir().expect("temp root");
+        let cwd = root.path().join("single-vault-project");
+        tokio::fs::create_dir_all(cwd.join(".xv"))
+            .await
+            .expect("fixture directories");
+        tokio::fs::write(
+            cwd.join(".xv.toml"),
+            r#"
+default_env = "dev"
+
+[env.dev]
+backend = "local"
+vault = "single-vault"
+"#,
+        )
+        .await
+        .expect("project config");
+        tokio::fs::write(
+            cwd.join(".xv").join("context"),
+            br#"{"current":null,"recent":[],"workspace":null}"#,
+        )
+        .await
+        .expect("isolated context");
+        let registry = BackendRegistry::for_test(
+            "azure",
+            vec![(
+                "azure",
+                Arc::new(StubBackend::new()) as Arc<dyn crate::backend::Backend>,
+            )],
+        );
+        let raw_config = Config {
+            backend: Some("azure".into()),
+            local: Some(LocalConfig {
+                store_path: Some(root.path().join("store").to_string_lossy().into_owned()),
+                key_file: Some(root.path().join("key").to_string_lossy().into_owned()),
+                default_vault: Some("single-vault".into()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
+            ..Default::default()
+        };
+
+        let resolved = super::resolve_ui_context_and_backend(&raw_config, &registry, &cwd)
+            .await
+            .expect("single project vault");
+
+        assert_eq!(resolved.context.backend, "local");
+        assert_eq!(resolved.context.backend_kind, BackendKind::Local);
+        assert_eq!(resolved.context.vault, "single-vault");
+        assert!(!resolved.context.workspace.configured);
+        assert_eq!(
+            resolved.context.sources.backend,
+            ContextSource::ProjectEnvironment
+        );
+        assert_eq!(
+            resolved.context.sources.vault,
+            ContextSource::ProjectEnvironment
+        );
+        assert_eq!(resolved.backend.name(), "local");
     }
 }

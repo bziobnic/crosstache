@@ -241,22 +241,23 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
 /// Bind the embedded web UI and return it without starting the accept loop.
 pub async fn prepare_web(
     config: Config,
-    registry: Option<&BackendRegistry>,
+    _registry: Option<&BackendRegistry>,
     port: Option<u16>,
 ) -> Result<PreparedWebServer> {
     let preference_path = preferences::preference_path_for(&Config::get_config_path()?);
     let preference_store =
         preferences::PreferenceStore::new(preference_path, config.clipboard_timeout);
-    let registry = registry.ok_or_else(|| {
-        CrosstacheError::config("backend initialization failed; `xv ui` needs a working backend")
-    })?;
     let cwd = std::env::current_dir()?;
-    let resolved = context::resolve_ui_context_and_backend(&config, registry, &cwd).await?;
+    let effective = crate::config::project::resolve_effective_backend_config(&config, &cwd).await?;
+    effective.config.validate()?;
+    let registry =
+        BackendRegistry::from_config(&effective.config).map_err(CrosstacheError::from)?;
+    let resolved = context::resolve_ui_context_from_effective(&effective, &registry, &cwd).await?;
     let vault = resolved.context.vault.clone();
     let backend = resolved.backend;
     // Fail loud at startup on a broken [types.*] block, matching the CLI's
     // eager type-resolution paths.
-    let types = config.resolve_record_types().await?;
+    let types = effective.config.resolve_record_types().await?;
 
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);

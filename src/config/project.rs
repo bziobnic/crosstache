@@ -97,6 +97,84 @@ pub fn resolve_effective_backend<'a>(
         .unwrap_or("azure")
 }
 
+/// Display-safe provenance for the effective backend selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackendSelectionSource {
+    Cli,
+    Environment,
+    ProjectEnvironment,
+    GlobalConfig,
+    BuiltIn,
+}
+
+/// A config snapshot whose backend has been folded through the same
+/// precedence chain used by CLI and desktop web startup.
+pub(crate) struct EffectiveBackendConfig {
+    pub(crate) config: crate::config::Config,
+    pub(crate) source: BackendSelectionSource,
+}
+
+/// Fold the effective backend for an explicit working directory.
+///
+/// Precedence is CLI flag > active project environment > `XV_BACKEND` >
+/// global config > built-in Azure. The input may be either a raw config
+/// loaded by the desktop shell or the provenance-enriched config prepared by
+/// `main.rs`; both produce the same effective snapshot.
+pub(crate) async fn resolve_effective_backend_config(
+    config: &crate::config::Config,
+    cwd: &Path,
+) -> Result<EffectiveBackendConfig> {
+    let project = find_project_config(cwd).await?;
+    let profile_backend = match project.as_ref() {
+        Some((_path, project)) => resolve_env(project, config.env_flag.as_deref())?
+            .and_then(|(_name, profile)| profile.backend.as_deref()),
+        None => None,
+    };
+
+    let prepared_by_cli = config.cli_backend_was_arg
+        || config.cli_backend.is_some()
+        || config.disk_backend.is_some()
+        || config.pre_flag_backend.is_some();
+
+    let (backend, source) = if config.cli_backend_was_arg {
+        (
+            config
+                .cli_backend
+                .as_deref()
+                .unwrap_or_else(|| config.effective_backend_name())
+                .to_string(),
+            BackendSelectionSource::Cli,
+        )
+    } else if let Some(backend) = profile_backend {
+        validate_env_profile_backend(backend)?;
+        (
+            backend.to_string(),
+            BackendSelectionSource::ProjectEnvironment,
+        )
+    } else if let Some(backend) = config.cli_backend.as_deref() {
+        (backend.to_string(), BackendSelectionSource::Environment)
+    } else if !prepared_by_cli {
+        match std::env::var("XV_BACKEND") {
+            Ok(backend) => (backend, BackendSelectionSource::Environment),
+            Err(_) => match config.backend.as_deref() {
+                Some(backend) => (backend.to_string(), BackendSelectionSource::GlobalConfig),
+                None => ("azure".to_string(), BackendSelectionSource::BuiltIn),
+            },
+        }
+    } else if let Some(backend) = config.disk_backend.as_deref() {
+        (backend.to_string(), BackendSelectionSource::GlobalConfig)
+    } else {
+        ("azure".to_string(), BackendSelectionSource::BuiltIn)
+    };
+
+    let mut effective = config.clone();
+    effective.backend = Some(backend);
+    Ok(EffectiveBackendConfig {
+        config: effective,
+        source,
+    })
+}
+
 /// Scanner configuration block for leak detection settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScanConfig {
