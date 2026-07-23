@@ -58,6 +58,23 @@ Task 5 conversion and atomic rename contracts.
    changes, failures, closes, successful completion, and context changes.
 10. Rename and conversion inputs are now part of the drawer draft, so Escape,
     close, and context navigation consistently offer Keep editing or Discard.
+11. A second review remediation added a failing store-snapshot assertion that
+    proved preview failure scrubbed the protected DOM state but left its value
+    in the central draft. Scrubbing now immediately synchronizes the draft and
+    conversion serialization omits both empty and null protected values. The
+    webdriver-only snapshot seam used by the browser assertion is unavailable
+    during ordinary interactive use.
+12. Added a delayed-apply barrier test before locking behavior. While apply is
+    pending the complete conversion workflow is inert and every target,
+    supplied, reveal, copy, preview, and confirm control is disabled. Guarded
+    handlers cannot invalidate the immutable operation, delayed success closes
+    the drawer and refreshes the list, and failure restores the controls after
+    scrubbing protected state.
+13. The full typed suite caught an interaction between scrub synchronization
+    and context activation. A confirmed context switch now skips only the
+    intermediate draft write after activation begins because that draft is
+    immediately closed; this avoids misclassifying cleanup as new scoped
+    activity while still removing the draft and protected values.
 
 ## Verification
 
@@ -69,8 +86,8 @@ Task 5 conversion and atomic rename contracts.
 - `cargo fmt -- --check`: **passed**
 - `cargo check --features ui`: **passed**
 - `git diff --check`: **passed**
-- `npx playwright test tests/web/ui-typed-editor.spec.js`: **9 passed**
-- `npx playwright test`: **32 passed**
+- `npx playwright test tests/web/ui-typed-editor.spec.js`: **11 passed**
+- `npx playwright test`: **34 passed**
 - Axe scans in new-secret metadata controls, open conversion preview, and
   rename-error states: **no serious or critical violations**
 

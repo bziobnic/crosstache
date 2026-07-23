@@ -1257,6 +1257,13 @@ function syncDraftControls() {
   ]) {
     syncPendingDisabled($(selector), pending);
   }
+  const conversionWorkflow = $('#conversion-workflow');
+  if (pending) conversionWorkflow.setAttribute('inert', '');
+  else conversionWorkflow.removeAttribute('inert');
+  conversionWorkflow.setAttribute('aria-disabled', String(pending));
+  for (const control of conversionWorkflow.querySelectorAll('input, select, button')) {
+    syncPendingDisabled(control, pending);
+  }
   const backdrop = $('#drawer-backdrop');
   backdrop.dataset.pending = String(pending);
   backdrop.classList.toggle('pending-disabled', pending);
@@ -2022,7 +2029,7 @@ function conversionSuppliedFields() {
         input.dataset.conversionField,
         input.dataset.fieldKind === 'secret' ? input._protectedState?.value : input.value,
       ])
-      .filter(([, value]) => value !== ''),
+      .filter(([, value]) => value !== '' && value != null),
   );
 }
 
@@ -2077,10 +2084,20 @@ function scrubConversionProtectedState(entry) {
   entry.input.value = '';
 }
 
-function clearConversionFields() {
+function scrubConversionFields({ remove = false } = {}) {
   for (const entry of conversionFieldStates.values()) scrubConversionProtectedState(entry);
-  conversionFieldStates.clear();
-  $('#conversion-required-fields').replaceChildren();
+  if (remove) {
+    conversionFieldStates.clear();
+    $('#conversion-required-fields').replaceChildren();
+  }
+  // A confirmed context switch closes the draft immediately. Dispatching an
+  // intermediate draft change after activation starts would look like new
+  // scoped activity and correctly cancel that activation.
+  if (!store.snapshot().contextSwitchPending) updateDraft();
+}
+
+function clearConversionFields() {
+  scrubConversionFields({ remove: true });
 }
 
 function conversionExposureIsCurrent({ entry, revision, epoch, generation }) {
@@ -2089,6 +2106,7 @@ function conversionExposureIsCurrent({ entry, revision, epoch, generation }) {
     && conversionFieldStates.get(entry.name) === entry
     && entry.input.isConnected
     && entry.state.revision === revision
+    && !store.snapshot().savePending
     && !$('#drawer').hidden;
 }
 
@@ -2165,6 +2183,7 @@ function conversionProtectedField(name, definition) {
     renderProtectedControl(input, reveal, state);
   };
   input.oninput = () => {
+    if (store.snapshot().savePending) return;
     XvUiModel.editProtected(state, input.value);
     resetRevealTimer(state);
     clearConversionPreview();
@@ -2219,6 +2238,7 @@ function ensureConversionField(name) {
   input.dataset.fieldKind = definition?.kind || 'metadata';
   input.required = true;
   input.oninput = () => {
+    if (store.snapshot().savePending) return;
     clearConversionPreview();
     updateDraft();
   };
@@ -2282,7 +2302,7 @@ async function previewConversion() {
     renderConversionPreview(preview, operation);
   } catch (error) {
     if (!conversionOperationIsCurrent(operation)) return;
-    for (const entry of conversionFieldStates.values()) scrubConversionProtectedState(entry);
+    scrubConversionFields();
     if (error?.field?.startsWith('supplied_fields.')) {
       ensureConversionField(error.field.slice('supplied_fields.'.length));
     }
@@ -2527,6 +2547,7 @@ $('#conversion-toggle').onclick = () => setWorkflowOpen(
 );
 $('#rename-toggle').onclick = () => setWorkflowOpen('rename', $('#rename-workflow').hidden);
 $('#conversion-target').onchange = () => {
+  if (store.snapshot().savePending) return;
   clearConversionPreview();
   clearConversionFields();
   updateDraft();

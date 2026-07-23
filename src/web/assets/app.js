@@ -23,6 +23,9 @@ const store = createStore({
   draft: null,
   savePending: false,
 }, draftReducer);
+if (navigator.webdriver) {
+  globalThis.__xvTestStoreSnapshot = () => store.snapshot();
+}
 const api = createApiClient({
   token,
   onInflight: (inflight) => {
