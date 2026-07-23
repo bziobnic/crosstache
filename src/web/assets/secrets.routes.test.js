@@ -702,6 +702,84 @@ test('mounted folder navigation filters rows and restores expansion without leak
   }
 });
 
+test('mounted local search and composable filters stay metadata-only and expose removable controls', async () => {
+  const context = {
+    ...routedContext('primary', 'one'),
+    capabilities: { ...routedContext('primary', 'one').capabilities, files: true },
+  };
+  const secretRows = [
+    {
+      name: 'prod-login',
+      folder: 'prod',
+      groups: ['ops'],
+      note: 'needle-private-note',
+      tags: { 'xv-type': 'login' },
+      enabled: true,
+      expires_on: '2035-01-01T00:00:00Z',
+    },
+    {
+      name: 'disabled-database',
+      folder: 'prod',
+      groups: ['ops'],
+      tags: { 'xv-type': 'database' },
+      enabled: false,
+    },
+  ];
+  const fileRows = [
+    { name: 'prod/report.pdf', size: 4, content_type: 'application/pdf' },
+    { name: 'dev/readme.txt', size: 3, content_type: 'text/plain' },
+  ];
+  const api = async (method, requestPath) => {
+    if (method === 'GET' && requestPath === '/api/context') return context;
+    if (requestPath === '/api/types') return { types: [] };
+    if (requestPath === '/api/vaults') return { vaults: [{ name: 'one' }] };
+    if (method === 'GET' && requestPath.startsWith('/api/secrets')) return secretRows;
+    if (method === 'GET' && requestPath.startsWith('/api/files')) return fileRows;
+    return [];
+  };
+  const ui = await mountRouteUi({ apiImpl: api });
+  try {
+    const visibleNames = (surface, prefix) => ui.findAll(
+      `#${surface}-table tbody`,
+      (element) => element.getAttribute?.('aria-label')?.startsWith(prefix),
+    ).map((element) => element.getAttribute('aria-label'));
+
+    const search = ui.elements.get('#search');
+    search.value = 'needle-private-note';
+    search.oninput();
+    assert.deepEqual(visibleNames('secrets', 'Edit secret '), [], 'notes are never searchable');
+    assert.equal(ui.elements.get('#secret-search-clear').hidden, false);
+    ui.elements.get('#secret-search-clear').onclick();
+    assert.equal(search.value, '');
+
+    const enabled = ui.elements.get('#secret-filter-enabled');
+    enabled.value = 'false';
+    enabled.onchange();
+    assert.equal(ui.elements.get('#secret-item-count').textContent, '1 / 2 secrets');
+    assert.deepEqual(visibleNames('secrets', 'Edit secret '), ['Edit secret disabled-database']);
+    const statusChip = ui.find('#secret-filter-chips', (element) => (
+      element.getAttribute?.('aria-label') === 'Remove Status: disabled filter'
+    ));
+    assert.ok(statusChip);
+    statusChip.onclick();
+    assert.deepEqual(visibleNames('secrets', 'Edit secret '), [
+      'Edit secret disabled-database',
+      'Edit secret prod-login',
+    ]);
+
+    await ui.elements.get('#tab-files').onclick();
+    const fileSearch = ui.elements.get('#file-search');
+    fileSearch.value = 'APPLICATION/PDF';
+    fileSearch.oninput();
+    assert.deepEqual(ui.findAll('#files-table tbody', (element) => (
+      element.key === 'strong' && element.textContent
+    )).map((element) => element.textContent), ['prod/report.pdf']);
+    assert.equal(ui.elements.get('#file-search-clear').hidden, false);
+  } finally {
+    ui.restore();
+  }
+});
+
 test('empty list refresh persists pruning and cleans legacy folder state before a later re-add', async () => {
   const context = routedContext('primary', 'one');
   const apps = XvUiModel.folderIdentity('apps');

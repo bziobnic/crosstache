@@ -75,11 +75,20 @@
       <span id="secret-item-count" class="item-count" aria-live="polite">0 secrets</span>
     </div>
     <div class="toolbar">
-      <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search by name, folder, group, or note"></label>
+      <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search names, folders, groups, and record types"></label>
+      <button id="secret-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
       <button id="refresh-secrets" class="button secondary" type="button" aria-label="Refresh secrets">Refresh</button>
       <button id="select-secrets" class="button secondary" type="button">Select</button>
       <button id="new-secret" class="button primary" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New secret</button>
     </div>
+    <div id="secret-filter-controls" class="filter-controls" role="group" aria-label="Secret filters">
+      <label>Group<select id="secret-filter-group"><option value="">All groups</option></select></label>
+      <label>Record type<select id="secret-filter-type"><option value="">All record types</option></select></label>
+      <label>Expiry<select id="secret-filter-expiry"><option value="">Any expiry</option><option value="none">No expiry</option><option value="expiring">Expiring</option><option value="expired">Expired</option></select></label>
+      <label>Status<select id="secret-filter-enabled"><option value="">Any status</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
+      <button id="secret-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
+    </div>
+    <div id="secret-filter-chips" class="filter-chips" role="group" aria-label="Active secret filters" aria-live="polite" hidden></div>
     <div class="folder-mobile-controls" aria-label="Secret folder controls">
       <button id="secrets-folder-filter-open" class="button secondary" type="button" aria-haspopup="dialog" aria-controls="secrets-folder-sheet">Filter folders</button>
       <button id="secrets-mobile-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
@@ -138,10 +147,17 @@
       <span id="file-item-count" class="item-count" aria-live="polite">0 files</span>
     </div>
     <div class="toolbar file-toolbar">
-      <span class="toolbar-spacer"></span>
+      <label class="search-field"><span class="sr-only">Search files</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="file-search" type="search" placeholder="Search file names, folders, and types"></label>
+      <button id="file-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
       <button id="refresh-files" class="button secondary" type="button" aria-label="Refresh files">Refresh</button>
       <button id="select-files" class="button secondary" type="button">Select</button>
     </div>
+    <div id="file-filter-controls" class="filter-controls" role="group" aria-label="File filters">
+      <label>Type<select id="file-filter-type"><option value="">All file types</option></select></label>
+      <label>Upload status<select id="file-filter-uploadStatus"><option value="">Any upload status</option><option value="queued">Queued</option><option value="uploading">Uploading</option><option value="finishing">Finishing</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option><option value="ambiguous">Needs refresh</option></select></label>
+      <button id="file-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
+    </div>
+    <div id="file-filter-chips" class="filter-chips" role="group" aria-label="Active file filters" aria-live="polite" hidden></div>
     <div class="folder-mobile-controls" aria-label="File folder controls">
       <button id="files-folder-filter-open" class="button secondary" type="button" aria-haspopup="dialog" aria-controls="files-folder-sheet">Filter folders</button>
       <button id="files-mobile-folders-expand-all" class="button ghost compact" type="button">Expand all</button>

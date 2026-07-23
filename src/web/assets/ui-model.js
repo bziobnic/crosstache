@@ -166,6 +166,83 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     return value.split('/').filter((segment) => segment !== '').join('/');
   }
 
+  function normalizeFilterValue(value) {
+    return typeof value === 'string'
+      ? value.normalize('NFKC').toLocaleLowerCase().trim()
+      : '';
+  }
+
+  function groupValues(value) {
+    const values = Array.isArray(value)
+      ? value
+      : (typeof value === 'string' ? value.split(',') : []);
+    return values.map(normalizeFilterValue).filter(Boolean);
+  }
+
+  function recordType(item) {
+    return item?.tags?.['xv-type']
+      || item?.record_type
+      || item?.type
+      || (item?.content_type === 'application/vnd.xv.record' ? 'record' : 'plain');
+  }
+
+  function matchesExpiry(item, expiry, now) {
+    if (!expiry) return true;
+    if (!item?.expires_on) return expiry === 'none';
+    const timestamp = new Date(item.expires_on).getTime();
+    if (Number.isNaN(timestamp)) return false;
+    if (expiry === 'expired') return timestamp <= now.getTime();
+    if (expiry === 'expiring') return timestamp > now.getTime();
+    return false;
+  }
+
+  function filterSecrets(items, filters = {}, { now = new Date() } = {}) {
+    const folder = normalizeFilterValue(filters.folder);
+    const group = normalizeFilterValue(filters.group);
+    const type = normalizeFilterValue(filters.type);
+    const expiry = normalizeFilterValue(filters.expiry);
+    const hasEnabled = typeof filters.enabled === 'boolean';
+    return (items || []).filter((item) => (
+      (!folder || normalizeFilterValue(item?.folder) === folder)
+      && (!group || groupValues(item?.groups).includes(group))
+      && (!type || normalizeFilterValue(recordType(item)) === type)
+      && (!hasEnabled || item?.enabled === filters.enabled)
+      && matchesExpiry(item, expiry, now)
+    ));
+  }
+
+  function fileFolder(item) {
+    if (typeof item?.folder === 'string') return item.folder;
+    const name = typeof item?.name === 'string' ? item.name : '';
+    const separator = name.lastIndexOf('/');
+    return separator < 0 ? '' : name.slice(0, separator);
+  }
+
+  function filterFiles(items, filters = {}) {
+    const folder = normalizeFilterValue(filters.folder);
+    const type = normalizeFilterValue(filters.type);
+    const uploadStatus = normalizeFilterValue(
+      filters.uploadStatus ?? filters.upload_status,
+    );
+    return (items || []).filter((item) => (
+      (!folder || normalizeFilterValue(fileFolder(item)) === folder)
+      && (!type || normalizeFilterValue(item?.content_type) === type)
+      && (!uploadStatus || normalizeFilterValue(
+        item?.upload_status ?? item?.status,
+      ) === uploadStatus)
+    ));
+  }
+
+  function activeFilterChips(filters = {}, labels = {}) {
+    return Object.entries(filters).flatMap(([key, value]) => {
+      if (value === '' || value === null || value === undefined) return [];
+      const display = typeof value === 'boolean'
+        ? (value ? 'enabled' : 'disabled')
+        : String(value);
+      return [{ key, label: `${labels[key] || key}: ${display}` }];
+    });
+  }
+
   const FOLDER_ALL = Object.freeze({ kind: 'all' });
   const FOLDER_UNFILED = Object.freeze({ kind: 'unfiled' });
 
@@ -686,4 +763,5 @@ export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
   buildFolderTree, buildFolderViewModel, initialExpansion, createFolderTokenIndex,
   folderPreferenceKey, loadFolderExpansion,
   saveFolderExpansion, createFolderNavigationState, itemMatchesFolder,
-  flattenFolderTree, renderFolderTree };
+  flattenFolderTree, renderFolderTree, filterSecrets, filterFiles,
+  activeFilterChips };

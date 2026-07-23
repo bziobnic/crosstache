@@ -559,3 +559,104 @@ test('pruned expansion persists across fresh state and does not return when a fo
     false,
   );
 });
+
+test('secret filters compose with AND semantics', () => {
+  const fixtures = [
+    {
+      name: 'prod-login',
+      folder: 'prod',
+      groups: ['ops', 'dba'],
+      tags: { 'xv-type': 'login' },
+      enabled: true,
+      expires_on: '2030-01-02T00:00:00Z',
+    },
+    {
+      name: 'disabled-login',
+      folder: 'prod',
+      groups: 'ops',
+      tags: { 'xv-type': 'login' },
+      enabled: false,
+      expires_on: '2030-01-02T00:00:00Z',
+    },
+    {
+      name: 'prod-note',
+      folder: 'prod',
+      groups: 'ops',
+      enabled: true,
+      expires_on: '2030-01-02T00:00:00Z',
+    },
+  ];
+  const result = model.filterSecrets(fixtures, {
+    folder: 'prod',
+    group: 'OPS',
+    type: 'login',
+    enabled: true,
+    expiry: 'expiring',
+  }, { now: new Date('2029-01-01T00:00:00Z') });
+  assert.deepEqual(result.map((item) => item.name), ['prod-login']);
+});
+
+test('secret expiry and enabled filters distinguish missing expired and active metadata', () => {
+  const fixtures = [
+    { name: 'none', enabled: true },
+    { name: 'expired', enabled: false, expires_on: '2025-01-01T00:00:00Z' },
+    { name: 'future', enabled: true, expires_on: '2030-01-01T00:00:00Z' },
+  ];
+  const options = { now: new Date('2029-01-01T00:00:00Z') };
+  assert.deepEqual(model.filterSecrets(fixtures, { expiry: 'none' }, options).map(x => x.name), ['none']);
+  assert.deepEqual(model.filterSecrets(fixtures, { expiry: 'expired' }, options).map(x => x.name), ['expired']);
+  assert.deepEqual(model.filterSecrets(fixtures, { expiry: 'expiring' }, options).map(x => x.name), ['future']);
+  assert.deepEqual(model.filterSecrets(fixtures, { enabled: false }, options).map(x => x.name), ['expired']);
+});
+
+test('file filters compose folder MIME type and upload status without mutating rows', () => {
+  const fixtures = [
+    { name: 'prod/report.pdf', content_type: 'application/pdf', upload_status: 'completed' },
+    { name: 'prod/draft.txt', content_type: 'text/plain', upload_status: 'failed' },
+    { name: 'dev/report.pdf', content_type: 'application/pdf', upload_status: 'completed' },
+  ];
+  const before = structuredClone(fixtures);
+  const result = model.filterFiles(fixtures, {
+    folder: 'prod',
+    type: 'APPLICATION/PDF',
+    uploadStatus: 'completed',
+  });
+  assert.deepEqual(result.map((item) => item.name), ['prod/report.pdf']);
+  assert.deepEqual(fixtures, before);
+});
+
+test('blank filter values are inactive and group matching is token exact', () => {
+  const fixtures = [
+    { name: 'one', groups: 'devops, dba' },
+    { name: 'two', groups: ['ops'] },
+  ];
+  assert.deepEqual(model.filterSecrets(fixtures, {
+    folder: '',
+    group: '',
+    type: '',
+    expiry: '',
+    enabled: null,
+  }), fixtures);
+  assert.deepEqual(model.filterSecrets(fixtures, { group: 'ops' }).map(x => x.name), ['two']);
+});
+
+test('active filter chips have stable labels and preserve boolean false', () => {
+  assert.deepEqual(model.activeFilterChips({
+    folder: 'prod',
+    group: 'ops',
+    type: '',
+    expiry: 'expired',
+    enabled: false,
+  }, {
+    folder: 'Folder',
+    group: 'Group',
+    type: 'Type',
+    expiry: 'Expiry',
+    enabled: 'Status',
+  }), [
+    { key: 'folder', label: 'Folder: prod' },
+    { key: 'group', label: 'Group: ops' },
+    { key: 'expiry', label: 'Expiry: expired' },
+    { key: 'enabled', label: 'Status: disabled' },
+  ]);
+});

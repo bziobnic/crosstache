@@ -54,6 +54,8 @@ fn asset(path: &str) -> Option<(&'static str, &'static str)> {
             include_str!("assets/accessibility.js"),
         )),
         "/secrets.js" => Some(("application/javascript", include_str!("assets/secrets.js"))),
+        "/commands.js" => Some(("application/javascript", include_str!("assets/commands.js"))),
+        "/files.js" => Some(("application/javascript", include_str!("assets/files.js"))),
         "/preferences.js" => Some((
             "application/javascript",
             include_str!("assets/preferences.js"),
@@ -502,6 +504,8 @@ mod tests {
             "/accessibility.js",
             "/secrets.js",
             "/preferences.js",
+            "/commands.js",
+            "/files.js",
         ] {
             assert!(asset(path).is_some(), "missing {path}");
         }
@@ -1148,8 +1152,12 @@ mod tests {
 
     #[test]
     fn ui_sorts_filtered_folder_rows() {
-        assert!(APP_JS.contains("const sorted = sortedTableItems('secrets', visible);"));
-        assert!(APP_JS.contains("const sorted = sortedTableItems('files', visible);"));
+        assert!(APP_JS.contains(
+            "const sorted = query.trim() ? visible : sortedTableItems('secrets', visible);"
+        ));
+        assert!(APP_JS.contains(
+            "const sorted = query.trim() ? visible : sortedTableItems('files', visible);"
+        ));
         assert!(
             APP_JS.contains("for (const secret of sorted) tbody.appendChild(secretRow(secret));")
         );

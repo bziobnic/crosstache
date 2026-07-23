@@ -1,4 +1,6 @@
 import * as XvUiModel from './ui-model.js';
+import { buildMetadataIndex, searchIndex } from './commands.js';
+import { mountFilterControls } from './files.js';
 import { guardNavigation } from './dialogs.js';
 import { setProtectedValueStatus } from './accessibility.js';
 import { contextQuery, formatContextLine } from './context.js';
@@ -115,7 +117,9 @@ function icon(name) {
 function setListSummary(kind, visibleCount, totalCount, folderCount) {
   const singular = kind === 'secrets' ? 'secret' : 'file';
   const noun = visibleCount === 1 ? singular : kind;
-  $(`#${singular}-item-count`).textContent = `${visibleCount} ${noun}`;
+  $(`#${singular}-item-count`).textContent = visibleCount === totalCount
+    ? `${visibleCount} ${noun}`
+    : `${visibleCount} / ${totalCount} ${kind}`;
   const visibility = visibleCount === totalCount
     ? `${totalCount} ${totalCount === 1 ? singular : kind}`
     : `${visibleCount} of ${totalCount} ${kind}`;
@@ -523,6 +527,7 @@ function showListState(tbody, kind, state, cols) {
     files: {
       failed: ['Couldn’t load files', 'The current vault could not be read.'],
       empty: ['No files yet', 'Upload the first encrypted file to this vault.'],
+      filtered: ['No matching files', 'Try a different name, folder, type, or status.'],
     },
   };
   const [title, description] = copy[kind][state];
@@ -557,6 +562,10 @@ const folderNavigationFocus = {
   files: { desktop: XvUiModel.FOLDER_ALL, mobile: XvUiModel.FOLDER_ALL },
 };
 const folderTokenIndexes = { secrets: null, files: null };
+const listFilters = {
+  secrets: { group: '', type: '', expiry: '', enabled: null },
+  files: { type: '', uploadStatus: '' },
+};
 
 function navigationFor(kind) {
   return kind === 'secrets' ? secretFolderNavigation : fileFolderNavigation;
@@ -688,6 +697,71 @@ function initFolderNavigationControls() {
     });
     close.onclick = dismiss;
   }
+}
+
+function selectedFolderLabel(kind) {
+  const selected = navigationFor(kind).snapshot().selected;
+  if (selected.kind === 'folder') return selected.path;
+  if (selected.kind === 'unfiled') return 'Unfiled';
+  return '';
+}
+
+function clearSelectedFolder(kind) {
+  navigationFor(kind).select(XvUiModel.FOLDER_ALL);
+  folderNavigationFocus[kind] = {
+    desktop: XvUiModel.FOLDER_ALL,
+    mobile: XvUiModel.FOLDER_ALL,
+  };
+}
+
+const filterControls = {
+  secrets: mountFilterControls({
+    document,
+    surface: 'secret',
+    filters: listFilters.secrets,
+    keys: ['group', 'type', 'expiry', 'enabled'],
+    labels: {
+      folder: 'Folder',
+      group: 'Group',
+      type: 'Record type',
+      expiry: 'Expiry',
+      enabled: 'Status',
+    },
+    onChange: () => renderSecrets(),
+    folderValue: () => selectedFolderLabel('secrets'),
+    clearFolder: () => clearSelectedFolder('secrets'),
+  }),
+  files: mountFilterControls({
+    document,
+    surface: 'file',
+    filters: listFilters.files,
+    keys: ['type', 'uploadStatus'],
+    labels: {
+      folder: 'Folder',
+      type: 'Type',
+      uploadStatus: 'Upload status',
+    },
+    onChange: () => renderFiles(),
+    folderValue: () => selectedFolderLabel('files'),
+    clearFolder: () => clearSelectedFolder('files'),
+  }),
+};
+
+function groupFilterOptions(items) {
+  return items.flatMap((item) => (
+    Array.isArray(item.groups)
+      ? item.groups
+      : (typeof item.groups === 'string' ? item.groups.split(',') : [])
+  )).map((group) => group.trim()).filter(Boolean);
+}
+
+function recordTypeFilterOptions(items) {
+  return items.map((item) => (
+    item?.tags?.[TYPE_TAG]
+      || item?.record_type
+      || item?.type
+      || (item?.content_type === RECORD_CONTENT_TYPE ? 'record' : 'plain')
+  ));
 }
 
 const tableSort = {
@@ -934,6 +1008,7 @@ function toggleSelected(kind, id) {
 let ctx = null;
 let currentVault = null;
 let secrets = [];
+let secretSearchIndex = buildMetadataIndex();
 let editing = null; // name of secret open in drawer, null = new
 let drawerGeneration = 0;
 let drawerScope = null;
@@ -1812,6 +1887,10 @@ async function loadSecrets(vault, scope = captureOperationScope(), errorOwner = 
     if (generation !== secretLoadGeneration) return false;
     folderTokenIndexes.secrets = tokenIndex;
     secrets = loadedSecrets;
+    secretSearchIndex = buildMetadataIndex({
+      secrets,
+      folders: folderPaths('secrets', secrets),
+    });
   } catch (e) {
     if (generation !== secretLoadGeneration || isAborted(e)) return false;
     secretsState = hasSuccessfulSecretsSnapshot ? 'ready' : 'failed';
@@ -1838,21 +1917,31 @@ $('#refresh-secrets').onclick = () => loadSecrets(currentVault, captureOperation
 
 function renderSecrets() {
   if (secretsState !== 'ready') return; // keep the loading/failed placeholder
-  const filter = $('#search').value.toLowerCase();
+  const query = $('#search').value;
   const tbody = $('#secrets-table tbody');
   tbody.innerHTML = '';
-  const searchVisible = secrets.filter((s) => {
-    if (!filter) return true;
-    const name = s.original_name || s.name;
-    const hay = `${name} ${s.folder || ''} ${s.groups || ''} ${s.note || ''}`.toLowerCase();
-    return hay.includes(filter);
-  });
-  const folderCount = renderFolderNavigation('secrets', secrets, searchVisible);
+  const searchVisible = query.trim()
+    ? searchIndex(secretSearchIndex, query)
+      .filter((entry) => entry.surface === 'secrets')
+      .map((entry) => secrets[entry.sourceIndex])
+    : secrets;
+  const filtered = XvUiModel.filterSecrets(searchVisible, listFilters.secrets);
+  const folderCount = renderFolderNavigation('secrets', secrets, filtered);
   const selectedFolder = secretFolderNavigation.snapshot().selected;
-  const visible = searchVisible.filter((secret) => (
+  const visible = filtered.filter((secret) => (
     XvUiModel.itemMatchesFolder(secret, selectedFolder)
   ));
-  const sorted = sortedTableItems('secrets', visible);
+  const sorted = query.trim() ? visible : sortedTableItems('secrets', visible);
+  filterControls.secrets.setOptions('group', [
+    ...groupFilterOptions(secrets),
+    listFilters.secrets.group,
+  ]);
+  filterControls.secrets.setOptions('type', [
+    ...recordTypeFilterOptions(secrets),
+    listFilters.secrets.type,
+  ]);
+  filterControls.secrets.render();
+  $('#secret-search-clear').hidden = !query;
   setListSummary(
     'secrets',
     visible.length,
@@ -2103,6 +2192,11 @@ function confirmPurge(name, scope) {
 }
 
 $('#search').oninput = renderSecrets;
+$('#secret-search-clear').onclick = () => {
+  $('#search').value = '';
+  renderSecrets();
+  $('#search').focus();
+};
 $('#new-secret').onclick = (event) => openDrawer(null, event.currentTarget);
 
 function isCurrentDrawer(generation, selection) {
@@ -2959,6 +3053,7 @@ async function switchTab(which) {
 
 // ---- files ----
 let files = [];
+let fileSearchIndex = buildMetadataIndex();
 let filesState = 'ready';
 let fileLoadGeneration = 0;
 let fileLoadController = null;
@@ -2994,6 +3089,10 @@ async function loadFiles(vault, scope = captureOperationScope(), errorOwner = nu
     if (generation !== fileLoadGeneration) return false;
     folderTokenIndexes.files = tokenIndex;
     files = loadedFiles;
+    fileSearchIndex = buildMetadataIndex({
+      files,
+      folders: folderPaths('files', files),
+    });
   } catch (e) {
     if (generation !== fileLoadGeneration || isAborted(e)) return false;
     filesState = hasSuccessfulFilesSnapshot ? 'ready' : 'failed';
@@ -3022,9 +3121,16 @@ function renderFiles() {
   if (filesState !== 'ready') return;
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
-  const folderCount = renderFolderNavigation('files', files, files);
+  const query = $('#file-search').value;
+  const searchVisible = query.trim()
+    ? searchIndex(fileSearchIndex, query)
+      .filter((entry) => entry.surface === 'files')
+      .map((entry) => files[entry.sourceIndex])
+    : files;
+  const filtered = XvUiModel.filterFiles(searchVisible, listFilters.files);
+  const folderCount = renderFolderNavigation('files', files, filtered);
   const selectedFolder = fileFolderNavigation.snapshot().selected;
-  const visible = files.filter((file) => XvUiModel.itemMatchesFolder(
+  const visible = filtered.filter((file) => XvUiModel.itemMatchesFolder(
     { folder: folderOf('files', file) },
     selectedFolder,
   ));
@@ -3035,11 +3141,26 @@ function renderFiles() {
     folderCount,
   );
   const cols = fileSelection.enabled ? 5 : 4;
-  const sorted = sortedTableItems('files', visible);
+  const sorted = query.trim() ? visible : sortedTableItems('files', visible);
+  filterControls.files.setOptions('type', [
+    ...files.map((file) => file.content_type).filter(Boolean),
+    listFilters.files.type,
+  ]);
+  filterControls.files.render();
+  $('#file-search-clear').hidden = !query;
   for (const file of sorted) tbody.appendChild(fileRow(file));
   syncSelectionUi('files', sorted.map((file) => file.name));
-  if (!tbody.children.length) showListState(tbody, 'files', 'empty', cols);
+  if (!tbody.children.length) {
+    showListState(tbody, 'files', files.length ? 'filtered' : 'empty', cols);
+  }
 }
+
+$('#file-search').oninput = renderFiles;
+$('#file-search-clear').onclick = () => {
+  $('#file-search').value = '';
+  renderFiles();
+  $('#file-search').focus();
+};
 
 function fileNameCell(name) {
   if (fileSelection.enabled) {
