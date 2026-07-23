@@ -974,6 +974,40 @@ impl LocalSecretBackend {
         Ok(write_lock)
     }
 
+    fn maintenance_lock_for_vault(
+        &self,
+        vault: &str,
+        vault_dir: &Path,
+        dry_run: bool,
+        operation: &str,
+    ) -> Result<fs::File, BackendError> {
+        if dry_run {
+            let read_lock = lock_vault_shared(vault_dir).map_err(|error| {
+                BackendError::Internal(format!(
+                    "could not read-lock vault {} for {operation}: {error}",
+                    vault_dir.display()
+                ))
+            })?;
+            if self.has_any_update_artifacts(vault)? {
+                return Err(BackendError::Conflict(format!(
+                    "pending local transaction recovery required in vault '{vault}' before \
+                     {operation}; run this command once without --dry-run to recover, then retry \
+                     the dry run"
+                )));
+            }
+            return Ok(read_lock);
+        }
+
+        let write_lock = lock_vault(vault_dir).map_err(|error| {
+            BackendError::Internal(format!(
+                "could not lock vault {} for {operation}: {error}",
+                vault_dir.display()
+            ))
+        })?;
+        self.recover_all_update_artifacts_locked(vault)?;
+        Ok(write_lock)
+    }
+
     fn publish_update_journal_locked(
         &self,
         paths: &UpdateTransactionPaths,
@@ -1220,24 +1254,21 @@ impl LocalSecretBackend {
             if !vault_dir.join(".vault.json").exists() {
                 continue;
             }
-            // Serialize against concurrent mutations of this vault. Fail loudly
-            // on lock errors so the caller never reports success while leaving a
-            // vault's metadata plaintext. The lock is held until `_lock` drops
-            // at the end of this iteration.
-            let _lock = lock_vault(&vault_dir).map_err(|e| {
-                BackendError::Internal(format!(
-                    "could not lock vault {} for metadata migration (another xv process may be \
-                     running): {e}",
-                    vault_dir.display()
-                ))
-            })?;
             let vault = vault_dir
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| {
                     BackendError::Internal(format!("invalid vault dir {}", vault_dir.display()))
                 })?;
-            self.recover_all_update_artifacts_locked(vault)?;
+            // A dry run holds shared across artifact detection and the complete
+            // scan. It never recovers or cleans. A real run holds exclusive and
+            // recovers before scanning or rewriting metadata.
+            let _lock = self.maintenance_lock_for_vault(
+                vault,
+                &vault_dir,
+                dry_run,
+                "metadata-encryption dry run",
+            )?;
 
             // Walk only the secret-metadata subtrees: active + archived secrets
             // live under secrets/ (which contains .versions/), trashed secrets
@@ -1338,17 +1369,12 @@ impl LocalSecretBackend {
                 })?
                 .to_string();
 
-            // Same lock as runtime mutations, so a migration step can't race a
-            // concurrent write. Held until `_lock` drops at iteration end.
-            let _lock = lock_vault(&vault_dir).map_err(|e| {
-                BackendError::Internal(format!(
-                    "could not lock vault {} for migration (another xv process may be \
-                     running): {e}",
-                    vault_dir.display()
-                ))
-            })?;
-
-            self.recover_all_update_artifacts_locked(&vault)?;
+            let _lock = self.maintenance_lock_for_vault(
+                &vault,
+                &vault_dir,
+                dry_run,
+                "opaque-migration dry run",
+            )?;
             self.migrate_vault(&vault, dry_run, &mut report)?;
         }
         Ok(report)
@@ -2439,6 +2465,7 @@ mod tests {
     use crate::backend::local::crypto::generate_keypair;
     use crate::records::{RECORD_CONTENT_TYPE, TYPE_TAG};
     use crate::secret::manager::FieldUpdate;
+    use std::collections::BTreeMap;
     use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -2660,6 +2687,68 @@ mod tests {
         let identity = crypto::load_identity(&key_path).unwrap();
         let recipients = crypto::load_recipients(&recipients_path).unwrap();
         LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata, false)
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum TreeSnapshotEntry {
+        Directory { permissions: u32 },
+        File { permissions: u32, bytes: Vec<u8> },
+        Symlink { target: PathBuf },
+    }
+
+    #[cfg(unix)]
+    fn snapshot_permissions(metadata: &fs::Metadata) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode()
+    }
+
+    #[cfg(not(unix))]
+    fn snapshot_permissions(metadata: &fs::Metadata) -> u32 {
+        u32::from(metadata.permissions().readonly())
+    }
+
+    fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, TreeSnapshotEntry> {
+        fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, TreeSnapshotEntry>) {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if metadata.file_type().is_symlink() {
+                snapshot.insert(
+                    relative,
+                    TreeSnapshotEntry::Symlink {
+                        target: fs::read_link(path).unwrap(),
+                    },
+                );
+                return;
+            }
+            if metadata.is_dir() {
+                snapshot.insert(
+                    relative,
+                    TreeSnapshotEntry::Directory {
+                        permissions: snapshot_permissions(&metadata),
+                    },
+                );
+                let mut children = fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect::<Vec<_>>();
+                children.sort();
+                for child in children {
+                    visit(root, &child, snapshot);
+                }
+                return;
+            }
+            snapshot.insert(
+                relative,
+                TreeSnapshotEntry::File {
+                    permissions: snapshot_permissions(&metadata),
+                    bytes: fs::read(path).unwrap(),
+                },
+            );
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
     }
 
     fn make_request(name: &str, value: &str) -> SecretRequest {
@@ -3774,6 +3863,123 @@ mod tests {
             current.value.as_deref().map(|value| value.as_str()),
             Some("old-value")
         );
+    }
+
+    fn assert_pending_recovery_required(error: BackendError, operation: &str) {
+        match error {
+            BackendError::Conflict(message) => {
+                assert!(message.contains("pending local transaction recovery required"));
+                assert!(message.contains("vault 'default'"));
+                assert!(message.contains(operation));
+                assert!(message.contains("without --dry-run"));
+            }
+            other => panic!("expected structured pending-recovery conflict, got {other:?}"),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum MaintenanceRecovery {
+        EncryptMetadata,
+        Migrate,
+    }
+
+    async fn assert_interrupted_maintenance_dry_runs_preserve_tree(
+        opaque: bool,
+        stage: u8,
+        recover_with: MaintenanceRecovery,
+    ) {
+        let (backend, tmp) = backend_for_mode(opaque);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, stage);
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+
+        // `migrate_all` requires opaque filenames. Reopening a plain store in
+        // opaque mode is read-only and is the supported pre-migration shape.
+        let migration_backend = reopen_opaque(&tmp, false);
+        let before = snapshot_tree(tmp.path());
+
+        let encrypt_error = backend.reencrypt_all_metadata(true).unwrap_err();
+        assert_pending_recovery_required(encrypt_error, "metadata-encryption dry run");
+        assert_eq!(
+            snapshot_tree(tmp.path()),
+            before,
+            "metadata dry run changed interrupted tree at stage {stage}"
+        );
+
+        let migrate_error = migration_backend.migrate_all(true).unwrap_err();
+        assert_pending_recovery_required(migrate_error, "opaque-migration dry run");
+        assert_eq!(
+            snapshot_tree(tmp.path()),
+            before,
+            "migration dry run changed interrupted tree at stage {stage}"
+        );
+
+        match recover_with {
+            MaintenanceRecovery::EncryptMetadata => {
+                backend.reencrypt_all_metadata(false).unwrap();
+                let current = backend.get_secret("default", "atomic", true).await.unwrap();
+                assert_eq!(
+                    current.value.as_deref().map(|value| value.as_str()),
+                    Some("old-value")
+                );
+            }
+            MaintenanceRecovery::Migrate => {
+                migration_backend.migrate_all(false).unwrap();
+                let current = migration_backend
+                    .get_secret("default", "atomic", true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    current.value.as_deref().map(|value| value.as_str()),
+                    Some("old-value")
+                );
+            }
+        }
+        assert!(!backend.has_any_update_artifacts("default").unwrap());
+    }
+
+    #[tokio::test]
+    async fn interrupted_maintenance_dry_runs_are_byte_exact_plain_and_opaque() {
+        // 10: partial temp publication; 1: half-active pair; 3: partial archive.
+        for opaque in [false, true] {
+            for stage in [10, 1, 3] {
+                for recover_with in [
+                    MaintenanceRecovery::EncryptMetadata,
+                    MaintenanceRecovery::Migrate,
+                ] {
+                    assert_interrupted_maintenance_dry_runs_preserve_tree(
+                        opaque,
+                        stage,
+                        recover_with,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_maintenance_dry_runs_leave_plain_and_opaque_trees_unchanged() {
+        for opaque in [false, true] {
+            let (backend, tmp) = backend_for_mode(opaque);
+            backend
+                .set_secret("default", make_request("clean", "value"))
+                .await
+                .unwrap();
+            let migration_backend = reopen_opaque(&tmp, false);
+            let before = snapshot_tree(tmp.path());
+
+            backend.reencrypt_all_metadata(true).unwrap();
+            assert_eq!(snapshot_tree(tmp.path()), before);
+            migration_backend.migrate_all(true).unwrap();
+            assert_eq!(snapshot_tree(tmp.path()), before);
+        }
     }
 
     async fn assert_all_active_and_history_reads_wait_for_transaction(opaque: bool) {
