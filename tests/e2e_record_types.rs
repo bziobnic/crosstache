@@ -1477,7 +1477,7 @@ fn untype_with_extra_secret_fields_requires_yes() {
 }
 
 #[test]
-fn type_on_existing_record_errors() {
+fn type_on_existing_record_converts_safely_without_yes() {
     let (mut cmd, temp) = common::xv_isolated_local();
     let out = cmd
         .args([
@@ -1495,17 +1495,82 @@ fn type_on_existing_record_errors() {
     assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
 
     let out2 = xv_same_env(temp.path())
-        .args(["update", "cred", "--type", "api-key"])
+        .args(["update", "cred", "--type", "database"])
         .output()
         .unwrap();
-    assert_eq!(
-        out2.status.code(),
-        Some(3),
+    assert!(
+        out2.status.success(),
         "stderr: {}",
         common::stderr_str(&out2)
     );
-    let stderr = common::stderr_str(&out2);
-    assert!(stderr.contains("already"), "stderr: {stderr}");
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["tags"]["xv-type"], "database");
+    assert_eq!(meta["tags"]["f.username"], "bob");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "hunter2");
+}
+
+#[test]
+fn lossy_record_to_record_conversion_refuses_non_tty_without_yes() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let refused = xv_same_env(temp.path())
+        .args(["update", "cred", "--type", "api-key"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(3));
+    let refused_error = common::stderr_str(&refused);
+    assert!(refused_error.contains("username"), "{refused_error}");
+    assert!(refused_error.contains("--yes"), "{refused_error}");
+    assert!(!refused_error.contains("hunter2"), "{refused_error}");
+    let unchanged = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(unchanged["tags"]["xv-type"], "login");
+
+    let converted = xv_same_env(temp.path())
+        .args(["update", "cred", "--type", "api-key", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        converted.status.success(),
+        "stderr: {}",
+        common::stderr_str(&converted)
+    );
+    let summary = common::stderr_str(&converted);
+    assert!(summary.contains("password -> key"), "{summary}");
+    assert!(summary.contains("username"), "{summary}");
+    assert!(!summary.contains("hunter2"), "{summary}");
+
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["tags"]["xv-type"], "api-key");
+    assert!(meta["tags"].get("f.username").is_none());
+    let value = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert_eq!(common::stdout_str(&value), "hunter2");
 }
 
 // ---------------------------------------------------------------------------

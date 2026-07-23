@@ -825,9 +825,10 @@ pub enum Commands {
             "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
         ])]
         secret_fields: Vec<(String, String)>,
-        /// Explicitly convert a bare secret into a typed record: its
-        /// current value becomes the primary field. Errors if the secret
-        /// is already a record. Mutually exclusive with --untype/--field/
+        /// Convert a plain or typed secret to this record type. Plain values
+        /// become the target primary field; typed records retain exact field
+        /// matches and map the old primary when needed. Lossy conversion
+        /// prompts unless --yes is given. Mutually exclusive with --untype/--field/
         /// --field-secret and with every classic update flag, INCLUDING
         /// --value/--stdin: converting and replacing the primary value in
         /// one step is not supported in v1 — convert first (this command,
@@ -841,8 +842,8 @@ pub enum Commands {
         ])]
         r#type: Option<String>,
         /// Flatten a typed record back to a bare secret holding the
-        /// primary field's value. Dropping non-primary secret fields
-        /// prompts for confirmation unless --yes is given. Mutually
+        /// primary field's value. Dropping any other record fields prompts
+        /// for confirmation unless --yes is given. Mutually
         /// exclusive with --type/--field/--field-secret and with every
         /// classic update flag; see --field's note.
         #[arg(long, conflicts_with_all = [
@@ -852,8 +853,7 @@ pub enum Commands {
             "clear_expires", "clear_not_before", "clear_note", "clear_folder", "enabled",
         ])]
         untype: bool,
-        /// Skip the confirmation prompt when --untype would drop
-        /// non-primary secret fields.
+        /// Skip the confirmation prompt when --type or --untype would drop fields.
         #[arg(long, short = 'y')]
         yes: bool,
     },
