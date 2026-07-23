@@ -73,6 +73,10 @@ mod tests {
             token: "test-token".to_string(),
             vault: "default".to_string(),
             types: crate::records::builtin_types(),
+            preferences: crate::web::preferences::PreferenceStore::new(
+                temp.path().join("ui.json"),
+                30,
+            ),
         })
     }
 

@@ -1,4 +1,4 @@
-const PREFERENCE_SCHEMAS = {
+const LEGACY_WIDTH_SCHEMAS = {
   'xv.ui.columns.secrets.v1': (value) => Array.isArray(value)
     && value.length === 5
     && value.every((width) => Number.isFinite(width)),
@@ -7,28 +7,182 @@ const PREFERENCE_SCHEMAS = {
     && value.every((width) => Number.isFinite(width)),
 };
 
-export function createPreferenceClient(api) {
-  return {
-    get(key, fallback = null) {
-      const isValid = PREFERENCE_SCHEMAS[key];
-      if (!isValid) return fallback;
-      try {
-        const value = localStorage.getItem(key);
-        const parsed = value === null ? fallback : JSON.parse(value);
-        return isValid(parsed) ? parsed : fallback;
-      } catch (_) {
-        return fallback;
+const DEFAULTS = Object.freeze({
+  version: 1,
+  theme: 'system',
+  exposure_timeout_seconds: 30,
+  density: 'comfortable',
+  folder_expansion: true,
+  column_widths: Object.freeze({
+    secrets: Object.freeze([28, 15, 14, 25, 18]),
+    files: Object.freeze([42, 12, 24, 22]),
+  }),
+});
+
+const FIELD_SCHEMAS = {
+  theme: (value) => ['system', 'light', 'dark'].includes(value),
+  exposure_timeout_seconds: (value) => Number.isSafeInteger(value) && value >= 0,
+  density: (value) => ['comfortable', 'compact'].includes(value),
+  folder_expansion: (value) => typeof value === 'boolean',
+  column_widths: (value) => value !== null
+    && typeof value === 'object'
+    && LEGACY_WIDTH_SCHEMAS['xv.ui.columns.secrets.v1'](value.secrets)
+    && LEGACY_WIDTH_SCHEMAS['xv.ui.columns.files.v1'](value.files),
+};
+
+function clone(value) {
+  return structuredClone(value);
+}
+
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const nested of Object.values(value)) deepFreeze(nested);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function immutable(value) {
+  return deepFreeze(clone(value));
+}
+
+function sanitize(input) {
+  const source = input !== null && typeof input === 'object' ? input : {};
+  const clean = clone(DEFAULTS);
+  for (const [key, isValid] of Object.entries(FIELD_SCHEMAS)) {
+    if (isValid(source[key])) clean[key] = clone(source[key]);
+  }
+  clean.version = 1;
+  return clean;
+}
+
+function safeError(error) {
+  return immutable({
+    message: error?.message || 'Settings could not be saved.',
+    hint: error?.hint || 'Check the application configuration and try again.',
+  });
+}
+
+function showSettingsError(error) {
+  const surface = globalThis.document?.getElementById?.('settings-error');
+  if (!surface) return;
+  const message = surface.querySelector?.('.error-message');
+  const hint = surface.querySelector?.('.error-hint');
+  if (message) message.textContent = error.message;
+  if (hint) hint.textContent = error.hint;
+  surface.hidden = false;
+}
+
+function sameValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function createPreferenceClient(api, options = {}) {
+  const {
+    setTimeoutImpl = globalThis.setTimeout.bind(globalThis),
+    clearTimeoutImpl = globalThis.clearTimeout.bind(globalThis),
+    onSettingsError = showSettingsError,
+  } = options;
+  let state = immutable(DEFAULTS);
+  let loadPromise = null;
+  let saveTimer = null;
+  let saveQueue = Promise.resolve();
+  let currentError = null;
+  const overrides = {};
+
+  function request(method, body) {
+    if (typeof api === 'function') return api(method, '/api/preferences', body);
+    if (typeof api?.request === 'function') return api.request(method, '/api/preferences', body);
+    return Promise.resolve(clone(DEFAULTS));
+  }
+
+  function reportError(error) {
+    currentError = safeError(error);
+    onSettingsError?.(currentError);
+  }
+
+  function mergeOverrides(base) {
+    return sanitize({ ...base, ...overrides });
+  }
+
+  function load() {
+    if (!loadPromise) {
+      loadPromise = request('GET')
+        .then((loaded) => {
+          state = immutable(mergeOverrides(loaded));
+          return immutable(state);
+        })
+        .catch((error) => {
+          reportError(error);
+          return immutable(state);
+        });
+    }
+    return loadPromise;
+  }
+
+  async function persist() {
+    await load();
+    const payload = sanitize(state);
+    const sentOverrides = clone(overrides);
+    try {
+      const saved = await request('PUT', payload);
+      for (const [key, value] of Object.entries(sentOverrides)) {
+        if (sameValue(overrides[key], value)) delete overrides[key];
       }
+      currentError = null;
+      state = immutable(mergeOverrides(saved));
+    } catch (error) {
+      reportError(error);
+    }
+  }
+
+  function scheduleSave() {
+    if (saveTimer !== null) clearTimeoutImpl(saveTimer);
+    saveTimer = setTimeoutImpl(() => {
+      saveTimer = null;
+      saveQueue = saveQueue.then(persist);
+      return saveQueue;
+    }, 250);
+  }
+
+  const client = {
+    load,
+    snapshot: () => immutable(state),
+    settingsError: () => currentError && immutable(currentError),
+    get(key, fallback = null) {
+      const legacySchema = LEGACY_WIDTH_SCHEMAS[key];
+      if (legacySchema) {
+        try {
+          const value = localStorage.getItem(key);
+          const parsed = value === null ? fallback : JSON.parse(value);
+          return legacySchema(parsed) ? parsed : fallback;
+        } catch (_) {
+          return fallback;
+        }
+      }
+      return FIELD_SCHEMAS[key]?.(state[key]) ? clone(state[key]) : fallback;
     },
     set(key, value) {
-      if (!PREFERENCE_SCHEMAS[key]?.(value)) return false;
-      try {
-        localStorage.setItem(key, JSON.stringify(value));
-        return true;
-      } catch (_) {
-        return false;
+      const legacySchema = LEGACY_WIDTH_SCHEMAS[key];
+      if (legacySchema) {
+        if (!legacySchema(value)) return false;
+        try {
+          localStorage.setItem(key, JSON.stringify(value));
+          return true;
+        } catch (_) {
+          return false;
+        }
       }
+      if (!FIELD_SCHEMAS[key]?.(value)) return false;
+      overrides[key] = clone(value);
+      state = immutable({ ...state, [key]: clone(value) });
+      scheduleSave();
+      return true;
     },
-    api,
   };
+
+  // Start exactly one background read. It is intentionally detached so a
+  // preference-file failure cannot delay or reject vault initialization.
+  void load();
+  return Object.freeze(client);
 }

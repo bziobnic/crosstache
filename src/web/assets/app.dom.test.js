@@ -109,7 +109,7 @@ function bootstrapDocument() {
   };
 }
 
-test('app bootstrap supplies its persisted token to the mounted UI', async () => {
+test('app bootstrap supplies its persisted token to every initial API request', async () => {
   const original = new Map(['document', 'location', 'sessionStorage', 'history', 'fetch']
     .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const session = new Map();
@@ -119,8 +119,8 @@ test('app bootstrap supplies its persisted token to the mounted UI', async () =>
     location: { search: '?token=bootstrap-token', pathname: '/' },
     sessionStorage: { getItem: (key) => session.get(key) || null, setItem: (key, value) => session.set(key, value) },
     history: { replaceState() {} },
-    fetch: async (_path, options) => {
-      calls.push(options);
+    fetch: async (requestPath, options) => {
+      calls.push({ requestPath, options });
       return { ok: false, status: 401, statusText: 'Unauthorized', json: async () => ({ error: 'Unauthorized' }) };
     },
   });
@@ -129,8 +129,13 @@ test('app bootstrap supplies its persisted token to the mounted UI', async () =>
     const appUrl = pathToFileURL(path.join(__dirname, 'app.js')).href;
     await import(`${appUrl}?bootstrap-test=${Date.now()}`);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].headers.Authorization, 'Bearer bootstrap-token');
+    assert.deepEqual(
+      calls.map(({ requestPath }) => requestPath).sort(),
+      ['/api/context', '/api/preferences'],
+    );
+    assert.ok(calls.every(({ options }) => (
+      options.headers.Authorization === 'Bearer bootstrap-token'
+    )));
   } finally {
     for (const [key, descriptor] of original) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);

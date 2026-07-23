@@ -32,3 +32,106 @@ test('secret-bearing and unknown preference keys never persist', () => withStora
   }
   assert.equal(values.size, 0);
 }));
+
+function manualClock() {
+  let scheduled = null;
+  return {
+    setTimeoutImpl(callback, milliseconds) {
+      assert.equal(milliseconds, 250);
+      scheduled = callback;
+      return 1;
+    },
+    clearTimeoutImpl() { scheduled = null; },
+    async run() {
+      assert.ok(scheduled, 'expected a debounced save');
+      const callback = scheduled;
+      scheduled = null;
+      await callback();
+    },
+  };
+}
+
+test('preferences load once and expose deeply immutable whitelisted snapshots', async () => {
+  const calls = [];
+  const api = async (method, path) => {
+    calls.push([method, path]);
+    return {
+      version: 1,
+      theme: 'dark',
+      exposure_timeout_seconds: 15,
+      density: 'compact',
+      folder_expansion: false,
+      column_widths: { secrets: [30, 15, 14, 23, 18], files: [40, 14, 24, 22] },
+      future_presentation: { accent: 'green' },
+      secret_name: 'must-not-enter-client-state',
+    };
+  };
+  const preferences = createPreferenceClient(api);
+
+  await Promise.all([preferences.load(), preferences.load()]);
+  const snapshot = preferences.snapshot();
+
+  assert.deepEqual(calls, [['GET', '/api/preferences']]);
+  assert.equal(snapshot.theme, 'dark');
+  assert.equal(snapshot.future_presentation, undefined);
+  assert.equal(snapshot.secret_name, undefined);
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(Object.isFrozen(snapshot.column_widths));
+  assert.ok(Object.isFrozen(snapshot.column_widths.secrets));
+  assert.throws(() => { snapshot.theme = 'light'; }, TypeError);
+  assert.throws(() => { snapshot.column_widths.secrets.push(1); }, TypeError);
+});
+
+test('preference saves are debounced and contain only whitelisted keys', async () => {
+  const clock = manualClock();
+  const calls = [];
+  const api = async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (method === 'GET') return { version: 1 };
+    return body;
+  };
+  const preferences = createPreferenceClient(api, clock);
+  await preferences.load();
+
+  assert.equal(preferences.set('theme', 'dark'), true);
+  assert.equal(preferences.set('density', 'compact'), true);
+  assert.equal(preferences.set('secret_name', 'DB_URL'), false);
+  assert.equal(preferences.set('search_query', 'payments'), false);
+  await clock.run();
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].method, 'PUT');
+  assert.equal(calls[1].path, '/api/preferences');
+  assert.deepEqual(Object.keys(calls[1].body).sort(), [
+    'column_widths', 'density', 'exposure_timeout_seconds',
+    'folder_expansion', 'theme', 'version',
+  ]);
+  assert.equal(calls[1].body.theme, 'dark');
+  assert.equal(calls[1].body.density, 'compact');
+  assert.equal(calls[1].body.secret_name, undefined);
+  assert.equal(calls[1].body.search_query, undefined);
+});
+
+test('failed preference saves report a non-blocking Settings error', async () => {
+  const clock = manualClock();
+  const errors = [];
+  const api = async (method) => {
+    if (method === 'GET') return { version: 1 };
+    throw Object.assign(new Error('Disk unavailable'), { hint: 'Check config permissions.' });
+  };
+  const preferences = createPreferenceClient(api, {
+    ...clock,
+    onSettingsError: (error) => errors.push(error),
+  });
+  await preferences.load();
+  assert.equal(preferences.set('theme', 'dark'), true);
+
+  await assert.doesNotReject(clock.run());
+
+  assert.equal(preferences.snapshot().theme, 'dark');
+  assert.deepEqual(errors, [{
+    message: 'Disk unavailable',
+    hint: 'Check config permissions.',
+  }]);
+  assert.deepEqual(preferences.settingsError(), errors[0]);
+});

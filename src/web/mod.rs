@@ -19,6 +19,7 @@ use crate::error::{CrosstacheError, Result};
 pub(crate) mod api;
 pub(crate) mod auth;
 pub(crate) mod errors;
+mod preferences;
 mod secrets;
 #[cfg(test)]
 pub(crate) mod testutil;
@@ -128,6 +129,9 @@ pub(crate) struct WebState {
     pub vault: String,
     /// Record types (builtin + [types.*] config), resolved once at startup.
     pub types: Vec<crate::records::RecordType>,
+    /// Versioned presentation-only preferences. This store is independent of
+    /// backend and vault state and never receives secret data.
+    pub(crate) preferences: preferences::PreferenceStore,
 }
 
 /// A bound web UI server that has not started accepting requests yet.
@@ -171,6 +175,10 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .route("/context", get(api::get_context))
         .route("/vaults", get(api::list_vaults))
         .route("/types", get(api::list_types))
+        .route(
+            "/preferences",
+            get(preferences::get_preferences).put(preferences::put_preferences),
+        )
         .route("/secrets", get(api::list_secrets))
         .route("/secrets/deleted", get(secrets::list_deleted))
         .route(
@@ -234,6 +242,9 @@ pub async fn prepare_web(
     registry: Option<&BackendRegistry>,
     port: Option<u16>,
 ) -> Result<PreparedWebServer> {
+    let preference_path = preferences::preference_path_for(&Config::get_config_path()?);
+    let preference_store =
+        preferences::PreferenceStore::new(preference_path, config.clipboard_timeout);
     let registry = registry.ok_or_else(|| {
         CrosstacheError::config("backend initialization failed; `xv ui` needs a working backend")
     })?;
@@ -252,6 +263,7 @@ pub async fn prepare_web(
         token: token.clone(),
         vault,
         types,
+        preferences: preference_store,
     });
     let app = build_router(state);
 

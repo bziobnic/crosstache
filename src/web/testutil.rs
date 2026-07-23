@@ -1,16 +1,33 @@
 //! Test-only helpers for the web module.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::WebState;
 
 pub(crate) fn test_state_with_token(token: &str) -> Arc<WebState> {
+    let path = std::env::temp_dir()
+        .join(format!("xv-web-test-{}", uuid::Uuid::new_v4()))
+        .join("ui.json");
+    test_state_with_token_and_preferences(token, path, 30)
+}
+
+fn test_state_with_token_and_preferences(
+    token: &str,
+    path: PathBuf,
+    clipboard_timeout: u64,
+) -> Arc<WebState> {
     Arc::new(WebState {
         backend: Arc::new(stub::StubBackend::new()),
         token: token.to_string(),
         vault: "default".to_string(),
         types: crate::records::builtin_types(),
+        preferences: super::preferences::PreferenceStore::new(path, clipboard_timeout),
     })
+}
+
+pub(crate) fn test_state_with_preferences(path: PathBuf, clipboard_timeout: u64) -> Arc<WebState> {
+    test_state_with_token_and_preferences("test-token", path, clipboard_timeout)
 }
 
 pub(crate) fn test_state() -> Arc<WebState> {
