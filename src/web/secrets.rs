@@ -1,13 +1,427 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::body::to_bytes;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::StatusCode;
 use axum::Json;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
+use crate::records::{
+    apply_conversion, preview_conversion, validate_conversion_backend, ConversionPreview,
+    ConversionRequest,
+};
 use crate::secret::manager::{DeletedSecretSummary, SecretProperties};
 
 use super::api::{ApiError, VaultQuery};
 use super::WebState;
+
+const MAX_CONVERSION_FIELDS: usize = 64;
+const MAX_CONVERSION_FIELD_NAME_BYTES: usize = 128;
+const MAX_CONVERSION_FIELD_VALUE_BYTES: usize = 1024 * 1024;
+const MAX_CONVERSION_TOTAL_VALUE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_CONVERSION_REQUEST_BYTES: usize = MAX_CONVERSION_TOTAL_VALUE_BYTES + 64 * 1024;
+pub(crate) const MAX_RENAME_REQUEST_BYTES: usize = 4 * 1024;
+const MAX_WEB_SECRET_NAME_BYTES: usize = 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConversionBody {
+    target_type: String,
+    #[serde(default)]
+    supplied_fields: BTreeMap<String, String>,
+    #[serde(default)]
+    confirm_lossy: bool,
+    source_version: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ConversionResult {
+    secret: SecretProperties,
+    summary: ConversionPreview,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ConversionPreviewResponse {
+    #[serde(flatten)]
+    summary: ConversionPreview,
+    source_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RenameBody {
+    new_name: String,
+}
+
+fn structured_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+    hint: &'static str,
+    field: Option<&'static str>,
+) -> ApiError {
+    ApiError::Structured {
+        status,
+        error: Box::new(super::errors::ApiErrorBody::new(
+            code, message, hint, field, None,
+        )),
+    }
+}
+
+fn validate_conversion_body(
+    state: &WebState,
+    body: &ConversionBody,
+) -> Result<ConversionRequest, ApiError> {
+    if body.target_type.is_empty() || body.target_type.len() > MAX_CONVERSION_FIELD_NAME_BYTES {
+        return Err(ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "Choose a valid target type.",
+            field: Some("target_type"),
+        });
+    }
+    if body
+        .source_version
+        .as_ref()
+        .is_some_and(|version| version.is_empty() || version.len() > 256)
+    {
+        return Err(ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "Use the source version returned by conversion preview.",
+            field: Some("source_version"),
+        });
+    }
+    let Some(target) = state
+        .types
+        .iter()
+        .find(|record_type| record_type.name == body.target_type)
+    else {
+        return Err(ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "Choose a known target type.",
+            field: Some("target_type"),
+        });
+    };
+    if body.supplied_fields.len() > MAX_CONVERSION_FIELDS {
+        return Err(ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "Too many supplied fields were provided.",
+            field: Some("supplied_fields"),
+        });
+    }
+    let mut total_value_bytes = 0usize;
+    for (name, value) in &body.supplied_fields {
+        if name.is_empty()
+            || name.len() > MAX_CONVERSION_FIELD_NAME_BYTES
+            || target.field(name).is_none()
+        {
+            return Err(ApiError::Validation {
+                status: StatusCode::BAD_REQUEST,
+                message: "A supplied field is not declared by the target type.",
+                field: Some("supplied_fields"),
+            });
+        }
+        if value.len() > MAX_CONVERSION_FIELD_VALUE_BYTES {
+            return Err(ApiError::Validation {
+                status: StatusCode::BAD_REQUEST,
+                message: "A supplied field value is too large.",
+                field: Some("supplied_fields"),
+            });
+        }
+        total_value_bytes = total_value_bytes.saturating_add(value.len());
+    }
+    if total_value_bytes > MAX_CONVERSION_TOTAL_VALUE_BYTES {
+        return Err(ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "The supplied field values are too large.",
+            field: Some("supplied_fields"),
+        });
+    }
+
+    let mut request = ConversionRequest::to_type(body.target_type.clone());
+    request.supplied_fields = body.supplied_fields.clone();
+    request.confirm_lossy = body.confirm_lossy;
+    Ok(request)
+}
+
+fn conversion_service_error(_error: crate::error::CrosstacheError) -> ApiError {
+    ApiError::Validation {
+        status: StatusCode::BAD_REQUEST,
+        message: "The secret cannot be converted with the supplied fields.",
+        field: Some("supplied_fields"),
+    }
+}
+
+fn conversion_apply_error(error: crate::error::CrosstacheError) -> ApiError {
+    match error {
+        crate::error::CrosstacheError::ConfigError(_) => ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "The converted secret exceeds a backend validation limit.",
+            field: Some("supplied_fields"),
+        },
+        other => ApiError::App(other),
+    }
+}
+
+fn redact_conversion_properties(properties: &mut SecretProperties) {
+    properties.value = None;
+    properties
+        .tags
+        .retain(|key, _| !key.starts_with(crate::records::FIELD_TAG_PREFIX));
+}
+
+fn conversion_backend_preflight(backend: &dyn crate::backend::Backend) -> Result<(), ApiError> {
+    validate_conversion_backend(backend).map_err(|_| {
+        structured_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "xv-operation-unsupported",
+            "This backend does not support atomic record conversion.",
+            "Choose a backend that supports conversion and try again.",
+            Some("target_type"),
+        )
+    })
+}
+
+async fn bounded_json<T: DeserializeOwned>(
+    request: Request,
+    max_bytes: usize,
+    field: Option<&'static str>,
+    message: &'static str,
+    hint: &'static str,
+) -> Result<T, ApiError> {
+    let is_json = request
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(';').next() == Some("application/json"));
+    if !is_json {
+        return Err(structured_error(
+            StatusCode::BAD_REQUEST,
+            "xv-invalid-request",
+            message,
+            hint,
+            field,
+        ));
+    }
+    let bytes = to_bytes(request.into_body(), max_bytes)
+        .await
+        .map_err(|_| {
+            structured_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "xv-request-too-large",
+                "The request is too large to process.",
+                "Reduce the request size and try again.",
+                field,
+            )
+        })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        structured_error(
+            StatusCode::BAD_REQUEST,
+            "xv-invalid-request",
+            message,
+            hint,
+            field,
+        )
+    })
+}
+
+pub(crate) async fn preview_conversion_route(
+    State(state): State<Arc<WebState>>,
+    Path(name): Path<String>,
+    Query(query): Query<VaultQuery>,
+    request: Request,
+) -> Result<Json<ConversionPreviewResponse>, ApiError> {
+    let body: ConversionBody = bounded_json(
+        request,
+        MAX_CONVERSION_REQUEST_BYTES,
+        Some("target_type"),
+        "The conversion request could not be understood.",
+        "Correct the highlighted fields and try again.",
+    )
+    .await?;
+    let request = validate_conversion_body(&state, &body)?;
+    let target = query.target(&state)?;
+    conversion_backend_preflight(target.backend.as_ref())?;
+    let secret = target
+        .backend
+        .secrets()
+        .get_secret(&target.context.vault, &name, true)
+        .await?;
+    let preview =
+        preview_conversion(&secret, &state.types, request).map_err(conversion_service_error)?;
+    Ok(Json(ConversionPreviewResponse {
+        summary: preview,
+        source_version: secret.version,
+    }))
+}
+
+pub(crate) async fn apply_conversion_route(
+    State(state): State<Arc<WebState>>,
+    Path(name): Path<String>,
+    Query(query): Query<VaultQuery>,
+    request: Request,
+) -> Result<Json<ConversionResult>, ApiError> {
+    let body: ConversionBody = bounded_json(
+        request,
+        MAX_CONVERSION_REQUEST_BYTES,
+        Some("target_type"),
+        "The conversion request could not be understood.",
+        "Correct the highlighted fields and try again.",
+    )
+    .await?;
+    let request = validate_conversion_body(&state, &body)?;
+    let target = query.target(&state)?;
+    conversion_backend_preflight(target.backend.as_ref())?;
+    let secret = target
+        .backend
+        .secrets()
+        .get_secret(&target.context.vault, &name, true)
+        .await?;
+    let preview =
+        preview_conversion(&secret, &state.types, request).map_err(conversion_service_error)?;
+    if preview.requires_confirmation {
+        return Err(structured_error(
+            StatusCode::CONFLICT,
+            "xv-conversion-confirmation-required",
+            "This conversion would lose or expose fields.",
+            "Review the conversion summary and explicitly confirm the change.",
+            Some("confirm_lossy"),
+        ));
+    }
+    let Some(source_version) = body.source_version.as_deref() else {
+        return Err(ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "Preview this conversion before applying it.",
+            field: Some("source_version"),
+        });
+    };
+    if secret.version != source_version {
+        return Err(structured_error(
+            StatusCode::CONFLICT,
+            "xv-conversion-source-changed",
+            "The secret changed after this conversion was previewed.",
+            "Preview the conversion again before applying it.",
+            Some("source_version"),
+        ));
+    }
+    let summary = preview.clone();
+    let mut secret = apply_conversion(
+        target.backend.as_ref(),
+        &target.context.vault,
+        &name,
+        preview,
+    )
+    .await
+    .map_err(conversion_apply_error)?;
+    redact_conversion_properties(&mut secret);
+    Ok(Json(ConversionResult { secret, summary }))
+}
+
+fn validate_secret_name(
+    name: &str,
+    capabilities: &crate::backend::BackendCapabilities,
+) -> Result<(), ApiError> {
+    let max_length = capabilities
+        .max_name_length
+        .unwrap_or(MAX_WEB_SECRET_NAME_BYTES)
+        .min(MAX_WEB_SECRET_NAME_BYTES);
+    if name.is_empty()
+        || name.len() > max_length
+        || name.chars().any(char::is_control)
+        || !capabilities.name_charset.is_valid(name)
+    {
+        return Err(ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "Enter a valid secret name for the selected backend.",
+            field: Some("name"),
+        });
+    }
+    Ok(())
+}
+
+fn rename_backend_error(error: crate::backend::error::BackendError) -> ApiError {
+    match error {
+        crate::backend::error::BackendError::Conflict(_) => structured_error(
+            StatusCode::CONFLICT,
+            "xv-conflict",
+            "A secret with the new name already exists.",
+            "Choose a different name and try again.",
+            Some("name"),
+        ),
+        crate::backend::error::BackendError::InvalidArgument(_) => ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "Enter a different valid secret name.",
+            field: Some("name"),
+        },
+        other => ApiError::Backend(other),
+    }
+}
+
+pub(crate) async fn rename(
+    State(state): State<Arc<WebState>>,
+    Path(name): Path<String>,
+    Query(query): Query<VaultQuery>,
+    request: Request,
+) -> Result<Json<SecretProperties>, ApiError> {
+    let body: RenameBody = bounded_json(
+        request,
+        MAX_RENAME_REQUEST_BYTES,
+        Some("name"),
+        "The rename request could not be understood.",
+        "Enter only a valid new secret name and try again.",
+    )
+    .await?;
+    let target = query.target(&state)?;
+    if !target.backend.secrets().supports_atomic_rename() {
+        return Err(structured_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "xv-operation-unsupported",
+            "This backend does not support conflict-safe rename.",
+            "Choose a backend with atomic rename support and try again.",
+            Some("name"),
+        ));
+    }
+    let capabilities = target.backend.capabilities();
+    validate_secret_name(&name, &capabilities)?;
+    validate_secret_name(&body.new_name, &capabilities)?;
+    super::api::reject_reserved_attachment_key(&name)?;
+    super::api::reject_reserved_attachment_key(&body.new_name)?;
+    if body.new_name == name {
+        return Err(ApiError::Validation {
+            status: StatusCode::BAD_REQUEST,
+            message: "Enter a name that is different from the current name.",
+            field: Some("name"),
+        });
+    }
+    if target
+        .backend
+        .secrets()
+        .secret_exists(&target.context.vault, &body.new_name)
+        .await?
+    {
+        return Err(structured_error(
+            StatusCode::CONFLICT,
+            "xv-conflict",
+            "A secret with the new name already exists.",
+            "Choose a different name and try again.",
+            Some("name"),
+        ));
+    }
+
+    // The backend contract performs its own destination guard immediately
+    // before the read-copy-delete operation. Keeping both checks means a
+    // destination created after this UI preflight still fails as a conflict.
+    let mut renamed = target
+        .backend
+        .secrets()
+        .rename_secret(&target.context.vault, &name, &body.new_name)
+        .await
+        .map_err(rename_backend_error)?;
+    renamed.value = None;
+    Ok(Json(renamed))
+}
 
 pub(crate) async fn list_deleted(
     State(state): State<Arc<WebState>>,
@@ -82,6 +496,829 @@ mod tests {
             crate::web::preferences::PreferenceStore::new(temp.path().join("ui.json"), 30),
             registry,
         ))
+    }
+
+    fn scoped_state(
+        primary: Arc<testutil::stub::StubBackend>,
+        stage: Arc<testutil::stub::StubBackend>,
+    ) -> Arc<crate::web::WebState> {
+        let primary_trait: Arc<dyn crate::backend::Backend> = primary;
+        let stage_trait: Arc<dyn crate::backend::Backend> = stage;
+        let registry = Arc::new(crate::backend::BackendRegistry::for_test(
+            "primary",
+            vec![("primary", primary_trait.clone()), ("stage", stage_trait)],
+        ));
+        let mut context = testutil::test_context(primary_trait.as_ref(), "payments", 30);
+        context.workspace.configured = true;
+        context.workspace.alias = "work".into();
+        context.workspace.entries = vec![
+            crate::web::context::WorkspaceEntrySummary {
+                alias: "work".into(),
+                backend: "primary".into(),
+                vault: "payments".into(),
+                default: true,
+            },
+            crate::web::context::WorkspaceEntrySummary {
+                alias: "stage".into(),
+                backend: "stage".into(),
+                vault: "sandbox".into(),
+                default: false,
+            },
+        ];
+        let path = std::env::temp_dir()
+            .join(format!("xv-web-scoped-test-{}", uuid::Uuid::new_v4()))
+            .join("ui.json");
+        Arc::new(crate::web::WebState::new(
+            primary_trait,
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(path, 30),
+            registry,
+        ))
+    }
+
+    fn atomic_stub(name: &'static str) -> Arc<testutil::stub::StubBackend> {
+        Arc::new(testutil::stub::StubBackend::with_capabilities(
+            name,
+            crate::backend::BackendCapabilities {
+                has_atomic_record_conversion: true,
+                has_enable_disable: true,
+                has_groups: true,
+                has_folders: true,
+                has_notes: true,
+                has_expiry: true,
+                max_name_length: Some(255),
+                ..Default::default()
+            },
+        ))
+    }
+
+    fn state_with_types(
+        backend: Arc<testutil::stub::StubBackend>,
+        types: Vec<crate::records::RecordType>,
+    ) -> Arc<crate::web::WebState> {
+        let backend_trait: Arc<dyn crate::backend::Backend> = backend;
+        let context = testutil::test_context(backend_trait.as_ref(), "vault", 30);
+        let path = std::env::temp_dir()
+            .join(format!("xv-web-types-test-{}", uuid::Uuid::new_v4()))
+            .join("ui.json");
+        Arc::new(crate::web::WebState::new(
+            backend_trait.clone(),
+            context,
+            "test-token".into(),
+            types,
+            crate::web::preferences::PreferenceStore::new(path, 30),
+            Arc::new(crate::backend::BackendRegistry::new(backend_trait)),
+        ))
+    }
+
+    async fn put_login_record(app: axum::Router, name: &str) {
+        let (status, _) = get_json(
+            app,
+            "PUT",
+            &format!("/api/secrets/{name}"),
+            Some(json!({
+                "value": r#"{"password":"route-secret-value"}"#,
+                "content_type": crate::records::RECORD_CONTENT_TYPE,
+                "tags": {
+                    crate::records::TYPE_TAG: "login",
+                    "f.username": "route-public-value"
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    async fn put_plain_secret(app: axum::Router, name: &str, value: &str) {
+        let (status, _) = get_json(
+            app,
+            "PUT",
+            &format!("/api/secrets/{name}"),
+            Some(json!({"value": value})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn conversion_preview_is_value_free_and_names_actual_loss() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = crate::web::build_router(real_local_state(&temp));
+        put_login_record(app.clone(), "login").await;
+
+        let (status, preview) = get_json(
+            app,
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({"target_type":"api-key"})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(preview["dropped"], json!(["username"]));
+        assert_eq!(preview["renamed"], json!(["password -> key"]));
+        assert_eq!(preview["requires_confirmation"], true);
+        let serialized = preview.to_string();
+        assert!(!serialized.contains("route-secret-value"));
+        assert!(!serialized.contains("route-public-value"));
+    }
+
+    #[tokio::test]
+    async fn conversion_apply_requires_stable_confirmation_and_returns_safe_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = crate::web::build_router(real_local_state(&temp));
+        put_login_record(app.clone(), "login").await;
+        let (_, preview) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({"target_type":"api-key"})),
+        )
+        .await;
+        let source_version = preview["source_version"].as_str().unwrap();
+
+        let (status, error) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion",
+            Some(json!({"target_type":"api-key","confirm_lossy":false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            error["error"]["code"],
+            "xv-conversion-confirmation-required"
+        );
+
+        let (status, converted) = get_json(
+            app,
+            "POST",
+            "/api/secrets/login/conversion",
+            Some(json!({
+                "target_type":"api-key",
+                "confirm_lossy":true,
+                "source_version":source_version
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            converted["secret"]["content_type"],
+            crate::records::RECORD_CONTENT_TYPE
+        );
+        assert_eq!(
+            converted["secret"]["tags"][crate::records::TYPE_TAG],
+            "api-key"
+        );
+        assert_eq!(converted["summary"]["dropped"], json!(["username"]));
+        assert!(converted["secret"]["value"].is_null());
+        let serialized = converted.to_string();
+        assert!(!serialized.contains("route-secret-value"));
+        assert!(!serialized.contains("route-public-value"));
+    }
+
+    #[tokio::test]
+    async fn conversion_request_rejects_unknown_and_unrelated_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = crate::web::build_router(real_local_state(&temp));
+        put_login_record(app.clone(), "login").await;
+
+        for body in [
+            json!({"target_type":"missing"}),
+            json!({"target_type":"api-key","metadata":{"note":"unrelated"}}),
+            json!({"target_type":"api-key","supplied_fields":{"unknown":"value"}}),
+        ] {
+            let (status, error) = get_json(
+                app.clone(),
+                "POST",
+                "/api/secrets/login/conversion/preview",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error["error"]["field"].is_string());
+            assert!(!error.to_string().contains("route-secret-value"));
+        }
+    }
+
+    #[tokio::test]
+    async fn conversion_and_rename_requests_enforce_bounded_shapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = crate::web::build_router(real_local_state(&temp));
+        put_login_record(app.clone(), "login").await;
+        let too_many: serde_json::Map<String, serde_json::Value> = (0..65)
+            .map(|index| (format!("field-{index}"), json!("bounded-marker")))
+            .collect();
+        for body in [
+            json!({"target_type":"x".repeat(129)}),
+            json!({"target_type":"api-key","supplied_fields":too_many}),
+            json!({
+                "target_type":"api-key",
+                "supplied_fields":{"account":"x".repeat(super::MAX_CONVERSION_FIELD_VALUE_BYTES + 1)}
+            }),
+        ] {
+            let (status, error) = get_json(
+                app.clone(),
+                "POST",
+                "/api/secrets/login/conversion/preview",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error["error"]["field"].is_string());
+            assert!(!error.to_string().contains("bounded-marker"));
+        }
+
+        let (status, oversized) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({
+                "target_type":"api-key",
+                "supplied_fields":{
+                    "account":"x".repeat(super::MAX_CONVERSION_REQUEST_BYTES + 1)
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(oversized["error"]["code"], "xv-request-too-large");
+
+        let rename_app = crate::web::build_router(testutil::test_state());
+        put_plain_secret(rename_app.clone(), "source", "bounded-secret-value").await;
+        let (status, error) = get_json(
+            rename_app,
+            "POST",
+            "/api/secrets/source/rename",
+            Some(json!({"new_name":"x".repeat(super::MAX_WEB_SECRET_NAME_BYTES + 1)})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"]["field"], "name");
+        assert!(!error.to_string().contains("bounded-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn conversion_apply_rejects_a_stale_preview_without_changing_the_new_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = crate::web::build_router(real_local_state(&temp));
+        put_login_record(app.clone(), "login").await;
+        let (_, preview) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({"target_type":"api-key"})),
+        )
+        .await;
+        let source_version = preview["source_version"]
+            .as_str()
+            .expect("preview source version")
+            .to_string();
+
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/login",
+            Some(json!({"value":"newer-source-value"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, stale) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion",
+            Some(json!({
+                "target_type":"api-key",
+                "confirm_lossy":true,
+                "source_version":source_version
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(stale["error"]["code"], "xv-conversion-source-changed");
+
+        let (_, current) = get_json(app, "POST", "/api/secrets/login/value", None).await;
+        assert_eq!(current["value"], "newer-source-value");
+    }
+
+    #[tokio::test]
+    async fn concurrent_conversion_tabs_keep_their_exact_attached_workspace_targets() {
+        let primary = atomic_stub("primary");
+        let stage = atomic_stub("stage");
+        let app = crate::web::build_router(scoped_state(primary.clone(), stage.clone()));
+        let primary_scope = "?alias=work&backend=primary&vault=payments";
+        let stage_scope = "?alias=stage&backend=stage&vault=sandbox";
+        for scope in [primary_scope, stage_scope] {
+            let (status, _) = get_json(
+                app.clone(),
+                "PUT",
+                &format!("/api/secrets/login{scope}"),
+                Some(json!({
+                    "value": r#"{"password":"scoped-secret-value"}"#,
+                    "content_type": crate::records::RECORD_CONTENT_TYPE,
+                    "tags": {
+                        crate::records::TYPE_TAG: "login",
+                        "f.username": "scoped-user"
+                    }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (_, primary_preview) = get_json(
+            app.clone(),
+            "POST",
+            &format!("/api/secrets/login/conversion/preview{primary_scope}"),
+            Some(json!({"target_type":"database"})),
+        )
+        .await;
+        let (_, stage_preview) = get_json(
+            app.clone(),
+            "POST",
+            &format!("/api/secrets/login/conversion/preview{stage_scope}"),
+            Some(json!({"target_type":"api-key"})),
+        )
+        .await;
+
+        let primary_tab = tokio::spawn(get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion?alias=work&backend=primary&vault=payments",
+            Some(json!({
+                "target_type":"database",
+                "confirm_lossy":true,
+                "source_version":primary_preview["source_version"]
+            })),
+        ));
+        let stage_tab = tokio::spawn(get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion?alias=stage&backend=stage&vault=sandbox",
+            Some(json!({
+                "target_type":"api-key",
+                "confirm_lossy":true,
+                "source_version":stage_preview["source_version"]
+            })),
+        ));
+        let ((primary_status, _), (stage_status, _)) =
+            tokio::try_join!(primary_tab, stage_tab).unwrap();
+        assert_eq!(primary_status, StatusCode::OK);
+        assert_eq!(stage_status, StatusCode::OK);
+
+        assert_eq!(
+            primary.secrets.lock().unwrap()["login"]
+                .tags
+                .as_ref()
+                .unwrap()[crate::records::TYPE_TAG],
+            "database"
+        );
+        assert_eq!(
+            stage.secrets.lock().unwrap()["login"]
+                .tags
+                .as_ref()
+                .unwrap()[crate::records::TYPE_TAG],
+            "api-key"
+        );
+        let (_, base) = get_json(app, "GET", "/api/context", None).await;
+        assert_eq!(base["backend"], "primary");
+        assert_eq!(base["vault"], "payments");
+    }
+
+    #[tokio::test]
+    async fn unsupported_conversion_is_rejected_before_a_malformed_source_is_read() {
+        let backend = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "unsupported",
+            crate::backend::BackendCapabilities::default(),
+        ));
+        let app =
+            crate::web::build_router(state_with_types(backend, crate::records::builtin_types()));
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/broken",
+            Some(json!({
+                "value":"malformed-secret-envelope",
+                "content_type":crate::records::RECORD_CONTENT_TYPE,
+                "tags":{crate::records::TYPE_TAG:"login"}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/broken/conversion/preview",
+            Some(json!({"target_type":"api-key"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(error["error"]["code"], "xv-operation-unsupported");
+    }
+
+    #[tokio::test]
+    async fn conversion_requires_missing_fields_and_never_echoes_supplied_values() {
+        use crate::records::{FieldDef, FieldKind, RecordType, TypeSource};
+
+        let required_type = RecordType {
+            name: "required-target".into(),
+            source: TypeSource::Project,
+            fields: vec![
+                FieldDef {
+                    name: "account".into(),
+                    kind: FieldKind::Metadata,
+                    required: true,
+                    primary: false,
+                },
+                FieldDef {
+                    name: "password".into(),
+                    kind: FieldKind::Secret,
+                    required: true,
+                    primary: true,
+                },
+            ],
+        };
+        let mut types = crate::records::builtin_types();
+        types.push(required_type);
+        let backend = atomic_stub("required");
+        let app = crate::web::build_router(state_with_types(backend, types));
+        put_login_record(app.clone(), "login").await;
+
+        let (status, missing) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({"target_type":"required-target"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(missing["error"]["field"], "supplied_fields");
+
+        let (status, preview) = get_json(
+            app,
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({
+                "target_type":"required-target",
+                "supplied_fields":{"account":"supplied-sensitive-marker"}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!preview.to_string().contains("supplied-sensitive-marker"));
+    }
+
+    #[tokio::test]
+    async fn sensitivity_exposure_requires_confirmation_without_echoing_the_value() {
+        use crate::records::{FieldDef, FieldKind, RecordType, TypeSource};
+
+        let protected = RecordType {
+            name: "protected".into(),
+            source: TypeSource::Project,
+            fields: vec![
+                FieldDef {
+                    name: "password".into(),
+                    kind: FieldKind::Secret,
+                    required: true,
+                    primary: true,
+                },
+                FieldDef {
+                    name: "token".into(),
+                    kind: FieldKind::Secret,
+                    required: false,
+                    primary: false,
+                },
+            ],
+        };
+        let exposed = RecordType {
+            name: "exposed".into(),
+            source: TypeSource::Project,
+            fields: vec![
+                FieldDef {
+                    name: "password".into(),
+                    kind: FieldKind::Secret,
+                    required: true,
+                    primary: true,
+                },
+                FieldDef {
+                    name: "token".into(),
+                    kind: FieldKind::Metadata,
+                    required: false,
+                    primary: false,
+                },
+            ],
+        };
+        let backend = atomic_stub("sensitivity");
+        let app =
+            crate::web::build_router(state_with_types(backend.clone(), vec![protected, exposed]));
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/record",
+            Some(json!({
+                "value":r#"{"password":"password-marker","token":"exposed-marker"}"#,
+                "content_type":crate::records::RECORD_CONTENT_TYPE,
+                "tags":{crate::records::TYPE_TAG:"protected"}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, preview) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/record/conversion/preview",
+            Some(json!({"target_type":"exposed"})),
+        )
+        .await;
+        assert_eq!(preview["exposed"], json!(["token"]));
+        assert_eq!(preview["requires_confirmation"], true);
+        assert!(!preview.to_string().contains("exposed-marker"));
+
+        let (status, converted) = get_json(
+            app,
+            "POST",
+            "/api/secrets/record/conversion",
+            Some(json!({
+                "target_type":"exposed",
+                "confirm_lossy":true,
+                "source_version":preview["source_version"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!converted.to_string().contains("exposed-marker"));
+        assert_eq!(
+            backend.secrets.lock().unwrap()["record"]
+                .tags
+                .as_ref()
+                .unwrap()["f.token"],
+            "exposed-marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_envelope_and_tag_budget_fail_without_mutation() {
+        let malformed_backend = atomic_stub("malformed");
+        let malformed_app = crate::web::build_router(state_with_types(
+            malformed_backend,
+            crate::records::builtin_types(),
+        ));
+        let _ = get_json(
+            malformed_app.clone(),
+            "PUT",
+            "/api/secrets/broken",
+            Some(json!({
+                "value":"malformed-envelope-marker",
+                "content_type":crate::records::RECORD_CONTENT_TYPE,
+                "tags":{crate::records::TYPE_TAG:"login"}
+            })),
+        )
+        .await;
+        let (status, error) = get_json(
+            malformed_app,
+            "POST",
+            "/api/secrets/broken/conversion/preview",
+            Some(json!({"target_type":"database"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!error.to_string().contains("malformed-envelope-marker"));
+
+        let limited = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "limited",
+            crate::backend::BackendCapabilities {
+                has_atomic_record_conversion: true,
+                has_enable_disable: true,
+                has_groups: true,
+                has_folders: true,
+                has_notes: true,
+                has_expiry: true,
+                max_tags: Some(1),
+                ..Default::default()
+            },
+        ));
+        let app = crate::web::build_router(state_with_types(
+            limited.clone(),
+            crate::records::builtin_types(),
+        ));
+        put_login_record(app.clone(), "login").await;
+        let (_, preview) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({"target_type":"database"})),
+        )
+        .await;
+        let (status, _) = get_json(
+            app,
+            "POST",
+            "/api/secrets/login/conversion",
+            Some(json!({
+                "target_type":"database",
+                "source_version":preview["source_version"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            limited.secrets.lock().unwrap()["login"]
+                .tags
+                .as_ref()
+                .unwrap()[crate::records::TYPE_TAG],
+            "login"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversion_backend_failure_keeps_internal_details_and_values_out_of_json() {
+        let failing = Arc::new(testutil::stub::StubBackend::with_update_error(
+            "failing",
+            crate::backend::BackendCapabilities {
+                has_atomic_record_conversion: true,
+                has_enable_disable: true,
+                has_groups: true,
+                has_folders: true,
+                has_notes: true,
+                has_expiry: true,
+                ..Default::default()
+            },
+            "sensitive-internal-backend-marker",
+        ));
+        let app =
+            crate::web::build_router(state_with_types(failing, crate::records::builtin_types()));
+        put_login_record(app.clone(), "login").await;
+        let (_, preview) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/login/conversion/preview",
+            Some(json!({"target_type":"database"})),
+        )
+        .await;
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/login/conversion",
+            Some(json!({
+                "target_type":"database",
+                "source_version":preview["source_version"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error["error"]["code"], "xv-unknown");
+        let serialized = error.to_string();
+        assert!(!serialized.contains("sensitive-internal-backend-marker"));
+        assert!(!serialized.contains("route-secret-value"));
+        assert!(!serialized.contains("route-public-value"));
+    }
+
+    #[tokio::test]
+    async fn rename_moves_only_the_named_secret_and_returns_no_value() {
+        let app = crate::web::build_router(testutil::test_state());
+        put_plain_secret(app.clone(), "source", "rename-secret-value").await;
+
+        let (status, renamed) = get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/source/rename",
+            Some(json!({"new_name":"destination"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(renamed["original_name"], "destination");
+        assert!(renamed["value"].is_null());
+        assert!(!renamed.to_string().contains("rename-secret-value"));
+
+        let (source_status, _) = get_json(app.clone(), "GET", "/api/secrets/source", None).await;
+        let (destination_status, _) = get_json(app, "GET", "/api/secrets/destination", None).await;
+        assert_eq!(source_status, StatusCode::NOT_FOUND);
+        assert_eq!(destination_status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_collision_noop_and_unrelated_metadata_on_name_field() {
+        let app = crate::web::build_router(testutil::test_state());
+        put_plain_secret(app.clone(), "source", "source-value").await;
+        put_plain_secret(app.clone(), "destination", "destination-value").await;
+
+        for (body, expected_status) in [
+            (json!({"new_name":"destination"}), StatusCode::CONFLICT),
+            (json!({"new_name":"source"}), StatusCode::BAD_REQUEST),
+            (
+                json!({"new_name":"other","note":"unrelated"}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, error) = get_json(
+                app.clone(),
+                "POST",
+                "/api/secrets/source/rename",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, expected_status);
+            assert_eq!(error["error"]["field"], "name");
+            assert!(!error.to_string().contains("source-value"));
+            assert!(!error.to_string().contains("destination-value"));
+        }
+
+        let (_, source) = get_json(app.clone(), "POST", "/api/secrets/source/value", None).await;
+        let (_, destination) = get_json(app, "POST", "/api/secrets/destination/value", None).await;
+        assert!(source.to_string().contains("source-value"));
+        assert!(destination.to_string().contains("destination-value"));
+    }
+
+    #[tokio::test]
+    async fn rename_missing_source_and_partial_backend_failure_are_safe() {
+        let (status, missing) = get_json(
+            crate::web::build_router(testutil::test_state()),
+            "POST",
+            "/api/secrets/missing/rename",
+            Some(json!({"new_name":"destination"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(missing["error"]["code"], "xv-secret-not-found");
+
+        let backend = Arc::new(testutil::stub::StubBackend::with_delete_error(
+            "partial",
+            "sensitive backend failure",
+        ));
+        let backend_trait: Arc<dyn crate::backend::Backend> = backend.clone();
+        let context = testutil::test_context(backend_trait.as_ref(), "vault", 30);
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(crate::web::WebState::new(
+            backend_trait.clone(),
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(root.path().join("ui.json"), 30),
+            Arc::new(crate::backend::BackendRegistry::new(backend_trait)),
+        ));
+        let app = crate::web::build_router(state);
+        put_plain_secret(app.clone(), "source", "partial-secret-value").await;
+
+        let (status, partial) = get_json(
+            app,
+            "POST",
+            "/api/secrets/source/rename",
+            Some(json!({"new_name":"destination"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(partial["error"]["code"], "xv-rename-incomplete");
+        assert!(!partial.to_string().contains("sensitive backend failure"));
+        assert!(!partial.to_string().contains("partial-secret-value"));
+        assert!(backend.secrets.lock().unwrap().contains_key("source"));
+        assert!(backend.secrets.lock().unwrap().contains_key("destination"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_rename_tabs_keep_their_exact_attached_workspace_targets() {
+        let primary = atomic_stub("primary");
+        let stage = atomic_stub("stage");
+        let app = crate::web::build_router(scoped_state(primary.clone(), stage.clone()));
+        for scope in [
+            "?alias=work&backend=primary&vault=payments",
+            "?alias=stage&backend=stage&vault=sandbox",
+        ] {
+            let (status, _) = get_json(
+                app.clone(),
+                "PUT",
+                &format!("/api/secrets/source{scope}"),
+                Some(json!({"value":"tab-secret-value"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        let primary_tab = tokio::spawn(get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/source/rename?alias=work&backend=primary&vault=payments",
+            Some(json!({"new_name":"primary-name"})),
+        ));
+        let stage_tab = tokio::spawn(get_json(
+            app.clone(),
+            "POST",
+            "/api/secrets/source/rename?alias=stage&backend=stage&vault=sandbox",
+            Some(json!({"new_name":"stage-name"})),
+        ));
+        let ((primary_status, _), (stage_status, _)) =
+            tokio::try_join!(primary_tab, stage_tab).unwrap();
+        assert_eq!(primary_status, StatusCode::OK);
+        assert_eq!(stage_status, StatusCode::OK);
+        assert!(primary.secrets.lock().unwrap().contains_key("primary-name"));
+        assert!(!primary.secrets.lock().unwrap().contains_key("stage-name"));
+        assert!(stage.secrets.lock().unwrap().contains_key("stage-name"));
+        assert!(!stage.secrets.lock().unwrap().contains_key("primary-name"));
+
+        let (_, base) = get_json(app, "GET", "/api/context", None).await;
+        assert_eq!(base["backend"], "primary");
+        assert_eq!(base["vault"], "payments");
     }
 
     #[tokio::test]

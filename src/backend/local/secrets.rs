@@ -1607,12 +1607,12 @@ impl LocalSecretBackend {
     }
 }
 
-#[async_trait]
-impl SecretBackend for LocalSecretBackend {
-    async fn set_secret(
+impl LocalSecretBackend {
+    fn set_secret_with_mode(
         &self,
         vault: &str,
         request: SecretRequest,
+        require_absent: bool,
     ) -> Result<SecretProperties, BackendError> {
         let store = self.store_path.clone();
         let identity = self.identity.clone();
@@ -1643,6 +1643,11 @@ impl SecretBackend for LocalSecretBackend {
         let stem = self.resolve_active_stem(vault, &name)?;
         let ap = age_path(&store, vault, &stem)?;
         let mp = meta_path(&store, vault, &stem)?;
+        if require_absent && mp.exists() {
+            return Err(BackendError::Conflict(format!(
+                "secret '{name}' already exists in vault '{vault}'"
+            )));
+        }
 
         // Snapshot old state for transactional replace+archive.
         let old_snapshot = if mp.exists() {
@@ -1724,6 +1729,29 @@ impl SecretBackend for LocalSecretBackend {
         self.ensure_opaque_layout(vault, &name)?;
 
         Ok(meta_to_properties(&meta, None))
+    }
+}
+
+#[async_trait]
+impl SecretBackend for LocalSecretBackend {
+    fn supports_atomic_rename(&self) -> bool {
+        true
+    }
+
+    async fn set_secret(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        self.set_secret_with_mode(vault, request, false)
+    }
+
+    async fn create_secret_if_absent(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        self.set_secret_with_mode(vault, request, true)
     }
 
     async fn get_secret(
@@ -5695,6 +5723,32 @@ mod tests {
         assert_eq!(index.len(), 2, "both secrets indexed");
         let listed = b1.list_secrets("default", None).await.unwrap();
         assert_eq!(listed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_if_absent_never_replaces_the_winner() {
+        let (_backend, tmp) = test_backend_opaque();
+        let first = reopen_opaque(&tmp, false);
+        let second = reopen_opaque(&tmp, false);
+
+        let (first_result, second_result) = tokio::join!(
+            first.create_secret_if_absent("default", make_request("same-name", "first")),
+            second.create_secret_if_absent("default", make_request("same-name", "second")),
+        );
+
+        assert!(
+            matches!(
+                (&first_result, &second_result),
+                (Ok(_), Err(BackendError::Conflict(_))) | (Err(BackendError::Conflict(_)), Ok(_))
+            ),
+            "exactly one atomic create must win: {first_result:?} / {second_result:?}"
+        );
+        let winner = first
+            .get_secret("default", "same-name", true)
+            .await
+            .unwrap();
+        let winner_value = winner.value.as_ref().map(|value| value.as_str());
+        assert!(matches!(winner_value, Some("first") | Some("second")));
     }
 
     /// Shared rename assertions, run against both store layouts.

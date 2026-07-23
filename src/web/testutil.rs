@@ -106,6 +106,8 @@ pub(crate) mod stub {
         health_error: Option<&'static str>,
         list_error: Option<&'static str>,
         list_delay: Option<Duration>,
+        delete_error: Option<&'static str>,
+        update_error: Option<&'static str>,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         pub deleted: Mutex<HashMap<String, SecretRequest>>,
         #[cfg(feature = "file-ops")]
@@ -142,6 +144,8 @@ pub(crate) mod stub {
                 health_error: None,
                 list_error: None,
                 list_delay: None,
+                delete_error: None,
+                update_error: None,
                 secrets: Mutex::new(HashMap::new()),
                 deleted: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
@@ -164,6 +168,22 @@ pub(crate) mod stub {
         pub(crate) fn with_list_delay(name: &'static str, list_delay: Duration) -> Self {
             let mut backend = Self::with_capabilities(name, BackendCapabilities::default());
             backend.list_delay = Some(list_delay);
+            backend
+        }
+
+        pub(crate) fn with_delete_error(name: &'static str, delete_error: &'static str) -> Self {
+            let mut backend = Self::with_capabilities(name, BackendCapabilities::default());
+            backend.delete_error = Some(delete_error);
+            backend
+        }
+
+        pub(crate) fn with_update_error(
+            name: &'static str,
+            capabilities: BackendCapabilities,
+            update_error: &'static str,
+        ) -> Self {
+            let mut backend = Self::with_capabilities(name, capabilities);
+            backend.update_error = Some(update_error);
             backend
         }
     }
@@ -231,6 +251,10 @@ pub(crate) mod stub {
 
     #[async_trait]
     impl SecretBackend for StubBackend {
+        fn supports_atomic_rename(&self) -> bool {
+            true
+        }
+
         async fn set_secret(
             &self,
             _vault: &str,
@@ -241,6 +265,23 @@ pub(crate) mod stub {
                 .lock()
                 .unwrap()
                 .insert(request.name.clone(), request);
+            Ok(props)
+        }
+
+        async fn create_secret_if_absent(
+            &self,
+            _vault: &str,
+            request: SecretRequest,
+        ) -> Result<SecretProperties, BackendError> {
+            let mut secrets = self.secrets.lock().unwrap();
+            if secrets.contains_key(&request.name) {
+                return Err(BackendError::Conflict(format!(
+                    "secret '{}' already exists",
+                    request.name
+                )));
+            }
+            let props = props_from_request(&request, false);
+            secrets.insert(request.name.clone(), request);
             Ok(props)
         }
 
@@ -310,6 +351,9 @@ pub(crate) mod stub {
         }
 
         async fn delete_secret(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
+            if let Some(message) = self.delete_error {
+                return Err(BackendError::Internal(message.into()));
+            }
             let request = self.secrets.lock().unwrap().remove(name).ok_or_else(|| {
                 BackendError::NotFound {
                     name: name.to_string(),
@@ -381,6 +425,9 @@ pub(crate) mod stub {
             name: &str,
             request: SecretUpdateRequest,
         ) -> Result<SecretProperties, BackendError> {
+            if let Some(message) = self.update_error {
+                return Err(BackendError::Internal(message.into()));
+            }
             let mut secrets = self.secrets.lock().unwrap();
             let mut current = secrets
                 .get(name)

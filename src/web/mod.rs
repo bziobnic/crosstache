@@ -282,6 +282,24 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         )
         .route("/secrets/{name}/value", post(api::reveal_secret))
         .route("/secrets/{name}/move", post(api::move_secret))
+        .route(
+            "/secrets/{name}/conversion/preview",
+            post(secrets::preview_conversion_route).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_CONVERSION_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/secrets/{name}/conversion",
+            post(secrets::apply_conversion_route).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_CONVERSION_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/secrets/{name}/rename",
+            post(secrets::rename).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_RENAME_REQUEST_BYTES,
+            )),
+        )
         .route("/secrets/{name}/restore", post(secrets::restore))
         .route(
             "/secrets/{name}/purge",

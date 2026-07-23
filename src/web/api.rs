@@ -23,6 +23,10 @@ use super::WebState;
 pub(crate) enum ApiError {
     App(CrosstacheError),
     Backend(BackendError),
+    Structured {
+        status: StatusCode,
+        error: Box<super::errors::ApiErrorBody>,
+    },
     Validation {
         status: StatusCode,
         message: &'static str,
@@ -47,6 +51,7 @@ impl IntoResponse for ApiError {
         let (status, error) = match self {
             ApiError::App(error) => super::errors::crosstache_error(error),
             ApiError::Backend(error) => super::errors::backend_error(error),
+            ApiError::Structured { status, error } => (status, *error),
             ApiError::Validation {
                 status,
                 message,
@@ -293,7 +298,7 @@ pub(crate) async fn delete_secret(
 /// UI has no confirm plumbing to warn (unlike the CLI's `confirm_destructive`
 /// prompts), so writing, deleting, or renaming it from here is rejected
 /// outright.
-fn reject_reserved_attachment_key(name: &str) -> Result<(), ApiError> {
+pub(crate) fn reject_reserved_attachment_key(name: &str) -> Result<(), ApiError> {
     if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
         return Err(validation_error(
             StatusCode::BAD_REQUEST,

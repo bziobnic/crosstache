@@ -63,6 +63,27 @@ pub trait SecretBackend: Send + Sync {
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError>;
 
+    /// Create a secret only if the destination is still absent at the
+    /// provider's commit point. Implementations must never update or replace
+    /// an existing secret. Backends without a conditional-create primitive
+    /// must leave this unsupported rather than emulate it with a racy
+    /// exists-then-set sequence.
+    async fn create_secret_if_absent(
+        &self,
+        _vault: &str,
+        _request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        Err(BackendError::Unsupported(
+            "atomic create-if-absent required for rename".into(),
+        ))
+    }
+
+    /// Whether this backend has a provider-enforced no-overwrite commit point
+    /// for rename. False means rename must fail before reading the source.
+    fn supports_atomic_rename(&self) -> bool {
+        false
+    }
+
     /// Rename a secret: read value + metadata, create it under `new_name`
     /// (tags, groups, note, folder, content type, expiry ride along), then
     /// delete the old name via the backend's normal delete (soft delete /
@@ -72,15 +93,21 @@ pub trait SecretBackend: Send + Sync {
     /// returns [`BackendError::RenameIncomplete`] and deliberately does NOT
     /// roll back the new secret — no secret material may be lost.
     ///
-    /// The destination-exists guard is a best-effort pre-check, not a lock:
-    /// backends' `set_secret` is create-or-replace, so a concurrent write to
-    /// `new_name` between the check and the create would be overwritten.
+    /// The destination-exists guard is an early preflight for useful errors.
+    /// [`create_secret_if_absent`](Self::create_secret_if_absent) is the
+    /// authoritative no-overwrite commit point and must reject a destination
+    /// introduced after the preflight.
     async fn rename_secret(
         &self,
         vault: &str,
         name: &str,
         new_name: &str,
     ) -> Result<SecretProperties, BackendError> {
+        if !self.supports_atomic_rename() {
+            return Err(BackendError::Unsupported(
+                "atomic create-if-absent required for rename".into(),
+            ));
+        }
         if new_name == name {
             return Err(BackendError::InvalidArgument(format!(
                 "secret is already named '{name}'"
@@ -94,7 +121,7 @@ pub trait SecretBackend: Send + Sync {
 
         let current = self.get_secret(vault, name, true).await?;
         let request = rename_request_from_properties(new_name, &current)?;
-        let created = self.set_secret(vault, request).await?;
+        let created = self.create_secret_if_absent(vault, request).await?;
 
         if let Err(cause) = self.delete_secret(vault, name).await {
             return Err(BackendError::RenameIncomplete {
@@ -271,6 +298,7 @@ mod tests {
     struct StubBackend {
         secrets: Mutex<HashMap<String, SecretRequest>>,
         fail_delete: bool,
+        introduce_destination_before_create: bool,
     }
 
     impl StubBackend {
@@ -278,6 +306,15 @@ mod tests {
             Self {
                 secrets: Mutex::new(HashMap::new()),
                 fail_delete,
+                introduce_destination_before_create: false,
+            }
+        }
+
+        fn with_destination_race() -> Self {
+            Self {
+                secrets: Mutex::new(HashMap::new()),
+                fail_delete: false,
+                introduce_destination_before_create: true,
             }
         }
     }
@@ -317,6 +354,10 @@ mod tests {
 
     #[async_trait]
     impl SecretBackend for StubBackend {
+        fn supports_atomic_rename(&self) -> bool {
+            true
+        }
+
         async fn set_secret(
             &self,
             _vault: &str,
@@ -327,6 +368,32 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(request.name.clone(), request);
+            Ok(props)
+        }
+
+        async fn create_secret_if_absent(
+            &self,
+            _vault: &str,
+            request: SecretRequest,
+        ) -> Result<SecretProperties, BackendError> {
+            let mut secrets = self.secrets.lock().unwrap();
+            if self.introduce_destination_before_create {
+                secrets.insert(
+                    request.name.clone(),
+                    SecretRequest {
+                        value: Zeroizing::new("concurrent-value".into()),
+                        ..seeded_request(&request.name)
+                    },
+                );
+            }
+            if secrets.contains_key(&request.name) {
+                return Err(BackendError::Conflict(format!(
+                    "secret '{}' already exists",
+                    request.name
+                )));
+            }
+            let props = props_from_request(&request, false);
+            secrets.insert(request.name.clone(), request);
             Ok(props)
         }
 
@@ -454,6 +521,32 @@ mod tests {
         // Both still present and untouched.
         assert!(backend.get_secret("v", "a", true).await.is_ok());
         assert!(backend.get_secret("v", "b", true).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rename_destination_race_preserves_concurrent_value_and_source() {
+        let backend = StubBackend::with_destination_race();
+        backend
+            .set_secret("v", seeded_request("source"))
+            .await
+            .unwrap();
+
+        let error = backend
+            .rename_secret("v", "source", "destination")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, BackendError::Conflict(_)), "{error:?}");
+        let source = backend.get_secret("v", "source", true).await.unwrap();
+        let destination = backend.get_secret("v", "destination", true).await.unwrap();
+        assert_eq!(
+            source.value.as_ref().map(|value| value.as_str()),
+            Some("the-value")
+        );
+        assert_eq!(
+            destination.value.as_ref().map(|value| value.as_str()),
+            Some("concurrent-value")
+        );
     }
 
     #[tokio::test]

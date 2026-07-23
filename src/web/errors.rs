@@ -22,14 +22,30 @@ pub(crate) struct ApiErrorEnvelope {
 }
 
 impl ApiErrorBody {
-    pub(crate) fn validation(message: &'static str, field: Option<&'static str>) -> Self {
+    pub(crate) fn new(
+        code: &'static str,
+        message: impl Into<String>,
+        hint: &'static str,
+        field: Option<&'static str>,
+        details: Option<Value>,
+    ) -> Self {
         Self {
-            code: "xv-invalid-argument",
+            code,
             message: message.into(),
-            hint: "Correct the highlighted field and try again.",
+            hint,
             field,
-            details: None,
+            details,
         }
+    }
+
+    pub(crate) fn validation(message: &'static str, field: Option<&'static str>) -> Self {
+        Self::new(
+            "xv-invalid-argument",
+            message,
+            "Correct the highlighted field and try again.",
+            field,
+            None,
+        )
     }
 }
 
