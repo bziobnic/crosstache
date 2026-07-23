@@ -88,17 +88,8 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     return value.split('/').filter((segment) => segment !== '').join('/');
   }
 
-  function opaqueHash(value) {
-    let hash = 0xcbf29ce484222325n;
-    for (const character of String(value)) {
-      hash ^= BigInt(character.codePointAt(0));
-      hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-    }
-    return hash.toString(16).padStart(16, '0');
-  }
-
-  const FOLDER_ALL = Object.freeze({ kind: 'all', opaque: 'a' });
-  const FOLDER_UNFILED = Object.freeze({ kind: 'unfiled', opaque: 'u' });
+  const FOLDER_ALL = Object.freeze({ kind: 'all' });
+  const FOLDER_UNFILED = Object.freeze({ kind: 'unfiled' });
 
   function folderIdentity(path) {
     const normalized = normalizeFolderPath(path);
@@ -106,14 +97,15 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     return Object.freeze({
       kind: 'folder',
       path: normalized,
-      opaque: `f-${opaqueHash(normalized)}`,
     });
   }
 
   function folderIdentityKey(identity) {
-    if (identity?.kind === 'all') return FOLDER_ALL.opaque;
-    if (identity?.kind === 'unfiled') return FOLDER_UNFILED.opaque;
-    if (identity?.kind === 'folder' && typeof identity.opaque === 'string') return identity.opaque;
+    if (identity?.kind === 'all') return '["all"]';
+    if (identity?.kind === 'unfiled') return '["unfiled"]';
+    if (identity?.kind === 'folder' && typeof identity.path === 'string') {
+      return JSON.stringify(['folder', identity.path]);
+    }
     return '';
   }
 
@@ -184,29 +176,47 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     return Number(total) <= 50 ? 'all' : 'collapsed';
   }
 
-  function folderPreferenceKey({ backend, vault, surface }) {
-    const scope = JSON.stringify([
-      String(backend || ''),
-      String(vault || ''),
-      String(surface || ''),
-    ]);
-    return `xv.ui.folder-expansion.v3:${opaqueHash(scope)}`;
+  const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+
+  function createFolderTokenIndex(response) {
+    if (response?.version !== 1 || !OPAQUE_TOKEN.test(response?.scope_token)
+      || !Array.isArray(response?.folders)) return null;
+    const byIdentityKey = new Map();
+    const byToken = new Map();
+    for (const entry of response.folders) {
+      if (typeof entry?.path !== 'string' || entry.path === ''
+        || normalizeFolderPath(entry.path) !== entry.path
+        || !OPAQUE_TOKEN.test(entry?.token)) return null;
+      const identity = folderIdentity(entry.path);
+      const identityKey = folderIdentityKey(identity);
+      if (byIdentityKey.has(identityKey) || byToken.has(entry.token)) return null;
+      byIdentityKey.set(identityKey, entry.token);
+      byToken.set(entry.token, identity);
+    }
+    return Object.freeze({
+      scopeToken: response.scope_token,
+      byIdentityKey,
+      byToken,
+    });
   }
 
-  function cleanupLegacyFolderExpansion(storage, scope) {
+  function folderPreferenceKey(tokenIndex) {
+    return OPAQUE_TOKEN.test(tokenIndex?.scopeToken)
+      ? `xv.ui.folder-expansion.v4:${tokenIndex.scopeToken}`
+      : '';
+  }
+
+  function cleanupLegacyFolderExpansion(storage) {
     if (typeof storage?.removeItem !== 'function') return;
-    const legacyScoped = ['xv.ui.folder-expansion.v2', scope?.backend, scope?.vault, scope?.surface]
-      .map((part, index) => index === 0 ? part : encodeURIComponent(String(part || '')))
-      .join(':');
     const legacyKeys = new Set([
-      legacyScoped,
       'xv.ui.folder-expansion.v1',
       'folder_expansion',
     ]);
     if (Number.isInteger(storage.length) && typeof storage.key === 'function') {
       for (let index = 0; index < storage.length; index++) {
         const key = storage.key(index);
-        if (key?.startsWith('xv.ui.folder-expansion.v2:')) legacyKeys.add(key);
+        if (key?.startsWith('xv.ui.folder-expansion.v2:')
+          || key?.startsWith('xv.ui.folder-expansion.v3:')) legacyKeys.add(key);
       }
     }
     for (const key of legacyKeys) {
@@ -214,15 +224,17 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     }
   }
 
-  function loadFolderExpansion(storage, scope) {
+  function loadFolderExpansion(storage, tokenIndex) {
     if (typeof storage?.getItem !== 'function') return null;
     try {
-      cleanupLegacyFolderExpansion(storage, scope);
-      const serialized = storage.getItem(folderPreferenceKey(scope));
+      cleanupLegacyFolderExpansion(storage);
+      const key = folderPreferenceKey(tokenIndex);
+      if (!key) return null;
+      const serialized = storage.getItem(key);
       if (serialized === null) return null;
       const parsed = JSON.parse(serialized);
-      if (parsed?.version !== 3 || !Array.isArray(parsed.expanded)
-        || parsed.expanded.some((id) => typeof id !== 'string' || !/^f-[a-f0-9]{16}$/.test(id))) {
+      if (parsed?.version !== 4 || !Array.isArray(parsed.expanded)
+        || parsed.expanded.some((token) => !OPAQUE_TOKEN.test(token))) {
         return null;
       }
       return [...new Set(parsed.expanded)];
@@ -231,18 +243,20 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     }
   }
 
-  function saveFolderExpansion(storage, scope, expanded) {
+  function saveFolderExpansion(storage, tokenIndex, expanded) {
     if (typeof storage?.setItem !== 'function') return false;
     try {
-      cleanupLegacyFolderExpansion(storage, scope);
+      cleanupLegacyFolderExpansion(storage);
+      const key = folderPreferenceKey(tokenIndex);
+      if (!key) return false;
       const identities = expanded instanceof Map ? expanded.values() : expanded;
-      const ids = [...identities]
-        .map(folderIdentityKey)
-        .filter((id) => /^f-[a-f0-9]{16}$/.test(id))
+      const tokens = [...identities]
+        .map((identity) => tokenIndex.byIdentityKey.get(folderIdentityKey(identity)))
+        .filter((token) => OPAQUE_TOKEN.test(token))
         .sort((left, right) => collator.compare(left, right));
-      storage.setItem(folderPreferenceKey(scope), JSON.stringify({
-        version: 3,
-        expanded: ids,
+      storage.setItem(key, JSON.stringify({
+        version: 4,
+        expanded: tokens,
       }));
       return true;
     } catch (_) {
@@ -253,19 +267,27 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   function createFolderNavigationState(storage) {
     let scope = null;
     let scopeKey = null;
+    let tokenIndex = null;
+    let hydratedScopeToken = null;
     let selected = FOLDER_ALL;
     let folderIds = [];
     let expandableIds = [];
     const expanded = new Map();
 
-    const persist = () => scope && saveFolderExpansion(storage, scope, expanded);
+    const persist = () => scope && tokenIndex
+      && saveFolderExpansion(storage, tokenIndex, expanded);
     return Object.freeze({
       sync(nextScope, {
         total,
         folderIds: nextFolderIds = null,
         expandableIds: nextExpandableIds,
+        tokenIndex: nextTokenIndex = null,
       }) {
-        const nextKey = folderPreferenceKey(nextScope);
+        const nextKey = JSON.stringify([
+          String(nextScope?.backend || ''),
+          String(nextScope?.vault || ''),
+          String(nextScope?.surface || ''),
+        ]);
         expandableIds = [...nextExpandableIds];
         folderIds = [...(nextFolderIds || nextExpandableIds)];
         const availableFolders = new Map(
@@ -274,10 +296,31 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         const availableExpandable = new Map(
           expandableIds.map((id) => [folderIdentityKey(id), id]),
         );
-        if (nextKey === scopeKey) {
-          for (const key of [...expanded.keys()]) {
-            if (!availableExpandable.has(key)) expanded.delete(key);
+        const sameScope = nextKey === scopeKey;
+        tokenIndex = nextTokenIndex;
+        if (sameScope) {
+          if (tokenIndex && hydratedScopeToken !== tokenIndex.scopeToken) {
+            const saved = loadFolderExpansion(storage, tokenIndex);
+            if (saved !== null) {
+              expanded.clear();
+              for (const token of saved) {
+                const identity = tokenIndex.byToken.get(token);
+                const key = folderIdentityKey(identity);
+                if (availableExpandable.has(key)) {
+                  expanded.set(key, availableExpandable.get(key));
+                }
+              }
+            }
+            hydratedScopeToken = tokenIndex.scopeToken;
           }
+          let pruned = false;
+          for (const key of [...expanded.keys()]) {
+            if (!availableExpandable.has(key)) {
+              expanded.delete(key);
+              pruned = true;
+            }
+          }
+          if (pruned) persist();
           if (!sameFolderIdentity(selected, FOLDER_ALL)
             && !availableFolders.has(folderIdentityKey(selected))) {
             selected = FOLDER_ALL;
@@ -286,13 +329,16 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         }
         scope = { ...nextScope };
         scopeKey = nextKey;
+        hydratedScopeToken = tokenIndex?.scopeToken || null;
         selected = FOLDER_ALL;
         expanded.clear();
-        const saved = loadFolderExpansion(storage, scope);
+        const saved = tokenIndex ? loadFolderExpansion(storage, tokenIndex) : null;
         const initial = initialExpansion({ total, saved });
         const initialKeys = initial === 'all'
           ? [...availableExpandable.keys()]
-          : (Array.isArray(initial) ? initial : []);
+          : (Array.isArray(initial)
+            ? initial.map((token) => folderIdentityKey(tokenIndex?.byToken.get(token)))
+            : []);
         for (const key of initialKeys) {
           if (availableExpandable.has(key)) expanded.set(key, availableExpandable.get(key));
         }
@@ -427,15 +473,16 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
       ? focusedId
       : effectiveSelected;
     const buttons = [];
+    const buttonsByIdentity = new Map();
     const hadTreeFocus = Boolean(container.contains?.(document.activeElement));
     const previousFocusKey = hadTreeFocus
-      ? document.activeElement?.dataset?.folderId
+      ? document.activeElement?.__xvFolderIdentityKey
       : '';
 
     container.setAttribute('role', 'tree');
     const focusItem = (id) => {
       const key = folderIdentityKey(id);
-      const button = buttons.find((candidate) => candidate.dataset.folderId === key);
+      const button = buttonsByIdentity.get(key);
       if (!button) return;
       rovingId = id;
       for (const candidate of buttons) {
@@ -445,7 +492,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
       onFocus?.(id);
     };
 
-    for (const row of rows) {
+    for (const [rowIndex, row] of rows.entries()) {
       const button = document.createElement('button');
       const rowKey = folderIdentityKey(row.id);
       const visibleCount = row.id.kind === 'all'
@@ -456,7 +503,8 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         : `${visibleCount} visible of ${row.totalCount} total`;
       button.type = 'button';
       button.className = 'folder-tree-item';
-      button.dataset.folderId = rowKey;
+      button.dataset.folderId = `folder-node-${rowIndex}`;
+      button.__xvFolderIdentityKey = rowKey;
       button.dataset.level = String(row.level);
       button.style.setProperty('--folder-depth', String(row.level - 1));
       button.setAttribute('role', 'treeitem');
@@ -481,8 +529,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
           event.preventDefault();
           event.stopPropagation();
           onToggle?.(row.id, !expanded.has(rowKey));
-          const replacement = [...container.querySelectorAll('[role="treeitem"]')]
-            .find((candidate) => candidate.dataset.folderId === rowKey);
+          const replacement = container.__xvFolderButtons?.get(rowKey);
           replacement?.focus();
         };
       }
@@ -502,8 +549,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
       };
       button.onclick = () => {
         if (onSelect?.(row.id) === false) return;
-        const replacement = [...container.querySelectorAll('[role="treeitem"]')]
-          .find((candidate) => candidate.dataset.folderId === rowKey);
+        const replacement = container.__xvFolderButtons?.get(rowKey);
         replacement?.focus();
       };
       button.onkeydown = (event) => {
@@ -519,8 +565,8 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         }
         if (event.key === 'ArrowLeft') {
           if (row.children.length && expanded.has(rowKey)) onToggle?.(row.id, false);
-          else if (row.parentId) destination = buttons.find(
-            (candidate) => candidate.dataset.folderId === folderIdentityKey(row.parentId),
+          else if (row.parentId) destination = buttonsByIdentity.get(
+            folderIdentityKey(row.parentId),
           );
         }
         if (event.key === 'Enter' || event.key === ' ') {
@@ -532,17 +578,19 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
         event.preventDefault();
         if (destination) {
           const destinationRow = rows.find(
-            (candidate) => folderIdentityKey(candidate.id) === destination.dataset.folderId,
+            (candidate) => folderIdentityKey(candidate.id)
+              === destination.__xvFolderIdentityKey,
           );
           if (destinationRow) focusItem(destinationRow.id);
         } else if (event.key === 'Enter' || event.key === ' ') {
-          const replacement = [...container.querySelectorAll('[role="treeitem"]')]
-            .find((candidate) => candidate.dataset.folderId === rowKey);
+          const replacement = container.__xvFolderButtons?.get(rowKey);
           replacement?.focus();
         }
       };
       buttons.push(button);
+      buttonsByIdentity.set(rowKey, button);
     }
+    container.__xvFolderButtons = buttonsByIdentity;
     container.replaceChildren(...buttons);
     if (hadTreeFocus) {
       const replacement = rows.find((row) => folderIdentityKey(row.id) === previousFocusKey);
@@ -554,6 +602,7 @@ export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
   protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
   sortedCopy, normalizeWidths, resizeAdjacentWidths, normalizeFolderPath,
   FOLDER_ALL, FOLDER_UNFILED, folderIdentity, folderIdentityKey, sameFolderIdentity,
-  buildFolderTree, buildFolderViewModel, initialExpansion, folderPreferenceKey, loadFolderExpansion,
+  buildFolderTree, buildFolderViewModel, initialExpansion, createFolderTokenIndex,
+  folderPreferenceKey, loadFolderExpansion,
   saveFolderExpansion, createFolderNavigationState, itemMatchesFolder,
   flattenFolderTree, renderFolderTree };

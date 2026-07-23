@@ -378,6 +378,17 @@ test('mounted folder navigation filters rows and restores expansion without leak
         : { context: primary, secrets: primarySecrets };
     }
     if (requestPath === '/api/types') return { types: [] };
+    if (method === 'POST' && requestPath.startsWith('/api/folder-tokens')) {
+      const scopeCharacter = requestPath.includes('vault=two') ? 'T' : 'S';
+      return {
+        version: 1,
+        scope_token: scopeCharacter.repeat(43),
+        folders: body.folders.map((folder, index) => ({
+          path: folder,
+          token: String.fromCharCode(65 + index).repeat(43),
+        })),
+      };
+    }
     if (method === 'GET' && requestPath.startsWith('/api/secrets')) return primarySecrets;
     return [];
   };
@@ -415,6 +426,7 @@ test('mounted folder navigation filters rows and restores expansion without leak
       },
       secrets: primarySecrets,
     });
+    await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(
       item('All items').getAttribute('aria-selected'),
       'true',
@@ -422,11 +434,13 @@ test('mounted folder navigation filters rows and restores expansion without leak
     );
 
     assert.equal(await ui.contextRail.switchTo('stage'), true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(item('All items').getAttribute('aria-selected'), 'true');
     assert.equal(item('other').getAttribute('aria-expanded'), 'true', 'small workspace expands');
     assert.equal(item('apps'), undefined, 'prior workspace folders are absent');
 
     assert.equal(await ui.contextRail.switchTo('primary'), true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(item('All items').getAttribute('aria-selected'), 'true', 'folder selection resets');
     assert.equal(item('apps').getAttribute('aria-expanded'), 'true', 'scoped expansion restores');
     assert.ok(item('prod'));

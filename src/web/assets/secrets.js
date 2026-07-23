@@ -431,6 +431,7 @@ const folderNavigationFocus = {
   secrets: { desktop: XvUiModel.FOLDER_ALL, mobile: XvUiModel.FOLDER_ALL },
   files: { desktop: XvUiModel.FOLDER_ALL, mobile: XvUiModel.FOLDER_ALL },
 };
+const folderTokenIndexes = { secrets: null, files: null };
 
 function navigationFor(kind) {
   return kind === 'secrets' ? secretFolderNavigation : fileFolderNavigation;
@@ -448,6 +449,29 @@ function folderModelItems(kind, items) {
   return items.map((item) => ({ ...item, folder: folderOf(kind, item) }));
 }
 
+function folderPaths(kind, items) {
+  const paths = new Set();
+  for (const item of items) {
+    const path = folderOf(kind, item);
+    if (!path) continue;
+    const segments = path.split('/');
+    for (let index = 1; index <= segments.length; index++) {
+      paths.add(segments.slice(0, index).join('/'));
+    }
+  }
+  return [...paths];
+}
+
+function requestFolderTokenIndex(kind, items, scope) {
+  const folders = folderPaths(kind, items);
+  if (!folders.length) return null;
+  return api(
+    'POST',
+    `/api/folder-tokens${vaultQS(scope.vault, scope)}`,
+    { surface: kind, folders },
+  ).then((response) => XvUiModel.createFolderTokenIndex(response));
+}
+
 function folderScope(kind) {
   const backend = typeof ctx?.backend === 'string' ? ctx.backend : ctx?.backend?.name;
   return { backend: backend || '', vault: currentVault || '', surface: kind };
@@ -462,6 +486,7 @@ function renderFolderNavigation(kind, allItems, visibleItems) {
     total: allItems.length,
     folderIds: viewModel.folderIds,
     expandableIds: viewModel.expandableIds,
+    tokenIndex: folderTokenIndexes[kind],
   });
   const renderOne = (mobile) => {
     const mode = mobile ? 'mobile' : 'desktop';
@@ -1180,6 +1205,8 @@ store.subscribe((snapshot, event) => {
   secretsState = 'ready';
   secretLoadGeneration++;
   fileLoadGeneration++;
+  folderTokenIndexes.secrets = null;
+  folderTokenIndexes.files = null;
   clearSelection('secrets');
   clearSelection('files');
   secretFolderNavigation.select(XvUiModel.FOLDER_ALL);
@@ -1195,6 +1222,13 @@ store.subscribe((snapshot, event) => {
   applyContextCapabilities();
   clearListLoadError('secrets');
   renderSecrets();
+  const generation = secretLoadGeneration;
+  const scope = captureOperationScope();
+  requestFolderTokenIndex('secrets', secrets, scope)?.then((tokenIndex) => {
+    if (!tokenIndex || generation !== secretLoadGeneration || !scopeMatchesCurrent(scope)) return;
+    folderTokenIndexes.secrets = tokenIndex;
+    renderSecrets();
+  }).catch(() => { /* folder state remains safely in memory for this session */ });
   if (ctx.capabilities.files) loadFiles(currentVault).catch(fail);
   if (activeTab === 'trash') loadDeleted(currentVault).catch(fail);
 });
@@ -1443,6 +1477,8 @@ async function init() {
       const selectedVault = currentVault;
       secretLoadGeneration++;
       fileLoadGeneration++;
+      folderTokenIndexes.secrets = null;
+      folderTokenIndexes.files = null;
       clearSelection('secrets');
       clearSelection('files');
       secretFolderNavigation.select(XvUiModel.FOLDER_ALL);
@@ -1473,6 +1509,7 @@ let secretsState = 'ready';
 let secretLoadGeneration = 0;
 async function loadSecrets(vault, scope = captureOperationScope()) {
   const generation = ++secretLoadGeneration;
+  folderTokenIndexes.secrets = null;
   secretsState = 'loading';
   secrets = [];
   setListLoadStatus('secrets', 'loading');
@@ -1480,6 +1517,15 @@ async function loadSecrets(vault, scope = captureOperationScope()) {
   try {
     const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault, scope)}`);
     if (generation !== secretLoadGeneration) return false;
+    let tokenIndex = null;
+    try {
+      const tokenRequest = requestFolderTokenIndex('secrets', loadedSecrets, scope);
+      if (tokenRequest) tokenIndex = await tokenRequest;
+    } catch (_) {
+      tokenIndex = null;
+    }
+    if (generation !== secretLoadGeneration) return false;
+    folderTokenIndexes.secrets = tokenIndex;
     secrets = loadedSecrets;
   } catch (e) {
     if (generation !== secretLoadGeneration || isAborted(e)) return false;
@@ -2181,6 +2227,7 @@ let fileLoadGeneration = 0;
 async function loadFiles(vault, scope = captureOperationScope()) {
   const generation = ++fileLoadGeneration;
   if (!ctx.capabilities.files) return false;
+  folderTokenIndexes.files = null;
   filesState = 'loading';
   files = [];
   setListLoadStatus('files', 'loading');
@@ -2188,6 +2235,15 @@ async function loadFiles(vault, scope = captureOperationScope()) {
   try {
     const loadedFiles = await api('GET', `/api/files${vaultQS(vault, scope)}`);
     if (generation !== fileLoadGeneration) return false;
+    let tokenIndex = null;
+    try {
+      const tokenRequest = requestFolderTokenIndex('files', loadedFiles, scope);
+      if (tokenRequest) tokenIndex = await tokenRequest;
+    } catch (_) {
+      tokenIndex = null;
+    }
+    if (generation !== fileLoadGeneration) return false;
+    folderTokenIndexes.files = tokenIndex;
     files = loadedFiles;
   } catch (e) {
     if (generation !== fileLoadGeneration || isAborted(e)) return false;

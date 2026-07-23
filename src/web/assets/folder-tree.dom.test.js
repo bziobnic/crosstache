@@ -116,11 +116,11 @@ test('mounted folder tree exposes semantic hierarchy, selection, and visible/tot
   assert.equal(container.getAttribute('role'), 'tree');
   const treeitems = container.querySelectorAll('[role="treeitem"]');
   assert.deepEqual(treeitems.map((item) => item.dataset.folderId), [
-    model.folderIdentityKey(model.FOLDER_ALL),
-    model.folderIdentityKey(model.FOLDER_UNFILED),
-    model.folderIdentityKey(apps),
-    model.folderIdentityKey(model.folderIdentity('apps/prod')),
-    model.folderIdentityKey(model.folderIdentity('apps/stage')),
+    'folder-node-0',
+    'folder-node-1',
+    'folder-node-2',
+    'folder-node-3',
+    'folder-node-4',
   ]);
   assert.equal(treeitems[0].getAttribute('aria-selected'), 'true');
   assert.equal(treeitems[0].tabIndex, 0);
@@ -134,7 +134,7 @@ test('mounted folder tree exposes semantic hierarchy, selection, and visible/tot
   assert.deepEqual(selected, [apps]);
   assert.deepEqual(
     mounted.visibleIds.map(model.folderIdentityKey),
-    treeitems.map((item) => item.dataset.folderId),
+    treeitems.map((item) => item.__xvFolderIdentityKey),
   );
 });
 
@@ -165,7 +165,9 @@ test('mounted folder tree uses roving tabindex and complete tree keyboard naviga
     onFocus: (id) => focused.push(id),
   });
   const treeitems = container.querySelectorAll('[role="treeitem"]');
-  const byId = Object.fromEntries(treeitems.map((item) => [item.dataset.folderId, item]));
+  const byId = Object.fromEntries(
+    treeitems.map((item) => [item.__xvFolderIdentityKey, item]),
+  );
   const allKey = model.folderIdentityKey(model.FOLDER_ALL);
   const unfiledKey = model.folderIdentityKey(model.FOLDER_UNFILED);
   const appsKey = model.folderIdentityKey(apps);
@@ -216,7 +218,7 @@ test('ArrowRight expands a collapsed parent without moving focus', () => {
     onToggle: (id, expanded) => toggles.push([id, expanded]),
   });
   const apps = container.querySelectorAll('[role="treeitem"]').find(
-    (item) => item.dataset.folderId === model.folderIdentityKey(appsIdentity),
+    (item) => item.__xvFolderIdentityKey === model.folderIdentityKey(appsIdentity),
   );
 
   apps.focus();
@@ -297,6 +299,8 @@ test('all, unfiled, and reserved-name folders produce unique treeitem identities
 
   assert.equal(ids.length, 4);
   assert.equal(new Set(ids).size, ids.length);
+  assert.ok(ids.every((id) => /^folder-node-\d+$/.test(id)));
+  assert.equal(ids.includes(model.folderIdentityKey(model.folderIdentity('__all__'))), false);
   assert.equal(treeitems.filter((item) => item.tabIndex === 0).length, 1);
   assert.equal(
     treeitems.filter((item) => item.getAttribute('aria-selected') === 'true').length,

@@ -20,6 +20,7 @@ pub(crate) mod api;
 pub(crate) mod auth;
 mod context;
 pub(crate) mod errors;
+mod folder_tokens;
 mod preferences;
 mod secrets;
 #[cfg(test)]
@@ -132,6 +133,7 @@ pub(crate) struct WebState {
     /// Versioned presentation-only preferences. This store is independent of
     /// backend and vault state and never receives secret data.
     pub(crate) preferences: preferences::PreferenceStore,
+    pub(crate) folder_tokens: folder_tokens::FolderTokenService,
     pub(crate) registry: Arc<BackendRegistry>,
     backend: Arc<dyn Backend>,
     context: context::EffectiveUiContext,
@@ -155,10 +157,16 @@ impl WebState {
             token,
             types,
             preferences,
+            folder_tokens: folder_tokens::FolderTokenService::random(),
             registry,
             backend,
             context,
         }
+    }
+
+    fn with_folder_tokens(mut self, folder_tokens: folder_tokens::FolderTokenService) -> Self {
+        self.folder_tokens = folder_tokens;
+        self
     }
 
     #[cfg(test)]
@@ -258,6 +266,7 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .route("/workspaces/activate", post(context::activate_workspace))
         .route("/vaults", get(api::list_vaults))
         .route("/types", get(api::list_types))
+        .route("/folder-tokens", post(folder_tokens::issue_tokens))
         .route(
             "/preferences",
             get(preferences::get_preferences).put(preferences::put_preferences),
@@ -325,9 +334,13 @@ pub async fn prepare_web(
     _registry: Option<&BackendRegistry>,
     port: Option<u16>,
 ) -> Result<PreparedWebServer> {
-    let preference_path = preferences::preference_path_for(&Config::get_config_path()?);
+    let config_path = Config::get_config_path()?;
+    let preference_path = preferences::preference_path_for(&config_path);
     let preference_store =
         preferences::PreferenceStore::new(preference_path, config.clipboard_timeout);
+    let folder_tokens = folder_tokens::FolderTokenService::load_or_create(
+        &folder_tokens::folder_token_key_path_for(&config_path),
+    )?;
     let cwd = std::env::current_dir()?;
     let effective = crate::config::project::resolve_effective_backend_config(&config, &cwd).await?;
     effective.config.validate()?;
@@ -351,14 +364,17 @@ pub async fn prepare_web(
     rand::rng().fill_bytes(&mut buf);
     let token = hex::encode(buf);
 
-    let state = Arc::new(WebState::new(
-        backend,
-        resolved.context,
-        token.clone(),
-        types,
-        preference_store,
-        registry,
-    ));
+    let state = Arc::new(
+        WebState::new(
+            backend,
+            resolved.context,
+            token.clone(),
+            types,
+            preference_store,
+            registry,
+        )
+        .with_folder_tokens(folder_tokens),
+    );
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
@@ -767,7 +783,10 @@ mod tests {
         assert!(UI_MODEL_JS.contains("button.setAttribute('role', 'treeitem')"));
         assert!(UI_MODEL_JS.contains("button.setAttribute('aria-expanded'"));
         assert!(UI_MODEL_JS.contains("button.setAttribute('aria-selected'"));
-        assert!(UI_MODEL_JS.contains("function folderPreferenceKey({ backend, vault, surface })"));
+        assert!(UI_MODEL_JS.contains("function createFolderTokenIndex(response)"));
+        assert!(UI_MODEL_JS.contains("function folderPreferenceKey(tokenIndex)"));
+        assert!(UI_MODEL_JS.contains("xv.ui.folder-expansion.v4:"));
+        assert!(APP_JS.contains("`/api/folder-tokens${vaultQS(scope.vault, scope)}`"));
         assert!(APP_JS.contains("function renderFolderNavigation(kind, allItems, visibleItems)"));
         assert!(APP_JS.contains("surface: kind"));
         assert!(STYLE_CSS.contains(".folder-tree-item[aria-selected=\"true\"]"));

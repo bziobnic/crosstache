@@ -97,6 +97,7 @@ test('typed folder identities stay unique and opaque while rerenders keep one fo
   const items = tree.getByRole('treeitem');
   const ids = await items.evaluateAll((nodes) => nodes.map((node) => node.dataset.folderId));
   expect(new Set(ids).size).toBe(ids.length);
+  expect(ids.every((id) => /^folder-node-\d+$/.test(id))).toBe(true);
   await expect(treeitem(tree, /^__all__,/)).toBeVisible();
   await expect(treeitem(tree, /^__unfiled__,/)).toBeVisible();
   await expect(treeitem(tree, /^Unfiled,/)).toBeVisible();

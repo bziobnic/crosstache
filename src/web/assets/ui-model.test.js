@@ -2,6 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as model from './ui-model.js';
 
+function folderTokenIndex(scopeCharacter, paths) {
+  return model.createFolderTokenIndex({
+    version: 1,
+    scope_token: scopeCharacter.repeat(43),
+    folders: paths.map((path, index) => ({
+      path,
+      token: String.fromCharCode(65 + index).repeat(43),
+    })),
+  });
+}
+
 test('dates are date-only and absent expiration is blank', () => {
   assert.equal(model.formatDate('2026-07-15T23:45:00Z'), '2026-07-15');
   assert.equal(model.formatDate('Unknown'), 'Unknown');
@@ -186,24 +197,12 @@ test('small vaults expand on first visit and saved expansion always wins', () =>
   assert.deepEqual(model.initialExpansion({ total: 10, saved: [] }), []);
 });
 
-test('folder preference keys isolate backend registry name, vault, and surface', () => {
-  const secrets = model.folderPreferenceKey({
-    backend: 'azure/prod',
-    vault: 'payments east',
-    surface: 'secrets',
-  });
-  const files = model.folderPreferenceKey({
-    backend: 'azure/prod',
-    vault: 'payments east',
-    surface: 'files',
-  });
-  const otherVault = model.folderPreferenceKey({
-    backend: 'azure/prod',
-    vault: 'payments west',
-    surface: 'secrets',
-  });
+test('folder preference keys use only server-issued opaque scope tokens', () => {
+  const secrets = model.folderPreferenceKey(folderTokenIndex('S', []));
+  const files = model.folderPreferenceKey(folderTokenIndex('F', []));
+  const otherVault = model.folderPreferenceKey(folderTokenIndex('V', []));
 
-  assert.match(secrets, /^xv\.ui\.folder-expansion\.v3:[a-f0-9]+$/);
+  assert.match(secrets, /^xv\.ui\.folder-expansion\.v4:[A-Za-z0-9_-]{43}$/);
   assert.notEqual(secrets, files);
   assert.notEqual(secrets, otherVault);
   assert.equal(secrets.includes('azure'), false);
@@ -233,8 +232,9 @@ test('folder persistence stores only versioned opaque scope and folder identifie
     surface: 'secrets',
   };
   const folder = model.folderIdentity(' private folder /prod');
+  const tokenIndex = folderTokenIndex('S', [folder.path]);
 
-  assert.equal(model.saveFolderExpansion(storage, scope, new Map([
+  assert.equal(model.saveFolderExpansion(storage, tokenIndex, new Map([
     [model.folderIdentityKey(folder), folder],
   ])), true);
   const serialized = JSON.stringify([...values.entries()]);
@@ -248,8 +248,8 @@ test('folder persistence stores only versioned opaque scope and folder identifie
   ]) {
     assert.equal(serialized.includes(source), false, `storage leaked ${source}`);
   }
-  assert.match([...values.keys()][0], /^xv\.ui\.folder-expansion\.v3:[a-f0-9]+$/);
-  assert.deepEqual(model.loadFolderExpansion(storage, scope), [model.folderIdentityKey(folder)]);
+  assert.match([...values.keys()][0], /^xv\.ui\.folder-expansion\.v4:[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(model.loadFolderExpansion(storage, tokenIndex), ['A'.repeat(43)]);
   assert.ok(removed.some((key) => key.startsWith('xv.ui.folder-expansion.v2:')));
   assert.equal(
     [...values.keys()].some((key) => key.startsWith('xv.ui.folder-expansion.v2:')),
@@ -319,19 +319,23 @@ test('folder expansion persistence is explicit and isolated by context and surfa
   const scope = { backend: 'local-a', vault: 'one', surface: 'secrets' };
   const apps = model.folderIdentity('apps');
   const prod = model.folderIdentity('apps/prod');
+  const one = folderTokenIndex('S', [apps.path, prod.path]);
+  const two = folderTokenIndex('V', [apps.path, prod.path]);
+  const files = folderTokenIndex('F', [apps.path, prod.path]);
+  const backend = folderTokenIndex('B', [apps.path, prod.path]);
 
-  assert.equal(model.loadFolderExpansion(storage, scope), null);
-  assert.equal(model.saveFolderExpansion(storage, scope, new Map([
+  assert.equal(model.loadFolderExpansion(storage, one), null);
+  assert.equal(model.saveFolderExpansion(storage, one, new Map([
     [model.folderIdentityKey(apps), apps],
     [model.folderIdentityKey(prod), prod],
   ])), true);
-  assert.deepEqual(new Set(model.loadFolderExpansion(storage, scope)), new Set([
-    model.folderIdentityKey(apps),
-    model.folderIdentityKey(prod),
+  assert.deepEqual(new Set(model.loadFolderExpansion(storage, one)), new Set([
+    'A'.repeat(43),
+    'B'.repeat(43),
   ]));
-  assert.equal(model.loadFolderExpansion(storage, { ...scope, vault: 'two' }), null);
-  assert.equal(model.loadFolderExpansion(storage, { ...scope, surface: 'files' }), null);
-  assert.equal(model.loadFolderExpansion(storage, { ...scope, backend: 'local-b' }), null);
+  assert.equal(model.loadFolderExpansion(storage, two), null);
+  assert.equal(model.loadFolderExpansion(storage, files), null);
+  assert.equal(model.loadFolderExpansion(storage, backend), null);
 });
 
 test('legacy global folder expansion booleans never become per-context authority', () => {
@@ -375,18 +379,26 @@ test('folder navigation resets selection and restores expansion when workspace s
   const two = { backend: 'local', vault: 'two', surface: 'secrets' };
   const apps = model.folderIdentity('apps');
   const other = model.folderIdentity('other');
+  const oneTokens = folderTokenIndex('S', [apps.path]);
+  const twoTokens = folderTokenIndex('T', [other.path]);
 
-  navigation.sync(one, { total: 51, folderIds: [apps], expandableIds: [apps] });
+  navigation.sync(one, {
+    total: 51, folderIds: [apps], expandableIds: [apps], tokenIndex: oneTokens,
+  });
   assert.deepEqual(navigation.snapshot(), { selected: model.FOLDER_ALL, expanded: [] });
   navigation.select(apps);
   navigation.toggle(apps, true);
   assert.deepEqual(navigation.snapshot(), { selected: apps, expanded: [apps] });
 
-  navigation.sync(two, { total: 2, folderIds: [other], expandableIds: [other] });
+  navigation.sync(two, {
+    total: 2, folderIds: [other], expandableIds: [other], tokenIndex: twoTokens,
+  });
   assert.deepEqual(navigation.snapshot(), { selected: model.FOLDER_ALL, expanded: [other] });
   navigation.select(other);
 
-  navigation.sync(one, { total: 51, folderIds: [apps], expandableIds: [apps] });
+  navigation.sync(one, {
+    total: 51, folderIds: [apps], expandableIds: [apps], tokenIndex: oneTokens,
+  });
   assert.deepEqual(navigation.snapshot(), { selected: model.FOLDER_ALL, expanded: [apps] });
 });
 
@@ -402,20 +414,29 @@ test('folder navigation keeps files expansion independent from secrets in one va
   const apps = model.folderIdentity('apps');
   const prod = model.folderIdentity('apps/prod');
   const documents = model.folderIdentity('documents');
+  const secretTokens = folderTokenIndex('S', [apps.path, prod.path]);
+  const fileTokens = folderTokenIndex('F', [documents.path]);
 
   navigation.sync(secrets, {
     total: 60,
     folderIds: [apps, prod],
     expandableIds: [apps, prod],
+    tokenIndex: secretTokens,
   });
   navigation.expandAll();
-  navigation.sync(files, { total: 60, folderIds: [documents], expandableIds: [documents] });
+  navigation.sync(files, {
+    total: 60,
+    folderIds: [documents],
+    expandableIds: [documents],
+    tokenIndex: fileTokens,
+  });
   assert.deepEqual(navigation.snapshot(), { selected: model.FOLDER_ALL, expanded: [] });
   navigation.toggle(documents, true);
   navigation.sync(secrets, {
     total: 60,
     folderIds: [apps, prod],
     expandableIds: [apps, prod],
+    tokenIndex: secretTokens,
   });
   assert.deepEqual(navigation.snapshot(), {
     selected: model.FOLDER_ALL,
@@ -446,4 +467,95 @@ test('large folder view models build total and visible trees exactly once each',
   assert.equal(view.folderCount, 2_100);
   assert.equal(view.folderIds.length, 2_100);
   assert.ok(view.expandableIds.length > 0);
+});
+
+test('server token indexes reject duplicate tokens and preserve collision-free raw identities', () => {
+  const tokenA = 'A'.repeat(43);
+  const tokenB = 'B'.repeat(43);
+  const scopeToken = 'S'.repeat(43);
+  const valid = model.createFolderTokenIndex({
+    version: 1,
+    scope_token: scopeToken,
+    folders: [
+      { path: ' apps ', token: tokenA },
+      { path: '__unfiled__', token: tokenB },
+    ],
+  });
+
+  assert.ok(valid);
+  assert.equal(
+    valid.byIdentityKey.get(model.folderIdentityKey(model.folderIdentity(' apps '))),
+    tokenA,
+  );
+  assert.notEqual(
+    model.folderIdentityKey(model.folderIdentity('__unfiled__')),
+    model.folderIdentityKey(model.FOLDER_UNFILED),
+  );
+  assert.equal(model.createFolderTokenIndex({
+    version: 1,
+    scope_token: scopeToken,
+    folders: [
+      { path: 'one', token: tokenA },
+      { path: 'two', token: tokenA },
+    ],
+  }), null);
+});
+
+test('pruned expansion persists across fresh state and does not return when a folder is re-added', () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+    get length() { return values.size; },
+    key: (index) => [...values.keys()][index] ?? null,
+  };
+  const scope = { backend: 'private-backend', vault: 'private-vault', surface: 'secrets' };
+  const apps = model.folderIdentity('apps');
+  const prod = model.folderIdentity('apps/prod');
+  const tokenIndex = model.createFolderTokenIndex({
+    version: 1,
+    scope_token: 'S'.repeat(43),
+    folders: [
+      { path: apps.path, token: 'A'.repeat(43) },
+      { path: prod.path, token: 'P'.repeat(43) },
+    ],
+  });
+  const navigation = model.createFolderNavigationState(storage);
+
+  navigation.sync(scope, {
+    total: 51,
+    folderIds: [apps, prod],
+    expandableIds: [apps],
+    tokenIndex,
+  });
+  navigation.toggle(apps, true);
+  navigation.sync(scope, {
+    total: 1,
+    folderIds: [],
+    expandableIds: [],
+    tokenIndex,
+  });
+  assert.deepEqual(navigation.snapshot().expanded, []);
+  assert.equal(
+    [...values.values()].some((serialized) => serialized.includes('A'.repeat(43))),
+    false,
+  );
+
+  const fresh = model.createFolderNavigationState(storage);
+  fresh.sync(scope, {
+    total: 51,
+    folderIds: [apps, prod],
+    expandableIds: [apps],
+    tokenIndex,
+  });
+  assert.deepEqual(fresh.snapshot().expanded, []);
+  assert.equal(
+    JSON.stringify([...values.entries()]).includes('private-backend'),
+    false,
+  );
+  assert.equal(
+    JSON.stringify([...values.entries()]).includes('private-vault'),
+    false,
+  );
 });
