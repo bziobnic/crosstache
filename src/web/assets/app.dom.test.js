@@ -154,3 +154,37 @@ test('app bootstrap supplies its persisted token to every initial API request', 
     }
   }
 });
+
+test('missing-token bootstrap never starts context loading or leaks a rejection', async () => {
+  const original = new Map(['document', 'location', 'sessionStorage', 'history', 'fetch']
+    .map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const calls = [];
+  const unhandled = [];
+  const onUnhandled = (error) => unhandled.push(error);
+  process.on('unhandledRejection', onUnhandled);
+  Object.assign(globalThis, {
+    document: bootstrapDocument(),
+    location: { search: '', pathname: '/' },
+    sessionStorage: { getItem: () => null, setItem() {} },
+    history: { replaceState() {} },
+    fetch: async (requestPath) => {
+      calls.push(requestPath);
+      if (requestPath === '/api/context') throw new Error('context must not start');
+      throw new Error('safe preferences fixture failure');
+    },
+  });
+
+  try {
+    const appUrl = pathToFileURL(path.join(__dirname, 'app.js')).href;
+    await import(`${appUrl}?missing-token-test=${Date.now()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(calls, ['/api/preferences']);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    for (const [key, descriptor] of original) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+});

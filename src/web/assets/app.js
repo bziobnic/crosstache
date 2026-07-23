@@ -18,6 +18,7 @@ const store = createStore({
   context: null,
   initialSecrets: null,
   contextSwitchPending: false,
+  scopedMutationPending: false,
   contextError: null,
   draft: null,
   savePending: false,
@@ -33,12 +34,18 @@ const api = createApiClient({
 });
 const dialogs = createDialogManager(document);
 const preferences = createPreferenceClient(api);
+const themeSelect = document.getElementById('theme-select');
+
+function applyTheme(theme) {
+  if (document.documentElement) document.documentElement.dataset.theme = theme;
+  if (themeSelect) themeSelect.value = theme;
+}
+
 void preferences.load().then(() => {
   const theme = preferences.get('theme', 'system');
-  if (document.documentElement) document.documentElement.dataset.theme = theme;
-  document.getElementById('theme-toggle').textContent = `Theme: ${theme}`;
+  applyTheme(theme);
 });
-const contextRail = mountContextRail({
+const contextRail = token ? mountContextRail({
   store,
   api,
   guardNavigation: () => guardNavigation({
@@ -46,25 +53,81 @@ const contextRail = mountContextRail({
     savePending: store.snapshot().savePending,
     confirmDiscard: () => dialogs.confirmDiscard(),
   }),
+}) : null;
+
+function bindApplicationDialog({ openId, dialogId, closeId, initialFocus }) {
+  const open = document.getElementById(openId);
+  const dialog = document.getElementById(dialogId);
+  const close = document.getElementById(closeId);
+  const dismiss = () => dialogs.closeModal(dialog);
+  open.onclick = () => dialogs.openModal(dialog, {
+    initialFocus: initialFocus(),
+    invoker: open,
+    onEscape: dismiss,
+  });
+  close.onclick = dismiss;
+  return { open, dialog, close: dismiss };
+}
+
+const commandsPanel = bindApplicationDialog({
+  openId: 'commands-open',
+  dialogId: 'commands-dialog',
+  closeId: 'commands-close',
+  initialFocus: () => document.querySelector(
+    '#commands-dialog [data-command-target]:not([hidden]):not([disabled])',
+  ),
+});
+const commandButtons = [
+  ...(document.querySelectorAll?.('#commands-dialog [data-command-target]') || []),
+];
+function syncCommandAvailability() {
+  for (const command of commandButtons) {
+    const target = document.getElementById(command.dataset.commandTarget);
+    command.hidden = !target || target.hidden || target.disabled;
+  }
+}
+const openCommands = commandsPanel.open.onclick;
+commandsPanel.open.onclick = () => {
+  syncCommandAvailability();
+  openCommands();
+};
+for (const command of commandButtons) {
+  const target = document.getElementById(command.dataset.commandTarget);
+  command.onclick = async () => {
+    commandsPanel.close();
+    if (target.id === 'search' || target.id === 'new-secret') {
+      await document.getElementById('tab-secrets').onclick();
+    }
+    if (target.id === 'search') target.focus();
+    else target.click();
+  };
+}
+
+bindApplicationDialog({
+  openId: 'help-open',
+  dialogId: 'help-dialog',
+  closeId: 'help-close',
+  initialFocus: () => document.getElementById('help-close'),
+});
+bindApplicationDialog({
+  openId: 'settings-open',
+  dialogId: 'settings-dialog',
+  closeId: 'settings-close',
+  initialFocus: () => themeSelect,
 });
 
-document.getElementById('commands-open').onclick = () => document.getElementById('search').focus();
-document.getElementById('help-open').onclick = () => {
-  document.getElementById('context-details').open = true;
-  document.getElementById('context-details').focus();
-};
-document.getElementById('settings-open').onclick = () => {
-  document.getElementById('context-details').open = true;
-  document.getElementById('theme-toggle').focus();
-};
-document.getElementById('theme-toggle').onclick = async () => {
+document.addEventListener?.('keydown', (event) => {
+  if (!(event.key?.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey))) return;
+  if (dialogs.topModal()) return;
+  event.preventDefault();
+  document.getElementById('commands-open').click();
+});
+
+themeSelect.onchange = async () => {
   await preferences.load();
-  const themes = ['system', 'light', 'dark'];
-  const current = preferences.get('theme', 'system');
-  const theme = themes[(themes.indexOf(current) + 1) % themes.length];
+  const theme = themeSelect.value;
   preferences.set('theme', theme);
-  if (document.documentElement) document.documentElement.dataset.theme = theme;
-  document.getElementById('theme-toggle').textContent = `Theme: ${theme}`;
+  applyTheme(theme);
 };
 
 mountSecrets({ api, store, dialogs, announce, preferences, token, contextRail });

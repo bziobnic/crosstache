@@ -55,6 +55,10 @@ button, input, select, textarea { font:inherit; }
 .context-actions button:hover { border-color:#557668; background:#1b4534; }
 .context-actions kbd { color:#acd1bc; font-size:.65rem; }
 .context-version { margin-top:auto; color:#acd1bc; font-size:.68rem; }
+.context-rail.auth-recovery-mode {
+  grid-row:1 / span 2;
+}
+.context-rail.auth-recovery-mode > :not(.brand) { display:none; }
 .app-header { grid-column:2; border-bottom:1px solid var(--color-border); background:color-mix(in srgb, var(--color-surface) 92%, transparent); }
 .app-header-inner { width:min(100%, 76rem); min-height:4.125rem; margin:0 auto; padding:.75rem 1.5rem;
   display:flex; align-items:center; gap:.875rem; }
@@ -221,6 +225,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:0; b
 .confirmation-targets li { margin:.2rem 0; overflow-wrap:anywhere; }
 .confirmation-overflow { font-weight:650; }
 .confirmation-actions { display:flex; justify-content:flex-end; gap:.5rem; }
+.application-dialog { width:min(32rem, calc(100vw - 2rem)); }
+.application-dialog h3 { margin:1.2rem 0 .5rem; font-size:.9rem; }
+.command-list { display:grid; gap:.5rem; margin:1rem 0; }
+.command-list button { justify-content:flex-start; text-align:left; }
+.shortcut-list { display:grid; grid-template-columns:max-content 1fr; gap:.5rem .8rem; margin:.5rem 0; }
+.shortcut-list dt { font-weight:700; }
+.shortcut-list dd { margin:0; color:var(--color-text-muted); }
 .drawer-header { padding:1.4rem 1.5rem 1.1rem; border-bottom:1px solid var(--color-border); }
 .drawer-header h2 { margin:.25rem 0 .15rem; font-size:1.35rem; letter-spacing:-.035em; }
 .drawer-header p { margin:0; color:var(--color-text-muted); font-size:.78rem; }
@@ -345,6 +356,8 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 11%, transpa
   --shadow-raised:0 14px 34px rgb(0 0 0 / 20%);
   --focus-ring:0 0 0 3px rgb(101 198 142 / 22%);
 }
+:root[data-theme="dark"] .button.primary,
+:root[data-theme="dark"] .brand-mark { color:#102218; }
 button:focus-visible, .tab:focus-visible, [role="button"]:focus-visible, .linkish:focus-visible {
   outline:2px solid var(--color-accent); outline-offset:2px;
 }

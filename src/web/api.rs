@@ -74,14 +74,17 @@ fn validation_error(
 
 pub(crate) async fn list_vaults(
     State(state): State<Arc<WebState>>,
+    Query(q): Query<VaultQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (backend, context) = state.active_target();
-    match backend.vaults() {
+    let target = q.target(&state)?;
+    match target.backend.vaults() {
         Some(v) => {
             let vaults = v.list_vaults(None).await?;
             Ok(Json(json!({ "vaults": vaults })))
         }
-        None => Ok(Json(json!({ "vaults": [{ "name": context.vault }] }))),
+        None => Ok(Json(
+            json!({ "vaults": [{ "name": target.context.vault }] }),
+        )),
     }
 }
 
@@ -91,18 +94,26 @@ pub(crate) async fn list_types(State(state): State<Arc<WebState>>) -> Json<serde
 
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
+    alias: Option<String>,
+    backend: Option<String>,
     vault: Option<String>,
     group: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct VaultQuery {
+    alias: Option<String>,
+    backend: Option<String>,
     vault: Option<String>,
 }
 
 impl VaultQuery {
-    pub(crate) fn vault<'a>(&'a self, default_vault: &'a str) -> &'a str {
-        self.vault.as_deref().unwrap_or(default_vault)
+    pub(crate) fn target(&self, state: &WebState) -> Result<super::ScopedWebTarget, ApiError> {
+        state.scoped_target(
+            self.alias.as_deref(),
+            self.backend.as_deref(),
+            self.vault.as_deref(),
+        )
     }
 }
 
@@ -110,11 +121,12 @@ pub(crate) async fn list_secrets(
     State(state): State<Arc<WebState>>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<SecretSummary>>, ApiError> {
-    let (backend, context) = state.active_target();
-    let vault = q.vault.as_deref().unwrap_or(&context.vault);
-    let secrets = backend
+    let target =
+        state.scoped_target(q.alias.as_deref(), q.backend.as_deref(), q.vault.as_deref())?;
+    let secrets = target
+        .backend
         .secrets()
-        .list_secrets(vault, q.group.as_deref())
+        .list_secrets(&target.context.vault, q.group.as_deref())
         .await?;
     Ok(Json(secrets))
 }
@@ -124,10 +136,11 @@ pub(crate) async fn get_secret(
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
 ) -> Result<Json<SecretProperties>, ApiError> {
-    let (backend, context) = state.active_target();
-    let props = backend
+    let target = q.target(&state)?;
+    let props = target
+        .backend
         .secrets()
-        .get_secret(q.vault(&context.vault), &name, false)
+        .get_secret(&target.context.vault, &name, false)
         .await?;
     Ok(Json(props))
 }
@@ -137,10 +150,11 @@ pub(crate) async fn reveal_secret(
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (backend, context) = state.active_target();
-    let props = backend
+    let target = q.target(&state)?;
+    let props = target
+        .backend
         .secrets()
-        .get_secret(q.vault(&context.vault), &name, true)
+        .get_secret(&target.context.vault, &name, true)
         .await?;
     Ok(Json(
         json!({ "value": props.value.as_ref().map(|v| v.as_str()) }),
@@ -181,10 +195,11 @@ pub(crate) async fn put_secret(
         note: body.note,
         folder: body.folder,
     };
-    let (backend, context) = state.active_target();
-    let props = backend
+    let target = q.target(&state)?;
+    let props = target
+        .backend
         .secrets()
-        .set_secret(q.vault(&context.vault), request)
+        .set_secret(&target.context.vault, request)
         .await?;
     Ok(Json(props))
 }
@@ -250,10 +265,11 @@ pub(crate) async fn patch_secret(
         replace_tags: true,
         replace_groups: true,
     };
-    let (backend, context) = state.active_target();
-    let props = backend
+    let target = q.target(&state)?;
+    let props = target
+        .backend
         .secrets()
-        .update_secret(q.vault(&context.vault), &name, request)
+        .update_secret(&target.context.vault, &name, request)
         .await?;
     Ok(Json(props))
 }
@@ -264,10 +280,11 @@ pub(crate) async fn delete_secret(
     Query(q): Query<VaultQuery>,
 ) -> Result<StatusCode, ApiError> {
     reject_reserved_attachment_key(&name)?;
-    let (backend, context) = state.active_target();
-    backend
+    let target = q.target(&state)?;
+    target
+        .backend
         .secrets()
-        .delete_secret(q.vault(&context.vault), &name)
+        .delete_secret(&target.context.vault, &name)
         .await?;
     Ok(StatusCode::OK)
 }
@@ -299,12 +316,13 @@ pub(crate) async fn move_secret(
     Query(q): Query<VaultQuery>,
     Json(body): Json<MoveBody>,
 ) -> Result<Json<SecretProperties>, ApiError> {
-    let (backend, context) = state.active_target();
-    let vault = q.vault(&context.vault);
+    let target = q.target(&state)?;
+    let vault = &target.context.vault;
     match (body.new_name, body.folder) {
         (Some(new_name), None) => {
             reject_reserved_attachment_key(&name)?;
-            let props = backend
+            let props = target
+                .backend
                 .secrets()
                 .rename_secret(vault, &name, &new_name)
                 .await?;
@@ -325,7 +343,8 @@ pub(crate) async fn move_secret(
                 replace_tags: false,
                 replace_groups: false,
             };
-            let props = backend
+            let props = target
+                .backend
                 .secrets()
                 .update_secret(vault, &name, request)
                 .await?;
@@ -377,6 +396,8 @@ pub(crate) mod files {
 
     #[derive(Deserialize)]
     pub(crate) struct FilesQuery {
+        alias: Option<String>,
+        backend: Option<String>,
         vault: Option<String>,
         prefix: Option<String>,
     }
@@ -385,8 +406,8 @@ pub(crate) mod files {
         State(state): State<Arc<WebState>>,
         Query(q): Query<FilesQuery>,
     ) -> Result<Json<Vec<crate::blob::models::FileInfo>>, ApiError> {
-        let (backend, context) = state.active_target();
-        let vault = q.vault.as_deref().unwrap_or(&context.vault);
+        let target =
+            state.scoped_target(q.alias.as_deref(), q.backend.as_deref(), q.vault.as_deref())?;
         let request = FileListRequest {
             prefix: q.prefix,
             groups: None,
@@ -394,8 +415,8 @@ pub(crate) mod files {
             delimiter: None,
         };
         Ok(Json(
-            files_backend(backend.as_ref())?
-                .list_files(vault, request)
+            files_backend(target.backend.as_ref())?
+                .list_files(&target.context.vault, request)
                 .await?,
         ))
     }
@@ -458,9 +479,9 @@ pub(crate) mod files {
                 metadata: std::collections::HashMap::new(),
                 tags: std::collections::HashMap::new(),
             };
-            let (backend, context) = state.active_target();
-            let info = files_backend(backend.as_ref())?
-                .upload_file(q.vault(&context.vault), request, None)
+            let target = q.target(&state)?;
+            let info = files_backend(target.backend.as_ref())?
+                .upload_file(&target.context.vault, request, None)
                 .await?;
             return Ok(Json(info));
         }
@@ -476,9 +497,9 @@ pub(crate) mod files {
         Path(name): Path<String>,
         Query(q): Query<VaultQuery>,
     ) -> Result<Response, ApiError> {
-        let (active_backend, context) = state.active_target();
-        let vault = q.vault(&context.vault);
-        let backend = files_backend(active_backend.as_ref())?;
+        let target = q.target(&state)?;
+        let vault = &target.context.vault;
+        let backend = files_backend(target.backend.as_ref())?;
         let info = backend.get_file_info(vault, &name).await?;
         // Same transparent decryption as `xv file download`: content flagged
         // `xv_encrypted: age` (secret attachments, `xv file upload --encrypt`)
@@ -529,9 +550,9 @@ pub(crate) mod files {
         Path(name): Path<String>,
         Query(q): Query<VaultQuery>,
     ) -> Result<StatusCode, ApiError> {
-        let (backend, context) = state.active_target();
-        files_backend(backend.as_ref())?
-            .delete_file(q.vault(&context.vault), &name)
+        let target = q.target(&state)?;
+        files_backend(target.backend.as_ref())?
+            .delete_file(&target.context.vault, &name)
             .await?;
         Ok(StatusCode::OK)
     }
@@ -938,7 +959,7 @@ pub(crate) mod tests {
         // PUT now rejects it too (see `reserved_attachment_key_rejects_put`
         // below) — there's no API path left to create it.
         state
-            .active_backend()
+            .base_backend()
             .secrets()
             .set_secret(
                 "default",

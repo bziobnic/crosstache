@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createStore } from './store.js';
-import { contextDetails, formatContextLine, mountContextRail } from './context.js';
+import {
+  contextDetails,
+  contextQuery,
+  formatContextLine,
+  mountContextRail,
+} from './context.js';
 
 const primary = Object.freeze({
   backend: 'az-prod',
@@ -25,7 +30,13 @@ const primary = Object.freeze({
     environment: 'project',
   },
   connection: { state: 'connected', message: null },
-  capabilities: { files: false, soft_delete: true, purge: false },
+  capabilities: {
+    secrets: true,
+    vaults: false,
+    files: false,
+    soft_delete: true,
+    purge: false,
+  },
   version: '1.2.3',
 });
 
@@ -50,17 +61,28 @@ test('context line keeps backend and vault unambiguous', () => {
   assert.equal(formatContextLine(primary), 'az-prod / payments · checkout · prod');
 });
 
+test('context query binds alias, backend, and vault as one immutable scope', () => {
+  assert.equal(
+    contextQuery(primary),
+    '?alias=work&backend=az-prod&vault=payments',
+  );
+});
+
 test('context details disclose provenance, capability limits, connection, and version', () => {
   const details = contextDetails(primary);
   assert.deepEqual(details.values, [
     { label: 'Backend', value: 'az-prod (azure)', source: 'Project environment' },
     { label: 'Vault', value: 'payments', source: 'Workspace entry' },
     { label: 'Workspace', value: 'work', source: 'Project environment' },
-    { label: 'Project', value: 'checkout', source: 'Project' },
+    { label: 'Project', value: 'checkout — /work/checkout', source: 'Project' },
     { label: 'Environment', value: 'prod', source: 'Project' },
   ]);
   assert.equal(details.connection, 'Connected');
-  assert.deepEqual(details.limitations, ['File storage unavailable', 'Permanent purge unavailable']);
+  assert.deepEqual(details.limitations, [
+    'Vault management unavailable',
+    'File storage unavailable',
+    'Permanent purge unavailable',
+  ]);
   assert.equal(details.version, '1.2.3');
 });
 
@@ -125,6 +147,8 @@ function reducer(state, event) {
       };
     case 'context/switch-failed':
       return { ...state, contextSwitchPending: false, contextError: event.error };
+    case 'mutation/pending':
+      return { ...state, scopedMutationPending: Boolean(event.value) };
     case 'draft/save-pending':
       return { ...state, savePending: Boolean(event.value) };
     default:
@@ -148,13 +172,13 @@ async function mounted({ api, guardNavigation = async () => true, initial = prim
     contextError: null,
     draft: null,
     savePending: false,
+    scopedMutationPending: false,
   }, reducer);
   const calls = [];
   const request = api ?? (async (method, path, body) => {
     calls.push({ method, path, body });
     if (method === 'GET') return initial;
-    if (path === '/api/context/activate') return { context: stage };
-    return { secrets: [{ name: 'stage-only' }] };
+    return { context: stage, secrets: [{ name: 'stage-only' }] };
   });
   const rail = mountContextRail({ store, api: request, guardNavigation, document });
   await rail.ready;
@@ -166,9 +190,7 @@ test('mounted switch commits context and list together after the guard', async (
   const api = async (method) => {
     order.push(method);
     if (method === 'GET') return primary;
-    return order.filter((item) => item === 'POST').length === 1
-      ? { context: stage }
-      : { secrets: [{ name: 'stage-only' }] };
+    return { context: stage, secrets: [{ name: 'stage-only' }] };
   };
   const fixture = await mounted({
     api,
@@ -177,7 +199,7 @@ test('mounted switch commits context and list together after the guard', async (
 
   await fixture.rail.switchTo('stage');
 
-  assert.deepEqual(order, ['GET', 'guard', 'POST', 'POST']);
+  assert.deepEqual(order, ['GET', 'guard', 'POST']);
   assert.equal(fixture.store.snapshot().context.backend, 'local-stage');
   assert.deepEqual(fixture.store.snapshot().initialSecrets, [{ name: 'stage-only' }]);
   assert.equal(fixture.document.getElementById('context-line').textContent,
@@ -192,7 +214,7 @@ test('dirty draft rejection and save lock preserve the current context', async (
     api: async (method) => {
       if (method === 'GET') return primary;
       activationCalls++;
-      return activationCalls === 1 ? { context: stage } : { secrets: [] };
+      return { context: stage, secrets: [] };
     },
   });
   const select = fixture.document.getElementById('workspace-select');
@@ -208,6 +230,13 @@ test('dirty draft rejection and save lock preserve the current context', async (
   assert.equal(guardCalls, 1);
   assert.equal(activationCalls, 0);
   assert.equal(fixture.store.snapshot().context.backend, 'az-prod');
+
+  fixture.store.dispatch({ type: 'draft/save-pending', value: false });
+  fixture.store.dispatch({ type: 'mutation/pending', value: true });
+  await fixture.rail.switchTo('stage');
+  assert.equal(guardCalls, 1);
+  assert.equal(activationCalls, 0);
+  assert.equal(fixture.store.snapshot().context.backend, 'az-prod');
 });
 
 test('obsolete out-of-order switch cannot replace the latest context', async () => {
@@ -215,13 +244,14 @@ test('obsolete out-of-order switch cannot replace the latest context', async () 
   const second = deferred();
   let activation = 0;
   const fixture = await mounted({
-    api: async (method, path, body) => {
+    api: async (method, _path, body) => {
       if (method === 'GET') return primary;
-      if (path === '/api/context/activate') {
-        return { context: body.alias === 'work' ? primary : stage };
-      }
       activation++;
-      return activation === 1 ? first.promise : second.promise;
+      const response = activation === 1 ? first.promise : second.promise;
+      return response.then((result) => ({
+        context: body.alias === 'work' ? primary : stage,
+        secrets: result.secrets,
+      }));
     },
   });
 
@@ -243,10 +273,10 @@ for (const missing of ['context', 'secrets']) {
     const fixture = await mounted({
       api: async (method, path) => {
         if (method === 'GET') return primary;
-        if (path === '/api/context/activate') {
-          return missing === 'context' ? {} : { context: stage };
-        }
-        return missing === 'secrets' ? {} : { secrets: [] };
+        return {
+          ...(missing === 'context' ? {} : { context: stage }),
+          ...(missing === 'secrets' ? {} : { secrets: [] }),
+        };
       },
     });
 

@@ -9,6 +9,8 @@ const SOURCE_LABELS = Object.freeze({
 });
 
 const CAPABILITY_LABELS = Object.freeze({
+  secrets: 'Secret storage',
+  vaults: 'Vault management',
   files: 'File storage',
   folders: 'Folders',
   groups: 'Groups',
@@ -18,6 +20,7 @@ const CAPABILITY_LABELS = Object.freeze({
   restore: 'Restore',
   purge: 'Permanent purge',
   scheduled_purge: 'Scheduled purge',
+  trash: 'Trash browsing',
   versioning: 'Version history',
   rbac: 'Role-based access',
   audit: 'Audit history',
@@ -46,16 +49,33 @@ export function formatContextLine(context) {
   return qualifiers.length ? `${scope} · ${qualifiers.join(' · ')}` : scope;
 }
 
+export function contextQuery(context) {
+  const params = new URLSearchParams({
+    alias: context?.workspace?.alias || '',
+    backend: named(context?.backend),
+    vault: named(context?.vault),
+  });
+  return `?${params}`;
+}
+
 export function contextDetails(context) {
   const source = (key) => SOURCE_LABELS[context?.sources?.[key]]
     || titleCase(context?.sources?.[key] || 'built-in');
   const backend = named(context?.backend);
   const backendKind = named(context?.backend_kind);
+  const projectName = named(context?.project);
+  const projectPath = context?.project?.path || '';
   const values = [
     { label: 'Backend', value: backendKind ? `${backend} (${backendKind})` : backend, source: source('backend') },
     { label: 'Vault', value: named(context?.vault), source: source('vault') },
     { label: 'Workspace', value: context?.workspace?.alias || 'Default', source: source('workspace') },
-    { label: 'Project', value: named(context?.project) || 'No project', source: source('project') },
+    {
+      label: 'Project',
+      value: projectName
+        ? [projectName, projectPath].filter(Boolean).join(' — ')
+        : 'No project',
+      source: source('project'),
+    },
     { label: 'Environment', value: named(context?.environment) || 'No environment', source: source('environment') },
   ];
   const limitations = Object.entries(CAPABILITY_LABELS)
@@ -153,7 +173,10 @@ export function mountContextRail({
     }
     if (byId('context-version')) byId('context-version').textContent = `v${details.version}`;
     renderDetails(details);
-    renderSelector(context, snapshot.contextSwitchPending || snapshot.savePending);
+    renderSelector(
+      context,
+      snapshot.contextSwitchPending || snapshot.savePending || snapshot.scopedMutationPending,
+    );
     for (const surface of document.querySelectorAll?.('[data-context-copy]') || []) {
       surface.textContent = line;
     }
@@ -163,7 +186,7 @@ export function mountContextRail({
 
   async function switchTo(alias) {
     const before = store.snapshot();
-    if (!before.context || before.savePending) {
+    if (!before.context || before.savePending || before.scopedMutationPending) {
       render(before);
       return false;
     }
@@ -173,7 +196,7 @@ export function mountContextRail({
     }
 
     const guarded = store.snapshot();
-    if (guarded.savePending) {
+    if (guarded.savePending || guarded.scopedMutationPending) {
       render(guarded);
       return false;
     }
@@ -196,17 +219,6 @@ export function mountContextRail({
         backend: entry.backend,
         vault: entry.vault,
       };
-      const resolved = await apiRequest(
-        api,
-        'POST',
-        '/api/context/activate',
-        request,
-        { signal: controller.signal },
-      );
-      if (requestGeneration !== generation) return false;
-      if (!resolved?.context) {
-        throw new Error('Workspace activation did not return display-safe context.');
-      }
       const activated = await apiRequest(
         api,
         'POST',
@@ -215,12 +227,12 @@ export function mountContextRail({
         { signal: controller.signal },
       );
       if (requestGeneration !== generation) return false;
-      if (!Array.isArray(activated?.secrets)) {
+      if (!activated?.context || !Array.isArray(activated?.secrets)) {
         throw new Error('Workspace activation did not return both context and its initial secret list.');
       }
       store.dispatch({
         type: 'context/switch-succeeded',
-        context: resolved.context,
+        context: activated.context,
         secrets: activated.secrets,
       });
       return true;

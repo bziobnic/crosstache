@@ -13,10 +13,11 @@ pub(crate) async fn list_deleted(
     State(state): State<Arc<WebState>>,
     Query(query): Query<VaultQuery>,
 ) -> Result<Json<Vec<DeletedSecretSummary>>, ApiError> {
-    let (backend, context) = state.active_target();
-    let deleted = backend
+    let target = query.target(&state)?;
+    let deleted = target
+        .backend
         .secrets()
-        .list_deleted_secrets(query.vault(&context.vault))
+        .list_deleted_secrets(&target.context.vault)
         .await?;
     Ok(Json(deleted))
 }
@@ -26,10 +27,11 @@ pub(crate) async fn restore(
     Path(name): Path<String>,
     Query(query): Query<VaultQuery>,
 ) -> Result<Json<SecretProperties>, ApiError> {
-    let (backend, context) = state.active_target();
-    let restored = backend
+    let target = query.target(&state)?;
+    let restored = target
+        .backend
         .secrets()
-        .restore_secret(query.vault(&context.vault), &name)
+        .restore_secret(&target.context.vault, &name)
         .await?;
     Ok(Json(restored))
 }
@@ -39,10 +41,11 @@ pub(crate) async fn purge(
     Path(name): Path<String>,
     Query(query): Query<VaultQuery>,
 ) -> Result<StatusCode, ApiError> {
-    let (backend, context) = state.active_target();
-    backend
+    let target = query.target(&state)?;
+    target
+        .backend
         .secrets()
-        .purge_secret(query.vault(&context.vault), &name)
+        .purge_secret(&target.context.vault, &name)
         .await?;
     Ok(StatusCode::OK)
 }
@@ -197,7 +200,7 @@ mod tests {
         let (status, _) = get_json(app, "DELETE", "/api/secrets/recreated/purge", None).await;
         assert_eq!(status, StatusCode::OK);
         let history = state
-            .active_backend()
+            .base_backend()
             .secrets()
             .get_secret_version("default", "recreated", "v1", true)
             .await

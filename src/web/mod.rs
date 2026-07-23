@@ -1,7 +1,7 @@
 //! Embedded localhost web UI. Feature-gated on `ui`.
 //! See `docs/superpowers/specs/2026-07-08-web-ui-design.md`.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{Path, Request};
@@ -133,13 +133,13 @@ pub(crate) struct WebState {
     /// backend and vault state and never receives secret data.
     pub(crate) preferences: preferences::PreferenceStore,
     pub(crate) registry: Arc<BackendRegistry>,
-    active: RwLock<ActiveWebTarget>,
-}
-
-#[derive(Clone)]
-struct ActiveWebTarget {
     backend: Arc<dyn Backend>,
     context: context::EffectiveUiContext,
+}
+
+pub(crate) struct ScopedWebTarget {
+    pub(crate) backend: Arc<dyn Backend>,
+    pub(crate) context: context::EffectiveUiContext,
 }
 
 impl WebState {
@@ -156,33 +156,62 @@ impl WebState {
             types,
             preferences,
             registry,
-            active: RwLock::new(ActiveWebTarget { backend, context }),
+            backend,
+            context,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn active_backend(&self) -> Arc<dyn Backend> {
-        self.active_target().0
+    pub(crate) fn base_backend(&self) -> Arc<dyn Backend> {
+        self.backend.clone()
     }
 
-    pub(crate) fn active_context(&self) -> context::EffectiveUiContext {
-        self.active_target().1
+    pub(crate) fn base_context(&self) -> context::EffectiveUiContext {
+        self.context.clone()
     }
 
-    pub(crate) fn active_target(&self) -> (Arc<dyn Backend>, context::EffectiveUiContext) {
-        let active = self
-            .active
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (active.backend.clone(), active.context.clone())
-    }
-
-    pub(crate) fn activate(&self, backend: Arc<dyn Backend>, context: context::EffectiveUiContext) {
-        *self
-            .active
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            ActiveWebTarget { backend, context };
+    pub(crate) fn scoped_target(
+        &self,
+        alias: Option<&str>,
+        backend: Option<&str>,
+        vault: Option<&str>,
+    ) -> std::result::Result<ScopedWebTarget, api::ApiError> {
+        if alias.is_none() && backend.is_none() && vault.is_none() {
+            return Ok(ScopedWebTarget {
+                backend: self.backend.clone(),
+                context: self.context.clone(),
+            });
+        }
+        let (Some(alias), Some(backend_name), Some(vault)) = (alias, backend, vault) else {
+            return Err(api::ApiError::Validation {
+                status: StatusCode::BAD_REQUEST,
+                message: "Provide workspace alias, backend, and vault together.",
+                field: Some("workspace"),
+            });
+        };
+        let entry = self
+            .context
+            .workspace
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.alias == alias && entry.backend == backend_name && entry.vault == vault
+            })
+            .ok_or(api::ApiError::Validation {
+                status: StatusCode::BAD_REQUEST,
+                message: "Choose an attached workspace entry.",
+                field: Some("workspace"),
+            })?;
+        let backend = self.registry.materialize(&entry.backend)?;
+        let mut context = self.context.clone();
+        context.backend = entry.backend.clone();
+        context.backend_kind = backend.kind();
+        context.vault = entry.vault.clone();
+        context.workspace.alias = entry.alias.clone();
+        context.sources.backend = context::ContextSource::WorkspaceEntry;
+        context.sources.vault = context::ContextSource::WorkspaceEntry;
+        context.capabilities = context::CapabilitySummary::from(backend.capabilities());
+        Ok(ScopedWebTarget { backend, context })
     }
 }
 
@@ -474,8 +503,10 @@ mod tests {
     fn ui_guards_list_loads_against_stale_responses() {
         assert!(APP_JS.contains("let secretLoadGeneration = 0"));
         assert!(APP_JS.contains("let fileLoadGeneration = 0"));
-        assert!(APP_JS.contains("async function loadSecrets(vault)"));
-        assert!(APP_JS.contains("async function loadFiles(vault)"));
+        assert!(
+            APP_JS.contains("async function loadSecrets(vault, scope = captureOperationScope())")
+        );
+        assert!(APP_JS.contains("async function loadFiles(vault, scope = captureOperationScope())"));
         assert!(APP_JS.contains("if (generation !== secretLoadGeneration) return"));
         assert!(APP_JS.contains("if (generation !== fileLoadGeneration) return"));
     }
@@ -516,7 +547,7 @@ mod tests {
         }
 
         let secret_load = APP_JS
-            .split_once("async function loadSecrets(vault) {")
+            .split_once("async function loadSecrets(vault, scope = captureOperationScope()) {")
             .unwrap()
             .1
             .split_once("function renderSecrets()")
@@ -534,7 +565,7 @@ mod tests {
         );
 
         let file_load = APP_JS
-            .split_once("async function loadFiles(vault) {")
+            .split_once("async function loadFiles(vault, scope = captureOperationScope()) {")
             .unwrap()
             .1
             .split_once("function renderFiles()")
@@ -732,7 +763,7 @@ mod tests {
         assert!(APP_JS.contains("runBounded(items, 4"));
         assert!(APP_JS.contains("api('DELETE', `/api/secrets/"));
         assert!(APP_JS.contains("api('DELETE', `/api/files/"));
-        assert!(APP_JS.contains("/move${vaultQS(vault)}`, { folder }"));
+        assert!(APP_JS.contains("/move${vaultQS(vault, operationScope)}`, { folder }"));
     }
 
     #[test]
@@ -765,10 +796,10 @@ mod tests {
         assert!(APP_JS.contains("const selectionIsCurrent = generation === state.generation;"));
         assert!(
             APP_JS
-                .matches("if (vault !== currentVault) return;")
+                .matches("if (!scopeMatchesCurrent(operationScope)) return;")
                 .count()
                 >= 4,
-            "bulk delete and move must reconcile same-vault data independently of selection state"
+            "bulk delete and move must reconcile only their captured immutable operation scope"
         );
         assert!(!APP_JS
             .contains("if (generation !== state.generation || vault !== currentVault) return;"));

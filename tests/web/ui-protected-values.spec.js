@@ -44,8 +44,12 @@ async function seedRecord(page, name) {
     const context = await fetch('/api/context', {
       headers: { Authorization: `Bearer ${token}` },
     }).then((result) => result.json());
-    const vault = context.vault;
-    const result = await fetch(`/api/secrets/${encodeURIComponent(recordName)}?vault=${encodeURIComponent(vault)}`, {
+    const scope = new URLSearchParams({
+      alias: context.workspace.alias,
+      backend: context.backend,
+      vault: context.vault,
+    });
+    const result = await fetch(`/api/secrets/${encodeURIComponent(recordName)}?${scope}`, {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${token}`,

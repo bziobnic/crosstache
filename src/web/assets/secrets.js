@@ -1,7 +1,7 @@
 import * as XvUiModel from './ui-model.js';
 import { guardNavigation } from './dialogs.js';
 import { setProtectedValueStatus } from './accessibility.js';
-import { formatContextLine } from './context.js';
+import { contextQuery, formatContextLine } from './context.js';
 
 export function createExposureTimer({ seconds, onTick, onExpire, clock = globalThis }) {
   const duration = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -190,18 +190,19 @@ function confirmDeletion(kind, names) {
 }
 
 let pendingUndo = null;
-function showDeletionNotice(names) {
+function showDeletionNotice(names, scope = captureOperationScope()) {
   if (!names.length) return;
-  const recoverable = !!ctx.capabilities.soft_delete;
+  const recoverable = !!scope.capabilities.soft_delete;
   const model = deletionNoticeModel(names, recoverable);
   const notice = $('#action-notice');
   notice.classList.remove('error');
   notice.querySelector('.action-notice-message').textContent = model.message;
+  $('#action-notice-context').textContent = formatContextLine(scope);
   notice.hidden = false;
   const undo = $('#undo-delete');
-  undo.hidden = !(model.canUndo && ctx.capabilities.restore);
+  undo.hidden = !(model.canUndo && scope.capabilities.restore);
   undo.disabled = false;
-  pendingUndo = undo.hidden ? null : { names: [...names], vault: currentVault };
+  pendingUndo = undo.hidden ? null : { names: [...names], scope };
 }
 
 $('#dismiss-action-notice').onclick = () => {
@@ -213,30 +214,36 @@ $('#undo-delete').onclick = async () => {
   if (!pendingUndo) return;
   const notice = $('#action-notice');
   const button = $('#undo-delete');
-  const { names, vault } = pendingUndo;
+  const { names, scope } = pendingUndo;
+  const vault = scope.vault;
+  beginScopedMutation();
   button.disabled = true;
   button.textContent = 'Restoring…';
-  const results = await runBounded(names, 4, (name) => (
-    api('POST', `/api/secrets/${encodeURIComponent(name)}/restore${vaultQS(vault)}`)
-  ));
-  const restored = results.filter((result) => result.ok);
-  const failed = results.filter((result) => !result.ok);
-  if (vault === currentVault) {
-    await loadSecrets(vault);
-    if (activeTab === 'trash') await loadDeleted(vault);
-  }
-  if (failed.length) {
-    pendingUndo = { names: failed.map((result) => result.item), vault };
-    notice.classList.add('error');
-    notice.querySelector('.action-notice-message').textContent = `Undo failed: ${failed[0].error.message}`;
-    button.disabled = false;
-    button.textContent = 'Retry Undo';
-    showListError(activeTab, failed[0].error);
-  } else {
-    pendingUndo = null;
-    notice.querySelector('.action-notice-message').textContent = `${restored.length} ${restored.length === 1 ? 'secret' : 'secrets'} restored.`;
-    button.hidden = true;
-    button.textContent = 'Undo';
+  try {
+    const results = await runBounded(names, 4, (name) => (
+      api('POST', `/api/secrets/${encodeURIComponent(name)}/restore${vaultQS(vault, scope)}`)
+    ));
+    const restored = results.filter((result) => result.ok);
+    const failed = results.filter((result) => !result.ok);
+    if (scopeMatchesCurrent(scope)) {
+      await loadSecrets(vault, scope);
+      if (activeTab === 'trash') await loadDeleted(vault, scope);
+    }
+    if (failed.length) {
+      pendingUndo = { names: failed.map((result) => result.item), scope };
+      notice.classList.add('error');
+      notice.querySelector('.action-notice-message').textContent = `Undo failed: ${failed[0].error.message}`;
+      button.disabled = false;
+      button.textContent = 'Retry Undo';
+      showListError(activeTab, failed[0].error);
+    } else {
+      pendingUndo = null;
+      notice.querySelector('.action-notice-message').textContent = `${restored.length} ${restored.length === 1 ? 'secret' : 'secrets'} restored.`;
+      button.hidden = true;
+      button.textContent = 'Undo';
+    }
+  } finally {
+    endScopedMutation();
   }
 };
 function isAborted(error) {
@@ -1042,6 +1049,32 @@ function currentContextLine() {
   return formatContextLine(store.snapshot().context || ctx);
 }
 
+function captureOperationScope() {
+  return structuredClone(store.snapshot().context || ctx);
+}
+
+function scopeMatchesCurrent(scope) {
+  const current = store.snapshot().context || ctx;
+  return current?.workspace?.alias === scope?.workspace?.alias
+    && current?.backend === scope?.backend
+    && current?.vault === scope?.vault;
+}
+
+let scopedMutationDepth = 0;
+function beginScopedMutation() {
+  scopedMutationDepth++;
+  if (scopedMutationDepth === 1) {
+    store.dispatch({ type: 'mutation/pending', value: true });
+  }
+}
+
+function endScopedMutation() {
+  scopedMutationDepth = Math.max(0, scopedMutationDepth - 1);
+  if (scopedMutationDepth === 0) {
+    store.dispatch({ type: 'mutation/pending', value: false });
+  }
+}
+
 function beginDraft() {
   store.dispatch({ type: 'draft/open', draft: drawerDraft() });
 }
@@ -1266,13 +1299,14 @@ function renderRecordFields(typeName, secretFields, metaFields, forNew) {
   $('#value-section').hidden = true;
 }
 
-const vaultQS = (vault) => `?vault=${encodeURIComponent(vault)}`;
+const vaultQS = (vault, scope = captureOperationScope()) => contextQuery({ ...scope, vault });
 
 // ---- context & vaults ----
 let authRecoveryActive = false;
 function showAuthRecovery() {
   authRecoveryActive = true;
-  $('#context-rail').hidden = true;
+  $('#context-rail').hidden = false;
+  $('#context-rail').classList.add('auth-recovery-mode');
   $('#vault-context').hidden = true;
   $('#vault-tabs').hidden = true;
   $('#secrets-view').hidden = true;
@@ -1367,14 +1401,14 @@ async function init() {
 // clobber the failed placeholder) while the fetch is in flight.
 let secretsState = 'ready';
 let secretLoadGeneration = 0;
-async function loadSecrets(vault) {
+async function loadSecrets(vault, scope = captureOperationScope()) {
   const generation = ++secretLoadGeneration;
   secretsState = 'loading';
   secrets = [];
   setListLoadStatus('secrets', 'loading');
   showListState($('#secrets-table tbody'), 'secrets', 'loading', secretSelection.enabled ? 6 : 5);
   try {
-    const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault)}`);
+    const loadedSecrets = await api('GET', `/api/secrets${vaultQS(vault, scope)}`);
     if (generation !== secretLoadGeneration) return false;
     secrets = loadedSecrets;
   } catch (e) {
@@ -1512,15 +1546,15 @@ function showTrashPlaceholder(title, description) {
   tbody.appendChild(row);
 }
 
-async function loadDeleted(vault) {
-  if (!ctx.capabilities.soft_delete) return false;
+async function loadDeleted(vault, scope = captureOperationScope()) {
+  if (!scope.capabilities.soft_delete) return false;
   const generation = ++trashLoadGeneration;
   trashState = 'loading';
   deletedSecrets = [];
   $('#trash-item-count').textContent = 'Loading Trash…';
   showTrashPlaceholder('Loading Trash…', 'Loading recoverable secrets from the current vault…');
   try {
-    const loaded = await api('GET', `/api/secrets/deleted${vaultQS(vault)}`);
+    const loaded = await api('GET', `/api/secrets/deleted${vaultQS(vault, scope)}`);
     if (generation !== trashLoadGeneration) return false;
     deletedSecrets = loaded;
   } catch (error) {
@@ -1575,14 +1609,23 @@ function trashRow(secret) {
     restore.textContent = 'Restore';
     restore.setAttribute('aria-label', `Restore ${name}`);
     restore.onclick = async () => {
+      const scope = captureOperationScope();
+      beginScopedMutation();
       restore.disabled = true;
       try {
-        await api('POST', `/api/secrets/${encodeURIComponent(name)}/restore${vaultQS(currentVault)}`);
-        toast(`${name} restored`);
-        await Promise.all([loadDeleted(currentVault), loadSecrets(currentVault)]);
+        await api('POST', `/api/secrets/${encodeURIComponent(name)}/restore${vaultQS(scope.vault, scope)}`);
+        toast(`${name} restored in ${formatContextLine(scope)}`);
+        if (scopeMatchesCurrent(scope)) {
+          await Promise.all([
+            loadDeleted(scope.vault, scope),
+            loadSecrets(scope.vault, scope),
+          ]);
+        }
       } catch (error) {
         showListError('trash', error);
         restore.disabled = false;
+      } finally {
+        endScopedMutation();
       }
     };
     actions.appendChild(restore);
@@ -1595,14 +1638,18 @@ function trashRow(secret) {
     purge.setAttribute('aria-label', `Purge ${name}`);
     purge.onclick = async () => {
       if (!ctx.capabilities.purge || !(await confirmPurge(name))) return;
+      const scope = captureOperationScope();
+      beginScopedMutation();
       purge.disabled = true;
       try {
-        await api('DELETE', `/api/secrets/${encodeURIComponent(name)}/purge${vaultQS(currentVault)}`);
-        toast(`${name} permanently purged`);
-        await loadDeleted(currentVault);
+        await api('DELETE', `/api/secrets/${encodeURIComponent(name)}/purge${vaultQS(scope.vault, scope)}`);
+        toast(`${name} permanently purged from ${formatContextLine(scope)}`);
+        if (scopeMatchesCurrent(scope)) await loadDeleted(scope.vault, scope);
       } catch (error) {
         showListError('trash', error);
         purge.disabled = false;
+      } finally {
+        endScopedMutation();
       }
     };
     actions.appendChild(purge);
@@ -1906,10 +1953,12 @@ $('#secret-form').onsubmit = async (ev) => {
   const groups = f.groups.value.split(',').map(s => s.trim()).filter(Boolean);
   const expiresPut = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : null;
   const expiresPatch = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : '';
+  const operationScope = captureOperationScope();
+  beginScopedMutation();
   setSavePending(true);
   try {
     if (selection && name !== selection) {
-      await api('POST', `/api/secrets/${encodeURIComponent(selection)}/move${vaultQS(currentVault)}`, { new_name: name });
+      await api('POST', `/api/secrets/${encodeURIComponent(selection)}/move${vaultQS(operationScope.vault, operationScope)}`, { new_name: name });
       if (!isCurrentDrawer(generation, selection)) return;
       editing = name;
       selection = name;
@@ -1928,7 +1977,7 @@ $('#secret-form').onsubmit = async (ev) => {
       for (const k of Object.keys(envelope).sort()) sorted[k] = envelope[k];
       const tags = { ...(editingMeta?.tags || {}), ...fieldTags };
       if (recordState.typeName) tags[TYPE_TAG] = recordState.typeName;
-      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
+      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(operationScope.vault, operationScope)}`, {
         value: JSON.stringify(sorted),
         content_type: RECORD_CONTENT_TYPE,
         folder: f.folder.value || null,
@@ -1942,7 +1991,7 @@ $('#secret-form').onsubmit = async (ev) => {
     } else if (plainSecretState?.dirty || (!selection && f.value.value)) {
       // full write: value + all metadata
       const value = selection ? plainSecretState.value : f.value.value;
-      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
+      await api('PUT', `/api/secrets/${encodeURIComponent(name)}${vaultQS(operationScope.vault, operationScope)}`, {
         value,
         folder: f.folder.value || null,
         note: f.note.value || null,
@@ -1955,7 +2004,7 @@ $('#secret-form').onsubmit = async (ev) => {
       });
     } else if (selection) {
       // metadata-only patch ("" clears)
-      await api('PATCH', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`, {
+      await api('PATCH', `/api/secrets/${encodeURIComponent(name)}${vaultQS(operationScope.vault, operationScope)}`, {
         folder: f.folder.value,
         note: f.note.value,
         groups,
@@ -1966,13 +2015,16 @@ $('#secret-form').onsubmit = async (ev) => {
     }
     if (!isCurrentDrawer(generation, selection)) return;
     closeDrawer();
-    toast('saved');
-    await loadSecrets(currentVault);
+    toast(`Saved in ${formatContextLine(operationScope)}`);
+    if (scopeMatchesCurrent(operationScope)) {
+      await loadSecrets(operationScope.vault, operationScope);
+    }
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     showFormError(e);
   } finally {
     setSavePending(false);
+    endScopedMutation();
   }
 };
 
@@ -1984,19 +2036,22 @@ $('#delete').onclick = async () => {
   setSavePending(true);
   beginPendingAction(btn, 'Deleting…');
   const generation = drawerGeneration;
-  const vault = currentVault;
+  const operationScope = captureOperationScope();
+  const vault = operationScope.vault;
+  beginScopedMutation();
   try {
-    await api('DELETE', `/api/secrets/${encodeURIComponent(selection)}${vaultQS(vault)}`);
+    await api('DELETE', `/api/secrets/${encodeURIComponent(selection)}${vaultQS(vault, operationScope)}`);
     if (!isCurrentDrawer(generation, selection)) return;
     closeDrawer();
-    showDeletionNotice([selection]);
-    await loadSecrets(vault);
+    showDeletionNotice([selection], operationScope);
+    await loadSecrets(vault, operationScope);
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
     resetConfirmation(btn, 'Delete');
     showFormError(e);
   } finally {
     setSavePending(false);
+    endScopedMutation();
   }
 };
 
@@ -2049,7 +2104,7 @@ let files = [];
 let filesState = 'ready';
 let fileLoadGeneration = 0;
 
-async function loadFiles(vault) {
+async function loadFiles(vault, scope = captureOperationScope()) {
   const generation = ++fileLoadGeneration;
   if (!ctx.capabilities.files) return false;
   filesState = 'loading';
@@ -2057,7 +2112,7 @@ async function loadFiles(vault) {
   setListLoadStatus('files', 'loading');
   showListState($('#files-table tbody'), 'files', 'loading', fileSelection.enabled ? 5 : 4);
   try {
-    const loadedFiles = await api('GET', `/api/files${vaultQS(vault)}`);
+    const loadedFiles = await api('GET', `/api/files${vaultQS(vault, scope)}`);
     if (generation !== fileLoadGeneration) return false;
     files = loadedFiles;
   } catch (e) {
@@ -2165,17 +2220,21 @@ async function runBounded(items, limit, operation) {
   return results;
 }
 
-function reportBulkResults(kind, verb, results) {
+function reportBulkResults(kind, verb, results, scope) {
   const succeeded = results.filter((result) => result.ok).length;
   const failures = results.filter((result) => !result.ok);
+  const contextLine = formatContextLine(scope);
   if (!failures.length) {
-    toast(`${verb} ${succeeded} item${succeeded === 1 ? '' : 's'}`);
+    toast(`${verb} ${succeeded} item${succeeded === 1 ? '' : 's'} in ${contextLine}`);
     return;
   }
   const details = failures
     .map(({ item, error }) => `${item}: ${error.message}`)
     .join('; ');
-  showListError(kind, new Error(`${verb} ${succeeded}; ${failures.length} failed — ${details}`));
+  showListError(
+    kind,
+    new Error(`${verb} ${succeeded} in ${contextLine}; ${failures.length} failed — ${details}`),
+  );
 }
 
 function setBulkPending(kind, pending, label) {
@@ -2201,37 +2260,48 @@ async function bulkDelete(kind) {
   if (!(await confirmDeletion(kind === 'secrets' ? 'secret' : 'file', items))) return;
 
   const generation = state.generation;
-  const vault = currentVault;
+  const operationScope = captureOperationScope();
+  const vault = operationScope.vault;
+  beginScopedMutation();
   setBulkPending(kind, true, 'Deleting…');
-  const results = await runBounded(items, 4, (item) => {
-    if (kind === 'secrets') {
-      return api('DELETE', `/api/secrets/${encodeURIComponent(item)}${vaultQS(vault)}`);
-    }
-    return api('DELETE', `/api/files/${encodeURIComponent(item)}${vaultQS(vault)}`);
-  });
-  if (vault !== currentVault) return;
-
-  const selectionIsCurrent = generation === state.generation;
-  if (selectionIsCurrent) {
-    for (const result of results) {
-      if (result.ok) state.ids.delete(result.item);
-    }
-    state.pending = false;
-  }
   try {
-    if (kind === 'secrets') await loadSecrets(vault);
-    else await loadFiles(vault);
-  } catch (e) {
-    fail(e);
-  }
-  if (vault !== currentVault) return;
-  if (!selectionIsCurrent || generation !== state.generation) return;
-  setBulkPending(kind, false, '');
-  if (kind === 'secrets') {
-    showDeletionNotice(results.filter((result) => result.ok).map((result) => result.item));
-    if (results.some((result) => !result.ok)) reportBulkResults(kind, 'Deleted', results);
-  } else {
-    reportBulkResults(kind, 'Deleted', results);
+    const results = await runBounded(items, 4, (item) => {
+      if (kind === 'secrets') {
+        return api('DELETE', `/api/secrets/${encodeURIComponent(item)}${vaultQS(vault, operationScope)}`);
+      }
+      return api('DELETE', `/api/files/${encodeURIComponent(item)}${vaultQS(vault, operationScope)}`);
+    });
+    if (!scopeMatchesCurrent(operationScope)) return;
+
+    const selectionIsCurrent = generation === state.generation;
+    if (selectionIsCurrent) {
+      for (const result of results) {
+        if (result.ok) state.ids.delete(result.item);
+      }
+      state.pending = false;
+    }
+    try {
+      if (kind === 'secrets') await loadSecrets(vault, operationScope);
+      else await loadFiles(vault, operationScope);
+    } catch (e) {
+      fail(e);
+    }
+    if (!scopeMatchesCurrent(operationScope)) return;
+    if (!selectionIsCurrent || generation !== state.generation) return;
+    setBulkPending(kind, false, '');
+    if (kind === 'secrets') {
+      showDeletionNotice(
+        results.filter((result) => result.ok).map((result) => result.item),
+        operationScope,
+      );
+      if (results.some((result) => !result.ok)) {
+        reportBulkResults(kind, 'Deleted', results, operationScope);
+      }
+    } else {
+      reportBulkResults(kind, 'Deleted', results, operationScope);
+    }
+  } finally {
+    endScopedMutation();
   }
 }
 
@@ -2246,7 +2316,9 @@ async function bulkMoveSecrets() {
   }
 
   const generation = state.generation;
-  const vault = currentVault;
+  const operationScope = captureOperationScope();
+  const vault = operationScope.vault;
+  beginScopedMutation();
   const moveButton = $('#bulk-move-secrets');
   state.pending = true;
   $('#cancel-secret-selection').disabled = true;
@@ -2254,31 +2326,35 @@ async function bulkMoveSecrets() {
   $('#bulk-delete-secrets').disabled = true;
   beginPendingAction(moveButton, 'Moving…');
   renderSecrets();
-  const results = await runBounded(items, 4, (item) => (
-    api('POST', `/api/secrets/${encodeURIComponent(item)}/move${vaultQS(vault)}`, { folder })
-  ));
-  if (vault !== currentVault) return;
-
-  const selectionIsCurrent = generation === state.generation;
-  if (selectionIsCurrent) {
-    for (const result of results) {
-      if (result.ok) state.ids.delete(result.item);
-    }
-    state.pending = false;
-  }
   try {
-    await loadSecrets(vault);
-  } catch (e) {
-    fail(e);
+    const results = await runBounded(items, 4, (item) => (
+      api('POST', `/api/secrets/${encodeURIComponent(item)}/move${vaultQS(vault, operationScope)}`, { folder })
+    ));
+    if (!scopeMatchesCurrent(operationScope)) return;
+
+    const selectionIsCurrent = generation === state.generation;
+    if (selectionIsCurrent) {
+      for (const result of results) {
+        if (result.ok) state.ids.delete(result.item);
+      }
+      state.pending = false;
+    }
+    try {
+      await loadSecrets(vault, operationScope);
+    } catch (e) {
+      fail(e);
+    }
+    if (!scopeMatchesCurrent(operationScope)) return;
+    if (!selectionIsCurrent || generation !== state.generation) return;
+    $('#cancel-secret-selection').disabled = false;
+    $('#secret-move-folder').disabled = false;
+    resetConfirmation(moveButton, 'Move');
+    updateSelectionControls('secrets');
+    renderSecrets();
+    reportBulkResults('secrets', 'Moved', results, operationScope);
+  } finally {
+    endScopedMutation();
   }
-  if (vault !== currentVault) return;
-  if (!selectionIsCurrent || generation !== state.generation) return;
-  $('#cancel-secret-selection').disabled = false;
-  $('#secret-move-folder').disabled = false;
-  resetConfirmation(moveButton, 'Move');
-  updateSelectionControls('secrets');
-  renderSecrets();
-  reportBulkResults('secrets', 'Moved', results);
 }
 
 $('#select-secrets').onclick = () => setSelectionMode('secrets', true);
@@ -2305,21 +2381,24 @@ async function downloadFile(name) {
 
 async function uploadFiles(fileList) {
   if (store.snapshot().savePending) return;
-  const uploadVault = currentVault;
-  const uploadScope = currentContextLine();
+  const operationScope = captureOperationScope();
+  const uploadVault = operationScope.vault;
+  const uploadScope = formatContextLine(operationScope);
+  beginScopedMutation();
   setSavePending(true);
   try {
     for (const file of fileList) {
       const form = new FormData();
       form.append('file', file, file.name);
       try {
-        await api('POST', `/api/files${vaultQS(uploadVault)}`, form);
+        await api('POST', `/api/files${vaultQS(uploadVault, operationScope)}`, form);
         toast(`Uploaded ${file.name} to ${uploadScope}`);
       } catch (e) { fail(e); }
     }
-    if (uploadVault === currentVault) await loadFiles(uploadVault);
+    if (scopeMatchesCurrent(operationScope)) await loadFiles(uploadVault, operationScope);
   } finally {
     setSavePending(false);
+    endScopedMutation();
   }
 }
 

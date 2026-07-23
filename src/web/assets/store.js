@@ -47,6 +47,8 @@ export function draftReducer(state, event) {
         contextSwitchPending: false,
         contextError: structuredClone(event.error),
       };
+    case 'mutation/pending':
+      return { ...state, scopedMutationPending: Boolean(event.value) };
     case 'draft/open': {
       const baseline = normalizeSecretDraft(event.draft);
       return { ...state, draft: { baseline, working: structuredClone(baseline) }, savePending: false };

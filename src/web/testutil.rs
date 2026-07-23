@@ -86,6 +86,7 @@ pub(crate) fn test_state() -> Arc<WebState> {
 pub(crate) mod stub {
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use async_trait::async_trait;
 
@@ -104,6 +105,7 @@ pub(crate) mod stub {
         capabilities: BackendCapabilities,
         health_error: Option<&'static str>,
         list_error: Option<&'static str>,
+        list_delay: Option<Duration>,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         pub deleted: Mutex<HashMap<String, SecretRequest>>,
         #[cfg(feature = "file-ops")]
@@ -139,6 +141,7 @@ pub(crate) mod stub {
                 capabilities,
                 health_error: None,
                 list_error: None,
+                list_delay: None,
                 secrets: Mutex::new(HashMap::new()),
                 deleted: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
@@ -155,6 +158,12 @@ pub(crate) mod stub {
         pub(crate) fn with_list_error(name: &'static str, list_error: &'static str) -> Self {
             let mut backend = Self::with_capabilities(name, BackendCapabilities::default());
             backend.list_error = Some(list_error);
+            backend
+        }
+
+        pub(crate) fn with_list_delay(name: &'static str, list_delay: Duration) -> Self {
+            let mut backend = Self::with_capabilities(name, BackendCapabilities::default());
+            backend.list_delay = Some(list_delay);
             backend
         }
     }
@@ -267,6 +276,9 @@ pub(crate) mod stub {
             _vault: &str,
             group_filter: Option<&str>,
         ) -> Result<Vec<SecretSummary>, BackendError> {
+            if let Some(delay) = self.list_delay {
+                tokio::time::sleep(delay).await;
+            }
             if let Some(message) = self.list_error {
                 return Err(BackendError::Internal(message.into()));
             }

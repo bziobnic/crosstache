@@ -117,7 +117,7 @@ pub(crate) struct ResolvedUiContext {
 pub(crate) async fn get_context(
     State(state): State<Arc<super::WebState>>,
 ) -> Json<EffectiveUiContext> {
-    Json(state.active_context())
+    Json(state.base_context())
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +134,7 @@ pub(crate) struct ActivateContextResponse {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ActivateWorkspaceResponse {
+    context: EffectiveUiContext,
     secrets: Vec<crate::secret::manager::SecretSummary>,
 }
 
@@ -141,23 +142,12 @@ async fn resolve_activation_candidate(
     state: &super::WebState,
     request: &ActivateContextRequest,
 ) -> std::result::Result<(Arc<dyn Backend>, EffectiveUiContext), super::api::ApiError> {
-    let current = state.active_context();
-    let entry = current
-        .workspace
-        .entries
-        .iter()
-        .find(|entry| {
-            entry.alias == request.alias
-                && entry.backend == request.backend
-                && entry.vault == request.vault
-        })
-        .cloned()
-        .ok_or(super::api::ApiError::Validation {
-            status: axum::http::StatusCode::BAD_REQUEST,
-            message: "Choose an attached workspace entry.",
-            field: Some("workspace"),
-        })?;
-    let backend = state.registry.materialize(&entry.backend)?;
+    let target = state.scoped_target(
+        Some(&request.alias),
+        Some(&request.backend),
+        Some(&request.vault),
+    )?;
+    let backend = target.backend;
     let connection = match backend.health_check().await {
         Ok(()) => ConnectionSummary {
             state: "connected".into(),
@@ -168,15 +158,8 @@ async fn resolve_activation_candidate(
             message: Some("The selected backend is unavailable.".into()),
         },
     };
-    let mut context = current;
-    context.backend = entry.backend.clone();
-    context.backend_kind = backend.kind();
-    context.vault = entry.vault.clone();
-    context.workspace.alias = entry.alias.clone();
-    context.sources.backend = ContextSource::WorkspaceEntry;
-    context.sources.vault = ContextSource::WorkspaceEntry;
+    let mut context = target.context;
     context.connection = connection;
-    context.capabilities = CapabilitySummary::from(backend.capabilities());
     Ok((backend, context))
 }
 
@@ -194,8 +177,7 @@ pub(crate) async fn activate_workspace(
 ) -> std::result::Result<Json<ActivateWorkspaceResponse>, super::api::ApiError> {
     let (backend, context) = resolve_activation_candidate(&state, &request).await?;
     let secrets = backend.secrets().list_secrets(&context.vault, None).await?;
-    state.activate(backend, context.clone());
-    Ok(Json(ActivateWorkspaceResponse { secrets }))
+    Ok(Json(ActivateWorkspaceResponse { context, secrets }))
 }
 
 struct ProjectResolution {
@@ -688,7 +670,7 @@ vaults = [
     }
 
     #[tokio::test]
-    async fn activation_routes_keep_context_display_safe_and_publish_after_the_list() {
+    async fn candidate_context_is_display_safe_and_workspace_activation_is_atomic() {
         let app = crate::web::build_router(crate::web::testutil::test_state());
         let request = json!({
             "alias": "default",
@@ -717,7 +699,199 @@ vaults = [
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["context"]["backend"], "stub");
+        assert_eq!(body["context"]["vault"], "default");
         assert_eq!(body["secrets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn scoped_destructive_write_uses_the_requested_attached_backend() {
+        use std::sync::Arc;
+
+        use crate::secret::manager::SecretRequest;
+        use crate::web::testutil::stub::StubBackend;
+        use zeroize::Zeroizing;
+
+        fn request(name: &str) -> SecretRequest {
+            SecretRequest {
+                name: name.into(),
+                value: Zeroizing::new("protected".into()),
+                content_type: None,
+                enabled: Some(true),
+                expires_on: None,
+                not_before: None,
+                tags: None,
+                groups: None,
+                note: None,
+                folder: None,
+            }
+        }
+
+        let primary = Arc::new(StubBackend::with_capabilities(
+            "primary",
+            Default::default(),
+        ));
+        let stage = Arc::new(StubBackend::with_capabilities("stage", Default::default()));
+        primary
+            .secrets
+            .lock()
+            .unwrap()
+            .insert("victim".into(), request("victim"));
+        stage
+            .secrets
+            .lock()
+            .unwrap()
+            .insert("victim".into(), request("victim"));
+        let primary_backend: Arc<dyn crate::backend::Backend> = primary.clone();
+        let stage_backend: Arc<dyn crate::backend::Backend> = stage.clone();
+        let registry = Arc::new(BackendRegistry::for_test(
+            "primary",
+            vec![
+                ("primary", primary_backend.clone()),
+                ("stage", stage_backend),
+            ],
+        ));
+        let mut context =
+            crate::web::testutil::test_context(primary_backend.as_ref(), "payments", 30);
+        context.workspace.configured = true;
+        context.workspace.alias = "work".into();
+        context.workspace.entries = vec![
+            super::WorkspaceEntrySummary {
+                alias: "work".into(),
+                backend: "primary".into(),
+                vault: "payments".into(),
+                default: true,
+            },
+            super::WorkspaceEntrySummary {
+                alias: "stage".into(),
+                backend: "stage".into(),
+                vault: "sandbox".into(),
+                default: false,
+            },
+        ];
+        let root = tempfile::tempdir().expect("preferences");
+        let state = Arc::new(crate::web::WebState::new(
+            primary_backend,
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(root.path().join("ui.json"), 30),
+            registry,
+        ));
+        let app = crate::web::build_router(state);
+
+        let (status, _) = crate::web::api::tests::get_json(
+            app,
+            "DELETE",
+            "/api/secrets/victim?alias=stage&backend=stage&vault=sandbox",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(primary.secrets.lock().unwrap().contains_key("victim"));
+        assert!(!stage.secrets.lock().unwrap().contains_key("victim"));
+    }
+
+    #[tokio::test]
+    async fn partial_or_unattached_request_scope_never_falls_back() {
+        let app = crate::web::build_router(crate::web::testutil::test_state());
+
+        let (partial_status, partial) = crate::web::api::tests::get_json(
+            app.clone(),
+            "GET",
+            "/api/secrets?vault=default",
+            None,
+        )
+        .await;
+        assert_eq!(partial_status, StatusCode::BAD_REQUEST);
+        assert_eq!(partial["error"]["field"], "workspace");
+
+        let (wrong_status, wrong) = crate::web::api::tests::get_json(
+            app,
+            "GET",
+            "/api/secrets?alias=default&backend=other&vault=default",
+            None,
+        )
+        .await;
+        assert_eq!(wrong_status, StatusCode::BAD_REQUEST);
+        assert_eq!(wrong["error"]["field"], "workspace");
+    }
+
+    #[tokio::test]
+    async fn delayed_out_of_order_workspace_responses_are_tab_safe_and_leave_no_server_state() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::web::testutil::stub::StubBackend;
+
+        let primary: Arc<dyn crate::backend::Backend> = Arc::new(StubBackend::with_capabilities(
+            "primary",
+            Default::default(),
+        ));
+        let delayed: Arc<dyn crate::backend::Backend> = Arc::new(StubBackend::with_list_delay(
+            "stage",
+            Duration::from_millis(40),
+        ));
+        let registry = Arc::new(BackendRegistry::for_test(
+            "primary",
+            vec![("primary", primary.clone()), ("stage", delayed)],
+        ));
+        let mut context = crate::web::testutil::test_context(primary.as_ref(), "payments", 30);
+        context.workspace.configured = true;
+        context.workspace.alias = "work".into();
+        context.workspace.entries = vec![
+            super::WorkspaceEntrySummary {
+                alias: "work".into(),
+                backend: "primary".into(),
+                vault: "payments".into(),
+                default: true,
+            },
+            super::WorkspaceEntrySummary {
+                alias: "stage".into(),
+                backend: "stage".into(),
+                vault: "sandbox".into(),
+                default: false,
+            },
+        ];
+        let root = tempfile::tempdir().expect("preferences");
+        let state = Arc::new(crate::web::WebState::new(
+            primary,
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(root.path().join("ui.json"), 30),
+            registry,
+        ));
+        let app = crate::web::build_router(state);
+
+        let delayed_tab = tokio::spawn(crate::web::api::tests::get_json(
+            app.clone(),
+            "POST",
+            "/api/workspaces/activate",
+            Some(json!({"alias":"stage","backend":"stage","vault":"sandbox"})),
+        ));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let (_, primary_tab) = crate::web::api::tests::get_json(
+            app.clone(),
+            "POST",
+            "/api/workspaces/activate",
+            Some(json!({"alias":"work","backend":"primary","vault":"payments"})),
+        )
+        .await;
+        assert_eq!(primary_tab["context"]["backend"], "primary");
+        assert_eq!(primary_tab["context"]["vault"], "payments");
+
+        let (_, late_response) = delayed_tab.await.expect("delayed tab response");
+        assert_eq!(late_response["context"]["backend"], "stage");
+        assert_eq!(late_response["context"]["vault"], "sandbox");
+
+        // Dropping or losing either activation response cannot mutate shared
+        // process state: a new tab still starts from the resolved base context.
+        let (_, fresh_tab) =
+            crate::web::api::tests::get_json(app, "GET", "/api/context", None).await;
+        assert_eq!(fresh_tab["backend"], "primary");
+        assert_eq!(fresh_tab["vault"], "payments");
     }
 
     #[tokio::test]
