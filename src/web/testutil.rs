@@ -111,6 +111,7 @@ pub(crate) mod stub {
         update_error: Option<&'static str>,
         conversion_cas_race_value: Option<&'static str>,
         revision_validation_supported: bool,
+        atomic_rename_supported: bool,
         rename_source_race: bool,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         revisions: Mutex<HashMap<String, String>>,
@@ -147,6 +148,7 @@ pub(crate) mod stub {
             capabilities: BackendCapabilities,
         ) -> Self {
             let revision_validation_supported = capabilities.has_conditional_record_conversion;
+            let atomic_rename_supported = capabilities.has_atomic_rename;
             Self {
                 name,
                 capabilities,
@@ -157,6 +159,7 @@ pub(crate) mod stub {
                 update_error: None,
                 conversion_cas_race_value: None,
                 revision_validation_supported,
+                atomic_rename_supported,
                 rename_source_race: false,
                 secrets: Mutex::new(HashMap::new()),
                 revisions: Mutex::new(HashMap::new()),
@@ -222,6 +225,11 @@ pub(crate) mod stub {
 
         pub(crate) fn without_revision_validation(mut self) -> Self {
             self.revision_validation_supported = false;
+            self
+        }
+
+        pub(crate) fn without_atomic_rename_support(mut self) -> Self {
+            self.atomic_rename_supported = false;
             self
         }
     }
@@ -298,7 +306,7 @@ pub(crate) mod stub {
         }
 
         fn supports_atomic_rename(&self) -> bool {
-            self.capabilities.has_atomic_rename
+            self.atomic_rename_supported
         }
 
         async fn set_secret(

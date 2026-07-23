@@ -618,7 +618,7 @@ async fn execute_cross_vault_alias_mv(
 /// SAME way `get`/`set`/etc. already do, never a separate config-level
 /// vault when a workspace is attached.
 pub(crate) fn validate_atomic_rename_backend(backend: &dyn crate::backend::Backend) -> Result<()> {
-    if !backend.capabilities().has_atomic_rename || !backend.secrets().supports_atomic_rename() {
+    if !crate::backend::atomic_rename_available(backend) {
         return Err(CrosstacheError::config(
             "backend does not support atomic rename; no changes were written",
         ));

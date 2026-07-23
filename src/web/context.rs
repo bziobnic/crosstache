@@ -5,7 +5,10 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{Backend, BackendKind, BackendRegistry};
+use crate::backend::{
+    atomic_rename_available, conditional_record_conversion_available, Backend, BackendKind,
+    BackendRegistry,
+};
 use crate::config::project::{
     find_project_config, resolve_effective_backend_config, resolve_env_with_source,
     BackendSelectionSource, EnvProfile, EnvironmentSelectionSource, ProjectConfig,
@@ -409,9 +412,7 @@ fn default_entry_config<'a>(
 impl CapabilitySummary {
     pub(crate) fn from_backend(backend: &dyn Backend) -> Self {
         let capabilities = backend.capabilities();
-        let conditional_conversion = capabilities.has_conditional_record_conversion
-            && backend.secrets().supports_conditional_update()
-            && backend.secrets().supports_revision_validation();
+        let conditional_conversion = conditional_record_conversion_available(backend);
         Self {
             secrets: true,
             vaults: capabilities.has_vaults,
@@ -431,7 +432,7 @@ impl CapabilitySummary {
             rotation: capabilities.has_secret_rotation,
             conversion: conditional_conversion,
             conditional_conversion,
-            atomic_rename: capabilities.has_atomic_rename,
+            atomic_rename: atomic_rename_available(backend),
             metadata: true,
         }
     }

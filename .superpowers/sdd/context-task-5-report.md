@@ -193,13 +193,38 @@ in place. Its negative tests prove conversion is rejected during capability
 preflight, before any source read, and that the UI does not advertise
 conditional conversion.
 
+## Fourth review remediation
+
+The final capability-truthfulness pass replaced the remaining duplicated
+decisions with two backend-level availability predicates.
+
+Conditional web conversion is available only when all four guarantees agree:
+
+- `has_atomic_record_conversion`;
+- `has_conditional_record_conversion`;
+- `supports_conditional_update`; and
+- `supports_revision_validation`.
+
+The conversion route preflight and Effective UI context now call that same
+predicate. A mismatched backend supplies conditional update and validation but
+does not advertise a complete atomic update; its regression proves the UI
+hides conversion and the route returns `xv-operation-unsupported` for a
+missing source, demonstrating rejection before a read.
+
+Atomic rename likewise requires both `has_atomic_rename` and
+`supports_atomic_rename`. Effective UI context, the web route, and CLI rename
+preflight share this predicate. A backend that advertises rename without
+implementing the primitive is hidden by the UI and rejected by the route
+before a missing source can be read.
+
 ## Verification
 
-- `cargo test --features ui --lib` — 1,045 passed, 1 ignored.
-- `cargo test --no-default-features --features ui --lib --quiet` — 980 passed,
+- `cargo test --features ui --lib` — 1,047 passed, 1 ignored.
+- `cargo test --no-default-features --features ui --lib --quiet` — 982 passed,
   1 ignored.
-- `cargo test --features ui --lib web::secrets::tests` — 30 passed.
+- `cargo test --features ui --lib web::secrets::tests` — 32 passed.
 - `cargo test --features ui --lib records::conversion::tests` — 30 passed.
+- `cargo test --features ui --lib web::context::tests` — 16 passed.
 - Rename-journal durability regressions — 2 passed.
 - Opaque rename artifact privacy regression — passed.
 - Attachment/rename namespace regressions — passed.

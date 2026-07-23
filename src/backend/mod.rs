@@ -272,6 +272,22 @@ pub trait Backend: Send + Sync {
     async fn health_check(&self) -> Result<(), BackendError>;
 }
 
+/// Whether web record conversion has every advertised and implemented
+/// primitive needed for both update and no-op commits.
+pub(crate) fn conditional_record_conversion_available(backend: &dyn Backend) -> bool {
+    let capabilities = backend.capabilities();
+    capabilities.has_atomic_record_conversion
+        && capabilities.has_conditional_record_conversion
+        && backend.secrets().supports_conditional_update()
+        && backend.secrets().supports_revision_validation()
+}
+
+/// Whether secret rename has both the advertised guarantee and its backend
+/// primitive.
+pub(crate) fn atomic_rename_available(backend: &dyn Backend) -> bool {
+    backend.capabilities().has_atomic_rename && backend.secrets().supports_atomic_rename()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

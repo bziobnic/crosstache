@@ -9,6 +9,7 @@ use axum::Json;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::backend::atomic_rename_available;
 use crate::records::{
     apply_conversion, preview_conversion, validate_conditional_conversion_backend,
     ConversionPreview, ConversionRequest,
@@ -454,9 +455,7 @@ pub(crate) async fn rename(
     )
     .await?;
     let target = query.target(&state)?;
-    if !target.backend.capabilities().has_atomic_rename
-        || !target.backend.secrets().supports_atomic_rename()
-    {
+    if !atomic_rename_available(target.backend.as_ref()) {
         return Err(structured_error(
             StatusCode::NOT_IMPLEMENTED,
             "xv-operation-unsupported",
@@ -578,7 +577,7 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
-    use crate::backend::local::LocalBackend;
+    use crate::backend::{local::LocalBackend, Backend};
     use crate::config::settings::LocalConfig;
     use crate::web::api::tests::get_json;
     use crate::web::testutil;
@@ -1385,6 +1384,57 @@ mod tests {
             "POST",
             "/api/secrets/missing/conversion/preview",
             Some(json!({"target_type":"api-key"})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(error["error"]["code"], "xv-operation-unsupported");
+    }
+
+    #[tokio::test]
+    async fn conversion_without_atomic_update_is_hidden_and_rejected_before_source_read() {
+        let backend = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "conditional-without-atomic",
+            crate::backend::BackendCapabilities {
+                has_conditional_record_conversion: true,
+                ..Default::default()
+            },
+        ));
+        assert!(backend.secrets().supports_conditional_update());
+        assert!(backend.secrets().supports_revision_validation());
+        let context = testutil::test_context(backend.as_ref(), "vault", 30);
+        assert!(!context.capabilities.conversion);
+        assert!(!context.capabilities.conditional_conversion);
+        let app =
+            crate::web::build_router(state_with_types(backend, crate::records::builtin_types()));
+
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/missing/conversion/preview",
+            Some(json!({"target_type":"api-key"})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(error["error"]["code"], "xv-operation-unsupported");
+    }
+
+    #[tokio::test]
+    async fn rename_without_backend_primitive_is_hidden_and_rejected_before_source_read() {
+        let backend = Arc::new(testutil::stub::StubBackend::new().without_atomic_rename_support());
+        assert!(backend.capabilities().has_atomic_rename);
+        assert!(!backend.secrets().supports_atomic_rename());
+        let context = testutil::test_context(backend.as_ref(), "vault", 30);
+        assert!(!context.capabilities.atomic_rename);
+        let app =
+            crate::web::build_router(state_with_types(backend, crate::records::builtin_types()));
+
+        let (status, error) = get_json(
+            app,
+            "POST",
+            "/api/secrets/missing/rename",
+            Some(json!({"new_name":"destination"})),
         )
         .await;
 

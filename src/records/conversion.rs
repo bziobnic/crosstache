@@ -1,4 +1,6 @@
-use crate::backend::{secret::split_denormalized_tags, Backend};
+use crate::backend::{
+    conditional_record_conversion_available, secret::split_denormalized_tags, Backend,
+};
 use crate::error::{CrosstacheError, Result};
 use crate::records::{
     check_tag_budget, encode_envelope, find_type, is_record, parse_envelope,
@@ -568,10 +570,7 @@ pub fn validate_conversion_backend(backend: &dyn Backend) -> Result<()> {
 #[cfg_attr(not(feature = "ui"), allow(dead_code))]
 pub fn validate_conditional_conversion_backend(backend: &dyn Backend) -> Result<()> {
     validate_conversion_backend(backend)?;
-    if !backend.capabilities().has_conditional_record_conversion
-        || !backend.secrets().supports_conditional_update()
-        || !backend.secrets().supports_revision_validation()
-    {
+    if !conditional_record_conversion_available(backend) {
         return Err(CrosstacheError::config(
             "backend does not support conditional record conversion; no changes were written",
         ));
