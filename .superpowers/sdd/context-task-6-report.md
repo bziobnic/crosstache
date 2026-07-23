@@ -44,6 +44,20 @@ Task 5 conversion and atomic rename contracts.
 6. Added a nested rename error-focus assertion. It failed because `field:
    "name"` focused the read-only primary name; error mapping was fixed to focus
    the active rename input.
+7. Review remediation began with three focused failing browser assertions:
+   an older login preview replaced a newer API-key preview, a required
+   conversion password was rendered without protected-field lifecycle state,
+   and changing the conversion target did not participate in the Escape
+   discard guard.
+8. Added failing race, immutable-request, protected-lifecycle, apply-failure,
+   close, and context-switch cases before hardening the workflow. Conversion
+   previews now capture the complete request and drawer/context generations;
+   stale responses are ignored and apply reuses the exact successful snapshot.
+9. Supplied secret fields now use the same masking, reveal, copy, expiry, and
+   scrubbing lifecycle as other protected values. They are scrubbed on target
+   changes, failures, closes, successful completion, and context changes.
+10. Rename and conversion inputs are now part of the drawer draft, so Escape,
+    close, and context navigation consistently offer Keep editing or Discard.
 
 ## Verification
 
@@ -55,8 +69,8 @@ Task 5 conversion and atomic rename contracts.
 - `cargo fmt -- --check`: **passed**
 - `cargo check --features ui`: **passed**
 - `git diff --check`: **passed**
-- `npx playwright test tests/web/ui-typed-editor.spec.js`: **5 passed**
-- `npx playwright test`: **28 passed**
+- `npx playwright test tests/web/ui-typed-editor.spec.js`: **9 passed**
+- `npx playwright test`: **32 passed**
 - Axe scans in new-secret metadata controls, open conversion preview, and
   rename-error states: **no serious or critical violations**
 

@@ -864,6 +864,9 @@ let recordState = null;
 let plainSecretState = null;
 let selectedGroups = [];
 let conversionPreviewState = null;
+let conversionOperationGeneration = 0;
+let conversionLifecycleEpoch = 0;
+const conversionFieldStates = new Map();
 let drawerInvoker = null;
 const revealTimers = new Map();
 let clipboardExposure = null;
@@ -1000,6 +1003,7 @@ function forgetProtectedValues() {
   if (recordState?.secretFields) {
     for (const name of Object.keys(recordState.secretFields)) delete recordState.secretFields[name];
   }
+  clearConversionFields();
   const valueInput = $('#secret-form').elements.value;
   valueInput.value = '';
   setProtectedValueStatus(document, '');
@@ -1223,6 +1227,11 @@ function drawerDraft() {
     expires_on: fields.expires_on.value,
     type: $('#type-picker').value,
     record: recordState ? { type: recordState.typeName, fields: recordFields } : null,
+    rename: $('#rename-name').value,
+    conversion: {
+      target: conversionTargetBody(),
+      supplied_fields: conversionSuppliedFields(),
+    },
   };
 }
 
@@ -1977,13 +1986,14 @@ function isCurrentDrawer(generation, selection) {
 }
 
 function clearDrawerState() {
+  clearConversionPreview();
+  clearConversionFields();
   editing = null;
   drawerScope = null;
   editingMeta = null;
   recordState = null;
   plainSecretState = null;
   selectedGroups = [];
-  conversionPreviewState = null;
 }
 
 function setWorkflowOpen(kind, open) {
@@ -2008,9 +2018,183 @@ function conversionTargetBody() {
 function conversionSuppliedFields() {
   return Object.fromEntries(
     [...$('#conversion-required-fields').querySelectorAll('input[data-conversion-field]')]
-      .map((input) => [input.dataset.conversionField, input.value])
+      .map((input) => [
+        input.dataset.conversionField,
+        input.dataset.fieldKind === 'secret' ? input._protectedState?.value : input.value,
+      ])
       .filter(([, value]) => value !== ''),
   );
+}
+
+function conversionRequestSnapshot() {
+  return structuredClone({
+    target: conversionTargetBody(),
+    supplied_fields: conversionSuppliedFields(),
+  });
+}
+
+function conversionTargetDefinition(name) {
+  const targetType = $('#conversion-target').value;
+  return types.find((type) => type.name === targetType)
+    ?.fields?.find((field) => field.name === name) || null;
+}
+
+function sameOperationScope(left, right) {
+  return left?.workspace?.alias === right?.workspace?.alias
+    && left?.backend === right?.backend
+    && left?.vault === right?.vault;
+}
+
+function conversionOperationIsCurrent(operation) {
+  return operation.operationGeneration === conversionOperationGeneration
+    && operation.lifecycleEpoch === conversionLifecycleEpoch
+    && operation.drawerGeneration === drawerGeneration
+    && operation.selection === editing
+    && !$('#drawer').hidden
+    && sameOperationScope(operation.scope, drawerScope)
+    && scopeMatchesCurrent(operation.scope);
+}
+
+function clearConversionPreview({ clearSummary = true } = {}) {
+  conversionOperationGeneration++;
+  conversionLifecycleEpoch++;
+  conversionPreviewState = null;
+  $('#conversion-confirm').hidden = true;
+  if (clearSummary) {
+    $('#conversion-summary').hidden = true;
+    $('#conversion-summary').replaceChildren();
+  }
+}
+
+function scrubConversionProtectedState(entry) {
+  stopRevealTimer(entry.state);
+  entry.state.revision++;
+  entry.state.value = null;
+  entry.state.hasStoredValue = false;
+  entry.state.masked = false;
+  entry.state.dirty = false;
+  entry.state.loadPromise = null;
+  entry.input.value = '';
+}
+
+function clearConversionFields() {
+  for (const entry of conversionFieldStates.values()) scrubConversionProtectedState(entry);
+  conversionFieldStates.clear();
+  $('#conversion-required-fields').replaceChildren();
+}
+
+function conversionExposureIsCurrent({ entry, revision, epoch, generation }) {
+  return generation === drawerGeneration
+    && epoch === conversionLifecycleEpoch
+    && conversionFieldStates.get(entry.name) === entry
+    && entry.input.isConnected
+    && entry.state.revision === revision
+    && !$('#drawer').hidden;
+}
+
+function conversionProtectedField(name, definition) {
+  const row = document.createElement('div');
+  row.className = 'form-field';
+  const label = document.createElement('label');
+  const inputId = `conversion-field-${++nextRecordFieldId}`;
+  label.className = 'field-label';
+  label.htmlFor = inputId;
+  label.textContent = `${name} (required for conversion)`;
+  const input = document.createElement('input');
+  input.id = inputId;
+  input.dataset.conversionField = name;
+  input.dataset.fieldKind = 'secret';
+  input.required = true;
+  input.autocomplete = 'new-password';
+  const state = XvUiModel.createProtectedState('', false);
+  input._protectedState = state;
+  const help = document.createElement('span');
+  help.className = 'field-help';
+  help.id = `${inputId}-help`;
+  help.textContent = [
+    definition?.required ? 'Required' : 'Optional',
+    'protected value',
+    definition?.primary ? 'primary field' : '',
+  ].filter(Boolean).join(' · ');
+  const protection = document.createElement('span');
+  protection.className = 'sr-only';
+  protection.id = `protected-field-state-${++nextProtectionDescriptionId}`;
+  protection.textContent = 'Protected value is revealed.';
+  input._protectionDescription = protection;
+  input.setAttribute('aria-describedby', `${help.id} ${protection.id} protected-value-status`);
+  const actions = document.createElement('span');
+  actions.className = 'field-actions';
+  const reveal = document.createElement('button');
+  reveal.type = 'button';
+  reveal.className = 'button secondary';
+  reveal.dataset.protectedField = name;
+  reveal.setAttribute('aria-controls', inputId);
+  reveal.setAttribute('aria-describedby', `${protection.id} protected-value-status`);
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'button secondary';
+  copy.textContent = 'Copy';
+  copy.setAttribute('aria-label', `Copy ${name}`);
+  copy.setAttribute('aria-controls', inputId);
+  copy.setAttribute('aria-describedby', `${protection.id} protected-value-status`);
+  const entry = { name, row, input, state, reveal };
+  conversionFieldStates.set(name, entry);
+  renderProtectedControl(input, reveal, state);
+  reveal.onclick = async () => {
+    const generation = drawerGeneration;
+    const epoch = conversionLifecycleEpoch;
+    const revision = state.revision;
+    const seconds = await exposureTimeoutSeconds();
+    if (!conversionExposureIsCurrent({ entry, revision, epoch, generation })) return;
+    if (state.masked) {
+      XvUiModel.revealProtected(state);
+      startRevealTimer({
+        field: name,
+        input,
+        button: reveal,
+        state,
+        seconds,
+        scope: captureExposureScope(),
+      });
+    } else {
+      stopRevealTimer(state);
+      XvUiModel.hideProtected(state);
+      const owner = claimProtectedStatus(captureExposureScope());
+      setScopedProtectedStatus(owner, `${name} hidden.`);
+    }
+    renderProtectedControl(input, reveal, state);
+  };
+  input.oninput = () => {
+    XvUiModel.editProtected(state, input.value);
+    resetRevealTimer(state);
+    clearConversionPreview();
+    updateDraft();
+  };
+  bindProtectedInteractions(input, state);
+  copy.onclick = async () => {
+    try {
+      const generation = drawerGeneration;
+      const epoch = conversionLifecycleEpoch;
+      const revision = state.revision;
+      const seconds = await exposureTimeoutSeconds();
+      if (!conversionExposureIsCurrent({ entry, revision, epoch, generation })) return;
+      await copyProtectedValue({
+        field: name,
+        state,
+        expected: state.value ?? '',
+        seconds,
+        scope: captureExposureScope(),
+        isCurrent: () => conversionExposureIsCurrent({
+          entry, revision, epoch, generation,
+        }),
+      });
+    } catch (error) {
+      showFormError(error);
+    }
+  };
+  actions.append(reveal, copy);
+  row.append(label, input, help, protection, actions);
+  return input;
 }
 
 function ensureConversionField(name) {
@@ -2018,6 +2202,13 @@ function ensureConversionField(name) {
   const existing = [...required.querySelectorAll('input[data-conversion-field]')]
     .find((input) => input.dataset.conversionField === name);
   if (existing) return existing;
+  const definition = conversionTargetDefinition(name);
+  if (definition?.kind === 'secret') {
+    const input = conversionProtectedField(name, definition);
+    required.appendChild(conversionFieldStates.get(name).row);
+    updateDraft();
+    return input;
+  }
   const label = document.createElement('label');
   label.className = 'form-field';
   const text = document.createElement('span');
@@ -2025,15 +2216,29 @@ function ensureConversionField(name) {
   text.textContent = `${name} (required for conversion)`;
   const input = document.createElement('input');
   input.dataset.conversionField = name;
+  input.dataset.fieldKind = definition?.kind || 'metadata';
   input.required = true;
+  input.oninput = () => {
+    clearConversionPreview();
+    updateDraft();
+  };
   label.append(text, input);
   required.appendChild(label);
+  updateDraft();
   return input;
 }
 
-function renderConversionPreview(preview) {
+function renderConversionPreview(preview, operation) {
   const summary = XvUiModel.conversionSummary(preview);
-  conversionPreviewState = { ...summary, target: conversionTargetBody() };
+  conversionPreviewState = {
+    ...summary,
+    request: structuredClone(operation.request),
+    selection: operation.selection,
+    scope: structuredClone(operation.scope),
+    drawerGeneration: operation.drawerGeneration,
+    lifecycleEpoch: operation.lifecycleEpoch,
+    operationGeneration: operation.operationGeneration,
+  };
   const container = $('#conversion-summary');
   const heading = document.createElement('strong');
   heading.textContent = summary.description;
@@ -2056,15 +2261,28 @@ function renderConversionPreview(preview) {
 
 async function previewConversion() {
   if (!editing || !canStartScopedAction(drawerScope)) return;
+  conversionPreviewState = null;
+  $('#conversion-confirm').hidden = true;
+  const operation = {
+    operationGeneration: ++conversionOperationGeneration,
+    lifecycleEpoch: conversionLifecycleEpoch,
+    drawerGeneration,
+    selection: editing,
+    scope: structuredClone(drawerScope),
+    request: conversionRequestSnapshot(),
+  };
   clearFormError();
   try {
     const preview = await api(
       'POST',
-      `/api/secrets/${encodeURIComponent(editing)}/conversion/preview${vaultQS(drawerScope.vault, drawerScope)}`,
-      { target: conversionTargetBody(), supplied_fields: conversionSuppliedFields() },
+      `/api/secrets/${encodeURIComponent(operation.selection)}/conversion/preview${vaultQS(operation.scope.vault, operation.scope)}`,
+      operation.request,
     );
-    renderConversionPreview(preview);
+    if (!conversionOperationIsCurrent(operation)) return;
+    renderConversionPreview(preview, operation);
   } catch (error) {
+    if (!conversionOperationIsCurrent(operation)) return;
+    for (const entry of conversionFieldStates.values()) scrubConversionProtectedState(entry);
     if (error?.field?.startsWith('supplied_fields.')) {
       ensureConversionField(error.field.slice('supplied_fields.'.length));
     }
@@ -2074,29 +2292,47 @@ async function previewConversion() {
 
 async function confirmConversion() {
   if (!editing || !conversionPreviewState || !canStartScopedAction(drawerScope)) return;
-  const generation = drawerGeneration;
-  const selection = editing;
-  const operationScope = structuredClone(drawerScope);
+  const preview = conversionPreviewState;
+  const currentRequest = conversionRequestSnapshot();
+  if (JSON.stringify(currentRequest) !== JSON.stringify(preview.request)
+    || preview.drawerGeneration !== drawerGeneration
+    || preview.selection !== editing
+    || !sameOperationScope(preview.scope, drawerScope)
+    || !scopeMatchesCurrent(preview.scope)) {
+    clearConversionPreview();
+    return;
+  }
+  const operation = {
+    operationGeneration: ++conversionOperationGeneration,
+    lifecycleEpoch: conversionLifecycleEpoch,
+    drawerGeneration,
+    selection: preview.selection,
+    scope: structuredClone(preview.scope),
+  };
   beginScopedMutation();
   setSavePending(true);
   clearFormError();
   try {
     await api(
       'POST',
-      `/api/secrets/${encodeURIComponent(selection)}/conversion${vaultQS(operationScope.vault, operationScope)}`,
+      `/api/secrets/${encodeURIComponent(operation.selection)}/conversion${vaultQS(operation.scope.vault, operation.scope)}`,
       {
-        target: conversionPreviewState.target,
-        supplied_fields: conversionSuppliedFields(),
+        ...structuredClone(preview.request),
         confirm_lossy: true,
-        source_revision: conversionPreviewState.sourceRevision,
+        source_revision: preview.sourceRevision,
       },
     );
-    if (!isCurrentDrawer(generation, selection)) return;
+    if (!conversionOperationIsCurrent(operation)) return;
     closeDrawer();
-    toast(`Converted ${selection} in ${formatContextLine(operationScope)}`);
-    if (scopeMatchesCurrent(operationScope)) await loadSecrets(operationScope.vault, operationScope);
+    toast(`Converted ${operation.selection} in ${formatContextLine(operation.scope)}`);
+    if (scopeMatchesCurrent(operation.scope)) await loadSecrets(operation.scope.vault, operation.scope);
   } catch (error) {
-    if (isCurrentDrawer(generation, selection)) showFormError(error);
+    if (conversionOperationIsCurrent(operation)) {
+      clearConversionPreview();
+      clearConversionFields();
+      showFormError(error);
+      updateDraft();
+    }
   } finally {
     setSavePending(false);
     endScopedMutation();
@@ -2291,10 +2527,9 @@ $('#conversion-toggle').onclick = () => setWorkflowOpen(
 );
 $('#rename-toggle').onclick = () => setWorkflowOpen('rename', $('#rename-workflow').hidden);
 $('#conversion-target').onchange = () => {
-  conversionPreviewState = null;
-  $('#conversion-summary').hidden = true;
-  $('#conversion-confirm').hidden = true;
-  $('#conversion-required-fields').replaceChildren();
+  clearConversionPreview();
+  clearConversionFields();
+  updateDraft();
 };
 $('#conversion-preview').onclick = previewConversion;
 $('#conversion-confirm').onclick = confirmConversion;

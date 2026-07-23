@@ -30,6 +30,20 @@ async function putSecret(page, name, body) {
   expect(result.ok, result.text).toBe(true);
 }
 
+async function installClipboard(page) {
+  await page.addInitScript(() => {
+    let value = '';
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        readText: async () => value,
+        writeText: async (next) => { value = next; },
+      },
+    });
+    window.__conversionClipboard = () => value;
+  });
+}
+
 test('guided cards create plain and typed secrets with only selected fields', async ({ page, baseURL }) => {
   await openNewSecret(page, baseURL);
   const form = page.locator('#secret-form');
@@ -250,4 +264,289 @@ test('server field errors remain described and focus the matching draft control'
   await expect(folder).toHaveAttribute('aria-invalid', 'true');
   await expect(folder).toHaveAttribute('aria-describedby', /secret-form-error/);
   await expect(form.locator('textarea[name="value"]')).toHaveValue('still-here');
+});
+
+test('conversion previews ignore stale responses and apply one immutable request snapshot', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await putSecret(page, 'preview-race', { value: 'race-value' });
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit secret preview-race' }).click();
+
+  const pending = [];
+  await page.route('**/api/secrets/preview-race/conversion/preview?**', async (route) => {
+    await new Promise((resolve) => pending.push({ route, resolve }));
+  });
+  await page.getByRole('button', { name: 'Convert type' }).click();
+  const target = page.getByLabel('Conversion target');
+  await target.selectOption('login');
+  await page.getByRole('button', { name: 'Preview conversion' }).click();
+  await expect.poll(() => pending.length).toBe(1);
+  await target.selectOption('api-key');
+  await page.getByRole('button', { name: 'Preview conversion' }).click();
+  await expect.poll(() => pending.length).toBe(2);
+
+  await pending[1].route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      dropped: ['newer-api-key-preview'],
+      exposed: [],
+      renamed: [],
+      requires_confirmation: true,
+      source_revision: 'revision-newer',
+    }),
+  });
+  pending[1].resolve();
+  await expect(page.locator('#conversion-summary')).toContainText('newer-api-key-preview');
+  await pending[0].route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({
+      dropped: ['stale-login-preview'],
+      exposed: [],
+      renamed: [],
+      requires_confirmation: true,
+      source_revision: 'revision-stale',
+    }),
+  });
+  pending[0].resolve();
+  await expect(page.locator('#conversion-summary')).not.toContainText('stale-login-preview');
+
+  let applyBody;
+  await page.route('**/api/secrets/preview-race/conversion?**', async (route) => {
+    applyBody = route.request().postDataJSON();
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ secret: {}, summary: {} }),
+    });
+  });
+  await page.getByRole('button', { name: 'Confirm conversion' }).click();
+  expect(applyBody).toEqual({
+    target: { kind: 'typed', target_type: 'api-key' },
+    supplied_fields: {},
+    confirm_lossy: true,
+    source_revision: 'revision-newer',
+  });
+});
+
+test('supplied protected fields are lifecycle-managed and edits invalidate confirmation', async ({ page, baseURL }) => {
+  await installClipboard(page);
+  await page.goto(baseURL);
+  await putSecret(page, 'protected-conversion', { value: 'conversion-source' });
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit secret protected-conversion' }).click();
+  await page.route('**/api/secrets/protected-conversion/conversion/preview?**', async (route) => {
+    const body = route.request().postDataJSON();
+    if (!body.supplied_fields?.password) {
+      return route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'xv-invalid-argument',
+            message: 'Password is required.',
+            hint: 'Supply the protected field.',
+            field: 'supplied_fields.password',
+          },
+        }),
+      });
+    }
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        dropped: [],
+        exposed: [],
+        renamed: [],
+        requires_confirmation: false,
+        source_revision: 'protected-revision',
+      }),
+    });
+  });
+  await page.getByRole('button', { name: 'Convert type' }).click();
+  await page.getByLabel('Conversion target').selectOption('login');
+  await page.getByRole('button', { name: 'Preview conversion' }).click();
+  const password = page.locator('#conversion-required-fields input[data-conversion-field="password"]');
+  await expect(password).toHaveAttribute('data-field-kind', 'secret');
+  await password.fill('conversion-protected-marker');
+  expect(await password.evaluate((input) => ({
+    connected: input.isConnected,
+    value: input._protectedState.value,
+    dirty: input._protectedState.dirty,
+  }))).toEqual({
+    connected: true,
+    value: 'conversion-protected-marker',
+    dirty: true,
+  });
+  await page.getByRole('button', { name: 'Copy password', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__conversionClipboard())).toBe('conversion-protected-marker');
+  await page.getByRole('button', { name: 'Hide password', exact: true }).click();
+  await expect(password).toHaveValue('***************');
+  await page.getByRole('button', { name: 'Reveal password', exact: true }).click();
+  await expect(password).toHaveValue('conversion-protected-marker');
+  await page.getByRole('button', { name: 'Rename secret' }).click();
+  await expect(password).toBeHidden();
+  expect(await password.evaluate((input) => input._protectedState.value)).toBe('conversion-protected-marker');
+  await page.getByRole('button', { name: 'Convert type' }).click();
+  await page.getByRole('button', { name: 'Preview conversion' }).click();
+  await expect(page.getByRole('button', { name: 'Confirm conversion' })).toBeVisible();
+  await password.fill('changed-after-preview');
+  await expect(page.getByRole('button', { name: 'Confirm conversion' })).toBeHidden();
+
+  await page.evaluate(() => {
+    window.__detachedConversionInput = document.querySelector(
+      '#conversion-required-fields input[data-conversion-field="password"]',
+    );
+  });
+  await page.getByLabel('Conversion target').selectOption('api-key');
+  await expect(password).toHaveCount(0);
+  expect(await page.evaluate(() => ({
+    connected: window.__detachedConversionInput.isConnected,
+    value: window.__detachedConversionInput.value,
+    protectedValue: window.__detachedConversionInput._protectedState?.value,
+    hasStoredValue: window.__detachedConversionInput._protectedState?.hasStoredValue,
+  }))).toEqual({
+    connected: false,
+    value: '',
+    protectedValue: null,
+    hasStoredValue: false,
+  });
+});
+
+test('conversion failures and drawer close scrub detached protected supplied state', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await putSecret(page, 'protected-failure', { value: 'conversion-source' });
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit secret protected-failure' }).click();
+  await page.route('**/api/secrets/protected-failure/conversion/preview?**', async (route) => {
+    const body = route.request().postDataJSON();
+    if (!body.supplied_fields?.password) {
+      return route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'xv-invalid-argument',
+            message: 'Password is required.',
+            hint: 'Supply the protected field.',
+            field: 'supplied_fields.password',
+          },
+        }),
+      });
+    }
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        dropped: [],
+        exposed: [],
+        renamed: [],
+        requires_confirmation: false,
+        source_revision: 'failure-revision',
+      }),
+    });
+  });
+  await page.route('**/api/secrets/protected-failure/conversion?**', async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: {
+          code: 'xv-conversion-source-changed',
+          message: 'The source changed.',
+          hint: 'Preview again.',
+          field: 'source_revision',
+        },
+      }),
+    });
+  });
+  await page.getByRole('button', { name: 'Convert type' }).click();
+  await page.getByLabel('Conversion target').selectOption('login');
+  await page.getByRole('button', { name: 'Preview conversion' }).click();
+  let password = page.locator('#conversion-required-fields input[data-conversion-field="password"]');
+  await password.fill('apply-failure-marker');
+  await page.getByRole('button', { name: 'Preview conversion' }).click();
+  await page.evaluate(() => {
+    window.__failedConversionInput = document.querySelector(
+      '#conversion-required-fields input[data-conversion-field="password"]',
+    );
+  });
+  await page.getByRole('button', { name: 'Confirm conversion' }).click();
+  await expect(page.locator('#secret-form-error')).toBeVisible();
+  expect(await page.evaluate(() => ({
+    connected: window.__failedConversionInput.isConnected,
+    value: window.__failedConversionInput.value,
+    protectedValue: window.__failedConversionInput._protectedState.value,
+    hasStoredValue: window.__failedConversionInput._protectedState.hasStoredValue,
+  }))).toEqual({
+    connected: false,
+    value: '',
+    protectedValue: null,
+    hasStoredValue: false,
+  });
+
+  await page.getByRole('button', { name: 'Preview conversion' }).click();
+  password = page.locator('#conversion-required-fields input[data-conversion-field="password"]');
+  await password.fill('close-marker');
+  await page.evaluate(() => {
+    window.__closedConversionInput = document.querySelector(
+      '#conversion-required-fields input[data-conversion-field="password"]',
+    );
+  });
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Discard changes' }).click();
+  expect(await page.evaluate(() => ({
+    connected: window.__closedConversionInput.isConnected,
+    value: window.__closedConversionInput.value,
+    protectedValue: window.__closedConversionInput._protectedState.value,
+    hasStoredValue: window.__closedConversionInput._protectedState.hasStoredValue,
+  }))).toEqual({
+    connected: false,
+    value: '',
+    protectedValue: null,
+    hasStoredValue: false,
+  });
+});
+
+test('rename and conversion fields participate in drawer and context navigation guards', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await putSecret(page, 'workflow-draft', { value: 'workflow-value' });
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit secret workflow-draft' }).click();
+  await page.getByRole('button', { name: 'Convert type' }).click();
+  await page.getByLabel('Conversion target').selectOption('login');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: 'Discard changes?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Keep editing' }).click();
+  await expect(page.getByLabel('Conversion target')).toHaveValue('login');
+
+  await page.getByRole('button', { name: 'Rename secret' }).click();
+  await page.getByLabel('New secret name').fill('workflow-draft-renamed');
+  await page.locator('#workspace-select').selectOption('sandbox');
+  await expect(page.getByRole('dialog', { name: 'Discard changes?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Keep editing' }).click();
+  await expect(page.getByLabel('New secret name')).toHaveValue('workflow-draft-renamed');
+  await expect(page.locator('#workspace-select')).not.toHaveValue('sandbox');
+
+  let releasePreview;
+  await page.route('**/api/secrets/workflow-draft/conversion/preview?**', async (route) => {
+    await new Promise((resolve) => { releasePreview = async () => {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          dropped: ['must-remain-stale'],
+          exposed: [],
+          renamed: [],
+          requires_confirmation: true,
+          source_revision: 'stale-after-context',
+        }),
+      });
+      resolve();
+    }; });
+  });
+  await page.getByRole('button', { name: 'Convert type' }).click();
+  await page.getByRole('button', { name: 'Preview conversion' }).click();
+  await expect.poll(() => typeof releasePreview).toBe('function');
+  await page.locator('#workspace-select').selectOption('sandbox');
+  await page.getByRole('button', { name: 'Discard changes' }).click();
+  await expect(page.locator('#context-line')).toContainText('sandbox');
+  await releasePreview();
+  await expect(page.locator('#drawer')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Confirm conversion' })).toBeHidden();
 });

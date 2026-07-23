@@ -771,8 +771,18 @@ mod tests {
             APP_JS
                 .matches("if (!isCurrentDrawer(generation, selection)) return;")
                 .count()
-                >= 8
+                >= 7
         );
+        assert!(APP_JS.contains("function conversionOperationIsCurrent(operation)"));
+        for marker in [
+            "operation.operationGeneration === conversionOperationGeneration",
+            "operation.lifecycleEpoch === conversionLifecycleEpoch",
+            "operation.drawerGeneration === drawerGeneration",
+            "operation.selection === editing",
+            "sameOperationScope(operation.scope, drawerScope)",
+        ] {
+            assert!(APP_JS.contains(marker), "missing conversion guard {marker}");
+        }
     }
 
     #[test]
