@@ -145,7 +145,57 @@ test('production markup exposes a persistent accessible Settings error surface',
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   assert.match(html, /id="settings-error"[^>]*class="error-panel"[^>]*role="alert"/);
   assert.match(html, /id="settings-error"[^>]*aria-live="assertive"/);
+  assert.match(html, /id="settings-status"[^>]*role="alert"[^>]*aria-live="assertive"/);
+  assert.match(html, /id="settings-retry"/);
+  assert.match(html, /id="settings-error-retry"/);
   assert.match(html, /Settings need attention/);
+  const main = html.split(/<main[^>]*>/)[1].split('</main>')[0];
+  assert.match(main, /id="settings-status"/, 'global status remains beside auth recovery');
+});
+
+test('explicit retry repeats a failed background load and clears only on success', async () => {
+  const errors = [];
+  let attempts = 0;
+  const preferences = createPreferenceClient(async (method) => {
+    assert.equal(method, 'GET');
+    attempts++;
+    if (attempts === 1) throw new Error('Preferences unavailable');
+    return { version: 1, theme: 'dark' };
+  }, {
+    onSettingsError: (error) => errors.push(error),
+  });
+
+  await preferences.load();
+  assert.equal(preferences.settingsError().message, 'Preferences unavailable');
+  assert.equal(preferences.snapshot().theme, 'system');
+
+  await preferences.retry();
+
+  assert.equal(attempts, 2);
+  assert.equal(preferences.snapshot().theme, 'dark');
+  assert.equal(preferences.settingsError(), null);
+  assert.deepEqual(errors.at(-1), null);
+});
+
+test('explicit retry persists the latest overrides after a failed save', async () => {
+  const clock = manualClock();
+  let putAttempts = 0;
+  const preferences = createPreferenceClient(async (method, _path, body) => {
+    if (method === 'GET') return { version: 1 };
+    putAttempts++;
+    if (putAttempts === 1) throw new Error('Preferences read-only');
+    return body;
+  }, clock);
+  await preferences.load();
+  preferences.set('theme', 'dark');
+  await clock.run();
+  assert.equal(preferences.settingsError().message, 'Preferences read-only');
+
+  await preferences.retry();
+
+  assert.equal(putAttempts, 2);
+  assert.equal(preferences.snapshot().theme, 'dark');
+  assert.equal(preferences.settingsError(), null);
 });
 
 test('default Settings renderer shows failures and clears after a successful retry', async () => {

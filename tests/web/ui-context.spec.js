@@ -129,6 +129,9 @@ test('bulk, Undo, restore, and purge hold one immutable scope and lock switching
   await page.getByRole('button', { name: 'Select', exact: true }).click();
   await page.getByRole('checkbox', { name: 'Select secret scope-lock' }).check();
   await page.locator('#bulk-delete-secrets').click();
+  await expect(page.locator('#workspace-select')).toBeDisabled();
+  await attemptProgrammaticSwitch(page);
+  await expect(page.locator('#context-line')).toContainText('local / playwright');
   await page.getByRole('dialog', { name: 'Delete secret?' })
     .getByRole('button', { name: 'Delete secret' }).click();
   await expect(page.locator('#workspace-select')).toBeDisabled();
@@ -157,6 +160,7 @@ test('bulk, Undo, restore, and purge hold one immutable scope and lock switching
   await page.unrouteAll({ behavior: 'wait' });
   await page.getByRole('button', { name: 'Edit secret scope-lock' }).click();
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(page.locator('#workspace-select')).toBeDisabled();
   await page.getByRole('dialog', { name: 'Delete secret?' })
     .getByRole('button', { name: 'Delete secret' }).click();
   await page.getByRole('tab', { name: 'Trash' }).click();
@@ -191,6 +195,9 @@ test('bulk, Undo, restore, and purge hold one immutable scope and lock switching
   });
   const purgeRow = page.getByRole('row', { name: /scope-lock/ });
   await purgeRow.getByRole('button', { name: 'Purge scope-lock' }).click();
+  await expect(page.locator('#workspace-select')).toBeDisabled();
+  await attemptProgrammaticSwitch(page);
+  await expect(page.locator('#context-line')).toContainText('local / playwright');
   const purgeDialog = page.getByRole('dialog', { name: 'Permanently purge scope-lock?' });
   await purgeDialog.getByLabel('Type scope-lock to confirm').fill('scope-lock');
   await purgeDialog.getByRole('button', { name: 'Permanently purge' }).click();
@@ -199,5 +206,117 @@ test('bulk, Undo, restore, and purge hold one immutable scope and lock switching
   await expect(page.locator('#context-line')).toContainText('local / playwright');
   releasePurge();
   await expect(purgeRow).toHaveCount(0);
+  await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
+test('a pending workspace switch blocks reverse-order scoped actions and stale drawers', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await createSecret(page, 'reverse-edit');
+  await createSecret(page, 'reverse-trash');
+  await page.getByRole('button', { name: 'Edit secret reverse-trash' }).click();
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Delete secret?' })
+    .getByRole('button', { name: 'Delete secret' }).click();
+  await page.getByRole('tab', { name: 'Trash' }).click();
+  await expect(page.getByRole('button', { name: 'Restore reverse-trash' })).toBeVisible();
+  await page.getByRole('tab', { name: 'Secrets' }).click();
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select secret reverse-edit' }).check();
+  await page.locator('#secret-move-folder').fill('blocked-folder');
+
+  let releaseActivation;
+  const activationGate = new Promise((resolve) => { releaseActivation = resolve; });
+  await page.route('**/api/workspaces/activate', async (route) => {
+    await activationGate;
+    await route.continue();
+  });
+  const scopedRequests = [];
+  page.on('request', (request) => {
+    if (/\/api\/(?:secrets|files)/.test(request.url())
+      && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method())) {
+      scopedRequests.push([request.method(), request.url()]);
+    }
+  });
+
+  await page.locator('#workspace-select').selectOption('sandbox');
+  await expect(page.locator('main')).toHaveAttribute('inert', '');
+  await expect(page.locator('#app-header')).toHaveAttribute('inert', '');
+  await expect(page.locator('#progress-context')).toHaveText(/local \/ playwright/);
+
+  await page.evaluate(() => {
+    document.querySelector('#new-secret').click();
+    document.querySelector('[aria-label="Edit secret reverse-edit"]').click();
+    document.querySelector('#bulk-delete-secrets').click();
+    document.querySelector('#bulk-move-secrets').click();
+    document.querySelector('#undo-delete').click();
+    document.querySelector('[aria-label="Restore reverse-trash"]').click();
+    document.querySelector('[aria-label="Purge reverse-trash"]').click();
+    const input = document.querySelector('#file-input');
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['blocked'], 'blocked.txt', { type: 'text/plain' }));
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+  await expect(page.locator('#drawer')).toBeHidden();
+  await expect(page.locator('#delete-confirmation')).toBeHidden();
+  await expect(page.locator('#purge-confirmation')).toBeHidden();
+  expect(scopedRequests).toEqual([]);
+
+  releaseActivation();
+  await expect(page.locator('#context-line')).toContainText('local / sandbox');
+  await expect(page.locator('#drawer')).toBeHidden();
+  expect(scopedRequests).toEqual([]);
+});
+
+test('Settings failures remain global after close and explicit Retry recovers safely', async ({ page, baseURL }) => {
+  let getAttempts = 0;
+  let putAttempts = 0;
+  await page.route('**/api/preferences', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      getAttempts++;
+      if (getAttempts === 1) {
+        await route.fulfill({
+          status: 500,
+          json: { error: { message: 'Settings load failed', hint: 'Retry the read.' } },
+        });
+        return;
+      }
+      await route.fulfill({ status: 200, json: { version: 1, theme: 'system' } });
+      return;
+    }
+    putAttempts++;
+    if (putAttempts === 1) {
+      await route.fulfill({
+        status: 500,
+        json: { error: { message: 'Settings save failed', hint: 'Retry the write.' } },
+      });
+      return;
+    }
+    await route.fulfill({ status: 200, body: route.request().postData() });
+  });
+
+  await page.goto(baseURL);
+  const status = page.locator('#settings-status');
+  await expect(status).toBeVisible();
+  await expect(status).toContainText('Settings load failed');
+  await expect(page.locator('#settings-open')).toHaveAttribute('data-error', 'true');
+  await page.locator('#settings-retry').click();
+  await expect(status).toBeHidden();
+  await expect(page.locator('#settings-open')).not.toHaveAttribute('data-error', 'true');
+
+  await page.locator('#settings-open').click();
+  await page.getByRole('dialog', { name: 'Settings' }).getByLabel('Theme').selectOption('dark');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#settings-open')).toBeFocused();
+  await expect(status).toBeVisible();
+  await expect(status).toContainText('Settings save failed');
+  await expect(page.locator('#settings-open')).toHaveAttribute('data-error', 'true');
+  await page.locator('#settings-retry').click();
+  await expect(status).toBeHidden();
+
+  await createSecret(page, 'settings-retry-vault-usable');
+  await expect(page.getByRole('button', { name: 'Edit secret settings-retry-vault-usable' })).toBeVisible();
   await expectNoSeriousOrCriticalAxeViolations(page);
 });

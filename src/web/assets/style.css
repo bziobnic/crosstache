@@ -53,6 +53,7 @@ button, input, select, textarea { font:inherit; }
 .context-actions button { min-height:2.35rem; display:flex; align-items:center; justify-content:space-between;
   color:#f4faf6; border-color:transparent; background:transparent; text-align:left; }
 .context-actions button:hover { border-color:#557668; background:#1b4534; }
+.context-actions button[data-error="true"] { border-color:#f0b8a8; color:#ffe4dc; }
 .context-actions kbd { color:#acd1bc; font-size:.65rem; }
 .context-version { margin-top:auto; color:#acd1bc; font-size:.68rem; }
 .context-rail.auth-recovery-mode {
@@ -303,6 +304,7 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 11%, transpa
 .error-panel > div { display:grid; gap:.2rem; }
 .error-panel .error-message { color:var(--color-text); }
 .error-panel .error-hint { color:var(--color-text-muted); }
+.settings-status { margin-bottom:1rem; }
 .protected-value-status { margin-bottom:.75rem; padding:.65rem .75rem; border:1px solid var(--color-border);
   border-radius:var(--radius-control); color:var(--color-text); background:var(--color-accent-quiet); }
 

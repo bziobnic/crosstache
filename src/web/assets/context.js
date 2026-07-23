@@ -118,6 +118,14 @@ export function mountContextRail({
   const selector = byId('workspace-select');
   let generation = 0;
   let controller = null;
+  let scopedActivityRevision = 0;
+
+  function setScopedSurfacesInert(pending) {
+    for (const surface of document.querySelectorAll?.('[data-context-scoped]') || []) {
+      if (pending) surface.setAttribute('inert', '');
+      else surface.removeAttribute('inert');
+    }
+  }
 
   function renderDetails(details) {
     const list = byId('context-details-list');
@@ -177,12 +185,21 @@ export function mountContextRail({
       context,
       snapshot.contextSwitchPending || snapshot.savePending || snapshot.scopedMutationPending,
     );
+    setScopedSurfacesInert(snapshot.contextSwitchPending);
     for (const surface of document.querySelectorAll?.('[data-context-copy]') || []) {
       surface.textContent = line;
     }
   }
 
-  const unsubscribe = store.subscribe(render);
+  const unsubscribe = store.subscribe((snapshot, event) => {
+    if ((event.type === 'mutation/pending' && event.value)
+      || event.type === 'draft/open'
+      || event.type === 'draft/change'
+      || (event.type === 'draft/save-pending' && event.value)) {
+      scopedActivityRevision++;
+    }
+    render(snapshot);
+  });
 
   async function switchTo(alias) {
     const before = store.snapshot();
@@ -213,6 +230,7 @@ export function mountContextRail({
     controller?.abort();
     controller = new AbortController();
     store.dispatch({ type: 'context/switch-started', alias });
+    const activationRevision = scopedActivityRevision;
     try {
       const request = {
         alias: entry.alias,
@@ -227,6 +245,14 @@ export function mountContextRail({
         { signal: controller.signal },
       );
       if (requestGeneration !== generation) return false;
+      const latest = store.snapshot();
+      if (!latest.contextSwitchPending
+        || latest.savePending
+        || latest.scopedMutationPending
+        || scopedActivityRevision !== activationRevision) {
+        store.dispatch({ type: 'context/switch-cancelled' });
+        return false;
+      }
       if (!activated?.context || !Array.isArray(activated?.secrets)) {
         throw new Error('Workspace activation did not return both context and its initial secret list.');
       }

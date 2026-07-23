@@ -47,6 +47,8 @@ export function draftReducer(state, event) {
         contextSwitchPending: false,
         contextError: structuredClone(event.error),
       };
+    case 'context/switch-cancelled':
+      return { ...state, contextSwitchPending: false };
     case 'mutation/pending':
       return { ...state, scopedMutationPending: Boolean(event.value) };
     case 'draft/open': {

@@ -143,17 +143,16 @@ function toast(msg) {
   t._timer = setTimeout(() => { t.hidden = true; }, 4000);
 }
 
-function confirmDeletion(kind, names) {
+function confirmDeletion(kind, names, scope) {
   const dialog = $('#delete-confirmation');
   const cancel = $('#cancel-delete');
   const confirm = $('#confirm-delete');
   const plural = kind === 'file' ? 'files' : 'secrets';
-  const scope = store.snapshot().context || ctx;
   const model = deleteConfirmationModel({
     backend: scope.backend,
     vault: scope.vault,
     names,
-    recoverable: kind === 'secret' && !!ctx.capabilities.soft_delete,
+    recoverable: kind === 'secret' && !!scope.capabilities.soft_delete,
     kind,
   });
   $('#delete-confirmation-title').textContent = names.length === 1 ? `Delete ${kind}?` : `Delete ${plural}?`;
@@ -215,6 +214,7 @@ $('#undo-delete').onclick = async () => {
   const notice = $('#action-notice');
   const button = $('#undo-delete');
   const { names, scope } = pendingUndo;
+  if (!canStartScopedAction(scope)) return;
   const vault = scope.vault;
   beginScopedMutation();
   button.disabled = true;
@@ -749,6 +749,7 @@ let currentVault = null;
 let secrets = [];
 let editing = null; // name of secret open in drawer, null = new
 let drawerGeneration = 0;
+let drawerScope = null;
 // content_type + non-canonical tags of the secret open in drawer, so a value
 // edit doesn't silently drop them (the form has no fields for them).
 let editingMeta = null;
@@ -1027,7 +1028,8 @@ function syncPendingDisabled(control, pending) {
 }
 
 function syncDraftControls() {
-  const pending = store.snapshot().savePending;
+  const snapshot = store.snapshot();
+  const pending = Boolean(snapshot.savePending || snapshot.contextSwitchPending);
   for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash', '#workspace-select', '#save', '#delete']) {
     syncPendingDisabled($(selector), pending);
   }
@@ -1058,6 +1060,14 @@ function scopeMatchesCurrent(scope) {
   return current?.workspace?.alias === scope?.workspace?.alias
     && current?.backend === scope?.backend
     && current?.vault === scope?.vault;
+}
+
+function canStartScopedAction(scope = captureOperationScope()) {
+  const snapshot = store.snapshot();
+  return !snapshot.contextSwitchPending
+    && !snapshot.savePending
+    && !snapshot.scopedMutationPending
+    && scopeMatchesCurrent(scope);
 }
 
 let scopedMutationDepth = 0;
@@ -1118,7 +1128,13 @@ async function requestDrawerClose(afterClose) {
 
 store.subscribe((snapshot, event) => {
   syncDraftControls();
-  if (event.type === 'context/switch-started' && !$('#drawer').hidden) closeDrawer();
+  if (snapshot.contextSwitchPending) {
+    if (!$('#drawer').hidden) closeDrawer();
+    else if (event.type === 'context/switch-started') {
+      drawerGeneration++;
+      clearDrawerState();
+    }
+  }
   if (event.type !== 'context/switch-succeeded') return;
   ctx = snapshot.context;
   currentVault = ctx.vault;
@@ -1610,6 +1626,7 @@ function trashRow(secret) {
     restore.setAttribute('aria-label', `Restore ${name}`);
     restore.onclick = async () => {
       const scope = captureOperationScope();
+      if (!canStartScopedAction(scope)) return;
       beginScopedMutation();
       restore.disabled = true;
       try {
@@ -1637,11 +1654,12 @@ function trashRow(secret) {
     purge.textContent = 'Purge';
     purge.setAttribute('aria-label', `Purge ${name}`);
     purge.onclick = async () => {
-      if (!ctx.capabilities.purge || !(await confirmPurge(name))) return;
       const scope = captureOperationScope();
+      if (!scope.capabilities.purge || !canStartScopedAction(scope)) return;
       beginScopedMutation();
-      purge.disabled = true;
       try {
+        if (!(await confirmPurge(name, scope)) || !scopeMatchesCurrent(scope)) return;
+        purge.disabled = true;
         await api('DELETE', `/api/secrets/${encodeURIComponent(name)}/purge${vaultQS(scope.vault, scope)}`);
         toast(`${name} permanently purged from ${formatContextLine(scope)}`);
         if (scopeMatchesCurrent(scope)) await loadDeleted(scope.vault, scope);
@@ -1658,14 +1676,13 @@ function trashRow(secret) {
   return row;
 }
 
-function confirmPurge(name) {
-  if (!ctx.capabilities.purge) return Promise.resolve(false);
+function confirmPurge(name, scope) {
+  if (!scope.capabilities.purge) return Promise.resolve(false);
   const dialog = $('#purge-confirmation');
   const input = $('#purge-name');
   const cancel = $('#cancel-purge');
   const confirm = $('#confirm-purge');
   $('#purge-title').textContent = `Permanently purge ${name}?`;
-  const scope = store.snapshot().context || ctx;
   $('#purge-message').textContent = `Permanently purging ${name} from ${scope.backend} vault ${scope.vault} cannot be undone.`;
   $('#purge-input-label').textContent = `Type ${name} to confirm`;
   input.setAttribute('aria-label', `Type ${name} to confirm`);
@@ -1704,23 +1721,28 @@ function isCurrentDrawer(generation, selection) {
 
 function clearDrawerState() {
   editing = null;
+  drawerScope = null;
   editingMeta = null;
   recordState = null;
   plainSecretState = null;
 }
 
 async function openDrawer(name, invoker = document.activeElement) {
+  const scope = captureOperationScope();
+  if (!canStartScopedAction(scope)) return false;
   if (!$('#drawer').hidden && !(await requestDrawerClose())) return;
-  return openDrawerNow(name, invoker);
+  if (!canStartScopedAction(scope)) return false;
+  return openDrawerNow(name, invoker, scope);
 }
 
-async function openDrawerNow(name, invoker) {
+async function openDrawerNow(name, invoker, scope) {
   const generation = ++drawerGeneration;
   $('#drawer').hidden = true;
   clearFormError();
   resetConfirmation($('#delete'), 'Delete');
   clearDrawerState();
   editing = name;
+  drawerScope = structuredClone(scope);
   const f = $('#secret-form');
   f.reset();
   f.elements.expires_on.value = '';
@@ -1733,7 +1755,7 @@ async function openDrawerNow(name, invoker) {
   };
   $('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret';
   $('#drawer-title').textContent = name || 'New secret';
-  $('#drawer-context').textContent = currentContextLine();
+  $('#drawer-context').textContent = formatContextLine(scope);
   $('#save').textContent = name ? 'Save changes' : 'Create secret';
   f.elements.name.value = name || '';
   f.elements.name.readOnly = false;
@@ -1747,8 +1769,8 @@ async function openDrawerNow(name, invoker) {
   $('#type-picker').value = '';
   if (name) {
     try {
-      const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS(currentVault)}`);
-      if (generation !== drawerGeneration) return;
+      const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS(scope.vault, scope)}`);
+      if (generation !== drawerGeneration || !canStartScopedAction(scope)) return;
       const tags = meta.tags || {};
       f.elements.folder.value = tags.folder || '';
       f.elements.groups.value = tags.groups || '';
@@ -1767,8 +1789,8 @@ async function openDrawerNow(name, invoker) {
         enabled: meta.enabled,
         not_before: meta.not_before || null,
       };
-      if (isRecordMeta(meta)) await openRecord(name, meta, tags, generation);
-      if (generation !== drawerGeneration) return;
+      if (isRecordMeta(meta)) await openRecord(name, meta, tags, generation, scope);
+      if (generation !== drawerGeneration || !canStartScopedAction(scope)) return;
     } catch (e) {
       if (generation !== drawerGeneration) return;
       // Without the fetched metadata a save would send enabled:true and no
@@ -1795,9 +1817,9 @@ async function openDrawerNow(name, invoker) {
 
 // Fetches the envelope so secret fields are editable. Values live in JS
 // memory but display masked — the same exposure as the Reveal button.
-async function openRecord(name, meta, tags, generation) {
-  const { value } = await api('POST', `/api/secrets/${encodeURIComponent(name)}/value${vaultQS(currentVault)}`);
-  if (generation !== drawerGeneration) return;
+async function openRecord(name, meta, tags, generation, scope) {
+  const { value } = await api('POST', `/api/secrets/${encodeURIComponent(name)}/value${vaultQS(scope.vault, scope)}`);
+  if (generation !== drawerGeneration || !canStartScopedAction(scope)) return;
   let secretFields;
   try {
     secretFields = parseEnvelope(value ?? '');
@@ -1943,7 +1965,8 @@ $('#copy').onclick = async () => {
 
 $('#secret-form').onsubmit = async (ev) => {
   ev.preventDefault();
-  if (store.snapshot().savePending) return;
+  const operationScope = structuredClone(drawerScope || captureOperationScope());
+  if (!canStartScopedAction(operationScope)) return;
   const generation = drawerGeneration;
   let selection = editing;
   const f = ev.target.elements;
@@ -1953,7 +1976,6 @@ $('#secret-form').onsubmit = async (ev) => {
   const groups = f.groups.value.split(',').map(s => s.trim()).filter(Boolean);
   const expiresPut = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : null;
   const expiresPatch = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : '';
-  const operationScope = captureOperationScope();
   beginScopedMutation();
   setSavePending(true);
   try {
@@ -2030,16 +2052,18 @@ $('#secret-form').onsubmit = async (ev) => {
 
 $('#delete').onclick = async () => {
   const btn = $('#delete');
-  if (btn.disabled || store.snapshot().savePending) return;
+  const operationScope = structuredClone(drawerScope || captureOperationScope());
+  if (btn.disabled || !canStartScopedAction(operationScope)) return;
   const selection = editing;
-  if (!selection || !(await confirmDeletion('secret', [selection]))) return;
-  setSavePending(true);
-  beginPendingAction(btn, 'Deleting…');
-  const generation = drawerGeneration;
-  const operationScope = captureOperationScope();
+  if (!selection) return;
   const vault = operationScope.vault;
+  const generation = drawerGeneration;
   beginScopedMutation();
   try {
+    if (!(await confirmDeletion('secret', [selection], operationScope))
+      || !scopeMatchesCurrent(operationScope)) return;
+    setSavePending(true);
+    beginPendingAction(btn, 'Deleting…');
     await api('DELETE', `/api/secrets/${encodeURIComponent(selection)}${vaultQS(vault, operationScope)}`);
     if (!isCurrentDrawer(generation, selection)) return;
     closeDrawer();
@@ -2076,7 +2100,7 @@ for (const tab of [$('#tab-secrets'), $('#tab-files'), $('#tab-trash')]) {
 }
 let activeTab = 'secrets';
 async function switchTab(which) {
-  if (authRecoveryActive) return;
+  if (authRecoveryActive || store.snapshot().contextSwitchPending) return;
   if (which === 'trash' && !ctx.capabilities.soft_delete) return;
   if (which !== activeTab) {
     if (!(await requestDrawerClose())) return;
@@ -2257,14 +2281,18 @@ async function bulkDelete(kind) {
   const state = selectionState(kind);
   const items = [...state.ids];
   if (!items.length || state.pending) return;
-  if (!(await confirmDeletion(kind === 'secrets' ? 'secret' : 'file', items))) return;
-
-  const generation = state.generation;
   const operationScope = captureOperationScope();
+  if (!canStartScopedAction(operationScope)) return;
   const vault = operationScope.vault;
   beginScopedMutation();
-  setBulkPending(kind, true, 'Deleting…');
   try {
+    if (!(await confirmDeletion(
+      kind === 'secrets' ? 'secret' : 'file',
+      items,
+      operationScope,
+    )) || !scopeMatchesCurrent(operationScope)) return;
+    const generation = state.generation;
+    setBulkPending(kind, true, 'Deleting…');
     const results = await runBounded(items, 4, (item) => {
       if (kind === 'secrets') {
         return api('DELETE', `/api/secrets/${encodeURIComponent(item)}${vaultQS(vault, operationScope)}`);
@@ -2315,8 +2343,9 @@ async function bulkMoveSecrets() {
     return;
   }
 
-  const generation = state.generation;
   const operationScope = captureOperationScope();
+  if (!canStartScopedAction(operationScope)) return;
+  const generation = state.generation;
   const vault = operationScope.vault;
   beginScopedMutation();
   const moveButton = $('#bulk-move-secrets');
@@ -2368,8 +2397,10 @@ $('#bulk-delete-files').onclick = () => bulkDelete('files').catch(fail);
 $('#bulk-move-secrets').onclick = () => bulkMoveSecrets().catch(fail);
 
 async function downloadFile(name) {
+  const scope = captureOperationScope();
+  if (!canStartScopedAction(scope)) return;
   try {
-    const res = await api('GET', `/api/files/${encodeURIComponent(name)}${vaultQS(currentVault)}`, undefined, true);
+    const res = await api('GET', `/api/files/${encodeURIComponent(name)}${vaultQS(scope.vault, scope)}`, undefined, true);
     const blob = await res.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -2380,8 +2411,8 @@ async function downloadFile(name) {
 }
 
 async function uploadFiles(fileList) {
-  if (store.snapshot().savePending) return;
   const operationScope = captureOperationScope();
+  if (!canStartScopedAction(operationScope)) return;
   const uploadVault = operationScope.vault;
   const uploadScope = formatContextLine(operationScope);
   beginScopedMutation();
@@ -2406,7 +2437,10 @@ const dz = $('#dropzone');
 dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
 dz.ondragleave = () => dz.classList.remove('over');
 dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); uploadFiles(e.dataTransfer.files).catch(fail); };
-$('#browse-files').onclick = () => $('#file-input').click();
+$('#browse-files').onclick = () => {
+  if (!canStartScopedAction()) return;
+  $('#file-input').click();
+};
 $('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
 
 initColumnResizing();

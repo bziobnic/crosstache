@@ -64,19 +64,25 @@ function safeError(error) {
 }
 
 function showSettingsError(error) {
-  const surface = globalThis.document?.getElementById?.('settings-error');
-  if (!surface) return;
-  const message = surface.querySelector?.('.error-message');
-  const hint = surface.querySelector?.('.error-hint');
-  if (!error) {
-    if (message) message.textContent = '';
-    if (hint) hint.textContent = '';
-    surface.hidden = true;
-    return;
+  const document = globalThis.document;
+  for (const id of ['settings-status', 'settings-error']) {
+    const surface = document?.getElementById?.(id);
+    if (!surface) continue;
+    const message = surface.querySelector?.('.error-message');
+    const hint = surface.querySelector?.('.error-hint');
+    if (message) message.textContent = error?.message || '';
+    if (hint) hint.textContent = error?.hint || '';
+    surface.hidden = !error;
   }
-  if (message) message.textContent = error.message;
-  if (hint) hint.textContent = error.hint;
-  surface.hidden = false;
+  const opener = document?.getElementById?.('settings-open');
+  if (!opener) return;
+  if (error) {
+    opener.dataset.error = 'true';
+    opener.setAttribute('aria-describedby', 'settings-status-message');
+  } else {
+    delete opener.dataset.error;
+    opener.removeAttribute('aria-describedby');
+  }
 }
 
 function sameValue(left, right) {
@@ -93,7 +99,9 @@ export function createPreferenceClient(api, options = {}) {
   let loadPromise = null;
   let saveTimer = null;
   let saveQueue = Promise.resolve();
+  let retryPromise = null;
   let currentError = null;
+  let failedOperation = null;
   const overrides = {};
 
   function request(method, body) {
@@ -102,9 +110,16 @@ export function createPreferenceClient(api, options = {}) {
     return Promise.resolve(clone(DEFAULTS));
   }
 
-  function reportError(error) {
+  function reportError(error, operation) {
     currentError = safeError(error);
+    failedOperation = operation;
     onSettingsError?.(currentError);
+  }
+
+  function clearReportedError() {
+    currentError = null;
+    failedOperation = null;
+    onSettingsError?.(null);
   }
 
   function mergeOverrides(base) {
@@ -116,10 +131,11 @@ export function createPreferenceClient(api, options = {}) {
       loadPromise = request('GET')
         .then((loaded) => {
           state = immutable(mergeOverrides(loaded));
+          if (failedOperation === 'load') clearReportedError();
           return immutable(state);
         })
         .catch((error) => {
-          reportError(error);
+          reportError(error, 'load');
           return immutable(state);
         });
     }
@@ -135,13 +151,10 @@ export function createPreferenceClient(api, options = {}) {
       for (const [key, value] of Object.entries(sentOverrides)) {
         if (sameValue(overrides[key], value)) delete overrides[key];
       }
-      if (currentError !== null) {
-        currentError = null;
-        onSettingsError?.(null);
-      }
+      if (currentError !== null) clearReportedError();
       state = immutable(mergeOverrides(saved));
     } catch (error) {
-      reportError(error);
+      reportError(error, 'save');
     }
   }
 
@@ -156,6 +169,23 @@ export function createPreferenceClient(api, options = {}) {
 
   const client = {
     load,
+    retry() {
+      if (retryPromise) return retryPromise;
+      const operation = failedOperation;
+      if (!operation) return Promise.resolve(immutable(state));
+      if (saveTimer !== null) {
+        clearTimeoutImpl(saveTimer);
+        saveTimer = null;
+      }
+      retryPromise = (operation === 'save'
+        ? (saveQueue = saveQueue.then(persist))
+        : (() => {
+          loadPromise = null;
+          return load();
+        })())
+        .finally(() => { retryPromise = null; });
+      return retryPromise;
+    },
     snapshot: () => immutable(state),
     settingsError: () => currentError && immutable(currentError),
     get(key, fallback = null) {

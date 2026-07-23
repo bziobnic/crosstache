@@ -112,6 +112,7 @@ class FakeElement {
 }
 
 function fakeDocument() {
+  const scoped = [new FakeElement(), new FakeElement()];
   const elements = new Map([
     ['context-line', new FakeElement()],
     ['context-backend-kind', new FakeElement()],
@@ -125,9 +126,12 @@ function fakeDocument() {
   ]);
   return {
     elements,
+    scoped,
     getElementById(id) { return elements.get(id) ?? null; },
     createElement() { return new FakeElement(); },
-    querySelectorAll() { return []; },
+    querySelectorAll(selector) {
+      return selector === '[data-context-scoped]' ? scoped : [];
+    },
   };
 }
 
@@ -147,6 +151,8 @@ function reducer(state, event) {
       };
     case 'context/switch-failed':
       return { ...state, contextSwitchPending: false, contextError: event.error };
+    case 'context/switch-cancelled':
+      return { ...state, contextSwitchPending: false };
     case 'mutation/pending':
       return { ...state, scopedMutationPending: Boolean(event.value) };
     case 'draft/save-pending':
@@ -237,6 +243,45 @@ test('dirty draft rejection and save lock preserve the current context', async (
   assert.equal(guardCalls, 1);
   assert.equal(activationCalls, 0);
   assert.equal(fixture.store.snapshot().context.backend, 'az-prod');
+});
+
+test('switch pending makes every scoped application surface inert immediately', async () => {
+  const activation = deferred();
+  const fixture = await mounted({
+    api: async (method) => method === 'GET'
+      ? primary
+      : activation.promise,
+  });
+
+  const switching = fixture.rail.switchTo('stage');
+  await Promise.resolve();
+
+  assert.equal(fixture.store.snapshot().contextSwitchPending, true);
+  assert.ok(fixture.document.scoped.every((surface) => surface.attributes.has('inert')));
+
+  activation.resolve({ context: stage, secrets: [] });
+  await switching;
+  assert.ok(fixture.document.scoped.every((surface) => !surface.attributes.has('inert')));
+});
+
+test('activation cannot publish after scoped activity starts during its response window', async () => {
+  const activation = deferred();
+  const fixture = await mounted({
+    api: async (method) => method === 'GET'
+      ? primary
+      : activation.promise,
+  });
+
+  const switching = fixture.rail.switchTo('stage');
+  await Promise.resolve();
+  fixture.store.dispatch({ type: 'mutation/pending', value: true });
+  fixture.store.dispatch({ type: 'mutation/pending', value: false });
+  activation.resolve({ context: stage, secrets: [{ name: 'wrong-scope' }] });
+
+  assert.equal(await switching, false);
+  assert.equal(fixture.store.snapshot().context.backend, 'az-prod');
+  assert.equal(fixture.store.snapshot().initialSecrets, null);
+  assert.equal(fixture.store.snapshot().contextSwitchPending, false);
 });
 
 test('obsolete out-of-order switch cannot replace the latest context', async () => {

@@ -496,7 +496,8 @@ mod tests {
     #[test]
     fn ui_auth_recovery_cannot_be_dismissed_by_tabs() {
         assert!(APP_JS.contains("authRecoveryActive = true;"));
-        assert!(APP_JS.contains("if (authRecoveryActive) return;"));
+        assert!(APP_JS
+            .contains("if (authRecoveryActive || store.snapshot().contextSwitchPending) return;"));
     }
 
     #[test]
@@ -709,10 +710,10 @@ mod tests {
     #[test]
     fn ui_hides_and_clears_drawer_while_selection_loads() {
         assert!(APP_JS.contains(
-            "async function openDrawer(name, invoker = document.activeElement) {\n  if (!$('#drawer').hidden && !(await requestDrawerClose())) return;\n  return openDrawerNow(name, invoker);"
+            "async function openDrawer(name, invoker = document.activeElement) {\n  const scope = captureOperationScope();\n  if (!canStartScopedAction(scope)) return false;"
         ));
         assert!(APP_JS.contains(
-            "async function openDrawerNow(name, invoker) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
+            "async function openDrawerNow(name, invoker, scope) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
         ));
         assert!(APP_JS.contains("function clearDrawerState()"));
     }
@@ -768,9 +769,8 @@ mod tests {
 
     #[test]
     fn ui_bulk_deletes_require_confirmation() {
-        assert!(
-            APP_JS.contains("await confirmDeletion(kind === 'secrets' ? 'secret' : 'file', items)")
-        );
+        assert!(APP_JS.contains("if (!(await confirmDeletion("));
+        assert!(APP_JS.contains("      operationScope,\n    ))"));
         assert!(APP_JS.contains("recoverable: kind === 'secret'"));
     }
 
@@ -1000,7 +1000,8 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"browse-files\""));
         assert!(INDEX_HTML.contains("<button id=\"browse-files\""));
         assert!(!INDEX_HTML.contains("<label class=\"linkish\""));
-        assert!(APP_JS.contains("$('#browse-files').onclick = () => $('#file-input').click();"));
+        assert!(APP_JS.contains("$('#browse-files').onclick = () => {"));
+        assert!(APP_JS.contains("if (!canStartScopedAction()) return;"));
         assert!(APP_JS.contains("function itemNameCell(kind, name, activate, accessibleLabel)"));
         assert!(APP_JS.contains("button.className = 'item-name-content row-action'"));
         assert!(APP_JS.contains("`Edit secret ${name}`"));

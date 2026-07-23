@@ -41,6 +41,21 @@ function applyTheme(theme) {
   if (themeSelect) themeSelect.value = theme;
 }
 
+async function retrySettings(button) {
+  button.disabled = true;
+  try {
+    await preferences.retry();
+    applyTheme(preferences.get('theme', 'system'));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+for (const id of ['settings-retry', 'settings-error-retry']) {
+  const button = document.getElementById(id);
+  button.onclick = () => retrySettings(button);
+}
+
 void preferences.load().then(() => {
   const theme = preferences.get('theme', 'system');
   applyTheme(theme);
@@ -60,11 +75,14 @@ function bindApplicationDialog({ openId, dialogId, closeId, initialFocus }) {
   const dialog = document.getElementById(dialogId);
   const close = document.getElementById(closeId);
   const dismiss = () => dialogs.closeModal(dialog);
-  open.onclick = () => dialogs.openModal(dialog, {
-    initialFocus: initialFocus(),
-    invoker: open,
-    onEscape: dismiss,
-  });
+  open.onclick = () => {
+    if (store.snapshot().contextSwitchPending) return;
+    dialogs.openModal(dialog, {
+      initialFocus: initialFocus(),
+      invoker: open,
+      onEscape: dismiss,
+    });
+  };
   close.onclick = dismiss;
   return { open, dialog, close: dismiss };
 }
