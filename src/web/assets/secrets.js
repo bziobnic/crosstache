@@ -310,12 +310,47 @@ function showFormError(error) {
   if (isAborted(error)) return;
   showError('#secret-form-error', error);
   const field = errorCopy(error).field;
-  const input = field && $('#secret-form').elements[field];
-  input?.focus?.();
+  const mapped = {
+    target: '#conversion-target',
+    target_type: '#conversion-target',
+    supplied_fields: '#conversion-required-fields input',
+    source_revision: '#conversion-preview',
+    confirm_lossy: '#conversion-confirm',
+    new_name: '#rename-name',
+  };
+  const suppliedField = field?.startsWith('supplied_fields.')
+    ? field.slice('supplied_fields.'.length)
+    : null;
+  const workflowField = field === 'name' && !$('#rename-workflow').hidden
+    ? $('#rename-name')
+    : null;
+  const input = field && (
+    workflowField
+    || $('#secret-form').elements[field]
+    || (suppliedField
+      ? [...$('#conversion-required-fields').querySelectorAll('input[data-conversion-field]')]
+        .find((candidate) => candidate.dataset.conversionField === suppliedField)
+      : null)
+    || (mapped[field] ? $(mapped[field]) : null)
+  );
+  if (input) {
+    input.setAttribute('aria-invalid', 'true');
+    const describedBy = new Set((input.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean));
+    describedBy.add('secret-form-error');
+    input.setAttribute('aria-describedby', [...describedBy].join(' '));
+    input.focus?.();
+  }
 }
 
 function clearFormError() {
   clearError('#secret-form-error');
+  for (const control of $('#secret-form').querySelectorAll('[aria-invalid="true"]')) {
+    control.removeAttribute('aria-invalid');
+    const describedBy = (control.getAttribute('aria-describedby') || '')
+      .split(/\s+/).filter((id) => id && id !== 'secret-form-error');
+    if (describedBy.length) control.setAttribute('aria-describedby', describedBy.join(' '));
+    else control.removeAttribute('aria-describedby');
+  }
 }
 
 for (const panel of document.querySelectorAll('.error-panel')) {
@@ -827,6 +862,8 @@ let types = []; // resolved record types from /api/types
 // { typeName, secretFields: {name: value}, metaFields: {name: value} }
 let recordState = null;
 let plainSecretState = null;
+let selectedGroups = [];
+let conversionPreviewState = null;
 let drawerInvoker = null;
 const revealTimers = new Map();
 let clipboardExposure = null;
@@ -1056,6 +1093,118 @@ async function copyProtectedValue({ field, state, expected, seconds, scope, isCu
   }
 }
 
+function syncGroupValue() {
+  $('#secret-form').elements.groups.value = selectedGroups.join(',');
+}
+
+function renderGroupEditor() {
+  syncGroupValue();
+  const chips = selectedGroups.map((group) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    const label = document.createElement('span');
+    label.textContent = group;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', `Remove group ${group}`);
+    remove.onclick = () => {
+      selectedGroups = selectedGroups.filter((candidate) => candidate !== group);
+      renderGroupEditor();
+      updateDraft();
+    };
+    chip.append(label, remove);
+    return chip;
+  });
+  $('#group-chips').replaceChildren(...chips);
+  const suggestions = XvUiModel.groupSuggestions(secrets, selectedGroups);
+  $('#group-suggestions').replaceChildren(...suggestions.map((group) => {
+    const option = document.createElement('option');
+    option.value = group;
+    return option;
+  }));
+}
+
+function addGroup() {
+  const entry = $('#group-entry');
+  const group = entry.value.trim();
+  if (!group || selectedGroups.some((candidate) => candidate.toLocaleLowerCase() === group.toLocaleLowerCase())) {
+    entry.value = '';
+    return;
+  }
+  selectedGroups = [...selectedGroups, group];
+  entry.value = '';
+  renderGroupEditor();
+  updateDraft();
+}
+
+function renderFolderSuggestions() {
+  $('#folder-suggestions').replaceChildren(...folderPaths('secrets', secrets).map((path) => {
+    const option = document.createElement('option');
+    option.value = path;
+    return option;
+  }));
+}
+
+function setNoExpiry(noExpiry) {
+  const input = $('#secret-form').elements.expires_on;
+  if (noExpiry) input.value = '';
+  input.disabled = noExpiry;
+  $('#no-expiry').setAttribute('aria-pressed', String(noExpiry));
+  updateDraft();
+}
+
+function renderTypeCards() {
+  const cards = [
+    { name: '', label: 'Plain', source: 'Built in', required: [], protected: ['value'] },
+    ...XvUiModel.typeCards(types),
+  ];
+  $('#type-cards').replaceChildren(...cards.map((card) => {
+    const label = document.createElement('label');
+    label.className = 'type-card';
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'guided_type';
+    input.value = card.name;
+    input.checked = $('#type-picker').value === card.name;
+    const heading = document.createElement('strong');
+    heading.textContent = card.label;
+    const help = document.createElement('small');
+    help.textContent = card.name
+      ? `${card.required.length} required · ${card.protected.length} protected · ${card.source}`
+      : 'One protected value';
+    input.onchange = () => {
+      if (!input.checked) return;
+      $('#type-picker').value = card.name;
+      applyTypeSelection(card.name);
+    };
+    label.append(input, heading, help);
+    return label;
+  }));
+}
+
+function applyTypeSelection(typeName) {
+  if (!typeName) {
+    recordState = null;
+    $('#record-section').hidden = true;
+    $('#value-section').hidden = false;
+    $('#record-fields').innerHTML = '';
+  } else {
+    const type = types.find((candidate) => candidate.name === typeName);
+    const draft = XvUiModel.buildTypedDraft(type, {});
+    const secretFields = {};
+    const metaFields = {};
+    for (const field of Object.values(draft.fields)) {
+      if (field.value === '') continue;
+      if (field.kind === 'secret') secretFields[field.name] = field.value;
+      else metaFields[field.name] = field.value;
+    }
+    recordState = { typeName, secretFields, metaFields };
+    renderRecordFields(typeName, secretFields, metaFields, true);
+  }
+  updateDraft();
+}
+
 function drawerDraft() {
   const form = $('#secret-form');
   const fields = form.elements;
@@ -1092,7 +1241,11 @@ function syncPendingDisabled(control, pending) {
 function syncDraftControls() {
   const snapshot = store.snapshot();
   const pending = Boolean(snapshot.savePending || snapshot.contextSwitchPending);
-  for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash', '#save', '#delete']) {
+  for (const selector of [
+    '#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash',
+    '#save', '#delete', '#conversion-toggle', '#rename-toggle',
+    '#conversion-preview', '#conversion-confirm', '#rename-submit',
+  ]) {
     syncPendingDisabled($(selector), pending);
   }
   const backdrop = $('#drawer-backdrop');
@@ -1272,7 +1425,7 @@ function recordExposureIsCurrent({ scope, record, state, input, revision }) {
     && state.revision === revision;
 }
 
-function fieldRow(name, kind, value, required) {
+function fieldRow(name, kind, value, required, primary = false) {
   const field = document.createElement('div');
   field.className = 'form-field';
   const label = document.createElement('label');
@@ -1293,6 +1446,15 @@ function fieldRow(name, kind, value, required) {
   input.dataset.fieldName = name;
   input.dataset.fieldKind = kind;
   if (required) input.required = true;
+  const help = document.createElement('span');
+  help.className = 'field-help';
+  help.id = `${inputId}-field-help`;
+  help.textContent = [
+    required ? 'Required' : 'Optional',
+    kind === 'secret' ? 'protected value' : 'visible metadata',
+    primary ? 'primary field' : '',
+  ].filter(Boolean).join(' · ');
+  input.setAttribute('aria-describedby', help.id);
   if (kind === 'secret') {
     const state = XvUiModel.createProtectedState(value, value !== undefined);
     input._protectedState = state;
@@ -1302,7 +1464,7 @@ function fieldRow(name, kind, value, required) {
     protection.id = `protected-field-state-${++nextProtectionDescriptionId}`;
     protection.textContent = 'Protected value is hidden.';
     input._protectionDescription = protection;
-    input.setAttribute('aria-describedby', `${protection.id} protected-value-status`);
+    input.setAttribute('aria-describedby', `${help.id} ${protection.id} protected-value-status`);
     const row = document.createElement('span');
     row.className = 'field-actions';
     const rev = document.createElement('button');
@@ -1359,10 +1521,10 @@ function fieldRow(name, kind, value, required) {
       catch (e) { fail(e); }
     };
     row.append(rev, cp);
-    field.append(label, input, protection, row);
+    field.append(label, input, help, protection, row);
   } else {
     input.value = value || '';
-    field.append(label, input);
+    field.append(label, input, help);
   }
   return field;
 }
@@ -1381,7 +1543,7 @@ function renderRecordFields(typeName, secretFields, metaFields, forNew) {
   for (const def of declared) {
     seen.add(def.name);
     const value = def.kind === 'secret' ? secretFields[def.name] : metaFields[def.name];
-    container.appendChild(fieldRow(def.name, def.kind, value, forNew && def.required));
+    container.appendChild(fieldRow(def.name, def.kind, value, forNew && def.required, def.primary));
   }
   const extras = [
     ...Object.keys(secretFields).filter((n) => !seen.has(n)).map((n) => [n, 'secret']),
@@ -1444,18 +1606,18 @@ async function init() {
     opt.value = opt.textContent = rt.name;
     picker.appendChild(opt);
   }
-  picker.onchange = () => {
-    if (!picker.value) {
-      recordState = null;
-      $('#record-section').hidden = true;
-      $('#value-section').hidden = false;
-      $('#record-fields').innerHTML = '';
-    } else {
-      recordState = { typeName: picker.value, secretFields: {}, metaFields: {} };
-      renderRecordFields(picker.value, {}, {}, true);
-    }
-    updateDraft();
-  };
+  picker.onchange = () => applyTypeSelection(picker.value);
+  renderTypeCards();
+  const conversionTarget = $('#conversion-target');
+  conversionTarget.replaceChildren(...[
+    ['', 'Plain'],
+    ...types.map((type) => [type.name, type.name]),
+  ].map(([value, label]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }));
   if (!contextRail) {
     const { vaults } = await api('GET', '/api/vaults');
     const legacySelector = $('#vault-select');
@@ -1820,6 +1982,151 @@ function clearDrawerState() {
   editingMeta = null;
   recordState = null;
   plainSecretState = null;
+  selectedGroups = [];
+  conversionPreviewState = null;
+}
+
+function setWorkflowOpen(kind, open) {
+  const toggle = $(`#${kind}-toggle`);
+  const panel = $(`#${kind}-workflow`);
+  toggle.setAttribute('aria-expanded', String(open));
+  panel.hidden = !open;
+  if (open) {
+    const other = kind === 'conversion' ? 'rename' : 'conversion';
+    $(`#${other}-toggle`).setAttribute('aria-expanded', 'false');
+    $(`#${other}-workflow`).hidden = true;
+  }
+}
+
+function conversionTargetBody() {
+  const targetType = $('#conversion-target').value;
+  return targetType
+    ? { kind: 'typed', target_type: targetType }
+    : { kind: 'plain' };
+}
+
+function conversionSuppliedFields() {
+  return Object.fromEntries(
+    [...$('#conversion-required-fields').querySelectorAll('input[data-conversion-field]')]
+      .map((input) => [input.dataset.conversionField, input.value])
+      .filter(([, value]) => value !== ''),
+  );
+}
+
+function ensureConversionField(name) {
+  const required = $('#conversion-required-fields');
+  const existing = [...required.querySelectorAll('input[data-conversion-field]')]
+    .find((input) => input.dataset.conversionField === name);
+  if (existing) return existing;
+  const label = document.createElement('label');
+  label.className = 'form-field';
+  const text = document.createElement('span');
+  text.className = 'field-label';
+  text.textContent = `${name} (required for conversion)`;
+  const input = document.createElement('input');
+  input.dataset.conversionField = name;
+  input.required = true;
+  label.append(text, input);
+  required.appendChild(label);
+  return input;
+}
+
+function renderConversionPreview(preview) {
+  const summary = XvUiModel.conversionSummary(preview);
+  conversionPreviewState = { ...summary, target: conversionTargetBody() };
+  const container = $('#conversion-summary');
+  const heading = document.createElement('strong');
+  heading.textContent = summary.description;
+  const list = document.createElement('ul');
+  for (const [label, values] of [
+    ['Dropped', summary.dropped],
+    ['Exposed', summary.exposed],
+    ['Renamed', summary.renamed],
+  ]) {
+    if (!values.length) continue;
+    const item = document.createElement('li');
+    item.textContent = `${label}: ${values.join(', ')}`;
+    list.appendChild(item);
+  }
+  container.replaceChildren(heading, list);
+  container.hidden = false;
+  $('#conversion-confirm').hidden = false;
+  for (const name of summary.missing) ensureConversionField(name);
+}
+
+async function previewConversion() {
+  if (!editing || !canStartScopedAction(drawerScope)) return;
+  clearFormError();
+  try {
+    const preview = await api(
+      'POST',
+      `/api/secrets/${encodeURIComponent(editing)}/conversion/preview${vaultQS(drawerScope.vault, drawerScope)}`,
+      { target: conversionTargetBody(), supplied_fields: conversionSuppliedFields() },
+    );
+    renderConversionPreview(preview);
+  } catch (error) {
+    if (error?.field?.startsWith('supplied_fields.')) {
+      ensureConversionField(error.field.slice('supplied_fields.'.length));
+    }
+    showFormError(error);
+  }
+}
+
+async function confirmConversion() {
+  if (!editing || !conversionPreviewState || !canStartScopedAction(drawerScope)) return;
+  const generation = drawerGeneration;
+  const selection = editing;
+  const operationScope = structuredClone(drawerScope);
+  beginScopedMutation();
+  setSavePending(true);
+  clearFormError();
+  try {
+    await api(
+      'POST',
+      `/api/secrets/${encodeURIComponent(selection)}/conversion${vaultQS(operationScope.vault, operationScope)}`,
+      {
+        target: conversionPreviewState.target,
+        supplied_fields: conversionSuppliedFields(),
+        confirm_lossy: true,
+        source_revision: conversionPreviewState.sourceRevision,
+      },
+    );
+    if (!isCurrentDrawer(generation, selection)) return;
+    closeDrawer();
+    toast(`Converted ${selection} in ${formatContextLine(operationScope)}`);
+    if (scopeMatchesCurrent(operationScope)) await loadSecrets(operationScope.vault, operationScope);
+  } catch (error) {
+    if (isCurrentDrawer(generation, selection)) showFormError(error);
+  } finally {
+    setSavePending(false);
+    endScopedMutation();
+  }
+}
+
+async function renameSecret() {
+  if (!editing || !canStartScopedAction(drawerScope)) return;
+  const newName = $('#rename-name').value.trim();
+  if (!newName) return;
+  const selection = editing;
+  const operationScope = structuredClone(drawerScope);
+  beginScopedMutation();
+  setSavePending(true);
+  clearFormError();
+  try {
+    await api(
+      'POST',
+      `/api/secrets/${encodeURIComponent(selection)}/rename${vaultQS(operationScope.vault, operationScope)}`,
+      { new_name: newName },
+    );
+    closeDrawer();
+    toast(`Renamed ${selection} to ${newName}`);
+    if (scopeMatchesCurrent(operationScope)) await loadSecrets(operationScope.vault, operationScope);
+  } catch (error) {
+    if (editing === selection) showFormError(error);
+  } finally {
+    setSavePending(false);
+    endScopedMutation();
+  }
 }
 
 async function openDrawer(name, invoker = document.activeElement) {
@@ -1841,6 +2148,19 @@ async function openDrawerNow(name, invoker, scope) {
   const f = $('#secret-form');
   f.reset();
   f.elements.expires_on.value = '';
+  f.elements.expires_on.disabled = false;
+  $('#no-expiry').setAttribute('aria-pressed', 'false');
+  $('#group-entry').value = '';
+  selectedGroups = [];
+  renderGroupEditor();
+  renderFolderSuggestions();
+  conversionPreviewState = null;
+  $('#conversion-summary').hidden = true;
+  $('#conversion-summary').replaceChildren();
+  $('#conversion-required-fields').replaceChildren();
+  $('#conversion-confirm').hidden = true;
+  setWorkflowOpen('conversion', false);
+  setWorkflowOpen('rename', false);
   plainSecretState = XvUiModel.createProtectedState(name ? null : '', !!name);
   f.elements.value._protectionDescription = $('#value-protection-state');
   renderProtectedControl(f.elements.value, $('#reveal'), plainSecretState);
@@ -1853,7 +2173,7 @@ async function openDrawerNow(name, invoker, scope) {
   $('#drawer-context').textContent = formatContextLine(scope);
   $('#save').textContent = name ? 'Save changes' : 'Create secret';
   f.elements.name.value = name || '';
-  f.elements.name.readOnly = false;
+  f.elements.name.readOnly = !!name;
   $('#reveal').hidden = $('#copy').hidden = $('#delete').hidden = !name;
   $('#record-section').hidden = true;
   $('#value-section').hidden = false;
@@ -1862,13 +2182,24 @@ async function openDrawerNow(name, invoker, scope) {
   $('#save').disabled = false;
   $('#type-picker-label').hidden = !!name; // type is chosen at creation only
   $('#type-picker').value = '';
+  renderTypeCards();
+  $('#secret-workflows').hidden = !name
+    || !(ctx.capabilities.conditional_conversion || ctx.capabilities.atomic_rename);
+  $('#current-secret-type').hidden = !name;
+  $('#current-secret-type').textContent = 'Current type: Plain';
+  $('#conversion-toggle').hidden = !name || !ctx.capabilities.conditional_conversion;
+  $('#rename-toggle').hidden = !name || !ctx.capabilities.atomic_rename;
+  $('#rename-name').value = '';
   if (name) {
     try {
       const meta = await api('GET', `/api/secrets/${encodeURIComponent(name)}${vaultQS(scope.vault, scope)}`);
       if (generation !== drawerGeneration || !canStartScopedAction(scope)) return;
       const tags = meta.tags || {};
       f.elements.folder.value = tags.folder || '';
-      f.elements.groups.value = tags.groups || '';
+      selectedGroups = Array.isArray(tags.groups)
+        ? tags.groups.filter(Boolean)
+        : String(tags.groups || '').split(',').map((group) => group.trim()).filter(Boolean);
+      renderGroupEditor();
       f.elements.note.value = tags.note || '';
       f.elements.expires_on.value = XvUiModel.expirationDate(meta.expires_on);
       const customTags = {};
@@ -1884,6 +2215,7 @@ async function openDrawerNow(name, invoker, scope) {
         enabled: meta.enabled,
         not_before: meta.not_before || null,
       };
+      $('#current-secret-type').textContent = `Current type: ${isRecordMeta(meta) ? (tags[TYPE_TAG] || 'Typed') : 'Plain'}`;
       if (isRecordMeta(meta)) await openRecord(name, meta, tags, generation, scope);
       if (generation !== drawerGeneration || !canStartScopedAction(scope)) return;
     } catch (e) {
@@ -1945,6 +2277,28 @@ async function openRecord(name, meta, tags, generation, scope) {
 }
 
 $('#close-drawer').onclick = () => requestDrawerClose();
+$('#group-add').onclick = addGroup;
+$('#group-entry').onkeydown = (event) => {
+  if (event.key !== 'Enter' && event.key !== ',') return;
+  event.preventDefault();
+  addGroup();
+};
+$('#no-expiry').onclick = () => setNoExpiry(true);
+$('#clear-expiry').onclick = () => setNoExpiry(false);
+$('#conversion-toggle').onclick = () => setWorkflowOpen(
+  'conversion',
+  $('#conversion-workflow').hidden,
+);
+$('#rename-toggle').onclick = () => setWorkflowOpen('rename', $('#rename-workflow').hidden);
+$('#conversion-target').onchange = () => {
+  conversionPreviewState = null;
+  $('#conversion-summary').hidden = true;
+  $('#conversion-confirm').hidden = true;
+  $('#conversion-required-fields').replaceChildren();
+};
+$('#conversion-preview').onclick = previewConversion;
+$('#conversion-confirm').onclick = confirmConversion;
+$('#rename-submit').onclick = renameSecret;
 $('#drawer-backdrop').onclick = (event) => {
   if (store.snapshot().savePending || dialogs.topModal() !== $('#drawer')) {
     event.preventDefault();
@@ -2067,6 +2421,7 @@ $('#secret-form').onsubmit = async (ev) => {
   const f = ev.target.elements;
   const name = f.name.value.trim();
   if (!name) return;
+  clearFormError();
   invalidateExposureLifecycle();
   const groups = f.groups.value.split(',').map(s => s.trim()).filter(Boolean);
   const expiresPut = f.expires_on.value ? `${f.expires_on.value}T00:00:00Z` : null;
@@ -2074,12 +2429,6 @@ $('#secret-form').onsubmit = async (ev) => {
   beginScopedMutation();
   setSavePending(true);
   try {
-    if (selection && name !== selection) {
-      await api('POST', `/api/secrets/${encodeURIComponent(selection)}/move${vaultQS(operationScope.vault, operationScope)}`, { new_name: name });
-      if (!isCurrentDrawer(generation, selection)) return;
-      editing = name;
-      selection = name;
-    }
     if (recordState) {
       // Records always take the full-PUT path: field edits change the value.
       const envelope = {};

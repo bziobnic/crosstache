@@ -1101,7 +1101,7 @@ test('record fields have collision-free descriptions and field-specific timer st
     for (const input of inputs) {
       assert.equal(
         input.getAttribute('aria-describedby'),
-        `${input._protectionDescription.id} protected-value-status`,
+        `${input.id}-field-help ${input._protectionDescription.id} protected-value-status`,
       );
     }
 

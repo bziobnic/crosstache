@@ -10,6 +10,84 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
   function expirationDate(value) {
     return typeof value === 'string' && value.length >= 10 ? value.slice(0, 10) : '';
   }
+  function typeCards(types = []) {
+    return types.map((type) => {
+      const fields = (type.fields || []).map((field) => ({ ...field }));
+      return {
+        name: type.name,
+        label: type.name,
+        source: type.source || '',
+        fields,
+        required: fields.filter((field) => field.required).map((field) => field.name),
+        protected: fields.filter((field) => field.kind === 'secret').map((field) => field.name),
+        primary: fields.find((field) => field.primary)?.name || null,
+      };
+    });
+  }
+  function buildTypedDraft(type, properties = {}) {
+    const tags = { ...(properties.tags || {}) };
+    const protectedValues = properties.protected || {};
+    const fields = {};
+    for (const field of type?.fields || []) {
+      const tagName = `f.${field.name}`;
+      const value = field.kind === 'secret'
+        ? protectedValues[field.name]
+        : (tags[tagName] ?? '');
+      fields[field.name] = {
+        name: field.name,
+        kind: field.kind,
+        required: !!field.required,
+        primary: !!field.primary,
+        value: value ?? '',
+        dirty: false,
+      };
+      delete tags[tagName];
+    }
+    delete tags['xv-type'];
+    return {
+      type: type?.name || '',
+      fields,
+      customTags: tags,
+      enabled: properties.enabled ?? true,
+      notBefore: properties.not_before ?? null,
+    };
+  }
+  function groupSuggestions(items = [], selected = []) {
+    const excluded = new Set(selected.map((value) => String(value).trim().toLocaleLowerCase()));
+    const suggestions = new Map();
+    for (const item of items) {
+      const groups = Array.isArray(item?.groups)
+        ? item.groups
+        : String(item?.groups || '').split(',');
+      for (const raw of groups) {
+        const value = String(raw).trim();
+        const key = value.toLocaleLowerCase();
+        if (!value || excluded.has(key) || suggestions.has(key)) continue;
+        suggestions.set(key, value);
+      }
+    }
+    return [...suggestions.values()].sort((left, right) => collator.compare(left, right));
+  }
+  function conversionSummary(preview = {}) {
+    const dropped = [...(preview.dropped || [])];
+    const exposed = [...(preview.exposed || [])];
+    const renamed = (preview.renamed || []).map((value) => String(value).replace(/\s*->\s*/g, ' → '));
+    const missing = [...(preview.missing_required || preview.missing || [])];
+    const parts = [];
+    if (dropped.length) parts.push(`Drops ${dropped.length} ${dropped.length === 1 ? 'field' : 'fields'}`);
+    if (exposed.length) parts.push(`exposes ${exposed.length} protected ${exposed.length === 1 ? 'field' : 'fields'}`);
+    if (renamed.length) parts.push(`renames ${renamed.length} ${renamed.length === 1 ? 'field' : 'fields'}`);
+    if (missing.length) parts.push(`needs ${missing.length} required ${missing.length === 1 ? 'field' : 'fields'}`);
+    return {
+      dropped,
+      exposed,
+      renamed,
+      missing,
+      requiresConfirmation: !!preview.requires_confirmation,
+      sourceRevision: preview.source_revision || '',
+      description: parts.length ? `${parts.join('; ')}.` : 'No fields are lost or exposed.',
+    };
+  }
   function createProtectedState(value = null, hasStoredValue = value !== null) {
     return { value, hasStoredValue, masked: hasStoredValue, dirty: false, revision: 0, loadPromise: null };
   }
@@ -601,6 +679,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     return Object.freeze({ visibleIds, focusedId: () => rovingId });
   }
 export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
+  typeCards, buildTypedDraft, groupSuggestions, conversionSummary,
   protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
   sortedCopy, normalizeWidths, resizeAdjacentWidths, normalizeFolderPath,
   FOLDER_ALL, FOLDER_UNFILED, folderIdentity, folderIdentityKey, sameFolderIdentity,

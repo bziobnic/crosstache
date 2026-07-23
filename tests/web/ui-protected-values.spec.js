@@ -168,18 +168,27 @@ test('record protected fields have unique descriptions and announce field-specif
   await expect(page.locator('#record-fields label button')).toHaveCount(0);
   const descriptions = await inputs.evaluateAll((elements) => elements.map((input) => {
     const describedBy = input.getAttribute('aria-describedby');
-    return { describedBy, descriptionId: describedBy.split(' ')[0] };
+    const [helpId, protectionId, statusId] = describedBy.split(' ');
+    return { describedBy, helpId, protectionId, statusId };
   }));
-  expect(new Set(descriptions.map(({ descriptionId }) => descriptionId)).size).toBe(2);
-  for (const { describedBy, descriptionId } of descriptions) {
-    expect(describedBy).toBe(`${descriptionId} protected-value-status`);
+  expect(new Set(descriptions.map(({ helpId }) => helpId)).size).toBe(2);
+  expect(new Set(descriptions.map(({ protectionId }) => protectionId)).size).toBe(2);
+  for (const { describedBy, helpId, protectionId, statusId } of descriptions) {
+    expect(describedBy).toBe(`${helpId} ${protectionId} ${statusId}`);
+    expect(statusId).toBe('protected-value-status');
   }
 
   for (const name of ['password', 'connection-string']) {
     const input = page.locator(`#record-fields input[data-field-name="${name}"]`);
-    const describedBy = await input.getAttribute('aria-describedby');
-    await expect(page.getByRole('button', { name: `Reveal ${name}`, exact: true })).toHaveAttribute('aria-describedby', describedBy);
-    await expect(page.getByRole('button', { name: `Copy ${name}`, exact: true })).toHaveAttribute('aria-describedby', describedBy);
+    const [, protectionId] = (await input.getAttribute('aria-describedby')).split(' ');
+    await expect(page.getByRole('button', { name: `Reveal ${name}`, exact: true })).toHaveAttribute(
+      'aria-describedby',
+      `${protectionId} protected-value-status`,
+    );
+    await expect(page.getByRole('button', { name: `Copy ${name}`, exact: true })).toHaveAttribute(
+      'aria-describedby',
+      `${protectionId} protected-value-status`,
+    );
   }
 
   await page.getByRole('button', { name: 'Reveal password', exact: true }).click();
@@ -188,7 +197,7 @@ test('record protected fields have unique descriptions and announce field-specif
   await expect(status).not.toContainText('first-browser-value');
   const field = page.locator('#record-fields input[data-field-name="password"]');
   await expect(field).toHaveValue('first-browser-value');
-  const stateId = (await field.getAttribute('aria-describedby')).split(' ')[0];
+  const stateId = (await field.getAttribute('aria-describedby')).split(' ')[1];
   await expect(page.locator(`#${stateId}`)).toContainText(/revealed/);
   await expectNoSeriousOrCriticalAxeViolations(page);
 });
