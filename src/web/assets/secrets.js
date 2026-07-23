@@ -1,6 +1,30 @@
 import * as XvUiModel from './ui-model.js';
 import { guardNavigation } from './dialogs.js';
 
+export function deleteConfirmationModel({ backend, vault, names, recoverable }) {
+  const targets = [...names];
+  const count = targets.length;
+  return {
+    visibleNames: targets.slice(0, 5),
+    overflow: Math.max(0, count - 5),
+    message: `Delete ${count} ${count === 1 ? 'secret' : 'secrets'} from ${backend} vault ${vault}?`,
+    recovery: recoverable
+      ? 'Deleted secrets can be restored from Trash.'
+      : `Recovery is unavailable on ${backend}.`,
+  };
+}
+
+export function deletionNoticeModel(names, recoverable) {
+  const count = names.length;
+  return recoverable
+    ? { message: `${count} ${count === 1 ? 'secret' : 'secrets'} moved to Trash.`, canUndo: true }
+    : { message: `${count} ${count === 1 ? 'secret' : 'secrets'} deleted. Recovery is unavailable.`, canUndo: false };
+}
+
+export function canPurgeSecret(expectedName, typedName) {
+  return typedName === expectedName;
+}
+
 export function mountSecrets({ api, store, dialogs, token }) {
 
 const $ = (sel) => document.querySelector(sel);
@@ -54,6 +78,100 @@ function toast(msg) {
   clearTimeout(t._timer);
   t._timer = setTimeout(() => { t.hidden = true; }, 4000);
 }
+
+function confirmSecretDeletion(names) {
+  const dialog = $('#delete-confirmation');
+  const cancel = $('#cancel-delete');
+  const confirm = $('#confirm-delete');
+  const model = deleteConfirmationModel({
+    backend: ctx.backend,
+    vault: currentVault,
+    names,
+    recoverable: !!ctx.capabilities.soft_delete,
+  });
+  $('#delete-confirmation-title').textContent = names.length === 1 ? 'Delete secret?' : 'Delete secrets?';
+  $('#delete-confirmation-message').textContent = model.message;
+  $('#delete-recovery').textContent = model.recovery;
+  $('#delete-targets').replaceChildren(...model.visibleNames.map((name) => {
+    const item = document.createElement('li');
+    item.textContent = name;
+    return item;
+  }));
+  const overflow = $('#delete-overflow');
+  overflow.hidden = model.overflow === 0;
+  overflow.textContent = model.overflow ? `and ${model.overflow} more` : '';
+  confirm.textContent = names.length === 1 ? 'Delete secret' : `Delete ${names.length} secrets`;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      cancel.onclick = null;
+      confirm.onclick = null;
+      dialogs.closeModal(dialog);
+      resolve(confirmed);
+    };
+    cancel.onclick = () => finish(false);
+    confirm.onclick = () => finish(true);
+    dialogs.openModal(dialog, {
+      initialFocus: cancel,
+      invoker: document.activeElement,
+      onEscape: () => finish(false),
+    });
+  });
+}
+
+let pendingUndo = null;
+function showDeletionNotice(names) {
+  if (!names.length) return;
+  const recoverable = !!ctx.capabilities.soft_delete;
+  const model = deletionNoticeModel(names, recoverable);
+  const notice = $('#action-notice');
+  notice.classList.remove('error');
+  notice.querySelector('.action-notice-message').textContent = model.message;
+  notice.hidden = false;
+  const undo = $('#undo-delete');
+  undo.hidden = !(model.canUndo && ctx.capabilities.restore);
+  undo.disabled = false;
+  pendingUndo = undo.hidden ? null : { names: [...names], vault: currentVault };
+}
+
+$('#dismiss-action-notice').onclick = () => {
+  pendingUndo = null;
+  $('#action-notice').hidden = true;
+};
+
+$('#undo-delete').onclick = async () => {
+  if (!pendingUndo) return;
+  const notice = $('#action-notice');
+  const button = $('#undo-delete');
+  const { names, vault } = pendingUndo;
+  button.disabled = true;
+  button.textContent = 'Restoring…';
+  const results = await runBounded(names, 4, (name) => (
+    api('POST', `/api/secrets/${encodeURIComponent(name)}/restore${vaultQS(vault)}`)
+  ));
+  const restored = results.filter((result) => result.ok);
+  const failed = results.filter((result) => !result.ok);
+  if (vault === currentVault) {
+    await loadSecrets(vault);
+    if (activeTab === 'trash') await loadDeleted(vault);
+  }
+  if (failed.length) {
+    pendingUndo = { names: failed.map((result) => result.item), vault };
+    notice.classList.add('error');
+    notice.querySelector('.action-notice-message').textContent = `Undo failed: ${failed[0].error.message}`;
+    button.disabled = false;
+    button.textContent = 'Retry Undo';
+    showListError(activeTab, failed[0].error);
+  } else {
+    pendingUndo = null;
+    notice.querySelector('.action-notice-message').textContent = `${restored.length} ${restored.length === 1 ? 'secret' : 'secrets'} restored.`;
+    button.hidden = true;
+    button.textContent = 'Undo';
+  }
+};
 function isAborted(error) {
   return error?.name === 'AbortError';
 }
@@ -93,7 +211,9 @@ function showError(surface, error, retry) {
 }
 
 function showListError(kind, error) {
-  const surface = `#${kind === 'secrets' ? 'secret' : 'file'}-error`;
+  const surface = kind === 'trash'
+    ? '#trash-error'
+    : `#${kind === 'secrets' ? 'secret' : 'file'}-error`;
   $(surface).dataset.source = 'action';
   showError(surface, error);
 }
@@ -600,7 +720,7 @@ function syncPendingDisabled(control, pending) {
 
 function syncDraftControls() {
   const pending = store.snapshot().savePending;
-  for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#vault-select', '#save', '#delete']) {
+  for (const selector of ['#close-drawer', '#new-secret', '#tab-secrets', '#tab-files', '#tab-trash', '#vault-select', '#save', '#delete']) {
     syncPendingDisabled($(selector), pending);
   }
   const backdrop = $('#drawer-backdrop');
@@ -770,6 +890,7 @@ function showAuthRecovery() {
   $('#vault-tabs').hidden = true;
   $('#secrets-view').hidden = true;
   $('#files-view').hidden = true;
+  $('#trash-view').hidden = true;
   $('#auth-recovery').hidden = false;
 }
 
@@ -790,6 +911,7 @@ async function init() {
   currentVault = ctx.vault;
   $('#backend-badge').textContent = ctx.backend;
   $('#tab-files').hidden = !ctx.capabilities.files;
+  $('#tab-trash').hidden = !ctx.capabilities.soft_delete;
   ({ types } = await api('GET', '/api/types'));
   const picker = $('#type-picker');
   picker.innerHTML = '';
@@ -838,7 +960,8 @@ async function init() {
     expandedSecretFolders.clear();
     expandedFileFolders.clear();
     loadSecrets(vault).catch(fail);
-    loadFiles(vault).catch(fail);
+    if (ctx.capabilities.files) loadFiles(vault).catch(fail);
+    if (activeTab === 'trash') loadDeleted(vault).catch(fail);
   };
   const vault = currentVault;
   if (!(await loadSecrets(vault))) return;
@@ -971,6 +1094,164 @@ function secretRow(s, grouped = false) {
   }
   tr.onclick = activate;
   return tr;
+}
+
+// ---- trash ----
+let deletedSecrets = [];
+let trashState = 'ready';
+let trashLoadGeneration = 0;
+
+function showTrashPlaceholder(title, description) {
+  const tbody = $('#trash-table tbody');
+  tbody.innerHTML = '';
+  const row = document.createElement('tr');
+  const cell = document.createElement('td');
+  cell.colSpan = 4;
+  const state = document.createElement('div');
+  state.className = 'empty-state';
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  const message = document.createElement('span');
+  message.textContent = description;
+  state.append(heading, message);
+  cell.appendChild(state);
+  row.appendChild(cell);
+  tbody.appendChild(row);
+}
+
+async function loadDeleted(vault) {
+  if (!ctx.capabilities.soft_delete) return false;
+  const generation = ++trashLoadGeneration;
+  trashState = 'loading';
+  deletedSecrets = [];
+  $('#trash-item-count').textContent = 'Loading Trash…';
+  showTrashPlaceholder('Loading Trash…', 'Loading recoverable secrets from the current vault…');
+  try {
+    const loaded = await api('GET', `/api/secrets/deleted${vaultQS(vault)}`);
+    if (generation !== trashLoadGeneration) return false;
+    deletedSecrets = loaded;
+  } catch (error) {
+    if (generation !== trashLoadGeneration || isAborted(error)) return false;
+    trashState = 'failed';
+    showTrashPlaceholder('Couldn’t load Trash', 'The current vault Trash could not be read.');
+    showError('#trash-error', error, () => loadDeleted(currentVault));
+    return false;
+  }
+  trashState = 'ready';
+  clearError('#trash-error');
+  renderTrash();
+  return true;
+}
+
+function renderTrash() {
+  if (trashState !== 'ready') return;
+  const tbody = $('#trash-table tbody');
+  tbody.innerHTML = '';
+  const sorted = [...deletedSecrets].sort((a, b) => (
+    (a.original_name || a.name).localeCompare(b.original_name || b.name)
+  ));
+  $('#trash-item-count').textContent = `${sorted.length} deleted ${sorted.length === 1 ? 'secret' : 'secrets'}`;
+  $('#trash-list-summary').textContent = sorted.length
+    ? `${sorted.length} recoverable ${sorted.length === 1 ? 'secret' : 'secrets'}. Purge is permanent.`
+    : 'Trash is empty.';
+  if (!sorted.length) {
+    showTrashPlaceholder('Trash is empty', 'Deleted secrets will appear here when recovery is available.');
+    return;
+  }
+  for (const secret of sorted) tbody.appendChild(trashRow(secret));
+}
+
+function trashRow(secret) {
+  const name = secret.original_name || secret.name;
+  const row = document.createElement('tr');
+  const nameCell = document.createElement('td');
+  nameCell.className = 'item-name';
+  nameCell.textContent = name;
+  const deletedCell = document.createElement('td');
+  deletedCell.textContent = secret.deleted_on ? `Deleted ${XvUiModel.formatDate(secret.deleted_on)}` : 'Deleted date unavailable';
+  const purgeDateCell = document.createElement('td');
+  purgeDateCell.textContent = secret.scheduled_purge_on
+    ? XvUiModel.formatDate(secret.scheduled_purge_on)
+    : (ctx.capabilities.scheduled_purge ? 'Date unavailable' : 'Not scheduled');
+  const actions = document.createElement('td');
+  actions.className = 'trash-actions';
+  if (ctx.capabilities.restore) {
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'button secondary compact';
+    restore.textContent = 'Restore';
+    restore.setAttribute('aria-label', `Restore ${name}`);
+    restore.onclick = async () => {
+      restore.disabled = true;
+      try {
+        await api('POST', `/api/secrets/${encodeURIComponent(name)}/restore${vaultQS(currentVault)}`);
+        toast(`${name} restored`);
+        await Promise.all([loadDeleted(currentVault), loadSecrets(currentVault)]);
+      } catch (error) {
+        showListError('trash', error);
+        restore.disabled = false;
+      }
+    };
+    actions.appendChild(restore);
+  }
+  if (ctx.capabilities.purge) {
+    const purge = document.createElement('button');
+    purge.type = 'button';
+    purge.className = 'button danger compact';
+    purge.textContent = 'Purge';
+    purge.setAttribute('aria-label', `Purge ${name}`);
+    purge.onclick = async () => {
+      if (!ctx.capabilities.purge || !(await confirmPurge(name))) return;
+      purge.disabled = true;
+      try {
+        await api('DELETE', `/api/secrets/${encodeURIComponent(name)}/purge${vaultQS(currentVault)}`);
+        toast(`${name} permanently purged`);
+        await loadDeleted(currentVault);
+      } catch (error) {
+        showListError('trash', error);
+        purge.disabled = false;
+      }
+    };
+    actions.appendChild(purge);
+  }
+  row.append(nameCell, deletedCell, purgeDateCell, actions);
+  return row;
+}
+
+function confirmPurge(name) {
+  if (!ctx.capabilities.purge) return Promise.resolve(false);
+  const dialog = $('#purge-confirmation');
+  const input = $('#purge-name');
+  const cancel = $('#cancel-purge');
+  const confirm = $('#confirm-purge');
+  $('#purge-title').textContent = `Permanently purge ${name}?`;
+  $('#purge-message').textContent = `Permanently purging ${name} from ${ctx.backend} vault ${currentVault} cannot be undone.`;
+  $('#purge-input-label').textContent = `Type ${name} to confirm`;
+  input.setAttribute('aria-label', `Type ${name} to confirm`);
+  input.value = '';
+  confirm.disabled = true;
+  input.oninput = () => { confirm.disabled = !canPurgeSecret(name, input.value); };
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      cancel.onclick = null;
+      confirm.onclick = null;
+      input.oninput = null;
+      dialogs.closeModal(dialog);
+      resolve(confirmed);
+    };
+    cancel.onclick = () => finish(false);
+    confirm.onclick = () => {
+      if (canPurgeSecret(name, input.value)) finish(true);
+    };
+    dialogs.openModal(dialog, {
+      initialFocus: input,
+      invoker: document.activeElement,
+      onEscape: () => finish(false),
+    });
+  });
 }
 
 $('#search').oninput = renderSecrets;
@@ -1262,17 +1543,17 @@ $('#secret-form').onsubmit = async (ev) => {
 $('#delete').onclick = async () => {
   const btn = $('#delete');
   if (btn.disabled || store.snapshot().savePending) return;
-  if (!armConfirmation(btn, 'Really delete?')) return;
+  const selection = editing;
+  if (!selection || !(await confirmSecretDeletion([selection]))) return;
   setSavePending(true);
   beginPendingAction(btn, 'Deleting…');
   const generation = drawerGeneration;
-  const selection = editing;
   const vault = currentVault;
   try {
     await api('DELETE', `/api/secrets/${encodeURIComponent(selection)}${vaultQS(vault)}`);
     if (!isCurrentDrawer(generation, selection)) return;
     closeDrawer();
-    toast('deleted');
+    showDeletionNotice([selection]);
     await loadSecrets(vault);
   } catch (e) {
     if (!isCurrentDrawer(generation, selection)) return;
@@ -1286,9 +1567,26 @@ $('#delete').onclick = async () => {
 // ---- tabs ----
 $('#tab-secrets').onclick = () => switchTab('secrets');
 $('#tab-files').onclick = () => switchTab('files');
+$('#tab-trash').onclick = () => switchTab('trash');
+for (const tab of [$('#tab-secrets'), $('#tab-files'), $('#tab-trash')]) {
+  tab.onkeydown = async (event) => {
+    const tabs = [$('#tab-secrets'), $('#tab-files'), $('#tab-trash')].filter((candidate) => !candidate.hidden);
+    const index = tabs.indexOf(tab);
+    let target = null;
+    if (event.key === 'ArrowRight') target = tabs[(index + 1) % tabs.length];
+    if (event.key === 'ArrowLeft') target = tabs[(index - 1 + tabs.length) % tabs.length];
+    if (event.key === 'Home') target = tabs[0];
+    if (event.key === 'End') target = tabs.at(-1);
+    if (!target) return;
+    event.preventDefault();
+    await target.onclick();
+    target.focus();
+  };
+}
 let activeTab = 'secrets';
 async function switchTab(which) {
   if (authRecoveryActive) return;
+  if (which === 'trash' && !ctx.capabilities.soft_delete) return;
   if (which !== activeTab) {
     if (!(await requestDrawerClose())) return;
     clearSelection('secrets');
@@ -1297,8 +1595,17 @@ async function switchTab(which) {
   }
   $('#secrets-view').hidden = which !== 'secrets';
   $('#files-view').hidden = which !== 'files';
+  $('#trash-view').hidden = which !== 'trash';
   $('#tab-secrets').classList.toggle('active', which === 'secrets');
   $('#tab-files').classList.toggle('active', which === 'files');
+  $('#tab-trash').classList.toggle('active', which === 'trash');
+  $('#tab-secrets').setAttribute('aria-selected', String(which === 'secrets'));
+  $('#tab-files').setAttribute('aria-selected', String(which === 'files'));
+  $('#tab-trash').setAttribute('aria-selected', String(which === 'trash'));
+  $('#tab-secrets').tabIndex = which === 'secrets' ? 0 : -1;
+  $('#tab-files').tabIndex = which === 'files' ? 0 : -1;
+  $('#tab-trash').tabIndex = which === 'trash' ? 0 : -1;
+  if (which === 'trash') await loadDeleted(currentVault);
 }
 
 // ---- files ----
@@ -1457,7 +1764,7 @@ async function bulkDelete(kind) {
   if (!items.length || state.pending) return;
   const button = selectionElements(kind).deleteButton;
   if (kind === 'secrets') {
-    if (!armConfirmation(button, `Delete ${items.length} secrets?`)) return;
+    if (!(await confirmSecretDeletion(items))) return;
   } else if (!armConfirmation(button, `Delete ${items.length} files?`)) {
     return;
   }
@@ -1489,7 +1796,12 @@ async function bulkDelete(kind) {
   if (vault !== currentVault) return;
   if (!selectionIsCurrent || generation !== state.generation) return;
   setBulkPending(kind, false, '');
-  reportBulkResults(kind, 'Deleted', results);
+  if (kind === 'secrets') {
+    showDeletionNotice(results.filter((result) => result.ok).map((result) => result.item));
+    if (results.some((result) => !result.ok)) reportBulkResults(kind, 'Deleted', results);
+  } else {
+    reportBulkResults(kind, 'Deleted', results);
+  }
 }
 
 async function bulkMoveSecrets() {

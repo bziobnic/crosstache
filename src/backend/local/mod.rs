@@ -220,6 +220,9 @@ impl Backend for LocalBackend {
             has_audit: false,
             has_versioning: true,
             has_soft_delete: true,
+            has_restore: true,
+            has_purge: true,
+            has_scheduled_purge: false,
             has_secret_rotation: false,
             has_groups: true,
             has_folders: true,
@@ -309,6 +312,9 @@ mod tests {
         assert!(caps.has_notes);
         assert!(caps.has_expiry);
         assert!(caps.has_soft_delete);
+        assert!(caps.has_restore);
+        assert!(caps.has_purge);
+        assert!(!caps.has_scheduled_purge);
         assert!(!caps.has_rbac);
         assert_eq!(caps.max_name_length, Some(255));
         #[cfg(feature = "file-ops")]

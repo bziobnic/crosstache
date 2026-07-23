@@ -22,9 +22,10 @@
         <select id="vault-select" title="Current vault"></select>
       </label>
     </div>
-    <nav id="vault-tabs" class="tab-list" aria-label="Vault content">
-      <button id="tab-secrets" class="tab active" type="button">Secrets</button>
-      <button id="tab-files" class="tab" type="button">Files</button>
+    <nav id="vault-tabs" class="tab-list" role="tablist" aria-label="Vault content">
+      <button id="tab-secrets" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="secrets-view">Secrets</button>
+      <button id="tab-files" class="tab" type="button" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
+      <button id="tab-trash" class="tab" type="button" role="tab" aria-selected="false" aria-controls="trash-view" tabindex="-1">Trash</button>
     </nav>
   </div>
 </header>
@@ -35,7 +36,7 @@
     <p>Reopen the URL printed by <code>xv ui</code> in your terminal.</p>
   </section>
 
-  <section id="secrets-view">
+  <section id="secrets-view" role="tabpanel" aria-labelledby="tab-secrets">
     <div class="view-heading">
       <div>
         <span class="eyebrow">Vault contents</span>
@@ -71,7 +72,7 @@
     <div id="secret-list-summary" class="list-summary" aria-live="polite">Values remain hidden until revealed.</div>
   </section>
 
-  <section id="files-view" hidden>
+  <section id="files-view" role="tabpanel" aria-labelledby="tab-files" hidden>
     <div class="view-heading">
       <div>
         <span class="eyebrow">Vault files</span>
@@ -109,6 +110,29 @@
       </table>
     </div>
     <div id="file-list-summary" class="list-summary" aria-live="polite">Files remain encrypted in the current vault.</div>
+  </section>
+
+  <section id="trash-view" role="tabpanel" aria-labelledby="tab-trash" hidden>
+    <div class="view-heading">
+      <div>
+        <span class="eyebrow">Recoverable deletion</span>
+        <h1>Trash</h1>
+        <p>Restore deleted secrets or permanently purge them when policy allows.</p>
+      </div>
+      <span id="trash-item-count" class="item-count" aria-live="polite">0 deleted secrets</span>
+    </div>
+    <div id="trash-error" class="error-panel" role="alert" hidden>
+      <div><strong>Trash needs attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+    </div>
+    <div class="data-surface">
+      <table id="trash-table">
+        <thead><tr><th>Name</th><th>Deleted</th><th>Scheduled purge</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="trash-list-summary" class="list-summary" aria-live="polite">Deleted secrets remain recoverable until purged.</div>
   </section>
 </main>
 
@@ -164,6 +188,34 @@
     <button type="button" id="keep-editing" class="button secondary">Keep editing</button>
     <button type="button" id="discard-changes" class="button danger">Discard changes</button>
   </div>
+</section>
+
+<section id="delete-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-confirmation-title" aria-describedby="delete-confirmation-message delete-recovery" tabindex="-1" hidden>
+  <h2 id="delete-confirmation-title">Delete secret?</h2>
+  <p id="delete-confirmation-message"></p>
+  <ul id="delete-targets" class="confirmation-targets"></ul>
+  <p id="delete-overflow" class="confirmation-overflow" hidden></p>
+  <p id="delete-recovery"></p>
+  <div class="confirmation-actions">
+    <button type="button" id="cancel-delete" class="button secondary">Cancel</button>
+    <button type="button" id="confirm-delete" class="button danger">Delete secret</button>
+  </div>
+</section>
+
+<section id="purge-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="purge-title" aria-describedby="purge-message" tabindex="-1" hidden>
+  <h2 id="purge-title">Permanently purge secret?</h2>
+  <p id="purge-message">This permanently removes the secret and cannot be undone.</p>
+  <label class="form-field"><span id="purge-input-label" class="field-label">Type the secret name to confirm</span><input id="purge-name" autocomplete="off"></label>
+  <div class="confirmation-actions">
+    <button type="button" id="cancel-purge" class="button secondary">Cancel</button>
+    <button type="button" id="confirm-purge" class="button danger" disabled>Permanently purge</button>
+  </div>
+</section>
+
+<section id="action-notice" class="action-notice" role="status" aria-live="polite" hidden>
+  <span class="action-notice-message"></span>
+  <button type="button" id="undo-delete" class="button secondary">Undo</button>
+  <button type="button" id="dismiss-action-notice" class="button ghost" aria-label="Dismiss notification">Dismiss</button>
 </section>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

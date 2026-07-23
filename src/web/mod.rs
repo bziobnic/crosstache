@@ -19,6 +19,7 @@ use crate::error::{CrosstacheError, Result};
 pub(crate) mod api;
 pub(crate) mod auth;
 pub(crate) mod errors;
+mod secrets;
 #[cfg(test)]
 pub(crate) mod testutil;
 
@@ -171,6 +172,7 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .route("/vaults", get(api::list_vaults))
         .route("/types", get(api::list_types))
         .route("/secrets", get(api::list_secrets))
+        .route("/secrets/deleted", get(secrets::list_deleted))
         .route(
             "/secrets/{name}",
             get(api::get_secret)
@@ -179,7 +181,12 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
                 .delete(api::delete_secret),
         )
         .route("/secrets/{name}/value", post(api::reveal_secret))
-        .route("/secrets/{name}/move", post(api::move_secret));
+        .route("/secrets/{name}/move", post(api::move_secret))
+        .route("/secrets/{name}/restore", post(secrets::restore))
+        .route(
+            "/secrets/{name}/purge",
+            axum::routing::delete(secrets::purge),
+        );
 
     #[cfg(feature = "file-ops")]
     let api = api
@@ -652,7 +659,7 @@ mod tests {
 
     #[test]
     fn ui_bulk_deletes_require_confirmation() {
-        assert!(APP_JS.contains("armConfirmation(button, `Delete ${items.length} secrets?`)"));
+        assert!(APP_JS.contains("await confirmSecretDeletion(items)"));
         assert!(APP_JS.contains("armConfirmation(button, `Delete ${items.length} files?`)"));
     }
 

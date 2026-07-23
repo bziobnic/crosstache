@@ -183,6 +183,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:0; b
   color:var(--color-text); background:var(--color-surface); box-shadow:var(--shadow-raised); }
 .confirmation-dialog h2 { margin:0; font-size:1.1rem; }
 .confirmation-dialog p { margin:.5rem 0 1rem; color:var(--color-text-muted); }
+.confirmation-targets { max-height:9rem; margin:.5rem 0; padding-left:1.25rem; overflow:auto; }
+.confirmation-targets li { margin:.2rem 0; overflow-wrap:anywhere; }
+.confirmation-overflow { font-weight:650; }
 .confirmation-actions { display:flex; justify-content:flex-end; gap:.5rem; }
 .drawer-header { padding:1.4rem 1.5rem 1.1rem; border-bottom:1px solid var(--color-border); }
 .drawer-header h2 { margin:.25rem 0 .15rem; font-size:1.35rem; letter-spacing:-.035em; }
@@ -240,6 +243,13 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 11%, transpa
   padding:.65rem .8rem; border:1px solid var(--color-border); border-radius:var(--radius-control);
   background:var(--color-surface); box-shadow:0 10px 28px rgb(24 34 28 / 18%); }
 .toast.success { color:var(--color-accent-hover); border-color:color-mix(in srgb, var(--color-accent) 32%, var(--color-border)); }
+.action-notice { position:fixed; z-index:18; right:1rem; bottom:1rem; display:flex; align-items:center; gap:.55rem;
+  max-width:min(34rem, calc(100vw - 2rem)); padding:.7rem .8rem; border:1px solid color-mix(in srgb, var(--color-accent) 32%, var(--color-border));
+  border-radius:var(--radius-control); color:var(--color-text); background:var(--color-surface); box-shadow:0 10px 28px rgb(24 34 28 / 18%); }
+.action-notice-message { flex:1; }
+.action-notice.error { border-color:color-mix(in srgb, var(--color-danger) 42%, var(--color-border)); }
+.trash-actions { display:flex; align-items:center; gap:.4rem; overflow:visible; }
+#trash-table th:last-child, #trash-table td:last-child { width:13rem; }
 .error-panel { display:flex; align-items:flex-start; justify-content:space-between; gap:.75rem; margin-bottom:.75rem; padding:.75rem;
   border:1px solid color-mix(in srgb, var(--color-danger) 42%, var(--color-border)); border-radius:var(--radius-control);
   color:var(--color-danger); background:var(--color-danger-quiet); }

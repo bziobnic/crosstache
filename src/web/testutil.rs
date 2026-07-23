@@ -26,7 +26,7 @@ pub(crate) mod stub {
     use crate::backend::error::BackendError;
     use crate::backend::{Backend, BackendCapabilities, BackendKind, SecretBackend};
     use crate::secret::manager::{
-        SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
+        DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
 
     /// Stored file entry: (content, content_type, metadata).
@@ -35,6 +35,7 @@ pub(crate) mod stub {
 
     pub(crate) struct StubBackend {
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
+        pub deleted: Mutex<HashMap<String, SecretRequest>>,
         #[cfg(feature = "file-ops")]
         pub files: Mutex<HashMap<String, StoredFile>>,
     }
@@ -43,6 +44,7 @@ pub(crate) mod stub {
         pub fn new() -> Self {
             Self {
                 secrets: Mutex::new(HashMap::new()),
+                deleted: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
                 files: Mutex::new(HashMap::new()),
             }
@@ -63,6 +65,10 @@ pub(crate) mod stub {
                 has_groups: true,
                 has_notes: true,
                 has_expiry: true,
+                has_soft_delete: true,
+                has_restore: true,
+                has_purge: true,
+                has_scheduled_purge: false,
                 #[cfg(feature = "file-ops")]
                 has_file_storage: true,
                 ..Default::default()
@@ -190,7 +196,43 @@ pub(crate) mod stub {
         }
 
         async fn delete_secret(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
-            self.secrets
+            let request = self.secrets.lock().unwrap().remove(name).ok_or_else(|| {
+                BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                }
+            })?;
+            self.deleted
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), request);
+            Ok(())
+        }
+
+        async fn restore_secret(
+            &self,
+            _vault: &str,
+            name: &str,
+        ) -> Result<SecretProperties, BackendError> {
+            let mut secrets = self.secrets.lock().unwrap();
+            if secrets.contains_key(name) {
+                return Err(BackendError::Conflict(format!(
+                    "secret '{name}' already exists"
+                )));
+            }
+            let request = self.deleted.lock().unwrap().remove(name).ok_or_else(|| {
+                BackendError::NotFound {
+                    name: name.to_string(),
+                    suggestion: None,
+                }
+            })?;
+            let props = props_from_request(&request, false);
+            secrets.insert(name.to_string(), request);
+            Ok(props)
+        }
+
+        async fn purge_secret(&self, _vault: &str, name: &str) -> Result<(), BackendError> {
+            self.deleted
                 .lock()
                 .unwrap()
                 .remove(name)
@@ -199,6 +241,24 @@ pub(crate) mod stub {
                     name: name.to_string(),
                     suggestion: None,
                 })
+        }
+
+        async fn list_deleted_secrets(
+            &self,
+            _vault: &str,
+        ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
+            Ok(self
+                .deleted
+                .lock()
+                .unwrap()
+                .values()
+                .map(|request| DeletedSecretSummary {
+                    name: request.name.clone(),
+                    original_name: request.name.clone(),
+                    deleted_on: Some("2026-07-22T00:00:00Z".to_string()),
+                    scheduled_purge_on: None,
+                })
+                .collect())
         }
 
         async fn update_secret(

@@ -1715,15 +1715,16 @@ impl SecretBackend for LocalSecretBackend {
         let ap = age_path(&self.store_path, vault, &target_stem)?;
         let mp = meta_path(&self.store_path, vault, &target_stem)?;
 
-        // If an active secret with this name exists (delete → recreate →
-        // restore), archive it to .versions/ instead of silently destroying
-        // it, mirroring the rollback path.
+        // A restore must never displace an active value. Leave both the live
+        // secret and trash entry untouched so the caller can resolve the
+        // collision explicitly.
         let existing_stem = self.resolve_active_stem(vault, name)?;
         let existing_ap = age_path(&self.store_path, vault, &existing_stem)?;
         let existing_mp = meta_path(&self.store_path, vault, &existing_stem)?;
-        let had_active = existing_ap.exists() || existing_mp.exists();
-        if had_active {
-            archive_current(&self.store_path, vault, &existing_stem)?;
+        if existing_ap.exists() || existing_mp.exists() {
+            return Err(BackendError::Conflict(format!(
+                "secret '{name}' already exists in vault '{vault}'"
+            )));
         }
 
         if let Some(trash_age) = trash_age.filter(|p| p.exists()) {
@@ -1737,22 +1738,7 @@ impl SecretBackend for LocalSecretBackend {
         fs::remove_dir_all(&tdir)
             .map_err(|e| BackendError::Internal(format!("remove trash dir: {e}")))?;
 
-        let mut meta = read_meta(&mp, &self.identity)?;
-        if had_active {
-            // Relabel so the restored secret doesn't reuse a version label
-            // already taken by the archived active secret.
-            let next_ver = next_version(&self.store_path, vault, &target_stem)?;
-            meta.version = format!("v{next_ver}");
-            meta.updated_at = Utc::now();
-            write_meta(
-                &mp,
-                &meta,
-                MetaCrypto {
-                    recipients: &self.recipients,
-                    encrypt: self.encrypt_metadata,
-                },
-            )?;
-        }
+        let meta = read_meta(&mp, &self.identity)?;
 
         // Re-add the active index entry and upgrade any remaining legacy layout.
         self.ensure_opaque_layout(vault, name)?;
@@ -2818,18 +2804,24 @@ mod tests {
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
         assert_eq!(deleted.len(), 1);
 
-        // Delete again and recover twice: most recent first, then the oldest.
+        // Delete again and recover the most recent snapshot.
         backend.delete_secret("default", "cycle").await.unwrap();
         backend.restore_secret("default", "cycle").await.unwrap();
         let got = backend.get_secret("default", "cycle", true).await.unwrap();
         assert_eq!(&*got.value.unwrap(), "second-value");
 
-        backend.restore_secret("default", "cycle").await.unwrap();
+        // Restoring the older snapshot over that live value is a visible
+        // conflict; the older trash entry remains recoverable.
+        let error = backend
+            .restore_secret("default", "cycle")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Conflict(_)));
         let got = backend.get_secret("default", "cycle", true).await.unwrap();
-        assert_eq!(&*got.value.unwrap(), "first-value");
+        assert_eq!(&*got.value.unwrap(), "second-value");
 
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
-        assert!(deleted.is_empty());
+        assert_eq!(deleted.len(), 1);
     }
 
     #[tokio::test]
@@ -2870,12 +2862,20 @@ mod tests {
             .unwrap();
         assert_eq!(&*got.value.unwrap(), "second");
 
-        backend.restore_secret("default", "collide").await.unwrap();
+        let error = backend
+            .restore_secret("default", "collide")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Conflict(_)));
         let got = backend
             .get_secret("default", "collide", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "first");
+        assert_eq!(&*got.value.unwrap(), "second");
+        assert_eq!(
+            backend.list_deleted_secrets("default").await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2939,7 +2939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_over_active_secret_archives_instead_of_clobbering() {
+    async fn restore_over_active_secret_reports_conflict_without_clobbering() {
         let (backend, _tmp) = test_backend();
 
         backend
@@ -2954,24 +2954,22 @@ mod tests {
             .await
             .unwrap();
 
-        // Restore brings back the trashed snapshot...
-        let restored = backend
+        let error = backend
             .restore_secret("default", "overwrite")
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Conflict(_)));
+
+        // The active value and recoverable trash entry both remain intact.
         let got = backend
             .get_secret("default", "overwrite", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "old-value");
-
-        // ...and the live secret is archived as a version, not destroyed.
-        let archived = backend
-            .get_secret_version("default", "overwrite", "v1", true)
-            .await
-            .unwrap();
-        assert_eq!(&*archived.value.unwrap(), "live-value");
-        assert_ne!(restored.version, "v1");
+        assert_eq!(&*got.value.unwrap(), "live-value");
+        assert_eq!(
+            backend.list_deleted_secrets("default").await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]

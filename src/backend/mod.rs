@@ -152,6 +152,12 @@ pub struct BackendCapabilities {
     pub has_versioning: bool,
     /// Recoverable (soft) deletion.
     pub has_soft_delete: bool,
+    /// Restore a soft-deleted secret.
+    pub has_restore: bool,
+    /// Permanently purge a deleted secret on demand.
+    pub has_purge: bool,
+    /// Backend schedules permanent purge after its recovery window.
+    pub has_scheduled_purge: bool,
     /// Scheduled secret rotation.
     pub has_secret_rotation: bool,
     /// Secret grouping / tagging.
@@ -188,6 +194,9 @@ impl Default for BackendCapabilities {
             has_audit: false,
             has_versioning: false,
             has_soft_delete: false,
+            has_restore: false,
+            has_purge: false,
+            has_scheduled_purge: false,
             has_secret_rotation: false,
             has_groups: false,
             has_folders: false,

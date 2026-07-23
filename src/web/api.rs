@@ -84,6 +84,10 @@ pub(crate) async fn get_context(State(state): State<Arc<WebState>>) -> Json<serd
             "groups": caps.has_groups,
             "notes": caps.has_notes,
             "expiry": caps.has_expiry,
+            "soft_delete": caps.has_soft_delete,
+            "restore": caps.has_restore,
+            "purge": caps.has_purge,
+            "scheduled_purge": caps.has_scheduled_purge,
         }
     }))
 }
@@ -116,7 +120,7 @@ pub(crate) struct VaultQuery {
 }
 
 impl VaultQuery {
-    fn vault<'a>(&'a self, state: &'a WebState) -> &'a str {
+    pub(crate) fn vault<'a>(&'a self, state: &'a WebState) -> &'a str {
         self.vault.as_deref().unwrap_or(&state.vault)
     }
 }
@@ -548,7 +552,7 @@ pub(crate) mod files {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use http_body_util::BodyExt;
@@ -641,6 +645,10 @@ mod tests {
         assert_eq!(json["backend"], "stub");
         assert_eq!(json["vault"], "default");
         assert_eq!(json["capabilities"]["folders"], true);
+        assert_eq!(json["capabilities"]["soft_delete"], true);
+        assert_eq!(json["capabilities"]["restore"], true);
+        assert_eq!(json["capabilities"]["purge"], true);
+        assert_eq!(json["capabilities"]["scheduled_purge"], false);
         #[cfg(feature = "file-ops")]
         assert_eq!(json["capabilities"]["files"], true);
         #[cfg(not(feature = "file-ops"))]
