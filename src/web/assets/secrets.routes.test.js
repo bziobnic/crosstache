@@ -115,7 +115,13 @@ function createDocument() {
     document.element('#close-drawer'),
     document.element('#save'),
   ];
-  for (const selector of ['#secret-error', '#file-error', '#secret-form-error']) {
+  for (const selector of [
+    '#secret-error',
+    '#secret-refresh-error',
+    '#file-error',
+    '#file-refresh-error',
+    '#secret-form-error',
+  ]) {
     document.element(selector).hidden = true;
   }
   document.element('#protected-value-status').hidden = true;
@@ -727,7 +733,7 @@ test('list failures persist with Retry and retry replaces the failed list state'
     },
   });
   try {
-    const panel = ui.elements.get('#secret-error');
+    const panel = ui.elements.get('#secret-refresh-error');
     assert.equal(panel.hidden, false);
     assert.equal(panel.querySelector('.error-message').textContent, 'Backend unavailable');
     await panel.querySelector('.error-retry').onclick();
@@ -798,9 +804,9 @@ test('aborted and stale list failures leave the current list surface unchanged',
     await staleLoad;
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(
-      ui.elements.get('#secret-error').hidden,
+      ui.elements.get('#secret-refresh-error').hidden,
       true,
-      ui.elements.get('#secret-error').querySelector('.error-message').textContent,
+      ui.elements.get('#secret-refresh-error').querySelector('.error-message').textContent,
     );
 
     const abortUi = await mountRouteUi({
@@ -813,7 +819,7 @@ test('aborted and stale list failures leave the current list surface unchanged',
       },
     });
     try {
-      assert.equal(abortUi.elements.get('#secret-error').hidden, true);
+      assert.equal(abortUi.elements.get('#secret-refresh-error').hidden, true);
     } finally {
       abortUi.restore();
     }

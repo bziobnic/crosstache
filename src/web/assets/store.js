@@ -32,6 +32,14 @@ const OPERATION_STATUSES = new Set([
   'cancelled',
   'failed',
 ]);
+const TERMINAL_OPERATION_STATUSES = new Set([
+  'succeeded',
+  'partially-succeeded',
+  'cancelled',
+  'failed',
+]);
+export const MAX_ROUTINE_OPERATION_HISTORY = 50;
+export const MAX_OPERATION_TOMBSTONES = 100;
 
 export function operationEvent(operationId, status, diagnostic) {
   if (!OPERATION_STATUSES.has(status)) throw new TypeError(`Unsupported operation status: ${status}`);
@@ -63,19 +71,101 @@ export function safeDiagnostic(input = {}) {
   return diagnostic;
 }
 
+export function createOwnerRegistry() {
+  const entries = new Map();
+  const generations = new Map();
+
+  function cleanup(entry) {
+    try { entry?.cleanup?.(); } catch (_) { /* cleanup is best effort */ }
+  }
+
+  return Object.freeze({
+    replace(key, { retained = null, cleanup: release } = {}) {
+      cleanup(entries.get(key));
+      const generation = (generations.get(key) || 0) + 1;
+      generations.set(key, generation);
+      entries.set(key, { generation, retained, cleanup: release });
+      return generation;
+    },
+    clear(key, expectedGeneration) {
+      const entry = entries.get(key);
+      if (!entry || (expectedGeneration !== undefined && entry.generation !== expectedGeneration)) {
+        return false;
+      }
+      cleanup(entry);
+      entries.delete(key);
+      generations.set(key, entry.generation + 1);
+      return true;
+    },
+    isCurrent(key, generation) {
+      return entries.get(key)?.generation === generation;
+    },
+    has(key) {
+      return entries.has(key);
+    },
+  });
+}
+
+function boundedOperations(operations) {
+  const routineTerminals = Object.entries(operations)
+    .filter(([, operation]) => (
+      !operation.durable && TERMINAL_OPERATION_STATUSES.has(operation.status)
+    ))
+    .sort(([, left], [, right]) => left.revision - right.revision);
+  const excess = routineTerminals.length - MAX_ROUTINE_OPERATION_HISTORY;
+  if (excess <= 0) return operations;
+  const bounded = { ...operations };
+  for (const [operationId] of routineTerminals.slice(0, excess)) delete bounded[operationId];
+  return bounded;
+}
+
+function boundedTerminals(terminals) {
+  const entries = Object.entries(terminals)
+    .sort(([, leftRevision], [, rightRevision]) => leftRevision - rightRevision);
+  const excess = entries.length - MAX_OPERATION_TOMBSTONES;
+  if (excess <= 0) return terminals;
+  const bounded = { ...terminals };
+  for (const [operationId] of entries.slice(0, excess)) delete bounded[operationId];
+  return bounded;
+}
+
 export function draftReducer(state, event) {
   switch (event.type) {
-    case 'operation/status':
+    case 'operation/status': {
+      const existing = state.operations?.[event.operationId];
+      if (state.operationTerminals?.[event.operationId]
+        || (existing && TERMINAL_OPERATION_STATUSES.has(existing.status))) {
+        return state;
+      }
+      const revision = (state.operationRevision || 0) + 1;
+      const terminal = TERMINAL_OPERATION_STATUSES.has(event.status);
+      const operations = boundedOperations({
+        ...(state.operations || {}),
+        [event.operationId]: {
+          status: event.status,
+          revision,
+          durable: Boolean(event.durable),
+          ...(event.diagnostic ? { diagnostic: safeDiagnostic(event.diagnostic) } : {}),
+        },
+      });
       return {
         ...state,
-        operations: {
-          ...(state.operations || {}),
-          [event.operationId]: {
-            status: event.status,
-            ...(event.diagnostic ? { diagnostic: safeDiagnostic(event.diagnostic) } : {}),
-          },
-        },
+        operationRevision: revision,
+        operationTerminals: terminal
+          ? boundedTerminals({
+            ...(state.operationTerminals || {}),
+            [event.operationId]: revision,
+          })
+          : state.operationTerminals,
+        operations,
       };
+    }
+    case 'operation/dismiss': {
+      if (!state.operations?.[event.operationId]) return state;
+      const operations = { ...state.operations };
+      delete operations[event.operationId];
+      return { ...state, operations };
+    }
     case 'context/loaded':
       return { ...state, context: structuredClone(event.context), contextError: null };
     case 'context/load-failed':

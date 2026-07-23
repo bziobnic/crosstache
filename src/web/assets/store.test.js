@@ -7,6 +7,9 @@ import {
   normalizeSecretDraft,
   operationEvent,
   operationResultStatus,
+  createOwnerRegistry,
+  MAX_OPERATION_TOMBSTONES,
+  MAX_ROUTINE_OPERATION_HISTORY,
   safeDiagnostic,
 } from './store.js';
 
@@ -79,4 +82,67 @@ test('safe diagnostics retain only actionable scope and failed names', () => {
     failedNames: ['one', 'two'],
   });
   assert.doesNotMatch(JSON.stringify(diagnostic), /secret-value|private note|private auth|Bearer|private token/);
+});
+
+test('routine terminal operation history is bounded while active and durable failures survive', () => {
+  let state = {};
+  for (let index = 0; index < MAX_ROUTINE_OPERATION_HISTORY + 25; index++) {
+    state = draftReducer(state, operationEvent(`request-${index}`, 'started'));
+    state = draftReducer(state, operationEvent(`request-${index}`, 'succeeded'));
+  }
+  state = draftReducer(state, operationEvent('request-active', 'started'));
+  state = draftReducer(state, {
+    ...operationEvent('bulk-actionable', 'partially-succeeded', {
+      failedNames: ['failed-name'],
+    }),
+    durable: true,
+  });
+
+  const operations = Object.values(state.operations);
+  assert.equal(operations.filter(({ durable, status }) => !durable && status !== 'started').length,
+    MAX_ROUTINE_OPERATION_HISTORY);
+  assert.equal(state.operations['request-active'].status, 'started');
+  assert.equal(state.operations['bulk-actionable'].durable, true);
+  assert.equal(state.operations[`request-${MAX_ROUTINE_OPERATION_HISTORY + 24}`].status, 'succeeded');
+  assert.ok(Object.keys(state.operationTerminals).length <= MAX_OPERATION_TOMBSTONES);
+});
+
+test('terminal operations are observable once, ignore double terminals, and dismiss durable state', () => {
+  let state = draftReducer({}, operationEvent('one', 'started'));
+  state = draftReducer(state, operationEvent('one', 'failed', { message: 'first' }));
+  const terminal = state.operations.one;
+  state = draftReducer(state, operationEvent('one', 'succeeded'));
+  assert.deepEqual(state.operations.one, terminal);
+
+  state = draftReducer(state, {
+    ...operationEvent('bulk', 'failed', { failedNames: ['only-name'] }),
+    durable: true,
+  });
+  state = draftReducer(state, { type: 'operation/dismiss', operationId: 'bulk' });
+  assert.equal(state.operations.bulk, undefined);
+  state = draftReducer(state, operationEvent('bulk', 'succeeded'));
+  assert.equal(state.operations.bulk, undefined);
+});
+
+test('owner replacement clears handlers and invalidates late generations without retaining state', () => {
+  const registry = createOwnerRegistry();
+  const retry = { onclick: () => {} };
+  const copy = { onclick: () => {} };
+  const retained = { failedNames: ['private-name'], retry: () => {} };
+  const first = registry.replace('secret-action', {
+    retained,
+    cleanup: () => {
+      retry.onclick = null;
+      copy.onclick = null;
+    },
+  });
+
+  const second = registry.replace('secret-action', { retained: { failedNames: ['new-name'] } });
+
+  assert.equal(retry.onclick, null);
+  assert.equal(copy.onclick, null);
+  assert.equal(registry.isCurrent('secret-action', first), false);
+  assert.equal(registry.isCurrent('secret-action', second), true);
+  registry.clear('secret-action', second);
+  assert.equal(registry.has('secret-action'), false);
 });

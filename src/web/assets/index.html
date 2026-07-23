@@ -99,6 +99,11 @@
       <button class="button secondary error-copy" type="button" hidden>Copy details</button>
       <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
     </div>
+    <div id="secret-refresh-error" class="error-panel" role="alert" hidden>
+      <div><strong>Secret list is stale</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+    </div>
     <div id="secrets-workspace" class="vault-workspace">
       <aside class="folder-sidebar" aria-labelledby="secrets-folder-heading">
         <div class="folder-sidebar-heading">
@@ -151,6 +156,11 @@
       <div><strong>Files need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
       <button class="button secondary error-retry" type="button" hidden>Retry</button>
       <button class="button secondary error-copy" type="button" hidden>Copy details</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+    </div>
+    <div id="file-refresh-error" class="error-panel" role="alert" hidden>
+      <div><strong>File list is stale</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
       <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
     </div>
     <div id="dropzone">

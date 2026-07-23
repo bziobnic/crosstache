@@ -572,10 +572,12 @@ mod tests {
     fn ui_guards_list_loads_against_stale_responses() {
         assert!(APP_JS.contains("let secretLoadGeneration = 0"));
         assert!(APP_JS.contains("let fileLoadGeneration = 0"));
-        assert!(
-            APP_JS.contains("async function loadSecrets(vault, scope = captureOperationScope())")
-        );
-        assert!(APP_JS.contains("async function loadFiles(vault, scope = captureOperationScope())"));
+        assert!(APP_JS.contains(
+            "async function loadSecrets(vault, scope = captureOperationScope(), errorOwner = null)"
+        ));
+        assert!(APP_JS.contains(
+            "async function loadFiles(vault, scope = captureOperationScope(), errorOwner = null)"
+        ));
         assert!(APP_JS.contains("if (generation !== secretLoadGeneration) return"));
         assert!(APP_JS.contains("if (generation !== fileLoadGeneration) return"));
     }
@@ -616,7 +618,9 @@ mod tests {
         }
 
         let secret_load = APP_JS
-            .split_once("async function loadSecrets(vault, scope = captureOperationScope()) {")
+            .split_once(
+                "async function loadSecrets(vault, scope = captureOperationScope(), errorOwner = null) {",
+            )
             .unwrap()
             .1
             .split_once("function renderSecrets()")
@@ -637,7 +641,9 @@ mod tests {
         );
 
         let file_load = APP_JS
-            .split_once("async function loadFiles(vault, scope = captureOperationScope()) {")
+            .split_once(
+                "async function loadFiles(vault, scope = captureOperationScope(), errorOwner = null) {",
+            )
             .unwrap()
             .1
             .split_once("function renderFiles()")

@@ -57,6 +57,14 @@ operation lifecycle vocabulary (`started`, `succeeded`,
 `partially-succeeded`, `cancelled`, and `failed`) and runs axe against stale
 and partial-result surfaces.
 
+Refresh and action failures use independent owned surfaces, so delayed refresh
+failures and bulk partial results cannot overwrite each other's Retry or Copy
+details handlers. The suite exercises both completion orders, dismissal during
+an in-flight retry, handler cleanup, and suppression of late completions.
+Store tests cap routine terminal operation history while retaining active
+operations and currently actionable durable failures; dismissal releases the
+durable diagnostic and retry state.
+
 Install the test-only JavaScript dependencies and a worktree-local Chromium:
 
 ```bash
