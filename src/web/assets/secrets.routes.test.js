@@ -472,8 +472,11 @@ test('mounted protected fields reset inactivity and hide on timeout, visibility,
     await openExistingSecret(ui, 'existing');
     const value = ui.elements.get('#field-value');
     const status = ui.elements.get('#protected-value-status');
-    await ui.elements.get('#reveal').onclick();
+    const reveal = ui.elements.get('#reveal');
+    assert.equal(reveal.getAttribute('aria-label'), 'Reveal value');
+    await reveal.onclick();
     assert.equal(value.value, 'top-secret');
+    assert.equal(reveal.getAttribute('aria-label'), 'Hide value');
     assert.equal(status.textContent, 'Value revealed. Hides in 2 seconds.');
     assert.doesNotMatch(status.textContent, /top-secret/);
 
@@ -484,16 +487,25 @@ test('mounted protected fields reset inactivity and hide on timeout, visibility,
     assert.equal(value.value, 'top-secret');
     clock.advanceOneSecond();
     assert.equal(value.value, PROTECTED_MASK);
+    assert.equal(reveal.getAttribute('aria-label'), 'Reveal value');
 
-    await ui.elements.get('#reveal').onclick();
+    await reveal.onclick();
+    assert.equal(reveal.getAttribute('aria-label'), 'Hide value');
+    await reveal.onclick();
+    assert.equal(value.value, PROTECTED_MASK);
+    assert.equal(reveal.getAttribute('aria-label'), 'Reveal value');
+
+    await reveal.onclick();
     ui.document.visibilityState = 'hidden';
     ui.document.dispatch('visibilitychange');
     assert.equal(value.value, PROTECTED_MASK);
+    assert.equal(reveal.getAttribute('aria-label'), 'Reveal value');
 
     ui.document.visibilityState = 'visible';
-    await ui.elements.get('#reveal').onclick();
+    await reveal.onclick();
     ui.dispatchWindow('blur');
     assert.equal(value.value, PROTECTED_MASK);
+    assert.equal(reveal.getAttribute('aria-label'), 'Reveal value');
   } finally {
     ui.restore();
   }

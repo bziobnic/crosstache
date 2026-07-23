@@ -28,8 +28,10 @@ test('delete Undo, Trash conflict, and typed-name purge are safe and persistent'
   await deleteSecret(page, 'recover-me', vault);
   const notice = page.locator('#action-notice');
   await expect(notice).toContainText('moved to Trash');
+  await expectNoSeriousOrCriticalAxeViolations(page);
   await notice.getByRole('button', { name: 'Undo' }).click();
   await expect(page.getByRole('button', { name: 'Edit secret recover-me' })).toBeVisible();
+  await expectNoSeriousOrCriticalAxeViolations(page);
 
   await deleteSecret(page, 'recover-me', vault);
   await createSecret(page, 'recover-me', 'replacement value');

@@ -661,6 +661,55 @@ fn parse_secret_properties_bundle(
     })
 }
 
+// These codecs are macros rather than private functions because backup and
+// restore are opt-in trait operations. The UI-only binary cannot reach those
+// methods, but unit tests still expand and exercise the exact production logic.
+macro_rules! decode_backup_value {
+    ($json:expr) => {{
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let json: &serde_json::Value = $json;
+        json.get("value")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| CrosstacheError::azure_api("Backup response missing 'value' field"))
+            .and_then(|value| {
+                URL_SAFE_NO_PAD
+                    .decode(value.trim_end_matches('='))
+                    .map_err(|error| {
+                        CrosstacheError::azure_api(format!(
+                            "Failed to decode backup payload: {error}"
+                        ))
+                    })
+            })
+    }};
+}
+
+macro_rules! build_restore_request_body {
+    ($backup_data:expr) => {{
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        serde_json::json!({ "value": URL_SAFE_NO_PAD.encode($backup_data) })
+    }};
+}
+
+macro_rules! parse_restored_secret_properties {
+    ($json:expr) => {{
+        let json: &serde_json::Value = $json;
+        (|| -> Result<SecretProperties> {
+            let id = json
+                .get("id")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    CrosstacheError::azure_api("Restore response missing secret 'id' field")
+                })?;
+            if id.rsplit('/').nth(1).is_none_or(str::is_empty) {
+                return Err(CrosstacheError::azure_api(format!(
+                    "Restore response contained unexpected secret id '{id}'"
+                )));
+            }
+            parse_secret_properties_bundle(json, "", false, "")
+        })()
+    }};
+}
+
 #[async_trait]
 impl SecretOperations for AzureSecretOperations {
     async fn set_secret(
@@ -1591,16 +1640,7 @@ impl SecretOperations for AzureSecretOperations {
         // Parse the response and decode the base64url backup blob
         let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-        let value = json
-            .get("value")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| CrosstacheError::azure_api("Backup response missing 'value' field"))?;
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-        URL_SAFE_NO_PAD
-            .decode(value.trim_end_matches('='))
-            .map_err(|error| {
-                CrosstacheError::azure_api(format!("Failed to decode backup payload: {error}"))
-            })
+        decode_backup_value!(&json)
     }
 
     async fn restore_secret_from_backup(
@@ -1635,8 +1675,7 @@ impl SecretOperations for AzureSecretOperations {
         );
 
         // Make the REST API call to restore the secret from the backup.
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-        let restore_body = serde_json::json!({ "value": URL_SAFE_NO_PAD.encode(backup_data) });
+        let restore_body = build_restore_request_body!(backup_data);
         let response = client
             .post(&restore_url)
             .headers(headers)
@@ -1656,18 +1695,7 @@ impl SecretOperations for AzureSecretOperations {
         // Parse the response to get the restored secret properties
         let json: serde_json::Value =
             read_json_body(response, crate::utils::MAX_RESPONSE_BYTES).await?;
-        let id = json
-            .get("id")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                CrosstacheError::azure_api("Restore response missing secret 'id' field")
-            })?;
-        if id.rsplit('/').nth(1).is_none_or(str::is_empty) {
-            return Err(CrosstacheError::azure_api(format!(
-                "Restore response contained unexpected secret id '{id}'"
-            )));
-        }
-        parse_secret_properties_bundle(&json, "", false, "")
+        parse_restored_secret_properties!(&json)
     }
 }
 
@@ -1854,6 +1882,48 @@ mod tests {
         assert!(parse_deleted_secret_summary(&serde_json::json!({})).is_none());
         assert!(parse_deleted_secret_summary(&serde_json::json!({ "id": 42 })).is_none());
         assert!(parse_deleted_secret_summary(&serde_json::json!({ "id": "" })).is_none());
+    }
+
+    #[test]
+    fn test_backup_value_codec_roundtrip_and_padding() {
+        let original: Vec<u8> = (0u8..=255).collect();
+        let body = build_restore_request_body!(&original);
+        assert_eq!(decode_backup_value!(&body).unwrap(), original);
+        let encoded = body.get("value").unwrap().as_str().unwrap();
+        assert!(!encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='));
+
+        let unpadded = serde_json::json!({ "value": "AAECAw" });
+        let padded = serde_json::json!({ "value": "AAECAw==" });
+        assert_eq!(decode_backup_value!(&unpadded).unwrap(), vec![0, 1, 2, 3]);
+        assert_eq!(decode_backup_value!(&padded).unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_backup_value_codec_rejects_missing_and_invalid_payloads() {
+        let missing = decode_backup_value!(&serde_json::json!({})).unwrap_err();
+        assert!(missing.to_string().contains("missing 'value'"), "{missing}");
+
+        let invalid = decode_backup_value!(&serde_json::json!({ "value": "!!!" })).unwrap_err();
+        assert!(
+            invalid.to_string().contains("Failed to decode"),
+            "{invalid}"
+        );
+    }
+
+    #[test]
+    fn test_restored_secret_parser_rejects_malformed_ids() {
+        let missing = parse_restored_secret_properties!(&serde_json::json!({})).unwrap_err();
+        assert!(
+            missing.to_string().contains("missing secret 'id'"),
+            "{missing}"
+        );
+
+        let malformed =
+            parse_restored_secret_properties!(&serde_json::json!({ "id": "abc" })).unwrap_err();
+        assert!(
+            malformed.to_string().contains("unexpected secret id"),
+            "{malformed}"
+        );
     }
 
     #[test]

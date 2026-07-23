@@ -40,9 +40,11 @@ Hermetic tests live in:
 ## Hermetic browser and accessibility tests
 
 The embedded UI has Playwright coverage for keyboard/dialog behavior, Trash
-and purge safety, and protected-value reveal/copy lifecycles. Every
-representative state is checked with axe; serious and critical violations fail
-the test and report the owning rule and locator.
+and purge safety, and protected-value reveal/copy lifecycles. Axe scans the
+initial list, sheet, nested confirmation, Secrets and Files selection,
+standalone Undo notice, post-Undo restored list, populated/error Trash, purge,
+file-delete confirmation, and plain/record protected-value states. Serious and
+critical violations fail the test and report the owning rule and locator.
 
 Install the test-only JavaScript dependencies and a worktree-local Chromium:
 

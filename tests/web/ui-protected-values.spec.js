@@ -104,6 +104,7 @@ test('reveal inactivity resets and hides on timeout, visibility, blur, close, an
   const status = page.locator('#protected-value-status');
   await reveal.click();
   await expect(value).toHaveValue('short-lived-value');
+  await expect(page.getByRole('button', { name: 'Hide value', exact: true })).toBeVisible();
   await expect(status).toHaveText('Value revealed. Hides in 30 seconds.');
   await expect(status).not.toContainText('short-lived-value');
   await expectNoSeriousOrCriticalAxeViolations(page);
@@ -113,6 +114,14 @@ test('reveal inactivity resets and hides on timeout, visibility, blur, close, an
   await expect(value).toHaveValue('short-lived-value');
   await page.clock.runFor(1_000);
   await expect(value).toHaveValue('***************');
+  await expect(reveal).toBeVisible();
+
+  await reveal.click();
+  const hide = page.getByRole('button', { name: 'Hide value', exact: true });
+  await expect(hide).toBeVisible();
+  await hide.click();
+  await expect(value).toHaveValue('***************');
+  await expect(reveal).toBeVisible();
 
   await reveal.click();
   await page.evaluate(() => {
@@ -120,6 +129,7 @@ test('reveal inactivity resets and hides on timeout, visibility, blur, close, an
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect(value).toHaveValue('***************');
+  await expect(reveal).toBeVisible();
 
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
@@ -127,6 +137,7 @@ test('reveal inactivity resets and hides on timeout, visibility, blur, close, an
   await reveal.click();
   await page.evaluate(() => window.dispatchEvent(new Event('blur')));
   await expect(value).toHaveValue('***************');
+  await expect(reveal).toBeVisible();
 
   await reveal.click();
   await page.getByRole('button', { name: 'Cancel' }).click();

@@ -1,5 +1,14 @@
 import { test, expect, expectNoSeriousOrCriticalAxeViolations } from './fixtures.js';
 
+async function createSecret(page, name) {
+  await page.locator('#new-secret').click();
+  const form = page.locator('#secret-form');
+  await form.locator('input[name="name"]').fill(name);
+  await form.locator('textarea[name="value"]').fill('selection value');
+  await page.getByRole('button', { name: 'Create secret' }).click();
+  await expect(page.getByRole('button', { name: `Edit secret ${name}` })).toBeVisible();
+}
+
 test('secret sheet traps focus, guards Escape, and restores the invoker', async ({ page, baseURL }) => {
   await page.goto(baseURL);
   await page.locator('#new-secret').click();
@@ -37,4 +46,25 @@ test('discard confirmation ignores backdrop clicks until its original action com
   await page.getByRole('button', { name: 'Cancel' }).click();
   await page.getByRole('button', { name: 'Discard changes' }).click();
   await expect(page.locator('#new-secret')).toBeFocused();
+});
+
+test('secret and file selection states have no serious or critical violations', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await createSecret(page, 'selection-secret');
+
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select secret selection-secret' }).check();
+  await expectNoSeriousOrCriticalAxeViolations(page);
+  await page.locator('#cancel-secret-selection').click();
+
+  await page.getByRole('tab', { name: 'Files' }).click();
+  await page.locator('#file-input').setInputFiles({
+    name: 'selection-file.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('selection file'),
+  });
+  await expect(page.getByRole('link', { name: 'selection-file.txt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select file selection-file.txt' }).check();
+  await expectNoSeriousOrCriticalAxeViolations(page);
 });

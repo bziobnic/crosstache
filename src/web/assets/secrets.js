@@ -1079,7 +1079,10 @@ async function requestDrawerClose(afterClose) {
 store.subscribe(syncDraftControls);
 
 function setRevealLabel(button, label) {
-  if (button.id === 'reveal') button.replaceChildren(icon('eye'), label);
+  if (button.id === 'reveal') {
+    button.replaceChildren(icon('eye'), label);
+    button.setAttribute('aria-label', `${label} value`);
+  }
   else {
     button.textContent = label;
     if (button.dataset.protectedField) button.setAttribute('aria-label', `${label} ${button.dataset.protectedField}`);
