@@ -3680,9 +3680,9 @@ async fn execute_record_type_conversion(
     let mut preview = crate::records::preview_conversion(&secret, &types, request)?;
     print_conversion_preview(&preview);
     if preview.requires_confirmation {
+        let impact = conversion_confirmation_impact(&preview);
         let prompt = format!(
-            "Converting '{name}' to type '{type_name}' will permanently drop field(s): {}. Continue?",
-            preview.dropped.join(", ")
+            "Converting '{name}' to type '{type_name}' requires confirmation ({impact}). Continue?"
         );
         if !confirm_record_action(false, &prompt)? {
             output::info("Aborted; secret not converted.");
@@ -3731,10 +3731,8 @@ async fn execute_record_untype(
     let mut preview = crate::records::preview_conversion(&secret, &types, request)?;
     print_conversion_preview(&preview);
     if preview.requires_confirmation {
-        let prompt = format!(
-            "Untyping '{name}' will permanently drop field(s): {}. Continue?",
-            preview.dropped.join(", ")
-        );
+        let impact = conversion_confirmation_impact(&preview);
+        let prompt = format!("Untyping '{name}' requires confirmation ({impact}). Continue?");
         if !confirm_record_action(false, &prompt)? {
             output::info("Aborted; secret not untyped.");
             return Ok(());
@@ -3762,9 +3760,32 @@ fn print_conversion_preview(preview: &crate::records::ConversionPreview) {
     if !preview.renamed.is_empty() {
         output::info(&format!("Renamed field(s): {}", preview.renamed.join(", ")));
     }
+    if !preview.copied.is_empty() {
+        output::info(&format!("Copied field(s): {}", preview.copied.join(", ")));
+    }
+    if !preview.sensitivity_changes.is_empty() {
+        output::info(&format!(
+            "Sensitivity change(s): {}",
+            preview.sensitivity_changes.join(", ")
+        ));
+    }
     if !preview.dropped.is_empty() {
         output::warn(&format!("Dropped field(s): {}", preview.dropped.join(", ")));
     }
+}
+
+fn conversion_confirmation_impact(preview: &crate::records::ConversionPreview) -> String {
+    let mut impacts = Vec::new();
+    if !preview.dropped.is_empty() {
+        impacts.push(format!("drop field(s): {}", preview.dropped.join(", ")));
+    }
+    if !preview.exposed.is_empty() {
+        impacts.push(format!(
+            "expose protected field(s) as metadata: {}",
+            preview.exposed.join(", ")
+        ));
+    }
+    impacts.join("; ")
 }
 
 /// Every classic (non-record) `xv update` metadata flag that was actually
@@ -7317,6 +7338,8 @@ mod tests {
 
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
+                has_atomic_record_conversion: false,
+                has_enable_disable: false,
                 has_vaults: self.kind == BackendKind::Local,
                 has_file_storage: false,
                 has_rbac: false,

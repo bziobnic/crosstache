@@ -1428,6 +1428,8 @@ mod tests {
 
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
+                has_atomic_record_conversion: false,
+                has_enable_disable: false,
                 has_vaults: true,
                 has_file_storage: false,
                 has_rbac: false,
@@ -1576,6 +1578,8 @@ mod tests {
         }
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
+                has_atomic_record_conversion: false,
+                has_enable_disable: false,
                 has_vaults: true,
                 has_file_storage: true,
                 has_rbac: true,

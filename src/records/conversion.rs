@@ -2,8 +2,8 @@ use crate::backend::{secret::split_denormalized_tags, Backend};
 use crate::error::{CrosstacheError, Result};
 use crate::records::{
     check_tag_budget, encode_envelope, find_type, is_record, parse_envelope,
-    predicted_reserved_tag_count, FieldKind, RecordType, FIELD_TAG_PREFIX, RECORD_CONTENT_TYPE,
-    TYPE_TAG,
+    predicted_reserved_tag_count_for_shape, FieldKind, RecordType, FIELD_TAG_PREFIX,
+    RECORD_CONTENT_TYPE, TYPE_TAG,
 };
 use crate::secret::manager::{FieldUpdate, SecretProperties, SecretUpdateRequest};
 use serde::{Deserialize, Serialize};
@@ -65,7 +65,10 @@ impl ConversionRequest {
 pub struct ConversionPreview {
     pub retained: Vec<String>,
     pub renamed: Vec<String>,
+    pub copied: Vec<String>,
     pub dropped: Vec<String>,
+    pub sensitivity_changes: Vec<String>,
+    pub exposed: Vec<String>,
     pub target_type: Option<String>,
     pub requires_confirmation: bool,
     /// Kept out of serialized previews because these are secret values.
@@ -83,7 +86,10 @@ impl std::fmt::Debug for ConversionPreview {
             .debug_struct("ConversionPreview")
             .field("retained", &self.retained)
             .field("renamed", &self.renamed)
+            .field("copied", &self.copied)
             .field("dropped", &self.dropped)
+            .field("sensitivity_changes", &self.sensitivity_changes)
+            .field("exposed", &self.exposed)
             .field("target_type", &self.target_type)
             .field("requires_confirmation", &self.requires_confirmation)
             .field(
@@ -114,6 +120,7 @@ struct PreparedConversion {
 #[derive(Default)]
 struct SourceFields {
     fields: BTreeMap<String, String>,
+    kinds: BTreeMap<String, FieldKind>,
     primary: Option<String>,
 }
 
@@ -165,6 +172,10 @@ fn source_fields(secret: &SecretProperties, types: &[RecordType]) -> Result<Sour
         ))
     })?;
 
+    let mut kinds: BTreeMap<String, FieldKind> = envelope
+        .keys()
+        .map(|name| (name.clone(), FieldKind::Secret))
+        .collect();
     let mut fields = envelope;
     for (key, value) in &secret.tags {
         if let Some(name) = key.strip_prefix(FIELD_TAG_PREFIX) {
@@ -174,6 +185,7 @@ fn source_fields(secret: &SecretProperties, types: &[RecordType]) -> Result<Sour
                     secret.original_name
                 )));
             }
+            kinds.insert(name.to_string(), FieldKind::Metadata);
         }
     }
 
@@ -187,6 +199,7 @@ fn source_fields(secret: &SecretProperties, types: &[RecordType]) -> Result<Sour
 
     Ok(SourceFields {
         fields,
+        kinds,
         primary: Some(primary),
     })
 }
@@ -228,7 +241,10 @@ fn preview_to_plain(
     Ok(ConversionPreview {
         retained: vec![primary.clone()],
         renamed: Vec::new(),
+        copied: Vec::new(),
         dropped,
+        sensitivity_changes: Vec::new(),
+        exposed: Vec::new(),
         target_type: None,
         requires_confirmation,
         target_secret_fields,
@@ -294,8 +310,12 @@ fn preview_to_type(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
             request.confirm_lossy,
             false,
+            true,
         );
     }
 
@@ -315,6 +335,7 @@ fn preview_to_type(
 
     let target_primary = target.primary().name.clone();
     let mut renamed = Vec::new();
+    let mut copied = Vec::new();
     if !all_target_fields.contains_key(&target_primary)
         && !request.supplied_fields.contains_key(&target_primary)
     {
@@ -323,7 +344,12 @@ fn preview_to_type(
             all_target_fields.insert(target_primary.clone(), value.clone());
             used_source.insert(source_primary.clone());
             if source_primary != &target_primary {
-                renamed.push(format!("{source_primary} -> {target_primary}"));
+                let impact = format!("{source_primary} -> {target_primary}");
+                if retained.iter().any(|name| name == source_primary) {
+                    copied.push(impact);
+                } else {
+                    renamed.push(impact);
+                }
             }
         }
     }
@@ -349,7 +375,28 @@ fn preview_to_type(
         .collect();
     retained.sort();
     renamed.sort();
+    copied.sort();
     dropped.sort();
+    let mut sensitivity_changes = Vec::new();
+    let mut exposed = Vec::new();
+    for field in &target.fields {
+        let Some(source_kind) = source.kinds.get(&field.name) else {
+            continue;
+        };
+        if *source_kind != field.kind {
+            sensitivity_changes.push(format!(
+                "{}: {} -> {}",
+                field.name,
+                kind_name(*source_kind),
+                kind_name(field.kind)
+            ));
+            if *source_kind == FieldKind::Secret && field.kind == FieldKind::Metadata {
+                exposed.push(field.name.clone());
+            }
+        }
+    }
+    sensitivity_changes.sort();
+    exposed.sort();
     let no_op = same_type && all_target_fields == source.fields;
 
     finish_typed_preview(
@@ -358,9 +405,13 @@ fn preview_to_type(
         all_target_fields,
         retained,
         renamed,
+        copied,
         dropped,
+        sensitivity_changes,
+        exposed,
         request.confirm_lossy,
         no_op,
+        false,
     )
 }
 
@@ -371,9 +422,13 @@ fn finish_typed_preview(
     all_target_fields: BTreeMap<String, String>,
     retained: Vec<String>,
     renamed: Vec<String>,
+    copied: Vec<String>,
     dropped: Vec<String>,
+    sensitivity_changes: Vec<String>,
+    exposed: Vec<String>,
     confirm_lossy: bool,
     no_op: bool,
+    allow_missing_required: bool,
 ) -> Result<ConversionPreview> {
     let primary = target.primary();
     if all_target_fields
@@ -387,9 +442,10 @@ fn finish_typed_preview(
     }
     for field in &target.fields {
         if field.required
-            && all_target_fields
-                .get(&field.name)
-                .is_some_and(|value| value.trim().is_empty())
+            && ((!allow_missing_required && !all_target_fields.contains_key(&field.name))
+                || all_target_fields
+                    .get(&field.name)
+                    .is_some_and(|value| value.trim().is_empty()))
         {
             return Err(CrosstacheError::config(format!(
                 "required field '{}' for type '{}' cannot be empty",
@@ -427,18 +483,28 @@ fn finish_typed_preview(
         confirm_lossy,
         no_op,
     );
-    let requires_confirmation = !dropped.is_empty() && !confirm_lossy;
+    let requires_confirmation = (!dropped.is_empty() || !exposed.is_empty()) && !confirm_lossy;
 
     Ok(ConversionPreview {
         retained,
         renamed,
+        copied,
         dropped,
+        sensitivity_changes,
+        exposed,
         target_type: Some(target.name.clone()),
         requires_confirmation,
         target_secret_fields,
         target_metadata_fields,
         prepared,
     })
+}
+
+fn kind_name(kind: FieldKind) -> &'static str {
+    match kind {
+        FieldKind::Metadata => "metadata",
+        FieldKind::Secret => "secret",
+    }
 }
 
 fn prepare_common(
@@ -475,11 +541,22 @@ pub async fn apply_conversion(
     preview: ConversionPreview,
 ) -> Result<SecretProperties> {
     if preview.requires_confirmation
-        || (!preview.dropped.is_empty() && !preview.prepared.confirm_lossy)
+        || ((!preview.dropped.is_empty() || !preview.exposed.is_empty())
+            && !preview.prepared.confirm_lossy)
     {
+        let mut impacts = Vec::new();
+        if !preview.dropped.is_empty() {
+            impacts.push(format!("drop field(s): {}", preview.dropped.join(", ")));
+        }
+        if !preview.exposed.is_empty() {
+            impacts.push(format!(
+                "expose secret field(s) as metadata: {}",
+                preview.exposed.join(", ")
+            ));
+        }
         return Err(CrosstacheError::config(format!(
-            "conversion would drop field(s): {}. Confirm the lossy conversion before applying it",
-            preview.dropped.join(", ")
+            "conversion would {}. Confirm the lossy conversion before applying it",
+            impacts.join(" and ")
         )));
     }
     if preview.prepared.no_op {
@@ -487,6 +564,11 @@ pub async fn apply_conversion(
     }
 
     let caps = backend.capabilities();
+    if !caps.has_atomic_record_conversion {
+        return Err(CrosstacheError::config(
+            "backend does not support atomic record conversion; no changes were written",
+        ));
+    }
     if preview.prepared.groups.is_some() && !caps.has_groups {
         return Err(CrosstacheError::config(
             "backend does not support preserving secret groups during conversion",
@@ -516,13 +598,14 @@ pub async fn apply_conversion(
         }
     }
 
-    let reserved_count = predicted_reserved_tag_count(
+    let reserved_count = predicted_reserved_tag_count_for_shape(
         backend.kind(),
         preview.target_type.is_some(),
         preview.prepared.groups.is_some(),
         preview.prepared.note.is_some(),
         preview.prepared.folder.is_some(),
         preview.prepared.original.expires_on.is_some(),
+        !preview.prepared.content_type.is_empty(),
     );
     let user_tags: BTreeMap<String, String> = preview
         .prepared
@@ -566,7 +649,9 @@ pub async fn apply_conversion(
         name: name.to_string(),
         value: Some(Zeroizing::new(preview.prepared.value)),
         content_type: Some(preview.prepared.content_type),
-        enabled: Some(preview.prepared.original.enabled),
+        enabled: caps
+            .has_enable_disable
+            .then_some(preview.prepared.original.enabled),
         expires_on,
         not_before,
         tags: Some(preview.prepared.tags),
@@ -590,7 +675,9 @@ mod tests {
     use crate::backend::{
         error::BackendError, BackendCapabilities, BackendKind, NameCharset, SecretBackend,
     };
-    use crate::records::{builtin_types, RECORD_CONTENT_TYPE, TYPE_TAG};
+    use crate::records::{
+        builtin_types, FieldDef, RecordType, TypeSource, RECORD_CONTENT_TYPE, TYPE_TAG,
+    };
     use crate::secret::manager::{
         SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
     };
@@ -638,11 +725,45 @@ mod tests {
         )
     }
 
+    fn custom_type(name: &str, token_kind: FieldKind) -> RecordType {
+        RecordType {
+            name: name.into(),
+            source: TypeSource::Project,
+            fields: vec![
+                FieldDef {
+                    name: "password".into(),
+                    kind: FieldKind::Secret,
+                    required: true,
+                    primary: true,
+                },
+                FieldDef {
+                    name: "token".into(),
+                    kind: token_kind,
+                    required: false,
+                    primary: false,
+                },
+            ],
+        }
+    }
+
+    fn custom_record(type_name: &str, token_kind: FieldKind) -> SecretProperties {
+        let mut tags = HashMap::from([(TYPE_TAG.into(), type_name.into())]);
+        let envelope = match token_kind {
+            FieldKind::Secret => r#"{"password":"hunter2","token":"private-token"}"#,
+            FieldKind::Metadata => {
+                tags.insert("f.token".into(), "metadata-token".into());
+                r#"{"password":"hunter2"}"#
+            }
+        };
+        properties(envelope, RECORD_CONTENT_TYPE, tags)
+    }
+
     #[derive(Clone)]
     struct RecordingBackend {
         updates: Arc<Mutex<Vec<SecretUpdateRequest>>>,
         fail_update: bool,
         caps: BackendCapabilities,
+        kind: BackendKind,
     }
 
     impl RecordingBackend {
@@ -650,7 +771,10 @@ mod tests {
             Self {
                 updates: Arc::new(Mutex::new(Vec::new())),
                 fail_update: false,
+                kind: BackendKind::Local,
                 caps: BackendCapabilities {
+                    has_atomic_record_conversion: true,
+                    has_enable_disable: true,
                     has_groups: true,
                     has_folders: true,
                     has_notes: true,
@@ -733,7 +857,7 @@ mod tests {
         }
 
         fn kind(&self) -> BackendKind {
-            BackendKind::Local
+            self.kind
         }
 
         fn capabilities(&self) -> BackendCapabilities {
@@ -929,6 +1053,109 @@ mod tests {
     }
 
     #[test]
+    fn secret_to_metadata_is_reported_as_exposure_and_requires_confirmation() {
+        let source = custom_type("secure", FieldKind::Secret);
+        let target = custom_type("visible", FieldKind::Metadata);
+        let preview = preview_conversion(
+            &custom_record("secure", FieldKind::Secret),
+            &[source, target],
+            ConversionRequest::to_type("visible"),
+        )
+        .unwrap();
+        assert_eq!(preview.exposed, vec!["token"]);
+        assert_eq!(
+            preview.sensitivity_changes,
+            vec!["token: secret -> metadata"]
+        );
+        assert!(preview.requires_confirmation);
+
+        let json = serde_json::to_string(&preview).unwrap();
+        assert!(json.contains("token: secret -> metadata"), "{json}");
+        assert!(!json.contains("private-token"), "{json}");
+        assert!(!format!("{preview:?}").contains("private-token"));
+    }
+
+    #[test]
+    fn metadata_to_secret_is_reported_without_requiring_confirmation() {
+        let source = custom_type("visible", FieldKind::Metadata);
+        let target = custom_type("secure", FieldKind::Secret);
+        let preview = preview_conversion(
+            &custom_record("visible", FieldKind::Metadata),
+            &[source, target],
+            ConversionRequest::to_type("secure"),
+        )
+        .unwrap();
+
+        assert!(preview.exposed.is_empty());
+        assert_eq!(
+            preview.sensitivity_changes,
+            vec!["token: metadata -> secret"]
+        );
+        assert!(!preview.requires_confirmation);
+        assert_eq!(preview.target_secret_fields["token"], "metadata-token");
+
+        let json = serde_json::to_string(&preview).unwrap();
+        assert!(json.contains("token: metadata -> secret"), "{json}");
+        assert!(!json.contains("metadata-token"), "{json}");
+    }
+
+    #[test]
+    fn missing_required_non_primary_target_field_fails_for_record_conversion() {
+        let mut target = builtin_types()
+            .into_iter()
+            .find(|t| t.name == "api-key")
+            .unwrap();
+        target.name = "required-account".into();
+        target
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "account")
+            .unwrap()
+            .required = true;
+        let error = preview_conversion(
+            &login_record(),
+            &[
+                builtin_types()
+                    .into_iter()
+                    .find(|t| t.name == "login")
+                    .unwrap(),
+                target,
+            ],
+            ConversionRequest::to_type("required-account"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("account"));
+    }
+
+    #[test]
+    fn retained_source_primary_copied_to_new_primary_is_not_called_renamed() {
+        let mut target = builtin_types()
+            .into_iter()
+            .find(|t| t.name == "api-key")
+            .unwrap();
+        target.fields.push(crate::records::FieldDef {
+            name: "password".into(),
+            kind: FieldKind::Secret,
+            required: false,
+            primary: false,
+        });
+        let preview = preview_conversion(
+            &login_record(),
+            &[
+                builtin_types()
+                    .into_iter()
+                    .find(|t| t.name == "login")
+                    .unwrap(),
+                target,
+            ],
+            ConversionRequest::to_type("api-key"),
+        )
+        .unwrap();
+        assert!(preview.renamed.is_empty());
+        assert_eq!(preview.copied, vec!["password -> key"]);
+    }
+
+    #[test]
     fn serialized_preview_contains_impact_only_not_secret_values() {
         let preview = preview_conversion(
             &plain("do-not-serialize"),
@@ -1047,6 +1274,61 @@ mod tests {
 
         assert!(error.to_string().contains("folder"));
         assert_eq!(backend.update_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn aws_non_atomic_capability_is_rejected_before_any_sdk_mutation() {
+        let preview = preview_conversion(
+            &plain("token"),
+            &builtin_types(),
+            ConversionRequest::to_type("api-key"),
+        )
+        .unwrap();
+        let mut backend = RecordingBackend::supported();
+        backend.kind = BackendKind::Aws;
+        backend.caps.has_atomic_record_conversion = false;
+        backend.caps.has_enable_disable = false;
+        let error = apply_conversion(&backend, "vault", "secret", preview)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("atomic"));
+        assert_eq!(backend.update_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn backend_without_enable_disable_omits_enabled_for_every_conversion_shape() {
+        let cases = [
+            (
+                plain("token"),
+                ConversionRequest::to_type("api-key"),
+                "plain to record",
+            ),
+            (
+                login_record(),
+                ConversionRequest::to_type("database"),
+                "record to record",
+            ),
+            (
+                login_record(),
+                ConversionRequest::plain(),
+                "record to plain",
+            ),
+        ];
+
+        for (source, mut conversion, label) in cases {
+            conversion.confirm_lossy = true;
+            let preview = preview_conversion(&source, &builtin_types(), conversion).unwrap();
+            let mut backend = RecordingBackend::supported();
+            backend.caps.has_enable_disable = false;
+
+            apply_conversion(&backend, "vault", "secret", preview)
+                .await
+                .unwrap();
+
+            let updates = backend.updates.lock().unwrap();
+            assert_eq!(updates.len(), 1, "{label}");
+            assert_eq!(updates[0].enabled, None, "{label}");
+        }
     }
 
     #[tokio::test]

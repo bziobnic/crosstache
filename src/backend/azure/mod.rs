@@ -180,6 +180,8 @@ impl Backend for AzureBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
+            has_atomic_record_conversion: true,
+            has_enable_disable: true,
             has_vaults: true,
             has_file_storage: {
                 #[cfg(feature = "file-ops")]

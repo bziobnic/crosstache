@@ -103,36 +103,17 @@ impl Backend for AwsBackend {
     }
 
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
-            has_vaults: true,
-            has_file_storage: {
-                #[cfg(feature = "file-ops")]
-                {
-                    self.files_impl.is_some()
-                }
-                #[cfg(not(feature = "file-ops"))]
-                {
-                    false
-                }
-            },
-            has_rbac: false,
-            has_audit: true,
-            has_versioning: true,
-            has_soft_delete: true,
-            has_restore: true,
-            has_purge: true,
-            has_scheduled_purge: true,
-            has_secret_rotation: true,
-            has_groups: true,
-            has_folders: true,
-            has_notes: true,
-            has_expiry: true,
-            max_secret_size: Some(65_536),
-            max_name_length: Some(encoding::MAX_NAME_LEN),
-            name_charset: NameCharset::AwsRelaxed,
-            max_tags: Some(50),
-            max_tag_value_len: Some(256),
-        }
+        let has_file_storage = {
+            #[cfg(feature = "file-ops")]
+            {
+                self.files_impl.is_some()
+            }
+            #[cfg(not(feature = "file-ops"))]
+            {
+                false
+            }
+        };
+        aws_capabilities(has_file_storage)
     }
 
     fn secrets(&self) -> &dyn SecretBackend {
@@ -154,5 +135,44 @@ impl Backend for AwsBackend {
 
     async fn health_check(&self) -> Result<(), BackendError> {
         self.secrets_impl.health_check().await
+    }
+}
+
+fn aws_capabilities(has_file_storage: bool) -> BackendCapabilities {
+    BackendCapabilities {
+        has_atomic_record_conversion: false,
+        has_enable_disable: false,
+        has_vaults: true,
+        has_file_storage,
+        has_rbac: false,
+        has_audit: true,
+        has_versioning: true,
+        has_soft_delete: true,
+        has_restore: true,
+        has_purge: true,
+        has_scheduled_purge: true,
+        has_secret_rotation: true,
+        has_groups: true,
+        has_folders: true,
+        has_notes: true,
+        has_expiry: true,
+        max_secret_size: Some(65_536),
+        max_name_length: Some(encoding::MAX_NAME_LEN),
+        name_charset: NameCharset::AwsRelaxed,
+        max_tags: Some(50),
+        max_tag_value_len: Some(256),
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn aws_explicitly_rejects_atomic_conversion_and_enable_updates() {
+        let capabilities = aws_capabilities(false);
+
+        assert!(!capabilities.has_atomic_record_conversion);
+        assert!(!capabilities.has_enable_disable);
     }
 }

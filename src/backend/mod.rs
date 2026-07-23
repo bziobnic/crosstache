@@ -140,6 +140,10 @@ impl NameCharset {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 pub struct BackendCapabilities {
+    /// One backend call can atomically replace a secret value and all conversion metadata.
+    pub has_atomic_record_conversion: bool,
+    /// Backend supports preserving/changing the enabled flag.
+    pub has_enable_disable: bool,
     /// Multi-vault/namespace support.
     pub has_vaults: bool,
     /// File/blob storage.
@@ -188,6 +192,8 @@ impl Default for BackendCapabilities {
     /// Returns a minimal capability set (everything disabled, unrestricted names).
     fn default() -> Self {
         Self {
+            has_atomic_record_conversion: false,
+            has_enable_disable: false,
             has_vaults: false,
             has_file_storage: false,
             has_rbac: false,

@@ -423,7 +423,7 @@ impl From<BackendCapabilities> for CapabilitySummary {
             rbac: capabilities.has_rbac,
             audit: capabilities.has_audit,
             rotation: capabilities.has_secret_rotation,
-            conversion: true,
+            conversion: capabilities.has_atomic_record_conversion,
             metadata: true,
         }
     }

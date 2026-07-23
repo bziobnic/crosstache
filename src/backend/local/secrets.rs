@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -539,6 +540,7 @@ pub struct LocalSecretBackend {
     /// HMAC key for opaque stems, derived from `identity`. `None` when
     /// `opaque_filenames` is off, so the legacy path never computes it.
     index_key: Option<[u8; 32]>,
+    transaction_fail_after: AtomicU8,
 }
 
 impl LocalSecretBackend {
@@ -563,7 +565,22 @@ impl LocalSecretBackend {
             encrypt_metadata,
             opaque_filenames,
             index_key,
+            transaction_fail_after: AtomicU8::new(0),
         }
+    }
+
+    #[cfg(test)]
+    fn inject_update_failure_after(&self, stage: u8) {
+        self.transaction_fail_after.store(stage, Ordering::SeqCst);
+    }
+
+    fn update_failpoint(&self, stage: u8) -> Result<(), BackendError> {
+        if self.transaction_fail_after.load(Ordering::SeqCst) == stage {
+            return Err(BackendError::Internal(format!(
+                "injected local update failure after stage {stage}"
+            )));
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1459,9 +1476,9 @@ impl SecretBackend for LocalSecretBackend {
         let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         let _lock = lock_vault(&vault_dir)?;
 
-        // Resolve where the active pair lives (opaque, or legacy via the read
-        // fallback). The trailing `ensure_opaque_layout` migrates legacy → opaque
-        // so even a metadata-only update upgrades the layout and clears the leak.
+        // Migrate any legacy layout before the transaction starts, so a later
+        // migration failure can never leave a successfully converted mixed state.
+        self.ensure_opaque_layout(vault, name)?;
         let stem = self.resolve_active_stem(vault, name)?;
         let mp = meta_path(&self.store_path, vault, &stem)?;
         if !mp.exists() {
@@ -1472,41 +1489,16 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         let mut meta = read_meta(&mp, &self.identity)?;
+        let old_meta = meta.clone();
         let now = Utc::now();
 
-        // If value is being updated, replace active first, then archive prior snapshot.
-        if let Some(ref new_value) = request.value {
-            let ap = age_path(&self.store_path, vault, &stem)?;
-            let old_age = fs::read(&ap).map_err(|e| {
-                BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
-            })?;
-            let old_meta = meta.clone();
-
+        if request.value.is_some() {
             let old_num: u32 = meta
                 .version
                 .strip_prefix('v')
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             meta.version = format!("v{}", old_num + 1);
-
-            let ap_tmp = temp_path_for(&ap)?;
-            crypto::encrypt_to_file(&ap_tmp, new_value.as_bytes(), &self.recipients)?;
-            fs::rename(&ap_tmp, &ap).map_err(|e| {
-                BackendError::Internal(format!("activate age {}: {e}", ap.display()))
-            })?;
-
-            archive_snapshot(
-                &self.store_path,
-                vault,
-                &stem,
-                &old_meta.version,
-                &old_age,
-                &old_meta,
-                MetaCrypto {
-                    recipients: &self.recipients,
-                    encrypt: self.encrypt_metadata,
-                },
-            )?;
         }
 
         // Merge or replace tags
@@ -1545,17 +1537,63 @@ impl SecretBackend for LocalSecretBackend {
         meta.folder = request.folder.apply(meta.folder.take());
 
         meta.updated_at = now;
-        write_meta(
-            &mp,
-            &meta,
-            MetaCrypto {
-                recipients: &self.recipients,
-                encrypt: self.encrypt_metadata,
-            },
-        )?;
+        let crypto_opts = MetaCrypto {
+            recipients: &self.recipients,
+            encrypt: self.encrypt_metadata,
+        };
 
-        // Upgrade legacy layout → opaque and refresh the index entry.
-        self.ensure_opaque_layout(vault, name)?;
+        if let Some(ref new_value) = request.value {
+            let ap = age_path(&self.store_path, vault, &stem)?;
+            let old_age = fs::read(&ap).map_err(|e| {
+                BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
+            })?;
+            let ap_tmp = temp_path_for(&ap)?;
+            let mp_tmp = temp_path_for(&mp)?;
+            crypto::encrypt_to_file(&ap_tmp, new_value.as_bytes(), &self.recipients)?;
+            write_meta(&mp_tmp, &meta, crypto_opts)?;
+
+            let archive_dir = versions_dir(&self.store_path, vault, &stem)?;
+            let archive_age = archive_dir.join(format!("{}.age", old_meta.version));
+            let archive_meta = archive_dir.join(format!("{}.meta.json", old_meta.version));
+            let rollback = |cause: BackendError| -> Result<SecretProperties, BackendError> {
+                write_private(&ap, &old_age)
+                    .map_err(|e| BackendError::Internal(format!("rollback active value: {e}")))?;
+                write_meta(&mp, &old_meta, crypto_opts)?;
+                let _ = fs::remove_file(&archive_age);
+                let _ = fs::remove_file(&archive_meta);
+                let _ = fs::remove_file(&ap_tmp);
+                let _ = fs::remove_file(&mp_tmp);
+                Err(cause)
+            };
+
+            if let Err(error) = fs::rename(&ap_tmp, &ap)
+                .map_err(|e| BackendError::Internal(format!("activate age {}: {e}", ap.display())))
+                .and_then(|_| self.update_failpoint(1))
+            {
+                return rollback(error);
+            }
+            if let Err(error) = fs::rename(&mp_tmp, &mp)
+                .map_err(|e| BackendError::Internal(format!("activate meta {}: {e}", mp.display())))
+                .and_then(|_| self.update_failpoint(2))
+            {
+                return rollback(error);
+            }
+            if let Err(error) = archive_snapshot(
+                &self.store_path,
+                vault,
+                &stem,
+                &old_meta.version,
+                &old_age,
+                &old_meta,
+                crypto_opts,
+            )
+            .and_then(|_| self.update_failpoint(3))
+            {
+                return rollback(error);
+            }
+        } else {
+            write_meta(&mp, &meta, crypto_opts)?;
+        }
 
         Ok(meta_to_properties(&meta, None))
     }
@@ -1863,6 +1901,7 @@ impl SecretBackend for LocalSecretBackend {
 mod tests {
     use super::*;
     use crate::backend::local::crypto::generate_keypair;
+    use crate::records::{RECORD_CONTENT_TYPE, TYPE_TAG};
     use crate::secret::manager::FieldUpdate;
     use tempfile::TempDir;
 
@@ -2655,6 +2694,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&*got.value.unwrap(), "new");
+    }
+
+    async fn assert_update_failure_rolls_back(opaque: bool) {
+        for stage in 1..=3 {
+            let (backend, _tmp) = if opaque {
+                test_backend_opaque()
+            } else {
+                test_backend()
+            };
+            backend
+                .set_secret("default", make_request("atomic", "old-value"))
+                .await
+                .unwrap();
+            backend.inject_update_failure_after(stage);
+            let request = SecretUpdateRequest {
+                name: "atomic".into(),
+                value: Some(Zeroizing::new("new-value".into())),
+                content_type: Some(RECORD_CONTENT_TYPE.into()),
+                enabled: Some(false),
+                expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+                not_before: crate::secret::manager::FieldUpdate::Unchanged,
+                tags: Some(HashMap::from([(TYPE_TAG.into(), "api-key".into())])),
+                groups: Some(vec!["new-group".into()]),
+                note: crate::secret::manager::FieldUpdate::Set("new-note".into()),
+                folder: crate::secret::manager::FieldUpdate::Set("new/folder".into()),
+                replace_tags: true,
+                replace_groups: true,
+            };
+            let error = backend
+                .update_secret("default", "atomic", request)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("injected"), "{error}");
+            let current = backend.get_secret("default", "atomic", true).await.unwrap();
+            assert_eq!(
+                current.value.as_deref().map(|v| v.as_str()),
+                Some("old-value")
+            );
+            assert_eq!(current.version, "v1");
+            assert_eq!(current.content_type, "text/plain");
+            assert!(!current.tags.contains_key(TYPE_TAG));
+            assert!(current.enabled);
+            assert_eq!(
+                backend
+                    .list_versions("default", "atomic")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn conversion_update_failures_roll_back_plain_store() {
+        assert_update_failure_rolls_back(false).await;
+    }
+
+    #[tokio::test]
+    async fn conversion_update_failures_roll_back_opaque_store() {
+        assert_update_failure_rolls_back(true).await;
     }
 
     /// An update request that changes nothing — base for tri-state tests.

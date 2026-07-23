@@ -674,6 +674,164 @@ mod build_patched_tags_tests {
 }
 
 #[cfg(test)]
+mod atomic_conversion_update_tests {
+    use super::*;
+    use crate::error::Result;
+    use chrono::{TimeZone, Utc};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use zeroize::Zeroizing;
+
+    struct AtomicUpdateMock {
+        reads: AtomicUsize,
+        updates: Mutex<Vec<SecretRequest>>,
+    }
+
+    impl AtomicUpdateMock {
+        fn new() -> Self {
+            Self {
+                reads: AtomicUsize::new(0),
+                updates: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    fn properties() -> SecretProperties {
+        SecretProperties {
+            name: "secret".into(),
+            original_name: "secret".into(),
+            value: None,
+            version: "1".into(),
+            version_number: Some(1),
+            created_timestamp: 0,
+            created_on: String::new(),
+            updated_on: String::new(),
+            enabled: true,
+            expires_on: None,
+            not_before: None,
+            tags: HashMap::new(),
+            content_type: String::new(),
+            recovery_level: None,
+        }
+    }
+
+    #[async_trait]
+    impl SecretOperations for AtomicUpdateMock {
+        async fn get_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            _include_value: bool,
+        ) -> Result<SecretProperties> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(properties())
+        }
+
+        async fn update_secret(
+            &self,
+            _vault: &str,
+            _name: &str,
+            request: &SecretRequest,
+        ) -> Result<SecretProperties> {
+            self.updates.lock().unwrap().push(request.clone());
+            Ok(properties())
+        }
+
+        async fn set_secret(&self, _v: &str, _r: &SecretRequest) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn get_secret_version(
+            &self,
+            _v: &str,
+            _n: &str,
+            _ver: &str,
+            _i: bool,
+        ) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn list_secrets(&self, _v: &str, _g: Option<&str>) -> Result<Vec<SecretSummary>> {
+            unimplemented!()
+        }
+        async fn delete_secret(&self, _v: &str, _n: &str) -> Result<()> {
+            unimplemented!()
+        }
+        async fn restore_secret(&self, _v: &str, _n: &str) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn purge_secret(&self, _v: &str, _n: &str) -> Result<()> {
+            unimplemented!()
+        }
+        async fn list_deleted_secrets(&self, _v: &str) -> Result<Vec<DeletedSecretSummary>> {
+            unimplemented!()
+        }
+        async fn secret_exists(&self, _v: &str, _n: &str) -> Result<bool> {
+            unimplemented!()
+        }
+        async fn get_secret_versions(&self, _v: &str, _n: &str) -> Result<Vec<SecretProperties>> {
+            unimplemented!()
+        }
+        async fn rollback_secret(
+            &self,
+            _v: &str,
+            _n: &str,
+            _version: &str,
+        ) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+        async fn backup_secret(&self, _v: &str, _n: &str) -> Result<Vec<u8>> {
+            unimplemented!()
+        }
+        async fn restore_secret_from_backup(
+            &self,
+            _v: &str,
+            _b: &[u8],
+        ) -> Result<SecretProperties> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_conversion_shape_uses_one_put_without_a_read_or_patch() {
+        let inner = Arc::new(AtomicUpdateMock::new());
+        let backend = AzureSecretBackend::new(inner.clone());
+        let expires = Utc.with_ymd_and_hms(2030, 1, 2, 0, 0, 0).unwrap();
+        let request = SecretUpdateRequest {
+            name: "secret".into(),
+            value: Some(Zeroizing::new("converted-envelope".into())),
+            content_type: Some("application/vnd.xv.record+json".into()),
+            enabled: Some(false),
+            expires_on: FieldUpdate::Set(expires),
+            not_before: FieldUpdate::Clear,
+            tags: Some(HashMap::from([("xv-type".into(), "api-key".into())])),
+            groups: Some(vec!["ops".into()]),
+            note: FieldUpdate::Set("preserved".into()),
+            folder: FieldUpdate::Clear,
+            replace_tags: true,
+            replace_groups: true,
+        };
+
+        backend
+            .update_secret("vault", "secret", request)
+            .await
+            .unwrap();
+
+        assert_eq!(inner.reads.load(Ordering::SeqCst), 0);
+        let updates = inner.updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0].content_type.as_deref(),
+            Some("application/vnd.xv.record+json")
+        );
+        assert_eq!(updates[0].enabled, Some(false));
+        assert_eq!(updates[0].expires_on, Some(expires));
+        assert_eq!(updates[0].not_before, None);
+        assert_eq!(updates[0].groups.as_deref(), Some(&["ops".to_string()][..]));
+        assert_eq!(updates[0].note.as_deref(), Some("preserved"));
+        assert_eq!(updates[0].folder, None);
+    }
+}
+
+#[cfg(test)]
 mod rollback_version_resolver_tests {
     //! Behavior lock for the friendly-version→GUID resolver that moved into
     //! `AzureSecretBackend::rollback` (`resolve_version_guid`) during Phase 2.
