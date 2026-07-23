@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createPreferenceClient } from './preferences.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function withStorage(run) {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
@@ -134,4 +139,58 @@ test('failed preference saves report a non-blocking Settings error', async () =>
     hint: 'Check config permissions.',
   }]);
   assert.deepEqual(preferences.settingsError(), errors[0]);
+});
+
+test('production markup exposes a persistent accessible Settings error surface', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  assert.match(html, /id="settings-error"[^>]*class="error-panel"[^>]*role="alert"/);
+  assert.match(html, /id="settings-error"[^>]*aria-live="assertive"/);
+  assert.match(html, /Settings need attention/);
+});
+
+test('default Settings renderer shows failures and clears after a successful retry', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const message = { textContent: '' };
+  const hint = { textContent: '' };
+  const surface = {
+    hidden: true,
+    querySelector(selector) {
+      if (selector === '.error-message') return message;
+      if (selector === '.error-hint') return hint;
+      return null;
+    },
+  };
+  globalThis.document = {
+    getElementById(id) { return id === 'settings-error' ? surface : null; },
+  };
+  const clock = manualClock();
+  let putAttempts = 0;
+  const api = async (method, _path, body) => {
+    if (method === 'GET') return { version: 1 };
+    putAttempts += 1;
+    if (putAttempts === 1) {
+      throw Object.assign(new Error('Disk unavailable'), { hint: 'Check config permissions.' });
+    }
+    return body;
+  };
+
+  try {
+    const preferences = createPreferenceClient(api, clock);
+    await preferences.load();
+    assert.equal(preferences.set('theme', 'dark'), true);
+    await assert.doesNotReject(clock.run());
+    assert.equal(surface.hidden, false);
+    assert.equal(message.textContent, 'Disk unavailable');
+    assert.equal(hint.textContent, 'Check config permissions.');
+
+    assert.equal(preferences.set('theme', 'light'), true);
+    await assert.doesNotReject(clock.run());
+    assert.equal(surface.hidden, true);
+    assert.equal(message.textContent, '');
+    assert.equal(hint.textContent, '');
+    assert.equal(preferences.settingsError(), null);
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'document', original);
+    else delete globalThis.document;
+  }
 });

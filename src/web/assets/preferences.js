@@ -68,6 +68,12 @@ function showSettingsError(error) {
   if (!surface) return;
   const message = surface.querySelector?.('.error-message');
   const hint = surface.querySelector?.('.error-hint');
+  if (!error) {
+    if (message) message.textContent = '';
+    if (hint) hint.textContent = '';
+    surface.hidden = true;
+    return;
+  }
   if (message) message.textContent = error.message;
   if (hint) hint.textContent = error.hint;
   surface.hidden = false;
@@ -129,7 +135,10 @@ export function createPreferenceClient(api, options = {}) {
       for (const [key, value] of Object.entries(sentOverrides)) {
         if (sameValue(overrides[key], value)) delete overrides[key];
       }
-      currentError = null;
+      if (currentError !== null) {
+        currentError = null;
+        onSettingsError?.(null);
+      }
       state = immutable(mergeOverrides(saved));
     } catch (error) {
       reportError(error);

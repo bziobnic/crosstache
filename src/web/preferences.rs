@@ -129,7 +129,15 @@ fn validate_widths(name: &str, widths: &[f64], expected: usize) -> Result<()> {
 }
 
 fn reject_vault_data_keys(value: &Value) -> Result<()> {
-    const FORBIDDEN: &[&str] = &[
+    reject_vault_data_keys_in_context(value, false, 0)
+}
+
+fn reject_vault_data_keys_in_context(
+    value: &Value,
+    sensitive_context: bool,
+    depth: usize,
+) -> Result<()> {
+    const EXPLICIT_FORBIDDEN: &[&str] = &[
         "secret",
         "secretname",
         "secretnames",
@@ -137,51 +145,67 @@ fn reject_vault_data_keys(value: &Value) -> Result<()> {
         "secretnotes",
         "secretvalue",
         "secretvalues",
-        "value",
-        "note",
-        "notes",
-        "query",
         "searchquery",
         "searchhistory",
         "clipboard",
+        "clipboardcontent",
         "clipboardcontents",
         "credential",
         "credentials",
         "credentialtoken",
         "credentialstoken",
         "password",
-        "token",
-        "tokens",
         "accesstoken",
         "authtoken",
         "apikey",
         "vaultdata",
     ];
+    const AMBIGUOUS_LEAVES: &[&str] = &["value", "note", "notes", "query", "token", "tokens"];
+    const SENSITIVE_CONTEXTS: &[&str] = &[
+        "auth",
+        "authentication",
+        "clipboard",
+        "credential",
+        "credentials",
+        "record",
+        "search",
+        "secret",
+        "secrets",
+        "session",
+        "vault",
+    ];
 
     match value {
         Value::Object(object) => {
             for (key, nested) in object {
-                let normalized: String = key
-                    .chars()
-                    .filter(|character| character.is_ascii_alphanumeric())
-                    .flat_map(char::to_lowercase)
-                    .collect();
-                if FORBIDDEN.contains(&normalized.as_str()) {
+                let normalized = canonical_key(key);
+                let ambiguous_sensitive = AMBIGUOUS_LEAVES.contains(&normalized.as_str())
+                    && (depth == 0 || sensitive_context);
+                if EXPLICIT_FORBIDDEN.contains(&normalized.as_str()) || ambiguous_sensitive {
                     return Err(CrosstacheError::invalid_argument(format!(
                         "UI preferences cannot contain vault data key '{key}'"
                     )));
                 }
-                reject_vault_data_keys(nested)?;
+                let nested_sensitive =
+                    sensitive_context || SENSITIVE_CONTEXTS.contains(&normalized.as_str());
+                reject_vault_data_keys_in_context(nested, nested_sensitive, depth + 1)?;
             }
         }
         Value::Array(values) => {
             for nested in values {
-                reject_vault_data_keys(nested)?;
+                reject_vault_data_keys_in_context(nested, sensitive_context, depth)?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+fn canonical_key(key: &str) -> String {
+    key.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 pub(crate) fn preference_path_for(config_path: &Path) -> PathBuf {
@@ -204,10 +228,8 @@ impl PreferenceStore {
 
     pub(crate) async fn load(&self) -> Result<UiPreferencesV1> {
         let mut preferences = match tokio::fs::read(&self.path).await {
-            Ok(bytes) => UiPreferencesV1::from_json(serde_json::from_slice(&bytes)?)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                UiPreferencesV1::default()
-            }
+            Ok(bytes) => self.parse_json(serde_json::from_slice(&bytes)?)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.defaults(),
             Err(error) => return Err(error.into()),
         };
         self.clamp_exposure_timeout(&mut preferences);
@@ -215,7 +237,7 @@ impl PreferenceStore {
     }
 
     pub(crate) async fn save_json(&self, value: Value) -> Result<UiPreferencesV1> {
-        let mut preferences = UiPreferencesV1::from_json(value)?;
+        let mut preferences = self.parse_json(value)?;
         self.clamp_exposure_timeout(&mut preferences);
         let mut bytes = serde_json::to_vec_pretty(&preferences)?;
         bytes.push(b'\n');
@@ -229,6 +251,32 @@ impl PreferenceStore {
                 .exposure_timeout_seconds
                 .min(self.clipboard_timeout);
         }
+    }
+
+    fn default_exposure_timeout(&self) -> u64 {
+        if self.clipboard_timeout == 0 {
+            default_exposure_timeout_seconds()
+        } else {
+            self.clipboard_timeout
+        }
+    }
+
+    fn defaults(&self) -> UiPreferencesV1 {
+        UiPreferencesV1 {
+            exposure_timeout_seconds: self.default_exposure_timeout(),
+            ..UiPreferencesV1::default()
+        }
+    }
+
+    fn parse_json(&self, value: Value) -> Result<UiPreferencesV1> {
+        let has_exposure_timeout = value
+            .as_object()
+            .is_some_and(|object| object.contains_key("exposure_timeout_seconds"));
+        let mut preferences = UiPreferencesV1::from_json(value)?;
+        if !has_exposure_timeout {
+            preferences.exposure_timeout_seconds = self.default_exposure_timeout();
+        }
+        Ok(preferences)
     }
 }
 
@@ -279,6 +327,7 @@ mod tests {
             "search.query",
             "search_history",
             "clipboard.contents",
+            "clipboard_content",
             "credentials.token",
             "api_key",
         ] {
@@ -286,6 +335,35 @@ mod tests {
                 UiPreferencesV1::from_json(json!({"version": 1, (key): "sensitive"})).is_err(),
                 "accepted forbidden preference key {key}"
             );
+        }
+    }
+
+    #[test]
+    fn ambiguous_future_presentation_leaf_keys_are_ignored_outside_sensitive_contexts() {
+        let preferences = UiPreferencesV1::from_json(json!({
+            "version": 1,
+            "design": {
+                "value": "compact",
+                "note": "future design metadata",
+                "token": "spacing-unit",
+                "tokens": {"surface": "forest"}
+            }
+        }))
+        .unwrap();
+
+        let canonical = serde_json::to_value(preferences).unwrap();
+        assert_eq!(canonical.as_object().unwrap().len(), 6);
+        assert!(canonical.get("design").is_none());
+    }
+
+    #[test]
+    fn ambiguous_leaf_keys_are_rejected_in_sensitive_contexts() {
+        for value in [
+            json!({"version": 1, "auth": {"token": "bearer"}}),
+            json!({"version": 1, "search": {"query": "DB_URL"}}),
+            json!({"version": 1, "record": {"note": "secret note"}}),
+        ] {
+            assert!(UiPreferencesV1::from_json(value).is_err());
         }
     }
 
@@ -350,6 +428,25 @@ mod tests {
             }
         );
         assert!(!temp.path().join("ui.json").exists());
+    }
+
+    #[tokio::test]
+    async fn missing_timeout_uses_nonzero_policy_or_30_second_fallback() {
+        for (policy, expected) in [(12, 12), (30, 30), (60, 60), (0, 30)] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("ui.json");
+            let store = PreferenceStore::new(path.clone(), policy);
+            assert_eq!(
+                store.load().await.unwrap().exposure_timeout_seconds,
+                expected
+            );
+
+            std::fs::write(&path, br#"{"version":1,"theme":"dark"}"#).unwrap();
+            assert_eq!(
+                store.load().await.unwrap().exposure_timeout_seconds,
+                expected
+            );
+        }
     }
 
     #[tokio::test]
