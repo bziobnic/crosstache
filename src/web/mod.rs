@@ -39,6 +39,7 @@ const APP_JS: &str = concat!(
     include_str!("assets/app.js"),
     include_str!("assets/context.js"),
     include_str!("assets/secrets.js"),
+    include_str!("assets/settings.js"),
 );
 #[cfg(test)]
 const STYLE_CSS: &str = include_str!("assets/style.css");
@@ -64,6 +65,7 @@ fn asset(path: &str) -> Option<(&'static str, &'static str)> {
             "application/javascript",
             include_str!("assets/preferences.js"),
         )),
+        "/settings.js" => Some(("application/javascript", include_str!("assets/settings.js"))),
         "/ui-model.js" => Some(("application/javascript", include_str!("assets/ui-model.js"))),
         "/style.css" => Some(("text/css", include_str!("assets/style.css"))),
         _ => None,
@@ -519,6 +521,7 @@ mod tests {
             "/accessibility.js",
             "/secrets.js",
             "/preferences.js",
+            "/settings.js",
             "/commands.js",
             "/files.js",
         ] {

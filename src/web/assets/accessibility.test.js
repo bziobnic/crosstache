@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   mountRovingFocus,
   mountTabs,
+  setBackgroundInert,
   syncVisibleSelection,
 } from './accessibility.js';
 
@@ -21,6 +22,7 @@ class TestElement {
   }
 
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  removeAttribute(name) { this.attributes.delete(name); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
   addEventListener(type, listener) {
     const listeners = this.listeners.get(type) || [];
@@ -162,4 +164,30 @@ test('syncVisibleSelection reports visible-only checked and mixed state', () => 
       mixed: false,
     },
   );
+});
+
+test('background inert targets app surfaces without disabling an active utility header', () => {
+  const appHeader = new TestElement('app-header');
+  const main = new TestElement('main');
+  const contextRail = new TestElement('context-rail');
+  const dialogHeader = new TestElement('help-header');
+  const close = new TestElement('help-close');
+  const document = {
+    querySelectorAll(selector) {
+      assert.equal(selector, '#app-header, main, #context-rail');
+      return [appHeader, main, contextRail];
+    },
+  };
+
+  setBackgroundInert(document, true);
+  for (const surface of [appHeader, main, contextRail]) {
+    assert.equal(surface.getAttribute('aria-hidden'), 'true');
+  }
+  assert.equal(dialogHeader.getAttribute('aria-hidden'), null);
+  assert.equal(close.getAttribute('aria-hidden'), null);
+
+  setBackgroundInert(document, false);
+  for (const surface of [appHeader, main, contextRail]) {
+    assert.equal(surface.getAttribute('aria-hidden'), null);
+  }
 });

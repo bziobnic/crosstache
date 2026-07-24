@@ -984,6 +984,13 @@ function initColumnResizing() {
       };
     });
   }
+  document.addEventListener?.('xv:layout-reset', (event) => {
+    for (const kind of ['secrets', 'files']) {
+      const widths = event.detail?.columnWidths?.[kind] ?? TABLE_WIDTHS[kind].defaults;
+      applyColumnWidths(kind, [...widths]);
+      saveColumnWidths(kind);
+    }
+  });
 }
 
 const secretSelection = { enabled: false, pending: false, ids: new Set(), visibleIds: [], generation: 0 };

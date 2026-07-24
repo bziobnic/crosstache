@@ -6,6 +6,7 @@ import { mountSecrets } from './secrets.js';
 import { createPreferenceClient } from './preferences.js';
 import { formatContextLine, mountContextRail } from './context.js';
 import { createCommandRegistry, mountCommandPalette } from './commands.js';
+import { mountHelp, mountSettings } from './settings.js';
 
 // Persist the session token per tab, then scrub it from the URL.
 const TOKEN_STORAGE_KEY = 'xv.ui.token';
@@ -49,16 +50,25 @@ const confirmNavigation = () => guardNavigation({
   confirmDiscard: () => dialogs.confirmDiscard(),
 });
 
-function applyTheme(theme) {
-  if (document.documentElement) document.documentElement.dataset.theme = theme;
-  if (themeSelect) themeSelect.value = theme;
-}
+const settings = mountSettings({
+  preferences,
+  securityPolicy: () => store.snapshot().context?.security ?? 0,
+});
+const help = mountHelp({
+  context: () => store.snapshot().context,
+});
+store.subscribe((_snapshot, event) => {
+  if (event.type === 'context/loaded' || event.type === 'context/switch-succeeded') {
+    settings.refresh();
+    help.refresh();
+  }
+});
 
 async function retrySettings(button) {
   button.disabled = true;
   try {
     await preferences.retry();
-    applyTheme(preferences.get('theme', 'system'));
+    settings.refresh();
   } finally {
     button.disabled = false;
   }
@@ -69,23 +79,20 @@ for (const id of ['settings-retry', 'settings-error-retry']) {
   button.onclick = () => retrySettings(button);
 }
 
-void preferences.load().then(() => {
-  const theme = preferences.get('theme', 'system');
-  applyTheme(theme);
-});
 const contextRail = token ? mountContextRail({
   store,
   api,
   guardNavigation: confirmNavigation,
 }) : null;
 
-function bindApplicationDialog({ openId, dialogId, closeId, initialFocus }) {
+function bindApplicationDialog({ openId, dialogId, closeId, initialFocus, beforeOpen = () => {} }) {
   const open = document.getElementById(openId);
   const dialog = document.getElementById(dialogId);
   const close = document.getElementById(closeId);
   const dismiss = () => dialogs.closeModal(dialog);
   open.onclick = () => {
     if (store.snapshot().contextSwitchPending) return;
+    beforeOpen();
     dialogs.openModal(dialog, {
       initialFocus: initialFocus(),
       invoker: open,
@@ -101,20 +108,15 @@ bindApplicationDialog({
   dialogId: 'help-dialog',
   closeId: 'help-close',
   initialFocus: () => document.getElementById('help-close'),
+  beforeOpen: help.refresh,
 });
 bindApplicationDialog({
   openId: 'settings-open',
   dialogId: 'settings-dialog',
   closeId: 'settings-close',
   initialFocus: () => themeSelect,
+  beforeOpen: settings.refresh,
 });
-
-themeSelect.onchange = async () => {
-  await preferences.load();
-  const theme = themeSelect.value;
-  preferences.set('theme', theme);
-  applyTheme(theme);
-};
 
 mountSecrets({
   api,

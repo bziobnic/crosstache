@@ -107,6 +107,7 @@ pub(crate) struct TransferSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct EffectiveUiContext {
+    pub(crate) config_path: PathBuf,
     pub(crate) backend: String,
     pub(crate) backend_kind: BackendKind,
     pub(crate) vault: String,
@@ -319,6 +320,7 @@ pub(crate) async fn resolve_ui_context_from_effective(
             .collect(),
     };
     let context = EffectiveUiContext {
+        config_path: Config::get_config_path()?,
         backend: target.entry.backend.clone(),
         backend_kind: target.backend.kind(),
         vault: target.entry.vault.clone(),
@@ -461,6 +463,7 @@ impl CapabilitySummary {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::Path;
 
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
@@ -639,6 +642,13 @@ vaults = [
         assert_eq!(json["security"]["clipboard_timeout_seconds"], 17);
         assert_eq!(json["transfers"]["max_concurrent_uploads"], 3);
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+        let config_path = json["config_path"]
+            .as_str()
+            .expect("display-safe config path");
+        assert!(
+            Path::new(config_path).ends_with(Path::new("xv").join("xv.conf")),
+            "context exposes only the resolved filesystem config path"
+        );
 
         let text = json.to_string().to_ascii_lowercase();
         for forbidden in [

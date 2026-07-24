@@ -26,7 +26,7 @@ function modalDocument() {
     main: null,
     contextRail: null,
     querySelectorAll(selector) {
-      return selector === 'header, main, #context-rail'
+      return selector === '#app-header, main, #context-rail'
         ? [this.header, this.main, this.contextRail]
         : [];
     },

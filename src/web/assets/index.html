@@ -68,9 +68,8 @@
   <section id="secrets-view" role="tabpanel" aria-labelledby="tab-secrets">
     <div class="view-heading">
       <div>
-        <span class="eyebrow">Vault contents</span>
-        <h1>Your secrets</h1>
-        <p>Browse, organize, and safely manage credentials in this vault.</p>
+        <span class="eyebrow">Current vault</span>
+        <h1>Secrets</h1>
       </div>
       <span id="secret-item-count" class="item-count" aria-live="polite">0 secrets</span>
     </div>
@@ -141,9 +140,8 @@
   <section id="files-view" role="tabpanel" aria-labelledby="tab-files" hidden>
     <div class="view-heading">
       <div>
-        <span class="eyebrow">Vault files</span>
-        <h1>Your files</h1>
-        <p>Upload, download, and organize encrypted files in this vault.</p>
+        <span class="eyebrow">Current vault</span>
+        <h1>Files</h1>
       </div>
       <span id="file-item-count" class="item-count" aria-live="polite">0 files</span>
     </div>
@@ -241,7 +239,6 @@
       <div>
         <span class="eyebrow">Recoverable deletion</span>
         <h1>Trash</h1>
-        <p>Restore deleted secrets or permanently purge them when policy allows.</p>
       </div>
       <span id="trash-item-count" class="item-count" aria-live="polite">0 deleted secrets</span>
     </div>
@@ -435,39 +432,93 @@
   </div>
 </section>
 
-<section id="help-dialog" class="confirmation-dialog application-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1" hidden>
-  <h2 id="help-title">Help</h2>
-  <p><strong>Effective context:</strong> <span data-context-copy></span></p>
-  <p>Every create, edit, delete, restore, purge, and upload is bound to the backend and vault shown here.</p>
-  <h3>Keyboard shortcuts</h3>
-  <dl class="shortcut-list">
-    <dt><kbd>⌘K</kbd> or <kbd>Ctrl+K</kbd></dt><dd>Open Commands</dd>
-    <dt><kbd>/</kbd></dt><dd>Search the current list</dd>
-    <dt><kbd>⌘N</kbd> or <kbd>Ctrl+N</kbd></dt><dd>Create a secret</dd>
-    <dt><kbd>Escape</kbd></dt><dd>Close the current dialog</dd>
-    <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Move between content tabs</dd>
-  </dl>
-  <div class="confirmation-actions">
-    <button type="button" id="help-close" class="button primary">Close Help</button>
+<section id="help-dialog" class="application-dialog utility-sheet" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1" hidden>
+  <header class="utility-sheet-header">
+    <div><span class="eyebrow">Reference</span><h2 id="help-title">Help</h2></div>
+    <button type="button" id="help-close" class="button ghost" aria-label="Close Help">Close</button>
+  </header>
+  <div class="utility-sheet-body">
+    <section class="utility-group" aria-labelledby="help-session-title">
+      <h3 id="help-session-title">Effective context</h3>
+      <strong id="help-context-summary">Loading context…</strong>
+      <p>Actions use the backend and vault shown in the context rail.</p>
+    </section>
+    <section class="utility-group" aria-labelledby="help-capability-title">
+      <h3 id="help-capability-title">Available here</h3>
+      <p id="help-capabilities">Capabilities load with the current context.</p>
+    </section>
+    <section class="utility-group" aria-labelledby="help-shortcuts-title">
+      <h3 id="help-shortcuts-title">Shortcuts</h3>
+      <dl class="shortcut-list">
+        <dt><kbd>⌘K</kbd> / <kbd>Ctrl+K</kbd></dt><dd>Commands</dd>
+        <dt><kbd>/</kbd></dt><dd>Search this list</dd>
+        <dt><kbd>⌘N</kbd> / <kbd>Ctrl+N</kbd></dt><dd>New secret</dd>
+        <dt><kbd>Escape</kbd></dt><dd>Close a sheet or dialog</dd>
+        <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Move between tabs</dd>
+      </dl>
+    </section>
+    <section class="utility-group" aria-labelledby="help-security-title">
+      <h3 id="help-security-title">Local-session security</h3>
+      <p>This UI is served locally. The session link is scoped to this tab and removed from the address bar after opening. It is never included in copied diagnostics.</p>
+    </section>
+    <section class="utility-group help-diagnostics" aria-labelledby="help-diagnostics-title">
+      <h3 id="help-diagnostics-title">Diagnostics</h3>
+      <dl>
+        <dt>Config</dt><dd id="help-config-path">Loading…</dd>
+        <dt>Version</dt><dd id="help-version">Loading…</dd>
+      </dl>
+      <button type="button" id="help-copy-diagnostics" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy redacted diagnostics</button>
+      <span id="help-copy-status" class="utility-live" role="status" aria-live="polite"></span>
+    </section>
   </div>
 </section>
 
-<section id="settings-dialog" class="confirmation-dialog application-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1" hidden>
-  <h2 id="settings-title">Settings</h2>
-  <p>Presentation settings stay separate from vault data.</p>
-  <label class="form-field" for="theme-select"><span class="field-label">Theme</span>
-    <select id="theme-select">
-      <option value="system">System</option>
-      <option value="light">Light</option>
-      <option value="dark">Dark</option>
-    </select>
-  </label>
-  <div id="settings-error" class="error-panel" role="alert" aria-live="assertive" aria-atomic="true" hidden>
-    <div><strong>Settings need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
-    <button class="button secondary" id="settings-error-retry" type="button">Retry Settings</button>
-  </div>
-  <div class="confirmation-actions">
-    <button type="button" id="settings-close" class="button primary">Close Settings</button>
+<section id="settings-dialog" class="application-dialog utility-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1" hidden>
+  <header class="utility-sheet-header">
+    <div><span class="eyebrow">Presentation</span><h2 id="settings-title">Settings</h2></div>
+    <button type="button" id="settings-close" class="button ghost" aria-label="Close Settings">Close</button>
+  </header>
+  <div class="utility-sheet-body">
+    <section class="utility-group" aria-labelledby="settings-appearance-title">
+      <h3 id="settings-appearance-title">Appearance</h3>
+      <label class="form-field" for="theme-select"><span class="field-label">Theme</span>
+        <select id="theme-select">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+    </section>
+    <section class="utility-group" aria-labelledby="settings-protection-title">
+      <h3 id="settings-protection-title">Protected values</h3>
+      <label class="form-field" for="exposure-timeout-select"><span class="field-label">Protected value timeout</span>
+        <select id="exposure-timeout-select">
+          <option value="15">15 seconds</option>
+          <option value="30">30 seconds</option>
+          <option value="60">1 minute</option>
+          <option value="120">2 minutes</option>
+        </select>
+      </label>
+      <p>Longer choices are limited by the application security policy.</p>
+    </section>
+    <section class="utility-group" aria-labelledby="settings-lists-title">
+      <h3 id="settings-lists-title">Lists</h3>
+      <label class="form-field" for="density-select"><span class="field-label">List density</span>
+        <select id="density-select">
+          <option value="comfortable">Comfortable</option>
+          <option value="compact">Compact</option>
+        </select>
+      </label>
+    </section>
+    <section class="utility-group utility-reset" aria-labelledby="settings-layout-title">
+      <div><h3 id="settings-layout-title">Layout</h3><p>Restore list density and column widths. Vault, folder, and theme state stay intact.</p></div>
+      <button type="button" id="layout-reset" class="button secondary">Reset layout</button>
+    </section>
+    <span id="settings-live" class="utility-live" role="status" aria-live="polite"></span>
+    <div id="settings-error" class="error-panel" role="alert" aria-live="assertive" aria-atomic="true" hidden>
+      <div><strong>Settings need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary" id="settings-error-retry" type="button">Retry Settings</button>
+    </div>
   </div>
 </section>
 

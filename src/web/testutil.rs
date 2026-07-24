@@ -41,6 +41,9 @@ pub(crate) fn test_context(
     };
 
     EffectiveUiContext {
+        config_path: std::env::temp_dir()
+            .join("xv-web-test-config")
+            .join("xv.conf"),
         backend: backend.name().to_string(),
         backend_kind: backend.kind(),
         vault: vault.to_string(),
