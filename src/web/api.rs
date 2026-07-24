@@ -22,11 +22,16 @@ use super::WebState;
 
 pub(crate) enum ApiError {
     App(CrosstacheError),
-    /// Ad-hoc status/message for handler-level validation errors that don't
-    /// map to a `CrosstacheError` variant. Constructed starting in Task 4's
-    /// secret handlers (request parsing/validation).
-    #[allow(dead_code)]
-    Status(StatusCode, String),
+    Backend(BackendError),
+    Structured {
+        status: StatusCode,
+        error: Box<super::errors::ApiErrorBody>,
+    },
+    Validation {
+        status: StatusCode,
+        message: &'static str,
+        field: Option<&'static str>,
+    },
 }
 
 impl From<CrosstacheError> for ApiError {
@@ -37,57 +42,54 @@ impl From<CrosstacheError> for ApiError {
 
 impl From<BackendError> for ApiError {
     fn from(e: BackendError) -> Self {
-        Self::App(e.into())
+        Self::Backend(e)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, msg) = match self {
-            ApiError::Status(s, m) => (s, m),
-            ApiError::App(e) => {
-                use CrosstacheError::*;
-                let status = match &e {
-                    SecretNotFound { .. } | VaultNotFound { .. } => StatusCode::NOT_FOUND,
-                    PermissionDenied(_) => StatusCode::FORBIDDEN,
-                    AuthenticationError(_) => StatusCode::UNAUTHORIZED,
-                    Conflict(_) => StatusCode::CONFLICT,
-                    RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-                    InvalidArgument(_) => StatusCode::BAD_REQUEST,
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                };
-                (status, e.to_string())
-            }
+        let (status, error) = match self {
+            ApiError::App(error) => super::errors::crosstache_error(error),
+            ApiError::Backend(error) => super::errors::backend_error(error),
+            ApiError::Structured { status, error } => (status, *error),
+            ApiError::Validation {
+                status,
+                message,
+                field,
+            } => (
+                status,
+                super::errors::ApiErrorBody::validation(message, field),
+            ),
         };
-        (status, Json(json!({ "error": msg }))).into_response()
+        (status, Json(super::errors::ApiErrorEnvelope { error })).into_response()
     }
 }
 
-pub(crate) async fn get_context(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
-    let caps = state.backend.capabilities();
-    Json(json!({
-        "backend": state.backend.name(),
-        "vault": state.vault,
-        "capabilities": {
-            "vaults": caps.has_vaults,
-            "files": caps.has_file_storage,
-            "folders": caps.has_folders,
-            "groups": caps.has_groups,
-            "notes": caps.has_notes,
-            "expiry": caps.has_expiry,
-        }
-    }))
+pub(crate) fn validation_error(
+    status: StatusCode,
+    message: &'static str,
+    field: Option<&'static str>,
+) -> ApiError {
+    ApiError::Validation {
+        status,
+        message,
+        field,
+    }
 }
 
 pub(crate) async fn list_vaults(
     State(state): State<Arc<WebState>>,
+    Query(q): Query<VaultQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    match state.backend.vaults() {
+    let target = q.target(&state)?;
+    match target.backend.vaults() {
         Some(v) => {
             let vaults = v.list_vaults(None).await?;
             Ok(Json(json!({ "vaults": vaults })))
         }
-        None => Ok(Json(json!({ "vaults": [{ "name": state.vault }] }))),
+        None => Ok(Json(
+            json!({ "vaults": [{ "name": target.context.vault }] }),
+        )),
     }
 }
 
@@ -97,18 +99,26 @@ pub(crate) async fn list_types(State(state): State<Arc<WebState>>) -> Json<serde
 
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
+    alias: Option<String>,
+    backend: Option<String>,
     vault: Option<String>,
     group: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct VaultQuery {
+    alias: Option<String>,
+    backend: Option<String>,
     vault: Option<String>,
 }
 
 impl VaultQuery {
-    fn vault<'a>(&'a self, state: &'a WebState) -> &'a str {
-        self.vault.as_deref().unwrap_or(&state.vault)
+    pub(crate) fn target(&self, state: &WebState) -> Result<super::ScopedWebTarget, ApiError> {
+        state.scoped_target(
+            self.alias.as_deref(),
+            self.backend.as_deref(),
+            self.vault.as_deref(),
+        )
     }
 }
 
@@ -116,11 +126,12 @@ pub(crate) async fn list_secrets(
     State(state): State<Arc<WebState>>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<SecretSummary>>, ApiError> {
-    let vault = q.vault.as_deref().unwrap_or(&state.vault);
-    let secrets = state
+    let target =
+        state.scoped_target(q.alias.as_deref(), q.backend.as_deref(), q.vault.as_deref())?;
+    let secrets = target
         .backend
         .secrets()
-        .list_secrets(vault, q.group.as_deref())
+        .list_secrets(&target.context.vault, q.group.as_deref())
         .await?;
     Ok(Json(secrets))
 }
@@ -130,10 +141,11 @@ pub(crate) async fn get_secret(
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
 ) -> Result<Json<SecretProperties>, ApiError> {
-    let props = state
+    let target = q.target(&state)?;
+    let props = target
         .backend
         .secrets()
-        .get_secret(q.vault(&state), &name, false)
+        .get_secret(&target.context.vault, &name, false)
         .await?;
     Ok(Json(props))
 }
@@ -143,10 +155,11 @@ pub(crate) async fn reveal_secret(
     Path(name): Path<String>,
     Query(q): Query<VaultQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let props = state
+    let target = q.target(&state)?;
+    let props = target
         .backend
         .secrets()
-        .get_secret(q.vault(&state), &name, true)
+        .get_secret(&target.context.vault, &name, true)
         .await?;
     Ok(Json(
         json!({ "value": props.value.as_ref().map(|v| v.as_str()) }),
@@ -187,10 +200,11 @@ pub(crate) async fn put_secret(
         note: body.note,
         folder: body.folder,
     };
-    let props = state
+    let target = q.target(&state)?;
+    let props = target
         .backend
         .secrets()
-        .set_secret(q.vault(&state), request)
+        .set_secret(&target.context.vault, request)
         .await?;
     Ok(Json(props))
 }
@@ -216,14 +230,21 @@ fn str_field(v: Option<String>) -> FieldUpdate<String> {
     }
 }
 
-fn date_field(v: Option<String>) -> Result<FieldUpdate<DateTime<Utc>>, ApiError> {
+fn date_field(
+    v: Option<String>,
+    field: &'static str,
+) -> Result<FieldUpdate<DateTime<Utc>>, ApiError> {
     match v {
         None => Ok(FieldUpdate::Unchanged),
         Some(s) if s.is_empty() => Ok(FieldUpdate::Clear),
         Some(s) => DateTime::parse_from_rfc3339(&s)
             .map(|d| FieldUpdate::Set(d.with_timezone(&Utc)))
-            .map_err(|e| {
-                ApiError::Status(StatusCode::BAD_REQUEST, format!("bad timestamp '{s}': {e}"))
+            .map_err(|_| {
+                validation_error(
+                    StatusCode::BAD_REQUEST,
+                    "Enter a valid timestamp.",
+                    Some(field),
+                )
             }),
     }
 }
@@ -237,11 +258,12 @@ pub(crate) async fn patch_secret(
     reject_reserved_attachment_key(&name)?;
     let request = SecretUpdateRequest {
         name: name.clone(),
+        expected_revision: None,
         value: None,
         content_type: None,
         enabled: body.enabled,
-        expires_on: date_field(body.expires_on)?,
-        not_before: date_field(body.not_before)?,
+        expires_on: date_field(body.expires_on, "expires_on")?,
+        not_before: date_field(body.not_before, "not_before")?,
         tags: body.tags,
         groups: body.groups,
         note: str_field(body.note),
@@ -249,10 +271,11 @@ pub(crate) async fn patch_secret(
         replace_tags: true,
         replace_groups: true,
     };
-    let props = state
+    let target = q.target(&state)?;
+    let props = target
         .backend
         .secrets()
-        .update_secret(q.vault(&state), &name, request)
+        .update_secret(&target.context.vault, &name, request)
         .await?;
     Ok(Json(props))
 }
@@ -263,10 +286,11 @@ pub(crate) async fn delete_secret(
     Query(q): Query<VaultQuery>,
 ) -> Result<StatusCode, ApiError> {
     reject_reserved_attachment_key(&name)?;
-    state
+    let target = q.target(&state)?;
+    target
         .backend
         .secrets()
-        .delete_secret(q.vault(&state), &name)
+        .delete_secret(&target.context.vault, &name)
         .await?;
     Ok(StatusCode::OK)
 }
@@ -275,15 +299,12 @@ pub(crate) async fn delete_secret(
 /// UI has no confirm plumbing to warn (unlike the CLI's `confirm_destructive`
 /// prompts), so writing, deleting, or renaming it from here is rejected
 /// outright.
-fn reject_reserved_attachment_key(name: &str) -> Result<(), ApiError> {
+pub(crate) fn reject_reserved_attachment_key(name: &str) -> Result<(), ApiError> {
     if name == crate::secret::attachments::ATTACHMENT_KEY_SECRET {
-        return Err(ApiError::Status(
+        return Err(validation_error(
             StatusCode::BAD_REQUEST,
-            format!(
-                "'{name}' is the attachment encryption key for this vault; writing, deleting, \
-                 or renaming it would make all attachments unreadable. Use the CLI \
-                 (`xv set` / `xv delete --force` / `xv mv`) if you really mean to."
-            ),
+            "The attachment encryption key cannot be changed from the web interface.",
+            Some("name"),
         ));
     }
     Ok(())
@@ -301,20 +322,22 @@ pub(crate) async fn move_secret(
     Query(q): Query<VaultQuery>,
     Json(body): Json<MoveBody>,
 ) -> Result<Json<SecretProperties>, ApiError> {
-    let vault = q.vault(&state).to_string();
+    let target = q.target(&state)?;
+    let vault = &target.context.vault;
     match (body.new_name, body.folder) {
         (Some(new_name), None) => {
             reject_reserved_attachment_key(&name)?;
-            let props = state
+            let props = target
                 .backend
                 .secrets()
-                .rename_secret(&vault, &name, &new_name)
+                .rename_secret(vault, &name, &new_name)
                 .await?;
             Ok(Json(props))
         }
         (None, Some(folder)) => {
             let request = SecretUpdateRequest {
                 name: name.clone(),
+                expected_revision: None,
                 value: None,
                 content_type: None,
                 enabled: None,
@@ -327,16 +350,17 @@ pub(crate) async fn move_secret(
                 replace_tags: false,
                 replace_groups: false,
             };
-            let props = state
+            let props = target
                 .backend
                 .secrets()
-                .update_secret(&vault, &name, request)
+                .update_secret(vault, &name, request)
                 .await?;
             Ok(Json(props))
         }
-        _ => Err(ApiError::Status(
+        _ => Err(validation_error(
             StatusCode::BAD_REQUEST,
-            "provide exactly one of new_name or folder".into(),
+            "Provide either a new name or a destination folder.",
+            Some("name"),
         )),
     }
 }
@@ -345,8 +369,7 @@ pub(crate) async fn move_secret(
 pub(crate) mod files {
     use super::*;
     use crate::backend::FileBackend;
-    use crate::blob::models::{FileListRequest, FileUploadRequest};
-    use axum::extract::Multipart;
+    use crate::blob::models::FileListRequest;
     use axum::http::header;
     use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
@@ -367,17 +390,20 @@ pub(crate) mod files {
         .remove(b'|')
         .remove(b'~');
 
-    fn files_backend(state: &WebState) -> Result<&dyn FileBackend, ApiError> {
-        state.backend.files().ok_or_else(|| {
-            ApiError::Status(
+    fn files_backend(backend: &dyn crate::backend::Backend) -> Result<&dyn FileBackend, ApiError> {
+        backend.files().ok_or_else(|| {
+            validation_error(
                 StatusCode::NOT_IMPLEMENTED,
-                format!("the {} backend has no file storage", state.backend.name()),
+                "This backend does not provide file storage.",
+                None,
             )
         })
     }
 
     #[derive(Deserialize)]
     pub(crate) struct FilesQuery {
+        alias: Option<String>,
+        backend: Option<String>,
         vault: Option<String>,
         prefix: Option<String>,
     }
@@ -386,7 +412,8 @@ pub(crate) mod files {
         State(state): State<Arc<WebState>>,
         Query(q): Query<FilesQuery>,
     ) -> Result<Json<Vec<crate::blob::models::FileInfo>>, ApiError> {
-        let vault = q.vault.as_deref().unwrap_or(&state.vault);
+        let target =
+            state.scoped_target(q.alias.as_deref(), q.backend.as_deref(), q.vault.as_deref())?;
         let request = FileListRequest {
             prefix: q.prefix,
             groups: None,
@@ -394,7 +421,9 @@ pub(crate) mod files {
             delimiter: None,
         };
         Ok(Json(
-            files_backend(&state)?.list_files(vault, request).await?,
+            files_backend(target.backend.as_ref())?
+                .list_files(&target.context.vault, request)
+                .await?,
         ))
     }
 
@@ -404,73 +433,31 @@ pub(crate) mod files {
         Path(name): Path<String>,
         Query(q): Query<VaultQuery>,
     ) -> Result<Json<Vec<crate::blob::models::FileInfo>>, ApiError> {
+        let target = q.target(&state)?;
         Ok(Json(
             crate::secret::attachments::list_attachments(
-                files_backend(&state)?,
-                q.vault(&state),
+                files_backend(target.backend.as_ref())?,
+                &target.context.vault,
                 &name,
             )
             .await?,
         ))
     }
-
-    pub(crate) async fn upload_file(
-        State(state): State<Arc<WebState>>,
-        Query(q): Query<VaultQuery>,
-        mut multipart: Multipart,
-    ) -> Result<Json<crate::blob::models::FileInfo>, ApiError> {
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|e| ApiError::Status(StatusCode::BAD_REQUEST, format!("bad multipart: {e}")))?
-        {
-            if field.name() != Some("file") {
-                continue;
-            }
-            let name = field.file_name().map(str::to_string).ok_or_else(|| {
-                ApiError::Status(StatusCode::BAD_REQUEST, "file part needs a filename".into())
-            })?;
-            let content_type = field.content_type().map(str::to_string);
-            let content = field
-                .bytes()
-                .await
-                .map_err(|e| {
-                    ApiError::Status(StatusCode::BAD_REQUEST, format!("read upload: {e}"))
-                })?
-                .to_vec();
-            let request = FileUploadRequest {
-                name,
-                content,
-                content_type,
-                groups: Vec::new(),
-                metadata: std::collections::HashMap::new(),
-                tags: std::collections::HashMap::new(),
-            };
-            let info = files_backend(&state)?
-                .upload_file(q.vault(&state), request, None)
-                .await?;
-            return Ok(Json(info));
-        }
-        Err(ApiError::Status(
-            StatusCode::BAD_REQUEST,
-            "multipart body needs a 'file' part".into(),
-        ))
-    }
-
     pub(crate) async fn download_file(
         State(state): State<Arc<WebState>>,
         Path(name): Path<String>,
         Query(q): Query<VaultQuery>,
     ) -> Result<Response, ApiError> {
-        let vault = q.vault(&state);
-        let backend = files_backend(&state)?;
+        let target = q.target(&state)?;
+        let vault = &target.context.vault;
+        let backend = files_backend(target.backend.as_ref())?;
         let info = backend.get_file_info(vault, &name).await?;
         // Same transparent decryption as `xv file download`: content flagged
         // `xv_encrypted: age` (secret attachments, `xv file upload --encrypt`)
         // is decrypted with the vault's attachment key; everything else passes
         // through untouched.
         let bytes = crate::secret::attachments::download_decrypted(
-            state.backend.secrets(),
+            target.backend.secrets(),
             backend,
             vault,
             &name,
@@ -514,15 +501,16 @@ pub(crate) mod files {
         Path(name): Path<String>,
         Query(q): Query<VaultQuery>,
     ) -> Result<StatusCode, ApiError> {
-        files_backend(&state)?
-            .delete_file(q.vault(&state), &name)
+        let target = q.target(&state)?;
+        files_backend(target.backend.as_ref())?
+            .delete_file(&target.context.vault, &name)
             .await?;
         Ok(StatusCode::OK)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use http_body_util::BodyExt;
@@ -562,6 +550,51 @@ mod tests {
         (status, json)
     }
 
+    async fn raw_api_response(
+        app: axum::Router,
+        method: &str,
+        path: &str,
+        body: &'static str,
+        content_type: Option<&str>,
+        authorization: Option<&str>,
+    ) -> axum::response::Response {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "127.0.0.1:1");
+        if let Some(content_type) = content_type {
+            req = req.header(header::CONTENT_TYPE, content_type);
+        }
+        if let Some(authorization) = authorization {
+            req = req.header(header::AUTHORIZATION, authorization);
+        }
+        app.oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn assert_api_error(
+        response: axum::response::Response,
+        expected_status: StatusCode,
+        expected_code: &str,
+        forbidden_text: Option<&str>,
+    ) {
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        if let Some(forbidden_text) = forbidden_text {
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(forbidden_text),
+                "error envelope leaked request or framework text: {forbidden_text}"
+            );
+        }
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"]["code"], expected_code);
+        assert!(json["error"]["message"].is_string());
+        assert!(json["error"]["hint"].is_string());
+    }
+
     #[tokio::test]
     async fn context_reports_backend_and_capabilities() {
         let app = crate::web::build_router(testutil::test_state());
@@ -570,6 +603,10 @@ mod tests {
         assert_eq!(json["backend"], "stub");
         assert_eq!(json["vault"], "default");
         assert_eq!(json["capabilities"]["folders"], true);
+        assert_eq!(json["capabilities"]["soft_delete"], true);
+        assert_eq!(json["capabilities"]["restore"], true);
+        assert_eq!(json["capabilities"]["purge"], true);
+        assert_eq!(json["capabilities"]["scheduled_purge"], false);
         #[cfg(feature = "file-ops")]
         assert_eq!(json["capabilities"]["files"], true);
         #[cfg(not(feature = "file-ops"))]
@@ -669,6 +706,221 @@ mod tests {
         assert_eq!(&bytes[..], b"BEGIN CERT");
     }
 
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn scoped_attachment_download_uses_the_selected_backends_key() {
+        use std::sync::Arc;
+
+        use crate::backend::Backend;
+        use crate::secret::attachments;
+
+        let primary = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "primary",
+            crate::backend::BackendCapabilities {
+                has_file_storage: true,
+                ..Default::default()
+            },
+        ));
+        let stage = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "stage",
+            crate::backend::BackendCapabilities {
+                has_file_storage: true,
+                ..Default::default()
+            },
+        ));
+        let primary_trait: Arc<dyn crate::backend::Backend> = primary;
+        let stage_trait: Arc<dyn crate::backend::Backend> = stage.clone();
+        let registry = Arc::new(crate::backend::BackendRegistry::for_test(
+            "primary",
+            vec![
+                ("primary", primary_trait.clone()),
+                ("stage", stage_trait.clone()),
+            ],
+        ));
+        let mut context = testutil::test_context(primary_trait.as_ref(), "default", 30);
+        context.workspace.configured = true;
+        context
+            .workspace
+            .entries
+            .push(crate::web::context::WorkspaceEntrySummary {
+                alias: "stage".into(),
+                backend: "stage".into(),
+                vault: "sandbox".into(),
+                default: false,
+            });
+        let state = Arc::new(crate::web::WebState::new(
+            primary_trait,
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(
+                std::env::temp_dir()
+                    .join(format!("xv-web-attachment-scope-{}", uuid::Uuid::new_v4()))
+                    .join("ui.json"),
+                30,
+            ),
+            registry,
+        ));
+        attachments::upload_encrypted(
+            stage.secrets(),
+            stage.files().unwrap(),
+            "sandbox",
+            crate::blob::models::FileUploadRequest {
+                name: attachments::attachment_blob_name("db-cert", "cert.pem"),
+                content: b"STAGE CERT".to_vec(),
+                content_type: Some("application/x-pem-file".into()),
+                groups: Vec::new(),
+                metadata: std::collections::HashMap::new(),
+                tags: std::collections::HashMap::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let response = crate::web::build_router(state)
+            .oneshot(
+                Request::get(
+                    "/api/files/attachments%2Fdb-cert%2Fcert.pem?alias=stage&backend=stage&vault=sandbox",
+                )
+                .header(header::HOST, "127.0.0.1:1")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"STAGE CERT");
+    }
+
+    #[tokio::test]
+    async fn api_normalizes_auth_and_router_failures_to_safe_envelopes() {
+        let app = crate::web::build_router(testutil::test_state());
+        assert_api_error(
+            raw_api_response(app.clone(), "GET", "/api/context", "", None, None).await,
+            StatusCode::UNAUTHORIZED,
+            "xv-auth-required",
+            None,
+        )
+        .await;
+        assert_api_error(
+            raw_api_response(
+                app.clone(),
+                "GET",
+                "/api/context",
+                "",
+                None,
+                Some("Bearer wrong-token"),
+            )
+            .await,
+            StatusCode::UNAUTHORIZED,
+            "xv-auth-required",
+            Some("wrong-token"),
+        )
+        .await;
+        assert_api_error(
+            raw_api_response(
+                app.clone(),
+                "PUT",
+                "/api/secrets/new-secret",
+                "{\"value\":\"malformed-json-marker\"",
+                Some("application/json"),
+                Some("Bearer test-token"),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "xv-invalid-request",
+            Some("malformed-json-marker"),
+        )
+        .await;
+        let query_app = axum::Router::new()
+            .route(
+                "/api/query",
+                axum::routing::get(
+                    |_q: axum::extract::Query<std::collections::HashMap<String, u8>>| async {},
+                ),
+            )
+            .layer(axum::middleware::from_fn(crate::web::normalize_api_errors))
+            .layer(axum::middleware::from_fn(crate::web::auth::no_store));
+        assert_api_error(
+            raw_api_response(
+                query_app,
+                "GET",
+                "/api/query?limit=not-a-number",
+                "",
+                None,
+                None,
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "xv-invalid-request",
+            Some("not-a-number"),
+        )
+        .await;
+        #[cfg(feature = "file-ops")]
+        {
+            assert_api_error(
+                raw_api_response(
+                    app.clone(),
+                    "POST",
+                    "/api/files",
+                    "not a multipart body",
+                    Some("text/plain"),
+                    Some("Bearer test-token"),
+                )
+                .await,
+                StatusCode::BAD_REQUEST,
+                "xv-invalid-request",
+                Some("not a multipart body"),
+            )
+            .await;
+        }
+        assert_api_error(
+            raw_api_response(
+                app,
+                "GET",
+                "/api/not-a-route",
+                "",
+                None,
+                Some("Bearer test-token"),
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "xv-api-route-not-found",
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn api_normalizes_body_limit_rejections_without_a_large_allocation() {
+        let app = axum::Router::new()
+            .route(
+                "/api/limited",
+                axum::routing::post(|_: axum::Json<serde_json::Value>| async {}),
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(1))
+            .layer(axum::middleware::from_fn(crate::web::normalize_api_errors))
+            .layer(axum::middleware::from_fn(crate::web::auth::no_store));
+        assert_api_error(
+            raw_api_response(
+                app,
+                "POST",
+                "/api/limited",
+                "{}",
+                Some("application/json"),
+                None,
+            )
+            .await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "xv-request-too-large",
+            None,
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn secret_crud_roundtrip() {
         let app = crate::web::build_router(testutil::test_state());
@@ -732,6 +984,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn secret_list_exposes_canonical_expiry_without_value_disclosure() {
+        let app = crate::web::build_router(testutil::test_state());
+        let (status, _) = get_json(
+            app.clone(),
+            "PUT",
+            "/api/secrets/expiring",
+            Some(json!({
+                "value": "must-not-leak",
+                "expires_on": "2030-01-02T03:04:05Z"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, rows) = get_json(app, "GET", "/api/secrets", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "expiring")
+            .unwrap();
+        assert_eq!(row["expires_on"], "2030-01-02T03:04:05Z");
+        assert!(row.get("value").is_none());
+        assert!(!rows.to_string().contains("must-not-leak"));
+    }
+
+    #[tokio::test]
+    async fn missing_secret_has_stable_error() {
+        let app = crate::web::build_router(testutil::test_state());
+        let (status, json) = get_json(app, "GET", "/api/secrets/missing", None).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["code"], "xv-secret-not-found");
+        assert_eq!(json["error"]["message"], "Secret 'missing' was not found.");
+        assert!(json["error"]["hint"].as_str().unwrap().contains("Refresh"));
+    }
+
+    #[tokio::test]
     async fn reserved_attachment_key_rejects_delete_and_rename_but_allows_folder_move() {
         let state = testutil::test_state();
         let reserved = crate::secret::attachments::ATTACHMENT_KEY_SECRET;
@@ -739,7 +1030,7 @@ mod tests {
         // PUT now rejects it too (see `reserved_attachment_key_rejects_put`
         // below) — there's no API path left to create it.
         state
-            .backend
+            .base_backend()
             .secrets()
             .set_secret(
                 "default",
@@ -998,6 +1289,10 @@ mod tests {
         let (status, json_body) = get_json(app.clone(), "GET", "/api/files", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json_body[0]["name"], "notes.txt");
+        assert!(
+            json_body[0].get("upload_status").is_none(),
+            "persisted FileInfo has no truthful upload lifecycle state"
+        );
 
         // download
         let res = app

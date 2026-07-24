@@ -3,18 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
   <title>Crosstache Vault</title>
   <link rel="stylesheet" href="loading.css">
 </head>
 <body>
-  <main>
-    <div class="brand" aria-label="Crosstache Vault">xv</div>
-    <div class="copy">
-      <h1>Opening your vault</h1>
-      <p id="status">Loading configuration and connecting to the active backend.</p>
-    </div>
-    <div class="progress" aria-hidden="true"><span></span></div>
+  <main class="shell">
+    <aside class="context" aria-label="Crosstache">
+      <div class="brand" aria-label="Crosstache Vault">xv</div>
+      <div class="context-copy">
+        <p class="context-kicker">Crosstache Vault</p>
+        <p>One deliberate path from configuration to a verified vault.</p>
+      </div>
+      <div class="vault-line" aria-hidden="true"><span></span></div>
+      <p class="privacy-note">Credentials stay with your provider tools.</p>
+    </aside>
+    <article class="task-surface" id="app" aria-live="polite">
+      <section class="phase" aria-labelledby="phase-title">
+        <p class="eyebrow">Starting Crosstache</p>
+        <h1 id="phase-title">Loading configuration</h1>
+        <p class="lede">Finding your active backend and vault.</p>
+        <div class="progress" aria-label="Loading configuration"><span></span></div>
+      </section>
+    </article>
   </main>
-  <script src="loading.js"></script>
+  <script type="module" src="loading.js"></script>
 </body>
 </html>

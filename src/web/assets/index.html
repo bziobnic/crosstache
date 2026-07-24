@@ -7,119 +7,318 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div id="progress" hidden></div>
-<header id="app-header" class="app-header">
+<div id="progress" role="status" aria-live="polite" hidden>
+  <span>Working in <strong id="progress-context" data-context-copy></strong></span>
+</div>
+<aside id="context-rail" class="context-rail" aria-label="Effective context">
+  <div class="brand" role="img" aria-label="Crosstache Vault">
+    <span class="brand-mark" aria-hidden="true">xv</span>
+    <span class="brand-name">Crosstache Vault</span>
+  </div>
+  <section class="context-primary" aria-labelledby="context-heading">
+    <span id="context-heading" class="context-kicker">Effective context</span>
+    <strong id="context-line"></strong>
+    <span id="context-backend-kind" class="context-kind"></span>
+  </section>
+  <div id="vault-context" class="vault-context">
+    <span id="backend-badge" class="sr-only"></span>
+    <label class="workspace-picker">
+      <span>Workspace</span>
+      <select id="workspace-select" title="Current workspace" aria-describedby="context-line"></select>
+    </label>
+  </div>
+  <div class="context-status">
+    <span id="context-connection" class="connection-state"></span>
+    <span id="context-capabilities"></span>
+  </div>
+  <div id="context-error" class="context-error" role="alert" hidden>
+    <span id="context-error-message"></span>
+  </div>
+  <details id="context-details" class="context-details" tabindex="-1">
+    <summary>Context details</summary>
+    <dl id="context-details-list"></dl>
+  </details>
+  <nav class="context-actions" aria-label="Application">
+    <button id="commands-open" type="button">Commands <kbd>⌘K</kbd></button>
+    <button id="help-open" type="button">Help</button>
+    <button id="settings-open" type="button">Settings</button>
+  </nav>
+  <span id="context-version" class="context-version"></span>
+</aside>
+<header id="app-header" class="app-header" data-context-scoped>
   <div class="app-header-inner">
-    <div class="brand" aria-label="Crosstache Vault">
-      <span class="brand-mark" aria-hidden="true">xv</span>
-      <span class="brand-name">Crosstache Vault</span>
-    </div>
-    <div id="vault-context" class="vault-context">
-      <span id="backend-badge" class="backend-badge"></span>
-      <label class="vault-picker">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span class="sr-only">Current vault</span>
-        <select id="vault-select" title="Current vault"></select>
-      </label>
-    </div>
-    <nav id="vault-tabs" class="tab-list" aria-label="Vault content">
-      <button id="tab-secrets" class="tab active" type="button">Secrets</button>
-      <button id="tab-files" class="tab" type="button">Files</button>
+    <nav id="vault-tabs" class="tab-list" role="tablist" aria-label="Vault content">
+      <button id="tab-secrets" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="secrets-view">Secrets</button>
+      <button id="tab-files" class="tab" type="button" role="tab" aria-selected="false" aria-controls="files-view" tabindex="-1">Files</button>
+      <button id="tab-trash" class="tab" type="button" role="tab" aria-selected="false" aria-controls="trash-view" tabindex="-1">Trash</button>
     </nav>
   </div>
 </header>
 
-<main>
+<main data-context-scoped>
+  <section id="settings-status" class="error-panel settings-status" role="alert" aria-live="assertive" aria-atomic="true" hidden>
+    <div><strong>Settings need attention</strong><span id="settings-status-message" class="error-message"></span><small class="error-hint"></small></div>
+    <button class="button secondary" id="settings-retry" type="button">Retry Settings</button>
+  </section>
   <section id="auth-recovery" class="recovery" hidden>
     <h1>Session link required</h1>
     <p>Reopen the URL printed by <code>xv ui</code> in your terminal.</p>
   </section>
 
-  <section id="secrets-view">
+  <section id="secrets-view" role="tabpanel" aria-labelledby="tab-secrets">
     <div class="view-heading">
       <div>
-        <span class="eyebrow">Vault contents</span>
-        <h1>Your secrets</h1>
-        <p>Browse, organize, and safely manage credentials in this vault.</p>
+        <span class="eyebrow">Current vault</span>
+        <h1>Secrets</h1>
       </div>
       <span id="secret-item-count" class="item-count" aria-live="polite">0 secrets</span>
     </div>
     <div class="toolbar">
-      <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search by name, folder, group, or note"></label>
+      <label class="search-field"><span class="sr-only">Search secrets</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="search" type="search" placeholder="Search names, folders, groups, and record types"></label>
+      <button id="secret-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
+      <button id="refresh-secrets" class="button secondary" type="button" aria-label="Refresh secrets">Refresh</button>
       <button id="select-secrets" class="button secondary" type="button">Select</button>
       <button id="new-secret" class="button primary" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-plus"></use></svg>New secret</button>
     </div>
+    <div id="secret-filter-controls" class="filter-controls" role="group" aria-label="Secret filters">
+      <label>Group<select id="secret-filter-group"><option value="">All groups</option></select></label>
+      <label>Record type<select id="secret-filter-type"><option value="">All record types</option></select></label>
+      <label>Expiry<select id="secret-filter-expiry"><option value="">Any expiry</option><option value="none">No expiry</option><option value="expiring">Expiring</option><option value="expired">Expired</option></select></label>
+      <label>Status<select id="secret-filter-enabled"><option value="">Any status</option><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
+      <button id="secret-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
+    </div>
+    <div id="secret-filter-chips" class="filter-chips" role="group" aria-label="Active secret filters" aria-live="polite" hidden></div>
+    <div class="folder-mobile-controls" aria-label="Secret folder controls">
+      <button id="secrets-folder-filter-open" class="button secondary" type="button" aria-haspopup="dialog" aria-controls="secrets-folder-sheet">Filter folders</button>
+      <button id="secrets-mobile-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
+      <button id="secrets-mobile-folders-collapse-all" class="button ghost compact" type="button">Collapse all</button>
+    </div>
     <div id="secret-bulk-bar" class="bulk-toolbar" hidden>
       <span id="secret-selection-count" aria-live="polite">0 selected</span>
+      <small data-context-copy></small>
       <input id="secret-move-folder" placeholder="destination folder" aria-label="Destination folder">
       <button id="bulk-move-secrets" class="button primary" type="button">Move</button>
       <button id="bulk-delete-secrets" class="button danger" type="button" data-default-label="Delete">Delete</button>
       <button id="cancel-secret-selection" class="button ghost" type="button">Cancel</button>
     </div>
-    <div class="data-surface">
-      <table id="secrets-table">
-        <colgroup><col class="selection-col" hidden><col class="column-secret-name"><col class="column-secret-folder"><col class="column-groups"><col class="column-note"><col class="column-secret-updated"></colgroup>
-        <thead><tr><th class="selection-column" hidden><input id="select-all-secrets" type="checkbox" aria-label="Select all visible secrets"></th><th class="column-secret-name sortable" data-sort-key="name" aria-sort="ascending"><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Name and Folder columns" tabindex="0"></span></th><th class="column-secret-folder sortable" data-sort-key="folder" aria-sort="none"><button class="sort-button" type="button">Folder<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Folder and Groups columns" tabindex="0"></span></th><th class="column-groups sortable" data-sort-key="groups" aria-sort="none"><button class="sort-button" type="button">Groups<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Groups and Note columns" tabindex="0"></span></th><th class="column-note sortable" data-sort-key="note" aria-sort="none"><button class="sort-button" type="button">Note<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Note and Updated columns" tabindex="0"></span></th><th class="column-secret-updated sortable" data-sort-key="updated" aria-sort="none"><button class="sort-button" type="button">Updated<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
-        <tbody></tbody>
-      </table>
+    <div id="secret-error" class="error-panel" role="alert" hidden>
+      <div><strong>Secrets need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button secondary error-copy" type="button" hidden>Copy details</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
     </div>
-    <div id="secret-list-summary" class="list-summary" aria-live="polite">Values remain hidden until revealed.</div>
+    <div id="secret-refresh-error" class="error-panel" role="alert" hidden>
+      <div><strong>Secret list is stale</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+    </div>
+    <div id="secrets-workspace" class="vault-workspace">
+      <aside class="folder-sidebar" aria-labelledby="secrets-folder-heading">
+        <div class="folder-sidebar-heading">
+          <h2 id="secrets-folder-heading">Folders</h2>
+          <div class="folder-actions">
+            <button id="secrets-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
+            <button id="secrets-folders-collapse-all" class="button ghost compact" type="button">Collapse all</button>
+          </div>
+        </div>
+        <div id="secrets-folder-tree" class="folder-tree" role="tree" aria-label="Secret folders"></div>
+      </aside>
+      <div class="vault-content">
+        <div class="data-surface">
+          <table id="secrets-table" tabindex="-1">
+            <colgroup><col class="selection-col" hidden><col class="column-secret-name"><col class="column-secret-folder"><col class="column-groups"><col class="column-note"><col class="column-secret-updated"></colgroup>
+            <thead><tr><th class="selection-column" hidden><input id="select-all-secrets" type="checkbox" aria-label="Select all 0 visible secrets" aria-checked="false"></th><th class="column-secret-name sortable" data-sort-key="name" aria-sort="ascending"><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Name and Folder columns" tabindex="0"></span></th><th class="column-secret-folder sortable" data-sort-key="folder" aria-sort="none"><button class="sort-button" type="button">Folder<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Folder and Groups columns" tabindex="0"></span></th><th class="column-groups sortable" data-sort-key="groups" aria-sort="none"><button class="sort-button" type="button">Groups<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Groups and Note columns" tabindex="0"></span></th><th class="column-note sortable" data-sort-key="note" aria-sort="none"><button class="sort-button" type="button">Note<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Note and Updated columns" tabindex="0"></span></th><th class="column-secret-updated sortable" data-sort-key="updated" aria-sort="none"><button class="sort-button" type="button">Updated<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="secrets-stacked" class="stacked-list" role="region" aria-label="Secrets" tabindex="-1" hidden></div>
+        </div>
+        <div id="secret-list-summary" class="list-summary" aria-live="polite">Values remain hidden until revealed.</div>
+      </div>
+    </div>
   </section>
 
-  <section id="files-view" hidden>
+  <section id="files-view" role="tabpanel" aria-labelledby="tab-files" hidden>
     <div class="view-heading">
       <div>
-        <span class="eyebrow">Vault files</span>
-        <h1>Your files</h1>
-        <p>Upload, download, and organize encrypted files in this vault.</p>
+        <span class="eyebrow">Current vault</span>
+        <h1>Files</h1>
       </div>
       <span id="file-item-count" class="item-count" aria-live="polite">0 files</span>
     </div>
     <div class="toolbar file-toolbar">
-      <span class="toolbar-spacer"></span>
+      <label class="search-field"><span class="sr-only">Search files</span><svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg><input id="file-search" type="search" placeholder="Search file names, folders, and types"></label>
+      <button id="file-search-clear" class="button ghost compact search-clear" type="button" hidden>Clear search</button>
+      <button id="refresh-files" class="button secondary" type="button" aria-label="Refresh files">Refresh</button>
       <button id="select-files" class="button secondary" type="button">Select</button>
+    </div>
+    <div id="file-filter-controls" class="filter-controls" role="group" aria-label="File filters">
+      <label>Type<select id="file-filter-type"><option value="">All file types</option></select></label>
+      <button id="file-filters-clear" class="button ghost compact" type="button" hidden>Clear filters</button>
+    </div>
+    <div id="file-filter-chips" class="filter-chips" role="group" aria-label="Active file filters" aria-live="polite" hidden></div>
+    <div class="folder-mobile-controls" aria-label="File folder controls">
+      <button id="files-folder-filter-open" class="button secondary" type="button" aria-haspopup="dialog" aria-controls="files-folder-sheet">Filter folders</button>
+      <button id="files-mobile-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
+      <button id="files-mobile-folders-collapse-all" class="button ghost compact" type="button">Collapse all</button>
     </div>
     <div id="file-bulk-bar" class="bulk-toolbar" hidden>
       <span id="file-selection-count" aria-live="polite">0 selected</span>
+      <small data-context-copy></small>
       <button id="bulk-delete-files" class="button danger" type="button" data-default-label="Delete">Delete</button>
       <button id="cancel-file-selection" class="button ghost" type="button">Cancel</button>
+    </div>
+    <div id="file-error" class="error-panel" role="alert" hidden>
+      <div><strong>Files need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button secondary error-copy" type="button" hidden>Copy details</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+    </div>
+    <div id="file-refresh-error" class="error-panel" role="alert" hidden>
+      <div><strong>File list is stale</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
     </div>
     <div id="dropzone">
       <div class="dropzone-content">
         <span class="dropzone-icon"><svg class="icon" aria-hidden="true"><use href="#icon-upload"></use></svg></span>
-        <span><strong>Drop files here to upload</strong><small>or <button id="browse-files" class="linkish" type="button">browse from your computer</button></small></span>
+        <span><strong>Drop files here to upload</strong><small>100 MB per file · <span id="upload-concurrency">up to 1 upload at a time</span></small><small>or <button id="browse-files" class="linkish" type="button">browse from your computer</button></small><small id="dropzone-context" data-context-copy></small></span>
         <input id="file-input" type="file" multiple hidden>
       </div>
     </div>
+    <div class="upload-destination">
+      <label for="upload-destination">Upload destination</label>
+      <select id="upload-destination"><option value="">Vault root</option></select>
+    </div>
+    <section id="upload-queue" class="upload-queue" aria-labelledby="upload-queue-heading" hidden>
+      <div class="upload-queue-heading">
+        <div>
+          <h2 id="upload-queue-heading">Uploads</h2>
+          <small id="upload-queue-context"></small>
+        </div>
+        <button id="retry-uploads" class="button secondary compact" type="button" hidden>Retry unfinished</button>
+      </div>
+      <ol id="upload-queue-items" class="upload-queue-items"></ol>
+    </section>
+    <section id="upload-summary" class="upload-summary" aria-labelledby="upload-summary-heading" aria-live="polite" hidden>
+      <div>
+        <h2 id="upload-summary-heading">Upload summary</h2>
+        <ul id="upload-summary-items"></ul>
+      </div>
+      <button id="dismiss-upload-summary" class="button ghost compact" type="button">Dismiss summary</button>
+    </section>
+    <p id="upload-new-batch-message" class="field-error" role="status" tabindex="-1" hidden>
+      Dismiss the current upload summary before choosing another batch.
+    </p>
+    <div id="files-workspace" class="vault-workspace">
+      <aside class="folder-sidebar" aria-labelledby="files-folder-heading">
+        <div class="folder-sidebar-heading">
+          <h2 id="files-folder-heading">Folders</h2>
+          <div class="folder-actions">
+            <button id="files-folders-expand-all" class="button ghost compact" type="button">Expand all</button>
+            <button id="files-folders-collapse-all" class="button ghost compact" type="button">Collapse all</button>
+          </div>
+        </div>
+        <div id="files-folder-tree" class="folder-tree" role="tree" aria-label="File folders"></div>
+      </aside>
+      <div class="vault-content">
+        <div class="data-surface">
+          <table id="files-table" tabindex="-1">
+            <colgroup><col class="selection-col" hidden><col class="column-file-name"><col class="column-file-size"><col class="column-file-type"><col class="column-file-modified"></colgroup>
+            <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all 0 visible files" aria-checked="false"></th><th class="column-file-name sortable" data-sort-key="name" aria-sort="ascending"><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Name and Size columns" tabindex="0"></span></th><th class="column-file-size sortable" data-sort-key="size" aria-sort="none"><button class="sort-button" type="button">Size<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Size and Type columns" tabindex="0"></span></th><th class="column-file-type sortable" data-sort-key="type" aria-sort="none"><button class="sort-button" type="button">Type<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Type and Modified columns" tabindex="0"></span></th><th class="column-file-modified sortable" data-sort-key="modified" aria-sort="none"><button class="sort-button" type="button">Modified<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="files-stacked" class="stacked-list" role="region" aria-label="Files" tabindex="-1" hidden></div>
+        </div>
+        <div id="file-list-summary" class="list-summary" aria-live="polite">Files remain encrypted in the current vault.</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="trash-view" role="tabpanel" aria-labelledby="tab-trash" hidden>
+    <div class="view-heading">
+      <div>
+        <span class="eyebrow">Recoverable deletion</span>
+        <h1>Trash</h1>
+      </div>
+      <span id="trash-item-count" class="item-count" aria-live="polite">0 deleted secrets</span>
+    </div>
+    <div id="trash-error" class="error-panel" role="alert" hidden>
+      <div><strong>Trash needs attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary error-retry" type="button" hidden>Retry</button>
+      <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+    </div>
     <div class="data-surface">
-      <table id="files-table">
-        <colgroup><col class="selection-col" hidden><col class="column-file-name"><col class="column-file-size"><col class="column-file-type"><col class="column-file-modified"></colgroup>
-        <thead><tr><th class="selection-column" hidden><input id="select-all-files" type="checkbox" aria-label="Select all visible files"></th><th class="column-file-name sortable" data-sort-key="name" aria-sort="ascending"><button class="sort-button" type="button">Name<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Name and Size columns" tabindex="0"></span></th><th class="column-file-size sortable" data-sort-key="size" aria-sort="none"><button class="sort-button" type="button">Size<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Size and Type columns" tabindex="0"></span></th><th class="column-file-type sortable" data-sort-key="type" aria-sort="none"><button class="sort-button" type="button">Type<span class="sort-indicator" aria-hidden="true"></span></button><span class="column-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Type and Modified columns" tabindex="0"></span></th><th class="column-file-modified sortable" data-sort-key="modified" aria-sort="none"><button class="sort-button" type="button">Modified<span class="sort-indicator" aria-hidden="true"></span></button></th></tr></thead>
+      <table id="trash-table">
+        <thead><tr><th>Name</th><th>Deleted</th><th>Scheduled purge</th><th>Actions</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
-    <div id="file-list-summary" class="list-summary" aria-live="polite">Files remain encrypted in the current vault.</div>
+    <div id="trash-list-summary" class="list-summary" aria-live="polite">Deleted secrets remain recoverable until purged.</div>
+  </section>
+
+  <section id="action-notice" class="action-notice" role="status" aria-live="polite" hidden>
+    <span class="action-notice-message"></span>
+    <small id="action-notice-context"></small>
+    <button type="button" id="undo-delete" class="button secondary">Undo</button>
+    <button type="button" id="dismiss-action-notice" class="button ghost" aria-label="Dismiss notification">Dismiss</button>
   </section>
 </main>
 
-<aside id="drawer" aria-labelledby="drawer-title" hidden>
+<section id="secrets-folder-sheet" class="folder-sheet" role="dialog" aria-modal="true" aria-labelledby="secrets-folder-sheet-title" tabindex="-1" hidden>
+  <div class="folder-sheet-heading">
+    <h2 id="secrets-folder-sheet-title">Filter secret folders</h2>
+    <button id="secrets-folder-sheet-close" class="button ghost" type="button">Done</button>
+  </div>
+  <div class="folder-actions">
+    <button id="secrets-mobile-sheet-expand-all" class="button secondary compact" type="button">Expand all</button>
+    <button id="secrets-mobile-sheet-collapse-all" class="button secondary compact" type="button">Collapse all</button>
+  </div>
+  <div id="secrets-mobile-folder-tree" class="folder-tree" role="tree" aria-label="Secret folder filter"></div>
+</section>
+
+<section id="files-folder-sheet" class="folder-sheet" role="dialog" aria-modal="true" aria-labelledby="files-folder-sheet-title" tabindex="-1" hidden>
+  <div class="folder-sheet-heading">
+    <h2 id="files-folder-sheet-title">Filter file folders</h2>
+    <button id="files-folder-sheet-close" class="button ghost" type="button">Done</button>
+  </div>
+  <div class="folder-actions">
+    <button id="files-mobile-sheet-expand-all" class="button secondary compact" type="button">Expand all</button>
+    <button id="files-mobile-sheet-collapse-all" class="button secondary compact" type="button">Collapse all</button>
+  </div>
+  <div id="files-mobile-folder-tree" class="folder-tree" role="tree" aria-label="File folder filter"></div>
+</section>
+
+<div id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1" hidden>
   <div class="drawer-header">
     <span id="drawer-kicker" class="eyebrow">Create secret</span>
     <h2 id="drawer-title">New secret</h2>
-    <p>Values remain concealed until explicitly revealed.</p>
+    <p id="drawer-context" data-context-copy></p>
+    <small>Values remain concealed until explicitly revealed.</small>
   </div>
   <form id="secret-form" autocomplete="off">
     <div class="drawer-body">
+      <div id="secret-form-error" class="error-panel" role="alert" hidden>
+        <div><strong>Couldn’t save secret</strong><span class="error-message"></span><small class="error-hint"></small></div>
+        <button class="button ghost error-dismiss" type="button" aria-label="Dismiss error">Dismiss</button>
+      </div>
+      <div id="protected-value-status" class="protected-value-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
       <label class="form-field"><span class="field-label">Name <span class="field-hint">Required</span></span><input name="name" required></label>
-      <label id="type-picker-label" class="form-field" hidden><span class="field-label">Type</span><select id="type-picker"></select></label>
+      <fieldset id="type-picker-label" class="form-field type-picker" hidden>
+        <legend class="field-label">Secret type</legend>
+        <p class="field-help">Choose Plain or a guided type. Only fields for your choice are shown.</p>
+        <div id="type-cards" class="type-cards"></div>
+        <select id="type-picker" class="sr-only" aria-hidden="true" tabindex="-1"></select>
+      </fieldset>
       <div id="value-section">
-        <label class="form-field"><span class="field-label">Value <span class="field-hint">Protected</span></span>
-          <textarea name="value" rows="4" placeholder="Leave blank to keep the current value"></textarea>
+        <div class="form-field">
+          <label class="field-label" for="secret-value">Value <span class="field-hint">Protected</span></label>
+          <textarea id="secret-value" name="value" rows="4" aria-describedby="value-protection-state protected-value-status" placeholder="Leave blank to keep the current value"></textarea>
+          <span id="value-protection-state" class="sr-only">Protected value is hidden.</span>
           <span class="field-actions">
-            <button type="button" id="reveal" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg>Reveal</button>
-            <button type="button" id="copy" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy</button>
+            <button type="button" id="reveal" class="button secondary" aria-label="Reveal value" aria-controls="secret-value" aria-describedby="value-protection-state protected-value-status"><svg class="icon" aria-hidden="true"><use href="#icon-eye"></use></svg>Reveal</button>
+            <button type="button" id="copy" class="button secondary" aria-label="Copy value" aria-controls="secret-value" aria-describedby="value-protection-state protected-value-status"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy</button>
           </span>
-        </label>
+        </div>
       </div>
       <div id="record-section" hidden>
         <div id="record-type"></div>
@@ -129,10 +328,51 @@
         <span class="field-label">Attachments</span>
         <ul id="attachments-list" class="attachment-list"></ul>
       </div>
-      <label class="form-field"><span class="field-label">Folder</span><input name="folder"></label>
-      <label class="form-field"><span class="field-label">Groups</span><input name="groups" placeholder="Comma-separated"></label>
+      <label class="form-field"><span class="field-label">Folder</span><input name="folder" list="folder-suggestions" autocomplete="off"><datalist id="folder-suggestions"></datalist></label>
+      <div class="form-field group-editor">
+        <span class="field-label">Groups</span>
+        <input name="groups" type="hidden">
+        <div id="group-chips" class="chip-list" aria-live="polite"></div>
+        <div class="field-actions">
+          <label class="sr-only" for="group-entry">Add a group</label>
+          <input id="group-entry" list="group-suggestions" autocomplete="off" placeholder="Add a group">
+          <button id="group-add" class="button secondary" type="button">Add group</button>
+        </div>
+        <datalist id="group-suggestions"></datalist>
+      </div>
       <label class="form-field"><span class="field-label">Note</span><input name="note"></label>
-      <label class="form-field"><span class="field-label">Expires</span><input name="expires_on" type="text" inputmode="numeric" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" title="Enter a date as YYYY-MM-DD"></label>
+      <div class="form-field expiry-editor">
+        <label class="field-label" for="secret-expires-on">Expires</label>
+        <input id="secret-expires-on" name="expires_on" type="date">
+        <div class="field-actions">
+          <button id="no-expiry" class="button secondary" type="button">No expiry</button>
+          <button id="clear-expiry" class="button ghost" type="button">Clear expiry</button>
+        </div>
+      </div>
+      <p id="current-secret-type" class="field-help" hidden></p>
+      <section id="secret-workflows" class="nested-workflows" aria-label="Secret workflows" hidden>
+        <div class="workflow-actions">
+          <button id="conversion-toggle" class="button secondary" type="button" aria-expanded="false" aria-controls="conversion-workflow">Convert type</button>
+          <button id="rename-toggle" class="button secondary" type="button" aria-expanded="false" aria-controls="rename-workflow">Rename secret</button>
+        </div>
+        <section id="conversion-workflow" class="nested-workflow" aria-labelledby="conversion-heading" hidden>
+          <h3 id="conversion-heading">Convert type</h3>
+          <p>Preview field impact before changing this secret.</p>
+          <label class="form-field" for="conversion-target"><span class="field-label">Conversion target</span><select id="conversion-target"></select></label>
+          <div id="conversion-required-fields"></div>
+          <div id="conversion-summary" class="impact-summary" role="status" aria-live="polite" hidden></div>
+          <div class="workflow-actions">
+            <button id="conversion-preview" class="button secondary" type="button">Preview conversion</button>
+            <button id="conversion-confirm" class="button danger" type="button" hidden>Confirm conversion</button>
+          </div>
+        </section>
+        <section id="rename-workflow" class="nested-workflow" aria-labelledby="rename-heading" hidden>
+          <h3 id="rename-heading">Rename secret</h3>
+          <p>Renaming is separate from content and metadata changes.</p>
+          <label class="form-field" for="rename-name"><span class="field-label">New secret name</span><input id="rename-name" name="new_name" autocomplete="off"></label>
+          <button id="rename-submit" class="button primary" type="button">Apply rename</button>
+        </section>
+      </section>
     </div>
     <div class="drawer-footer">
       <button type="button" id="delete" class="button danger" data-default-label="Delete">Delete</button>
@@ -141,7 +381,146 @@
       <button type="submit" id="save" class="button primary">Save changes</button>
     </div>
   </form>
-</aside>
+</div>
+<div id="drawer-backdrop" class="drawer-backdrop" aria-hidden="true" tabindex="-1" hidden></div>
+<section id="discard-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-title" aria-describedby="discard-message" tabindex="-1" hidden>
+  <h2 id="discard-title">Discard changes?</h2>
+  <p id="discard-message">Your unsaved changes will be lost.</p>
+  <p class="confirmation-context" data-context-copy></p>
+  <div class="confirmation-actions">
+    <button type="button" id="keep-editing" class="button secondary">Keep editing</button>
+    <button type="button" id="discard-changes" class="button danger">Discard changes</button>
+  </div>
+</section>
+
+<section id="delete-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-confirmation-title" aria-describedby="delete-confirmation-message delete-recovery" tabindex="-1" hidden>
+  <h2 id="delete-confirmation-title">Delete secret?</h2>
+  <p id="delete-confirmation-message"></p>
+  <p class="confirmation-context" data-context-copy></p>
+  <ul id="delete-targets" class="confirmation-targets"></ul>
+  <p id="delete-overflow" class="confirmation-overflow" hidden></p>
+  <p id="delete-recovery"></p>
+  <div class="confirmation-actions">
+    <button type="button" id="cancel-delete" class="button secondary">Cancel</button>
+    <button type="button" id="confirm-delete" class="button danger">Delete secret</button>
+  </div>
+</section>
+
+<section id="purge-confirmation" class="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="purge-title" aria-describedby="purge-message" tabindex="-1" hidden>
+  <h2 id="purge-title">Permanently purge secret?</h2>
+  <p id="purge-message">This permanently removes the secret and cannot be undone.</p>
+  <p class="confirmation-context" data-context-copy></p>
+  <label class="form-field"><span id="purge-input-label" class="field-label">Type the secret name to confirm</span><input id="purge-name" autocomplete="off"></label>
+  <div class="confirmation-actions">
+    <button type="button" id="cancel-purge" class="button secondary">Cancel</button>
+    <button type="button" id="confirm-purge" class="button danger" disabled>Permanently purge</button>
+  </div>
+</section>
+
+<section id="commands-dialog" class="confirmation-dialog application-dialog" role="dialog" aria-modal="true" aria-labelledby="commands-title" aria-describedby="commands-description" tabindex="-1" hidden>
+  <h2 id="commands-title">Commands</h2>
+  <p id="commands-description">Search actions and loaded metadata in the current effective context.</p>
+  <label class="command-query">
+    <span class="sr-only">Search commands and vault metadata</span>
+    <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+    <input id="commands-query" type="search" role="combobox" aria-label="Search commands and vault metadata" aria-autocomplete="list" aria-controls="commands-results" aria-expanded="false" autocomplete="off" spellcheck="false">
+  </label>
+  <div id="commands-results" class="command-list" role="listbox" aria-label="Command palette results"></div>
+  <p id="commands-empty" class="command-empty" role="status" hidden>No matching commands or loaded metadata.</p>
+  <div class="confirmation-actions">
+    <button type="button" id="commands-close" class="button ghost">Close</button>
+  </div>
+</section>
+
+<section id="help-dialog" class="application-dialog utility-sheet" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1" hidden>
+  <header class="utility-sheet-header">
+    <div><span class="eyebrow">Reference</span><h2 id="help-title">Help</h2></div>
+    <button type="button" id="help-close" class="button ghost" aria-label="Close Help">Close</button>
+  </header>
+  <div class="utility-sheet-body">
+    <section class="utility-group" aria-labelledby="help-session-title">
+      <h3 id="help-session-title">Effective context</h3>
+      <strong id="help-context-summary">Loading context…</strong>
+      <p>Actions use the backend and vault shown in the context rail.</p>
+    </section>
+    <section class="utility-group" aria-labelledby="help-capability-title">
+      <h3 id="help-capability-title">Available here</h3>
+      <p id="help-capabilities">Capabilities load with the current context.</p>
+    </section>
+    <section class="utility-group" aria-labelledby="help-shortcuts-title">
+      <h3 id="help-shortcuts-title">Shortcuts</h3>
+      <dl class="shortcut-list">
+        <dt><kbd>⌘K</kbd> / <kbd>Ctrl+K</kbd></dt><dd>Commands</dd>
+        <dt><kbd>/</kbd></dt><dd>Search this list</dd>
+        <dt><kbd>⌘N</kbd> / <kbd>Ctrl+N</kbd></dt><dd>New secret</dd>
+        <dt><kbd>Escape</kbd></dt><dd>Close a sheet or dialog</dd>
+        <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Move between tabs</dd>
+      </dl>
+    </section>
+    <section class="utility-group" aria-labelledby="help-security-title">
+      <h3 id="help-security-title">Local-session security</h3>
+      <p>This UI accepts connections only from this computer. The session link is removed from the address bar and kept in this browser tab. Any app or browser on this computer with that link can access this session while Crosstache is running. Do not share it. Copied diagnostics omit the link and token.</p>
+    </section>
+    <section class="utility-group help-diagnostics" aria-labelledby="help-diagnostics-title">
+      <h3 id="help-diagnostics-title">Diagnostics</h3>
+      <dl>
+        <dt>Config</dt><dd id="help-config-path">Loading…</dd>
+        <dt>Version</dt><dd id="help-version">Loading…</dd>
+      </dl>
+      <button type="button" id="help-copy-diagnostics" class="button secondary"><svg class="icon" aria-hidden="true"><use href="#icon-copy"></use></svg>Copy redacted diagnostics</button>
+      <span id="help-copy-status" class="utility-live" role="status" aria-live="polite"></span>
+    </section>
+  </div>
+</section>
+
+<section id="settings-dialog" class="application-dialog utility-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1" hidden>
+  <header class="utility-sheet-header">
+    <div><span class="eyebrow">Presentation</span><h2 id="settings-title">Settings</h2></div>
+    <button type="button" id="settings-close" class="button ghost" aria-label="Close Settings">Close</button>
+  </header>
+  <div class="utility-sheet-body">
+    <section class="utility-group" aria-labelledby="settings-appearance-title">
+      <h3 id="settings-appearance-title">Appearance</h3>
+      <label class="form-field" for="theme-select"><span class="field-label">Theme</span>
+        <select id="theme-select">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+    </section>
+    <section class="utility-group" aria-labelledby="settings-protection-title">
+      <h3 id="settings-protection-title">Protected values</h3>
+      <label class="form-field" for="exposure-timeout-select"><span class="field-label">Protected value timeout</span>
+        <select id="exposure-timeout-select">
+          <option value="15">15 seconds</option>
+          <option value="30">30 seconds</option>
+          <option value="60">1 minute</option>
+          <option value="120">2 minutes</option>
+        </select>
+      </label>
+      <p id="timeout-policy-copy">Loading the application security policy…</p>
+    </section>
+    <section class="utility-group" aria-labelledby="settings-lists-title">
+      <h3 id="settings-lists-title">Lists</h3>
+      <label class="form-field" for="density-select"><span class="field-label">List density</span>
+        <select id="density-select">
+          <option value="comfortable">Comfortable</option>
+          <option value="compact">Compact</option>
+        </select>
+      </label>
+    </section>
+    <section class="utility-group utility-reset" aria-labelledby="settings-layout-title">
+      <div><h3 id="settings-layout-title">Layout</h3><p>Restore list density and column widths. Vault, folder, and theme state stay intact.</p></div>
+      <button type="button" id="layout-reset" class="button secondary">Reset layout</button>
+    </section>
+    <span id="settings-live" class="utility-live" role="status" aria-live="polite"></span>
+    <div id="settings-error" class="error-panel" role="alert" aria-live="assertive" aria-atomic="true" hidden>
+      <div><strong>Settings need attention</strong><span class="error-message"></span><small class="error-hint"></small></div>
+      <button class="button secondary" id="settings-error-retry" type="button">Retry Settings</button>
+    </div>
+  </div>
+</section>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <svg id="xv-icon-sprite" class="icon-sprite" aria-hidden="true">
@@ -160,7 +539,6 @@
   <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"></path></symbol>
   <symbol id="icon-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v6M12 17h.01"></path></symbol>
 </svg>
-<script src="/ui-model.js"></script>
-<script src="/app.js"></script>
+<script type="module" src="/app.js"></script>
 </body>
 </html>

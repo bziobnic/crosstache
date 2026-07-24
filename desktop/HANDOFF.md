@@ -45,6 +45,7 @@ non-shutdown `serve` method.
 - `desktop/src-tauri/icons/`: source PNG/SVG and generated macOS `.icns`.
 - `src/web/mod.rs`: reusable `prepare_web`/`PreparedWebServer` lifecycle.
 - `desktop/README.md`: source-run and bundle commands.
+- `tests/desktop/package-smoke.sh`: isolated unsigned-bundle first-run smoke.
 
 The root manifest is now a workspace with `desktop/src-tauri` as a member and
 the original crosstache package as the sole default member. Existing root
@@ -73,6 +74,18 @@ cd desktop/src-tauri
 cargo tauri build --bundles app --no-sign --ci
 ```
 
+Isolated packaged first-run verification (from the repository root):
+
+```bash
+bash tests/desktop/package-smoke.sh
+```
+
+The smoke uses only a `mktemp` root for HOME/XDG config/data and derives a
+fixed Local setup/list request from that validated root. It directly launches
+the unsigned bundle executable, observes token-free `setup-required` and
+`ready` markers, then terminates it. It creates no vault secret records and
+never reads a real user configuration or vault.
+
 ## Verification completed
 
 - `cargo check -p xv-desktop`: passed.
@@ -91,9 +104,11 @@ cargo tauri build --bundles app --no-sign --ci
   against the isolated local vault.
 - Packaged `.app`: launched successfully and visually rendered the full vault
   UI from its bundled executable.
+- Packaged first-run smoke: builds a non-signing `.app`, verifies isolated
+  Setup Required → Local setup/list → Ready, and preserves logs on failure.
 
-The smoke test used temporary HOME/XDG directories under `/tmp`; it did not
-read or mutate a real vault.
+The smoke test uses a temporary HOME/XDG root under the system temporary
+directory; it does not read or mutate a real vault.
 
 ## Known limitations
 
@@ -101,10 +116,9 @@ read or mutate a real vault.
   desktop release matrix has been added.
 - The `.app` is unsigned and not notarized. There is no DMG, updater, or store
   packaging.
-- Desktop startup calls `load_config()` directly. It supports project-relative
-  vault/type discovery after `--project`, but it does not yet share the CLI's
-  full top-level backend-precedence resolution from `src/main.rs`, especially
-  project environment profiles that select a backend.
+- Desktop startup and setup use the shared configuration and verified setup
+  services. Project-relative vault/type discovery remains supported after
+  `--project`.
 - A Finder-launched app has a different environment and `PATH` than a terminal.
   Azure CLI and AWS SSO/profile authentication still need explicit packaged-app
   testing.
@@ -113,20 +127,15 @@ read or mutate a real vault.
   service and a frontend transport adapter.
 - There is no in-app project picker, recent-project list, backend switcher, or
   credential recovery workflow.
-- The debug build prints the tokenized loopback URL for smoke testing. Release
-  builds do not print it.
 - The macOS clipboard integration test noted above remains environment-sensitive
   in the sandbox and was not changed as part of this desktop work.
 
 ## Recommended next steps
 
-1. Extract the CLI's config/backend/profile precedence into a reusable library
-   startup service and use it from both binaries.
-2. Add a native project-directory picker and persist recent project choices.
-3. Test packaged Azure CLI, Azure environment credentials, AWS profiles, and
+1. Add a native project-directory picker and persist recent project choices.
+2. Test packaged Azure CLI, Azure environment credentials, AWS profiles, and
    AWS SSO behavior from Finder launch contexts.
-4. Decide whether the production desktop app retains the hardened Axum
+3. Decide whether the production desktop app retains the hardened Axum
    loopback transport or migrates to Tauri IPC.
-5. Add macOS signing/notarization secrets and a desktop bundle job to the
+4. Add macOS signing/notarization secrets and a desktop bundle job to the
    release workflow; add a DMG only after that path is stable.
-6. Add an automated packaged-app smoke test where platform tooling permits it.

@@ -52,7 +52,11 @@ pub enum CacheEntryType {
 /// layout also nests under a `backend` component (see `to_path` below), so a
 /// pre-existing `v2`-era entry (no backend component in its path) simply
 /// misses rather than being read by the wrong backend's listing.
-pub(crate) const SECRETS_LIST_FILENAME: &str = "secrets-list-v3.json";
+///
+/// Bumped v3 -> v4 when display-safe canonical expiry metadata was added to
+/// `SecretSummary`, so cached pre-expiry rows cannot silently misclassify
+/// expiring secrets as having no expiry.
+pub(crate) const SECRETS_LIST_FILENAME: &str = "secrets-list-v4.json";
 
 /// Identifies a cache entry and determines its file path.
 #[allow(clippy::enum_variant_names)]
@@ -451,7 +455,7 @@ mod tests {
         };
         assert_eq!(
             key.to_path(&base),
-            PathBuf::from("/cache/azure/myvault/secrets-list-v3.json")
+            PathBuf::from("/cache/azure/myvault/secrets-list-v4.json")
         );
 
         let key = CacheKey::VaultList;

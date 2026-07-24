@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::backend::error::BackendError;
-use crate::backend::secret::SecretBackend;
+use crate::backend::secret::{SecretBackend, SecretSnapshot};
 use crate::secret::manager::{
     DeletedSecretSummary, SecretProperties, SecretRequest, SecretSummary, SecretUpdateRequest,
 };
@@ -57,6 +57,15 @@ pub struct SecretMeta {
     pub folder: Option<String>,
     /// Current version label, e.g. `"v1"`.
     pub version: String,
+    /// Opaque compare-and-swap token for the active generation. Unlike the
+    /// human-readable version label, this is never reused after recreation.
+    #[serde(default)]
+    pub revision: String,
+}
+
+#[derive(Deserialize)]
+struct PersistedFileMetadata {
+    name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +109,92 @@ fn meta_path(store_path: &Path, vault: &str, stem: &str) -> Result<PathBuf, Back
 /// Version-archive directory for a given filename `stem`.
 fn versions_dir(store_path: &Path, vault: &str, stem: &str) -> Result<PathBuf, BackendError> {
     Ok(secrets_dir(store_path, vault)?.join(".versions").join(stem))
+}
+
+fn transactions_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
+    Ok(secrets_dir(store_path, vault)?.join(".transactions"))
+}
+
+#[derive(Debug)]
+struct UpdateTransactionPaths {
+    dir: PathBuf,
+    journal: PathBuf,
+    journal_temp: PathBuf,
+    old_age: PathBuf,
+    old_meta: PathBuf,
+    new_age: PathBuf,
+    new_meta: PathBuf,
+}
+
+impl UpdateTransactionPaths {
+    fn new(store_path: &Path, vault: &str, stem: &str) -> Result<Self, BackendError> {
+        let dir = transactions_dir(store_path, vault)?;
+        Ok(Self {
+            journal: dir.join(format!("{stem}.journal.json")),
+            journal_temp: dir.join(format!("{stem}.journal.tmp")),
+            old_age: dir.join(format!("{stem}.old.age")),
+            old_meta: dir.join(format!("{stem}.old.meta")),
+            new_age: dir.join(format!("{stem}.new.age")),
+            new_meta: dir.join(format!("{stem}.new.meta")),
+            dir,
+        })
+    }
+
+    fn data_files(&self) -> [&Path; 4] {
+        [&self.old_age, &self.old_meta, &self.new_age, &self.new_meta]
+    }
+
+    fn artifacts(&self) -> [&Path; 6] {
+        [
+            &self.journal,
+            &self.journal_temp,
+            &self.old_age,
+            &self.old_meta,
+            &self.new_age,
+            &self.new_meta,
+        ]
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateJournal {
+    version: u8,
+    stem: String,
+    old_version: String,
+}
+
+#[derive(Debug)]
+struct RenameTransactionPaths {
+    dir: PathBuf,
+    journal: PathBuf,
+    journal_temp: PathBuf,
+    source_age: PathBuf,
+    source_meta: PathBuf,
+    destination_age: PathBuf,
+    destination_meta: PathBuf,
+}
+
+impl RenameTransactionPaths {
+    fn new(store_path: &Path, vault: &str, id: &str) -> Result<Self, BackendError> {
+        let dir = transactions_dir(store_path, vault)?.join(format!("rename-{id}"));
+        Ok(Self {
+            journal: dir.join("journal.json"),
+            journal_temp: dir.join("journal.tmp"),
+            source_age: dir.join("source.age"),
+            source_meta: dir.join("source.meta"),
+            destination_age: dir.join("destination.age"),
+            destination_meta: dir.join("destination.meta"),
+            dir,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RenameJournal {
+    version: u8,
+    source_stem: String,
+    destination_stem: String,
+    deleted_at_millis: u128,
 }
 
 /// Whether a version-archive directory exists and contains at least one entry.
@@ -325,6 +420,10 @@ fn meta_to_properties(meta: &SecretMeta, value: Option<Zeroizing<String>>) -> Se
     }
 }
 
+fn new_revision() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 fn meta_to_summary(meta: &SecretMeta) -> SecretSummary {
     let groups_str = if meta.groups.is_empty() {
         None
@@ -340,6 +439,7 @@ fn meta_to_summary(meta: &SecretMeta) -> SecretSummary {
         groups: groups_str,
         updated_on: meta.updated_at.format("%Y-%m-%d %H:%M").to_string(),
         enabled: meta.enabled,
+        expires_on: meta.expires_on,
         content_type: meta.content_type.clone(),
         tags: meta.tags.clone(),
     }
@@ -394,6 +494,60 @@ fn write_meta(path: &Path, meta: &SecretMeta, crypto_opts: MetaCrypto) -> Result
         .map_err(|e| BackendError::Internal(format!("write meta {}: {e}", path.display())))
 }
 
+fn sync_file(path: &Path) -> Result<(), BackendError> {
+    fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| BackendError::Internal(format!("sync file {}: {e}", path.display())))
+}
+
+fn sync_directory(path: &Path) -> Result<(), BackendError> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| {
+                BackendError::Internal(format!("sync directory {}: {e}", path.display()))
+            })?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    #[cfg(test)]
+    tests::record_directory_sync(path);
+    Ok(())
+}
+
+fn durable_write_private(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
+    write_private(path, bytes)
+        .map_err(|e| BackendError::Internal(format!("write durable {}: {e}", path.display())))?;
+    sync_file(path)?;
+    let parent = path.parent().ok_or_else(|| {
+        BackendError::Internal(format!("durable path {} has no parent", path.display()))
+    })?;
+    sync_directory(parent)
+}
+
+fn durable_replace_from(path: &Path, destination: &Path) -> Result<(), BackendError> {
+    let bytes = fs::read(path)
+        .map_err(|e| BackendError::Internal(format!("read backup {}: {e}", path.display())))?;
+    let temp = temp_path_for(destination)?;
+    durable_write_private(&temp, &bytes)?;
+    fs::rename(&temp, destination).map_err(|e| {
+        BackendError::Internal(format!(
+            "restore generation {} -> {}: {e}",
+            temp.display(),
+            destination.display()
+        ))
+    })?;
+    sync_directory(destination.parent().ok_or_else(|| {
+        BackendError::Internal(format!(
+            "active path {} has no parent",
+            destination.display()
+        ))
+    })?)
+}
+
 fn temp_path_for(path: &Path) -> Result<PathBuf, BackendError> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -407,6 +561,25 @@ fn temp_path_for(path: &Path) -> Result<PathBuf, BackendError> {
     Ok(path.with_file_name(format!(".{name}.tmp.{pid}.{ts}")))
 }
 
+fn create_versions_dir_durable(vdir: &Path) -> Result<(), BackendError> {
+    fs::create_dir_all(vdir).map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+    sync_directory(vdir)?;
+    let versions_parent = vdir.parent().ok_or_else(|| {
+        BackendError::Internal(format!(
+            "versions directory {} has no parent",
+            vdir.display()
+        ))
+    })?;
+    sync_directory(versions_parent)?;
+    let secrets_parent = versions_parent.parent().ok_or_else(|| {
+        BackendError::Internal(format!(
+            "versions parent {} has no parent",
+            versions_parent.display()
+        ))
+    })?;
+    sync_directory(secrets_parent)
+}
+
 fn archive_snapshot(
     store_path: &Path,
     vault: &str,
@@ -417,8 +590,7 @@ fn archive_snapshot(
     crypto_opts: MetaCrypto,
 ) -> Result<(), BackendError> {
     let vdir = versions_dir(store_path, vault, stem)?;
-    fs::create_dir_all(&vdir)
-        .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+    create_versions_dir_durable(&vdir)?;
 
     let age_dest = vdir.join(format!("{version}.age"));
     let meta_dest = vdir.join(format!("{version}.meta.json"));
@@ -474,8 +646,7 @@ fn archive_current(store_path: &Path, vault: &str, stem: &str) -> Result<u32, Ba
 
     let ver = next_version(store_path, vault, stem)?;
     let vdir = versions_dir(store_path, vault, stem)?;
-    fs::create_dir_all(&vdir)
-        .map_err(|e| BackendError::Internal(format!("mkdir versions: {e}")))?;
+    create_versions_dir_durable(&vdir)?;
 
     if ap.exists() {
         let dest = vdir.join(format!("v{ver}.age"));
@@ -490,7 +661,7 @@ fn archive_current(store_path: &Path, vault: &str, stem: &str) -> Result<u32, Ba
 }
 
 /// Acquire an exclusive file lock on the vault directory to prevent concurrent mutations.
-fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
+pub(crate) fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
     let lock_path = vault_dir.join(".lock");
     let lock_file = fs::OpenOptions::new()
         .create(true)
@@ -502,6 +673,45 @@ fn lock_vault(vault_dir: &Path) -> Result<fs::File, BackendError> {
         .lock_exclusive()
         .map_err(|e| BackendError::Internal(format!("vault locked by another process: {e}")))?;
     Ok(lock_file)
+}
+
+/// Acquire a shared vault lock for a complete active-generation read.
+pub(crate) fn lock_vault_shared(vault_dir: &Path) -> Result<fs::File, BackendError> {
+    let lock_path = vault_dir.join(".lock");
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| BackendError::Internal(format!("open lock: {e}")))?;
+    fs2::FileExt::lock_shared(&lock_file)
+        .map_err(|e| BackendError::Internal(format!("vault read lock failed: {e}")))?;
+    Ok(lock_file)
+}
+
+#[cfg(feature = "file-ops")]
+pub(crate) fn secret_name_from_metadata_bytes(
+    raw: &[u8],
+    identity: &age::x25519::Identity,
+) -> Result<String, BackendError> {
+    let metadata: SecretMeta = if crypto::is_age_encrypted(raw) {
+        let plaintext = crypto::decrypt_bytes(raw, identity)
+            .map_err(|e| BackendError::Internal(format!("decrypt secret metadata: {e}")))?;
+        serde_json::from_slice(&plaintext)
+            .map_err(|e| BackendError::Internal(format!("parse secret metadata: {e}")))?
+    } else {
+        serde_json::from_slice(raw)
+            .map_err(|e| BackendError::Internal(format!("parse secret metadata: {e}")))?
+    };
+    Ok(metadata.name)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+enum UpdateInterruption {
+    None,
+    Rollback(BackendError),
+    SimulatedCrash(BackendError),
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +774,518 @@ impl LocalSecretBackend {
             opaque_filenames,
             index_key,
         }
+    }
+
+    #[cfg(test)]
+    fn update_interruption(&self, stage: u8) -> UpdateInterruption {
+        tests::run_update_hook(&self.store_path, stage)
+    }
+
+    #[cfg(not(test))]
+    fn update_interruption(&self, _stage: u8) -> UpdateInterruption {
+        UpdateInterruption::None
+    }
+
+    fn transaction_stems_for_name(&self, name: &str) -> Vec<String> {
+        let active = self.active_stem(name);
+        if self.opaque_filenames {
+            let legacy = encode_name(name);
+            if legacy != active {
+                return vec![active, legacy];
+            }
+        }
+        vec![active]
+    }
+
+    #[cfg(test)]
+    fn has_pending_update_for_name(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        self.transaction_stems_for_name(name)
+            .into_iter()
+            .try_fold(false, |pending, stem| {
+                Ok(pending
+                    || UpdateTransactionPaths::new(&self.store_path, vault, &stem)?
+                        .journal
+                        .exists())
+            })
+    }
+
+    fn has_update_artifacts_for_name(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        self.transaction_stems_for_name(name)
+            .into_iter()
+            .try_fold(false, |found, stem| {
+                let paths = UpdateTransactionPaths::new(&self.store_path, vault, &stem)?;
+                Ok(found || paths.artifacts().iter().any(|path| path.exists()))
+            })
+    }
+
+    fn transaction_artifact_stems(&self, vault: &str) -> Result<Vec<String>, BackendError> {
+        let dir = transactions_dir(&self.store_path, vault)?;
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let suffixes = [
+            ".journal.json",
+            ".journal.tmp",
+            ".old.age",
+            ".old.meta",
+            ".new.age",
+            ".new.meta",
+        ];
+        let mut stems = Vec::new();
+        for entry in fs::read_dir(&dir)
+            .map_err(|e| BackendError::Internal(format!("read transactions dir: {e}")))?
+        {
+            let entry = entry
+                .map_err(|e| BackendError::Internal(format!("read transaction entry: {e}")))?;
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = suffixes
+                .iter()
+                .find_map(|suffix| file_name.strip_suffix(suffix))
+            {
+                stems.push(stem.to_string());
+            }
+        }
+        stems.sort();
+        stems.dedup();
+        Ok(stems)
+    }
+
+    fn has_any_update_artifacts(&self, vault: &str) -> Result<bool, BackendError> {
+        Ok(!self.transaction_artifact_stems(vault)?.is_empty()
+            || !self.rename_transaction_dirs(vault)?.is_empty())
+    }
+
+    fn recovery_interruption(&self, stage: u8) -> Result<(), BackendError> {
+        match self.update_interruption(stage) {
+            UpdateInterruption::None => Ok(()),
+            UpdateInterruption::Rollback(error) | UpdateInterruption::SimulatedCrash(error) => {
+                Err(error)
+            }
+        }
+    }
+
+    fn remove_transaction_file(path: &Path, label: &str) -> Result<bool, BackendError> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(path).map_err(|e| {
+            BackendError::Internal(format!("remove {label} {}: {e}", path.display()))
+        })?;
+        Ok(true)
+    }
+
+    /// Remove files that never became part of a published transaction, or
+    /// residue left after a durably committed update/rollback. Caller holds the
+    /// exclusive vault lock and has established that no final journal exists.
+    fn cleanup_unjournaled_transaction_locked(
+        &self,
+        paths: &UpdateTransactionPaths,
+    ) -> Result<(), BackendError> {
+        if paths.journal.exists() {
+            return Err(BackendError::Internal(format!(
+                "refusing to clean live update journal {}",
+                paths.journal.display()
+            )));
+        }
+        Self::remove_transaction_file(&paths.journal_temp, "temporary update journal")?;
+        for path in paths.data_files() {
+            Self::remove_transaction_file(path, "transaction file")?;
+        }
+        if paths.dir.exists() {
+            sync_directory(&paths.dir)?;
+            sync_directory(paths.dir.parent().ok_or_else(|| {
+                BackendError::Internal(format!(
+                    "transaction directory {} has no parent",
+                    paths.dir.display()
+                ))
+            })?)?;
+        }
+        Ok(())
+    }
+
+    /// Roll back one journaled update. Caller holds the exclusive vault lock.
+    ///
+    /// Backups are copied, not moved, so recovery is idempotent if the process
+    /// itself stops between restoring the value and metadata. Active/archive
+    /// rollback is synced before journal removal; removing and syncing the
+    /// journal is the rollback commit point. Backup/staging cleanup happens
+    /// only after that durable absence.
+    fn recover_update_for_stem_locked(&self, vault: &str, stem: &str) -> Result<(), BackendError> {
+        let paths = UpdateTransactionPaths::new(&self.store_path, vault, stem)?;
+        if !paths.journal.exists() {
+            return self.cleanup_unjournaled_transaction_locked(&paths);
+        }
+        let journal_bytes = fs::read(&paths.journal).map_err(|e| {
+            BackendError::Internal(format!(
+                "read update journal {}: {e}",
+                paths.journal.display()
+            ))
+        })?;
+        let journal: UpdateJournal = serde_json::from_slice(&journal_bytes).map_err(|e| {
+            BackendError::Internal(format!(
+                "parse update journal {}: {e}",
+                paths.journal.display()
+            ))
+        })?;
+        if journal.version != 1 || journal.stem != stem {
+            return Err(BackendError::Internal(format!(
+                "invalid update journal {}",
+                paths.journal.display()
+            )));
+        }
+        if !paths.old_age.exists() || !paths.old_meta.exists() {
+            return Err(BackendError::Internal(format!(
+                "incomplete update recovery data for stem '{stem}'"
+            )));
+        }
+
+        let active_age = age_path(&self.store_path, vault, stem)?;
+        let active_meta = meta_path(&self.store_path, vault, stem)?;
+        durable_replace_from(&paths.old_age, &active_age)?;
+        durable_replace_from(&paths.old_meta, &active_meta)?;
+        self.recovery_interruption(20)?;
+
+        let archive_dir = versions_dir(&self.store_path, vault, stem)?;
+        let archive_age = archive_dir.join(format!("{}.age", journal.old_version));
+        let archive_meta = archive_dir.join(format!("{}.meta.json", journal.old_version));
+        if Self::remove_transaction_file(&archive_age, "partial archive")? {
+            self.recovery_interruption(21)?;
+        }
+        if Self::remove_transaction_file(&archive_meta, "partial archive")? {
+            self.recovery_interruption(22)?;
+        }
+        if archive_dir.exists() {
+            sync_directory(&archive_dir)?;
+        }
+        self.recovery_interruption(23)?;
+
+        Self::remove_transaction_file(&paths.journal, "update journal")?;
+        self.recovery_interruption(24)?;
+        sync_directory(&paths.dir)?;
+        self.recovery_interruption(25)?;
+
+        for (path, stage) in [
+            (&paths.old_age, 26),
+            (&paths.old_meta, 27),
+            (&paths.new_age, 28),
+            (&paths.new_meta, 29),
+        ] {
+            if Self::remove_transaction_file(path, "recovered transaction file")? {
+                self.recovery_interruption(stage)?;
+            }
+        }
+        Self::remove_transaction_file(&paths.journal_temp, "temporary update journal")?;
+        sync_directory(&paths.dir)?;
+        self.recovery_interruption(30)?;
+        sync_directory(paths.dir.parent().ok_or_else(|| {
+            BackendError::Internal(format!(
+                "transaction directory {} has no parent",
+                paths.dir.display()
+            ))
+        })?)
+    }
+
+    /// Recover every possible layout stem for a named secret. Caller holds the
+    /// exclusive vault lock.
+    fn recover_pending_update_for_name_locked(
+        &self,
+        vault: &str,
+        name: &str,
+    ) -> Result<(), BackendError> {
+        for stem in self.transaction_stems_for_name(name) {
+            self.recover_update_for_stem_locked(vault, &stem)?;
+        }
+        Ok(())
+    }
+
+    fn recover_all_update_artifacts_locked(&self, vault: &str) -> Result<(), BackendError> {
+        for stem in self.transaction_artifact_stems(vault)? {
+            self.recover_update_for_stem_locked(vault, &stem)?;
+        }
+        self.recover_all_rename_transactions_locked(vault)?;
+        Ok(())
+    }
+
+    fn rename_transaction_dirs(&self, vault: &str) -> Result<Vec<PathBuf>, BackendError> {
+        let dir = transactions_dir(&self.store_path, vault)?;
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut transactions = fs::read_dir(&dir)
+            .map_err(|e| BackendError::Internal(format!("read transactions dir: {e}")))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("rename-"))
+            })
+            .collect::<Vec<_>>();
+        transactions.sort();
+        Ok(transactions)
+    }
+
+    fn recover_rename_transaction_locked(
+        &self,
+        vault: &str,
+        dir: &Path,
+    ) -> Result<(), BackendError> {
+        let journal_path = dir.join("journal.json");
+        if !journal_path.exists() {
+            fs::remove_dir_all(dir).map_err(|e| {
+                BackendError::Internal(format!(
+                    "clean uncommitted rename transaction {}: {e}",
+                    dir.display()
+                ))
+            })?;
+            sync_directory(&transactions_dir(&self.store_path, vault)?)?;
+            return Ok(());
+        }
+        let journal: RenameJournal =
+            serde_json::from_slice(&fs::read(&journal_path).map_err(|e| {
+                BackendError::Internal(format!("read rename journal {}: {e}", dir.display()))
+            })?)
+            .map_err(|e| {
+                BackendError::Internal(format!("parse rename journal {}: {e}", dir.display()))
+            })?;
+        let paths = RenameTransactionPaths {
+            dir: dir.to_path_buf(),
+            journal: journal_path,
+            journal_temp: dir.join("journal.tmp"),
+            source_age: dir.join("source.age"),
+            source_meta: dir.join("source.meta"),
+            destination_age: dir.join("destination.age"),
+            destination_meta: dir.join("destination.meta"),
+        };
+        let source_age = age_path(&self.store_path, vault, &journal.source_stem)?;
+        let source_meta = meta_path(&self.store_path, vault, &journal.source_stem)?;
+        let source_properties = paths
+            .source_meta
+            .exists()
+            .then(|| read_meta(&paths.source_meta, &self.identity))
+            .transpose()?;
+        let destination_properties = if paths.destination_meta.exists() {
+            Some(read_meta(&paths.destination_meta, &self.identity)?)
+        } else {
+            let active_destination = meta_path(&self.store_path, vault, &journal.destination_stem)?;
+            active_destination
+                .exists()
+                .then(|| read_meta(&active_destination, &self.identity))
+                .transpose()?
+        };
+        if paths.source_age.exists() {
+            durable_replace_from(&paths.source_age, &source_age)?;
+        }
+        if let Some(source_properties) = source_properties.as_ref() {
+            write_meta(
+                &source_meta,
+                source_properties,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
+            sync_file(&source_meta)?;
+        }
+
+        for destination in [
+            age_path(&self.store_path, vault, &journal.destination_stem)?,
+            meta_path(&self.store_path, vault, &journal.destination_stem)?,
+        ] {
+            if destination.exists() {
+                fs::remove_file(&destination).map_err(|e| {
+                    BackendError::Internal(format!(
+                        "remove rolled-back rename destination {}: {e}",
+                        destination.display()
+                    ))
+                })?;
+            }
+        }
+        let trash = trash_entry_dir(
+            &self.store_path,
+            vault,
+            &journal.source_stem,
+            journal.deleted_at_millis,
+        )?;
+        if trash.exists() {
+            fs::remove_dir_all(&trash).map_err(|e| {
+                BackendError::Internal(format!(
+                    "remove rolled-back rename trash {}: {e}",
+                    trash.display()
+                ))
+            })?;
+        }
+        if let Some(source_properties) = source_properties {
+            self.ensure_opaque_layout(vault, &source_properties.name)?;
+        }
+        if let Some(destination_properties) = destination_properties {
+            self.ensure_opaque_layout(vault, &destination_properties.name)?;
+        }
+        fs::remove_dir_all(dir).map_err(|e| {
+            BackendError::Internal(format!(
+                "remove recovered rename transaction {}: {e}",
+                dir.display()
+            ))
+        })?;
+        sync_directory(&transactions_dir(&self.store_path, vault)?)?;
+        Ok(())
+    }
+
+    fn recover_all_rename_transactions_locked(&self, vault: &str) -> Result<(), BackendError> {
+        for dir in self.rename_transaction_dirs(vault)? {
+            self.recover_rename_transaction_locked(vault, &dir)?;
+        }
+        Ok(())
+    }
+
+    fn read_lock_for_name(&self, vault: &str, name: &str) -> Result<fs::File, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        loop {
+            let read_lock = lock_vault_shared(&vault_dir)?;
+            if !self.has_update_artifacts_for_name(vault, name)?
+                && self.rename_transaction_dirs(vault)?.is_empty()
+            {
+                return Ok(read_lock);
+            }
+            drop(read_lock);
+            let write_lock = lock_vault(&vault_dir)?;
+            self.recover_pending_update_for_name_locked(vault, name)?;
+            self.recover_all_rename_transactions_locked(vault)?;
+            drop(write_lock);
+        }
+    }
+
+    fn read_lock_for_vault(&self, vault: &str) -> Result<fs::File, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        loop {
+            let read_lock = lock_vault_shared(&vault_dir)?;
+            if !self.has_any_update_artifacts(vault)? {
+                return Ok(read_lock);
+            }
+            drop(read_lock);
+            let write_lock = lock_vault(&vault_dir)?;
+            self.recover_all_update_artifacts_locked(vault)?;
+            drop(write_lock);
+        }
+    }
+
+    fn mutation_lock_for_name(&self, vault: &str, name: &str) -> Result<fs::File, BackendError> {
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        let write_lock = lock_vault(&vault_dir)?;
+        self.recover_pending_update_for_name_locked(vault, name)?;
+        self.recover_all_rename_transactions_locked(vault)?;
+        Ok(write_lock)
+    }
+
+    fn maintenance_lock_for_vault(
+        &self,
+        vault: &str,
+        vault_dir: &Path,
+        dry_run: bool,
+        operation: &str,
+    ) -> Result<fs::File, BackendError> {
+        if dry_run {
+            let read_lock = lock_vault_shared(vault_dir).map_err(|error| {
+                BackendError::Internal(format!(
+                    "could not read-lock vault {} for {operation}: {error}",
+                    vault_dir.display()
+                ))
+            })?;
+            if self.has_any_update_artifacts(vault)? {
+                return Err(BackendError::Conflict(format!(
+                    "pending local transaction recovery required in vault '{vault}' before \
+                     {operation}; run this command once without --dry-run to recover, then retry \
+                     the dry run"
+                )));
+            }
+            return Ok(read_lock);
+        }
+
+        let write_lock = lock_vault(vault_dir).map_err(|error| {
+            BackendError::Internal(format!(
+                "could not lock vault {} for {operation}: {error}",
+                vault_dir.display()
+            ))
+        })?;
+        self.recover_all_update_artifacts_locked(vault)?;
+        Ok(write_lock)
+    }
+
+    fn publish_update_journal_locked(
+        &self,
+        paths: &UpdateTransactionPaths,
+        journal_bytes: &[u8],
+    ) -> Result<UpdateInterruption, BackendError> {
+        write_private(&paths.journal_temp, journal_bytes).map_err(|e| {
+            BackendError::Internal(format!(
+                "write temporary update journal {}: {e}",
+                paths.journal_temp.display()
+            ))
+        })?;
+        sync_file(&paths.journal_temp)?;
+        let interruption = self.update_interruption(10);
+        if !matches!(interruption, UpdateInterruption::None) {
+            return Ok(interruption);
+        }
+        fs::rename(&paths.journal_temp, &paths.journal).map_err(|e| {
+            BackendError::Internal(format!(
+                "publish update journal {}: {e}",
+                paths.journal.display()
+            ))
+        })?;
+        let interruption = self.update_interruption(11);
+        if !matches!(interruption, UpdateInterruption::None) {
+            return Ok(interruption);
+        }
+        sync_directory(&paths.dir)?;
+        Ok(UpdateInterruption::None)
+    }
+
+    fn publish_rename_journal_locked(
+        &self,
+        paths: &RenameTransactionPaths,
+        journal_bytes: &[u8],
+    ) -> Result<UpdateInterruption, BackendError> {
+        write_private(&paths.journal_temp, journal_bytes).map_err(|e| {
+            BackendError::Internal(format!(
+                "write temporary rename journal {}: {e}",
+                paths.journal_temp.display()
+            ))
+        })?;
+        sync_file(&paths.journal_temp)?;
+        let interruption = self.update_interruption(90);
+        if !matches!(interruption, UpdateInterruption::None) {
+            return Ok(interruption);
+        }
+        fs::rename(&paths.journal_temp, &paths.journal).map_err(|e| {
+            BackendError::Internal(format!(
+                "publish rename journal {}: {e}",
+                paths.journal.display()
+            ))
+        })?;
+        let interruption = self.update_interruption(91);
+        if !matches!(interruption, UpdateInterruption::None) {
+            return Ok(interruption);
+        }
+        sync_directory(&paths.dir)?;
+        Ok(UpdateInterruption::None)
+    }
+
+    /// Commit cleanup after the complete new generation and its archive are
+    /// durable. Removing and syncing the journal is the commit point; any
+    /// later crash may leave harmless staging residue, but readers can trust
+    /// the already-synced active pair. A future update removes that residue.
+    fn finish_update_transaction_locked(
+        &self,
+        paths: &UpdateTransactionPaths,
+    ) -> Result<(), BackendError> {
+        if paths.journal.exists() {
+            Self::remove_transaction_file(&paths.journal, "committed update journal")?;
+            sync_directory(&paths.dir)?;
+        }
+        self.cleanup_unjournaled_transaction_locked(paths)
     }
 
     // -----------------------------------------------------------------------
@@ -767,17 +1489,21 @@ impl LocalSecretBackend {
             if !vault_dir.join(".vault.json").exists() {
                 continue;
             }
-            // Serialize against concurrent mutations of this vault. Fail loudly
-            // on lock errors so the caller never reports success while leaving a
-            // vault's metadata plaintext. The lock is held until `_lock` drops
-            // at the end of this iteration.
-            let _lock = lock_vault(&vault_dir).map_err(|e| {
-                BackendError::Internal(format!(
-                    "could not lock vault {} for metadata migration (another xv process may be \
-                     running): {e}",
-                    vault_dir.display()
-                ))
-            })?;
+            let vault = vault_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    BackendError::Internal(format!("invalid vault dir {}", vault_dir.display()))
+                })?;
+            // A dry run holds shared across artifact detection and the complete
+            // scan. It never recovers or cleans. A real run holds exclusive and
+            // recovers before scanning or rewriting metadata.
+            let _lock = self.maintenance_lock_for_vault(
+                vault,
+                &vault_dir,
+                dry_run,
+                "metadata-encryption dry run",
+            )?;
 
             // Walk only the secret-metadata subtrees: active + archived secrets
             // live under secrets/ (which contains .versions/), trashed secrets
@@ -878,16 +1604,12 @@ impl LocalSecretBackend {
                 })?
                 .to_string();
 
-            // Same lock as runtime mutations, so a migration step can't race a
-            // concurrent write. Held until `_lock` drops at iteration end.
-            let _lock = lock_vault(&vault_dir).map_err(|e| {
-                BackendError::Internal(format!(
-                    "could not lock vault {} for migration (another xv process may be \
-                     running): {e}",
-                    vault_dir.display()
-                ))
-            })?;
-
+            let _lock = self.maintenance_lock_for_vault(
+                &vault,
+                &vault_dir,
+                dry_run,
+                "opaque-migration dry run",
+            )?;
             self.migrate_vault(&vault, dry_run, &mut report)?;
         }
         Ok(report)
@@ -1055,8 +1777,17 @@ impl LocalSecretBackend {
                 suggestion: None,
             });
         }
-        let _lock = lock_vault(&vault_dir)?;
+        let _lock = self.mutation_lock_for_name(vault, name)?;
+        self.delete_secret_at_locked(vault, name, deleted_at_millis)
+    }
 
+    /// Soft-delete while the caller holds the exclusive vault lock.
+    fn delete_secret_at_locked(
+        &self,
+        vault: &str,
+        name: &str,
+        deleted_at_millis: u128,
+    ) -> Result<(), BackendError> {
         // Where the active pair currently lives (opaque stem, or legacy via the
         // read fallback on an un-migrated store).
         let src_stem = self.resolve_active_stem(vault, name)?;
@@ -1120,12 +1851,12 @@ impl LocalSecretBackend {
     }
 }
 
-#[async_trait]
-impl SecretBackend for LocalSecretBackend {
-    async fn set_secret(
+impl LocalSecretBackend {
+    fn set_secret_with_mode(
         &self,
         vault: &str,
         request: SecretRequest,
+        require_absent: bool,
     ) -> Result<SecretProperties, BackendError> {
         let store = self.store_path.clone();
         let identity = self.identity.clone();
@@ -1141,20 +1872,26 @@ impl SecretBackend for LocalSecretBackend {
             });
         }
 
-        // Acquire exclusive vault lock for the duration of the mutation.
-        let _lock = lock_vault(&vault_dir)?;
+        let name = request.name.clone();
+        // Recover a stopped same-name conversion before replacing or creating
+        // any active files. The returned lock remains held for the mutation.
+        let _lock = self.mutation_lock_for_name(vault, &name)?;
 
         let sdir = secrets_dir(&store, vault)?;
         create_private_dir(&sdir)
             .map_err(|e| BackendError::Internal(format!("mkdir secrets: {e}")))?;
 
-        let name = request.name.clone();
         // Resolve where an existing pair lives (opaque stem, or legacy via the
         // read fallback). A brand-new secret resolves to the active stem. The
         // trailing `ensure_opaque_layout` migrates any legacy stem to opaque.
         let stem = self.resolve_active_stem(vault, &name)?;
         let ap = age_path(&store, vault, &stem)?;
         let mp = meta_path(&store, vault, &stem)?;
+        if require_absent && mp.exists() {
+            return Err(BackendError::Conflict(format!(
+                "secret '{name}' already exists in vault '{vault}'"
+            )));
+        }
 
         // Snapshot old state for transactional replace+archive.
         let old_snapshot = if mp.exists() {
@@ -1193,6 +1930,7 @@ impl SecretBackend for LocalSecretBackend {
             note: request.note.clone(),
             folder: request.folder.clone(),
             version: version.clone(),
+            revision: new_revision(),
         };
 
         // Encrypt + write to temp files first, then atomically replace active.
@@ -1238,12 +1976,397 @@ impl SecretBackend for LocalSecretBackend {
         Ok(meta_to_properties(&meta, None))
     }
 
+    /// Read a complete active generation while the caller holds the exclusive
+    /// vault lock. Legacy metadata is assigned and durably persists a fresh
+    /// revision before the snapshot is returned.
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
+    fn get_secret_snapshot_locked(
+        &self,
+        vault: &str,
+        name: &str,
+        include_value: bool,
+    ) -> Result<SecretSnapshot, BackendError> {
+        self.ensure_opaque_layout(vault, name)?;
+        let stem = self.resolve_active_stem(vault, name)?;
+        let mp = meta_path(&self.store_path, vault, &stem)?;
+        if !mp.exists() {
+            return Err(BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            });
+        }
+        let mut meta = read_meta(&mp, &self.identity)?;
+        if meta.revision.is_empty() {
+            meta.revision = new_revision();
+            write_meta(
+                &mp,
+                &meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
+            sync_file(&mp)?;
+            sync_directory(mp.parent().expect("secret metadata has parent"))?;
+        }
+        let value = if include_value {
+            let ap = age_path(&self.store_path, vault, &stem)?;
+            Some(crypto::decrypt_from_file(&ap, &self.identity)?)
+        } else {
+            None
+        };
+        Ok(SecretSnapshot {
+            properties: meta_to_properties(&meta, value),
+            revision: meta.revision,
+        })
+    }
+
+    fn atomic_rename(
+        &self,
+        vault: &str,
+        name: &str,
+        new_name: &str,
+        expected_revision: Option<&str>,
+    ) -> Result<SecretProperties, BackendError> {
+        if name == new_name {
+            return Err(BackendError::InvalidArgument(format!(
+                "secret is already named '{name}'"
+            )));
+        }
+        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
+        if !vault_dir.join(".vault.json").exists() {
+            return Err(BackendError::VaultNotFound {
+                name: vault.to_string(),
+                suggestion: None,
+            });
+        }
+        let _lock = lock_vault(&vault_dir)?;
+        self.recover_all_update_artifacts_locked(vault)?;
+        self.ensure_opaque_layout(vault, name)?;
+        self.ensure_opaque_layout(vault, new_name)?;
+
+        let source_stem = self.resolve_active_stem(vault, name)?;
+        let source_age = age_path(&self.store_path, vault, &source_stem)?;
+        let source_meta_path = meta_path(&self.store_path, vault, &source_stem)?;
+        if !source_age.exists() || !source_meta_path.exists() {
+            return Err(BackendError::NotFound {
+                name: name.to_string(),
+                suggestion: None,
+            });
+        }
+        let mut source_meta = read_meta(&source_meta_path, &self.identity)?;
+        if source_meta.revision.is_empty() {
+            source_meta.revision = new_revision();
+            write_meta(
+                &source_meta_path,
+                &source_meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: self.encrypt_metadata,
+                },
+            )?;
+            sync_file(&source_meta_path)?;
+        }
+        if expected_revision.is_some_and(|expected| source_meta.revision != expected) {
+            return Err(BackendError::SourceRevisionConflict {
+                name: name.to_string(),
+            });
+        }
+
+        let destination_stem = self.active_stem(new_name);
+        let destination_age = age_path(&self.store_path, vault, &destination_stem)?;
+        let destination_meta_path = meta_path(&self.store_path, vault, &destination_stem)?;
+        if destination_age.exists() || destination_meta_path.exists() {
+            return Err(BackendError::DestinationExists {
+                name: new_name.to_string(),
+            });
+        }
+
+        for attachment_name in [name, new_name] {
+            if self.has_attachments_locked(vault, attachment_name)? {
+                return Err(BackendError::AttachmentsPresent {
+                    name: attachment_name.to_string(),
+                });
+            }
+        }
+
+        let mut deleted_at_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?
+            .as_millis();
+        for _ in 0..1000 {
+            let candidate = trash_entry_dir(
+                &self.store_path,
+                vault,
+                &self.active_stem(name),
+                deleted_at_millis,
+            )?;
+            if !candidate.exists() {
+                break;
+            }
+            deleted_at_millis += 1;
+        }
+
+        let transaction = RenameTransactionPaths::new(&self.store_path, vault, &new_revision())?;
+        create_private_dir(&transaction.dir).map_err(|e| {
+            BackendError::Internal(format!(
+                "create rename transaction {}: {e}",
+                transaction.dir.display()
+            ))
+        })?;
+        let source_age_bytes = fs::read(&source_age).map_err(|e| {
+            BackendError::Internal(format!("read rename source {}: {e}", source_age.display()))
+        })?;
+        let source_meta_bytes = fs::read(&source_meta_path).map_err(|e| {
+            BackendError::Internal(format!(
+                "read rename source metadata {}: {e}",
+                source_meta_path.display()
+            ))
+        })?;
+        durable_write_private(&transaction.source_age, &source_age_bytes)?;
+        if self.opaque_filenames {
+            write_meta(
+                &transaction.source_meta,
+                &source_meta,
+                MetaCrypto {
+                    recipients: &self.recipients,
+                    encrypt: true,
+                },
+            )?;
+            sync_file(&transaction.source_meta)?;
+        } else {
+            durable_write_private(&transaction.source_meta, &source_meta_bytes)?;
+        }
+        durable_write_private(&transaction.destination_age, &source_age_bytes)?;
+
+        let now = Utc::now();
+        let mut destination_meta = source_meta;
+        destination_meta.name = new_name.to_string();
+        destination_meta.original_name = new_name.to_string();
+        destination_meta.version = "v1".to_string();
+        destination_meta.revision = new_revision();
+        destination_meta.created_at = now;
+        destination_meta.updated_at = now;
+        write_meta(
+            &transaction.destination_meta,
+            &destination_meta,
+            MetaCrypto {
+                recipients: &self.recipients,
+                encrypt: self.encrypt_metadata || self.opaque_filenames,
+            },
+        )?;
+        sync_file(&transaction.destination_meta)?;
+        let journal = RenameJournal {
+            version: 1,
+            source_stem,
+            destination_stem,
+            deleted_at_millis,
+        };
+        let journal_bytes = serde_json::to_vec_pretty(&journal)
+            .map_err(|e| BackendError::Internal(format!("serialize rename journal: {e}")))?;
+        match self.publish_rename_journal_locked(&transaction, &journal_bytes)? {
+            UpdateInterruption::None => {}
+            UpdateInterruption::Rollback(error) => {
+                fs::remove_dir_all(&transaction.dir).map_err(|cleanup| {
+                    BackendError::Internal(format!(
+                        "{error}; clean unpublished rename transaction: {cleanup}"
+                    ))
+                })?;
+                sync_directory(&transactions_dir(&self.store_path, vault)?)?;
+                return Err(error);
+            }
+            UpdateInterruption::SimulatedCrash(error) => return Err(error),
+        }
+
+        let rollback = |cause: BackendError| -> Result<SecretProperties, BackendError> {
+            match self.recover_rename_transaction_locked(vault, &transaction.dir) {
+                Ok(()) => Err(cause),
+                Err(recovery) => Err(BackendError::Internal(format!(
+                    "{cause}; rename recovery also failed: {recovery}"
+                ))),
+            }
+        };
+        match self.update_interruption(100) {
+            UpdateInterruption::None => {}
+            UpdateInterruption::Rollback(error) => return rollback(error),
+            UpdateInterruption::SimulatedCrash(error) => return Err(error),
+        }
+
+        fs::rename(&transaction.destination_age, &destination_age).map_err(|e| {
+            BackendError::Internal(format!(
+                "activate rename destination {}: {e}",
+                destination_age.display()
+            ))
+        })?;
+        if let Err(error) = fs::rename(&transaction.destination_meta, &destination_meta_path)
+            .map_err(|e| {
+                BackendError::Internal(format!(
+                    "activate rename destination metadata {}: {e}",
+                    destination_meta_path.display()
+                ))
+            })
+        {
+            return rollback(error);
+        }
+        sync_directory(destination_age.parent().expect("destination has parent"))?;
+        match self.update_interruption(101) {
+            UpdateInterruption::None => {}
+            UpdateInterruption::Rollback(error) => return rollback(error),
+            UpdateInterruption::SimulatedCrash(error) => return Err(error),
+        }
+
+        if let Err(error) = self.delete_secret_at_locked(vault, name, deleted_at_millis) {
+            return rollback(error);
+        }
+        match self.update_interruption(102) {
+            UpdateInterruption::None => {}
+            UpdateInterruption::Rollback(error) => return rollback(error),
+            UpdateInterruption::SimulatedCrash(error) => return Err(error),
+        }
+        self.ensure_opaque_layout(vault, new_name)?;
+        Self::remove_transaction_file(&transaction.journal, "committed rename journal")?;
+        sync_directory(&transaction.dir)?;
+        fs::remove_dir_all(&transaction.dir).map_err(|e| {
+            BackendError::Internal(format!(
+                "remove committed rename transaction {}: {e}",
+                transaction.dir.display()
+            ))
+        })?;
+        sync_directory(&transactions_dir(&self.store_path, vault)?)?;
+        Ok(meta_to_properties(&destination_meta, None))
+    }
+
+    fn has_attachments_locked(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        let files = paths::files_dir(&self.store_path, vault)?;
+        if !files.exists() {
+            return Ok(false);
+        }
+        let prefix = crate::secret::attachments::attachment_prefix(name);
+        for entry in fs::read_dir(&files)
+            .map_err(|e| BackendError::Internal(format!("read files dir: {e}")))?
+            .flatten()
+        {
+            let path = entry.path();
+            if !path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .is_some_and(|file| file.ends_with(".meta.json"))
+            {
+                continue;
+            }
+            let bytes = fs::read(&path).map_err(|e| {
+                BackendError::Internal(format!("read file metadata {}: {e}", path.display()))
+            })?;
+            let info: PersistedFileMetadata = serde_json::from_slice(&bytes).map_err(|e| {
+                BackendError::Internal(format!(
+                    "parse file metadata {} while checking attachments: {e}",
+                    path.display()
+                ))
+            })?;
+            if info.name.starts_with(&prefix) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+#[async_trait]
+impl SecretBackend for LocalSecretBackend {
+    fn supports_conditional_update(&self) -> bool {
+        true
+    }
+
+    fn supports_revision_validation(&self) -> bool {
+        true
+    }
+
+    fn supports_atomic_rename(&self) -> bool {
+        true
+    }
+
+    async fn set_secret(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        self.set_secret_with_mode(vault, request, false)
+    }
+
+    async fn create_secret_if_absent(
+        &self,
+        vault: &str,
+        request: SecretRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        self.set_secret_with_mode(vault, request, true)
+    }
+
+    async fn get_secret_snapshot(
+        &self,
+        vault: &str,
+        name: &str,
+        include_value: bool,
+    ) -> Result<SecretSnapshot, BackendError> {
+        let _lock = self.mutation_lock_for_name(vault, name)?;
+        self.get_secret_snapshot_locked(vault, name, include_value)
+    }
+
+    async fn update_secret_if_revision(
+        &self,
+        vault: &str,
+        name: &str,
+        expected_revision: &str,
+        mut request: SecretUpdateRequest,
+    ) -> Result<SecretProperties, BackendError> {
+        request.expected_revision = Some(expected_revision.to_string());
+        self.update_secret(vault, name, request).await
+    }
+
+    async fn validate_secret_revision(
+        &self,
+        vault: &str,
+        name: &str,
+        expected_revision: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        let _lock = self.mutation_lock_for_name(vault, name)?;
+        let snapshot = self.get_secret_snapshot_locked(vault, name, false)?;
+        if snapshot.revision != expected_revision {
+            return Err(BackendError::SourceRevisionConflict {
+                name: name.to_string(),
+            });
+        }
+        Ok(snapshot.properties)
+    }
+
+    async fn rename_secret_if_revision(
+        &self,
+        vault: &str,
+        name: &str,
+        new_name: &str,
+        expected_revision: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        self.atomic_rename(vault, name, new_name, Some(expected_revision))
+    }
+
+    async fn rename_secret(
+        &self,
+        vault: &str,
+        name: &str,
+        new_name: &str,
+    ) -> Result<SecretProperties, BackendError> {
+        self.atomic_rename(vault, name, new_name, None)
+    }
+
     async fn get_secret(
         &self,
         vault: &str,
         name: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
+        // The helper may briefly drop shared and take exclusive for recovery;
+        // it returns only a fresh shared lock with no transaction artifacts.
+        let _read_lock = self.read_lock_for_name(vault, name)?;
+
         // Resolve the on-disk stem (opaque, or legacy via the read-only
         // back-compat fallback). Reads never create or upgrade legacy files.
         let stem = self.resolve_active_stem(vault, name)?;
@@ -1297,13 +2420,30 @@ impl SecretBackend for LocalSecretBackend {
         version: &str,
         include_value: bool,
     ) -> Result<SecretProperties, BackendError> {
+        let _read_lock = self.read_lock_for_name(vault, name)?;
+
         // First check if this is the current version.
         let stem = self.resolve_active_stem(vault, name)?;
         let mp = meta_path(&self.store_path, vault, &stem)?;
         if mp.exists() {
             let meta = read_meta(&mp, &self.identity)?;
             if meta.version == version {
-                return self.get_secret(vault, name, include_value).await;
+                let value = if include_value {
+                    let age_file = age_path(&self.store_path, vault, &stem)?;
+                    if fs::symlink_metadata(&age_file)
+                        .map(|metadata| metadata.is_symlink())
+                        .unwrap_or(false)
+                    {
+                        return Err(BackendError::Internal(format!(
+                            "refusing to decrypt secret file: {} is a symlink",
+                            age_file.display()
+                        )));
+                    }
+                    Some(crypto::decrypt_from_file(&age_file, &self.identity)?)
+                } else {
+                    None
+                };
+                return Ok(meta_to_properties(&meta, value));
             }
         }
 
@@ -1359,6 +2499,7 @@ impl SecretBackend for LocalSecretBackend {
         if !sdir.exists() {
             return Ok(Vec::new());
         }
+        let _read_lock = self.read_lock_for_vault(vault)?;
 
         let mut results = Vec::new();
         let push_meta = |meta: &SecretMeta, results: &mut Vec<SecretSummary>| {
@@ -1455,13 +2596,12 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         request: SecretUpdateRequest,
     ) -> Result<SecretProperties, BackendError> {
-        // Acquire exclusive vault lock — update_secret may call archive_current/next_version.
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        let _lock = lock_vault(&vault_dir)?;
+        // Acquire once and recover before inspecting the active/history pair.
+        let _lock = self.mutation_lock_for_name(vault, name)?;
 
-        // Resolve where the active pair lives (opaque, or legacy via the read
-        // fallback). The trailing `ensure_opaque_layout` migrates legacy → opaque
-        // so even a metadata-only update upgrades the layout and clears the leak.
+        // Migrate any legacy layout before the transaction starts, so a later
+        // migration failure can never leave a successfully converted mixed state.
+        self.ensure_opaque_layout(vault, name)?;
         let stem = self.resolve_active_stem(vault, name)?;
         let mp = meta_path(&self.store_path, vault, &stem)?;
         if !mp.exists() {
@@ -1472,42 +2612,27 @@ impl SecretBackend for LocalSecretBackend {
         }
 
         let mut meta = read_meta(&mp, &self.identity)?;
+        if request
+            .expected_revision
+            .as_deref()
+            .is_some_and(|expected| meta.revision != expected)
+        {
+            return Err(BackendError::SourceRevisionConflict {
+                name: name.to_string(),
+            });
+        }
+        let old_meta = meta.clone();
         let now = Utc::now();
 
-        // If value is being updated, replace active first, then archive prior snapshot.
-        if let Some(ref new_value) = request.value {
-            let ap = age_path(&self.store_path, vault, &stem)?;
-            let old_age = fs::read(&ap).map_err(|e| {
-                BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
-            })?;
-            let old_meta = meta.clone();
-
+        if request.value.is_some() {
             let old_num: u32 = meta
                 .version
                 .strip_prefix('v')
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             meta.version = format!("v{}", old_num + 1);
-
-            let ap_tmp = temp_path_for(&ap)?;
-            crypto::encrypt_to_file(&ap_tmp, new_value.as_bytes(), &self.recipients)?;
-            fs::rename(&ap_tmp, &ap).map_err(|e| {
-                BackendError::Internal(format!("activate age {}: {e}", ap.display()))
-            })?;
-
-            archive_snapshot(
-                &self.store_path,
-                vault,
-                &stem,
-                &old_meta.version,
-                &old_age,
-                &old_meta,
-                MetaCrypto {
-                    recipients: &self.recipients,
-                    encrypt: self.encrypt_metadata,
-                },
-            )?;
         }
+        meta.revision = new_revision();
 
         // Merge or replace tags
         if let Some(new_tags) = &request.tags {
@@ -1545,17 +2670,131 @@ impl SecretBackend for LocalSecretBackend {
         meta.folder = request.folder.apply(meta.folder.take());
 
         meta.updated_at = now;
-        write_meta(
-            &mp,
-            &meta,
-            MetaCrypto {
-                recipients: &self.recipients,
-                encrypt: self.encrypt_metadata,
-            },
-        )?;
+        let crypto_opts = MetaCrypto {
+            recipients: &self.recipients,
+            encrypt: self.encrypt_metadata,
+        };
 
-        // Upgrade legacy layout → opaque and refresh the index entry.
-        self.ensure_opaque_layout(vault, name)?;
+        if let Some(ref new_value) = request.value {
+            let ap = age_path(&self.store_path, vault, &stem)?;
+            let old_age = fs::read(&ap).map_err(|e| {
+                BackendError::Internal(format!("read existing age {}: {e}", ap.display()))
+            })?;
+            let old_meta_bytes = fs::read(&mp).map_err(|e| {
+                BackendError::Internal(format!("read existing meta {}: {e}", mp.display()))
+            })?;
+            let transaction = UpdateTransactionPaths::new(&self.store_path, vault, &stem)?;
+            create_private_dir(&transaction.dir).map_err(|e| {
+                BackendError::Internal(format!(
+                    "create transaction directory {}: {e}",
+                    transaction.dir.display()
+                ))
+            })?;
+            // No journal means any files here are residue from staging before
+            // the transaction became visible. They cannot describe an active
+            // mutation and are safe to replace.
+            self.cleanup_unjournaled_transaction_locked(&transaction)?;
+
+            durable_write_private(&transaction.old_age, &old_age)?;
+            durable_write_private(&transaction.old_meta, &old_meta_bytes)?;
+            crypto::encrypt_to_file(&transaction.new_age, new_value.as_bytes(), &self.recipients)?;
+            sync_file(&transaction.new_age)?;
+            write_meta(&transaction.new_meta, &meta, crypto_opts)?;
+            sync_file(&transaction.new_meta)?;
+            sync_directory(&transaction.dir)?;
+
+            let journal = UpdateJournal {
+                version: 1,
+                stem: stem.clone(),
+                old_version: old_meta.version.clone(),
+            };
+            let journal_bytes = serde_json::to_vec_pretty(&journal)
+                .map_err(|e| BackendError::Internal(format!("serialize update journal: {e}")))?;
+            let rollback = |cause: BackendError| -> Result<SecretProperties, BackendError> {
+                match self.recover_update_for_stem_locked(vault, &stem) {
+                    Ok(()) => Err(cause),
+                    Err(recovery) => Err(BackendError::Internal(format!(
+                        "{cause}; update recovery also failed: {recovery}"
+                    ))),
+                }
+            };
+
+            // Publish via a synced temp and atomic rename. The final marker is
+            // never opened with truncate semantics.
+            match self.publish_update_journal_locked(&transaction, &journal_bytes) {
+                Ok(UpdateInterruption::None) => {}
+                Ok(UpdateInterruption::Rollback(error)) => {
+                    if transaction.journal.exists() {
+                        return rollback(error);
+                    }
+                    self.cleanup_unjournaled_transaction_locked(&transaction)?;
+                    return Err(error);
+                }
+                Ok(UpdateInterruption::SimulatedCrash(error)) => return Err(error),
+                Err(error) => {
+                    if transaction.journal.exists() {
+                        return rollback(error);
+                    }
+                    self.cleanup_unjournaled_transaction_locked(&transaction)?;
+                    return Err(error);
+                }
+            }
+
+            match self.update_interruption(0) {
+                UpdateInterruption::None => {}
+                UpdateInterruption::Rollback(error) => return rollback(error),
+                UpdateInterruption::SimulatedCrash(error) => return Err(error),
+            }
+
+            if let Err(error) = fs::rename(&transaction.new_age, &ap)
+                .map_err(|e| BackendError::Internal(format!("activate age {}: {e}", ap.display())))
+            {
+                return rollback(error);
+            }
+            sync_directory(ap.parent().expect("active value has parent"))?;
+            match self.update_interruption(1) {
+                UpdateInterruption::None => {}
+                UpdateInterruption::Rollback(error) => return rollback(error),
+                UpdateInterruption::SimulatedCrash(error) => return Err(error),
+            }
+
+            if let Err(error) = fs::rename(&transaction.new_meta, &mp)
+                .map_err(|e| BackendError::Internal(format!("activate meta {}: {e}", mp.display())))
+            {
+                return rollback(error);
+            }
+            sync_directory(mp.parent().expect("active metadata has parent"))?;
+            match self.update_interruption(2) {
+                UpdateInterruption::None => {}
+                UpdateInterruption::Rollback(error) => return rollback(error),
+                UpdateInterruption::SimulatedCrash(error) => return Err(error),
+            }
+
+            if let Err(error) = archive_snapshot(
+                &self.store_path,
+                vault,
+                &stem,
+                &old_meta.version,
+                &old_age,
+                &old_meta,
+                crypto_opts,
+            ) {
+                return rollback(error);
+            }
+            let archive_dir = versions_dir(&self.store_path, vault, &stem)?;
+            sync_file(&archive_dir.join(format!("{}.age", old_meta.version)))?;
+            sync_file(&archive_dir.join(format!("{}.meta.json", old_meta.version)))?;
+            sync_directory(&archive_dir)?;
+            match self.update_interruption(3) {
+                UpdateInterruption::None => {}
+                UpdateInterruption::Rollback(error) => return rollback(error),
+                UpdateInterruption::SimulatedCrash(error) => return Err(error),
+            }
+
+            self.finish_update_transaction_locked(&transaction)?;
+        } else {
+            write_meta(&mp, &meta, crypto_opts)?;
+        }
 
         Ok(meta_to_properties(&meta, None))
     }
@@ -1569,6 +2808,7 @@ impl SecretBackend for LocalSecretBackend {
         vault: &str,
         name: &str,
     ) -> Result<Vec<SecretProperties>, BackendError> {
+        let _read_lock = self.read_lock_for_name(vault, name)?;
         let mut versions = Vec::new();
 
         // Collect archived versions (opaque, or legacy via read fallback)
@@ -1602,6 +2842,7 @@ impl SecretBackend for LocalSecretBackend {
     }
 
     async fn secret_exists(&self, vault: &str, name: &str) -> Result<bool, BackendError> {
+        let _read_lock = self.read_lock_for_name(vault, name)?;
         let stem = self.resolve_active_stem(vault, name)?;
         let mp = meta_path(&self.store_path, vault, &stem)?;
         Ok(mp.exists())
@@ -1613,9 +2854,8 @@ impl SecretBackend for LocalSecretBackend {
         name: &str,
         version: &str,
     ) -> Result<SecretProperties, BackendError> {
-        // Acquire exclusive vault lock — rollback calls archive_current/next_version.
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        let _lock = lock_vault(&vault_dir)?;
+        // Acquire once and recover before rollback inspects current/history.
+        let _lock = self.mutation_lock_for_name(vault, name)?;
 
         // Operate on the stem where this secret currently lives (opaque, or
         // legacy via the read fallback). `ensure_opaque_layout` migrates to
@@ -1653,6 +2893,7 @@ impl SecretBackend for LocalSecretBackend {
         let mut meta = read_meta(&mp, &self.identity)?;
         let next_ver = next_version(&self.store_path, vault, &stem)?;
         meta.version = format!("v{next_ver}");
+        meta.revision = new_revision();
         meta.updated_at = Utc::now();
         write_meta(
             &mp,
@@ -1681,7 +2922,7 @@ impl SecretBackend for LocalSecretBackend {
                 suggestion: None,
             });
         }
-        let _lock = lock_vault(&vault_dir)?;
+        let _lock = self.mutation_lock_for_name(vault, name)?;
 
         // Restore the most recent trash entry for this name (legacy un-suffixed
         // entries sort as oldest). Ties on timestamp break by path so the
@@ -1715,15 +2956,16 @@ impl SecretBackend for LocalSecretBackend {
         let ap = age_path(&self.store_path, vault, &target_stem)?;
         let mp = meta_path(&self.store_path, vault, &target_stem)?;
 
-        // If an active secret with this name exists (delete → recreate →
-        // restore), archive it to .versions/ instead of silently destroying
-        // it, mirroring the rollback path.
+        // A restore must never displace an active value. Leave both the live
+        // secret and trash entry untouched so the caller can resolve the
+        // collision explicitly.
         let existing_stem = self.resolve_active_stem(vault, name)?;
         let existing_ap = age_path(&self.store_path, vault, &existing_stem)?;
         let existing_mp = meta_path(&self.store_path, vault, &existing_stem)?;
-        let had_active = existing_ap.exists() || existing_mp.exists();
-        if had_active {
-            archive_current(&self.store_path, vault, &existing_stem)?;
+        if existing_ap.exists() || existing_mp.exists() {
+            return Err(BackendError::Conflict(format!(
+                "secret '{name}' already exists in vault '{vault}'"
+            )));
         }
 
         if let Some(trash_age) = trash_age.filter(|p| p.exists()) {
@@ -1738,21 +2980,18 @@ impl SecretBackend for LocalSecretBackend {
             .map_err(|e| BackendError::Internal(format!("remove trash dir: {e}")))?;
 
         let mut meta = read_meta(&mp, &self.identity)?;
-        if had_active {
-            // Relabel so the restored secret doesn't reuse a version label
-            // already taken by the archived active secret.
-            let next_ver = next_version(&self.store_path, vault, &target_stem)?;
-            meta.version = format!("v{next_ver}");
-            meta.updated_at = Utc::now();
-            write_meta(
-                &mp,
-                &meta,
-                MetaCrypto {
-                    recipients: &self.recipients,
-                    encrypt: self.encrypt_metadata,
-                },
-            )?;
-        }
+        meta.revision = new_revision();
+        meta.updated_at = Utc::now();
+        write_meta(
+            &mp,
+            &meta,
+            MetaCrypto {
+                recipients: &self.recipients,
+                encrypt: self.encrypt_metadata,
+            },
+        )?;
+        sync_file(&mp)?;
+        sync_directory(mp.parent().expect("restored metadata has parent"))?;
 
         // Re-add the active index entry and upgrade any remaining legacy layout.
         self.ensure_opaque_layout(vault, name)?;
@@ -1768,25 +3007,51 @@ impl SecretBackend for LocalSecretBackend {
                 suggestion: None,
             });
         }
-        let _lock = lock_vault(&vault_dir)?;
+        let _lock = self.mutation_lock_for_name(vault, name)?;
+
+        let trash_entries = self.trash_entries_for(vault, name)?;
+        if trash_entries.is_empty() {
+            return Err(BackendError::NotFound {
+                name: format!("{name} (deleted)"),
+                suggestion: Some("Secret is not in the trash".into()),
+            });
+        }
+
+        // A same-name active secret may have been recreated after deletion.
+        // Purging the old trash must not erase that live secret's versions.
+        let mut active_stems = vec![self.active_stem(name)];
+        if self.opaque_filenames {
+            active_stems.push(encode_name(name));
+        }
+        let has_active = active_stems.iter().try_fold(false, |found, stem| {
+            Ok::<_, BackendError>(
+                found
+                    || age_path(&self.store_path, vault, stem)?.exists()
+                    || meta_path(&self.store_path, vault, stem)?.exists(),
+            )
+        })?;
 
         // Permanently remove every trash entry for this name (opaque + legacy
         // stems, suffixed and unsuffixed).
-        for (_, tdir) in self.trash_entries_for(vault, name)? {
+        for (_, tdir) in trash_entries {
             fs::remove_dir_all(&tdir)
                 .map_err(|e| BackendError::Internal(format!("purge trash: {e}")))?;
         }
 
-        // Also remove any .versions/ for that secret, under both stems.
-        let mut version_stems = vec![self.active_stem(name)];
-        if self.opaque_filenames {
-            version_stems.push(encode_name(name));
-        }
-        for stem in version_stems {
-            let vdir = versions_dir(&self.store_path, vault, &stem)?;
-            if vdir.exists() {
-                fs::remove_dir_all(&vdir)
-                    .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+        // With no active same-name secret, versions belong only to the
+        // deleted secret and are purged with it. Otherwise preserve the
+        // shared version namespace for the active value.
+        if !has_active {
+            let mut version_stems = vec![self.active_stem(name)];
+            if self.opaque_filenames {
+                version_stems.push(encode_name(name));
+            }
+            for stem in version_stems {
+                let vdir = versions_dir(&self.store_path, vault, &stem)?;
+                if vdir.exists() {
+                    fs::remove_dir_all(&vdir)
+                        .map_err(|e| BackendError::Internal(format!("purge versions: {e}")))?;
+                }
             }
         }
 
@@ -1797,6 +3062,7 @@ impl SecretBackend for LocalSecretBackend {
         &self,
         vault: &str,
     ) -> Result<Vec<DeletedSecretSummary>, BackendError> {
+        let _read_lock = self.read_lock_for_vault(vault)?;
         let tbase = trash_base_dir(&self.store_path, vault)?;
         if !tbase.exists() {
             return Ok(Vec::new());
@@ -1851,8 +3117,144 @@ impl SecretBackend for LocalSecretBackend {
 mod tests {
     use super::*;
     use crate::backend::local::crypto::generate_keypair;
+    use crate::records::{RECORD_CONTENT_TYPE, TYPE_TAG};
     use crate::secret::manager::FieldUpdate;
+    use std::collections::BTreeMap;
+    use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    #[derive(Clone)]
+    enum UpdateTestHook {
+        Failure(u8),
+        Crash(u8),
+        Pause {
+            stage: u8,
+            state: Arc<(Mutex<PauseState>, Condvar)>,
+        },
+    }
+
+    #[derive(Default)]
+    struct PauseState {
+        reached: bool,
+        resumed: bool,
+    }
+
+    struct UpdatePause {
+        state: Arc<(Mutex<PauseState>, Condvar)>,
+    }
+
+    impl UpdatePause {
+        fn wait_until_reached(&self) {
+            let (mutex, condition) = &*self.state;
+            let mut state = mutex.lock().unwrap();
+            while !state.reached {
+                state = condition.wait(state).unwrap();
+            }
+        }
+
+        fn resume(self) {
+            let (mutex, condition) = &*self.state;
+            let mut state = mutex.lock().unwrap();
+            state.resumed = true;
+            condition.notify_all();
+        }
+    }
+
+    fn update_hooks() -> &'static Mutex<HashMap<PathBuf, UpdateTestHook>> {
+        static HOOKS: OnceLock<Mutex<HashMap<PathBuf, UpdateTestHook>>> = OnceLock::new();
+        HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn directory_syncs() -> &'static Mutex<Vec<PathBuf>> {
+        static SYNCS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+        SYNCS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub(super) fn record_directory_sync(path: &Path) {
+        directory_syncs().lock().unwrap().push(path.to_path_buf());
+    }
+
+    fn take_directory_syncs_under(root: &Path) -> Vec<PathBuf> {
+        let mut syncs = directory_syncs().lock().unwrap();
+        let mut matching = Vec::new();
+        syncs.retain(|path| {
+            if path.starts_with(root) {
+                matching.push(path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        matching
+    }
+
+    fn install_update_failure(store_path: &Path, stage: u8) {
+        update_hooks()
+            .lock()
+            .unwrap()
+            .insert(store_path.to_path_buf(), UpdateTestHook::Failure(stage));
+    }
+
+    fn install_update_crash(store_path: &Path, stage: u8) {
+        update_hooks()
+            .lock()
+            .unwrap()
+            .insert(store_path.to_path_buf(), UpdateTestHook::Crash(stage));
+    }
+
+    fn install_update_pause(store_path: &Path, stage: u8) -> UpdatePause {
+        let state = Arc::new((Mutex::new(PauseState::default()), Condvar::new()));
+        update_hooks().lock().unwrap().insert(
+            store_path.to_path_buf(),
+            UpdateTestHook::Pause {
+                stage,
+                state: Arc::clone(&state),
+            },
+        );
+        UpdatePause { state }
+    }
+
+    pub(super) fn run_update_hook(store_path: &Path, stage: u8) -> UpdateInterruption {
+        let hook = {
+            let mut hooks = update_hooks().lock().unwrap();
+            let matches = match hooks.get(store_path) {
+                Some(UpdateTestHook::Failure(expected)) | Some(UpdateTestHook::Crash(expected)) => {
+                    *expected == stage
+                }
+                Some(UpdateTestHook::Pause {
+                    stage: expected, ..
+                }) => *expected == stage,
+                None => false,
+            };
+            matches.then(|| hooks.remove(store_path).expect("matched hook exists"))
+        };
+        match hook {
+            Some(UpdateTestHook::Failure(_)) => {
+                UpdateInterruption::Rollback(BackendError::Internal(format!(
+                    "injected local update failure after stage {stage}"
+                )))
+            }
+            Some(UpdateTestHook::Crash(_)) => UpdateInterruption::SimulatedCrash(
+                BackendError::Internal(format!("simulated crash after local update stage {stage}")),
+            ),
+            Some(UpdateTestHook::Pause { state, .. }) => {
+                let (mutex, condition) = &*state;
+                let mut pause = mutex.lock().unwrap();
+                pause.reached = true;
+                condition.notify_all();
+                while !pause.resumed {
+                    pause = condition.wait(pause).unwrap();
+                }
+                UpdateInterruption::None
+            }
+            None => UpdateInterruption::None,
+        }
+    }
+
+    fn has_pending_update_journal(backend: &LocalSecretBackend, vault: &str, name: &str) -> bool {
+        backend.has_pending_update_for_name(vault, name).unwrap()
+    }
 
     /// Create a test backend with a temp dir and return it along with the temp dir.
     /// Metadata encryption is off (matches the default).
@@ -1939,6 +3341,68 @@ mod tests {
         let identity = crypto::load_identity(&key_path).unwrap();
         let recipients = crypto::load_recipients(&recipients_path).unwrap();
         LocalSecretBackend::with_options(store, identity, recipients, encrypt_metadata, false)
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum TreeSnapshotEntry {
+        Directory { permissions: u32 },
+        File { permissions: u32, bytes: Vec<u8> },
+        Symlink { target: PathBuf },
+    }
+
+    #[cfg(unix)]
+    fn snapshot_permissions(metadata: &fs::Metadata) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode()
+    }
+
+    #[cfg(not(unix))]
+    fn snapshot_permissions(metadata: &fs::Metadata) -> u32 {
+        u32::from(metadata.permissions().readonly())
+    }
+
+    fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, TreeSnapshotEntry> {
+        fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, TreeSnapshotEntry>) {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if metadata.file_type().is_symlink() {
+                snapshot.insert(
+                    relative,
+                    TreeSnapshotEntry::Symlink {
+                        target: fs::read_link(path).unwrap(),
+                    },
+                );
+                return;
+            }
+            if metadata.is_dir() {
+                snapshot.insert(
+                    relative,
+                    TreeSnapshotEntry::Directory {
+                        permissions: snapshot_permissions(&metadata),
+                    },
+                );
+                let mut children = fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect::<Vec<_>>();
+                children.sort();
+                for child in children {
+                    visit(root, &child, snapshot);
+                }
+                return;
+            }
+            snapshot.insert(
+                relative,
+                TreeSnapshotEntry::File {
+                    permissions: snapshot_permissions(&metadata),
+                    bytes: fs::read(path).unwrap(),
+                },
+            );
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
     }
 
     fn make_request(name: &str, value: &str) -> SecretRequest {
@@ -2269,6 +3733,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_secrets_treats_an_unmaterialized_workspace_vault_as_empty() {
+        let (backend, _tmp) = test_backend();
+
+        let secrets = backend.list_secrets("workspace-only", None).await.unwrap();
+
+        assert!(secrets.is_empty());
+    }
+
+    #[tokio::test]
     async fn delete_secret() {
         let (backend, _tmp) = test_backend();
 
@@ -2383,6 +3856,74 @@ mod tests {
 
         // Should not exist
         assert!(!backend.secret_exists("default", "purge-me").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn purge_after_restore_is_not_found_and_preserves_restored_history() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("stale-purge", "v1"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("stale-purge", "v2"))
+            .await
+            .unwrap();
+        backend
+            .delete_secret("default", "stale-purge")
+            .await
+            .unwrap();
+        backend
+            .restore_secret("default", "stale-purge")
+            .await
+            .unwrap();
+
+        let error = backend
+            .purge_secret("default", "stale-purge")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::NotFound { .. }));
+        let history = backend
+            .get_secret_version("default", "stale-purge", "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(&*history.value.unwrap(), "v1");
+    }
+
+    #[tokio::test]
+    async fn purge_old_trash_preserves_same_name_active_secret_and_versions() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("recreated", "old"))
+            .await
+            .unwrap();
+        backend.delete_secret("default", "recreated").await.unwrap();
+        backend
+            .set_secret("default", make_request("recreated", "live-v1"))
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("recreated", "live-v2"))
+            .await
+            .unwrap();
+
+        backend.purge_secret("default", "recreated").await.unwrap();
+
+        let active = backend
+            .get_secret("default", "recreated", true)
+            .await
+            .unwrap();
+        assert_eq!(&*active.value.unwrap(), "live-v2");
+        let history = backend
+            .get_secret_version("default", "recreated", "v1", true)
+            .await
+            .unwrap();
+        assert_eq!(&*history.value.unwrap(), "live-v1");
+        assert!(backend
+            .list_deleted_secrets("default")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2516,6 +4057,7 @@ mod tests {
 
         let update = SecretUpdateRequest {
             name: "upd".into(),
+            expected_revision: None,
             value: None,
             content_type: Some("application/json".into()),
             enabled: Some(false),
@@ -2551,6 +4093,7 @@ mod tests {
 
         let update = SecretUpdateRequest {
             name: "versioned".into(),
+            expected_revision: None,
             value: Some(Zeroizing::new("new".into())),
             content_type: None,
             enabled: None,
@@ -2577,10 +4120,918 @@ mod tests {
         assert_eq!(&*got.value.unwrap(), "new");
     }
 
+    async fn assert_update_failure_rolls_back(opaque: bool) {
+        for stage in 1..=3 {
+            let (backend, _tmp) = if opaque {
+                test_backend_opaque()
+            } else {
+                test_backend()
+            };
+            backend
+                .set_secret("default", make_request("atomic", "old-value"))
+                .await
+                .unwrap();
+            install_update_failure(&backend.store_path, stage);
+            let request = SecretUpdateRequest {
+                name: "atomic".into(),
+                expected_revision: None,
+                value: Some(Zeroizing::new("new-value".into())),
+                content_type: Some(RECORD_CONTENT_TYPE.into()),
+                enabled: Some(false),
+                expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+                not_before: crate::secret::manager::FieldUpdate::Unchanged,
+                tags: Some(HashMap::from([(TYPE_TAG.into(), "api-key".into())])),
+                groups: Some(vec!["new-group".into()]),
+                note: crate::secret::manager::FieldUpdate::Set("new-note".into()),
+                folder: crate::secret::manager::FieldUpdate::Set("new/folder".into()),
+                replace_tags: true,
+                replace_groups: true,
+            };
+            let error = backend
+                .update_secret("default", "atomic", request)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("injected"), "{error}");
+            let current = backend.get_secret("default", "atomic", true).await.unwrap();
+            assert_eq!(
+                current.value.as_deref().map(|v| v.as_str()),
+                Some("old-value")
+            );
+            assert_eq!(current.version, "v1");
+            assert_eq!(current.content_type, "text/plain");
+            assert!(!current.tags.contains_key(TYPE_TAG));
+            assert!(current.enabled);
+            assert_eq!(
+                backend
+                    .list_versions("default", "atomic")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    fn conversion_update_request() -> SecretUpdateRequest {
+        SecretUpdateRequest {
+            name: "atomic".into(),
+            expected_revision: None,
+            value: Some(Zeroizing::new("new-value".into())),
+            content_type: Some(RECORD_CONTENT_TYPE.into()),
+            enabled: Some(false),
+            expires_on: crate::secret::manager::FieldUpdate::Unchanged,
+            not_before: crate::secret::manager::FieldUpdate::Unchanged,
+            tags: Some(HashMap::from([(TYPE_TAG.into(), "api-key".into())])),
+            groups: Some(vec!["new-group".into()]),
+            note: crate::secret::manager::FieldUpdate::Set("new-note".into()),
+            folder: crate::secret::manager::FieldUpdate::Set("new/folder".into()),
+            replace_tags: true,
+            replace_groups: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn conversion_update_failures_roll_back_plain_store() {
+        assert_update_failure_rolls_back(false).await;
+    }
+
+    #[tokio::test]
+    async fn conversion_update_failures_roll_back_opaque_store() {
+        assert_update_failure_rolls_back(true).await;
+    }
+
+    async fn assert_reader_blocks_until_complete_generation_is_visible(opaque: bool) {
+        let (backend, _tmp) = if opaque {
+            test_backend_opaque()
+        } else {
+            test_backend()
+        };
+        let backend = Arc::new(backend);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        let pause = install_update_pause(&backend.store_path, 1);
+        let update_backend = Arc::clone(&backend);
+        let updater = tokio::spawn(async move {
+            update_backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+        });
+        pause.wait_until_reached();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let read_backend = Arc::clone(&backend);
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(read_backend.get_secret("default", "atomic", true));
+            result_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            result_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "reader observed the half-activated value/metadata pair"
+        );
+
+        pause.resume();
+        updater.await.unwrap().unwrap();
+        let observed = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        reader.join().unwrap();
+        assert_eq!(
+            observed.value.as_deref().map(|v| v.as_str()),
+            Some("new-value")
+        );
+        assert_eq!(observed.content_type, RECORD_CONTENT_TYPE);
+        assert_eq!(
+            observed.tags.get(TYPE_TAG).map(String::as_str),
+            Some("api-key")
+        );
+        assert_eq!(observed.version, "v2");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reader_blocks_across_plain_store_generation_activation() {
+        assert_reader_blocks_until_complete_generation_is_visible(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reader_blocks_across_opaque_store_generation_activation() {
+        assert_reader_blocks_until_complete_generation_is_visible(true).await;
+    }
+
+    async fn assert_restart_recovers_crashed_conversion(opaque: bool) {
+        for stage in 1..=3 {
+            let (backend, tmp) = if opaque {
+                test_backend_opaque()
+            } else {
+                test_backend()
+            };
+            backend
+                .set_secret("default", make_request("atomic", "old-value"))
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, stage);
+            let error = backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("simulated crash"), "{error}");
+            assert!(has_pending_update_journal(&backend, "default", "atomic"));
+            drop(backend);
+
+            let restarted = if opaque {
+                reopen_opaque(&tmp, false)
+            } else {
+                test_backend_reopen(&tmp, false)
+            };
+            let recovered = restarted
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.value.as_deref().map(|v| v.as_str()),
+                Some("old-value"),
+                "stage {stage}"
+            );
+            assert_eq!(recovered.version, "v1", "stage {stage}");
+            assert_eq!(recovered.content_type, "text/plain", "stage {stage}");
+            assert!(!recovered.tags.contains_key(TYPE_TAG), "stage {stage}");
+            assert!(
+                !has_pending_update_journal(&restarted, "default", "atomic"),
+                "stage {stage}"
+            );
+            assert_eq!(
+                restarted
+                    .list_versions("default", "atomic")
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "stage {stage}"
+            );
+        }
+    }
+
+    async fn assert_journal_is_durable_before_first_activation(opaque: bool) {
+        let (backend, _tmp) = if opaque {
+            test_backend_opaque()
+        } else {
+            test_backend()
+        };
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, 0);
+        let error = backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("simulated crash"), "{error}");
+        assert!(has_pending_update_journal(&backend, "default", "atomic"));
+
+        let stem = backend.resolve_active_stem("default", "atomic").unwrap();
+        let active_meta = read_meta(
+            &meta_path(&backend.store_path, "default", &stem).unwrap(),
+            &backend.identity,
+        )
+        .unwrap();
+        let active_value = crypto::decrypt_from_file(
+            &age_path(&backend.store_path, "default", &stem).unwrap(),
+            &backend.identity,
+        )
+        .unwrap();
+        assert_eq!(active_meta.version, "v1");
+        assert_eq!(active_meta.content_type, "text/plain");
+        assert_eq!(&*active_value, "old-value");
+    }
+
+    #[tokio::test]
+    async fn plain_store_journal_is_durable_before_first_activation() {
+        assert_journal_is_durable_before_first_activation(false).await;
+    }
+
+    #[tokio::test]
+    async fn opaque_store_journal_is_durable_before_first_activation() {
+        assert_journal_is_durable_before_first_activation(true).await;
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_plain_store_crash_markers_at_every_stage() {
+        assert_restart_recovers_crashed_conversion(false).await;
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_opaque_store_crash_markers_at_every_stage() {
+        assert_restart_recovers_crashed_conversion(true).await;
+    }
+
+    fn backend_for_mode(opaque: bool) -> (LocalSecretBackend, TempDir) {
+        if opaque {
+            test_backend_opaque()
+        } else {
+            test_backend()
+        }
+    }
+
+    fn reopen_for_mode(tmp: &TempDir, opaque: bool) -> LocalSecretBackend {
+        if opaque {
+            reopen_opaque(tmp, false)
+        } else {
+            test_backend_reopen(tmp, false)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum LaterMutation {
+        Set,
+        Delete,
+        Rollback,
+    }
+
+    async fn assert_crashed_update_cannot_undo_later_mutation(
+        opaque: bool,
+        mutation: LaterMutation,
+    ) {
+        let (backend, tmp) = backend_for_mode(opaque);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        if matches!(mutation, LaterMutation::Rollback) {
+            backend
+                .set_secret("default", make_request("atomic", "second-value"))
+                .await
+                .unwrap();
+        }
+
+        install_update_crash(&backend.store_path, 1);
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        assert!(has_pending_update_journal(&backend, "default", "atomic"));
+
+        match mutation {
+            LaterMutation::Set => {
+                backend
+                    .set_secret("default", make_request("atomic", "post-crash"))
+                    .await
+                    .unwrap();
+            }
+            LaterMutation::Delete => {
+                backend.delete_secret("default", "atomic").await.unwrap();
+            }
+            LaterMutation::Rollback => {
+                backend.rollback("default", "atomic", "v1").await.unwrap();
+            }
+        }
+        assert!(
+            !has_pending_update_journal(&backend, "default", "atomic"),
+            "later mutation left the old transaction able to undo it"
+        );
+        drop(backend);
+
+        let restarted = reopen_for_mode(&tmp, opaque);
+        match mutation {
+            LaterMutation::Set => {
+                let current = restarted
+                    .get_secret("default", "atomic", true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    current.value.as_deref().map(|value| value.as_str()),
+                    Some("post-crash")
+                );
+            }
+            LaterMutation::Delete => {
+                assert!(matches!(
+                    restarted.get_secret("default", "atomic", true).await,
+                    Err(BackendError::NotFound { .. })
+                ));
+            }
+            LaterMutation::Rollback => {
+                let current = restarted
+                    .get_secret("default", "atomic", true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    current.value.as_deref().map(|value| value.as_str()),
+                    Some("old-value")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_store_recovers_before_every_later_same_name_mutation() {
+        for mutation in [
+            LaterMutation::Set,
+            LaterMutation::Delete,
+            LaterMutation::Rollback,
+        ] {
+            assert_crashed_update_cannot_undo_later_mutation(false, mutation).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn opaque_store_recovers_before_every_later_same_name_mutation() {
+        for mutation in [
+            LaterMutation::Set,
+            LaterMutation::Delete,
+            LaterMutation::Rollback,
+        ] {
+            assert_crashed_update_cannot_undo_later_mutation(true, mutation).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn vault_wide_maintenance_recovers_transactions_before_scanning() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, 1);
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        backend.reencrypt_all_metadata(false).unwrap();
+        assert!(!has_pending_update_journal(&backend, "default", "atomic"));
+        let current = backend.get_secret("default", "atomic", true).await.unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+
+        let (opaque, _tmp) = test_backend_opaque();
+        opaque
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&opaque.store_path, 1);
+        opaque
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        opaque.migrate_all(false).unwrap();
+        assert!(!has_pending_update_journal(&opaque, "default", "atomic"));
+        let current = opaque.get_secret("default", "atomic", true).await.unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+    }
+
+    fn assert_pending_recovery_required(error: BackendError, operation: &str) {
+        match error {
+            BackendError::Conflict(message) => {
+                assert!(message.contains("pending local transaction recovery required"));
+                assert!(message.contains("vault 'default'"));
+                assert!(message.contains(operation));
+                assert!(message.contains("without --dry-run"));
+            }
+            other => panic!("expected structured pending-recovery conflict, got {other:?}"),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum MaintenanceRecovery {
+        EncryptMetadata,
+        Migrate,
+    }
+
+    async fn assert_interrupted_maintenance_dry_runs_preserve_tree(
+        opaque: bool,
+        stage: u8,
+        recover_with: MaintenanceRecovery,
+    ) {
+        let (backend, tmp) = backend_for_mode(opaque);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, stage);
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+
+        // `migrate_all` requires opaque filenames. Reopening a plain store in
+        // opaque mode is read-only and is the supported pre-migration shape.
+        let migration_backend = reopen_opaque(&tmp, false);
+        let before = snapshot_tree(tmp.path());
+
+        let encrypt_error = backend.reencrypt_all_metadata(true).unwrap_err();
+        assert_pending_recovery_required(encrypt_error, "metadata-encryption dry run");
+        assert_eq!(
+            snapshot_tree(tmp.path()),
+            before,
+            "metadata dry run changed interrupted tree at stage {stage}"
+        );
+
+        let migrate_error = migration_backend.migrate_all(true).unwrap_err();
+        assert_pending_recovery_required(migrate_error, "opaque-migration dry run");
+        assert_eq!(
+            snapshot_tree(tmp.path()),
+            before,
+            "migration dry run changed interrupted tree at stage {stage}"
+        );
+
+        match recover_with {
+            MaintenanceRecovery::EncryptMetadata => {
+                backend.reencrypt_all_metadata(false).unwrap();
+                let current = backend.get_secret("default", "atomic", true).await.unwrap();
+                assert_eq!(
+                    current.value.as_deref().map(|value| value.as_str()),
+                    Some("old-value")
+                );
+            }
+            MaintenanceRecovery::Migrate => {
+                migration_backend.migrate_all(false).unwrap();
+                let current = migration_backend
+                    .get_secret("default", "atomic", true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    current.value.as_deref().map(|value| value.as_str()),
+                    Some("old-value")
+                );
+            }
+        }
+        assert!(!backend.has_any_update_artifacts("default").unwrap());
+    }
+
+    #[tokio::test]
+    async fn interrupted_maintenance_dry_runs_are_byte_exact_plain_and_opaque() {
+        // 10: partial temp publication; 1: half-active pair; 3: partial archive.
+        for opaque in [false, true] {
+            for stage in [10, 1, 3] {
+                for recover_with in [
+                    MaintenanceRecovery::EncryptMetadata,
+                    MaintenanceRecovery::Migrate,
+                ] {
+                    assert_interrupted_maintenance_dry_runs_preserve_tree(
+                        opaque,
+                        stage,
+                        recover_with,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_maintenance_dry_runs_leave_plain_and_opaque_trees_unchanged() {
+        for opaque in [false, true] {
+            let (backend, tmp) = backend_for_mode(opaque);
+            backend
+                .set_secret("default", make_request("clean", "value"))
+                .await
+                .unwrap();
+            let migration_backend = reopen_opaque(&tmp, false);
+            let before = snapshot_tree(tmp.path());
+
+            backend.reencrypt_all_metadata(true).unwrap();
+            assert_eq!(snapshot_tree(tmp.path()), before);
+            migration_backend.migrate_all(true).unwrap();
+            assert_eq!(snapshot_tree(tmp.path()), before);
+        }
+    }
+
+    async fn assert_all_active_and_history_reads_wait_for_transaction(opaque: bool) {
+        let (backend, _tmp) = backend_for_mode(opaque);
+        let backend = Arc::new(backend);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+
+        let pause = install_update_pause(&backend.store_path, 1);
+        let update_backend = Arc::clone(&backend);
+        let updater = tokio::spawn(async move {
+            update_backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+        });
+        pause.wait_until_reached();
+
+        let (versions_tx, versions_rx) = mpsc::channel();
+        let versions_backend = Arc::clone(&backend);
+        let versions_reader = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            versions_tx
+                .send(runtime.block_on(versions_backend.list_versions("default", "atomic")))
+                .unwrap();
+        });
+        let (list_tx, list_rx) = mpsc::channel();
+        let list_backend = Arc::clone(&backend);
+        let list_reader = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            list_tx
+                .send(runtime.block_on(list_backend.list_secrets("default", None)))
+                .unwrap();
+        });
+        let (version_tx, version_rx) = mpsc::channel();
+        let version_backend = Arc::clone(&backend);
+        let version_reader =
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                version_tx
+                    .send(runtime.block_on(
+                        version_backend.get_secret_version("default", "atomic", "v1", true),
+                    ))
+                    .unwrap();
+            });
+
+        let early_versions = versions_rx.recv_timeout(Duration::from_millis(100)).ok();
+        let early_list = list_rx.recv_timeout(Duration::from_millis(100)).ok();
+        let early_version = version_rx.recv_timeout(Duration::from_millis(100)).ok();
+        let versions_blocked = early_versions.is_none();
+        let list_blocked = early_list.is_none();
+        let version_blocked = early_version.is_none();
+        pause.resume();
+        updater.await.unwrap().unwrap();
+
+        let versions = early_versions
+            .unwrap_or_else(|| versions_rx.recv_timeout(Duration::from_secs(2)).unwrap())
+            .unwrap();
+        let listed = early_list
+            .unwrap_or_else(|| list_rx.recv_timeout(Duration::from_secs(2)).unwrap())
+            .unwrap();
+        let version = early_version
+            .unwrap_or_else(|| version_rx.recv_timeout(Duration::from_secs(2)).unwrap())
+            .unwrap();
+        versions_reader.join().unwrap();
+        list_reader.join().unwrap();
+        version_reader.join().unwrap();
+
+        assert!(versions_blocked, "version listing bypassed the lock");
+        assert!(list_blocked, "secret listing bypassed the lock");
+        assert!(version_blocked, "version read bypassed the lock");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].content_type, RECORD_CONTENT_TYPE);
+        assert_eq!(
+            version.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+        assert_eq!(version.version, "v1");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn plain_store_all_observable_reads_wait_for_complete_transaction() {
+        assert_all_active_and_history_reads_wait_for_transaction(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn opaque_store_all_observable_reads_wait_for_complete_transaction() {
+        assert_all_active_and_history_reads_wait_for_transaction(true).await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum RecoveryRead {
+        Version,
+        Versions,
+        List,
+        Exists,
+    }
+
+    async fn assert_restart_read_recovers_before_observing(opaque: bool, read: RecoveryRead) {
+        let (backend, tmp) = backend_for_mode(opaque);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, 2);
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap_err();
+        drop(backend);
+
+        let restarted = reopen_for_mode(&tmp, opaque);
+        match read {
+            RecoveryRead::Version => {
+                let version = restarted
+                    .get_secret_version("default", "atomic", "v1", true)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    version.value.as_deref().map(|value| value.as_str()),
+                    Some("old-value")
+                );
+            }
+            RecoveryRead::Versions => {
+                let versions = restarted.list_versions("default", "atomic").await.unwrap();
+                assert_eq!(versions.len(), 1);
+                assert_eq!(versions[0].version, "v1");
+            }
+            RecoveryRead::List => {
+                let listed = restarted.list_secrets("default", None).await.unwrap();
+                assert_eq!(listed.len(), 1);
+                assert_eq!(listed[0].content_type, "text/plain");
+            }
+            RecoveryRead::Exists => {
+                assert!(restarted.secret_exists("default", "atomic").await.unwrap());
+            }
+        }
+        assert!(
+            !has_pending_update_journal(&restarted, "default", "atomic"),
+            "read exposed state without completing recovery"
+        );
+        let current = restarted
+            .get_secret("default", "atomic", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+        assert_eq!(current.version, "v1");
+    }
+
+    #[tokio::test]
+    async fn plain_store_restart_reads_recover_before_observing_files() {
+        for read in [
+            RecoveryRead::Version,
+            RecoveryRead::Versions,
+            RecoveryRead::List,
+            RecoveryRead::Exists,
+        ] {
+            assert_restart_read_recovers_before_observing(false, read).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn opaque_store_restart_reads_recover_before_observing_files() {
+        for read in [
+            RecoveryRead::Version,
+            RecoveryRead::Versions,
+            RecoveryRead::List,
+            RecoveryRead::Exists,
+        ] {
+            assert_restart_read_recovers_before_observing(true, read).await;
+        }
+    }
+
+    async fn assert_atomic_journal_publication_survives_crashes(opaque: bool) {
+        // 10: temp journal synced, before rename. 11: final journal renamed,
+        // before the transaction-directory fsync.
+        for stage in [10, 11] {
+            let (backend, tmp) = backend_for_mode(opaque);
+            backend
+                .set_secret("default", make_request("atomic", "old-value"))
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, stage);
+            let error = backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("simulated crash"), "{error}");
+
+            let stem = backend.resolve_active_stem("default", "atomic").unwrap();
+            let transaction =
+                UpdateTransactionPaths::new(&backend.store_path, "default", &stem).unwrap();
+            let journal_temp = transaction.dir.join(format!("{stem}.journal.tmp"));
+            if stage == 10 {
+                assert!(!transaction.journal.exists());
+                assert!(journal_temp.exists());
+            } else {
+                assert!(transaction.journal.exists());
+            }
+            drop(backend);
+
+            let restarted = reopen_for_mode(&tmp, opaque);
+            let current = restarted
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                current.value.as_deref().map(|value| value.as_str()),
+                Some("old-value")
+            );
+            assert_eq!(current.version, "v1");
+            assert!(!transaction.journal.exists());
+            assert!(!journal_temp.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_store_publishes_journal_atomically() {
+        assert_atomic_journal_publication_survives_crashes(false).await;
+    }
+
+    #[tokio::test]
+    async fn opaque_store_publishes_journal_atomically() {
+        assert_atomic_journal_publication_survives_crashes(true).await;
+    }
+
+    async fn assert_invalid_partial_journal_is_ignored_and_cleaned(opaque: bool) {
+        let (backend, _tmp) = backend_for_mode(opaque);
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        let stem = backend.resolve_active_stem("default", "atomic").unwrap();
+        let transaction =
+            UpdateTransactionPaths::new(&backend.store_path, "default", &stem).unwrap();
+        fs::create_dir_all(&transaction.dir).unwrap();
+        let journal_temp = transaction.dir.join(format!("{stem}.journal.tmp"));
+        fs::write(&journal_temp, b"{invalid partial journal").unwrap();
+
+        let current = backend.get_secret("default", "atomic", true).await.unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("old-value")
+        );
+        assert!(!journal_temp.exists());
+    }
+
+    #[tokio::test]
+    async fn partial_journal_temps_are_not_recovery_markers() {
+        assert_invalid_partial_journal_is_ignored_and_cleaned(false).await;
+        assert_invalid_partial_journal_is_ignored_and_cleaned(true).await;
+    }
+
+    async fn assert_recovery_crash_is_idempotent_at_every_cleanup_boundary(opaque: bool) {
+        // (recovery hook, update crash). The stage-3 transaction has a partial
+        // archive and consumed new-stage files; stage 0 retains all stage files.
+        let cases = [
+            (20, 3),
+            (21, 3),
+            (22, 3),
+            (23, 3),
+            (24, 3),
+            (25, 3),
+            (26, 3),
+            (27, 3),
+            (28, 0),
+            (29, 0),
+            (30, 3),
+        ];
+        for (recovery_stage, update_stage) in cases {
+            let (backend, tmp) = backend_for_mode(opaque);
+            backend
+                .set_secret("default", make_request("atomic", "old-value"))
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, update_stage);
+            backend
+                .update_secret("default", "atomic", conversion_update_request())
+                .await
+                .unwrap_err();
+
+            install_update_crash(&backend.store_path, recovery_stage);
+            let error = backend
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("simulated crash"),
+                "recovery stage {recovery_stage}: {error}"
+            );
+            drop(backend);
+
+            let restarted = reopen_for_mode(&tmp, opaque);
+            let recovered = restarted
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.value.as_deref().map(|value| value.as_str()),
+                Some("old-value"),
+                "recovery stage {recovery_stage}"
+            );
+            assert_eq!(recovered.version, "v1", "recovery stage {recovery_stage}");
+            restarted
+                .set_secret("default", make_request("atomic", "post-recovery"))
+                .await
+                .unwrap();
+            drop(restarted);
+
+            let final_restart = reopen_for_mode(&tmp, opaque);
+            let final_value = final_restart
+                .get_secret("default", "atomic", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                final_value.value.as_deref().map(|value| value.as_str()),
+                Some("post-recovery"),
+                "recovery stage {recovery_stage} left rollback state live"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_store_recovery_cleanup_is_crash_idempotent() {
+        assert_recovery_crash_is_idempotent_at_every_cleanup_boundary(false).await;
+    }
+
+    #[tokio::test]
+    async fn opaque_store_recovery_cleanup_is_crash_idempotent() {
+        assert_recovery_crash_is_idempotent_at_every_cleanup_boundary(true).await;
+    }
+
+    #[tokio::test]
+    async fn new_archive_directory_chain_is_synced_before_transaction_commit() {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("atomic", "old-value"))
+            .await
+            .unwrap();
+        take_directory_syncs_under(tmp.path());
+
+        backend
+            .update_secret("default", "atomic", conversion_update_request())
+            .await
+            .unwrap();
+
+        let stem = backend.resolve_active_stem("default", "atomic").unwrap();
+        let leaf = versions_dir(&backend.store_path, "default", &stem).unwrap();
+        let versions_parent = leaf.parent().unwrap().to_path_buf();
+        let secrets_parent = versions_parent.parent().unwrap().to_path_buf();
+        let syncs = take_directory_syncs_under(tmp.path());
+        let leaf_position = syncs.iter().position(|path| path == &leaf).unwrap();
+        let versions_position = syncs
+            .iter()
+            .position(|path| path == &versions_parent)
+            .expect("the .versions parent must be synced");
+        let secrets_position = syncs
+            .iter()
+            .enumerate()
+            .skip(versions_position + 1)
+            .find_map(|(position, path)| (path == &secrets_parent).then_some(position))
+            .expect("the secrets ancestor must be synced");
+        assert!(leaf_position < versions_position);
+        assert!(versions_position < secrets_position);
+    }
+
     /// An update request that changes nothing — base for tri-state tests.
     fn unchanged_update(name: &str) -> SecretUpdateRequest {
         SecretUpdateRequest {
             name: name.into(),
+            expected_revision: None,
             value: None,
             content_type: None,
             enabled: None,
@@ -2818,18 +5269,24 @@ mod tests {
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
         assert_eq!(deleted.len(), 1);
 
-        // Delete again and recover twice: most recent first, then the oldest.
+        // Delete again and recover the most recent snapshot.
         backend.delete_secret("default", "cycle").await.unwrap();
         backend.restore_secret("default", "cycle").await.unwrap();
         let got = backend.get_secret("default", "cycle", true).await.unwrap();
         assert_eq!(&*got.value.unwrap(), "second-value");
 
-        backend.restore_secret("default", "cycle").await.unwrap();
+        // Restoring the older snapshot over that live value is a visible
+        // conflict; the older trash entry remains recoverable.
+        let error = backend
+            .restore_secret("default", "cycle")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Conflict(_)));
         let got = backend.get_secret("default", "cycle", true).await.unwrap();
-        assert_eq!(&*got.value.unwrap(), "first-value");
+        assert_eq!(&*got.value.unwrap(), "second-value");
 
         let deleted = backend.list_deleted_secrets("default").await.unwrap();
-        assert!(deleted.is_empty());
+        assert_eq!(deleted.len(), 1);
     }
 
     #[tokio::test]
@@ -2870,12 +5327,20 @@ mod tests {
             .unwrap();
         assert_eq!(&*got.value.unwrap(), "second");
 
-        backend.restore_secret("default", "collide").await.unwrap();
+        let error = backend
+            .restore_secret("default", "collide")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Conflict(_)));
         let got = backend
             .get_secret("default", "collide", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "first");
+        assert_eq!(&*got.value.unwrap(), "second");
+        assert_eq!(
+            backend.list_deleted_secrets("default").await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2939,7 +5404,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_over_active_secret_archives_instead_of_clobbering() {
+    async fn restore_over_active_secret_reports_conflict_without_clobbering() {
         let (backend, _tmp) = test_backend();
 
         backend
@@ -2954,24 +5419,22 @@ mod tests {
             .await
             .unwrap();
 
-        // Restore brings back the trashed snapshot...
-        let restored = backend
+        let error = backend
             .restore_secret("default", "overwrite")
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Conflict(_)));
+
+        // The active value and recoverable trash entry both remain intact.
         let got = backend
             .get_secret("default", "overwrite", true)
             .await
             .unwrap();
-        assert_eq!(&*got.value.unwrap(), "old-value");
-
-        // ...and the live secret is archived as a version, not destroyed.
-        let archived = backend
-            .get_secret_version("default", "overwrite", "v1", true)
-            .await
-            .unwrap();
-        assert_eq!(&*archived.value.unwrap(), "live-value");
-        assert_ne!(restored.version, "v1");
+        assert_eq!(&*got.value.unwrap(), "live-value");
+        assert_eq!(
+            backend.list_deleted_secrets("default").await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -3059,6 +5522,31 @@ mod tests {
             assert!(
                 !entry.contains(&enc),
                 "percent-encoded name {enc:?} leaked in entry {entry:?}"
+            );
+        }
+    }
+
+    fn assert_no_name_in_tree_contents(root: &Path, name: &str) {
+        let encoded = encode_name(name);
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in fs::read_dir(&path).unwrap().flatten() {
+                    stack.push(entry.path());
+                }
+                continue;
+            }
+            let bytes = fs::read(&path).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                !text.contains(name),
+                "raw name {name:?} leaked in {}",
+                path.display()
+            );
+            assert!(
+                !text.contains(&encoded),
+                "encoded name {encoded:?} leaked in {}",
+                path.display()
             );
         }
     }
@@ -3900,6 +6388,427 @@ mod tests {
         assert_eq!(index.len(), 2, "both secrets indexed");
         let listed = b1.list_secrets("default", None).await.unwrap();
         assert_eq!(listed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_if_absent_never_replaces_the_winner() {
+        let (_backend, tmp) = test_backend_opaque();
+        let first = reopen_opaque(&tmp, false);
+        let second = reopen_opaque(&tmp, false);
+
+        let (first_result, second_result) = tokio::join!(
+            first.create_secret_if_absent("default", make_request("same-name", "first")),
+            second.create_secret_if_absent("default", make_request("same-name", "second")),
+        );
+
+        assert!(
+            matches!(
+                (&first_result, &second_result),
+                (Ok(_), Err(BackendError::Conflict(_))) | (Err(BackendError::Conflict(_)), Ok(_))
+            ),
+            "exactly one atomic create must win: {first_result:?} / {second_result:?}"
+        );
+        let winner = first
+            .get_secret("default", "same-name", true)
+            .await
+            .unwrap();
+        let winner_value = winner.value.as_ref().map(|value| value.as_str());
+        assert!(matches!(winner_value, Some("first") | Some("second")));
+    }
+
+    #[tokio::test]
+    async fn conditional_update_rejects_an_edit_after_the_snapshot() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("cas-secret", "original"))
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", "cas-secret", true)
+            .await
+            .unwrap();
+
+        backend
+            .set_secret("default", make_request("cas-secret", "newer"))
+            .await
+            .unwrap();
+        let error = backend
+            .update_secret_if_revision(
+                "default",
+                "cas-secret",
+                &snapshot.revision,
+                conversion_update_request(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, BackendError::SourceRevisionConflict { .. }),
+            "{error:?}"
+        );
+        let current = backend
+            .get_secret("default", "cas-secret", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            current.value.as_deref().map(|value| value.as_str()),
+            Some("newer")
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_recreate_never_reuses_an_opaque_revision() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("generation", "first"))
+            .await
+            .unwrap();
+        let first = backend
+            .get_secret_snapshot("default", "generation", false)
+            .await
+            .unwrap();
+
+        backend
+            .delete_secret("default", "generation")
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("generation", "second"))
+            .await
+            .unwrap();
+        let recreated = backend
+            .get_secret_snapshot("default", "generation", false)
+            .await
+            .unwrap();
+
+        assert_eq!(first.properties.version, recreated.properties.version);
+        assert_ne!(first.revision, recreated.revision);
+    }
+
+    #[tokio::test]
+    async fn rollback_and_restore_each_publish_a_fresh_revision() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("generation", "first"))
+            .await
+            .unwrap();
+        let first = backend
+            .get_secret_snapshot("default", "generation", false)
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("generation", "second"))
+            .await
+            .unwrap();
+        let second = backend
+            .get_secret_snapshot("default", "generation", false)
+            .await
+            .unwrap();
+        backend
+            .rollback("default", "generation", "v1")
+            .await
+            .unwrap();
+        let rolled_back = backend
+            .get_secret_snapshot("default", "generation", false)
+            .await
+            .unwrap();
+        assert_ne!(rolled_back.revision, first.revision);
+        assert_ne!(rolled_back.revision, second.revision);
+
+        backend
+            .delete_secret("default", "generation")
+            .await
+            .unwrap();
+        backend
+            .restore_secret("default", "generation")
+            .await
+            .unwrap();
+        let restored = backend
+            .get_secret_snapshot("default", "generation", false)
+            .await
+            .unwrap();
+        assert_ne!(restored.revision, rolled_back.revision);
+    }
+
+    #[tokio::test]
+    async fn atomic_rename_rejects_a_changed_source_without_creating_destination() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "old"))
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", "source", true)
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("source", "newer"))
+            .await
+            .unwrap();
+
+        let error = backend
+            .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, BackendError::SourceRevisionConflict { .. }),
+            "{error:?}"
+        );
+        assert!(!backend
+            .secret_exists("default", "destination")
+            .await
+            .unwrap());
+        let source = backend.get_secret("default", "source", true).await.unwrap();
+        assert_eq!(
+            source.value.as_deref().map(|value| value.as_str()),
+            Some("newer")
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_rename_rejects_a_destination_created_after_source_snapshot() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "source-value"))
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", "source", true)
+            .await
+            .unwrap();
+        backend
+            .set_secret("default", make_request("destination", "concurrent-value"))
+            .await
+            .unwrap();
+
+        let error = backend
+            .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, BackendError::DestinationExists { .. }),
+            "{error:?}"
+        );
+        let destination = backend
+            .get_secret("default", "destination", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            destination.value.as_deref().map(|value| value.as_str()),
+            Some("concurrent-value")
+        );
+        assert!(backend.secret_exists("default", "source").await.unwrap());
+    }
+
+    #[cfg(not(feature = "file-ops"))]
+    #[tokio::test]
+    async fn persisted_attachment_metadata_blocks_rename_without_the_file_api() {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "source-value"))
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", "source", false)
+            .await
+            .unwrap();
+        let files = tmp.path().join("vaults/default/files");
+        create_private_dir(&files).unwrap();
+        write_private(
+            files.join("persisted.meta.json"),
+            br#"{"name":"attachments/source/proof.txt"}"#,
+        )
+        .unwrap();
+
+        let error = backend
+            .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, BackendError::AttachmentsPresent { ref name } if name == "source"),
+            "{error:?}"
+        );
+        assert!(backend.secret_exists("default", "source").await.unwrap());
+        assert!(!backend
+            .secret_exists("default", "destination")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn atomic_rename_recovers_crashes_at_every_visible_stage() {
+        for stage in [100, 101, 102] {
+            let (backend, _tmp) = test_backend();
+            backend
+                .set_secret("default", make_request("source", "source-value"))
+                .await
+                .unwrap();
+            let snapshot = backend
+                .get_secret_snapshot("default", "source", true)
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, stage);
+
+            let error = backend
+                .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, BackendError::Internal(_)), "{error:?}");
+
+            let recovered = backend.get_secret("default", "source", true).await.unwrap();
+            assert_eq!(
+                recovered.value.as_deref().map(|value| value.as_str()),
+                Some("source-value"),
+                "stage {stage}"
+            );
+            assert!(
+                !backend
+                    .secret_exists("default", "destination")
+                    .await
+                    .unwrap(),
+                "stage {stage}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_journal_is_published_from_a_durable_temp_file() {
+        for (stage, expected_file) in [(90, "journal.tmp"), (91, "journal.json")] {
+            let (backend, tmp) = test_backend();
+            backend
+                .set_secret("default", make_request("source", "source-value"))
+                .await
+                .unwrap();
+            let snapshot = backend
+                .get_secret_snapshot("default", "source", false)
+                .await
+                .unwrap();
+            install_update_crash(&backend.store_path, stage);
+
+            backend
+                .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+                .await
+                .expect_err("injected publication crash must stop rename");
+
+            let transactions = transactions_dir(tmp.path(), "default").unwrap();
+            let rename_dir = fs::read_dir(&transactions)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| path.is_dir())
+                .expect("rename transaction must remain for restart recovery");
+            assert!(
+                rename_dir.join(expected_file).exists(),
+                "stage {stage} must leave {expected_file}"
+            );
+            if stage == 90 {
+                assert!(!rename_dir.join("journal.json").exists());
+            }
+
+            let reopened = test_backend_reopen(&tmp, false);
+            let source = reopened
+                .get_secret("default", "source", true)
+                .await
+                .unwrap();
+            assert_eq!(
+                source.value.as_deref().map(|v| v.as_str()),
+                Some("source-value")
+            );
+            assert!(!reopened
+                .secret_exists("default", "destination")
+                .await
+                .unwrap());
+            assert!(
+                reopened
+                    .rename_transaction_dirs("default")
+                    .unwrap()
+                    .is_empty(),
+                "restart must clean the temporary or recover the published journal"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_rename_journal_temp_is_ignored_and_cleaned_on_restart() {
+        let (backend, tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "source-value"))
+            .await
+            .unwrap();
+        let transaction =
+            RenameTransactionPaths::new(tmp.path(), "default", "partial-publication").unwrap();
+        fs::create_dir_all(&transaction.dir).unwrap();
+        fs::write(transaction.dir.join("journal.tmp"), b"{").unwrap();
+        fs::write(&transaction.source_age, b"partial").unwrap();
+
+        let reopened = test_backend_reopen(&tmp, false);
+        let source = reopened
+            .get_secret("default", "source", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.value.as_deref().map(|v| v.as_str()),
+            Some("source-value")
+        );
+        assert!(!transaction.dir.exists());
+    }
+
+    #[tokio::test]
+    async fn opaque_rename_crash_artifacts_contain_no_source_or_destination_names() {
+        let (backend, tmp) = test_backend_opaque();
+        let source_name = "plain source / credential";
+        let destination_name = "plain destination / credential";
+        backend
+            .set_secret(
+                "default",
+                make_request(source_name, "do-not-leak-the-value-either"),
+            )
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", source_name, false)
+            .await
+            .unwrap();
+        install_update_crash(&backend.store_path, 100);
+
+        backend
+            .rename_secret_if_revision("default", source_name, destination_name, &snapshot.revision)
+            .await
+            .expect_err("injected crash must preserve transaction artifacts");
+
+        let transactions = transactions_dir(tmp.path(), "default").unwrap();
+        assert_no_name_leak(&transactions, source_name);
+        assert_no_name_leak(&transactions, destination_name);
+        assert_no_name_in_tree_contents(&transactions, source_name);
+        assert_no_name_in_tree_contents(&transactions, destination_name);
+    }
+
+    #[tokio::test]
+    async fn atomic_rename_rolls_back_a_partial_destination_failure() {
+        let (backend, _tmp) = test_backend();
+        backend
+            .set_secret("default", make_request("source", "source-value"))
+            .await
+            .unwrap();
+        let snapshot = backend
+            .get_secret_snapshot("default", "source", true)
+            .await
+            .unwrap();
+        install_update_failure(&backend.store_path, 101);
+
+        let error = backend
+            .rename_secret_if_revision("default", "source", "destination", &snapshot.revision)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Internal(_)), "{error:?}");
+        assert!(backend.secret_exists("default", "source").await.unwrap());
+        assert!(!backend
+            .secret_exists("default", "destination")
+            .await
+            .unwrap());
     }
 
     /// Shared rename assertions, run against both store layouts.

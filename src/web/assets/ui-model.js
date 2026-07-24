@@ -1,11 +1,5 @@
-'use strict';
-(function expose(root, factory) {
-  const model = factory();
-  if (typeof module === 'object' && module.exports) module.exports = model;
-  else root.XvUiModel = model;
-}(typeof globalThis === 'undefined' ? this : globalThis, () => {
-  const PROTECTED_MASK = '***************';
-  const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+const PROTECTED_MASK = '***************';
+const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
 
   function formatDate(value) {
     if (!value) return '';
@@ -15,6 +9,84 @@
   }
   function expirationDate(value) {
     return typeof value === 'string' && value.length >= 10 ? value.slice(0, 10) : '';
+  }
+  function typeCards(types = []) {
+    return types.map((type) => {
+      const fields = (type.fields || []).map((field) => ({ ...field }));
+      return {
+        name: type.name,
+        label: type.name,
+        source: type.source || '',
+        fields,
+        required: fields.filter((field) => field.required).map((field) => field.name),
+        protected: fields.filter((field) => field.kind === 'secret').map((field) => field.name),
+        primary: fields.find((field) => field.primary)?.name || null,
+      };
+    });
+  }
+  function buildTypedDraft(type, properties = {}) {
+    const tags = { ...(properties.tags || {}) };
+    const protectedValues = properties.protected || {};
+    const fields = {};
+    for (const field of type?.fields || []) {
+      const tagName = `f.${field.name}`;
+      const value = field.kind === 'secret'
+        ? protectedValues[field.name]
+        : (tags[tagName] ?? '');
+      fields[field.name] = {
+        name: field.name,
+        kind: field.kind,
+        required: !!field.required,
+        primary: !!field.primary,
+        value: value ?? '',
+        dirty: false,
+      };
+      delete tags[tagName];
+    }
+    delete tags['xv-type'];
+    return {
+      type: type?.name || '',
+      fields,
+      customTags: tags,
+      enabled: properties.enabled ?? true,
+      notBefore: properties.not_before ?? null,
+    };
+  }
+  function groupSuggestions(items = [], selected = []) {
+    const excluded = new Set(selected.map((value) => String(value).trim().toLocaleLowerCase()));
+    const suggestions = new Map();
+    for (const item of items) {
+      const groups = Array.isArray(item?.groups)
+        ? item.groups
+        : String(item?.groups || '').split(',');
+      for (const raw of groups) {
+        const value = String(raw).trim();
+        const key = value.toLocaleLowerCase();
+        if (!value || excluded.has(key) || suggestions.has(key)) continue;
+        suggestions.set(key, value);
+      }
+    }
+    return [...suggestions.values()].sort((left, right) => collator.compare(left, right));
+  }
+  function conversionSummary(preview = {}) {
+    const dropped = [...(preview.dropped || [])];
+    const exposed = [...(preview.exposed || [])];
+    const renamed = (preview.renamed || []).map((value) => String(value).replace(/\s*->\s*/g, ' → '));
+    const missing = [...(preview.missing_required || preview.missing || [])];
+    const parts = [];
+    if (dropped.length) parts.push(`Drops ${dropped.length} ${dropped.length === 1 ? 'field' : 'fields'}`);
+    if (exposed.length) parts.push(`exposes ${exposed.length} protected ${exposed.length === 1 ? 'field' : 'fields'}`);
+    if (renamed.length) parts.push(`renames ${renamed.length} ${renamed.length === 1 ? 'field' : 'fields'}`);
+    if (missing.length) parts.push(`needs ${missing.length} required ${missing.length === 1 ? 'field' : 'fields'}`);
+    return {
+      dropped,
+      exposed,
+      renamed,
+      missing,
+      requiresConfirmation: !!preview.requires_confirmation,
+      sourceRevision: preview.source_revision || '',
+      description: parts.length ? `${parts.join('; ')}.` : 'No fields are lost or exposed.',
+    };
   }
   function createProtectedState(value = null, hasStoredValue = value !== null) {
     return { value, hasStoredValue, masked: hasStoredValue, dirty: false, revision: 0, loadPromise: null };
@@ -88,7 +160,660 @@
     resized[index + 1] = pairTotal - left;
     return resized;
   }
-  return { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
-    protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
-    sortedCopy, normalizeWidths, resizeAdjacentWidths };
-}));
+
+  function contentMode(width) {
+    return width > 768 ? 'table' : 'stacked';
+  }
+
+  function contentRows(kind, items = [], { formatSize = (value) => String(value ?? '') } = {}) {
+    return items.map((item) => {
+      if (kind === 'secrets') {
+        const identifier = item.original_name || item.name || '';
+        return Object.freeze({
+          identifier,
+          source: item,
+          folder: item.folder || '',
+          metadata: Object.freeze([
+            { label: 'Folder', value: item.folder || '' },
+            { label: 'Groups', value: item.groups || '' },
+            { label: 'Note', value: item.note || '' },
+            { label: 'Updated', value: formatDate(item.updated_on) },
+          ]),
+        });
+      }
+      if (kind === 'files') {
+        const identifier = item.name || '';
+        return Object.freeze({
+          identifier,
+          source: item,
+          folder: fileFolder(item),
+          metadata: Object.freeze([
+            { label: 'Size', value: formatSize(item.size) },
+            { label: 'Type', value: item.content_type || '' },
+            { label: 'Modified', value: formatDate(item.last_modified) },
+          ]),
+        });
+      }
+      throw new TypeError(`Unknown content row kind: ${kind}`);
+    });
+  }
+
+  function groupContentRows(rows = []) {
+    const groups = new Map();
+    for (const row of rows) {
+      const folder = row.folder || '';
+      if (!groups.has(folder)) groups.set(folder, []);
+      groups.get(folder).push(row);
+    }
+    return [...groups]
+      .sort(([left], [right]) => {
+        if (!left) return right ? -1 : 0;
+        if (!right) return 1;
+        return collator.compare(left, right);
+      })
+      .map(([folder, groupedRows]) => Object.freeze({
+        folder,
+        label: folder || 'Unfiled',
+        rows: Object.freeze([...groupedRows]),
+      }));
+  }
+
+  function normalizeFolderPath(value) {
+    if (typeof value !== 'string') return '';
+    return value.split('/').filter((segment) => segment !== '').join('/');
+  }
+
+  function normalizeFilterValue(value) {
+    return typeof value === 'string'
+      ? value.normalize('NFKC').toLocaleLowerCase().trim()
+      : '';
+  }
+
+  function groupValues(value) {
+    const values = Array.isArray(value)
+      ? value
+      : (typeof value === 'string' ? value.split(',') : []);
+    return values.map(normalizeFilterValue).filter(Boolean);
+  }
+
+  function recordType(item) {
+    return item?.tags?.['xv-type']
+      || item?.record_type
+      || item?.type
+      || (item?.content_type === 'application/vnd.xv.record' ? 'record' : 'plain');
+  }
+
+  function matchesExpiry(item, expiry, now) {
+    if (!expiry) return true;
+    if (!item?.expires_on) return expiry === 'none';
+    const timestamp = new Date(item.expires_on).getTime();
+    if (Number.isNaN(timestamp)) return false;
+    if (expiry === 'expired') return timestamp <= now.getTime();
+    if (expiry === 'expiring') return timestamp > now.getTime();
+    return false;
+  }
+
+  function filterSecrets(items, filters = {}, { now = new Date() } = {}) {
+    const folder = normalizeFilterValue(filters.folder);
+    const group = normalizeFilterValue(filters.group);
+    const type = normalizeFilterValue(filters.type);
+    const expiry = normalizeFilterValue(filters.expiry);
+    const hasEnabled = typeof filters.enabled === 'boolean';
+    return (items || []).filter((item) => (
+      (!folder || normalizeFilterValue(item?.folder) === folder)
+      && (!group || groupValues(item?.groups).includes(group))
+      && (!type || normalizeFilterValue(recordType(item)) === type)
+      && (!hasEnabled || item?.enabled === filters.enabled)
+      && matchesExpiry(item, expiry, now)
+    ));
+  }
+
+  function fileFolder(item) {
+    if (typeof item?.folder === 'string') return item.folder;
+    const name = typeof item?.name === 'string' ? item.name : '';
+    const separator = name.lastIndexOf('/');
+    return separator < 0 ? '' : name.slice(0, separator);
+  }
+
+  function filterFiles(items, filters = {}) {
+    const folder = normalizeFilterValue(filters.folder);
+    const type = normalizeFilterValue(filters.type);
+    return (items || []).filter((item) => (
+      (!folder || normalizeFilterValue(fileFolder(item)) === folder)
+      && (!type || normalizeFilterValue(item?.content_type) === type)
+    ));
+  }
+
+  function activeFilterChips(filters = {}, labels = {}) {
+    return Object.entries(filters).flatMap(([key, value]) => {
+      if (value === '' || value === null || value === undefined) return [];
+      const display = typeof value === 'boolean'
+        ? (value ? 'enabled' : 'disabled')
+        : String(value);
+      return [{ key, label: `${labels[key] || key}: ${display}` }];
+    });
+  }
+
+  const FOLDER_ALL = Object.freeze({ kind: 'all' });
+  const FOLDER_UNFILED = Object.freeze({ kind: 'unfiled' });
+
+  function folderIdentity(path) {
+    const normalized = normalizeFolderPath(path);
+    if (normalized === '') return FOLDER_UNFILED;
+    return Object.freeze({
+      kind: 'folder',
+      path: normalized,
+    });
+  }
+
+  function folderIdentityKey(identity) {
+    if (identity?.kind === 'all') return '["all"]';
+    if (identity?.kind === 'unfiled') return '["unfiled"]';
+    if (identity?.kind === 'folder' && typeof identity.path === 'string') {
+      return JSON.stringify(['folder', identity.path]);
+    }
+    return '';
+  }
+
+  function sameFolderIdentity(left, right) {
+    if (left?.kind !== right?.kind) return false;
+    if (left?.kind === 'folder') return left.path === right.path;
+    return left?.kind === 'all' || left?.kind === 'unfiled';
+  }
+
+  function buildFolderTree(items) {
+    const roots = new Map();
+    const unfiledItems = [];
+
+    for (const item of items || []) {
+      const path = normalizeFolderPath(item?.folder);
+      if (!path) {
+        unfiledItems.push(item);
+        continue;
+      }
+      let siblings = roots;
+      let parentPath = '';
+      for (const segment of path.split('/')) {
+        const folderPath = parentPath ? `${parentPath}/${segment}` : segment;
+        if (!siblings.has(segment)) {
+          siblings.set(segment, {
+            id: folderIdentity(folderPath),
+            label: segment,
+            directCount: 0,
+            totalCount: 0,
+            items: [],
+            children: new Map(),
+          });
+        }
+        const node = siblings.get(segment);
+        node.totalCount++;
+        if (folderPath === path) {
+          node.directCount++;
+          node.items.push(item);
+        }
+        siblings = node.children;
+        parentPath = folderPath;
+      }
+    }
+
+    const finalize = (nodes) => [...nodes.values()]
+      .sort((left, right) => collator.compare(left.label, right.label))
+      .map((node) => ({
+        ...node,
+        children: finalize(node.children),
+      }));
+
+    const tree = finalize(roots);
+    if (unfiledItems.length) {
+      tree.unshift({
+        id: FOLDER_UNFILED,
+        label: 'Unfiled',
+        directCount: unfiledItems.length,
+        totalCount: unfiledItems.length,
+        items: [...unfiledItems],
+        children: [],
+      });
+    }
+    return tree;
+  }
+
+  function initialExpansion({ total, saved }) {
+    if (Array.isArray(saved)) return [...saved];
+    return Number(total) <= 50 ? 'all' : 'collapsed';
+  }
+
+  const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+
+  function createFolderTokenIndex(response) {
+    if (response?.version !== 1 || !OPAQUE_TOKEN.test(response?.scope_token)
+      || !Array.isArray(response?.folders)) return null;
+    const byIdentityKey = new Map();
+    const byToken = new Map();
+    for (const entry of response.folders) {
+      if (typeof entry?.path !== 'string' || entry.path === ''
+        || normalizeFolderPath(entry.path) !== entry.path
+        || !OPAQUE_TOKEN.test(entry?.token)) return null;
+      const identity = folderIdentity(entry.path);
+      const identityKey = folderIdentityKey(identity);
+      if (byIdentityKey.has(identityKey) || byToken.has(entry.token)) return null;
+      byIdentityKey.set(identityKey, entry.token);
+      byToken.set(entry.token, identity);
+    }
+    return Object.freeze({
+      scopeToken: response.scope_token,
+      byIdentityKey,
+      byToken,
+    });
+  }
+
+  function folderPreferenceKey(tokenIndex) {
+    return OPAQUE_TOKEN.test(tokenIndex?.scopeToken)
+      ? `xv.ui.folder-expansion.v4:${tokenIndex.scopeToken}`
+      : '';
+  }
+
+  function cleanupLegacyFolderExpansion(storage) {
+    if (typeof storage?.removeItem !== 'function') return;
+    const legacyKeys = new Set([
+      'xv.ui.folder-expansion.v1',
+      'folder_expansion',
+    ]);
+    if (Number.isInteger(storage.length) && typeof storage.key === 'function') {
+      for (let index = 0; index < storage.length; index++) {
+        const key = storage.key(index);
+        if (key?.startsWith('xv.ui.folder-expansion.v2:')
+          || key?.startsWith('xv.ui.folder-expansion.v3:')) legacyKeys.add(key);
+      }
+    }
+    for (const key of legacyKeys) {
+      try { storage.removeItem(key); } catch (_) { /* storage cleanup is best effort */ }
+    }
+  }
+
+  function loadFolderExpansion(storage, tokenIndex) {
+    if (typeof storage?.getItem !== 'function') return null;
+    try {
+      cleanupLegacyFolderExpansion(storage);
+      const key = folderPreferenceKey(tokenIndex);
+      if (!key) return null;
+      const serialized = storage.getItem(key);
+      if (serialized === null) return null;
+      const parsed = JSON.parse(serialized);
+      if (parsed?.version !== 4 || !Array.isArray(parsed.expanded)
+        || parsed.expanded.some((token) => !OPAQUE_TOKEN.test(token))) {
+        return null;
+      }
+      return [...new Set(parsed.expanded)];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveFolderExpansion(storage, tokenIndex, expanded) {
+    if (typeof storage?.setItem !== 'function') return false;
+    try {
+      cleanupLegacyFolderExpansion(storage);
+      const key = folderPreferenceKey(tokenIndex);
+      if (!key) return false;
+      const identities = expanded instanceof Map ? expanded.values() : expanded;
+      const tokens = [...identities]
+        .map((identity) => tokenIndex.byIdentityKey.get(folderIdentityKey(identity)))
+        .filter((token) => OPAQUE_TOKEN.test(token))
+        .sort((left, right) => collator.compare(left, right));
+      storage.setItem(key, JSON.stringify({
+        version: 4,
+        expanded: tokens,
+      }));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function createFolderNavigationState(storage) {
+    let scope = null;
+    let scopeKey = null;
+    let tokenIndex = null;
+    let hydratedTokenIndex = null;
+    let selected = FOLDER_ALL;
+    let folderIds = [];
+    let expandableIds = [];
+    const expanded = new Map();
+
+    const persist = () => scope && tokenIndex
+      && saveFolderExpansion(storage, tokenIndex, expanded);
+    return Object.freeze({
+      sync(nextScope, {
+        total,
+        folderIds: nextFolderIds = null,
+        expandableIds: nextExpandableIds,
+        tokenIndex: nextTokenIndex = null,
+      }) {
+        const nextKey = JSON.stringify([
+          String(nextScope?.backend || ''),
+          String(nextScope?.vault || ''),
+          String(nextScope?.surface || ''),
+        ]);
+        expandableIds = [...nextExpandableIds];
+        folderIds = [...(nextFolderIds || nextExpandableIds)];
+        const availableFolders = new Map(
+          folderIds.map((id) => [folderIdentityKey(id), id]),
+        );
+        const availableExpandable = new Map(
+          expandableIds.map((id) => [folderIdentityKey(id), id]),
+        );
+        const sameScope = nextKey === scopeKey;
+        tokenIndex = nextTokenIndex;
+        if (sameScope) {
+          let reconciledExpansion = false;
+          if (tokenIndex && hydratedTokenIndex !== tokenIndex) {
+            const saved = loadFolderExpansion(storage, tokenIndex);
+            if (saved !== null) {
+              expanded.clear();
+              for (const token of saved) {
+                const identity = tokenIndex.byToken.get(token);
+                const key = folderIdentityKey(identity);
+                if (availableExpandable.has(key)) {
+                  expanded.set(key, availableExpandable.get(key));
+                } else {
+                  reconciledExpansion = true;
+                }
+              }
+            }
+            hydratedTokenIndex = tokenIndex;
+          }
+          for (const key of [...expanded.keys()]) {
+            if (!availableExpandable.has(key)) {
+              expanded.delete(key);
+              reconciledExpansion = true;
+            }
+          }
+          if (reconciledExpansion) persist();
+          if (!sameFolderIdentity(selected, FOLDER_ALL)
+            && !availableFolders.has(folderIdentityKey(selected))) {
+            selected = FOLDER_ALL;
+          }
+          return selected;
+        }
+        scope = { ...nextScope };
+        scopeKey = nextKey;
+        hydratedTokenIndex = tokenIndex;
+        selected = FOLDER_ALL;
+        expanded.clear();
+        const saved = tokenIndex ? loadFolderExpansion(storage, tokenIndex) : null;
+        const initial = initialExpansion({ total, saved });
+        const initialKeys = initial === 'all'
+          ? [...availableExpandable.keys()]
+          : (Array.isArray(initial)
+            ? initial.map((token) => folderIdentityKey(tokenIndex?.byToken.get(token)))
+            : []);
+        for (const key of initialKeys) {
+          if (availableExpandable.has(key)) expanded.set(key, availableExpandable.get(key));
+        }
+        return selected;
+      },
+      select(id) {
+        selected = id?.kind ? id : FOLDER_ALL;
+        return selected;
+      },
+      toggle(id, value = !expanded.has(folderIdentityKey(id))) {
+        const key = folderIdentityKey(id);
+        if (value) expanded.set(key, id);
+        else {
+          expanded.delete(key);
+          if (selected?.kind === 'folder' && id?.kind === 'folder'
+            && selected.path.startsWith(`${id.path}/`)) {
+            selected = id;
+          }
+        }
+        persist();
+        return selected;
+      },
+      expandAll() {
+        expanded.clear();
+        for (const id of expandableIds) expanded.set(folderIdentityKey(id), id);
+        persist();
+        return selected;
+      },
+      collapseAll() {
+        expanded.clear();
+        selected = FOLDER_ALL;
+        persist();
+        return selected;
+      },
+      snapshot() {
+        return {
+          selected,
+          expanded: [...expanded.values()].sort((left, right) => (
+            collator.compare(left.path || '', right.path || '')
+          )),
+        };
+      },
+      expanded,
+    });
+  }
+
+  function itemMatchesFolder(item, selected) {
+    if (!selected || selected.kind === 'all') return true;
+    const folder = normalizeFolderPath(item?.folder);
+    if (selected.kind === 'unfiled') return folder === '';
+    if (selected.kind !== 'folder') return false;
+    const target = selected.path;
+    return folder === target || folder.startsWith(`${target}/`);
+  }
+
+  function treeCountMap(nodes, counts = new Map()) {
+    for (const node of nodes) {
+      counts.set(folderIdentityKey(node.id), node.totalCount);
+      treeCountMap(node.children, counts);
+    }
+    return counts;
+  }
+
+  function buildFolderViewModel(items, visibleItems = items, {
+    buildTree = buildFolderTree,
+  } = {}) {
+    const tree = buildTree(items);
+    const visibleTree = buildTree(visibleItems);
+    const folderIds = [];
+    const expandableIds = [];
+    let folderCount = 0;
+    const visit = (nodes) => {
+      for (const node of nodes) {
+        folderIds.push(node.id);
+        if (node.id.kind === 'folder') folderCount++;
+        if (node.children.length) expandableIds.push(node.id);
+        visit(node.children);
+      }
+    };
+    visit(tree);
+    return Object.freeze({
+      tree,
+      visibleCounts: treeCountMap(visibleTree),
+      folderIds: Object.freeze(folderIds),
+      expandableIds: Object.freeze(expandableIds),
+      folderCount,
+      totalCount: items.length,
+      visibleCount: visibleItems.length,
+    });
+  }
+
+  function flattenFolderTree(nodes, expanded, level = 1, parentId = null, rows = []) {
+    for (const node of nodes) {
+      rows.push({ ...node, level, parentId });
+      if (node.children.length && expanded.has(folderIdentityKey(node.id))) {
+        flattenFolderTree(node.children, expanded, level + 1, node.id, rows);
+      }
+    }
+    return rows;
+  }
+
+  function renderFolderTree({
+    document,
+    container,
+    items,
+    visibleItems = items,
+    viewModel = null,
+    expanded,
+    selected,
+    focusedId,
+    onSelect,
+    onToggle,
+    onFocus,
+  }) {
+    const folderView = viewModel || buildFolderViewModel(items, visibleItems);
+    const tree = folderView.tree;
+    const visibleCounts = folderView.visibleCounts;
+    const rows = [{
+      id: FOLDER_ALL,
+      label: 'All items',
+      level: 1,
+      parentId: null,
+      totalCount: folderView.totalCount,
+      children: [],
+    }, ...flattenFolderTree(tree, expanded)];
+    const visibleIds = rows.map((row) => row.id);
+    const visibleKeys = new Set(visibleIds.map(folderIdentityKey));
+    const effectiveSelected = visibleKeys.has(folderIdentityKey(selected))
+      ? selected
+      : FOLDER_ALL;
+    let rovingId = visibleKeys.has(folderIdentityKey(focusedId))
+      ? focusedId
+      : effectiveSelected;
+    const buttons = [];
+    const buttonsByIdentity = new Map();
+    const hadTreeFocus = Boolean(container.contains?.(document.activeElement));
+    const previousFocusKey = hadTreeFocus
+      ? document.activeElement?.__xvFolderIdentityKey
+      : '';
+
+    container.setAttribute('role', 'tree');
+    const focusItem = (id) => {
+      const key = folderIdentityKey(id);
+      const button = buttonsByIdentity.get(key);
+      if (!button) return;
+      rovingId = id;
+      for (const candidate of buttons) {
+        candidate.tabIndex = candidate === button ? 0 : -1;
+      }
+      button.focus();
+      onFocus?.(id);
+    };
+
+    for (const [rowIndex, row] of rows.entries()) {
+      const button = document.createElement('button');
+      const rowKey = folderIdentityKey(row.id);
+      const visibleCount = row.id.kind === 'all'
+        ? folderView.visibleCount
+        : (visibleCounts.get(rowKey) || 0);
+      const countLabel = visibleCount === row.totalCount
+        ? `${row.totalCount} ${row.totalCount === 1 ? 'item' : 'items'}`
+        : `${visibleCount} visible of ${row.totalCount} total`;
+      button.type = 'button';
+      button.className = 'folder-tree-item';
+      button.dataset.folderId = `folder-node-${rowIndex}`;
+      button.__xvFolderIdentityKey = rowKey;
+      button.dataset.level = String(row.level);
+      button.style.setProperty('--folder-depth', String(row.level - 1));
+      button.setAttribute('role', 'treeitem');
+      button.setAttribute('aria-level', String(row.level));
+      button.setAttribute('aria-selected', String(
+        sameFolderIdentity(row.id, effectiveSelected),
+      ));
+      button.setAttribute('aria-label', `${row.label}, ${countLabel}`);
+      button.tabIndex = sameFolderIdentity(row.id, rovingId) ? 0 : -1;
+      if (row.children.length) {
+        button.setAttribute('aria-expanded', String(expanded.has(rowKey)));
+      }
+
+      const disclosure = document.createElement('span');
+      disclosure.className = 'folder-tree-disclosure';
+      disclosure.textContent = row.children.length
+        ? (expanded.has(rowKey) ? '▾' : '▸')
+        : '';
+      disclosure.setAttribute('aria-hidden', 'true');
+      if (row.children.length) {
+        disclosure.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onToggle?.(row.id, !expanded.has(rowKey));
+          const replacement = container.__xvFolderButtons?.get(rowKey);
+          replacement?.focus();
+        };
+      }
+      const label = document.createElement('span');
+      label.className = 'folder-tree-label';
+      label.textContent = row.label;
+      const count = document.createElement('span');
+      count.className = 'folder-tree-count';
+      count.textContent = countLabel;
+      button.append(disclosure, label, count);
+      button.onfocus = () => {
+        rovingId = row.id;
+        for (const candidate of buttons) {
+          candidate.tabIndex = candidate === button ? 0 : -1;
+        }
+        onFocus?.(row.id);
+      };
+      button.onclick = () => {
+        if (onSelect?.(row.id) === false) return;
+        const replacement = container.__xvFolderButtons?.get(rowKey);
+        replacement?.focus();
+      };
+      button.onkeydown = (event) => {
+        const index = buttons.indexOf(button);
+        let destination = null;
+        if (event.key === 'ArrowDown') destination = buttons[Math.min(buttons.length - 1, index + 1)];
+        if (event.key === 'ArrowUp') destination = buttons[Math.max(0, index - 1)];
+        if (event.key === 'Home') destination = buttons[0];
+        if (event.key === 'End') destination = buttons.at(-1);
+        if (event.key === 'ArrowRight' && row.children.length) {
+          if (!expanded.has(rowKey)) onToggle?.(row.id, true);
+          else destination = buttons[index + 1];
+        }
+        if (event.key === 'ArrowLeft') {
+          if (row.children.length && expanded.has(rowKey)) onToggle?.(row.id, false);
+          else if (row.parentId) destination = buttonsByIdentity.get(
+            folderIdentityKey(row.parentId),
+          );
+        }
+        if (event.key === 'Enter' || event.key === ' ') {
+          onSelect?.(row.id);
+        } else if (!destination
+          && !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+          return;
+        }
+        event.preventDefault();
+        if (destination) {
+          const destinationRow = rows.find(
+            (candidate) => folderIdentityKey(candidate.id)
+              === destination.__xvFolderIdentityKey,
+          );
+          if (destinationRow) focusItem(destinationRow.id);
+        } else if (event.key === 'Enter' || event.key === ' ') {
+          const replacement = container.__xvFolderButtons?.get(rowKey);
+          replacement?.focus();
+        }
+      };
+      buttons.push(button);
+      buttonsByIdentity.set(rowKey, button);
+    }
+    container.__xvFolderButtons = buttonsByIdentity;
+    container.replaceChildren(...buttons);
+    if (hadTreeFocus) {
+      const replacement = rows.find((row) => folderIdentityKey(row.id) === previousFocusKey);
+      focusItem(replacement?.id || rovingId);
+    }
+    return Object.freeze({ visibleIds, focusedId: () => rovingId });
+  }
+export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
+  typeCards, buildTypedDraft, groupSuggestions, conversionSummary,
+  protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
+  sortedCopy, normalizeWidths, resizeAdjacentWidths, contentMode, contentRows,
+  groupContentRows, normalizeFolderPath,
+  FOLDER_ALL, FOLDER_UNFILED, folderIdentity, folderIdentityKey, sameFolderIdentity,
+  buildFolderTree, buildFolderViewModel, initialExpansion, createFolderTokenIndex,
+  folderPreferenceKey, loadFolderExpansion,
+  saveFolderExpansion, createFolderNavigationState, itemMatchesFolder,
+  flattenFolderTree, renderFolderTree, filterSecrets, filterFiles,
+  activeFilterChips };

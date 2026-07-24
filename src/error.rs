@@ -1,5 +1,362 @@
 use thiserror::Error;
 
+/// Display-safe setup failure for desktop recovery and diagnostics.
+///
+/// Every string is sanitized before construction. The raw provider error is
+/// retained only as bounded, redacted diagnostics; it must never be placed in
+/// `message`, `hint`, or a scope field.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[allow(dead_code)] // Consumed by the desktop recovery adapter in Task 3.
+pub struct SafeSetupError {
+    pub code: String,
+    pub operation: String,
+    pub backend: String,
+    pub vault: String,
+    pub message: String,
+    pub hint: String,
+    pub diagnostics: String,
+}
+
+#[allow(dead_code)] // Consumed by the desktop recovery adapter in Task 3.
+impl SafeSetupError {
+    /// Create a generic safe setup failure from an untrusted diagnostic.
+    pub fn from_message(message: &str) -> Self {
+        Self::from_parts(
+            "xv-backend-internal",
+            "setup",
+            "unknown",
+            "",
+            "Setup could not be completed.",
+            "Review the setup fields and provider login, then try again.",
+            message,
+        )
+    }
+
+    /// Classify an application failure and retain only redacted diagnostics.
+    pub fn from_error(
+        operation: &str,
+        backend: &str,
+        vault: &str,
+        error: &CrosstacheError,
+    ) -> Self {
+        use CrosstacheError::*;
+
+        let (code, message, hint) = match error {
+            AuthenticationError(_) => (
+                "xv-auth-failed",
+                "Authentication with the selected backend failed.",
+                setup_auth_hint(backend),
+            ),
+            ConfigError(_)
+            | ConfigLoadError(_)
+            | InvalidArgument(_)
+            | InvalidUrl(_)
+            | SerializationError(_) => (
+                "xv-config-invalid",
+                "The setup configuration is invalid.",
+                "Review the setup fields and try again.",
+            ),
+            PermissionDenied(_) => (
+                "xv-permission-denied",
+                "The selected identity does not have permission to list this vault.",
+                setup_permission_hint(backend),
+            ),
+            NetworkError(_)
+            | DnsResolutionError { .. }
+            | ConnectionTimeout(_)
+            | ConnectionRefused(_)
+            | SslError(_)
+            | HttpError(_) => (
+                "xv-network",
+                "The selected backend could not be reached.",
+                "Check the network connection and provider service, then try again.",
+            ),
+            _ => (
+                "xv-backend-internal",
+                "The selected backend could not complete setup verification.",
+                setup_backend_hint(backend),
+            ),
+        };
+
+        Self::from_parts(
+            code,
+            operation,
+            backend,
+            vault,
+            message,
+            hint,
+            &error.to_string(),
+        )
+    }
+
+    fn from_parts(
+        code: &str,
+        operation: &str,
+        backend: &str,
+        vault: &str,
+        message: &str,
+        hint: &str,
+        diagnostics: &str,
+    ) -> Self {
+        Self {
+            code: safe_setup_text(code, 64),
+            operation: safe_setup_text(operation, 64),
+            backend: safe_setup_text(backend, 64),
+            vault: safe_setup_text(vault, 256),
+            message: safe_setup_text(message, 512),
+            hint: safe_setup_text(hint, 512),
+            diagnostics: redact_setup_diagnostics(diagnostics),
+        }
+    }
+}
+
+fn setup_auth_hint(backend: &str) -> &'static str {
+    match backend {
+        "azure" => "Run 'az login', select the intended tenant and subscription, then try again.",
+        "aws" => {
+            "Run 'aws sso login' or refresh the configured AWS credential chain, then try again."
+        }
+        _ => "Check the configured local identity and try again.",
+    }
+}
+
+fn setup_permission_hint(backend: &str) -> &'static str {
+    match backend {
+        "azure" => "Check Azure Key Vault data-plane access for the selected identity.",
+        "aws" => "Check IAM permission to list secrets for the configured AWS identity.",
+        _ => "Check access to the configured local store and key.",
+    }
+}
+
+fn setup_backend_hint(backend: &str) -> &'static str {
+    match backend {
+        "azure" => "Check Azure service status and the non-secret setup fields, then try again.",
+        "aws" => "Check AWS service status and the non-secret setup fields, then try again.",
+        _ => "Check the local store configuration and try again.",
+    }
+}
+
+fn safe_setup_text(value: &str, max_chars: usize) -> String {
+    crate::utils::format::sanitize_control_chars(value)
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+fn looks_like_opaque_token(candidate: &str) -> bool {
+    if is_safe_camel_case_identifier(candidate) || is_safe_diagnostic_scalar(candidate) {
+        return false;
+    }
+
+    let has_upper = candidate.bytes().any(|byte| byte.is_ascii_uppercase());
+    let has_lower = candidate.bytes().any(|byte| byte.is_ascii_lowercase());
+    let has_digit = candidate.bytes().any(|byte| byte.is_ascii_digit());
+    let punctuation_kinds = b"._~+/=-"
+        .iter()
+        .filter(|punctuation| candidate.as_bytes().contains(punctuation))
+        .count();
+    let is_long_hex = candidate.len() >= 32
+        && has_digit
+        && candidate.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let is_long_alphabetic =
+        candidate.len() >= 24 && candidate.bytes().all(|byte| byte.is_ascii_alphabetic());
+    let is_long_alphanumeric = candidate.len() >= 24
+        && has_digit
+        && candidate.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    let has_token_padding = candidate.len() >= 20 && candidate.ends_with('=');
+
+    punctuation_kinds >= 2
+        || (has_digit && punctuation_kinds >= 1)
+        || (has_upper && has_lower && has_digit)
+        || is_long_hex
+        || is_long_alphabetic
+        || is_long_alphanumeric
+        || has_token_padding
+}
+
+fn is_safe_camel_case_identifier(candidate: &str) -> bool {
+    // Deliberately recognize diagnostic type roles, not provider-specific
+    // class names. This is a narrow syntax exception rather than an exhaustive
+    // allowlist of SDK identifiers.
+    const SAFE_TYPE_SUFFIXES: [&str; 3] = ["Credential", "Exception", "Error"];
+
+    if !candidate.bytes().all(|byte| byte.is_ascii_alphabetic())
+        || !candidate
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase())
+    {
+        return false;
+    }
+
+    let has_readable_word_boundary = candidate
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase());
+    has_readable_word_boundary
+        && SAFE_TYPE_SUFFIXES.iter().any(|suffix| {
+            candidate
+                .strip_suffix(suffix)
+                .is_some_and(|prefix| !prefix.is_empty())
+        })
+}
+
+fn is_safe_diagnostic_scalar(candidate: &str) -> bool {
+    let Some((key, value)) = candidate.split_once('=') else {
+        return false;
+    };
+    if value.contains('=') {
+        return false;
+    }
+
+    let key = key.to_ascii_lowercase();
+    if key.ends_with("version") {
+        let numeric_value = value
+            .strip_suffix("-preview")
+            .or_else(|| value.strip_suffix("-beta"))
+            .unwrap_or(value);
+        return numeric_segments(numeric_value, &['.', '-']);
+    }
+    if key == "retry-after" {
+        return value
+            .strip_suffix("-seconds")
+            .or_else(|| value.strip_suffix("-milliseconds"))
+            .is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+            })
+            || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
+    }
+    if key == "request-id" {
+        return value.strip_prefix("req-").is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    }
+    key == "status-code" && value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn numeric_segments(value: &str, separators: &[char]) -> bool {
+    !value.is_empty()
+        && value
+            .split(|character| separators.contains(&character))
+            .all(|segment| {
+                !segment.is_empty()
+                    && segment.len() <= 4
+                    && segment.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        && value
+            .chars()
+            .any(|character| separators.contains(&character))
+}
+
+fn redact_setup_diagnostics(value: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    fn pattern(slot: &'static OnceLock<Regex>, expression: &str) -> &'static Regex {
+        slot.get_or_init(|| Regex::new(expression).expect("setup redaction regex must compile"))
+    }
+
+    static AUTH_HEADER: OnceLock<Regex> = OnceLock::new();
+    static URL: OnceLock<Regex> = OnceLock::new();
+    static SENSITIVE_PAIR: OnceLock<Regex> = OnceLock::new();
+    static AUTH_SCHEME: OnceLock<Regex> = OnceLock::new();
+    static GUID: OnceLock<Regex> = OnceLock::new();
+    static AWS_ACCESS_KEY: OnceLock<Regex> = OnceLock::new();
+    static AWS_ACCOUNT_ID: OnceLock<Regex> = OnceLock::new();
+    static JWT: OnceLock<Regex> = OnceLock::new();
+    static OPAQUE_TOKEN: OnceLock<Regex> = OnceLock::new();
+    static UNC_PATH: OnceLock<Regex> = OnceLock::new();
+    static WINDOWS_PATH: OnceLock<Regex> = OnceLock::new();
+    static UNIX_PATH: OnceLock<Regex> = OnceLock::new();
+
+    // Bound attacker/provider-controlled input before repeated decoding and
+    // matching. Decode a small fixed number of layers so encoded URLs,
+    // headers, query credentials, and userinfo reach the same full-entity
+    // redaction rules as their literal forms.
+    let mut safe: String = value.chars().take(16_384).collect();
+    for _ in 0..4 {
+        let decoded = percent_encoding::percent_decode_str(&safe)
+            .decode_utf8_lossy()
+            .into_owned();
+        if decoded == safe {
+            break;
+        }
+        safe = decoded;
+    }
+    safe = crate::utils::format::sanitize_control_chars(&safe);
+
+    // Redact broad, structured entities before token/path substrings. This
+    // prevents later patterns from leaving a prefix or suffix of the same
+    // credential visible.
+    safe = pattern(
+        &AUTH_HEADER,
+        r"(?im)\b(?:authorization|proxy-authorization|x-api-key|x-amz-security-token|cookie|set-cookie)\s*:\s*[^\r\n]+",
+    )
+    .replace_all(&safe, "[AUTH HEADER REDACTED]")
+    .into_owned();
+    safe = pattern(&URL, r#"(?i)\b(?:https?|ftp)://[^\s<>"';]+"#)
+        .replace_all(&safe, "[URL REDACTED]")
+        .into_owned();
+    safe = pattern(
+        &SENSITIVE_PAIR,
+        r#"(?i)\b(?:authorization|proxy-authorization|client[_-]?secret|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|access[_-]?key(?:[_-]?id)?|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|token|api[_-]?key|accountkey|sharedaccesssignature|sig(?:nature)?|credential|client[_-]?assertion)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)"#,
+    )
+    .replace_all(&safe, "[CREDENTIAL REDACTED]")
+    .into_owned();
+    safe = pattern(
+        &AUTH_SCHEME,
+        r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+",
+    )
+    .replace_all(&safe, "[AUTH CREDENTIAL REDACTED]")
+    .into_owned();
+    safe = pattern(
+        &GUID,
+        r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    )
+    .replace_all(&safe, "[IDENTIFIER REDACTED]")
+    .into_owned();
+    safe = pattern(&AWS_ACCESS_KEY, r"(?i)\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+        .replace_all(&safe, "[IDENTIFIER REDACTED]")
+        .into_owned();
+    safe = pattern(&AWS_ACCOUNT_ID, r"\b[0-9]{12}\b")
+        .replace_all(&safe, "[IDENTIFIER REDACTED]")
+        .into_owned();
+    safe = pattern(
+        &UNC_PATH,
+        r#"(?i)(?:\\\\|//)[^\\/\s;,'"]+(?:[\\/][^\\/\s;,'"]+)+"#,
+    )
+    .replace_all(&safe, "[PATH REDACTED]")
+    .into_owned();
+    safe = pattern(
+        &WINDOWS_PATH,
+        r#"(?i)\b[A-Z]:\\(?:[^\\\s;,'"]+\\?)*[^\\\s;,'"]*"#,
+    )
+    .replace_all(&safe, "[PATH REDACTED]")
+    .into_owned();
+    safe = pattern(&UNIX_PATH, r#"(^|[\s=:'"(])((?:/[^\s;,'"()]+)+)"#)
+        .replace_all(&safe, "$1[PATH REDACTED]")
+        .into_owned();
+    safe = pattern(
+        &JWT,
+        r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+    )
+    .replace_all(&safe, "[TOKEN REDACTED]")
+    .into_owned();
+    safe = pattern(&OPAQUE_TOKEN, r"[A-Za-z0-9._~+/=-]{20,}")
+        .replace_all(&safe, |captures: &regex::Captures<'_>| {
+            let candidate = &captures[0];
+            if looks_like_opaque_token(candidate) {
+                "[TOKEN REDACTED]".to_string()
+            } else {
+                candidate.to_string()
+            }
+        })
+        .into_owned();
+
+    // Truncate only after all replacements, using Unicode scalar boundaries.
+    safe_setup_text(&safe, 2048)
+}
+
 /// Render the `EnvNotDefined` message. When `available` is empty the
 /// `.xv.toml` in question defines zero `[env.*]` blocks at all (a
 /// types-only project file, see #331) rather than simply lacking the
@@ -1065,6 +1422,7 @@ mod tests {
                     "groups",
                     "updated_on",
                     "enabled",
+                    "expires_on",
                     "content_type",
                 ],
                 allowed_value_like_fields: &[],

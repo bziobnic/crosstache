@@ -617,6 +617,15 @@ async fn execute_cross_vault_alias_mv(
 /// BLOCKER/MAJOR fix, Phase C follow-up): every `mv` form must resolve the
 /// SAME way `get`/`set`/etc. already do, never a separate config-level
 /// vault when a workspace is attached.
+pub(crate) fn validate_atomic_rename_backend(backend: &dyn crate::backend::Backend) -> Result<()> {
+    if !crate::backend::atomic_rename_available(backend) {
+        return Err(CrosstacheError::config(
+            "backend does not support atomic rename; no changes were written",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_secret_mv(
     backend: &std::sync::Arc<dyn crate::backend::Backend>,
@@ -661,6 +670,10 @@ async fn execute_secret_mv(
         return Ok(());
     }
 
+    if dest_name != src_name {
+        validate_atomic_rename_backend(backend.as_ref())?;
+    }
+
     // Collision pre-check — before any mutation — only relevant when the
     // name is actually changing.
     if dest_name != src_name && dest_collides(&secrets, &dest_name) {
@@ -694,6 +707,7 @@ async fn execute_secret_mv(
     if dest_folder_norm != current_folder_norm {
         let request = SecretUpdateRequest {
             name: src_name.clone(),
+            expected_revision: None,
             value: None,
             content_type: None,
             enabled: None,
@@ -831,6 +845,7 @@ async fn execute_folder_mv(
     for (old, new, name, new_folder) in &moves {
         let request = SecretUpdateRequest {
             name: name.clone(),
+            expected_revision: None,
             value: None,
             content_type: None,
             enabled: None,
@@ -1039,6 +1054,7 @@ async fn execute_filter_mv(
     for (old, new, name) in &moves {
         let request = SecretUpdateRequest {
             name: name.clone(),
+            expected_revision: None,
             value: None,
             content_type: None,
             enabled: None,
@@ -1173,6 +1189,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }
@@ -1221,6 +1238,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }
@@ -1326,6 +1344,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }
@@ -1428,12 +1447,20 @@ mod tests {
 
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
+                has_atomic_record_conversion: false,
+                has_conditional_record_conversion: false,
+                has_atomic_rename: false,
+                has_atomic_file_create: false,
+                has_enable_disable: false,
                 has_vaults: true,
                 has_file_storage: false,
                 has_rbac: false,
                 has_audit: false,
                 has_versioning: true,
                 has_soft_delete: true,
+                has_restore: true,
+                has_purge: true,
+                has_scheduled_purge: false,
                 has_secret_rotation: false,
                 has_groups: true,
                 has_folders: true,
@@ -1501,6 +1528,38 @@ mod tests {
         assert_eq!(
             called,
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_rename_preflights_before_folder_update() {
+        let backend = Arc::new(PartialFailBackend::new("never"));
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+        let config = Config::default();
+        let secrets = vec![folder_summary("source", "old")];
+
+        let error = execute_secret_mv(
+            &backend_dyn,
+            "limited",
+            &config,
+            "test-vault",
+            secrets,
+            "old/source",
+            "new/destination",
+            Some("old".to_string()),
+            "source".to_string(),
+            Some("new".to_string()),
+            "destination".to_string(),
+            false,
+            true,
+        )
+        .await
+        .expect_err("unsupported rename must fail before the folder update");
+
+        assert!(error.to_string().contains("atomic rename"), "{error}");
+        assert!(
+            backend.called_names().is_empty(),
+            "no metadata update may run before an unsupported rename"
         );
     }
 
@@ -1573,12 +1632,20 @@ mod tests {
         }
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
+                has_atomic_record_conversion: false,
+                has_conditional_record_conversion: false,
+                has_atomic_rename: false,
+                has_atomic_file_create: false,
+                has_enable_disable: false,
                 has_vaults: true,
                 has_file_storage: true,
                 has_rbac: true,
                 has_audit: true,
                 has_versioning: true,
                 has_soft_delete: true,
+                has_restore: true,
+                has_purge: true,
+                has_scheduled_purge: true,
                 has_secret_rotation: false,
                 has_groups: true,
                 has_folders: true,

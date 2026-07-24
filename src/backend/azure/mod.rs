@@ -180,6 +180,11 @@ impl Backend for AzureBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
+            has_atomic_record_conversion: true,
+            has_conditional_record_conversion: false,
+            has_atomic_rename: false,
+            has_atomic_file_create: false,
+            has_enable_disable: true,
             has_vaults: true,
             has_file_storage: {
                 #[cfg(feature = "file-ops")]
@@ -195,6 +200,9 @@ impl Backend for AzureBackend {
             has_audit: true,
             has_versioning: true,
             has_soft_delete: true,
+            has_restore: true,
+            has_purge: true,
+            has_scheduled_purge: true,
             has_secret_rotation: false,
             has_groups: true,
             has_folders: true,
@@ -272,6 +280,10 @@ mod tests {
             .expect("default Azure backend should construct for capability inspection");
 
         assert!(backend.capabilities().has_audit);
+        assert!(backend.capabilities().has_atomic_record_conversion);
+        assert!(!backend.capabilities().has_conditional_record_conversion);
+        assert!(!backend.capabilities().has_atomic_rename);
+        assert!(!backend.capabilities().has_atomic_file_create);
         assert!(backend.audit().is_some());
     }
 }

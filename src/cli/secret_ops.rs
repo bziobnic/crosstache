@@ -3301,8 +3301,8 @@ pub(crate) async fn execute_secret_inject_direct(
 
 /// Like [`crate::cli::helpers::confirm_proceed`], but exits with code 3
 /// (`CrosstacheError::config`) instead of 2 — record-types plan Task 9
-/// requires `xv update --untype` (when it would drop non-primary secret
-/// fields) to exit 3 without `--yes` on a non-interactive session,
+/// requires lossy record conversion to exit 3 without `--yes` on a
+/// non-interactive session,
 /// consistent with every other record-types validation failure, even
 /// though it mirrors `mv`'s bulk-confirm *behavior* (prompt unless `--yes`,
 /// hard-fail without a TTY).
@@ -3576,6 +3576,7 @@ async fn apply_record_field_changes(
 
     let request = crate::secret::manager::SecretUpdateRequest {
         name: name.to_string(),
+        expected_revision: None,
         value: new_value,
         content_type,
         enabled: enabled_override,
@@ -3661,110 +3662,42 @@ async fn execute_record_primary_update(
     .await
 }
 
-/// `xv update <name> --type <type>` (record-types plan Task 9): explicit
-/// conversion of a bare secret into a typed record. The current value
-/// becomes the primary field; existing groups/note/folder/user tags are
-/// untouched. Errors if the secret is already a record.
+/// Shared plain-to-record or record-to-record CLI adapter. The service keeps
+/// exact field matches, maps the source primary when needed, preserves
+/// metadata, and prepares the single atomic backend update.
 async fn execute_record_type_conversion(
     name: &str,
     type_name: &str,
+    yes: bool,
     vault_name: &str,
     config: &Config,
     backend: &dyn crate::backend::Backend,
     backend_name: &str,
 ) -> Result<()> {
+    crate::records::validate_conversion_backend(backend)?;
     let secret = backend.secrets().get_secret(vault_name, name, true).await?;
-    if crate::records::is_record(&secret.content_type) {
-        return Err(CrosstacheError::config(format!(
-            "secret '{name}' is already a typed record (type: {}); use --field/--field-secret to \
-             edit it, or --untype first to convert it back to a bare secret.",
-            secret.tags.get(TYPE_TAG).cloned().unwrap_or_default()
-        )));
-    }
-
     let types = config.resolve_record_types().await?;
-    let Some(record_type) = find_type(&types, type_name) else {
-        let mut known: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
-        known.sort_unstable();
-        return Err(CrosstacheError::config(format!(
-            "unknown type '{type_name}'. Known types: {}",
-            known.join(", ")
-        )));
-    };
-
-    let current_value = secret.value.clone().unwrap_or_default();
-    if current_value.is_empty() {
-        return Err(CrosstacheError::config(format!(
-            "secret '{name}' has no value to convert"
-        )));
+    let mut request = crate::records::ConversionRequest::to_type(type_name);
+    request.confirm_lossy = yes;
+    let mut preview = crate::records::preview_conversion(&secret, &types, request)?;
+    print_conversion_preview(&preview);
+    if preview.requires_confirmation {
+        let impact = conversion_confirmation_impact(&preview);
+        let prompt = format!(
+            "Converting '{name}' to type '{type_name}' requires confirmation ({impact}). Continue?"
+        );
+        if !confirm_record_action(false, &prompt)? {
+            output::info("Aborted; secret not converted.");
+            return Ok(());
+        }
+        let mut confirmed = crate::records::ConversionRequest::to_type(type_name);
+        confirmed.confirm_lossy = true;
+        preview = crate::records::preview_conversion(&secret, &types, confirmed)?;
     }
-
-    let mut envelope = BTreeMap::new();
-    envelope.insert(
-        record_type.primary().name.clone(),
-        current_value.as_str().to_string(),
-    );
-    let envelope_value = encode_envelope(&envelope)?;
-
-    // Tag budget: existing tags (unchanged) + the new xv-type tag. No f.*
-    // fields are added by a bare `--type` conversion (only the primary is
-    // set, and the primary never gets an f.* tag).
-    let user_tags = user_tags_of(&secret.tags);
-    let reserved_count = crate::records::predicted_reserved_tag_count(
-        backend.kind(),
-        true,
-        secret.tags.contains_key("groups"),
-        secret.tags.contains_key("note"),
-        secret.tags.contains_key("folder"),
-        secret.expires_on.is_some(),
-    );
-    crate::records::check_tag_budget(
-        &backend.capabilities(),
-        reserved_count,
-        &BTreeMap::new(),
-        &user_tags,
-    )?;
-
-    let mut new_tags = secret.tags.clone();
-    // Strip denormalized groups/note/folder (see
-    // `split_denormalized_tags`'s doc comment) before this becomes a
-    // `replace_tags: true` write, and USE the extracted values via the
-    // request's dedicated fields (`groups: Some(vec)` +
-    // `replace_groups: true`, `note`/`folder` as `Set`-when-known) rather
-    // than `None`/`Unchanged` — a value-changing update takes Azure's
-    // full-PUT path, which does not treat `groups: None` as "leave
-    // unchanged" the way local/AWS's delta model does: `prepare_secret_
-    // request` only re-adds the `groups` tag when the request field is
-    // `Some`, so `None` here previously erased group membership on Azure
-    // (Bugbot review, round 3).
-    let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut new_tags);
-    new_tags.insert(TYPE_TAG.to_string(), record_type.name.clone());
-
-    let request = crate::secret::manager::SecretUpdateRequest {
-        name: name.to_string(),
-        value: Some(Zeroizing::new(envelope_value)),
-        content_type: Some(RECORD_CONTENT_TYPE.to_string()),
-        enabled: None,
-        expires_on: crate::secret::manager::FieldUpdate::Unchanged,
-        not_before: crate::secret::manager::FieldUpdate::Unchanged,
-        tags: Some(new_tags),
-        groups,
-        note: note
-            .map(crate::secret::manager::FieldUpdate::Set)
-            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
-        folder: folder
-            .map(crate::secret::manager::FieldUpdate::Set)
-            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
-        replace_tags: true,
-        replace_groups: true,
-    };
-    let props = backend
-        .secrets()
-        .update_secret(vault_name, name, request)
-        .await?;
+    let props = crate::records::apply_atomic_conversion(backend, vault_name, name, preview).await?;
     output::success(&format!(
         "Successfully converted '{}' to type '{}'",
-        props.original_name, record_type.name
+        props.original_name, type_name
     ));
     invalidate_trait_secret_cache(config, backend_name, vault_name);
     Ok(())
@@ -3772,9 +3705,8 @@ async fn execute_record_type_conversion(
 
 /// `xv update <name> --untype` (record-types plan Task 9): flattens a
 /// typed record back to a bare secret holding the primary field's value.
-/// Non-primary secret fields are dropped with an interactive confirmation
-/// (or `--yes`); metadata fields are removed from tags. Non-TTY without
-/// `--yes` when fields would be dropped exits 3.
+/// All other record fields are dropped with an interactive confirmation
+/// (or `--yes`). Non-TTY without `--yes` when fields would be dropped exits 3.
 async fn execute_record_untype(
     name: &str,
     yes: bool,
@@ -3783,6 +3715,7 @@ async fn execute_record_untype(
     reg: &BackendRegistry,
     backend_name: &str,
 ) -> Result<()> {
+    crate::records::validate_conversion_backend(reg.active())?;
     let secret = reg
         .active()
         .secrets()
@@ -3795,88 +3728,68 @@ async fn execute_record_untype(
     }
 
     let type_name = secret.tags.get(TYPE_TAG).cloned().unwrap_or_default();
-    let raw = secret.value.as_deref().map(|s| s.as_str()).unwrap_or("");
-    let envelope = parse_record_envelope_or_fail(name, &secret.content_type, raw)?;
-
     let types = config.resolve_record_types().await?;
-    let Some(record_type) = find_type(&types, &type_name) else {
-        return Err(CrosstacheError::config(format!(
-            "secret '{name}' has type '{type_name}', which has no resolvable type definition \
-             (check your [types.*] config); its primary field can't be determined, so it can't be \
-             untyped automatically. Use 'xv get {name} --record' to inspect its raw fields."
-        )));
-    };
-
-    let primary_name = &record_type.primary().name;
-    let Some(primary_value) = envelope.get(primary_name) else {
-        return Err(CrosstacheError::config(format!(
-            "secret '{name}' is missing its primary field '{primary_name}' in the record envelope"
-        )));
-    };
-    let primary_value = primary_value.clone();
-
-    let mut dropped: Vec<String> = envelope
-        .keys()
-        .filter(|k| *k != primary_name)
-        .cloned()
-        .collect();
-    dropped.sort();
-
-    if !dropped.is_empty() {
-        let prompt = format!(
-            "Untyping '{name}' will permanently drop {} non-primary secret field(s): {}. Continue?",
-            dropped.len(),
-            dropped.join(", ")
-        );
-        if !confirm_record_action(yes, &prompt)? {
+    let mut request = crate::records::ConversionRequest::plain();
+    request.confirm_lossy = yes;
+    let mut preview = crate::records::preview_conversion(&secret, &types, request)?;
+    print_conversion_preview(&preview);
+    if preview.requires_confirmation {
+        let impact = conversion_confirmation_impact(&preview);
+        let prompt = format!("Untyping '{name}' requires confirmation ({impact}). Continue?");
+        if !confirm_record_action(false, &prompt)? {
             output::info("Aborted; secret not untyped.");
             return Ok(());
         }
-        output::warn(&format!("Dropped field(s): {}", dropped.join(", ")));
+        let mut confirmed = crate::records::ConversionRequest::plain();
+        confirmed.confirm_lossy = true;
+        preview = crate::records::preview_conversion(&secret, &types, confirmed)?;
     }
-
-    let mut new_tags = secret.tags.clone();
-    new_tags.remove(TYPE_TAG);
-    new_tags.retain(|k, _| !k.starts_with(FIELD_TAG_PREFIX));
-    // Strip denormalized groups/note/folder — see
-    // `split_denormalized_tags`'s doc comment — and USE the extracted
-    // values via the request's dedicated fields. Untyping is a
-    // value-changing update (Azure's full-PUT path), which does not treat
-    // `groups: None` as "leave unchanged": `prepare_secret_request` only
-    // re-adds the `groups` tag when the request field is `Some`, so
-    // `None` here previously erased group membership on Azure (Bugbot
-    // review, round 3).
-    let (groups, note, folder) = crate::backend::secret::split_denormalized_tags(&mut new_tags);
-
-    let request = crate::secret::manager::SecretUpdateRequest {
-        name: name.to_string(),
-        value: Some(Zeroizing::new(primary_value)),
-        content_type: Some(String::new()),
-        enabled: None,
-        expires_on: crate::secret::manager::FieldUpdate::Unchanged,
-        not_before: crate::secret::manager::FieldUpdate::Unchanged,
-        tags: Some(new_tags),
-        groups,
-        note: note
-            .map(crate::secret::manager::FieldUpdate::Set)
-            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
-        folder: folder
-            .map(crate::secret::manager::FieldUpdate::Set)
-            .unwrap_or(crate::secret::manager::FieldUpdate::Unchanged),
-        replace_tags: true,
-        replace_groups: true,
-    };
-    let props = reg
-        .active()
-        .secrets()
-        .update_secret(vault_name, name, request)
-        .await?;
+    let props =
+        crate::records::apply_atomic_conversion(reg.active(), vault_name, name, preview).await?;
     output::success(&format!(
         "Successfully untyped '{}' (was type '{type_name}')",
         props.original_name
     ));
     invalidate_trait_secret_cache(config, backend_name, vault_name);
     Ok(())
+}
+
+fn print_conversion_preview(preview: &crate::records::ConversionPreview) {
+    if !preview.retained.is_empty() {
+        output::info(&format!(
+            "Retained field(s): {}",
+            preview.retained.join(", ")
+        ));
+    }
+    if !preview.renamed.is_empty() {
+        output::info(&format!("Renamed field(s): {}", preview.renamed.join(", ")));
+    }
+    if !preview.copied.is_empty() {
+        output::info(&format!("Copied field(s): {}", preview.copied.join(", ")));
+    }
+    if !preview.sensitivity_changes.is_empty() {
+        output::info(&format!(
+            "Sensitivity change(s): {}",
+            preview.sensitivity_changes.join(", ")
+        ));
+    }
+    if !preview.dropped.is_empty() {
+        output::warn(&format!("Dropped field(s): {}", preview.dropped.join(", ")));
+    }
+}
+
+fn conversion_confirmation_impact(preview: &crate::records::ConversionPreview) -> String {
+    let mut impacts = Vec::new();
+    if !preview.dropped.is_empty() {
+        impacts.push(format!("drop field(s): {}", preview.dropped.join(", ")));
+    }
+    if !preview.exposed.is_empty() {
+        impacts.push(format!(
+            "expose protected field(s) as metadata: {}",
+            preview.exposed.join(", ")
+        ));
+    }
+    impacts.join("; ")
 }
 
 /// Every classic (non-record) `xv update` metadata flag that was actually
@@ -4005,6 +3918,9 @@ pub(crate) async fn execute_secret_update_direct(
         }
         let local_registry = BackendRegistry::new(resolved_backend);
         let reg = &local_registry;
+        if rename.is_some() {
+            crate::cli::mv_ops::validate_atomic_rename_backend(reg.active())?;
+        }
 
         // A bare `xv update NAME` — no value, no --stdin, and no other
         // update flag — prompts for the new value, matching the `value`
@@ -4053,6 +3969,7 @@ pub(crate) async fn execute_secret_update_direct(
                 return execute_record_type_conversion(
                     name,
                     &type_name,
+                    yes,
                     &vault_name,
                     &config,
                     reg.active(),
@@ -4229,6 +4146,7 @@ pub(crate) async fn execute_secret_update_direct(
         if has_other_updates || !renaming {
             let request = crate::secret::manager::SecretUpdateRequest {
                 name: name.to_string(),
+                expected_revision: None,
                 value: resolved_value,
                 content_type: None,
                 enabled,
@@ -7428,12 +7346,20 @@ mod tests {
 
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities {
+                has_atomic_record_conversion: false,
+                has_conditional_record_conversion: false,
+                has_atomic_rename: false,
+                has_atomic_file_create: false,
+                has_enable_disable: false,
                 has_vaults: self.kind == BackendKind::Local,
                 has_file_storage: false,
                 has_rbac: false,
                 has_audit: false,
                 has_versioning: true,
                 has_soft_delete: true,
+                has_restore: true,
+                has_purge: true,
+                has_scheduled_purge: self.kind != BackendKind::Local,
                 has_secret_rotation: self.kind == BackendKind::Aws,
                 has_groups: true,
                 has_folders: true,
@@ -7524,6 +7450,7 @@ mod tests {
             groups: groups.map(str::to_string),
             updated_on: "2026-04-28".to_string(),
             enabled,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         }
@@ -7719,6 +7646,25 @@ mod tests {
         let config = Config {
             backend: Some("local".to_string()),
             default_vault: String::new(),
+            local: Some(crate::config::settings::LocalConfig {
+                store_path: Some(
+                    temp_context_dir
+                        .path()
+                        .join("store")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                key_file: Some(
+                    temp_context_dir
+                        .path()
+                        .join("key.txt")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                default_vault: Some("default".to_string()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            }),
             ..Default::default()
         };
 
@@ -7731,6 +7677,22 @@ mod tests {
             "unexpected error: {msg}"
         );
         assert!(msg.contains("local"), "should name the backend: {msg}");
+    }
+
+    #[tokio::test]
+    async fn record_conversion_preflights_atomic_capability_before_read_or_prompt() {
+        let backend = TestBackend::aws();
+        let config = Config::default();
+
+        let error = execute_record_type_conversion(
+            "cred", "api-key", false, "default", &config, &backend, "aws",
+        )
+        .await
+        .expect_err("AWS conversion must fail before reading or prompting");
+        let message = error.to_string();
+        assert!(message.contains("atomic record conversion"), "{message}");
+        assert!(!message.contains("test backend"), "{message}");
+        assert!(!message.contains("--yes"), "{message}");
     }
 
     /// When `--backend local` is requested but backend init failed (registry
@@ -7825,6 +7787,7 @@ mod tests {
                 groups: groups.map(str::to_string),
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             }
@@ -8079,6 +8042,7 @@ mod tests {
                 groups: None,
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             }
@@ -8467,6 +8431,7 @@ mod tests {
             groups: None,
             updated_on: "2026-07-01 00:00:00 UTC".to_string(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         };
@@ -8491,6 +8456,7 @@ mod tests {
             groups: None,
             updated_on: String::new(),
             enabled: true,
+            expires_on: None,
             content_type: String::new(),
             tags: std::collections::HashMap::new(),
         };
@@ -8585,6 +8551,7 @@ mod tests {
                 groups: None,
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             }

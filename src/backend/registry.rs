@@ -61,6 +61,21 @@ impl std::fmt::Debug for BackendRegistry {
 }
 
 impl BackendRegistry {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        default: &'static str,
+        backends: Vec<(&'static str, Arc<dyn Backend>)>,
+    ) -> Self {
+        Self {
+            backends: backends.into_iter().collect(),
+            default,
+            azure_auth: None,
+            lazy_config: None,
+            lazy_names: Vec::new(),
+            lazy_cache: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
     /// Build a registry from the loaded [`Config`].
     ///
     /// The active backend is determined by `config.backend` (defaulting to
@@ -326,6 +341,18 @@ impl BackendRegistry {
         self.default
     }
 
+    /// Verify the active backend can connect and list the requested vault.
+    ///
+    /// Setup candidates call this before any configuration replacement. It
+    /// intentionally returns no provider records or diagnostics.
+    #[allow(dead_code)] // Consumed by the desktop setup adapter in Task 3.
+    pub async fn verify_active_vault(&self, vault: &str) -> Result<(), BackendError> {
+        let backend = self.active();
+        backend.health_check().await?;
+        backend.secrets().list_secrets(vault, None).await?;
+        Ok(())
+    }
+
     /// Create a fresh backend instance for the given kind using the provided config.
     ///
     /// Used for cross-backend operations such as resolving `xv://aws:prod/SECRET`
@@ -379,6 +406,35 @@ impl BackendRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[cfg(feature = "ui")]
+    async fn setup_verification_runs_health_check_before_vault_list() {
+        use crate::web::testutil::stub::StubBackend;
+
+        let health_failure = BackendRegistry::new(Arc::new(StubBackend::with_health_error(
+            "stub",
+            "health failed",
+        )));
+        let error = health_failure
+            .verify_active_vault("default")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Internal(ref message) if message == "health failed"));
+
+        let list_failure = BackendRegistry::new(Arc::new(StubBackend::with_list_error(
+            "stub",
+            "list failed",
+        )));
+        let error = list_failure
+            .verify_active_vault("default")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Internal(ref message) if message == "list failed"));
+
+        let success = BackendRegistry::new(Arc::new(StubBackend::new()));
+        success.verify_active_vault("default").await.unwrap();
+    }
 
     #[test]
     fn from_config_local_creates_backend() {

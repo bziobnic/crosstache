@@ -37,6 +37,135 @@ Hermetic tests live in:
 - `tests/config_command_tests.rs` — `xv config` command surface
 - `tests/tui_view_tests.rs` — TUI rendering snapshots (feature-gated)
 
+## Hermetic browser and accessibility tests
+
+The embedded UI has Playwright coverage for keyboard/dialog behavior, Trash
+and purge safety, and protected-value reveal/copy lifecycles. Axe scans the
+initial list, sheet, nested confirmation, Secrets and Files selection,
+standalone Undo notice, post-Undo restored list, populated/error Trash, purge,
+file-delete confirmation, and plain/record protected-value states. Serious and
+critical violations fail the test and report the owning rule and locator.
+
+`tests/web/ui-errors.spec.js` covers recoverable failure states. It verifies
+that a failed refresh keeps the last successful rows visible and marks them
+Stale with Retry, and that partial bulk results remain available with Retry
+failed and Copy details until resolved or dismissed. Copied diagnostics are
+restricted to the structured error code, safe message and hint, backend,
+vault, and failed item names; secret values, notes, authorization material,
+and request headers are never included. The browser test also asserts the
+operation lifecycle vocabulary (`started`, `succeeded`,
+`partially-succeeded`, `cancelled`, and `failed`) and runs axe against stale
+and partial-result surfaces.
+
+Refresh and action failures use independent owned surfaces, so delayed refresh
+failures and bulk partial results cannot overwrite each other's Retry or Copy
+details handlers. The suite exercises both completion orders, dismissal during
+an in-flight retry, handler cleanup, and suppression of late completions.
+Store tests cap routine terminal operation history while retaining active
+operations and currently actionable durable failures; dismissal releases the
+durable diagnostic and retry state.
+
+Install the test-only JavaScript dependencies and a worktree-local Chromium:
+
+```bash
+npm ci
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright install chromium
+```
+
+Run the focused accessibility gate or the complete browser suite:
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npm run test:a11y
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npm run test:browser
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-errors.spec.js
+```
+
+Responsive visual coverage lives in `tests/web/ui-visual.spec.js`. Four
+visual-only Playwright projects exercise 1180×760, 820×560, 768×700, and
+390×844; each project captures the same realistic long-name vault in light and
+dark themes. The fixture fixes displayed dates and fonts, requests reduced
+motion, disables screenshot animations, checks for horizontal page overflow,
+and runs axe before each capture. Committed baselines are stored under
+`tests/web/snapshots/<project>/`.
+
+Generate or intentionally refresh all eight baselines, then inspect every
+image before committing it:
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-visual.spec.js --update-snapshots
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-visual.spec.js
+```
+
+The `functional-chromium` project excludes the visual spec, and the four
+visual projects include only that spec. This keeps ordinary browser tests at
+one execution per test while allowing a mixed functional-and-visual command
+to run the complete responsive gate.
+
+The fixture builds `xv --features ui`, launches `xv ui --no-open`, and exposes
+the generated `baseURL` and `vault` to each test. Each app process receives an
+explicit environment with a temporary `HOME`, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, local backend store and key paths, `XV_BACKEND=local`, and
+`XV_NO_PARENT_CONFIG=1`. It cannot inherit a real Crosstache configuration or
+vault, and its temporary tree is removed during teardown. Protected-value
+tests install an in-page fake clipboard before navigation; they never read or
+write the host clipboard.
+
+The complete safety/accessibility phase gate is:
+
+```bash
+cargo fmt --check
+cargo clippy --features ui --all-targets -- -D warnings
+cargo test --features ui web:: --lib
+node --test src/web/assets/*.test.js
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-accessibility.spec.js tests/web/ui-trash.spec.js tests/web/ui-protected-values.spec.js
+```
+
+## Desktop onboarding and product-polish coverage
+
+The native desktop shell has a first-run Setup Required flow and a recoverable
+startup screen. Run it from source with `cargo run --manifest-path
+desktop/src-tauri/Cargo.toml`; with no configuration, choose Local to create a
+vault or choose Azure/AWS and validate the nonsecret configuration before it is
+saved. The web workspace includes the effective context rail, Trash and Undo,
+the typed secret editor, command palette (`Cmd/Ctrl+K`), upload queue,
+responsive stacked rows below 768px, and context-led Settings and Help sheets.
+
+The desktop static and isolated startup checks are:
+
+```bash
+cargo test -p xv-desktop
+node --test desktop/frontend/loading.test.js
+node tests/desktop/startup-smoke.js
+bash -n tests/desktop/package-smoke.sh
+```
+
+`tests/desktop/package-smoke.sh` builds an unsigned local macOS bundle and
+launches it only with an isolated Local HOME/XDG root. It must be run on a host
+that permits GUI launch; do not treat a headless `Abort trap: 6` as a package
+pass. The task ledger records a separate host pass, but release/final sign-off
+requires a fresh result.
+
+## Final app UX modernization gate
+
+Run these commands for final sign-off, then record their exact output/counts in
+`docs/APP-UX-IMPLEMENTATION-EVIDENCE.md`:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+node --test src/web/assets/*.test.js desktop/frontend/*.test.js
+npx playwright test
+bash tests/desktop/package-smoke.sh
+```
+
+The final manual matrix is controller-owned: packaged desktop against isolated
+Local plus representative invalid Azure/AWS configurations, and `xv ui`
+against isolated Local, at 1180×760, 820×560, 768×700, and 390×844 in light,
+dark, and keyboard-only modes. Exercise startup/recovery, scope, Trash,
+typed editing, command palette, upload queue, responsive rows, Settings, and
+Help without recording secret values in screenshots.
+
 ## Live integration (Azure required) — manual / weekly
 
 Tests in `tests/e2e_integration_tests.rs` are `#[ignore]`'d by default.

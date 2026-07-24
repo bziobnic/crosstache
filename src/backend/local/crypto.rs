@@ -18,20 +18,23 @@ use zeroize::Zeroizing;
 
 use crate::backend::error::BackendError;
 
+#[cfg(test)]
+thread_local! {
+    static DECRYPTED_ALLOCATION: std::cell::Cell<Option<(usize, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_decrypted_allocation() -> Option<(usize, usize)> {
+    DECRYPTED_ALLOCATION.take()
+}
+
 /// Encrypt `plaintext` and write the ciphertext to `path`.
 pub fn encrypt_to_file(
     path: &Path,
     plaintext: &[u8],
     recipients: &[age::x25519::Recipient],
 ) -> Result<(), BackendError> {
-    let boxed_recipients: Vec<Box<dyn age::Recipient + Send>> = recipients
-        .iter()
-        .map(|r| Box::new(r.clone()) as Box<dyn age::Recipient + Send>)
-        .collect();
-
-    let encryptor = age::Encryptor::with_recipients(boxed_recipients)
-        .ok_or_else(|| BackendError::Internal("no recipients provided".into()))?;
-
     #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -48,6 +51,29 @@ pub fn encrypt_to_file(
     let file = File::create(path)
         .map_err(|e| BackendError::Internal(format!("create {}: {e}", path.display())))?;
 
+    let file = encrypt_to_file_handle(file, plaintext, recipients)?;
+    file.sync_all()
+        .map_err(|e| BackendError::Internal(format!("sync {}: {e}", path.display())))?;
+
+    Ok(())
+}
+
+/// Stream `plaintext` through age into an already-open output handle.
+///
+/// The caller retains control of how the handle was opened (for example via
+/// `openat(2)` with `O_NOFOLLOW`) and receives it back after age has flushed
+/// its final authentication tag.
+pub fn encrypt_to_file_handle(
+    file: File,
+    plaintext: &[u8],
+    recipients: &[age::x25519::Recipient],
+) -> Result<File, BackendError> {
+    let boxed_recipients: Vec<Box<dyn age::Recipient + Send>> = recipients
+        .iter()
+        .map(|r| Box::new(r.clone()) as Box<dyn age::Recipient + Send>)
+        .collect();
+    let encryptor = age::Encryptor::with_recipients(boxed_recipients)
+        .ok_or_else(|| BackendError::Internal("no recipients provided".into()))?;
     let mut writer = encryptor
         .wrap_output(file)
         .map_err(|e| BackendError::Internal(format!("encrypt init: {e}")))?;
@@ -58,9 +84,7 @@ pub fn encrypt_to_file(
 
     writer
         .finish()
-        .map_err(|e| BackendError::Internal(format!("encrypt finish: {e}")))?;
-
-    Ok(())
+        .map_err(|e| BackendError::Internal(format!("encrypt finish: {e}")))
 }
 
 /// The age v1 ASCII-armor / binary header prefix. Used to detect whether a
@@ -133,39 +157,45 @@ pub fn decrypt_bytes(
     Ok(buf)
 }
 
-/// Read and decrypt the age file at `path`, returning the plaintext bytes.
+/// Stream age ciphertext from an already-open reader and return plaintext.
 ///
-/// Used for file/blob storage where the content may not be valid UTF-8.
-pub fn decrypt_bytes_from_file(
-    path: &Path,
+/// File operations use this instead of first materializing the entire
+/// ciphertext in memory. The returned plaintext remains zeroized on drop.
+pub fn decrypt_from_reader<R: Read>(
+    reader: R,
     identity: &age::x25519::Identity,
-) -> Result<Vec<u8>, BackendError> {
-    let file = File::open(path)
-        .map_err(|e| BackendError::Internal(format!("open {}: {e}", path.display())))?;
-    let reader = BufReader::new(file);
-
-    let decryptor = match age::Decryptor::new_buffered(reader)
+) -> Result<Zeroizing<Vec<u8>>, BackendError> {
+    let decryptor = match age::Decryptor::new_buffered(BufReader::new(reader))
         .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
     {
         age::Decryptor::Recipients(d) => d,
         _other => {
-            eprintln!("warning: unexpected age decryptor variant (expected Recipients)");
             return Err(BackendError::Internal(
-                "unexpected passphrase-encrypted file".into(),
+                "unexpected passphrase-encrypted data".into(),
             ));
         }
     };
-
     let mut decrypted = decryptor
         .decrypt(std::iter::once(identity as &dyn age::Identity))
         .map_err(|e| BackendError::Internal(format!("decrypt: {e}")))?;
-
-    let mut buf = Vec::new();
+    let mut plaintext = Zeroizing::new(Vec::new());
     decrypted
-        .read_to_end(&mut buf)
+        .read_to_end(&mut plaintext)
         .map_err(|e| BackendError::Internal(format!("read plaintext: {e}")))?;
+    #[cfg(test)]
+    {
+        DECRYPTED_ALLOCATION.set(Some((plaintext.as_ptr() as usize, plaintext.capacity())));
+    }
+    Ok(plaintext)
+}
 
-    Ok(buf)
+/// Move plaintext out of its zeroizing guard without copying its allocation.
+///
+/// The caller should keep the emptied guard in scope until the returned vector
+/// is ready to be returned. Any early error before this point still drops and
+/// zeroizes the populated guard.
+pub(crate) fn take_plaintext_allocation(plaintext: &mut Zeroizing<Vec<u8>>) -> Vec<u8> {
+    std::mem::take(&mut **plaintext)
 }
 
 /// Read and decrypt the age file at `path`, returning the plaintext as a
@@ -412,6 +442,18 @@ mod tests {
         encrypt_to_file(&secret_file, b"", &recipients).unwrap();
         let decrypted = decrypt_from_file(&secret_file, &identity).unwrap();
         assert_eq!(&*decrypted, "");
+    }
+
+    #[test]
+    fn taking_plaintext_allocation_moves_capacity_and_empties_guard() {
+        let mut guarded = Zeroizing::new(vec![0x5a; 1024]);
+        let pointer = guarded.as_ptr();
+        let capacity = guarded.capacity();
+        let plaintext = take_plaintext_allocation(&mut guarded);
+        assert!(guarded.is_empty());
+        assert_eq!(guarded.capacity(), 0);
+        assert_eq!(plaintext.as_ptr(), pointer);
+        assert_eq!(plaintext.capacity(), capacity);
     }
 
     #[cfg(unix)]

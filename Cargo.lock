@@ -1995,6 +1995,7 @@ dependencies = [
  "aws-sdk-cloudtrail",
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
+ "aws-smithy-http-client",
  "aws-smithy-mocks-experimental",
  "aws-smithy-runtime-api",
  "axum",
@@ -9395,10 +9396,14 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 name = "xv-desktop"
 version = "0.26.2"
 dependencies = [
+ "arboard",
  "crosstache",
+ "opener",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
 ]
 
 [[package]]

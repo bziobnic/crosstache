@@ -140,6 +140,19 @@ impl NameCharset {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Infrastructure for Phase 2 pluggability — consumed by future backends.
 pub struct BackendCapabilities {
+    /// One backend call can atomically replace a secret value and all conversion metadata.
+    pub has_atomic_record_conversion: bool,
+    /// Backend can compare an opaque source revision and commit the complete
+    /// conversion update at the same provider commit point.
+    pub has_conditional_record_conversion: bool,
+    /// Backend can atomically guard source revision and destination absence
+    /// while moving a complete secret.
+    pub has_atomic_rename: bool,
+    /// File backend can create a destination only when absent at the provider
+    /// commit point, without a check-then-write race.
+    pub has_atomic_file_create: bool,
+    /// Backend supports preserving/changing the enabled flag.
+    pub has_enable_disable: bool,
     /// Multi-vault/namespace support.
     pub has_vaults: bool,
     /// File/blob storage.
@@ -152,6 +165,12 @@ pub struct BackendCapabilities {
     pub has_versioning: bool,
     /// Recoverable (soft) deletion.
     pub has_soft_delete: bool,
+    /// Restore a soft-deleted secret.
+    pub has_restore: bool,
+    /// Permanently purge a deleted secret on demand.
+    pub has_purge: bool,
+    /// Backend schedules permanent purge after its recovery window.
+    pub has_scheduled_purge: bool,
     /// Scheduled secret rotation.
     pub has_secret_rotation: bool,
     /// Secret grouping / tagging.
@@ -182,12 +201,20 @@ impl Default for BackendCapabilities {
     /// Returns a minimal capability set (everything disabled, unrestricted names).
     fn default() -> Self {
         Self {
+            has_atomic_record_conversion: false,
+            has_conditional_record_conversion: false,
+            has_atomic_rename: false,
+            has_atomic_file_create: false,
+            has_enable_disable: false,
             has_vaults: false,
             has_file_storage: false,
             has_rbac: false,
             has_audit: false,
             has_versioning: false,
             has_soft_delete: false,
+            has_restore: false,
+            has_purge: false,
+            has_scheduled_purge: false,
             has_secret_rotation: false,
             has_groups: false,
             has_folders: false,
@@ -247,6 +274,31 @@ pub trait Backend: Send + Sync {
 
     /// Validate configuration and connectivity. Called once at startup.
     async fn health_check(&self) -> Result<(), BackendError>;
+}
+
+/// Whether web record conversion has every advertised and implemented
+/// primitive needed for both update and no-op commits.
+pub(crate) fn conditional_record_conversion_available(backend: &dyn Backend) -> bool {
+    let capabilities = backend.capabilities();
+    capabilities.has_atomic_record_conversion
+        && capabilities.has_conditional_record_conversion
+        && backend.secrets().supports_conditional_update()
+        && backend.secrets().supports_revision_validation()
+}
+
+/// Whether secret rename has both the advertised guarantee and its backend
+/// primitive.
+pub(crate) fn atomic_rename_available(backend: &dyn Backend) -> bool {
+    backend.capabilities().has_atomic_rename && backend.secrets().supports_atomic_rename()
+}
+
+/// Whether file upload conflict policies can use a real create-only primitive.
+#[cfg(all(feature = "file-ops", any(feature = "ui", test)))]
+pub(crate) fn atomic_file_create_available(backend: &dyn Backend) -> bool {
+    backend.capabilities().has_atomic_file_create
+        && backend
+            .files()
+            .is_some_and(FileBackend::supports_atomic_create)
 }
 
 #[cfg(test)]

@@ -3,9 +3,13 @@
 
 use std::sync::Arc;
 
-use axum::response::Html;
+use axum::body::{to_bytes, Body};
+use axum::extract::{Path, Request};
+use axum::http::{header::CONTENT_TYPE, StatusCode};
+use axum::middleware::Next;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use rand::Rng;
 
 use crate::backend::{Backend, BackendRegistry};
@@ -14,22 +18,217 @@ use crate::error::{CrosstacheError, Result};
 
 pub(crate) mod api;
 pub(crate) mod auth;
+mod context;
+pub(crate) mod errors;
+#[cfg(feature = "file-ops")]
+mod files;
+mod folder_tokens;
+mod preferences;
+mod secrets;
 #[cfg(test)]
 pub(crate) mod testutil;
 
+#[cfg(test)]
 const INDEX_HTML: &str = include_str!("assets/index.html");
+#[cfg(test)]
 const UI_MODEL_JS: &str = include_str!("assets/ui-model.js");
-const APP_JS: &str = include_str!("assets/app.js");
+#[cfg(test)]
+const ACCESSIBILITY_JS: &str = include_str!("assets/accessibility.js");
+#[cfg(test)]
+const APP_JS: &str = concat!(
+    include_str!("assets/app.js"),
+    include_str!("assets/context.js"),
+    include_str!("assets/secrets.js"),
+    include_str!("assets/settings.js"),
+);
+#[cfg(test)]
 const STYLE_CSS: &str = include_str!("assets/style.css");
+
+fn asset(path: &str) -> Option<(&'static str, &'static str)> {
+    match path {
+        "/app.js" => Some(("application/javascript", include_str!("assets/app.js"))),
+        "/api-client.js" => Some((
+            "application/javascript",
+            include_str!("assets/api-client.js"),
+        )),
+        "/store.js" => Some(("application/javascript", include_str!("assets/store.js"))),
+        "/dialogs.js" => Some(("application/javascript", include_str!("assets/dialogs.js"))),
+        "/context.js" => Some(("application/javascript", include_str!("assets/context.js"))),
+        "/accessibility.js" => Some((
+            "application/javascript",
+            include_str!("assets/accessibility.js"),
+        )),
+        "/secrets.js" => Some(("application/javascript", include_str!("assets/secrets.js"))),
+        "/commands.js" => Some(("application/javascript", include_str!("assets/commands.js"))),
+        "/files.js" => Some(("application/javascript", include_str!("assets/files.js"))),
+        "/preferences.js" => Some((
+            "application/javascript",
+            include_str!("assets/preferences.js"),
+        )),
+        "/settings.js" => Some(("application/javascript", include_str!("assets/settings.js"))),
+        "/ui-model.js" => Some(("application/javascript", include_str!("assets/ui-model.js"))),
+        "/style.css" => Some(("text/css", include_str!("assets/style.css"))),
+        _ => None,
+    }
+}
+
+async fn get_asset(Path(path): Path<String>) -> Response {
+    let path = format!("/{path}");
+    match asset(&path) {
+        Some((content_type, body)) => ([(CONTENT_TYPE, content_type)], body).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Ensures every API failure has the safe, stable error envelope. Axum
+/// extractor, body-limit, middleware, and fallback rejections otherwise emit
+/// framework-generated text that may be unstable or reveal request details.
+pub(crate) async fn normalize_api_errors(req: Request, next: Next) -> Response {
+    let is_api = req.uri().path() == "/api" || req.uri().path().starts_with("/api/");
+    let response = next.run(req).await;
+    if !is_api || response.status().is_success() {
+        return response;
+    }
+
+    let (parts, body) = response.into_parts();
+    let status = parts.status;
+    if let Ok(bytes) = to_bytes(body, 64 * 1024).await {
+        if is_api_error_envelope(&bytes) {
+            return Response::from_parts(parts, Body::from(bytes));
+        }
+    }
+
+    let mut response = (
+        status,
+        Json(errors::ApiErrorEnvelope {
+            error: errors::status_error(status),
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+fn is_api_error_envelope(bytes: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(error) = body.get("error").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    error
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && error
+            .get("hint")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+}
 
 /// Shared state for all handlers.
 pub(crate) struct WebState {
-    pub backend: Arc<dyn Backend>,
     pub token: String,
-    /// Default vault, resolved once at startup. Requests may override per-call.
-    pub vault: String,
     /// Record types (builtin + [types.*] config), resolved once at startup.
     pub types: Vec<crate::records::RecordType>,
+    /// Versioned presentation-only preferences. This store is independent of
+    /// backend and vault state and never receives secret data.
+    pub(crate) preferences: preferences::PreferenceStore,
+    pub(crate) folder_tokens: folder_tokens::FolderTokenService,
+    pub(crate) registry: Arc<BackendRegistry>,
+    backend: Arc<dyn Backend>,
+    context: context::EffectiveUiContext,
+}
+
+pub(crate) struct ScopedWebTarget {
+    pub(crate) backend: Arc<dyn Backend>,
+    pub(crate) context: context::EffectiveUiContext,
+}
+
+impl WebState {
+    pub(crate) fn new(
+        backend: Arc<dyn Backend>,
+        context: context::EffectiveUiContext,
+        token: String,
+        types: Vec<crate::records::RecordType>,
+        preferences: preferences::PreferenceStore,
+        registry: Arc<BackendRegistry>,
+    ) -> Self {
+        Self {
+            token,
+            types,
+            preferences,
+            folder_tokens: folder_tokens::FolderTokenService::random(),
+            registry,
+            backend,
+            context,
+        }
+    }
+
+    fn with_folder_tokens(mut self, folder_tokens: folder_tokens::FolderTokenService) -> Self {
+        self.folder_tokens = folder_tokens;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn base_backend(&self) -> Arc<dyn Backend> {
+        self.backend.clone()
+    }
+
+    pub(crate) fn base_context(&self) -> context::EffectiveUiContext {
+        self.context.clone()
+    }
+
+    pub(crate) fn scoped_target(
+        &self,
+        alias: Option<&str>,
+        backend: Option<&str>,
+        vault: Option<&str>,
+    ) -> std::result::Result<ScopedWebTarget, api::ApiError> {
+        if alias.is_none() && backend.is_none() && vault.is_none() {
+            return Ok(ScopedWebTarget {
+                backend: self.backend.clone(),
+                context: self.context.clone(),
+            });
+        }
+        let (Some(alias), Some(backend_name), Some(vault)) = (alias, backend, vault) else {
+            return Err(api::ApiError::Validation {
+                status: StatusCode::BAD_REQUEST,
+                message: "Provide workspace alias, backend, and vault together.",
+                field: Some("workspace"),
+            });
+        };
+        let entry = self
+            .context
+            .workspace
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.alias == alias && entry.backend == backend_name && entry.vault == vault
+            })
+            .ok_or(api::ApiError::Validation {
+                status: StatusCode::BAD_REQUEST,
+                message: "Choose an attached workspace entry.",
+                field: Some("workspace"),
+            })?;
+        let backend = self.registry.materialize(&entry.backend)?;
+        let mut context = self.context.clone();
+        context.backend = entry.backend.clone();
+        context.backend_kind = backend.kind();
+        context.vault = entry.vault.clone();
+        context.workspace.alias = entry.alias.clone();
+        context.sources.backend = context::ContextSource::WorkspaceEntry;
+        context.sources.vault = context::ContextSource::WorkspaceEntry;
+        context.capabilities = context::CapabilitySummary::from_backend(backend.as_ref());
+        Ok(ScopedWebTarget { backend, context })
+    }
 }
 
 /// A bound web UI server that has not started accepting requests yet.
@@ -70,10 +269,18 @@ impl PreparedWebServer {
 
 pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     let api = Router::new()
-        .route("/context", get(api::get_context))
+        .route("/context", get(context::get_context))
+        .route("/context/activate", post(context::activate_context))
+        .route("/workspaces/activate", post(context::activate_workspace))
         .route("/vaults", get(api::list_vaults))
         .route("/types", get(api::list_types))
+        .route("/folder-tokens", post(folder_tokens::issue_tokens))
+        .route(
+            "/preferences",
+            get(preferences::get_preferences).put(preferences::put_preferences),
+        )
         .route("/secrets", get(api::list_secrets))
+        .route("/secrets/deleted", get(secrets::list_deleted))
         .route(
             "/secrets/{name}",
             get(api::get_secret)
@@ -82,13 +289,47 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
                 .delete(api::delete_secret),
         )
         .route("/secrets/{name}/value", post(api::reveal_secret))
-        .route("/secrets/{name}/move", post(api::move_secret));
+        .route("/secrets/{name}/move", post(api::move_secret))
+        .route(
+            "/secrets/{name}/conversion/preview",
+            post(secrets::preview_conversion_route).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_CONVERSION_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/secrets/{name}/conversion",
+            post(secrets::apply_conversion_route).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_CONVERSION_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/secrets/{name}/rename",
+            post(secrets::rename).layer(axum::extract::DefaultBodyLimit::max(
+                secrets::MAX_RENAME_REQUEST_BYTES,
+            )),
+        )
+        .route("/secrets/{name}/restore", post(secrets::restore))
+        .route(
+            "/secrets/{name}/purge",
+            axum::routing::delete(secrets::purge),
+        );
 
     #[cfg(feature = "file-ops")]
     let api = api
         .route(
+            "/files/preflight",
+            post(files::preflight).layer(axum::extract::DefaultBodyLimit::max(
+                files::MAX_PREFLIGHT_BODY_BYTES,
+            )),
+        )
+        .route(
             "/files",
-            get(api::files::list_files).post(api::files::upload_file),
+            get(api::files::list_files)
+                .post(files::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    files::MAX_MULTIPART_ENVELOPE_BYTES,
+                ))
+                .layer(axum::middleware::from_fn(files::enforce_upload_envelope)),
         )
         .route(
             "/files/{name}",
@@ -114,58 +355,69 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
         .layer(axum::middleware::from_fn(auth::no_store));
 
     Router::new()
-        .route("/", get(|| async { Html(INDEX_HTML) }))
         .route(
-            "/ui-model.js",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-                    UI_MODEL_JS,
-                )
-            }),
+            "/",
+            get(|| async { Html(include_str!("assets/index.html")) }),
         )
-        .route(
-            "/app.js",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-                    APP_JS,
-                )
-            }),
-        )
-        .route(
-            "/style.css",
-            get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS) }),
-        )
+        .route("/{*path}", get(get_asset))
         .nest("/api", api)
         .with_state(state)
+        .layer(axum::middleware::from_fn(normalize_api_errors))
+}
+
+fn folder_token_service_for_config(
+    config_path: &std::path::Path,
+) -> Result<folder_tokens::FolderTokenService> {
+    folder_tokens::FolderTokenService::load_or_create(&folder_tokens::folder_token_key_path_for(
+        config_path,
+    ))
 }
 
 /// Bind the embedded web UI and return it without starting the accept loop.
 pub async fn prepare_web(
     config: Config,
-    registry: Option<&BackendRegistry>,
+    _registry: Option<&BackendRegistry>,
     port: Option<u16>,
 ) -> Result<PreparedWebServer> {
-    let registry = registry.ok_or_else(|| {
-        CrosstacheError::config("backend initialization failed; `xv ui` needs a working backend")
-    })?;
-    let vault = crate::cli::helpers::resolve_vault_for_trait(&config, Some(registry)).await?;
-    let backend = registry.active_arc();
+    let config_path = Config::get_config_path()?;
+    let preference_path = preferences::preference_path_for(&config_path);
+    let preference_store =
+        preferences::PreferenceStore::new(preference_path, config.clipboard_timeout);
+    let folder_tokens = folder_token_service_for_config(&config_path)?;
+    let cwd = std::env::current_dir()?;
+    let effective = crate::config::project::resolve_effective_backend_config(&config, &cwd).await?;
+    effective.config.validate()?;
+    let mut backend_names = vec!["azure".to_string(), "local".to_string(), "aws".to_string()];
+    for name in effective.config.named_backends.keys() {
+        if !backend_names.contains(name) {
+            backend_names.push(name.clone());
+        }
+    }
+    let registry = Arc::new(
+        BackendRegistry::with_lazy(&effective.config, &backend_names)
+            .map_err(CrosstacheError::from)?,
+    );
+    let resolved = context::resolve_ui_context_from_effective(&effective, &registry, &cwd).await?;
+    let backend = resolved.backend;
     // Fail loud at startup on a broken [types.*] block, matching the CLI's
     // eager type-resolution paths.
-    let types = config.resolve_record_types().await?;
+    let types = effective.config.resolve_record_types().await?;
 
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
     let token = hex::encode(buf);
 
-    let state = Arc::new(WebState {
-        backend,
-        token: token.clone(),
-        vault,
-        types,
-    });
+    let state = Arc::new(
+        WebState::new(
+            backend,
+            resolved.context,
+            token.clone(),
+            types,
+            preference_store,
+            registry,
+        )
+        .with_folder_tokens(folder_tokens),
+    );
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
@@ -211,6 +463,34 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    #[test]
+    fn prepare_web_token_setup_supports_a_fresh_xdg_config_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root
+            .path()
+            .join("xdg-config")
+            .join("xv")
+            .join("config.toml");
+
+        folder_token_service_for_config(&config_path).unwrap();
+
+        let key_path = folder_tokens::folder_token_key_path_for(&config_path);
+        assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(key_path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
     #[tokio::test]
     async fn serves_index_and_assets() {
         let app = build_router(testutil::test_state());
@@ -228,6 +508,24 @@ mod tests {
             assert_eq!(res.status(), StatusCode::OK, "{path}");
             let got = res.headers()["content-type"].to_str().unwrap().to_string();
             assert_eq!(got, ct, "{path}");
+        }
+    }
+
+    #[test]
+    fn ui_serves_native_module_graph() {
+        assert!(INDEX_HTML.contains("<script type=\"module\" src=\"/app.js\"></script>"));
+        for path in [
+            "/api-client.js",
+            "/store.js",
+            "/dialogs.js",
+            "/accessibility.js",
+            "/secrets.js",
+            "/preferences.js",
+            "/settings.js",
+            "/commands.js",
+            "/files.js",
+        ] {
+            assert!(asset(path).is_some(), "missing {path}");
         }
     }
 
@@ -288,15 +586,20 @@ mod tests {
     #[test]
     fn ui_auth_recovery_cannot_be_dismissed_by_tabs() {
         assert!(APP_JS.contains("authRecoveryActive = true;"));
-        assert!(APP_JS.contains("if (authRecoveryActive) return;"));
+        assert!(APP_JS
+            .contains("if (authRecoveryActive || store.snapshot().contextSwitchPending) return;"));
     }
 
     #[test]
     fn ui_guards_list_loads_against_stale_responses() {
         assert!(APP_JS.contains("let secretLoadGeneration = 0"));
         assert!(APP_JS.contains("let fileLoadGeneration = 0"));
-        assert!(APP_JS.contains("async function loadSecrets(vault)"));
-        assert!(APP_JS.contains("async function loadFiles(vault)"));
+        assert!(APP_JS.contains(
+            "async function loadSecrets(vault, scope = captureOperationScope(), errorOwner = null)"
+        ));
+        assert!(APP_JS.contains(
+            "async function loadFiles(vault, scope = captureOperationScope(), errorOwner = null)"
+        ));
         assert!(APP_JS.contains("if (generation !== secretLoadGeneration) return"));
         assert!(APP_JS.contains("if (generation !== fileLoadGeneration) return"));
     }
@@ -337,13 +640,18 @@ mod tests {
         }
 
         let secret_load = APP_JS
-            .split_once("async function loadSecrets(vault) {")
+            .split_once(
+                "async function loadSecrets(vault, scope = captureOperationScope(), errorOwner = null) {",
+            )
             .unwrap()
             .1
             .split_once("function renderSecrets()")
             .unwrap()
             .0;
-        assert!(secret_load.contains("secrets = [];\n  setListLoadStatus('secrets', 'loading');"));
+        assert!(secret_load.contains("if (!hasSuccessfulSecretsSnapshot) {"));
+        assert!(secret_load.contains("secrets = [];\n    setListLoadStatus('secrets', 'loading');"));
+        assert!(secret_load
+            .contains("secretsState = hasSuccessfulSecretsSnapshot ? 'ready' : 'failed';"));
         assert!(
             secret_load
                 .find("if (generation !== secretLoadGeneration) return false;")
@@ -355,13 +663,16 @@ mod tests {
         );
 
         let file_load = APP_JS
-            .split_once("async function loadFiles(vault) {")
+            .split_once(
+                "async function loadFiles(vault, scope = captureOperationScope(), errorOwner = null) {",
+            )
             .unwrap()
             .1
             .split_once("function renderFiles()")
             .unwrap()
             .0;
-        assert!(file_load.contains("files = [];\n  setListLoadStatus('files', 'loading');"));
+        assert!(file_load.contains("if (!hasSuccessfulFilesSnapshot) {"));
+        assert!(file_load.contains("files = [];\n    setListLoadStatus('files', 'loading');"));
         assert!(
             file_load
                 .find("if (generation !== fileLoadGeneration) return false;")
@@ -397,8 +708,9 @@ mod tests {
         assert!(APP_JS.contains("let plainSecretState = null;"));
         assert!(APP_JS.contains("async function loadPlainSecretValue(generation, selection)"));
         assert!(APP_JS.contains("XvUiModel.loadProtected(state"));
-        assert!(APP_JS.contains("const transition = state.revision;"));
-        assert!(APP_JS.contains("state.revision !== transition"));
+        assert!(APP_JS.contains("const revision = state.revision;"));
+        assert!(APP_JS.contains("state.revision === revision"));
+        assert!(APP_JS.contains("isExposureScopeCurrent(scope)"));
         assert!(APP_JS.contains("else if (plainSecretState?.dirty"));
         assert!(!APP_JS.contains("value: XvUiModel.PROTECTED_MASK"));
     }
@@ -408,10 +720,10 @@ mod tests {
         assert!(APP_JS.contains("f.elements.expires_on.value = '';"));
         assert!(APP_JS.contains("XvUiModel.expirationDate(meta.expires_on)"));
         assert!(APP_JS.contains("XvUiModel.formatDate(s.updated_on)"));
-        assert!(INDEX_HTML.contains(
-            "input name=\"expires_on\" type=\"text\" inputmode=\"numeric\" placeholder=\"YYYY-MM-DD\""
-        ));
-        assert!(!INDEX_HTML.contains("input name=\"expires_on\" type=\"date\""));
+        assert!(INDEX_HTML.contains("name=\"expires_on\" type=\"date\""));
+        assert!(INDEX_HTML.contains("id=\"no-expiry\""));
+        assert!(INDEX_HTML.contains("id=\"clear-expiry\""));
+        assert!(!INDEX_HTML.contains("placeholder=\"YYYY-MM-DD\""));
     }
 
     #[test]
@@ -452,11 +764,24 @@ mod tests {
         ] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
         }
-        assert!(APP_JS.contains("t.className = `toast ${isError ? 'error' : 'success'}`"));
-        assert!(APP_JS.contains("t.replaceChildren(icon(isError ? 'alert' : 'check')"));
+        for marker in [
+            "id=\"secret-error\" class=\"error-panel\" role=\"alert\"",
+            "id=\"file-error\" class=\"error-panel\" role=\"alert\"",
+            "id=\"secret-form-error\" class=\"error-panel\" role=\"alert\"",
+            "function showFormError(error)",
+            "function showListLoadError(kind, error)",
+        ] {
+            assert!(
+                INDEX_HTML.contains(marker) || APP_JS.contains(marker),
+                "missing {marker}"
+            );
+        }
+        assert!(!APP_JS.contains("toast(e.message, true)"));
+        assert!(!APP_JS.contains("isError ? 'error' : 'success'"));
         assert!(STYLE_CSS.contains(".bulk-toolbar {"));
         assert!(STYLE_CSS.contains(".dropzone-content {"));
         assert!(STYLE_CSS.contains(".toast.success {"));
+        assert!(STYLE_CSS.contains(".error-panel {"));
         assert!(
             !STYLE_CSS.contains("#toast {"),
             "legacy toast id styles override the unified toast component"
@@ -478,14 +803,27 @@ mod tests {
             APP_JS
                 .matches("if (!isCurrentDrawer(generation, selection)) return;")
                 .count()
-                >= 8
+                >= 7
         );
+        assert!(APP_JS.contains("function conversionOperationIsCurrent(operation)"));
+        for marker in [
+            "operation.operationGeneration === conversionOperationGeneration",
+            "operation.lifecycleEpoch === conversionLifecycleEpoch",
+            "operation.drawerGeneration === drawerGeneration",
+            "operation.selection === editing",
+            "sameOperationScope(operation.scope, drawerScope)",
+        ] {
+            assert!(APP_JS.contains(marker), "missing conversion guard {marker}");
+        }
     }
 
     #[test]
     fn ui_hides_and_clears_drawer_while_selection_loads() {
         assert!(APP_JS.contains(
-            "async function openDrawer(name) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
+            "async function openDrawer(name, invoker = document.activeElement) {\n  const scope = captureOperationScope();\n  if (!canStartScopedAction(scope)) return false;"
+        ));
+        assert!(APP_JS.contains(
+            "async function openDrawerNow(name, invoker, scope) {\n  const generation = ++drawerGeneration;\n  $('#drawer').hidden = true;"
         ));
         assert!(APP_JS.contains("function clearDrawerState()"));
     }
@@ -508,23 +846,51 @@ mod tests {
     fn ui_secret_drawer_lists_attachments_as_links() {
         assert!(INDEX_HTML.contains("id=\"attachments-section\""));
         assert!(INDEX_HTML.contains("id=\"attachments-list\""));
-        assert!(APP_JS.contains("/attachments${vaultQS(currentVault)}"));
+        assert!(APP_JS.contains("/attachments${vaultQS(scope.vault, scope)}"));
         assert!(APP_JS.contains("downloadFile(f.name, base)"));
         assert!(STYLE_CSS.contains(".attachment-link"));
     }
 
     #[test]
-    fn ui_marks_group_children_for_indentation() {
-        assert!(APP_JS.contains("renderRow(it, true)"));
-        assert!(APP_JS.contains("tr.classList.add('folder-child')"));
+    fn ui_replaces_flat_group_indentation_with_folder_navigation() {
+        assert!(!APP_JS.contains("tr.classList.add('folder-child')"));
         assert!(APP_JS.contains("td.classList.add('item-name')"));
-        assert!(STYLE_CSS.contains(".folder-child .item-name"));
+        assert!(INDEX_HTML.contains("class=\"folder-tree\" role=\"tree\""));
+    }
+
+    #[test]
+    fn ui_exposes_semantic_scoped_folder_navigation() {
+        for marker in [
+            "id=\"secrets-folder-tree\" class=\"folder-tree\" role=\"tree\"",
+            "id=\"files-folder-tree\" class=\"folder-tree\" role=\"tree\"",
+            "id=\"secrets-folder-sheet\" class=\"folder-sheet\" role=\"dialog\"",
+            "id=\"files-folder-sheet\" class=\"folder-sheet\" role=\"dialog\"",
+            "id=\"secrets-folders-expand-all\"",
+            "id=\"secrets-folders-collapse-all\"",
+            "id=\"files-folders-expand-all\"",
+            "id=\"files-folders-collapse-all\"",
+        ] {
+            assert!(INDEX_HTML.contains(marker), "missing {marker}");
+        }
+        assert!(UI_MODEL_JS.contains("function renderFolderTree({"));
+        assert!(UI_MODEL_JS.contains("button.setAttribute('role', 'treeitem')"));
+        assert!(UI_MODEL_JS.contains("button.setAttribute('aria-expanded'"));
+        assert!(UI_MODEL_JS.contains("button.setAttribute('aria-selected'"));
+        assert!(UI_MODEL_JS.contains("function createFolderTokenIndex(response)"));
+        assert!(UI_MODEL_JS.contains("function folderPreferenceKey(tokenIndex)"));
+        assert!(UI_MODEL_JS.contains("xv.ui.folder-expansion.v4:"));
+        assert!(APP_JS.contains("`/api/folder-tokens${vaultQS(scope.vault, scope)}`"));
+        assert!(APP_JS.contains("function renderFolderNavigation(kind, allItems, visibleItems)"));
+        assert!(APP_JS.contains("surface: kind"));
+        assert!(STYLE_CSS.contains(".folder-tree-item[aria-selected=\"true\"]"));
     }
 
     #[test]
     fn ui_selection_uses_visible_items_and_mixed_header_state() {
         assert!(APP_JS.contains("function syncSelectionUi(kind, visibleIds)"));
-        assert!(APP_JS.contains("selectAll.indeterminate = selectedVisible > 0 && !allVisible"));
+        assert!(ACCESSIBILITY_JS.contains("export function syncVisibleSelection({"));
+        assert!(APP_JS.contains("elements.selectAll.indeterminate = visible.mixed"));
+        assert!(APP_JS.contains("visible.mixed ? 'mixed' : String(visible.checked)"));
         assert!(APP_JS.contains("for (const id of visibleIds)"));
         assert!(APP_JS.contains("clearSelection('secrets')"));
         assert!(APP_JS.contains("clearSelection('files')"));
@@ -533,16 +899,17 @@ mod tests {
     #[test]
     fn ui_bulk_actions_are_bounded_and_reuse_item_routes() {
         assert!(APP_JS.contains("async function runBounded(items, limit, operation)"));
-        assert!(APP_JS.contains("runBounded(items, 4"));
+        assert!(APP_JS.contains("runBounded(targets, 4"));
         assert!(APP_JS.contains("api('DELETE', `/api/secrets/"));
         assert!(APP_JS.contains("api('DELETE', `/api/files/"));
-        assert!(APP_JS.contains("/move${vaultQS(vault)}`, { folder }"));
+        assert!(APP_JS.contains("/move${vaultQS(vault, operationScope)}`, { folder }"));
     }
 
     #[test]
     fn ui_bulk_deletes_require_confirmation() {
-        assert!(APP_JS.contains("armConfirmation(button, `Delete ${items.length} secrets?`)"));
-        assert!(APP_JS.contains("armConfirmation(button, `Delete ${items.length} files?`)"));
+        assert!(APP_JS.contains("if (!(await confirmDeletion("));
+        assert!(APP_JS.contains("      operationScope,\n    ))"));
+        assert!(APP_JS.contains("recoverable: kind === 'secret'"));
     }
 
     #[test]
@@ -555,11 +922,62 @@ mod tests {
 
     #[test]
     fn ui_selection_changes_reset_bulk_confirmation() {
-        assert!(APP_JS.contains("function resetBulkConfirmation(kind)"));
-        assert!(
-            APP_JS.matches("resetBulkConfirmation(kind);").count() >= 4,
-            "every selection mutation path must disarm bulk delete"
+        let between = |start, end| {
+            APP_JS
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing selection path {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing selection boundary {end}"))
+                .0
+        };
+        let reset = between(
+            "function resetBulkConfirmation(kind) {",
+            "function renderSelectionKind(kind) {",
         );
+        assert!(reset.contains("if (!state.pending)"));
+        assert!(reset.contains("resetConfirmation(selectionElements(kind).deleteButton, 'Delete')"));
+
+        let mode = between(
+            "function setSelectionMode(kind, enabled) {",
+            "function clearSelection(kind) {",
+        );
+        assert!(mode.contains("state.ids.clear();"));
+        assert!(mode.contains("resetConfirmation(elements.deleteButton, 'Delete');"));
+
+        let reconcile = between(
+            "function syncSelectionUi(kind, visibleIds) {",
+            "function updateSelectionControls(kind) {",
+        );
+        assert!(reconcile.contains("state.ids.delete(id);"));
+        assert!(reconcile.contains("if (selectionChanged) resetBulkConfirmation(kind);"));
+
+        let row_checkbox = between("function selectionCell(kind, id) {", "// ---- state ----");
+        assert!(row_checkbox.contains("if (checkbox.checked) state.ids.add(id);"));
+        assert!(row_checkbox.contains("else state.ids.delete(id);"));
+        assert!(row_checkbox.contains("resetBulkConfirmation(kind);"));
+
+        let visible = between(
+            "function setVisibleSelection(kind, checked) {",
+            "async function runBounded(items, limit, operation) {",
+        );
+        assert!(visible.contains("if (checked) state.ids.add(id);"));
+        assert!(visible.contains("else state.ids.delete(id);"));
+        assert!(visible.contains("resetBulkConfirmation(kind);"));
+
+        let bulk_delete = between(
+            "async function bulkDelete(kind) {",
+            "async function bulkMoveSecrets() {",
+        );
+        assert!(bulk_delete.contains("if (result.ok) state.ids.delete(result.item);"));
+        assert!(bulk_delete.contains("setBulkPending(kind, false, '');"));
+
+        let bulk_move = between(
+            "async function bulkMoveSecrets() {",
+            "$('#select-secrets').onclick",
+        );
+        assert!(bulk_move.contains("if (result.ok) state.ids.delete(result.item);"));
+        assert!(bulk_move.contains("resetConfirmation(moveButton, 'Move');"));
     }
 
     #[test]
@@ -567,10 +985,10 @@ mod tests {
         assert!(APP_JS.contains("const selectionIsCurrent = generation === state.generation;"));
         assert!(
             APP_JS
-                .matches("if (vault !== currentVault) return;")
+                .matches("if (!scopeMatchesCurrent(operationScope)) return;")
                 .count()
                 >= 4,
-            "bulk delete and move must reconcile same-vault data independently of selection state"
+            "bulk delete and move must reconcile only their captured immutable operation scope"
         );
         assert!(!APP_JS
             .contains("if (generation !== state.generation || vault !== currentVault) return;"));
@@ -580,8 +998,17 @@ mod tests {
     fn ui_preserves_failed_file_load_state_during_bulk_recovery() {
         assert!(APP_JS.contains("let filesState = 'ready';"));
         assert!(APP_JS.contains("filesState = 'loading';"));
-        assert!(APP_JS.contains("filesState = 'failed';"));
-        assert!(APP_JS.contains("function renderFiles() {\n  if (filesState !== 'ready') return;"));
+        assert!(APP_JS.contains("filesState = hasSuccessfulFilesSnapshot ? 'ready' : 'failed';"));
+        assert!(APP_JS.contains("if (!hasSuccessfulFilesSnapshot) {"));
+        let render = APP_JS
+            .split_once("function renderFiles() {")
+            .expect("file renderer")
+            .1
+            .split_once("$('#file-search').oninput")
+            .expect("file renderer boundary")
+            .0;
+        assert!(render.contains("if (!ctx?.capabilities.files) {"));
+        assert!(render.contains("if (filesState !== 'ready') return;"));
     }
 
     #[test]
@@ -642,10 +1069,9 @@ mod tests {
         );
         assert!(APP_JS.contains("icon('secret')"));
         assert!(APP_JS.contains("icon('file')"));
-        assert!(APP_JS.contains("icon(open ? 'chevron-down' : 'chevron-right')"));
-        assert!(APP_JS.contains("content.className = 'folder-cell-content'"));
-        assert!(STYLE_CSS.contains(".folder-cell-content { display:flex;"));
-        assert!(!STYLE_CSS.contains(".folder-cell { display:flex;"));
+        assert!(UI_MODEL_JS.contains("disclosure.className = 'folder-tree-disclosure'"));
+        assert!(STYLE_CSS.contains(".folder-tree { display:grid;"));
+        assert!(STYLE_CSS.contains(".folder-tree-disclosure {"));
     }
 
     #[test]
@@ -661,7 +1087,12 @@ mod tests {
         ] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
         }
-        assert!(APP_JS.contains("label.className = 'form-field'"));
+        assert!(APP_JS.contains("field.className = 'form-field'"));
+        assert!(APP_JS.contains("label.className = 'field-label'"));
+        assert!(APP_JS.contains("label.htmlFor = inputId"));
+        assert!(APP_JS.contains("field.append(label, input, help, protection, row)"));
+        assert!(APP_JS.contains("input.setAttribute('aria-describedby', help.id)"));
+        assert!(!APP_JS.contains("label.append(input, protection, row)"));
         assert!(APP_JS
             .contains("$('#drawer-kicker').textContent = name ? 'Edit secret' : 'Create secret'"));
         assert!(STYLE_CSS.contains(".drawer-footer {"));
@@ -696,6 +1127,9 @@ mod tests {
             "class=\"column-file-type sortable\"",
             "aria-label=\"Vault content\"",
             "aria-labelledby=\"drawer-title\"",
+            "role=\"dialog\"",
+            "aria-modal=\"true\"",
+            "id=\"drawer-backdrop\" class=\"drawer-backdrop\" aria-hidden=\"true\" tabindex=\"-1\"",
         ] {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
         }
@@ -705,9 +1139,9 @@ mod tests {
             "@media (max-width: 34rem)",
             "@media (prefers-reduced-motion: reduce)",
             ":focus-visible",
-            ".column-groups",
-            ".column-note",
-            ".column-file-type",
+            ".stacked-list",
+            ".stacked-activation:focus-visible",
+            ".stacked-selection",
         ] {
             assert!(STYLE_CSS.contains(rule), "missing {rule}");
         }
@@ -732,9 +1166,8 @@ mod tests {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
             assert!(APP_JS.contains(marker), "missing {marker}");
         }
-        assert!(STYLE_CSS.contains(
-            ".column-file-size, .column-file-type, .column-file-modified { display:none; }"
-        ));
+        assert!(APP_JS.contains("table.hidden = !tableMode"));
+        assert!(APP_JS.contains("stacked.hidden = tableMode"));
         assert!(!STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
         assert!(STYLE_CSS.contains(".selection-column { width:2.75rem;"));
         for rule in [
@@ -764,11 +1197,13 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"browse-files\""));
         assert!(INDEX_HTML.contains("<button id=\"browse-files\""));
         assert!(!INDEX_HTML.contains("<label class=\"linkish\""));
-        assert!(APP_JS.contains("$('#browse-files').onclick = () => $('#file-input').click();"));
+        assert!(APP_JS.contains("$('#browse-files').onclick = () => {"));
+        assert!(APP_JS.contains("if (!canStartScopedAction()) return;"));
         assert!(APP_JS.contains("function itemNameCell(kind, name, activate, accessibleLabel)"));
         assert!(APP_JS.contains("button.className = 'item-name-content row-action'"));
         assert!(APP_JS.contains("`Edit secret ${name}`"));
-        assert!(APP_JS.contains("`Select file ${name}`"));
+        assert!(APP_JS.contains("itemNameCell('file', name, null, '')"));
+        assert!(APP_JS.contains("`Select ${kind === 'secrets' ? 'secret' : 'file'} ${id}`"));
         assert!(STYLE_CSS.contains(".row-action:focus-visible"));
     }
 
@@ -794,9 +1229,16 @@ mod tests {
     }
 
     #[test]
-    fn ui_sorts_before_grouping() {
-        assert!(APP_JS.contains("const sorted = sortedTableItems('secrets', visible);"));
-        assert!(APP_JS.contains("const sorted = sortedTableItems('files', files);"));
-        assert!(APP_JS.contains("for (const name of [...groups.keys()].sort())"));
+    fn ui_sorts_filtered_folder_rows() {
+        assert!(APP_JS.contains(
+            "const sorted = query.trim() ? visible : sortedTableItems('secrets', visible);"
+        ));
+        assert!(APP_JS.contains(
+            "const sorted = query.trim() ? visible : sortedTableItems('files', visible);"
+        ));
+        assert!(APP_JS.contains("const rows = XvUiModel.contentRows('secrets', sorted);"));
+        assert!(APP_JS.contains("for (const row of rows) tbody.appendChild(secretRow(row));"));
+        assert!(APP_JS.contains("const rows = XvUiModel.contentRows('files', sorted"));
+        assert!(APP_JS.contains("for (const row of rows) tbody.appendChild(fileRow(row));"));
     }
 }

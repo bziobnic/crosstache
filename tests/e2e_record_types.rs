@@ -1357,6 +1357,227 @@ fn update_type_with_positional_value_is_a_usage_error() {
 // Task 9: `xv update --type` / `--untype` conversion
 // ---------------------------------------------------------------------------
 
+const SENSITIVITY_TYPES_TOML: &str = r#"
+default_env = "dev"
+
+[env.dev]
+vault = "default"
+resource_group = "test-rg"
+
+[types.secure]
+fields = [
+  { name = "password", kind = "secret", required = true, primary = true },
+  { name = "token", kind = "secret" },
+]
+
+[types.visible]
+fields = [
+  { name = "password", kind = "secret", required = true, primary = true },
+  { name = "token", kind = "metadata" },
+]
+
+[types.required-target]
+fields = [
+  { name = "password", kind = "secret", required = true, primary = true },
+  { name = "account", kind = "metadata", required = true },
+]
+
+[types.copied-primary]
+fields = [
+  { name = "key", kind = "secret", required = true, primary = true },
+  { name = "password", kind = "secret" },
+]
+"#;
+
+#[test]
+fn secret_to_metadata_conversion_requires_yes_and_never_prints_values() {
+    let (mut cmd, temp) = common::xv_isolated_local_with_profile(SENSITIVITY_TYPES_TOML);
+    let created = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "secure",
+            "--field",
+            "token=private-token",
+            "--value",
+            "primary-secret",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "stderr: {}",
+        common::stderr_str(&created)
+    );
+
+    let refused = xv_project_env(temp.path())
+        .args(["update", "cred", "--type", "visible"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(3));
+    let refused_error = common::stderr_str(&refused);
+    assert!(
+        refused_error.contains("token: secret -> metadata"),
+        "{refused_error}"
+    );
+    assert!(refused_error.contains("--yes"), "{refused_error}");
+    assert!(!refused_error.contains("private-token"), "{refused_error}");
+    assert!(!refused_error.contains("primary-secret"), "{refused_error}");
+    let unchanged = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(unchanged["tags"]["xv-type"], "secure");
+    assert!(unchanged["tags"].get("f.token").is_none());
+
+    let converted = xv_project_env(temp.path())
+        .args(["update", "cred", "--type", "visible", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        converted.status.success(),
+        "stderr: {}",
+        common::stderr_str(&converted)
+    );
+    let summary = common::stderr_str(&converted);
+    assert!(summary.contains("token: secret -> metadata"), "{summary}");
+    assert!(!summary.contains("private-token"), "{summary}");
+    assert!(!summary.contains("primary-secret"), "{summary}");
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["tags"]["xv-type"], "visible");
+    assert_eq!(meta["tags"]["f.token"], "private-token");
+}
+
+#[test]
+fn metadata_to_secret_conversion_reports_upgrade_without_confirmation() {
+    let (mut cmd, temp) = common::xv_isolated_local_with_profile(SENSITIVITY_TYPES_TOML);
+    let created = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "visible",
+            "--field",
+            "token=metadata-token",
+            "--value",
+            "primary-secret",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "stderr: {}",
+        common::stderr_str(&created)
+    );
+
+    let converted = xv_project_env(temp.path())
+        .args(["update", "cred", "--type", "secure"])
+        .output()
+        .unwrap();
+    assert!(
+        converted.status.success(),
+        "stderr: {}",
+        common::stderr_str(&converted)
+    );
+    let summary = common::stderr_str(&converted);
+    assert!(summary.contains("token: metadata -> secret"), "{summary}");
+    assert!(!summary.contains("metadata-token"), "{summary}");
+    assert!(!summary.contains("primary-secret"), "{summary}");
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["tags"]["xv-type"], "secure");
+    assert!(meta["tags"].get("f.token").is_none());
+
+    let field = xv_project_env(temp.path())
+        .args(["get", "cred", "--field", "token", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        field.status.success(),
+        "stderr: {}",
+        common::stderr_str(&field)
+    );
+    assert_eq!(common::stdout_str(&field), "metadata-token");
+}
+
+#[test]
+fn record_conversion_rejects_missing_required_non_primary_field_before_write() {
+    let (mut cmd, temp) = common::xv_isolated_local_with_profile(SENSITIVITY_TYPES_TOML);
+    let created = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "secure",
+            "--value",
+            "primary-secret",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "stderr: {}",
+        common::stderr_str(&created)
+    );
+
+    let rejected = xv_project_env(temp.path())
+        .args(["update", "cred", "--type", "required-target"])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(3));
+    let error = common::stderr_str(&rejected);
+    assert!(error.contains("account"), "{error}");
+    assert!(!error.contains("primary-secret"), "{error}");
+    let unchanged = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(unchanged["tags"]["xv-type"], "secure");
+}
+
+#[test]
+fn retained_primary_copied_to_new_primary_is_labeled_copied_in_cli_summary() {
+    let (mut cmd, temp) = common::xv_isolated_local_with_profile(SENSITIVITY_TYPES_TOML);
+    let created = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "secure",
+            "--value",
+            "primary-secret",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "stderr: {}",
+        common::stderr_str(&created)
+    );
+
+    let converted = xv_project_env(temp.path())
+        .args(["update", "cred", "--type", "copied-primary"])
+        .output()
+        .unwrap();
+    assert!(
+        converted.status.success(),
+        "stderr: {}",
+        common::stderr_str(&converted)
+    );
+    let summary = common::stderr_str(&converted);
+    assert!(
+        summary.contains("Copied field(s): password -> key"),
+        "{summary}"
+    );
+    assert!(
+        !summary.contains("Renamed field(s): password -> key"),
+        "{summary}"
+    );
+    assert!(!summary.contains("primary-secret"), "{summary}");
+
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["tags"]["xv-type"], "copied-primary");
+    let primary = xv_project_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert_eq!(common::stdout_str(&primary), "primary-secret");
+}
+
 #[test]
 fn type_conversion_roundtrip() {
     let (mut cmd, temp) = common::xv_isolated_local();
@@ -1477,7 +1698,7 @@ fn untype_with_extra_secret_fields_requires_yes() {
 }
 
 #[test]
-fn type_on_existing_record_errors() {
+fn type_on_existing_record_converts_safely_without_yes() {
     let (mut cmd, temp) = common::xv_isolated_local();
     let out = cmd
         .args([
@@ -1495,17 +1716,82 @@ fn type_on_existing_record_errors() {
     assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
 
     let out2 = xv_same_env(temp.path())
-        .args(["update", "cred", "--type", "api-key"])
+        .args(["update", "cred", "--type", "database"])
         .output()
         .unwrap();
-    assert_eq!(
-        out2.status.code(),
-        Some(3),
+    assert!(
+        out2.status.success(),
         "stderr: {}",
         common::stderr_str(&out2)
     );
-    let stderr = common::stderr_str(&out2);
-    assert!(stderr.contains("already"), "stderr: {stderr}");
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["tags"]["xv-type"], "database");
+    assert_eq!(meta["tags"]["f.username"], "bob");
+
+    let out3 = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        common::stderr_str(&out3)
+    );
+    assert_eq!(common::stdout_str(&out3), "hunter2");
+}
+
+#[test]
+fn lossy_record_to_record_conversion_refuses_non_tty_without_yes() {
+    let (mut cmd, temp) = common::xv_isolated_local();
+    let out = cmd
+        .args([
+            "set",
+            "cred",
+            "--type",
+            "login",
+            "--field",
+            "username=bob",
+            "--value",
+            "hunter2",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", common::stderr_str(&out));
+
+    let refused = xv_same_env(temp.path())
+        .args(["update", "cred", "--type", "api-key"])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(3));
+    let refused_error = common::stderr_str(&refused);
+    assert!(refused_error.contains("username"), "{refused_error}");
+    assert!(refused_error.contains("--yes"), "{refused_error}");
+    assert!(!refused_error.contains("hunter2"), "{refused_error}");
+    let unchanged = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(unchanged["tags"]["xv-type"], "login");
+
+    let converted = xv_same_env(temp.path())
+        .args(["update", "cred", "--type", "api-key", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        converted.status.success(),
+        "stderr: {}",
+        common::stderr_str(&converted)
+    );
+    let summary = common::stderr_str(&converted);
+    assert!(summary.contains("password -> key"), "{summary}");
+    assert!(summary.contains("username"), "{summary}");
+    assert!(!summary.contains("hunter2"), "{summary}");
+
+    let meta = read_local_meta(temp.path(), "default", "cred");
+    assert_eq!(meta["tags"]["xv-type"], "api-key");
+    assert!(meta["tags"].get("f.username").is_none());
+    let value = xv_same_env(temp.path())
+        .args(["get", "cred", "--raw"])
+        .output()
+        .unwrap();
+    assert_eq!(common::stdout_str(&value), "hunter2");
 }
 
 // ---------------------------------------------------------------------------

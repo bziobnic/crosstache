@@ -189,6 +189,7 @@ pub(crate) fn date_portion_for_display(timestamp: &str) -> String {
 
 /// One row/cell in the ls-style views.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum LsEntry {
     Folder(String),
     Secret(SecretSummary),
@@ -390,6 +391,7 @@ pub(crate) fn render_name_grid(names: &[String], width: usize) -> String {
                 groups: None,
                 updated_on: String::new(),
                 enabled: true,
+                expires_on: None,
                 content_type: String::new(),
                 tags: std::collections::HashMap::new(),
             })
@@ -468,6 +470,7 @@ mod tests {
             groups: None,
             updated_on: "2026-05-17 01:19:00 UTC".to_string(),
             enabled: true,
+            expires_on: None,
             content_type: "text/plain".to_string(),
             tags: std::collections::HashMap::new(),
         }

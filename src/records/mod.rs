@@ -5,11 +5,18 @@
 //! JSON envelope codec (`envelope`) used to store secret-kind fields in the
 //! backend secret value.
 
+pub mod conversion;
 pub mod envelope;
 pub mod types;
 
 // Re-exports consumed by CLI wiring added later in Phase A (Tasks 4/6/7);
 // unused from the `xv` binary target until then.
+#[allow(unused_imports)]
+pub use conversion::{
+    apply_atomic_conversion, apply_conversion, preview_conversion,
+    validate_conditional_conversion_backend, validate_conversion_backend, ConversionPreview,
+    ConversionRequest, ConversionTarget,
+};
 #[allow(unused_imports)]
 pub use envelope::{
     encode_envelope, is_record, parse_envelope, FIELD_TAG_PREFIX, RECORD_CONTENT_TYPE, TYPE_TAG,
@@ -143,6 +150,20 @@ pub fn predicted_reserved_tag_count(
     has_folder: bool,
     has_expiry: bool,
 ) -> usize {
+    predicted_reserved_tag_count_for_shape(
+        backend, has_type, has_groups, has_note, has_folder, has_expiry, has_type,
+    )
+}
+
+pub fn predicted_reserved_tag_count_for_shape(
+    backend: crate::backend::BackendKind,
+    has_type: bool,
+    has_groups: bool,
+    has_note: bool,
+    has_folder: bool,
+    has_expiry: bool,
+    has_content_type: bool,
+) -> usize {
     let type_tag = usize::from(has_type);
     match backend {
         crate::backend::BackendKind::Azure => {
@@ -158,7 +179,7 @@ pub fn predicted_reserved_tag_count(
                 + 1 // xv:original_name, always
                 + usize::from(has_groups) // xv:groups
                 + usize::from(has_folder) // xv:folder
-                + 1 // xv:content_type, always present on a record write
+                + usize::from(has_content_type) // xv:content_type only for non-empty content type
                 + usize::from(has_expiry) // xv:expires_at
                                           // note -> Description, not a tag; created_by is never written — 0 each.
         }
@@ -179,12 +200,20 @@ mod tag_budget_tests {
 
     fn caps(max_tags: Option<usize>, max_tag_value_len: Option<usize>) -> BackendCapabilities {
         BackendCapabilities {
+            has_atomic_record_conversion: false,
+            has_conditional_record_conversion: false,
+            has_atomic_rename: false,
+            has_atomic_file_create: false,
+            has_enable_disable: false,
             has_vaults: true,
             has_file_storage: false,
             has_rbac: false,
             has_audit: false,
             has_versioning: false,
             has_soft_delete: false,
+            has_restore: false,
+            has_purge: false,
+            has_scheduled_purge: false,
             has_secret_rotation: false,
             has_groups: true,
             has_folders: true,
@@ -302,6 +331,34 @@ mod tag_budget_tests {
         assert_eq!(
             predicted_reserved_tag_count(BackendKind::Aws, true, true, false, true, true),
             6
+        );
+    }
+
+    #[test]
+    fn aws_plain_untype_does_not_budget_an_empty_content_type_tag() {
+        assert_eq!(
+            predicted_reserved_tag_count_for_shape(
+                BackendKind::Aws,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            1
+        );
+        assert_eq!(
+            predicted_reserved_tag_count_for_shape(
+                BackendKind::Aws,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+            ),
+            3
         );
     }
 
