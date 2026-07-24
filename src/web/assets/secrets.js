@@ -7,6 +7,7 @@ import {
   syncVisibleSelection,
 } from './accessibility.js';
 import { contextQuery, formatContextLine } from './context.js';
+import { boundTimeout } from './preferences.js';
 import {
   bindOwnedRetry,
   createOwnerRegistry,
@@ -1175,7 +1176,9 @@ async function exposureTimeoutSeconds() {
   try { await preferences?.load?.(); } catch (_) { /* preference client reports its own safe error */ }
   const preferred = preferences?.get?.('exposure_timeout_seconds', null)
     ?? preferences?.snapshot?.()?.exposure_timeout_seconds;
-  return Number.isSafeInteger(preferred) && preferred >= 0 ? preferred : 30;
+  const requested = Number.isSafeInteger(preferred) && preferred >= 0 ? preferred : 30;
+  const policy = ctx?.security?.clipboard_timeout_seconds;
+  return boundTimeout(requested, policy);
 }
 
 function updateProtectionDescription(input, state) {

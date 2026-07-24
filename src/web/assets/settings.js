@@ -1,3 +1,5 @@
+import { boundTimeout } from './preferences.js';
+
 const THEMES = new Set(['system', 'light', 'dark']);
 const DENSITIES = new Set(['comfortable', 'compact']);
 const DEFAULT_COLUMN_WIDTHS = Object.freeze({
@@ -19,11 +21,7 @@ export function effectiveTheme(preference, mediaQuery) {
   return mediaQuery?.matches ? 'dark' : 'light';
 }
 
-export function boundTimeout(requested, policy) {
-  const timeout = nonNegativeInteger(requested);
-  const limit = nonNegativeInteger(policy);
-  return limit > 0 ? Math.min(timeout, limit) : timeout;
-}
+export { boundTimeout };
 
 function applyPresentation(document, preference, density, mediaQuery) {
   const root = document?.documentElement;

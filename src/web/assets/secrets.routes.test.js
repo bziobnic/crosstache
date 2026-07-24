@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStore, draftReducer } from './store.js';
 import { createDialogManager } from './dialogs.js';
 import { ApiError } from './api-client.js';
+import { createPreferenceClient } from './preferences.js';
 import * as XvUiModel from './ui-model.js';
 import { mountContextRail } from './context.js';
 
@@ -1428,10 +1429,17 @@ test('legacy vault transition clears both refresh owners before delayed new-scop
   }
 });
 
-function existingSecretApi(value = 'top-secret') {
+function existingSecretApi(value = 'top-secret', clipboardTimeout = undefined) {
   return async (method, path) => {
     if (path === '/api/context') {
-      return { vault: 'one', backend: 'test', capabilities: { files: false, soft_delete: false } };
+      return {
+        vault: 'one',
+        backend: 'test',
+        capabilities: { files: false, soft_delete: false },
+        ...(clipboardTimeout === undefined
+          ? {}
+          : { security: { clipboard_timeout_seconds: clipboardTimeout } }),
+      };
     }
     if (path === '/api/types') return { types: [] };
     if (path === '/api/vaults') return { vaults: [{ name: 'one' }, { name: 'two' }] };
@@ -1501,6 +1509,75 @@ test('mounted protected fields reset inactivity and hide on timeout, visibility,
     assert.equal(reveal.getAttribute('aria-label'), 'Reveal value');
   } finally {
     ui.restore();
+  }
+});
+
+test('failed preference GET clamps reveal and copy at the live nonzero context policy without writing', async () => {
+  const methods = [];
+  const preferences = createPreferenceClient(async (method) => {
+    methods.push(method);
+    throw new Error('preferences unavailable');
+  }, { onSettingsError() {} });
+  let clipboardValue = '';
+  const ui = await mountRouteUi({
+    apiImpl: existingSecretApi('top-secret', 17),
+    clipboard: {
+      readText: async () => clipboardValue,
+      writeText: async (value) => { clipboardValue = value; },
+    },
+    clock: exposureClock(),
+    preferences,
+  });
+  try {
+    await openExistingSecret(ui, 'existing');
+    await ui.elements.get('#reveal').onclick();
+    assert.equal(
+      ui.elements.get('#protected-value-status').textContent,
+      'Value revealed. Hides in 17 seconds.',
+    );
+    await ui.elements.get('#copy').onclick();
+    assert.equal(
+      ui.elements.get('#protected-value-status').textContent,
+      'Value copied. Clipboard clears in 17 seconds.',
+    );
+    assert.deepEqual(methods, ['GET']);
+  } finally {
+    ui.restore();
+  }
+});
+
+test('zero context policy keeps an ordinary loaded timeout and requested zero hides immediately', async () => {
+  const ordinary = await mountRouteUi({
+    apiImpl: existingSecretApi('top-secret', 0),
+    clock: exposureClock(),
+    preferences: twoSecondPreferences(),
+  });
+  try {
+    await openExistingSecret(ordinary, 'existing');
+    await ordinary.elements.get('#reveal').onclick();
+    assert.equal(
+      ordinary.elements.get('#protected-value-status').textContent,
+      'Value revealed. Hides in 2 seconds.',
+    );
+  } finally {
+    ordinary.restore();
+  }
+
+  const immediate = await mountRouteUi({
+    apiImpl: existingSecretApi('top-secret', 17),
+    preferences: {
+      load: async () => ({ exposure_timeout_seconds: 0 }),
+      get: () => 0,
+      snapshot: () => ({ exposure_timeout_seconds: 0 }),
+    },
+  });
+  try {
+    await openExistingSecret(immediate, 'existing');
+    await immediate.elements.get('#reveal').onclick();
+    assert.equal(immediate.elements.get('#protected-value-status').textContent, 'Value hidden.');
+    assert.equal(immediate.elements.get('#reveal').getAttribute('aria-label'), 'Reveal value');
+  } finally {
+    immediate.restore();
   }
 });
 

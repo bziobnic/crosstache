@@ -158,3 +158,60 @@ test('utility sheets become full-screen at 390px and disable motion when request
     animations: 'disabled',
   });
 });
+
+test('failed preference read still enforces the live policy at Settings, reveal, and copy', async ({ page, baseURL }) => {
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  let preferenceWrites = 0;
+  page.on('request', (request) => {
+    if (request.method() === 'PUT' && request.url().endsWith('/api/preferences')) {
+      preferenceWrites++;
+    }
+  });
+  await page.route('**/api/preferences', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: {
+          code: 'xv-preferences-unavailable',
+          message: 'Preferences unavailable.',
+          hint: 'Use the safe in-memory defaults.',
+        },
+      }),
+    });
+  });
+  await page.route('**/api/context', async (route) => {
+    const response = await route.fetch();
+    const context = await response.json();
+    context.security = { clipboard_timeout_seconds: 17 };
+    await route.fulfill({ response, json: context });
+  });
+
+  await page.goto(baseURL);
+  await expect(page.locator('#context-line')).toContainText('local / playwright');
+  await page.locator('#settings-open').click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings.getByLabel('Protected value timeout')).toHaveValue('17');
+  await expect(settings.getByLabel('Protected value timeout').locator('option:checked'))
+    .toHaveText('17 seconds (policy limit)');
+  await page.keyboard.press('Escape');
+
+  await page.locator('#new-secret').click();
+  await page.locator('#secret-form input[name="name"]').fill('policy-clamped');
+  await page.locator('#secret-form textarea[name="value"]').fill('fixture-only');
+  await page.getByRole('button', { name: 'Create secret' }).click();
+  await page.getByRole('button', { name: 'Edit secret policy-clamped' }).click();
+  await page.getByRole('button', { name: 'Reveal value' }).click();
+  await expect(page.locator('#protected-value-status')).toHaveText(
+    'Value revealed. Hides in 17 seconds.',
+  );
+  await page.getByRole('button', { name: 'Copy value' }).click();
+  await expect(page.locator('#protected-value-status')).toHaveText(
+    'Value copied. Clipboard clears in 17 seconds.',
+  );
+  expect(preferenceWrites).toBe(0);
+});

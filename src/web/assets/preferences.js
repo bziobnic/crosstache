@@ -30,6 +30,17 @@ const FIELD_SCHEMAS = {
     && LEGACY_WIDTH_SCHEMAS['xv.ui.columns.files.v1'](value.files),
 };
 
+function nonNegativeInteger(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+
+export function boundTimeout(requested, policy) {
+  const timeout = nonNegativeInteger(requested);
+  const limit = nonNegativeInteger(policy);
+  return limit > 0 ? Math.min(timeout, limit) : timeout;
+}
+
 function clone(value) {
   return structuredClone(value);
 }
