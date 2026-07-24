@@ -161,6 +161,43 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     return resized;
   }
 
+  function contentMode(width) {
+    return width > 768 ? 'table' : 'stacked';
+  }
+
+  function contentRows(kind, items = [], { formatSize = (value) => String(value ?? '') } = {}) {
+    return items.map((item) => {
+      if (kind === 'secrets') {
+        const identifier = item.original_name || item.name || '';
+        return Object.freeze({
+          identifier,
+          source: item,
+          folder: item.folder || '',
+          metadata: Object.freeze([
+            { label: 'Folder', value: item.folder || '' },
+            { label: 'Groups', value: item.groups || '' },
+            { label: 'Note', value: item.note || '' },
+            { label: 'Updated', value: formatDate(item.updated_on) },
+          ]),
+        });
+      }
+      if (kind === 'files') {
+        const identifier = item.name || '';
+        return Object.freeze({
+          identifier,
+          source: item,
+          folder: fileFolder(item),
+          metadata: Object.freeze([
+            { label: 'Size', value: formatSize(item.size) },
+            { label: 'Type', value: item.content_type || '' },
+            { label: 'Modified', value: formatDate(item.last_modified) },
+          ]),
+        });
+      }
+      throw new TypeError(`Unknown content row kind: ${kind}`);
+    });
+  }
+
   function normalizeFolderPath(value) {
     if (typeof value !== 'string') return '';
     return value.split('/').filter((segment) => segment !== '').join('/');
@@ -752,7 +789,7 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
 export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
   typeCards, buildTypedDraft, groupSuggestions, conversionSummary,
   protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
-  sortedCopy, normalizeWidths, resizeAdjacentWidths, normalizeFolderPath,
+  sortedCopy, normalizeWidths, resizeAdjacentWidths, contentMode, contentRows, normalizeFolderPath,
   FOLDER_ALL, FOLDER_UNFILED, folderIdentity, folderIdentityKey, sameFolderIdentity,
   buildFolderTree, buildFolderViewModel, initialExpansion, createFolderTokenIndex,
   folderPreferenceKey, loadFolderExpansion,

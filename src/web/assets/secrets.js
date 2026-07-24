@@ -501,40 +501,21 @@ function fmtSize(bytes) {
   return i === 0 ? `${Math.floor(size)} B` : `${size.toFixed(2)} ${units[i]}`;
 }
 
-function showListState(tbody, kind, state, cols) {
-  tbody.innerHTML = '';
-  if (state === 'loading') {
-    for (let index = 0; index < 3; index++) {
-      const tr = document.createElement('tr');
-      tr.className = 'skeleton-row';
-      const td = document.createElement('td');
-      td.colSpan = cols;
-      const content = document.createElement('div');
-      content.className = 'skeleton-content';
-      content.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
-      td.appendChild(content);
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    }
-    return;
-  }
+const LIST_STATE_COPY = {
+  secrets: {
+    failed: ['Couldn’t load secrets', 'The current vault could not be read.'],
+    empty: ['No secrets yet', 'Create the first secret in this vault.'],
+    filtered: ['No matching secrets', 'Try a different name, folder, group, or record type.'],
+  },
+  files: {
+    failed: ['Couldn’t load files', 'The current vault could not be read.'],
+    empty: ['No files yet', 'Upload the first encrypted file to this vault.'],
+    filtered: ['No matching files', 'Try a different name, folder, or type.'],
+  },
+};
 
-  const copy = {
-    secrets: {
-      failed: ['Couldn’t load secrets', 'The current vault could not be read.'],
-      empty: ['No secrets yet', 'Create the first secret in this vault.'],
-      filtered: ['No matching secrets', 'Try a different name, folder, group, or record type.'],
-    },
-    files: {
-      failed: ['Couldn’t load files', 'The current vault could not be read.'],
-      empty: ['No files yet', 'Upload the first encrypted file to this vault.'],
-      filtered: ['No matching files', 'Try a different name, folder, or type.'],
-    },
-  };
-  const [title, description] = copy[kind][state];
-  const tr = document.createElement('tr');
-  const td = document.createElement('td');
-  td.colSpan = cols;
+function emptyStateContent(kind, state) {
+  const [title, description] = LIST_STATE_COPY[kind][state];
   const container = document.createElement('div');
   container.className = `empty-state ${state}`;
   const heading = document.createElement('strong');
@@ -551,7 +532,54 @@ function showListState(tbody, kind, state, cols) {
     else button.onclick = () => $('#file-input').click();
     container.appendChild(button);
   }
-  td.appendChild(container);
+  return container;
+}
+
+function showStackedListState(kind, state) {
+  const container = $(`#${kind}-stacked`);
+  if (state === 'loading') {
+    const skeletons = Array.from({ length: 3 }, () => {
+      const row = document.createElement('div');
+      row.className = 'stacked-row skeleton-row';
+      row.setAttribute('role', 'listitem');
+      const content = document.createElement('div');
+      content.className = 'skeleton-content';
+      content.append(document.createElement('span'), document.createElement('span'));
+      row.appendChild(content);
+      return row;
+    });
+    container.replaceChildren(...skeletons);
+    return;
+  }
+  const stateItem = document.createElement('div');
+  stateItem.setAttribute('role', 'listitem');
+  stateItem.appendChild(emptyStateContent(kind, state));
+  container.replaceChildren(stateItem);
+}
+
+function showListState(tbody, kind, state, cols) {
+  tbody.innerHTML = '';
+  showStackedListState(kind, state);
+  if (state === 'loading') {
+    for (let index = 0; index < 3; index++) {
+      const tr = document.createElement('tr');
+      tr.className = 'skeleton-row';
+      const td = document.createElement('td');
+      td.colSpan = cols;
+      const content = document.createElement('div');
+      content.className = 'skeleton-content';
+      content.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
+      td.appendChild(content);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    return;
+  }
+
+  const tr = document.createElement('tr');
+  const td = document.createElement('td');
+  td.colSpan = cols;
+  td.appendChild(emptyStateContent(kind, state));
   tr.appendChild(td);
   tbody.appendChild(tr);
 }
@@ -770,6 +798,33 @@ const tableSort = {
   secrets: { key: 'name', direction: 'asc' },
   files: { key: 'name', direction: 'asc' },
 };
+const responsiveWindow = globalThis.window || globalThis;
+let responsiveContentMode = XvUiModel.contentMode(
+  Number(responsiveWindow.innerWidth) || 1024,
+);
+
+function syncContentSurfaces(kind) {
+  const table = $(`#${kind}-table`);
+  const stacked = $(`#${kind}-stacked`);
+  const tableMode = responsiveContentMode === 'table';
+  table.hidden = !tableMode;
+  stacked.hidden = tableMode;
+}
+
+function refreshResponsiveContentMode() {
+  const next = XvUiModel.contentMode(Number(responsiveWindow.innerWidth) || 1024);
+  if (next === responsiveContentMode) return;
+  responsiveContentMode = next;
+  for (const kind of ['secrets', 'files']) syncContentSurfaces(kind);
+  if (secretsState === 'ready') renderSecrets();
+  if (filesState === 'ready') renderFiles();
+}
+
+function initResponsiveContent() {
+  for (const kind of ['secrets', 'files']) syncContentSurfaces(kind);
+  responsiveWindow.addEventListener?.('resize', refreshResponsiveContentMode);
+}
+
 const SORT_COLUMNS = {
   secrets: {
     name: [(item) => item.original_name || item.name, 'text'],
@@ -1963,7 +2018,9 @@ function renderSecrets() {
     folderCount,
   );
   const cols = secretSelection.enabled ? 6 : 5;
-  for (const secret of sorted) tbody.appendChild(secretRow(secret));
+  const rows = XvUiModel.contentRows('secrets', sorted);
+  for (const row of rows) tbody.appendChild(secretRow(row));
+  renderStackedRows('secrets', rows);
   syncSelectionUi('secrets', sorted.map((secret) => secret.original_name || secret.name));
   if (!tbody.children.length) {
     showListState(tbody, 'secrets', secrets.length ? 'filtered' : 'empty', cols);
@@ -1996,8 +2053,9 @@ function itemNameCell(kind, name, activate, accessibleLabel) {
   return td;
 }
 
-function secretRow(s) {
-  const name = s.original_name || s.name;
+function secretRow(row) {
+  const s = row.source;
+  const name = row.identifier;
   const activate = () => {
     if (secretSelection.enabled) toggleSelected('secrets', name);
     else openDrawer(name);
@@ -2030,6 +2088,85 @@ function secretRow(s) {
   }
   tr.onclick = activate;
   return tr;
+}
+
+function stackedMetadata(metadata) {
+  const container = document.createElement('span');
+  container.className = 'stacked-metadata';
+  for (const { label, value } of metadata.filter((entry) => entry.value)) {
+    const item = document.createElement('span');
+    item.className = 'stacked-metadata-item';
+    const key = document.createElement('span');
+    key.className = 'stacked-metadata-label';
+    key.textContent = `${label}: `;
+    const detail = document.createElement('span');
+    detail.textContent = value;
+    item.append(key, detail);
+    container.appendChild(item);
+  }
+  return container;
+}
+
+function stackedActivation(kind, row) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  const selecting = selectionState(kind).enabled;
+  const label = `${selecting ? 'Select' : (kind === 'secrets' ? 'Edit' : 'Download')} ${singular} ${row.identifier}`;
+  const activation = kind === 'files' && !selecting
+    ? document.createElement('a')
+    : document.createElement('button');
+  activation.className = `stacked-activation ${kind === 'files' && !selecting ? 'file-link' : ''}`;
+  activation.setAttribute('aria-label', label);
+  if (activation.tagName === 'BUTTON') activation.type = 'button';
+  const identifier = document.createElement('strong');
+  identifier.className = 'stacked-identifier';
+  identifier.textContent = row.identifier;
+  activation.append(identifier, stackedMetadata(row.metadata));
+  if (kind === 'secrets') {
+    activation.onclick = () => {
+      if (selecting) toggleSelected(kind, row.identifier);
+      else openDrawer(row.identifier);
+    };
+  } else if (selecting) {
+    activation.onclick = () => toggleSelected(kind, row.identifier);
+  } else {
+    activation.href = `/api/files/${encodeURIComponent(row.identifier)}${vaultQS(currentVault)}`;
+    activation.download = row.identifier;
+    activation.onclick = (event) => {
+      event.preventDefault();
+      downloadFile(row.identifier);
+    };
+  }
+  return activation;
+}
+
+function renderStackedRows(kind, rows) {
+  const container = $(`#${kind}-stacked`);
+  const state = selectionState(kind);
+  const children = [];
+  let previousFolder = null;
+  for (const row of rows) {
+    const folder = row.folder || 'Unfiled';
+    if (folder !== previousFolder) {
+      const heading = document.createElement('div');
+      heading.className = 'stacked-folder-header';
+      heading.setAttribute('role', 'presentation');
+      heading.textContent = folder;
+      children.push(heading);
+      previousFolder = folder;
+    }
+    const item = document.createElement('div');
+    item.className = 'stacked-row';
+    item.setAttribute('role', 'listitem');
+    if (state.ids.has(row.identifier)) item.classList.add('selected-row');
+    if (state.enabled) {
+      const selection = selectionCell(kind, row.identifier);
+      selection.classList.add('stacked-selection');
+      item.appendChild(selection.firstElementChild);
+    }
+    item.appendChild(stackedActivation(kind, row));
+    children.push(item);
+  }
+  container.replaceChildren(...children);
 }
 
 // ---- trash ----
@@ -3195,7 +3332,9 @@ function renderFiles() {
   ]);
   filterControls.files.render();
   $('#file-search-clear').hidden = !query;
-  for (const file of sorted) tbody.appendChild(fileRow(file));
+  const rows = XvUiModel.contentRows('files', sorted, { formatSize: fmtSize });
+  for (const row of rows) tbody.appendChild(fileRow(row));
+  renderStackedRows('files', rows);
   syncSelectionUi('files', sorted.map((file) => file.name));
   if (!tbody.children.length) {
     showListState(tbody, 'files', files.length ? 'filtered' : 'empty', cols);
@@ -3230,8 +3369,9 @@ function fileNameCell(name) {
   return td;
 }
 
-function fileRow(f) {
-  const name = f.name;
+function fileRow(row) {
+  const f = row.source;
+  const name = row.identifier;
   const tr = document.createElement('tr');
   if (fileSelection.ids.has(name)) tr.classList.add('selected-row');
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
@@ -3599,6 +3739,7 @@ $('#file-input').onchange = (e) => {
 
 initColumnResizing();
 initSorting();
+initResponsiveContent();
 initFolderNavigationControls();
 init().catch(fail);
 }

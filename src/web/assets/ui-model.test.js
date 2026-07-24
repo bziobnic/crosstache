@@ -126,6 +126,43 @@ test('adjacent width shrink clamps exactly at the left minimum and preserves tot
   assert.equal(widths.reduce((sum, width) => sum + width, 0), 100);
 });
 
+test('content mode changes at the approved breakpoint', () => {
+  assert.equal(model.contentMode(769), 'table');
+  assert.equal(model.contentMode(768), 'stacked');
+  assert.equal(model.contentMode(390), 'stacked');
+});
+
+test('responsive content rows preserve complete identifiers and priority metadata', () => {
+  const longName = `${'credential-'.repeat(10)}tail`;
+  const [secret] = model.contentRows('secrets', [{
+    name: longName,
+    folder: 'teams/platform/production',
+    groups: 'operators',
+    note: 'rotation owner',
+    updated_on: '2026-07-24T10:00:00Z',
+  }]);
+  assert.equal(secret.identifier, longName);
+  assert.deepEqual(secret.metadata, [
+    { label: 'Folder', value: 'teams/platform/production' },
+    { label: 'Groups', value: 'operators' },
+    { label: 'Note', value: 'rotation owner' },
+    { label: 'Updated', value: '2026-07-24' },
+  ]);
+
+  const [file] = model.contentRows('files', [{
+    name: 'nested/path/archive.tar',
+    size: 2048,
+    content_type: 'application/x-tar',
+    last_modified: '2026-07-23T10:00:00Z',
+  }], { formatSize: (size) => `${size} bytes` });
+  assert.equal(file.identifier, 'nested/path/archive.tar');
+  assert.deepEqual(file.metadata, [
+    { label: 'Size', value: '2048 bytes' },
+    { label: 'Type', value: 'application/x-tar' },
+    { label: 'Modified', value: '2026-07-23' },
+  ]);
+});
+
 test('slash paths become nested folder nodes with stable unfiled node', () => {
   const tree = model.buildFolderTree([
     { name: 'a', folder: 'apps/prod' },
