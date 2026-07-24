@@ -111,13 +111,18 @@ export function createApiClient({
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const result = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+            const confirmed = result && typeof result === 'object' && (
+              (typeof result.name === 'string' && result.name.length > 0)
+              || (result.status === 'skipped' && typeof result.name === 'string' && result.name.length > 0)
+            );
+            if (!confirmed) throw new TypeError('incomplete confirmation');
             finish('succeeded', () => resolve(result));
           } catch {
-            finish('failed', () => reject(new ApiError({
-              status: xhr.status,
-              code: 'xv-invalid-response',
-              message: 'The upload completed but the server response was invalid.',
-            })));
+            const error = Object.assign(
+              new Error('The server did not provide a valid upload confirmation.'),
+              { name: 'AmbiguousUploadError', ambiguous: true },
+            );
+            finish('failed', () => reject(error));
           }
           return;
         }

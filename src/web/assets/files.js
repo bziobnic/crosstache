@@ -13,36 +13,49 @@ export const UPLOAD_STATES = Object.freeze([
 ]);
 
 const UPLOAD_TRANSITIONS = Object.freeze({
-  queued: Object.freeze({ 'preflight-started': 'preflighting', cancelled: 'cancelled' }),
+  queued: Object.freeze({
+    'preflight-started': 'preflighting',
+    'transfer-started': 'uploading',
+    cancel: 'cancelled',
+  }),
   preflighting: Object.freeze({
-    ready: 'uploading',
+    'preflight-ready': 'queued',
     conflict: 'awaiting-conflict',
     failed: 'failed',
-    cancelled: 'cancelled',
+    cancel: 'cancelled',
   }),
   'awaiting-conflict': Object.freeze({
-    resolved: 'uploading',
+    'decision-upload': 'queued',
     skipped: 'completed',
     failed: 'failed',
-    cancelled: 'cancelled',
+    cancel: 'cancelled',
   }),
   uploading: Object.freeze({
+    progress: 'uploading',
     'bytes-sent': 'finishing',
     'server-confirmed': 'completed',
     failed: 'failed',
     cancelled: 'cancelled',
     uncertain: 'ambiguous',
+    conflict: 'awaiting-conflict',
   }),
   finishing: Object.freeze({
+    progress: 'finishing',
     'server-confirmed': 'completed',
     failed: 'failed',
     cancelled: 'cancelled',
     uncertain: 'ambiguous',
+    conflict: 'awaiting-conflict',
   }),
   completed: Object.freeze({}),
   failed: Object.freeze({ retry: 'queued' }),
   cancelled: Object.freeze({ retry: 'queued' }),
-  ambiguous: Object.freeze({ retry: 'queued', 'server-confirmed': 'completed', cancelled: 'cancelled' }),
+  ambiguous: Object.freeze({
+    retry: 'queued',
+    'server-confirmed': 'completed',
+    'evidence-present': 'ambiguous',
+    'evidence-missing': 'cancelled',
+  }),
 });
 
 export function nextUploadState(current, event) {
@@ -51,7 +64,7 @@ export function nextUploadState(current, event) {
   return next;
 }
 
-const ACTIVE_UPLOAD_STATES = new Set(['preflighting', 'uploading', 'finishing']);
+const ACTIVE_UPLOAD_STATES = new Set(['uploading', 'finishing']);
 const RETRYABLE_UPLOAD_STATES = new Set(['failed', 'cancelled', 'ambiguous']);
 
 export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
@@ -65,6 +78,7 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
     evidence: '',
     policy: null,
     target: null,
+    preflightComplete: false,
   }));
   const byId = new Map(items.map((item) => [item.id, item]));
 
@@ -81,13 +95,17 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
   return Object.freeze({
     items: () => items.map((entry) => ({ ...entry })),
     get: (id) => ({ ...item(id) }),
-    transition(id, state, patch = {}) {
-      if (!UPLOAD_STATES.includes(state)) throw new TypeError(`Unknown upload state: ${state}`);
-      Object.assign(item(id), patch, { state });
-      return { ...item(id) };
-    },
     event(id, event, patch = {}) {
-      return this.transition(id, nextUploadState(item(id).state, event), patch);
+      const entry = item(id);
+      const state = nextUploadState(entry.state, event);
+      const lifecycle = {};
+      if (event.type === 'preflight-ready' || event.type === 'decision-upload') {
+        lifecycle.preflightComplete = true;
+      } else if (event.type === 'preflight-started' || event.type === 'retry') {
+        lifecycle.preflightComplete = false;
+      }
+      Object.assign(entry, lifecycle, patch, { state });
+      return { ...entry };
     },
     retryable: () => items.filter(({ state }) => RETRYABLE_UPLOAD_STATES.has(state))
       .map((entry) => ({ ...entry })),
@@ -96,8 +114,8 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
       const retried = [];
       for (const entry of items) {
         if (RETRYABLE_UPLOAD_STATES.has(entry.state) && (!selected || selected.has(entry.id))) {
-          Object.assign(entry, {
-            state: 'queued', loaded: 0, error: null, evidence: '', policy: null, target: null,
+          this.event(entry.id, { type: 'retry' }, {
+            loaded: 0, error: null, evidence: '', policy: null, target: null,
           });
           retried.push({ ...entry });
         }
@@ -106,12 +124,38 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
     },
     claimReady() {
       const available = Math.max(0, limit - activeCount());
-      const claimed = items.filter(({ state }) => state === 'queued').slice(0, available);
-      for (const entry of claimed) entry.state = 'preflighting';
+      const claimed = items
+        .filter(({ state, preflightComplete }) => state === 'queued' && preflightComplete)
+        .slice(0, available);
+      for (const entry of claimed) this.event(entry.id, { type: 'transfer-started' });
       return claimed.map((entry) => ({ ...entry }));
     },
     maxConcurrent: limit,
   });
+}
+
+export function validatePreflightResults(candidates, results) {
+  if (!Array.isArray(results)) throw new TypeError('Preflight must return exactly one result per candidate.');
+  const expected = new Set(candidates.map(({ id }) => id));
+  const seen = new Set();
+  const allowed = new Set(['ready', 'conflict', 'too-large', 'unsupported']);
+  for (const result of results) {
+    if (!result || typeof result.client_id !== 'string' || !expected.has(result.client_id)) {
+      throw new TypeError('Preflight returned an unknown candidate.');
+    }
+    if (seen.has(result.client_id)) {
+      throw new TypeError('Preflight must return exactly one result per candidate.');
+    }
+    if (!allowed.has(result.status)) throw new TypeError('Preflight returned an unknown status.');
+    if (result.status === 'conflict' && typeof result.suggested_name !== 'string') {
+      throw new TypeError('Preflight conflict is missing a rename suggestion.');
+    }
+    seen.add(result.client_id);
+  }
+  if (seen.size !== expected.size) {
+    throw new TypeError('Preflight must return exactly one result per candidate.');
+  }
+  return candidates.map(({ id }) => results.find(({ client_id }) => client_id === id));
 }
 
 export function uploadConflictDecision({ policy, suggestedName = null, allowReplace = true }) {
@@ -169,6 +213,7 @@ export function mountUploadQueue({
   getFiles,
   setPending = () => {},
   isScopeCurrent = () => true,
+  dismissOperation = () => {},
 }) {
   if (typeof document?.createElement !== 'function') {
     return Object.freeze({
@@ -189,6 +234,7 @@ export function mountUploadQueue({
   let batch = null;
   let nextId = 0;
   let scopeGeneration = 0;
+  const ownedOperationIds = new Set();
 
   function currentLimit() {
     return Math.max(1, Math.floor(Number(getContext()?.transfers?.max_concurrent_uploads) || 1));
@@ -209,6 +255,24 @@ export function mountUploadQueue({
     return batch
       && batch.scopeGeneration === scopeGeneration
       && isScopeCurrent(batch.scope);
+  }
+
+  function clearOwnedState({ clearSummary = true } = {}) {
+    if (batch) {
+      for (const controller of batch.controllers.values()) controller.abort();
+      if (!batch.released) setPending(false);
+    }
+    for (const operationId of ownedOperationIds) dismissOperation(operationId);
+    ownedOperationIds.clear();
+    batch = null;
+    queueItems.replaceChildren();
+    queueSurface.hidden = true;
+    retry.hidden = true;
+    destination.disabled = false;
+    if (clearSummary) {
+      summaryItems.replaceChildren();
+      summary.hidden = true;
+    }
   }
 
   function updateDestinationOptions(files) {
@@ -255,17 +319,45 @@ export function mountUploadQueue({
         allowReplace: true,
       });
       if (targetDecision.policy === 'skip') {
-        batch.queue.transition(targetItem.id, 'completed', {
+        batch.queue.event(targetItem.id, { type: 'skipped' }, {
           policy: 'skip',
           result: 'Skipped because a destination file already exists.',
+          file: null,
         });
       } else {
-        batch.queue.transition(targetItem.id, 'queued', targetDecision);
+        batch.queue.event(targetItem.id, { type: 'decision-upload' }, targetDecision);
       }
     }
     render();
     schedule();
     return decision;
+  }
+
+  function retryItems(ids) {
+    if (!batch || !exactScopeCurrent()) return;
+    if (batch.released) {
+      batch.released = false;
+      destination.disabled = true;
+      setPending(true);
+    }
+    const retried = batch.queue.retry(ids);
+    for (const entry of retried) batch.queue.event(entry.id, { type: 'preflight-started' });
+    render();
+    void preflight();
+  }
+
+  function cancelItem(id) {
+    if (!batch || !exactScopeCurrent()) return;
+    const entry = batch.queue.get(id);
+    if (['uploading', 'finishing'].includes(entry.state)) {
+      batch.controllers.get(id)?.abort();
+      return;
+    }
+    if (['queued', 'preflighting', 'awaiting-conflict'].includes(entry.state)) {
+      batch.queue.event(id, { type: 'cancel' });
+      render();
+      schedule();
+    }
   }
 
   function renderConflictActions(entry, row) {
@@ -302,6 +394,10 @@ export function mountUploadQueue({
       const status = document.createElement('span');
       status.className = 'upload-item-status';
       status.textContent = UPLOAD_STATUS_LABELS[entry.state];
+      if (['finishing', 'awaiting-conflict', 'failed', 'ambiguous'].includes(entry.state)) {
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+      }
       row.append(name, status);
       if (['uploading', 'finishing'].includes(entry.state)) {
         const progress = document.createElement('progress');
@@ -317,13 +413,23 @@ export function mountUploadQueue({
         detail.textContent = entry.evidence || entry.error || entry.result;
         row.appendChild(detail);
       }
-      if (['uploading', 'finishing'].includes(entry.state)) {
+      if (['queued', 'preflighting', 'awaiting-conflict', 'uploading', 'finishing'].includes(entry.state)) {
         const actions = document.createElement('div');
         actions.className = 'upload-item-actions';
         actions.appendChild(button(
           `Cancel ${entry.name}`,
-          () => batch?.controllers.get(entry.id)?.abort(),
+          () => cancelItem(entry.id),
           'button ghost compact',
+        ));
+        row.appendChild(actions);
+      }
+      if (RETRYABLE_UPLOAD_STATES.has(entry.state)) {
+        const actions = document.createElement('div');
+        actions.className = 'upload-item-actions';
+        actions.appendChild(button(
+          `Retry ${entry.name}`,
+          () => retryItems([entry.id]),
+          'button secondary compact',
         ));
         row.appendChild(actions);
       }
@@ -368,13 +474,14 @@ export function mountUploadQueue({
         after,
         expectedSize: entry.size,
       });
-      batch.queue.transition(id, evidence.state, {
+      batch.queue.event(id, {
+        type: evidence.state === 'cancelled' ? 'evidence-missing' : 'evidence-present',
+      }, {
         evidence: evidence.evidence,
-        result: evidence.state === 'completed' ? 'Confirmed after refreshing file metadata.' : null,
       });
     } catch {
       if (exactScopeCurrent()) {
-        batch.queue.transition(id, 'ambiguous', {
+        batch.queue.event(id, { type: 'evidence-present' }, {
           evidence: 'The server could not be refreshed, so completion remains unconfirmed.',
         });
       }
@@ -388,32 +495,40 @@ export function mountUploadQueue({
     const controller = new AbortController();
     batch.controllers.set(entry.id, controller);
     const attempt = (entry.attempt || 0) + 1;
-    batch.queue.transition(entry.id, 'uploading', { attempt });
+    batch.queue.event(entry.id, { type: 'progress' }, { attempt });
     render();
     const form = new FormData();
     form.append('file', entry.file, entry.name);
     let path = appendQuery('/api/files', scopeQuery(batch.scope));
+    const uploadQuery = new URLSearchParams({ destination: batch.destination });
     if (entry.policy) {
-      const policyQuery = new URLSearchParams({ policy: entry.policy });
-      if (entry.target) policyQuery.set('target', entry.target);
-      path = appendQuery(path, policyQuery.toString());
+      uploadQuery.set('policy', entry.policy);
+      if (entry.target) uploadQuery.set('target', entry.target);
     }
+    path = appendQuery(path, uploadQuery.toString());
     try {
+      const operationId = `upload-${entry.id}-${attempt}`;
+      ownedOperationIds.add(operationId);
       const response = await api.upload({
         path,
         formData: form,
         signal: controller.signal,
-        operationId: `upload-${entry.id}-${attempt}`,
+        operationId,
         onProgress: ({ loaded, total, finishing }) => {
           if (!batch || !exactScopeCurrent()) return;
-          batch.queue.transition(entry.id, finishing ? 'finishing' : 'uploading', { loaded, total });
+          const current = batch.queue.get(entry.id);
+          const event = finishing && current.state === 'uploading'
+            ? { type: 'bytes-sent' }
+            : { type: 'progress' };
+          batch.queue.event(entry.id, event, { loaded, total });
           render();
         },
       });
       if (!batch || !exactScopeCurrent()) return;
-      batch.queue.transition(entry.id, 'completed', {
+      batch.queue.event(entry.id, { type: 'server-confirmed' }, {
         loaded: entry.size,
         total: entry.size,
+        file: null,
         result: response?.status === 'skipped'
           ? 'Skipped because a destination file already exists.'
           : 'Server confirmed the upload.',
@@ -423,20 +538,20 @@ export function mountUploadQueue({
     } catch (error) {
       if (!batch || !exactScopeCurrent()) return;
       if (error?.code === 'xv-file-conflict') {
-        batch.queue.transition(entry.id, 'awaiting-conflict', {
+        batch.queue.event(entry.id, { type: 'conflict' }, {
           suggestedName: error.details?.suggested_name,
           error: 'The destination changed after preflight. Choose what to do.',
         });
         render();
         schedule();
       } else if (error?.name === 'AbortError' || error?.name === 'NetworkError' || error?.ambiguous) {
-        batch.queue.transition(entry.id, 'ambiguous', {
+        batch.queue.event(entry.id, { type: 'uncertain' }, {
           evidence: 'Refreshing server metadata to determine the outcome…',
         });
         render();
         await reconcileUncertain(entry.id, error);
       } else {
-        batch.queue.transition(entry.id, 'failed', { error: safeUploadError(error) });
+        batch.queue.event(entry.id, { type: 'failed' }, { error: safeUploadError(error) });
         render();
         schedule();
       }
@@ -474,15 +589,17 @@ export function mountUploadQueue({
         },
       );
       if (batch !== targetBatch || !exactScopeCurrent()) return;
-      for (const result of response.results || []) {
+      const results = validatePreflightResults(candidates, response?.results);
+      for (const result of results) {
+        if (batch.queue.get(result.client_id).state !== 'preflighting') continue;
         if (result.status === 'ready') {
-          batch.queue.transition(result.client_id, 'queued');
+          batch.queue.event(result.client_id, { type: 'preflight-ready' });
         } else if (result.status === 'conflict') {
-          batch.queue.transition(result.client_id, 'awaiting-conflict', {
+          batch.queue.event(result.client_id, { type: 'conflict' }, {
             suggestedName: result.suggested_name,
           });
         } else {
-          batch.queue.transition(result.client_id, 'failed', {
+          batch.queue.event(result.client_id, { type: 'failed' }, {
             error: result.status === 'too-large'
               ? `This file exceeds the ${Math.floor(result.max_bytes / 1024 / 1024)} MB limit.`
               : 'This backend cannot guarantee a conflict-safe upload.',
@@ -495,7 +612,9 @@ export function mountUploadQueue({
       if (batch !== targetBatch || !exactScopeCurrent()) return;
       for (const entry of batch.queue.items()) {
         if (entry.state === 'preflighting') {
-          batch.queue.transition(entry.id, 'failed', { error: safeUploadError(error) });
+          batch.queue.event(entry.id, { type: 'failed' }, {
+            error: 'The upload preflight response was invalid. Retry this item.',
+          });
         }
       }
       render();
@@ -505,6 +624,7 @@ export function mountUploadQueue({
   async function start(fileList) {
     const files = [...(fileList || [])];
     if (!files.length || activeBatch()) return false;
+    if (batch?.released) clearOwnedState({ clearSummary: false });
     const scope = structuredClone(getContext());
     const chosenDestination = destination.value;
     const existing = getFiles();
@@ -532,7 +652,7 @@ export function mountUploadQueue({
     };
     destination.disabled = true;
     setPending(true);
-    for (const entry of entries) batch.queue.transition(entry.id, 'preflighting');
+    for (const entry of entries) batch.queue.event(entry.id, { type: 'preflight-started' });
     render();
     await preflight();
     return true;
@@ -540,19 +660,10 @@ export function mountUploadQueue({
 
   retry.onclick = () => {
     if (!batch || !exactScopeCurrent()) return;
-    if (batch.released) {
-      batch.released = false;
-      destination.disabled = true;
-      setPending(true);
-    }
-    const retried = batch.queue.retry();
-    for (const entry of retried) batch.queue.transition(entry.id, 'preflighting');
-    render();
-    void preflight();
+    retryItems();
   };
   byId('dismiss-upload-summary').onclick = () => {
-    summary.hidden = true;
-    summaryItems.replaceChildren();
+    clearOwnedState();
   };
 
   syncContextCopy();
@@ -561,17 +672,19 @@ export function mountUploadQueue({
     start,
     refreshContext() {
       scopeGeneration++;
+      clearOwnedState();
       syncContextCopy();
       updateDestinationOptions(getFiles());
-      if (batch && !batch.released) {
-        for (const controller of batch.controllers.values()) controller.abort();
-        batch.released = true;
-        destination.disabled = false;
-        setPending(false);
-      }
     },
     updateDestinations: () => updateDestinationOptions(getFiles()),
     hasPending: activeBatch,
+    debugRetained: () => ({
+      hasBatch: Boolean(batch),
+      fileReferences: batch?.queue.items().filter(({ file }) => file).length || 0,
+      names: batch?.queue.items().map(({ name }) => name) || [],
+      controllers: batch?.controllers.size || 0,
+      operationIds: ownedOperationIds.size,
+    }),
   });
 }
 

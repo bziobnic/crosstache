@@ -76,6 +76,7 @@ pub(crate) struct UploadQuery {
     vault: Option<String>,
     policy: Option<ConflictPolicy>,
     target: Option<String>,
+    destination: Option<String>,
 }
 
 impl UploadQuery {
@@ -463,6 +464,10 @@ pub(crate) async fn upload(
     };
     let scoped_target = query.target_context(&state)?;
     let scoped_files = files_backend(scoped_target.backend.as_ref())?;
+    let destination = query.destination.as_deref().unwrap_or("");
+    if destination.len() > MAX_DESTINATION_BYTES {
+        return Err(invalid("The destination is too long.", "destination"));
+    }
     if let Some(name) = target_name.as_deref() {
         validate_generic_file_name(name, "target")?;
         validate_backend_file_name(scoped_files, name, "target")?;
@@ -490,9 +495,19 @@ pub(crate) async fn upload(
             .map(str::to_string)
             .ok_or_else(|| invalid("Choose a file with a name.", "file"))?;
         validate_generic_file_name(&original_name, "file")?;
-        let name = target_name.as_deref().unwrap_or(&original_name);
+        validate_backend_file_name(scoped_files, &original_name, "file")?;
+        let destination_name = destination_name(destination, &original_name)?;
+        let name = target_name.as_deref().unwrap_or(&destination_name);
         if target_name.is_none() {
-            validate_backend_file_name(scoped_files, name, "file")?;
+            validate_backend_file_name(
+                scoped_files,
+                name,
+                if destination.is_empty() {
+                    "file"
+                } else {
+                    "destination"
+                },
+            )?;
         }
         let content_type = field.content_type().map(str::to_string);
         if let Some(content_type) = content_type.as_deref() {
@@ -811,6 +826,93 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(renamed["name"], "report (2).pdf");
+    }
+
+    #[tokio::test]
+    async fn destination_is_applied_to_ready_skip_and_replace_without_changing_rename_target() {
+        let app = web::build_router(testutil::test_state());
+
+        let (status, ready) = upload(
+            app.clone(),
+            "/api/files?destination=docs",
+            "ready.txt",
+            "ready-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ready["name"], "docs/ready.txt");
+
+        let (status, _) = upload(
+            app.clone(),
+            "/api/files?policy=replace&destination=docs",
+            "same.txt",
+            "old-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, skipped) = upload(
+            app.clone(),
+            "/api/files?policy=skip&destination=docs",
+            "same.txt",
+            "ignored-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(skipped["name"], "docs/same.txt");
+        let before_replace = app
+            .clone()
+            .oneshot(
+                Request::get("/api/files/docs%2Fsame.txt")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(&before_replace[..], b"old-bytes");
+
+        let (status, replaced) = upload(
+            app.clone(),
+            "/api/files?policy=replace&destination=docs",
+            "same.txt",
+            "new-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replaced["name"], "docs/same.txt");
+        let after_replace = app
+            .clone()
+            .oneshot(
+                Request::get("/api/files/docs%2Fsame.txt")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(&after_replace[..], b"new-bytes");
+
+        let (status, renamed) = upload(
+            app,
+            "/api/files?policy=rename&destination=ignored&target=docs%2Frenamed.txt",
+            "same.txt",
+            "renamed-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(renamed["name"], "docs/renamed.txt");
     }
 
     #[tokio::test]

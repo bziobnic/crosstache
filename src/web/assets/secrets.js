@@ -1494,9 +1494,10 @@ function updateDraft() {
 }
 
 async function allowNavigation() {
+  const snapshot = store.snapshot();
   return await guardNavigation({
-    draft: store.snapshot().draft,
-    savePending: store.snapshot().savePending,
+    draft: snapshot.draft,
+    savePending: snapshot.savePending || snapshot.scopedMutationPending,
     confirmDiscard: () => dialogs.confirmDiscard(),
   });
 }
@@ -2817,9 +2818,10 @@ document.addEventListener?.('visibilitychange', () => {
 globalThis.addEventListener?.('blur', () => invalidateExposureLifecycle());
 
 globalThis.addEventListener?.('beforeunload', (event) => {
+  const snapshot = store.snapshot();
   const allowed = guardNavigation({
-    draft: store.snapshot().draft,
-    savePending: store.snapshot().savePending,
+    draft: snapshot.draft,
+    savePending: snapshot.savePending || snapshot.scopedMutationPending,
     confirmDiscard: () => false,
   });
   if (allowed === false) {
@@ -3569,7 +3571,11 @@ uploadManager = mountUploadQueue({
     else endScopedMutation();
   },
   isScopeCurrent: scopeMatchesCurrent,
+  dismissOperation: (operationId) => store.dispatch({ type: 'operation/dismiss', operationId }),
 });
+if (navigator.webdriver) {
+  globalThis.__xvUploadDebug = () => uploadManager.debugRetained();
+}
 
 async function uploadFiles(fileList) {
   const operationScope = captureOperationScope();

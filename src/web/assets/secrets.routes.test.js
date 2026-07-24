@@ -1188,6 +1188,37 @@ test('page clears native save-pending state after save completion and failure', 
   }
 });
 
+test('scoped upload ownership blocks beforeunload and native close until released', async () => {
+  const listeners = new Map();
+  const emitted = [];
+  const ui = await mountRouteUi({
+    tauriEvents: {
+      listen(name, listener) { listeners.set(name, listener); },
+      async emit(name) { emitted.push(name); },
+    },
+  });
+  try {
+    ui.store.dispatch({ type: 'mutation/pending', value: true });
+    let prevented = false;
+    const event = {
+      returnValue: undefined,
+      preventDefault() { prevented = true; },
+    };
+    ui.dispatchWindow('beforeunload', event);
+    assert.equal(prevented, true);
+    assert.equal(event.returnValue, '');
+
+    await listeners.get('xv://window-close-requested')();
+    assert.deepEqual(emitted, []);
+
+    ui.store.dispatch({ type: 'mutation/pending', value: false });
+    await listeners.get('xv://window-close-requested')();
+    assert.deepEqual(emitted, ['xv://window-close-approved']);
+  } finally {
+    ui.restore();
+  }
+});
+
 test('list failures persist with Retry and retry replaces the failed list state', async () => {
   let listCalls = 0;
   const ui = await mountRouteUi({

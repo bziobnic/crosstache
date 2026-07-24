@@ -166,3 +166,27 @@ test('XHR upload with an already-aborted signal settles without sending bytes', 
   }), { name: 'AbortError' });
   assert.equal(sent, false);
 });
+
+for (const [label, responseText] of [
+  ['empty', ''],
+  ['malformed', '{'],
+  ['incomplete', '{}'],
+]) {
+  test(`XHR upload treats ${label} 2xx confirmation as ambiguous`, async () => {
+    const xhr = {
+      upload: {},
+      open() {},
+      setRequestHeader() {},
+      send() {
+        this.status = 200;
+        this.responseText = responseText;
+        this.onload();
+      },
+    };
+    const client = createApiClient({ token: 'session-token', xhrFactory: () => xhr });
+    await assert.rejects(client.upload({
+      path: '/api/files',
+      formData: new FormData(),
+    }), (error) => error?.ambiguous === true && error?.name === 'AmbiguousUploadError');
+  });
+}
