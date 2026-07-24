@@ -1,5 +1,225 @@
 use thiserror::Error;
 
+/// Display-safe setup failure for desktop recovery and diagnostics.
+///
+/// Every string is sanitized before construction. The raw provider error is
+/// retained only as bounded, redacted diagnostics; it must never be placed in
+/// `message`, `hint`, or a scope field.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[allow(dead_code)] // Consumed by the desktop recovery adapter in Task 3.
+pub struct SafeSetupError {
+    pub code: String,
+    pub operation: String,
+    pub backend: String,
+    pub vault: String,
+    pub message: String,
+    pub hint: String,
+    pub diagnostics: String,
+}
+
+#[allow(dead_code)] // Consumed by the desktop recovery adapter in Task 3.
+impl SafeSetupError {
+    /// Create a generic safe setup failure from an untrusted diagnostic.
+    pub fn from_message(message: &str) -> Self {
+        Self::from_parts(
+            "xv-backend-internal",
+            "setup",
+            "unknown",
+            "",
+            "Setup could not be completed.",
+            "Review the setup fields and provider login, then try again.",
+            message,
+        )
+    }
+
+    /// Classify an application failure and retain only redacted diagnostics.
+    pub fn from_error(
+        operation: &str,
+        backend: &str,
+        vault: &str,
+        error: &CrosstacheError,
+    ) -> Self {
+        use CrosstacheError::*;
+
+        let (code, message, hint) = match error {
+            AuthenticationError(_) => (
+                "xv-auth-failed",
+                "Authentication with the selected backend failed.",
+                setup_auth_hint(backend),
+            ),
+            ConfigError(_)
+            | ConfigLoadError(_)
+            | InvalidArgument(_)
+            | InvalidUrl(_)
+            | SerializationError(_) => (
+                "xv-config-invalid",
+                "The setup configuration is invalid.",
+                "Review the setup fields and try again.",
+            ),
+            PermissionDenied(_) => (
+                "xv-permission-denied",
+                "The selected identity does not have permission to list this vault.",
+                setup_permission_hint(backend),
+            ),
+            NetworkError(_)
+            | DnsResolutionError { .. }
+            | ConnectionTimeout(_)
+            | ConnectionRefused(_)
+            | SslError(_)
+            | HttpError(_) => (
+                "xv-network",
+                "The selected backend could not be reached.",
+                "Check the network connection and provider service, then try again.",
+            ),
+            _ => (
+                "xv-backend-internal",
+                "The selected backend could not complete setup verification.",
+                setup_backend_hint(backend),
+            ),
+        };
+
+        Self::from_parts(
+            code,
+            operation,
+            backend,
+            vault,
+            message,
+            hint,
+            &error.to_string(),
+        )
+    }
+
+    fn from_parts(
+        code: &str,
+        operation: &str,
+        backend: &str,
+        vault: &str,
+        message: &str,
+        hint: &str,
+        diagnostics: &str,
+    ) -> Self {
+        Self {
+            code: safe_setup_text(code, 64),
+            operation: safe_setup_text(operation, 64),
+            backend: safe_setup_text(backend, 64),
+            vault: safe_setup_text(vault, 256),
+            message: safe_setup_text(message, 512),
+            hint: safe_setup_text(hint, 512),
+            diagnostics: redact_setup_diagnostics(diagnostics),
+        }
+    }
+}
+
+fn setup_auth_hint(backend: &str) -> &'static str {
+    match backend {
+        "azure" => "Run 'az login', select the intended tenant and subscription, then try again.",
+        "aws" => {
+            "Run 'aws sso login' or refresh the configured AWS credential chain, then try again."
+        }
+        _ => "Check the configured local identity and try again.",
+    }
+}
+
+fn setup_permission_hint(backend: &str) -> &'static str {
+    match backend {
+        "azure" => "Check Azure Key Vault data-plane access for the selected identity.",
+        "aws" => "Check IAM permission to list secrets for the configured AWS identity.",
+        _ => "Check access to the configured local store and key.",
+    }
+}
+
+fn setup_backend_hint(backend: &str) -> &'static str {
+    match backend {
+        "azure" => "Check Azure service status and the non-secret setup fields, then try again.",
+        "aws" => "Check AWS service status and the non-secret setup fields, then try again.",
+        _ => "Check the local store configuration and try again.",
+    }
+}
+
+fn safe_setup_text(value: &str, max_chars: usize) -> String {
+    crate::utils::format::sanitize_control_chars(value)
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+fn redact_setup_diagnostics(value: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    fn pattern(slot: &'static OnceLock<Regex>, expression: &str) -> &'static Regex {
+        slot.get_or_init(|| Regex::new(expression).expect("setup redaction regex must compile"))
+    }
+
+    static URL: OnceLock<Regex> = OnceLock::new();
+    static JWT: OnceLock<Regex> = OnceLock::new();
+    static AUTH_HEADER: OnceLock<Regex> = OnceLock::new();
+    static BEARER: OnceLock<Regex> = OnceLock::new();
+    static ENCODED_SENSITIVE_PAIR: OnceLock<Regex> = OnceLock::new();
+    static SENSITIVE_PAIR: OnceLock<Regex> = OnceLock::new();
+    static UNIX_PATH: OnceLock<Regex> = OnceLock::new();
+    static WINDOWS_PATH: OnceLock<Regex> = OnceLock::new();
+    static GUID: OnceLock<Regex> = OnceLock::new();
+    static AWS_ACCESS_KEY: OnceLock<Regex> = OnceLock::new();
+    static AWS_ACCOUNT_ID: OnceLock<Regex> = OnceLock::new();
+    static OPAQUE_TOKEN: OnceLock<Regex> = OnceLock::new();
+
+    let mut safe = value.to_string();
+    safe = pattern(&URL, r#"(?i)\b(?:https?|ftp)://[^\s<>"']+"#)
+        .replace_all(&safe, "[URL REDACTED]")
+        .into_owned();
+    safe = pattern(
+        &JWT,
+        r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+    )
+    .replace_all(&safe, "[TOKEN REDACTED]")
+    .into_owned();
+    safe = pattern(
+        &AUTH_HEADER,
+        r"(?im)\b(?:authorization|proxy-authorization|x-api-key|x-amz-security-token|cookie|set-cookie)\s*:\s*[^\r\n]+",
+    )
+    .replace_all(&safe, "[AUTH HEADER REDACTED]")
+    .into_owned();
+    safe = pattern(&BEARER, r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+        .replace_all(&safe, "Bearer [REDACTED]")
+        .into_owned();
+    safe = pattern(
+        &ENCODED_SENSITIVE_PAIR,
+        r"(?i)\b(?:authorization|client[_-]?secret|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|access[_-]?key(?:[_-]?id)?|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|token|api[_-]?key|accountkey|sharedaccesssignature|sig(?:nature)?|credential|client[_-]?assertion)%3d[^\s;]+",
+    )
+    .replace_all(&safe, "[ENCODED CREDENTIAL REDACTED]")
+    .into_owned();
+    safe = pattern(
+        &SENSITIVE_PAIR,
+        r#"(?i)\b(?:authorization|proxy-authorization|client[_-]?secret|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|access[_-]?key(?:[_-]?id)?|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|token|api[_-]?key|accountkey|sharedaccesssignature|sig(?:nature)?|credential|client[_-]?assertion)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)"#,
+    )
+    .replace_all(&safe, "[CREDENTIAL REDACTED]")
+    .into_owned();
+    safe = pattern(&WINDOWS_PATH, r#"(?i)\b[A-Z]:\\(?:[^\\\s;,'"]+\\?)+"#)
+        .replace_all(&safe, "[PATH REDACTED]")
+        .into_owned();
+    safe = pattern(&UNIX_PATH, r#"(?:/[^\s;,'"()]+)+"#)
+        .replace_all(&safe, "[PATH REDACTED]")
+        .into_owned();
+    safe = pattern(
+        &GUID,
+        r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+    )
+    .replace_all(&safe, "[IDENTIFIER REDACTED]")
+    .into_owned();
+    safe = pattern(&AWS_ACCESS_KEY, r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+        .replace_all(&safe, "[IDENTIFIER REDACTED]")
+        .into_owned();
+    safe = pattern(&AWS_ACCOUNT_ID, r"\b[0-9]{12}\b")
+        .replace_all(&safe, "[IDENTIFIER REDACTED]")
+        .into_owned();
+    safe = pattern(&OPAQUE_TOKEN, r"\b[A-Za-z0-9_-]{24,}\b")
+        .replace_all(&safe, "[TOKEN REDACTED]")
+        .into_owned();
+
+    safe_setup_text(&safe, 2048)
+}
+
 /// Render the `EnvNotDefined` message. When `available` is empty the
 /// `.xv.toml` in question defines zero `[env.*]` blocks at all (a
 /// types-only project file, see #331) rather than simply lacking the

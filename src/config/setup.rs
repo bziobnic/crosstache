@@ -1,7 +1,9 @@
 //! Shared non-interactive configuration setup models and persistence.
 
+use crate::backend::{Backend, BackendKind, BackendRegistry};
 use crate::config::settings::{AwsConfig, Config, LocalConfig};
 use crate::error::{CrosstacheError, Result};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -56,6 +58,134 @@ pub struct SetupVerification {
 pub struct SetupOutcome {
     pub preview: SetupPreview,
     pub verification: SetupVerification,
+}
+
+/// Backend verification boundary used by setup orchestration and isolated
+/// desktop tests.
+#[allow(dead_code)] // Consumed by the desktop setup adapter in Task 3.
+#[async_trait]
+pub trait SetupVerifier: Send + Sync {
+    async fn verify(&self, config: &Config) -> Result<SetupVerification>;
+}
+
+#[allow(dead_code)] // Consumed through setup_and_save by Task 3.
+struct DefaultSetupVerifier;
+
+#[allow(dead_code)] // Consumed through setup_and_save by Task 3.
+#[async_trait]
+impl SetupVerifier for DefaultSetupVerifier {
+    async fn verify(&self, config: &Config) -> Result<SetupVerification> {
+        let backend_name = config.effective_backend_name();
+        let kind: BackendKind = backend_name.parse().map_err(CrosstacheError::config)?;
+        let vault = config.default_vault.as_str();
+
+        match kind {
+            BackendKind::Local => {
+                // Construction intentionally initializes the configured age
+                // identity and vault directories before the list operation.
+                let backend = crate::backend::local::LocalBackend::new(config.local.as_ref())?;
+                backend.health_check().await?;
+                backend.secrets().list_secrets(vault, None).await?;
+            }
+            BackendKind::Azure | BackendKind::Aws => {
+                let registry = BackendRegistry::from_config(config)?;
+                registry.verify_active_vault(vault).await?;
+            }
+        }
+
+        Ok(SetupVerification {
+            operation: "list-secrets".into(),
+            backend: backend_name.into(),
+            vault: vault.into(),
+        })
+    }
+}
+
+/// Verify a validated setup candidate through the standard provider chain.
+#[allow(dead_code)] // Consumed by the desktop setup adapter in Task 3.
+pub async fn verify_setup(config: &Config) -> Result<SetupVerification> {
+    config.validate()?;
+    DefaultSetupVerifier.verify(config).await
+}
+
+fn setup_preview(config: &Config) -> SetupPreview {
+    SetupPreview {
+        backend: config.effective_backend_name().into(),
+        vault: config.default_vault.clone(),
+    }
+}
+
+async fn build_and_verify_candidate(
+    request: SetupRequest,
+    base: Config,
+    verifier: &dyn SetupVerifier,
+) -> Result<(Config, SetupOutcome)> {
+    let candidate = build_setup_config(&request, base)?;
+    let preview = setup_preview(&candidate);
+    let reported = verifier.verify(&candidate).await?;
+    if reported.operation != "list-secrets"
+        || reported.backend != preview.backend
+        || reported.vault != preview.vault
+    {
+        return Err(CrosstacheError::config(
+            "Setup verifier returned an inconsistent verification summary",
+        ));
+    }
+    // Reconstruct from trusted candidate scope after consistency validation;
+    // a custom verifier cannot inject provider diagnostics into the outcome.
+    let verification = SetupVerification {
+        operation: "list-secrets".into(),
+        backend: preview.backend.clone(),
+        vault: preview.vault.clone(),
+    };
+    Ok((
+        candidate,
+        SetupOutcome {
+            preview,
+            verification,
+        },
+    ))
+}
+
+/// Build and verify a setup candidate without persisting it.
+///
+/// Desktop preview/tests use this exact three-argument boundary. Production
+/// setup must use [`setup_and_save`] so verification cannot be reordered
+/// after replacement.
+#[allow(dead_code)] // Consumed by the desktop setup adapter in Task 3.
+pub async fn setup_with_verifier(
+    request: SetupRequest,
+    base: Config,
+    verifier: &dyn SetupVerifier,
+) -> Result<SetupOutcome> {
+    let (_, outcome) = build_and_verify_candidate(request, base, verifier).await?;
+    Ok(outcome)
+}
+
+/// Build, verify, then atomically persist a setup candidate.
+///
+/// No configuration replacement is attempted unless candidate verification
+/// succeeds. Build or verification failures therefore preserve prior bytes.
+#[allow(dead_code)] // Consumed by the desktop setup adapter in Task 3.
+pub async fn setup_and_save_with_verifier(
+    request: SetupRequest,
+    base: Config,
+    path: &Path,
+    verifier: &dyn SetupVerifier,
+) -> Result<SetupOutcome> {
+    let (candidate, outcome) = build_and_verify_candidate(request, base, verifier).await?;
+    atomic_save_config(&candidate, path).await?;
+    Ok(outcome)
+}
+
+/// Production setup orchestration for Task 3's desktop adapter.
+#[allow(dead_code)] // Consumed by the desktop setup adapter in Task 3.
+pub async fn setup_and_save(
+    request: SetupRequest,
+    base: Config,
+    path: &Path,
+) -> Result<SetupOutcome> {
+    setup_and_save_with_verifier(request, base, path, &DefaultSetupVerifier).await
 }
 
 fn required(value: &str, field: &str) -> Result<()> {
@@ -185,13 +315,75 @@ pub async fn atomic_save_config(config: &Config, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::settings::{AzureCredentialType, Config};
+    use crate::error::SafeSetupError;
+    use async_trait::async_trait;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn local_request(root: &std::path::Path) -> SetupRequest {
         SetupRequest::Local {
             store_path: root.join("store"),
             key_file: root.join("key.txt"),
             vault: "default".into(),
+        }
+    }
+
+    struct InspectingVerifier {
+        expected_backend: &'static str,
+        expected_vault: &'static str,
+        seen: AtomicBool,
+        fail: bool,
+    }
+
+    struct UnsafeSummaryVerifier;
+
+    #[async_trait]
+    impl SetupVerifier for UnsafeSummaryVerifier {
+        async fn verify(&self, _config: &Config) -> Result<SetupVerification> {
+            Ok(SetupVerification {
+                operation: "Bearer verifier-token".into(),
+                backend: "client_secret=verifier-secret".into(),
+                vault: "/Users/alice/private-vault".into(),
+            })
+        }
+    }
+
+    impl InspectingVerifier {
+        fn success(expected_backend: &'static str, expected_vault: &'static str) -> Self {
+            Self {
+                expected_backend,
+                expected_vault,
+                seen: AtomicBool::new(false),
+                fail: false,
+            }
+        }
+
+        fn failure(expected_backend: &'static str, expected_vault: &'static str) -> Self {
+            Self {
+                expected_backend,
+                expected_vault,
+                seen: AtomicBool::new(false),
+                fail: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SetupVerifier for InspectingVerifier {
+        async fn verify(&self, config: &Config) -> Result<SetupVerification> {
+            assert_eq!(config.effective_backend_name(), self.expected_backend);
+            assert_eq!(config.default_vault, self.expected_vault);
+            self.seen.store(true, Ordering::SeqCst);
+            if self.fail {
+                return Err(CrosstacheError::authentication(
+                    "Authorization: Bearer verification-token",
+                ));
+            }
+            Ok(SetupVerification {
+                operation: "list-secrets".into(),
+                backend: self.expected_backend.into(),
+                vault: self.expected_vault.into(),
+            })
         }
     }
 
@@ -333,6 +525,325 @@ mod tests {
         );
         assert_eq!(outcome.preview, preview);
         assert_eq!(outcome.verification, verification);
+    }
+
+    #[tokio::test]
+    async fn verify_local_setup_uses_the_candidate_config() {
+        let root = tempfile::tempdir().unwrap();
+        let verifier = InspectingVerifier::success("local", "default");
+
+        let outcome = setup_with_verifier(local_request(root.path()), Config::default(), &verifier)
+            .await
+            .unwrap();
+
+        assert!(verifier.seen.load(Ordering::SeqCst));
+        assert_eq!(outcome.verification.operation, "list-secrets");
+        assert_eq!(outcome.verification.backend, "local");
+        assert_eq!(outcome.preview.vault, "default");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verify_setup_initializes_local_backend_and_lists_requested_vault() {
+        let root = tempfile::tempdir().unwrap();
+        let config = build_setup_config(&local_request(root.path()), Config::default()).unwrap();
+
+        let verification = verify_setup(&config).await.unwrap();
+
+        assert_eq!(verification.operation, "list-secrets");
+        assert_eq!(verification.backend, "local");
+        assert_eq!(verification.vault, "default");
+        assert!(root
+            .path()
+            .join("store/vaults/default/.vault.json")
+            .is_file());
+        assert!(root.path().join("key.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn verify_azure_and_aws_setup_use_provider_candidates() {
+        let cases = [
+            (
+                SetupRequest::Azure {
+                    subscription_id: "subscription".into(),
+                    tenant_id: "tenant".into(),
+                    vault: "vault".into(),
+                    resource_group: "group".into(),
+                    location: "eastus".into(),
+                },
+                InspectingVerifier::success("azure", "vault"),
+            ),
+            (
+                SetupRequest::Aws {
+                    region: "us-east-1".into(),
+                    profile: Some("work".into()),
+                    vault_prefix: "team".into(),
+                },
+                InspectingVerifier::success("aws", "team"),
+            ),
+        ];
+
+        for (request, verifier) in cases {
+            let outcome = setup_with_verifier(request, Config::default(), &verifier)
+                .await
+                .unwrap();
+            assert!(verifier.seen.load(Ordering::SeqCst));
+            assert_eq!(outcome.verification.operation, "list-secrets");
+        }
+    }
+
+    #[tokio::test]
+    async fn verifier_cannot_inject_unsafe_summary_fields() {
+        let root = tempfile::tempdir().unwrap();
+
+        let error = setup_with_verifier(
+            local_request(root.path()),
+            Config::default(),
+            &UnsafeSummaryVerifier,
+        )
+        .await
+        .unwrap_err();
+        let rendered = error.to_string();
+
+        assert!(!rendered.contains("verifier-token"));
+        assert!(!rendered.contains("verifier-secret"));
+        assert!(!rendered.contains("/Users/alice"));
+    }
+
+    #[tokio::test]
+    async fn verify_failure_preserves_prior_config_bytes_and_never_saves_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        let prior = b"this exact prior configuration is intentionally untouched";
+        tokio::fs::write(&path, prior).await.unwrap();
+        let verifier = InspectingVerifier::failure("local", "default");
+
+        let result = setup_and_save_with_verifier(
+            local_request(root.path()),
+            Config::default(),
+            &path,
+            &verifier,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(verifier.seen.load(Ordering::SeqCst));
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), prior);
+        assert!(!root.path().join("store").exists());
+        assert!(!root.path().join("key.txt").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn build_failure_preserves_prior_config_bytes_and_skips_verification() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        let prior = b"prior bytes survive candidate validation";
+        tokio::fs::write(&path, prior).await.unwrap();
+        let verifier = InspectingVerifier::success("local", "default");
+        let invalid = SetupRequest::Local {
+            store_path: PathBuf::new(),
+            key_file: root.path().join("key.txt"),
+            vault: "default".into(),
+        };
+
+        let result =
+            setup_and_save_with_verifier(invalid, Config::default(), &path, &verifier).await;
+
+        assert!(result.is_err());
+        assert!(!verifier.seen.load(Ordering::SeqCst));
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), prior);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn save_failure_after_verification_preserves_prior_target_bytes() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("prior.conf");
+        let path = root.path().join("xv.conf");
+        let prior = b"prior target bytes survive atomic save refusal";
+        tokio::fs::write(&target, prior).await.unwrap();
+        symlink(&target, &path).unwrap();
+        let verifier = InspectingVerifier::success("local", "default");
+
+        let result = setup_and_save_with_verifier(
+            local_request(root.path()),
+            Config::default(),
+            &path,
+            &verifier,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(verifier.seen.load(Ordering::SeqCst));
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), prior);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn setup_and_save_verifies_local_candidate_before_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config").join("xv.conf");
+
+        let outcome = setup_and_save(local_request(root.path()), Config::default(), &path)
+            .await
+            .unwrap();
+
+        let saved: Config =
+            toml::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(saved.effective_backend_name(), "local");
+        assert_eq!(saved.default_vault, "default");
+        assert_eq!(outcome.verification.operation, "list-secrets");
+        assert!(root
+            .path()
+            .join("store/vaults/default/.vault.json")
+            .is_file());
+    }
+
+    #[test]
+    fn diagnostics_redact_auth_material_paths_urls_and_identifiers() {
+        let raw = concat!(
+            "AUTHORIZATION: Bearer abc\n",
+            "Proxy-Authorization: Basic dXNlcjpwYXNz\n",
+            "client_secret=hunter2; ",
+            "access_token=token-value; https://user:pass@example.test/path?sig=query-secret; ",
+            "client_secret%3Dpercent-secret%26scope%3Dvault; ",
+            "config=/Users/alice/.config/xv/xv.conf; ",
+            "tenant=123e4567-e89b-12d3-a456-426614174000; account=123456789012"
+        );
+
+        let safe = SafeSetupError::from_message(raw);
+        let serialized = serde_json::to_string(&safe).unwrap();
+
+        for forbidden in [
+            "abc",
+            "hunter2",
+            "dXNlcjpwYXNz",
+            "token-value",
+            "user:pass",
+            "query-secret",
+            "percent-secret",
+            "/Users/alice",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "123456789012",
+        ] {
+            assert!(
+                !safe.diagnostics.contains(forbidden),
+                "diagnostics leaked {forbidden}: {}",
+                safe.diagnostics
+            );
+            assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn diagnostics_are_bounded_after_redaction() {
+        let raw = format!(
+            "Authorization: Bearer never-visible; {} client_secret=also-never-visible",
+            "provider-detail ".repeat(400)
+        );
+
+        let safe = SafeSetupError::from_message(&raw);
+
+        assert!(safe.diagnostics.chars().count() <= 2048);
+        assert!(!safe.diagnostics.contains("never-visible"));
+        assert!(!safe.diagnostics.contains("also-never-visible"));
+    }
+
+    #[test]
+    fn diagnostics_redact_adversarial_encodings_and_remain_valid_json() {
+        let raw = concat!(
+            "Authorization :\r\n  Basic folded-basic-secret\r\n",
+            "x-api-key:\tapi-header-secret\n",
+            "Cookie: session=cookie-secret\n",
+            "https://user:password@example.test/vault?X-Amz-Signature=query-secret#fragment-secret ",
+            "CLIENT_SECRET%3dencoded-lower-secret%26next%3dok ",
+            "ACCESS_TOKEN%3Dencoded-upper-secret%26next%3Dok ",
+            "config=C:\\Users\\alice\\AppData\\xv.conf ",
+            "account=AKIAABCDEFGHIJKLMNOP ",
+            "abcdefgh.ijklmnop.qrstuvwx ",
+            "this_is_a_very_long_opaque_token_value_1234567890 ",
+            "\u{1b}[31mcontrol"
+        );
+
+        let safe = SafeSetupError::from_message(raw);
+        let json = serde_json::to_string(&safe).unwrap();
+        let round_trip: SafeSetupError = serde_json::from_str(&json).unwrap();
+        let debug = format!("{safe:?}");
+
+        for forbidden in [
+            "folded-basic-secret",
+            "api-header-secret",
+            "cookie-secret",
+            "user:password",
+            "query-secret",
+            "fragment-secret",
+            "encoded-lower-secret",
+            "encoded-upper-secret",
+            "C:\\Users\\alice",
+            "AKIAABCDEFGHIJKLMNOP",
+            "abcdefgh.ijklmnop.qrstuvwx",
+            "this_is_a_very_long_opaque_token_value_1234567890",
+        ] {
+            assert!(!safe.diagnostics.contains(forbidden));
+            assert!(!json.contains(forbidden));
+            assert!(!debug.contains(forbidden));
+        }
+        assert_eq!(round_trip, safe);
+        assert!(safe.diagnostics.chars().count() <= 2048);
+        assert!(!safe.diagnostics.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn diagnostics_classify_failures_with_provider_safe_hints() {
+        let cases = [
+            (
+                CrosstacheError::authentication("expired token"),
+                "azure",
+                "xv-auth-failed",
+                "az login",
+            ),
+            (
+                CrosstacheError::config("invalid field"),
+                "local",
+                "xv-config-invalid",
+                "setup fields",
+            ),
+            (
+                CrosstacheError::permission_denied("denied"),
+                "aws",
+                "xv-permission-denied",
+                "IAM",
+            ),
+            (
+                CrosstacheError::network("offline"),
+                "azure",
+                "xv-network",
+                "network",
+            ),
+            (
+                CrosstacheError::unknown("provider failure"),
+                "aws",
+                "xv-backend-internal",
+                "AWS",
+            ),
+        ];
+
+        for (error, backend, code, hint_fragment) in cases {
+            let safe = SafeSetupError::from_error("list-secrets", backend, "display-vault", &error);
+            assert_eq!(safe.code, code);
+            assert_eq!(safe.operation, "list-secrets");
+            assert_eq!(safe.backend, backend);
+            assert_eq!(safe.vault, "display-vault");
+            assert!(safe.hint.contains(hint_fragment), "{safe:?}");
+            assert!(!safe.message.contains(&error.to_string()));
+        }
     }
 
     #[test]
