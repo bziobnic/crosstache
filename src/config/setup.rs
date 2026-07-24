@@ -834,6 +834,81 @@ mod tests {
         assert_eq!(std::fs::read(&recipients).unwrap(), b"existing recipients");
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn dangling_final_symlink_targets_fail_before_verification_or_artifacts() {
+        use std::os::unix::fs::symlink;
+
+        for relative_target in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("xv.conf");
+            let prior = b"prior config survives a dangling local path";
+            tokio::fs::write(&path, prior).await.unwrap();
+            let missing = root.path().join("missing-target");
+            let link = root.path().join("store-link");
+            if relative_target {
+                symlink("missing-target", &link).unwrap();
+            } else {
+                symlink(&missing, &link).unwrap();
+            }
+            let request = SetupRequest::Local {
+                store_path: link.clone(),
+                key_file: missing.clone(),
+                vault: "default".into(),
+            };
+            let verifier = InspectingVerifier::success("local", "default");
+
+            let result =
+                setup_and_save_with_verifier(request, Config::default(), &path, &verifier).await;
+
+            assert!(result.is_err());
+            assert!(!result
+                .unwrap_err()
+                .to_string()
+                .contains(&root.path().to_string_lossy().into_owned()));
+            assert!(!verifier.seen.load(Ordering::SeqCst));
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), prior);
+            assert!(!missing.exists());
+            assert!(std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dangling_intermediate_symlink_chains_and_loops_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let dangling = root.path().join("dangling");
+        let chain = root.path().join("chain");
+        let missing_dir = root.path().join("missing-dir");
+        symlink(&missing_dir, &dangling).unwrap();
+        symlink("dangling", &chain).unwrap();
+
+        let loop_a = root.path().join("loop-a");
+        let loop_b = root.path().join("loop-b");
+        symlink("loop-b", &loop_a).unwrap();
+        symlink("loop-a", &loop_b).unwrap();
+
+        for store_path in [chain.join("store"), loop_a.join("store")] {
+            let request = SetupRequest::Local {
+                store_path,
+                key_file: root.path().join("key.txt"),
+                vault: "default".into(),
+            };
+            let error = build_setup_config(&request, Config::default()).unwrap_err();
+            assert!(!error
+                .to_string()
+                .contains(&root.path().to_string_lossy().into_owned()));
+        }
+
+        assert!(!missing_dir.exists());
+        assert!(!root.path().join("key.txt").exists());
+    }
+
     #[test]
     fn valid_adjacent_local_paths_do_not_collide() {
         let root = tempfile::tempdir().unwrap();
@@ -1095,6 +1170,52 @@ mod tests {
                 !safe.diagnostics.contains(token),
                 "diagnostics leaked token variant: {token}"
             );
+        }
+    }
+
+    #[test]
+    fn diagnostics_redact_long_single_case_and_padded_bare_tokens() {
+        let tokens = [
+            "abcdefghijklmnopqrstuvwxyz123456",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+            "abcdefghijklmnopqrstuvwx==",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ];
+        let safe = SafeSetupError::from_message(&tokens.join(" "));
+
+        for token in tokens {
+            assert!(
+                !safe.diagnostics.contains(token),
+                "diagnostics leaked bare token: {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_preserve_safe_scalar_fields_and_camel_case_identifiers() {
+        let raw = concat!(
+            "api-version=2023-07-01 ",
+            "x-ms-version=2023-11-03 ",
+            "Retry-After=120-seconds ",
+            "sdk-version=1.2.3 ",
+            "request-id=req-42 ",
+            "status-code=429 ",
+            "DefaultAzureCredential RequestFailedException ",
+            "ManagedIdentityCredential ServiceRequestException"
+        );
+
+        let safe = SafeSetupError::from_message(raw);
+
+        assert_eq!(safe.diagnostics, raw);
+    }
+
+    #[test]
+    fn diagnostics_never_exempt_safe_shaped_values_under_sensitive_keys() {
+        let raw = "token=2023-07-01 password=120-seconds client_secret=1.2.3";
+        let safe = SafeSetupError::from_message(raw);
+
+        for forbidden in ["2023-07-01", "120-seconds", "1.2.3"] {
+            assert!(!safe.diagnostics.contains(forbidden));
         }
     }
 

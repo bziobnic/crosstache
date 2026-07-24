@@ -3,6 +3,7 @@
 //! [`ResolvedLocalConfig`] resolves raw [`LocalConfig`] values from the config
 //! file into concrete [`PathBuf`]s with sane defaults.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
@@ -148,7 +149,125 @@ fn normalized_candidate_path(path: &Path, field: &str) -> Result<PathBuf, Backen
             "{field} must name a filesystem entry"
         )));
     }
-    Ok(resolve_existing_parent(normalized))
+    resolve_candidate_path(normalized)
+}
+
+fn resolve_candidate_path(path: PathBuf) -> Result<PathBuf, BackendError> {
+    const MAX_SYMLINK_DEPTH: usize = 40;
+
+    fn expand(
+        path: PathBuf,
+        visited: &mut HashSet<PathBuf>,
+        depth: usize,
+        require_existing: bool,
+    ) -> Result<PathBuf, BackendError> {
+        if depth > MAX_SYMLINK_DEPTH {
+            return Err(BackendError::InvalidArgument(
+                "local path contains too many symbolic links".into(),
+            ));
+        }
+
+        let components: Vec<(OsString, bool)> = path
+            .components()
+            .map(|component| {
+                (
+                    component.as_os_str().to_owned(),
+                    matches!(component, Component::Normal(_)),
+                )
+            })
+            .collect();
+        let mut current = PathBuf::new();
+        for (index, (component, inspect)) in components.iter().enumerate() {
+            current.push(component);
+            if !inspect {
+                continue;
+            }
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    if !visited.insert(current.clone()) {
+                        return Err(BackendError::InvalidArgument(
+                            "local path contains a symbolic-link cycle".into(),
+                        ));
+                    }
+                    let target = std::fs::read_link(&current).map_err(|_| {
+                        BackendError::InvalidArgument(
+                            "local path contains an unreadable symbolic link".into(),
+                        )
+                    })?;
+                    let target = if target.is_absolute() {
+                        target
+                    } else {
+                        current
+                            .parent()
+                            .unwrap_or_else(|| Path::new("/"))
+                            .join(target)
+                    };
+                    let target = normalize_symlink_target(&target)?;
+                    let mut resolved = expand(target, visited, depth + 1, true)?;
+                    for (remaining, _) in &components[index + 1..] {
+                        resolved.push(remaining);
+                    }
+                    return expand(resolved, visited, depth + 1, require_existing);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if require_existing {
+                        return Err(BackendError::InvalidArgument(
+                            "local path contains a dangling symbolic link".into(),
+                        ));
+                    }
+                    for (remaining, _) in &components[index + 1..] {
+                        current.push(remaining);
+                    }
+                    return Ok(resolve_existing_parent(current));
+                }
+                Err(_) => {
+                    return Err(BackendError::InvalidArgument(
+                        "local path cannot be inspected safely".into(),
+                    ));
+                }
+            }
+        }
+
+        current.canonicalize().map_err(|_| {
+            BackendError::InvalidArgument("local path cannot be resolved safely".into())
+        })
+    }
+
+    expand(path, &mut HashSet::new(), 0, false)
+}
+
+fn normalize_symlink_target(path: &Path) -> Result<PathBuf, BackendError> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                normalized.push(component.as_os_str());
+            }
+            Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    BackendError::InvalidArgument(
+                        "local path symbolic-link target must be valid Unicode".into(),
+                    )
+                })?;
+                if value.chars().any(char::is_control) {
+                    return Err(BackendError::InvalidArgument(
+                        "local path symbolic-link target contains a control character".into(),
+                    ));
+                }
+                normalized.push(value);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(BackendError::InvalidArgument(
+                        "local path symbolic-link target escapes its filesystem root".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 /// Resolve the nearest existing ancestor while preserving a potentially

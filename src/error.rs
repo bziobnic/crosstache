@@ -144,6 +144,10 @@ fn safe_setup_text(value: &str, max_chars: usize) -> String {
 }
 
 fn looks_like_opaque_token(candidate: &str) -> bool {
+    if is_safe_camel_case_identifier(candidate) || is_safe_diagnostic_scalar(candidate) {
+        return false;
+    }
+
     let has_upper = candidate.bytes().any(|byte| byte.is_ascii_uppercase());
     let has_lower = candidate.bytes().any(|byte| byte.is_ascii_lowercase());
     let has_digit = candidate.bytes().any(|byte| byte.is_ascii_digit());
@@ -154,11 +158,83 @@ fn looks_like_opaque_token(candidate: &str) -> bool {
     let is_long_hex = candidate.len() >= 32
         && has_digit
         && candidate.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let is_long_single_case_alpha =
+        candidate.len() >= 32 && candidate.bytes().all(|byte| byte.is_ascii_alphabetic());
+    let is_long_alphanumeric = candidate.len() >= 24
+        && has_digit
+        && candidate.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    let has_token_padding = candidate.len() >= 20 && candidate.ends_with('=');
 
     punctuation_kinds >= 2
         || (has_digit && punctuation_kinds >= 1)
         || (has_upper && has_lower && has_digit)
         || is_long_hex
+        || is_long_single_case_alpha
+        || is_long_alphanumeric
+        || has_token_padding
+}
+
+fn is_safe_camel_case_identifier(candidate: &str) -> bool {
+    if !candidate.bytes().all(|byte| byte.is_ascii_alphabetic())
+        || !candidate
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase())
+    {
+        return false;
+    }
+
+    candidate
+        .as_bytes()
+        .windows(2)
+        .filter(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+        .count()
+        >= 2
+}
+
+fn is_safe_diagnostic_scalar(candidate: &str) -> bool {
+    let Some((key, value)) = candidate.split_once('=') else {
+        return false;
+    };
+    if value.contains('=') {
+        return false;
+    }
+
+    let key = key.to_ascii_lowercase();
+    if key.ends_with("version") {
+        return numeric_segments(value, &['.', '-']);
+    }
+    if key == "retry-after" {
+        return value
+            .strip_suffix("-seconds")
+            .or_else(|| value.strip_suffix("-milliseconds"))
+            .is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+            })
+            || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
+    }
+    if key == "request-id" {
+        return value.strip_prefix("req-").is_some_and(|number| {
+            !number.is_empty()
+                && number.len() <= 12
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    }
+    key == "status-code" && value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn numeric_segments(value: &str, separators: &[char]) -> bool {
+    !value.is_empty()
+        && value
+            .split(|character| separators.contains(&character))
+            .all(|segment| {
+                !segment.is_empty()
+                    && segment.len() <= 4
+                    && segment.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        && value
+            .chars()
+            .any(|character| separators.contains(&character))
 }
 
 fn redact_setup_diagnostics(value: &str) -> String {
