@@ -110,7 +110,7 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
       } else if (event.type === 'preflight-started' || event.type === 'retry') {
         lifecycle.preflightComplete = false;
       }
-      if (event.type === 'decision-upload') {
+      if (event.type === 'decision-upload' || event.type === 'skipped') {
         Object.assign(lifecycle, {
           loaded: 0,
           error: null,
@@ -148,6 +148,15 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
   });
 }
 
+function isSafeLogicalName(name) {
+  const components = typeof name === 'string' ? name.split('/') : [];
+  return Boolean(name)
+    && !name.startsWith('/')
+    && !name.includes('\\')
+    && !name.includes('\0')
+    && components.every((component) => component && component !== '.' && component !== '..');
+}
+
 export function validatePreflightResults(candidates, results) {
   if (!Array.isArray(results)) throw new TypeError('Preflight must return exactly one result per candidate.');
   const expected = new Set(candidates.map(({ id }) => id));
@@ -161,8 +170,8 @@ export function validatePreflightResults(candidates, results) {
       throw new TypeError('Preflight must return exactly one result per candidate.');
     }
     if (!allowed.has(result.status)) throw new TypeError('Preflight returned an unknown status.');
-    if (result.status === 'conflict' && typeof result.suggested_name !== 'string') {
-      throw new TypeError('Preflight conflict is missing a rename suggestion.');
+    if (result.status === 'conflict' && !isSafeLogicalName(result.suggested_name)) {
+      throw new TypeError('Preflight conflict has an unsafe rename suggestion.');
     }
     seen.add(result.client_id);
   }
@@ -193,14 +202,7 @@ export function uploadConflictDecision({ policy, suggestedName = null, allowRepl
   if (!['skip', 'replace', 'rename'].includes(policy)) throw new TypeError('Unknown conflict policy');
   if (policy === 'replace' && !allowReplace) throw new TypeError('Replace is unsupported by this backend');
   if (policy === 'rename') {
-    const components = typeof suggestedName === 'string' ? suggestedName.split('/') : [];
-    if (
-      !suggestedName
-      || suggestedName.startsWith('/')
-      || suggestedName.includes('\\')
-      || suggestedName.includes('\0')
-      || components.some((component) => !component || component === '.' || component === '..')
-    ) {
+    if (!isSafeLogicalName(suggestedName)) {
       throw new TypeError('Rename requires a safe suggested name');
     }
   }
@@ -412,7 +414,7 @@ export function mountUploadQueue({
       summaryItems.replaceChildren();
     }
     const retried = targetBatch.queue.retry(ids);
-    if (retried.length) targetBatch.evidenceRefresh = null;
+    if (retried.length) targetBatch.evidenceWave = null;
     for (const entry of retried) targetBatch.queue.event(entry.id, { type: 'preflight-started' });
     render();
     if (retried.length) void preflight(targetBatch);
@@ -574,7 +576,7 @@ export function mountUploadQueue({
     destination.disabled = false;
     setPending(false);
     renderSummary(entries);
-    if (targetBatch.evidenceRefresh) {
+    if (targetBatch.evidenceWave) {
       updateDestinationOptions(getFiles());
       return;
     }
@@ -583,53 +585,93 @@ export function mountUploadQueue({
     }).catch(() => {});
   }
 
-  function evidenceSnapshot(targetBatch) {
-    if (!targetBatch.evidenceRefresh) {
-      targetBatch.evidenceRefresh = (async () => {
+  function reconcilingTargets(targetBatch) {
+    return targetBatch.queue.items()
+      .filter(({ state }) => state === 'reconciling')
+      .map((entry) => ({
+        id: entry.id,
+        targetName: entry.target || entry.fullName,
+        before: entry.before
+          ? { name: entry.before.name, size: entry.before.size }
+          : null,
+        size: entry.size,
+      }));
+  }
+
+  function acquireEvidenceWave(targetBatch) {
+    if (!targetBatch.evidenceWave) {
+      const wave = {
+        generation: ++targetBatch.evidenceWaveGeneration,
+        consumers: 0,
+        targetNames: reconcilingTargets(targetBatch).map(({ targetName }) => targetName),
+        metadataReferences: 0,
+        promise: null,
+      };
+      wave.promise = (async () => {
         try {
           const refreshed = await refreshFiles(targetBatch.scope);
           if (!exactBatchCurrent(targetBatch) || refreshed !== true) {
-            return { available: false, files: [] };
+            return { available: false, outcomes: new Map() };
           }
-          return {
-            available: true,
-            files: getFiles().map((file) => ({ ...file })),
-          };
+          const targets = reconcilingTargets(targetBatch);
+          wave.targetNames = targets.map(({ targetName }) => targetName);
+          const files = getFiles();
+          const outcomes = new Map();
+          for (const target of targets) {
+            const current = files.find(({ name }) => name === target.targetName);
+            const after = current ? { name: current.name, size: current.size } : null;
+            outcomes.set(target.id, uploadEvidenceState({
+              before: target.before,
+              after,
+              expectedSize: target.size,
+            }));
+          }
+          return { available: true, outcomes };
         } catch {
-          return { available: false, files: [] };
+          return { available: false, outcomes: new Map() };
         }
       })();
+      targetBatch.evidenceWave = wave;
     }
-    return targetBatch.evidenceRefresh;
+    targetBatch.evidenceWave.consumers++;
+    return targetBatch.evidenceWave;
+  }
+
+  function releaseEvidenceWave(targetBatch, wave, snapshot) {
+    wave.consumers = Math.max(0, wave.consumers - 1);
+    if (wave.consumers !== 0 || targetBatch.evidenceWave !== wave) return;
+    snapshot?.outcomes?.clear();
+    wave.targetNames = [];
+    wave.promise = null;
+    targetBatch.evidenceWave = null;
   }
 
   async function reconcileUncertain(targetBatch, id) {
     if (!exactBatchCurrent(targetBatch)) return;
-    const entry = targetBatch.queue.get(id);
-    const snapshot = await evidenceSnapshot(targetBatch);
-    if (!exactBatchCurrent(targetBatch)) return;
-    if (targetBatch.queue.get(id).state !== 'reconciling') return;
-    if (snapshot.available) {
-      const targetName = entry.target || entry.fullName;
-      const after = snapshot.files.find(({ name }) => name === targetName) || null;
-      const evidence = uploadEvidenceState({
-        before: entry.before,
-        after,
-        expectedSize: entry.size,
-      });
-      targetBatch.queue.event(id, {
-        type: evidence.state === 'cancelled' ? 'evidence-missing' : 'evidence-present',
-      }, {
-        evidence: evidence.evidence,
-      });
-    } else {
-      targetBatch.queue.event(id, { type: 'evidence-unavailable' }, {
-        evidence: 'The server metadata refresh was interrupted, so completion remains unconfirmed.',
-      });
+    const wave = acquireEvidenceWave(targetBatch);
+    let snapshot = null;
+    try {
+      snapshot = await wave.promise;
+      if (!exactBatchCurrent(targetBatch)) return;
+      if (targetBatch.queue.get(id).state !== 'reconciling') return;
+      const evidence = snapshot.available ? snapshot.outcomes.get(id) : null;
+      if (evidence) {
+        targetBatch.queue.event(id, {
+          type: evidence.state === 'cancelled' ? 'evidence-missing' : 'evidence-present',
+        }, {
+          evidence: evidence.evidence,
+        });
+      } else {
+        targetBatch.queue.event(id, { type: 'evidence-unavailable' }, {
+          evidence: 'The server metadata refresh was interrupted, so completion remains unconfirmed.',
+        });
+      }
+      if (!exactBatchCurrent(targetBatch)) return;
+      render();
+      schedule(targetBatch);
+    } finally {
+      releaseEvidenceWave(targetBatch, wave, snapshot);
     }
-    if (!exactBatchCurrent(targetBatch)) return;
-    render();
-    schedule(targetBatch);
   }
 
   async function transfer(targetBatch, entry) {
@@ -826,7 +868,8 @@ export function mountUploadQueue({
       scope,
       scopeGeneration,
       applyAllPolicy: null,
-      evidenceRefresh: null,
+      evidenceWave: null,
+      evidenceWaveGeneration: 0,
       released: false,
     };
     const targetBatch = batch;
@@ -864,6 +907,8 @@ export function mountUploadQueue({
       rowFileReferences: batch
         ? [...batch.rows.values()].filter(({ binding }) => 'file' in binding).length
         : 0,
+      evidenceMetadataReferences: batch?.evidenceWave?.metadataReferences || 0,
+      evidenceTargetNames: [...(batch?.evidenceWave?.targetNames || [])],
       names: batch?.queue.items().map(({ name }) => name) || [],
       controllers: batch?.controllers.size || 0,
       operationIds: ownedOperationIds.size,

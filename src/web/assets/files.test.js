@@ -71,23 +71,28 @@ test('per-item cancel and retry never alter a sibling', () => {
 });
 
 test('conflict upload decision clears stale terminal and evidence copy', () => {
-  const queue = createUploadQueue([{ id: 'a' }]);
-  queue.event('a', { type: 'preflight-started' });
-  queue.event('a', { type: 'conflict' }, {
-    error: 'stale conflict',
-    evidence: 'stale evidence',
-    result: 'stale result',
-  });
-  queue.event('a', { type: 'decision-upload' }, { policy: 'replace' });
-  assert.deepEqual(
-    {
-      state: queue.get('a').state,
-      error: queue.get('a').error,
-      evidence: queue.get('a').evidence,
-      result: queue.get('a').result,
-    },
-    { state: 'queued', error: null, evidence: '', result: null },
-  );
+  for (const [event, state, result] of [
+    [{ type: 'decision-upload' }, 'queued', null],
+    [{ type: 'skipped' }, 'completed', 'Skipped safely.'],
+  ]) {
+    const queue = createUploadQueue([{ id: 'a' }]);
+    queue.event('a', { type: 'preflight-started' });
+    queue.event('a', { type: 'conflict' }, {
+      error: 'stale conflict',
+      evidence: 'stale evidence',
+      result: 'stale result',
+    });
+    queue.event('a', event, { policy: 'skip', result });
+    assert.deepEqual(
+      {
+        state: queue.get('a').state,
+        error: queue.get('a').error,
+        evidence: queue.get('a').evidence,
+        result: queue.get('a').result,
+      },
+      { state, error: null, evidence: '', result },
+    );
+  }
 });
 
 test('preflight requires exactly one recognized result per candidate', () => {
@@ -112,6 +117,12 @@ test('preflight requires exactly one recognized result per candidate', () => {
     { client_id: 'a', status: 'mystery' },
     { client_id: 'b', status: 'ready' },
   ]), /status/i);
+  for (const suggestedName of ['', '../outside.txt', '/absolute.txt', 'bad\\name.txt']) {
+    assert.throws(() => validatePreflightResults(candidates, [
+      { client_id: 'a', status: 'conflict', suggested_name: suggestedName },
+      { client_id: 'b', status: 'ready' },
+    ]), /suggestion/i);
+  }
 });
 
 test('apply-to-all conflict policy never makes replace implicit', () => {

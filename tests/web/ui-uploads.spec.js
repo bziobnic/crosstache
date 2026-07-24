@@ -69,6 +69,8 @@ test('managed queue bounds transfers, distinguishes Finishing, and keeps a named
     hasBatch: false,
     fileReferences: 0,
     rowFileReferences: 0,
+    evidenceMetadataReferences: 0,
+    evidenceTargetNames: [],
     names: [],
     controllers: 0,
     operationIds: 0,
@@ -222,6 +224,102 @@ test('two uncertain items share one evidence refresh and retain pending ownershi
   releaseEvidence();
   await expect(page.locator('#upload-summary-items li')).toHaveCount(2);
   expect(evidenceRefreshes).toBe(1);
+});
+
+test('staggered uncertain items use fresh evidence waves and never infer missing from failed refreshes', async ({ page, baseURL }) => {
+  let uploadRequests = 0;
+  let evidenceRefreshes = 0;
+  await page.route('**/api/files?*', async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === 'POST' && url.pathname === '/api/files') {
+      uploadRequests++;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await route.continue().catch(() => {});
+      return;
+    }
+    if (route.request().method() === 'GET' && url.pathname === '/api/files' && uploadRequests === 2) {
+      evidenceRefreshes++;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { code: 'xv-network', message: 'Unavailable' } }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await openFiles(page, baseURL);
+  await page.locator('#file-input').setInputFiles([
+    { name: 'wave-one.txt', mimeType: 'text/plain', buffer: Buffer.alloc(64 * 1024, 1) },
+    { name: 'wave-two.txt', mimeType: 'text/plain', buffer: Buffer.alloc(64 * 1024, 2) },
+  ]);
+  await expect.poll(() => uploadRequests).toBe(2);
+  await page.getByRole('button', { name: 'Cancel wave-one.txt' }).click();
+  await expect(page.locator('.upload-item').filter({ hasText: 'wave-one.txt' }))
+    .toContainText('Completion could not be confirmed');
+  await page.getByRole('button', { name: 'Cancel wave-two.txt' }).click();
+  await expect(page.locator('#upload-summary-items li')).toHaveCount(2);
+  expect(evidenceRefreshes).toBe(2);
+  await expect(page.locator('#upload-summary')).not.toContainText('Cancelled');
+  expect(await page.evaluate(() => window.__xvUploadDebug())).toMatchObject({
+    evidenceMetadataReferences: 0,
+    evidenceTargetNames: [],
+  });
+});
+
+test('evidence wave debug retains only target names and drops them immediately after settlement', async ({ page, baseURL }) => {
+  await openFiles(page, baseURL);
+  await page.evaluate(async () => {
+    const context = window.__xvTestStoreSnapshot().context;
+    const query = new URLSearchParams({
+      alias: context.workspace.alias,
+      backend: context.backend,
+      vault: context.vault,
+      policy: 'replace',
+      destination: '',
+    });
+    const form = new FormData();
+    form.append('file', new File(['private'], 'unrelated-private-name.txt', { type: 'text/plain' }));
+    await fetch(`/api/files?${query}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${sessionStorage.getItem('xv.ui.token')}` },
+      body: form,
+    });
+  });
+  let releaseEvidence;
+  const evidenceGate = new Promise((resolve) => { releaseEvidence = resolve; });
+  let uploadSeen = false;
+  await page.route('**/api/files?*', async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === 'POST' && url.pathname === '/api/files') {
+      uploadSeen = true;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await route.continue().catch(() => {});
+      return;
+    }
+    if (route.request().method() === 'GET' && url.pathname === '/api/files' && uploadSeen) {
+      await evidenceGate;
+    }
+    await route.continue();
+  });
+  await page.locator('#file-input').setInputFiles({
+    name: 'privacy-target.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.alloc(64 * 1024, 6),
+  });
+  await expect.poll(() => uploadSeen).toBe(true);
+  await page.getByRole('button', { name: 'Cancel privacy-target.txt' }).click();
+  await expect.poll(() => page.evaluate(() => window.__xvUploadDebug().evidenceTargetNames))
+    .toEqual(['privacy-target.txt']);
+  expect(JSON.stringify(await page.evaluate(() => window.__xvUploadDebug())))
+    .not.toContain('unrelated-private-name.txt');
+  expect((await page.evaluate(() => window.__xvUploadDebug())).evidenceMetadataReferences).toBe(0);
+  releaseEvidence();
+  await expect(page.locator('#upload-summary')).toBeVisible();
+  expect(await page.evaluate(() => window.__xvUploadDebug())).toMatchObject({
+    evidenceMetadataReferences: 0,
+    evidenceTargetNames: [],
+  });
 });
 
 test('manual refresh abort makes evidence unavailable rather than falsely missing', async ({ page, baseURL }) => {
@@ -413,6 +511,46 @@ test('apply-all skip reports an upload when a delayed conflict disappeared', asy
     'late-skip.txt: Completed — Uploaded because the destination no longer existed.',
   );
   expect(delayedAttempts).toBe(2);
+});
+
+test('manual transfer conflict Skip clears stale conflict copy from the terminal row', async ({ page, baseURL }) => {
+  let attempts = 0;
+  await page.route('**/api/files?*', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() !== 'POST' || url.pathname !== '/api/files') {
+      await route.continue();
+      return;
+    }
+    attempts++;
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: {
+          code: 'xv-file-conflict',
+          message: 'Destination changed',
+          details: { suggested_name: 'manual-skip (2).txt' },
+        },
+      }),
+    });
+  });
+  await openFiles(page, baseURL);
+  await page.locator('#file-input').setInputFiles({
+    name: 'manual-skip.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('skip'),
+  });
+  const row = page.locator('.upload-item').filter({ hasText: 'manual-skip.txt' });
+  await expect(row).toContainText('The destination changed after preflight');
+  await row.getByRole('button', { name: 'Skip', exact: true }).click();
+  await expect(row).toContainText('Completed');
+  await expect(row).toContainText('Skipped because a destination file already exists.');
+  await expect(row).not.toContainText('destination changed');
+  await expect(page.locator('#upload-summary')).toContainText(
+    'manual-skip.txt: Completed — Skipped because a destination file already exists.',
+  );
+  expect(attempts).toBe(1);
 });
 
 test('terminal batch requires explicit dismissal before a new selection', async ({ page, baseURL }) => {
@@ -622,6 +760,31 @@ test('malformed preflight settles safely with item retries and no pending owner'
   expect(await page.evaluate(() => window.__xvTestStoreSnapshot().scopedMutationPending)).toBe(false);
 });
 
+test('unsafe preflight rename suggestion fails the item without exposing Rename', async ({ page, baseURL }) => {
+  await page.route('**/api/files/preflight?*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        results: [
+          { client_id: 'file-1', status: 'conflict', suggested_name: '../outside.txt' },
+        ],
+      }),
+    });
+  });
+  await openFiles(page, baseURL);
+  await page.locator('#file-input').setInputFiles({
+    name: 'unsafe-suggestion.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('unsafe'),
+  });
+  const row = page.locator('.upload-item').filter({ hasText: 'unsafe-suggestion.txt' });
+  await expect(row).toContainText('Failed');
+  await expect(row).toContainText('preflight response was invalid');
+  await expect(row.getByRole('button', { name: 'Rename' })).toHaveCount(0);
+  expect(await page.evaluate(() => window.__xvTestStoreSnapshot().scopedMutationPending)).toBe(false);
+});
+
 test('mobile queue keeps statuses and exact-item actions visible without horizontal overflow', async ({ page, baseURL }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openFiles(page, baseURL);
@@ -667,6 +830,8 @@ test('failed context transition preserves owned summary while a committed transi
     hasBatch: false,
     fileReferences: 0,
     rowFileReferences: 0,
+    evidenceMetadataReferences: 0,
+    evidenceTargetNames: [],
     names: [],
     controllers: 0,
     operationIds: 0,
