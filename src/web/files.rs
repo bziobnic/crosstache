@@ -236,29 +236,61 @@ fn backend_valid_renamed_name(
     name: &str,
     number: usize,
 ) -> Result<Option<String>, ApiError> {
-    let (directory, original_stem, extension) = renamed_name_parts(name);
-    for preserve_extension in [true, false] {
-        let mut stem = if preserve_extension {
-            original_stem.to_string()
-        } else {
-            name.rsplit_once('/')
-                .map_or(name, |(_, filename)| filename)
-                .to_string()
-        };
-        let extension = preserve_extension.then_some(extension).flatten();
-        for _ in 0..=MAX_NAME_BYTES {
-            let candidate = renamed_name(directory, &stem, extension, number);
-            if candidate.len() <= MAX_NAME_BYTES {
-                match files.validate_file_name(&candidate) {
-                    Ok(()) => return Ok(Some(candidate)),
-                    Err(BackendError::InvalidArgument(_)) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            let Some((index, _)) = stem.char_indices().next_back() else {
-                break;
+    let (original_directory, original_stem, extension) = renamed_name_parts(name);
+    for directory in [original_directory, ""] {
+        if directory.is_empty() && original_directory.is_empty() {
+            continue;
+        }
+        for preserve_extension in [true, false] {
+            let mut stem = if preserve_extension {
+                original_stem.to_string()
+            } else {
+                name.rsplit_once('/')
+                    .map_or(name, |(_, filename)| filename)
+                    .to_string()
             };
-            stem.truncate(index);
+            let extension = preserve_extension.then_some(extension).flatten();
+            for _ in 0..=MAX_NAME_BYTES {
+                let candidate = renamed_name(directory, &stem, extension, number);
+                if candidate.len() <= MAX_NAME_BYTES {
+                    match files.validate_file_name(&candidate) {
+                        Ok(()) => return Ok(Some(candidate)),
+                        Err(BackendError::InvalidArgument(_)) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                let Some((index, _)) = stem.char_indices().next_back() else {
+                    break;
+                };
+                stem.truncate(index);
+            }
+        }
+        if original_directory.is_empty() {
+            break;
+        }
+    }
+    if original_directory.is_empty() {
+        for preserve_extension in [true, false] {
+            let mut stem = if preserve_extension {
+                original_stem.to_string()
+            } else {
+                name.to_string()
+            };
+            let extension = preserve_extension.then_some(extension).flatten();
+            for _ in 0..=MAX_NAME_BYTES {
+                let candidate = renamed_name("", &stem, extension, number);
+                if candidate.len() <= MAX_NAME_BYTES {
+                    match files.validate_file_name(&candidate) {
+                        Ok(()) => return Ok(Some(candidate)),
+                        Err(BackendError::InvalidArgument(_)) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                let Some((index, _)) = stem.char_indices().next_back() else {
+                    break;
+                };
+                stem.truncate(index);
+            }
         }
     }
     Ok(None)
@@ -888,6 +920,55 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(backend.files.lock().unwrap()[&ascii_suggestion].0, b"new");
         assert_eq!(backend.files.lock().unwrap()[&ascii].0, b"old");
+    }
+
+    #[tokio::test]
+    async fn max_key_in_long_directory_keeps_conflict_contract_with_valid_fallback() {
+        let backend = Arc::new(testutil::stub::StubBackend::new().with_file_name_limit(255));
+        let directory = "d".repeat(253);
+        let existing = format!("{directory}/x");
+        backend
+            .files
+            .lock()
+            .unwrap()
+            .insert(existing.clone(), (b"old".to_vec(), "text/plain".into()));
+        let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
+        let candidate = json!({"files":[{
+            "client_id":"long-dir", "name":"x", "size":3,
+            "content_type":"text/plain", "destination":directory
+        }]});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/files/preflight")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(candidate.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["results"][0]["status"], "conflict");
+        let suggested = body["results"][0]["suggested_name"].as_str();
+        if let Some(suggested) = suggested {
+            backend.validate_file_name(suggested).unwrap();
+            assert!(!backend.files.lock().unwrap().contains_key(suggested));
+        }
+
+        let (status, body) = upload(app, "/api/files", &existing, "new").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "xv-file-conflict");
+        assert_eq!(backend.files.lock().unwrap()[&existing].0, b"old");
+        let upload_suggestion = body["error"]["suggested_name"].as_str();
+        if let Some(suggested) = upload_suggestion {
+            backend.validate_file_name(suggested).unwrap();
+            assert!(!backend.files.lock().unwrap().contains_key(suggested));
+        }
     }
 
     #[tokio::test]

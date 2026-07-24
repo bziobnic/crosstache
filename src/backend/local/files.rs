@@ -7,6 +7,7 @@
 //! - `<encoded_name>.meta.json` — plaintext metadata
 
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -18,7 +19,6 @@ use sha2::{Digest, Sha256};
 use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
 use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
-use crate::utils::helpers::{open_private_lock_file_no_follow, write_private};
 use crate::utils::progress::ProgressReporter;
 
 use super::{crypto, paths};
@@ -54,15 +54,18 @@ fn storage_stem(name: &str) -> Result<String, BackendError> {
     Ok(format!("h-{digest:x}"))
 }
 
+#[cfg(test)]
 fn files_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
     paths::files_dir(store_path, vault)
 }
 
+#[cfg(test)]
 fn file_age_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
     let enc = storage_stem(name)?;
     Ok(files_dir(store_path, vault)?.join(format!("{enc}.age")))
 }
 
+#[cfg(test)]
 fn file_meta_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
     let enc = storage_stem(name)?;
     Ok(files_dir(store_path, vault)?.join(format!("{enc}.meta.json")))
@@ -71,28 +74,6 @@ fn file_meta_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf,
 // ---------------------------------------------------------------------------
 // Metadata persisted alongside each file
 // ---------------------------------------------------------------------------
-
-fn read_file_meta(path: &Path) -> Result<FileInfo, BackendError> {
-    let data = fs::read_to_string(path)
-        .map_err(|e| BackendError::Internal(format!("read file meta {}: {e}", path.display())))?;
-    serde_json::from_str(&data)
-        .map_err(|e| BackendError::Internal(format!("parse file meta {}: {e}", path.display())))
-}
-
-fn write_file_meta(path: &Path, info: &FileInfo) -> Result<(), BackendError> {
-    let json = serde_json::to_string_pretty(info)
-        .map_err(|e| BackendError::Internal(format!("serialize file meta: {e}")))?;
-    write_private(path, json.as_bytes())
-        .map_err(|e| BackendError::Internal(format!("write file meta {}: {e}", path.display())))
-}
-
-fn sync_file(path: &Path) -> Result<(), BackendError> {
-    fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|e| BackendError::Internal(format!("sync file {}: {e}", path.display())))
-}
 
 fn sync_directory(path: &Path) -> Result<(), BackendError> {
     #[cfg(unix)]
@@ -193,10 +174,407 @@ fn ensure_existing_real_directory(path: &Path) -> Result<bool, BackendError> {
 }
 
 struct LocalFileChain {
-    vault_dir: PathBuf,
     files_dir: PathBuf,
-    #[cfg(unix)]
-    directory_ids: [(u64, u64); 4],
+    _store: AnchoredDir,
+    _vaults: AnchoredDir,
+    vault: AnchoredDir,
+    files: AnchoredDir,
+    transactions: Option<AnchoredDir>,
+}
+
+struct AnchoredDir {
+    file: fs::File,
+    display: PathBuf,
+}
+
+impl AnchoredDir {
+    fn open_path(path: &Path) -> Result<Self, BackendError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+                .map_err(|error| {
+                    BackendError::Internal(format!(
+                        "open anchored directory {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            Ok(Self {
+                file,
+                display: path.to_path_buf(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let file = fs::File::open(path).map_err(|error| {
+                BackendError::Internal(format!(
+                    "open anchored directory {}: {error}",
+                    path.display()
+                ))
+            })?;
+            Ok(Self {
+                file,
+                display: path.to_path_buf(),
+            })
+        }
+    }
+
+    fn open_dir(&self, name: &str) -> Result<Option<Self>, BackendError> {
+        validate_relative_component(name)?;
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = CString::new(name)
+                .map_err(|_| BackendError::Internal("directory name contains NUL".into()))?;
+            let fd = unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(BackendError::Internal(format!(
+                    "refusing unsafe anchored directory {}/{}: {error}",
+                    self.display.display(),
+                    name.to_string_lossy()
+                )));
+            }
+            Ok(Some(Self {
+                file: unsafe { fs::File::from_raw_fd(fd) },
+                display: self.display.join(name.to_string_lossy().as_ref()),
+            }))
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.display.join(name);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    Self::open_path(&path).map(Some)
+                }
+                Ok(_) => Err(BackendError::Internal(
+                    "refusing unsafe anchored directory".into(),
+                )),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(BackendError::Internal(format!(
+                    "inspect anchored directory: {error}"
+                ))),
+            }
+        }
+    }
+
+    fn open_or_create_private_dir(&self, name: &str) -> Result<Self, BackendError> {
+        if let Some(directory) = self.open_dir(name)? {
+            directory.repair_private_mode()?;
+            return Ok(directory);
+        }
+        validate_relative_component(name)?;
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            let c_name = CString::new(name)
+                .map_err(|_| BackendError::Internal("directory name contains NUL".into()))?;
+            let result = unsafe { libc::mkdirat(self.file.as_raw_fd(), c_name.as_ptr(), 0o700) };
+            if result < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(BackendError::Internal(format!(
+                    "create anchored directory: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+        #[cfg(not(unix))]
+        fs::create_dir(self.display.join(name)).map_err(|error| {
+            BackendError::Internal(format!("create anchored directory: {error}"))
+        })?;
+        let directory = self.open_dir(name)?.ok_or_else(|| {
+            BackendError::Internal("anchored directory disappeared after creation".into())
+        })?;
+        directory.repair_private_mode()?;
+        directory.sync()?;
+        self.sync()?;
+        Ok(directory)
+    }
+
+    fn repair_private_mode(&self) -> Result<(), BackendError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let metadata = self.file.metadata().map_err(|error| {
+                BackendError::Internal(format!("inspect anchored directory: {error}"))
+            })?;
+            // SAFETY: `geteuid` takes no arguments and has no preconditions.
+            if metadata.uid() != unsafe { libc::geteuid() } {
+                return Err(BackendError::Internal(
+                    "anchored directory is not owned by the current user".into(),
+                ));
+            }
+            if metadata.permissions().mode() & 0o777 != 0o700 {
+                self.file
+                    .set_permissions(fs::Permissions::from_mode(0o700))
+                    .map_err(|error| {
+                        BackendError::Internal(format!(
+                            "repair anchored directory permissions: {error}"
+                        ))
+                    })?;
+                self.sync()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn open_file(&self, name: &str) -> Result<Option<fs::File>, BackendError> {
+        self.open_file_with_flags(name, libc::O_RDONLY, 0)
+    }
+
+    fn create_private_file(&self, name: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        let mut file = self
+            .open_file_with_flags(name, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o600)?
+            .ok_or_else(|| BackendError::Internal("create anchored file failed".into()))?;
+        file.write_all(bytes)
+            .map_err(|error| BackendError::Internal(format!("write anchored file: {error}")))?;
+        file.sync_all()
+            .map_err(|error| BackendError::Internal(format!("sync anchored file: {error}")))
+    }
+
+    fn open_file_with_flags(
+        &self,
+        name: &str,
+        flags: libc::c_int,
+        mode: libc::mode_t,
+    ) -> Result<Option<fs::File>, BackendError> {
+        validate_relative_component(name)?;
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let c_name = CString::new(name)
+                .map_err(|_| BackendError::Internal("file name contains NUL".into()))?;
+            let fd = unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    c_name.as_ptr(),
+                    flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    libc::c_uint::from(mode),
+                )
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(BackendError::Internal(format!(
+                    "open anchored file {}: {error}",
+                    name
+                )));
+            }
+            let file = unsafe { fs::File::from_raw_fd(fd) };
+            if !file
+                .metadata()
+                .map_err(|error| BackendError::Internal(format!("inspect anchored file: {error}")))?
+                .is_file()
+            {
+                return Err(BackendError::Internal(
+                    "refusing unsafe non-file anchored entry".into(),
+                ));
+            }
+            Ok(Some(file))
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let mut options = fs::OpenOptions::new();
+            options.read(flags & libc::O_RDONLY == libc::O_RDONLY);
+            options.write(flags & libc::O_WRONLY != 0);
+            options.create(flags & libc::O_CREAT != 0);
+            options.truncate(flags & libc::O_TRUNC != 0);
+            let _ = mode;
+            match options.open(self.display.join(name)) {
+                Ok(file) if file.metadata().is_ok_and(|metadata| metadata.is_file()) => {
+                    Ok(Some(file))
+                }
+                Ok(_) => Err(BackendError::Internal(
+                    "refusing unsafe non-file anchored entry".into(),
+                )),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(BackendError::Internal(format!(
+                    "open anchored file: {error}"
+                ))),
+            }
+        }
+    }
+
+    fn read_file(&self, name: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        let Some(mut file) = self.open_file(name)? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| BackendError::Internal(format!("read anchored file: {error}")))?;
+        Ok(Some(bytes))
+    }
+
+    fn file_exists(&self, name: &str) -> Result<bool, BackendError> {
+        Ok(self.open_file(name)?.is_some())
+    }
+
+    fn rename_to(
+        &self,
+        source: &str,
+        destination_dir: &Self,
+        destination: &str,
+    ) -> Result<(), BackendError> {
+        validate_relative_component(source)?;
+        validate_relative_component(destination)?;
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            let source = CString::new(source)
+                .map_err(|_| BackendError::Internal("source name contains NUL".into()))?;
+            let destination = CString::new(destination)
+                .map_err(|_| BackendError::Internal("destination name contains NUL".into()))?;
+            let result = unsafe {
+                libc::renameat(
+                    self.file.as_raw_fd(),
+                    source.as_ptr(),
+                    destination_dir.file.as_raw_fd(),
+                    destination.as_ptr(),
+                )
+            };
+            if result < 0 {
+                return Err(BackendError::Internal(format!(
+                    "rename anchored file: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        fs::rename(
+            self.display.join(source),
+            destination_dir.display.join(destination),
+        )
+        .map_err(|error| BackendError::Internal(format!("rename anchored file: {error}")))
+    }
+
+    fn remove_file(&self, name: &str) -> Result<(), BackendError> {
+        self.unlink(name, 0)
+    }
+
+    fn remove_dir(&self, name: &str) -> Result<(), BackendError> {
+        self.unlink(name, libc::AT_REMOVEDIR)
+    }
+
+    fn unlink(&self, name: &str, flags: libc::c_int) -> Result<(), BackendError> {
+        validate_relative_component(name)?;
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            let name = CString::new(name)
+                .map_err(|_| BackendError::Internal("unlink name contains NUL".into()))?;
+            let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), flags) };
+            if result < 0 {
+                return Err(BackendError::Internal(format!(
+                    "remove anchored entry: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        if flags == libc::AT_REMOVEDIR {
+            fs::remove_dir(self.display.join(name)).map_err(|error| {
+                BackendError::Internal(format!("remove anchored directory: {error}"))
+            })
+        } else {
+            fs::remove_file(self.display.join(name))
+                .map_err(|error| BackendError::Internal(format!("remove anchored file: {error}")))
+        }
+    }
+
+    fn entry_names(&self) -> Result<Vec<String>, BackendError> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CStr;
+            use std::os::fd::AsRawFd;
+            let duplicate = unsafe { libc::dup(self.file.as_raw_fd()) };
+            if duplicate < 0 {
+                return Err(BackendError::Internal(format!(
+                    "duplicate directory handle: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let directory = unsafe { libc::fdopendir(duplicate) };
+            if directory.is_null() {
+                unsafe { libc::close(duplicate) };
+                return Err(BackendError::Internal(format!(
+                    "open directory stream: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let mut names = Vec::new();
+            loop {
+                let entry = unsafe { libc::readdir(directory) };
+                if entry.is_null() {
+                    break;
+                }
+                let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned();
+                if name != "." && name != ".." {
+                    names.push(name);
+                }
+            }
+            unsafe { libc::closedir(directory) };
+            names.sort();
+            Ok(names)
+        }
+        #[cfg(not(unix))]
+        {
+            let mut names = fs::read_dir(&self.display)
+                .map_err(|error| BackendError::Internal(format!("read directory: {error}")))?
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .map_err(|error| {
+                            BackendError::Internal(format!("read directory entry: {error}"))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            names.sort();
+            Ok(names)
+        }
+    }
+
+    fn sync(&self) -> Result<(), BackendError> {
+        self.file
+            .sync_all()
+            .map_err(|error| BackendError::Internal(format!("sync anchored directory: {error}")))?;
+        #[cfg(test)]
+        tests::record_file_event("sync-dir", &self.display);
+        Ok(())
+    }
+}
+
+fn validate_relative_component(name: &str) -> Result<(), BackendError> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(BackendError::Internal(
+            "invalid anchored filesystem component".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn local_file_chain_paths(store_path: &Path, vault: &str) -> Result<[PathBuf; 4], BackendError> {
@@ -241,24 +619,35 @@ fn ensure_writable_local_file_chain(
 }
 
 fn local_file_chain_from_paths(chain: &[PathBuf; 4]) -> Result<LocalFileChain, BackendError> {
-    #[cfg(unix)]
-    let directory_ids = {
-        use std::os::unix::fs::MetadataExt;
-
-        let mut ids = [(0, 0); 4];
-        for (index, directory) in chain.iter().enumerate() {
-            let metadata = fs::symlink_metadata(directory).map_err(|error| {
-                BackendError::Internal(format!("inspect local file directory identity: {error}"))
-            })?;
-            ids[index] = (metadata.dev(), metadata.ino());
-        }
-        ids
-    };
+    let store = AnchoredDir::open_path(&chain[0])?;
+    store.repair_private_mode()?;
+    let vaults = store
+        .open_dir("vaults")?
+        .ok_or_else(|| BackendError::Internal("vaults directory disappeared".into()))?;
+    vaults.repair_private_mode()?;
+    let vault_name = chain[2]
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| BackendError::Internal("vault name is not valid UTF-8".into()))?;
+    let vault = vaults
+        .open_dir(vault_name)?
+        .ok_or_else(|| BackendError::Internal("vault directory disappeared".into()))?;
+    vault.repair_private_mode()?;
+    let files = vault
+        .open_dir("files")?
+        .ok_or_else(|| BackendError::Internal("files directory disappeared".into()))?;
+    files.repair_private_mode()?;
+    let transactions = files.open_dir(".transactions")?;
+    if let Some(transactions) = transactions.as_ref() {
+        transactions.repair_private_mode()?;
+    }
     Ok(LocalFileChain {
-        vault_dir: chain[2].clone(),
         files_dir: chain[3].clone(),
-        #[cfg(unix)]
-        directory_ids,
+        _store: store,
+        _vaults: vaults,
+        vault,
+        files,
+        transactions,
     })
 }
 
@@ -267,70 +656,15 @@ fn lock_local_file_chain(
     vault: &str,
     chain: &LocalFileChain,
 ) -> Result<fs::File, BackendError> {
-    let lock_path = chain.vault_dir.join(".lock");
-    let lock_file = open_private_lock_file_no_follow(&lock_path)
-        .map_err(|error| BackendError::Internal(format!("open local file lock: {error}")))?;
+    let _ = (store_path, vault);
+    let lock_file = chain
+        .vault
+        .open_file_with_flags(".lock", libc::O_RDWR | libc::O_CREAT, 0o600)?
+        .ok_or_else(|| BackendError::Internal("open local file lock failed".into()))?;
     lock_file.lock_exclusive().map_err(|error| {
         BackendError::Internal(format!("local file vault lock failed: {error}"))
     })?;
-    let checked = existing_local_file_chain(store_path, vault)?.ok_or_else(|| {
-        BackendError::Internal("local file directory chain changed while locking".into())
-    })?;
-    if checked.vault_dir != chain.vault_dir || checked.files_dir != chain.files_dir || {
-        #[cfg(unix)]
-        {
-            checked.directory_ids != chain.directory_ids
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
-    } {
-        return Err(BackendError::Internal(
-            "local file directory chain changed while locking".into(),
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        let opened = lock_file
-            .metadata()
-            .map_err(|error| BackendError::Internal(format!("inspect local file lock: {error}")))?;
-        let linked = fs::symlink_metadata(&lock_path).map_err(|error| {
-            BackendError::Internal(format!("inspect linked local file lock: {error}"))
-        })?;
-        if linked.file_type().is_symlink()
-            || !linked.is_file()
-            || opened.dev() != linked.dev()
-            || opened.ino() != linked.ino()
-        {
-            return Err(BackendError::Internal(
-                "local file lock changed while locking".into(),
-            ));
-        }
-    }
     Ok(lock_file)
-}
-
-fn ensure_regular_no_symlink(path: &Path) -> Result<(), BackendError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|e| BackendError::Internal(format!("inspect file transaction artifact: {e}")))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(BackendError::Internal(
-            "refusing unsafe file transaction artifact".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn durable_private_copy(source: &Path, destination: &Path) -> Result<(), BackendError> {
-    ensure_regular_no_symlink(source)?;
-    let bytes = fs::read(source)
-        .map_err(|e| BackendError::Internal(format!("read file transaction backup: {e}")))?;
-    write_private(destination, bytes)
-        .map_err(|e| BackendError::Internal(format!("write file transaction backup: {e}")))?;
-    sync_file(destination)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -340,18 +674,16 @@ struct FileUploadJournal {
     had_meta: bool,
 }
 
+#[cfg(test)]
 struct FileTransactionPaths {
     dir: PathBuf,
     staged_age: PathBuf,
     staged_meta: PathBuf,
-    old_age: PathBuf,
-    old_meta: PathBuf,
-    journal_temp: PathBuf,
-    journal: PathBuf,
     active_age: PathBuf,
     active_meta: PathBuf,
 }
 
+#[cfg(test)]
 impl FileTransactionPaths {
     fn new(store_path: &Path, vault: &str, name: &str) -> Result<Self, BackendError> {
         let fdir = files_dir(store_path, vault)?;
@@ -369,10 +701,6 @@ impl FileTransactionPaths {
         Ok(Self {
             staged_age: dir.join("new.age"),
             staged_meta: dir.join("new.meta.json"),
-            old_age: dir.join("old.age"),
-            old_meta: dir.join("old.meta.json"),
-            journal_temp: dir.join("journal.tmp"),
-            journal: dir.join("journal.json"),
             active_age: fdir.join(format!("{stem}.age")),
             active_meta: fdir.join(format!("{stem}.meta.json")),
             dir,
@@ -425,152 +753,124 @@ impl LocalFileBackend {
         Ok(())
     }
 
-    fn remove_transaction_dir(paths: &FileTransactionPaths) -> Result<(), BackendError> {
-        if !paths.dir.exists() {
-            return Ok(());
-        }
-        let metadata = fs::symlink_metadata(&paths.dir).map_err(|e| {
-            BackendError::Internal(format!("inspect file transaction directory: {e}"))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(BackendError::Internal(
-                "refusing unsafe file transaction cleanup".into(),
-            ));
-        }
-        for entry in fs::read_dir(&paths.dir)
-            .map_err(|e| BackendError::Internal(format!("read file transaction: {e}")))?
-        {
-            let entry =
-                entry.map_err(|e| BackendError::Internal(format!("read file transaction: {e}")))?;
-            let metadata = entry.metadata().map_err(|e| {
-                BackendError::Internal(format!("inspect file transaction artifact: {e}"))
-            })?;
-            if !metadata.is_file() || entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
-                return Err(BackendError::Internal(
-                    "refusing unsafe file transaction artifact".into(),
-                ));
-            }
-            fs::remove_file(entry.path()).map_err(|e| {
-                BackendError::Internal(format!("remove file transaction artifact: {e}"))
-            })?;
-        }
-        fs::remove_dir(&paths.dir)
-            .map_err(|e| BackendError::Internal(format!("remove file transaction: {e}")))?;
-        if let Some(root) = paths.dir.parent() {
-            sync_directory(root)?;
-        }
+    #[cfg(test)]
+    fn file_swap_barrier(&self, stage: &'static str, files_dir: &Path) -> Result<(), BackendError> {
+        tests::run_file_swap_hook(&self.store_path, stage, files_dir)
+    }
+
+    #[cfg(not(test))]
+    fn file_swap_barrier(
+        &self,
+        _stage: &'static str,
+        _files_dir: &Path,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 
-    fn restore_path(backup: &Path, active: &Path, existed: bool) -> Result<(), BackendError> {
+    fn remove_transaction_dir(
+        root: &AnchoredDir,
+        transaction: &AnchoredDir,
+        stem: &str,
+    ) -> Result<(), BackendError> {
+        for entry in transaction.entry_names()? {
+            transaction.remove_file(&entry)?;
+        }
+        root.remove_dir(stem)?;
+        root.sync()
+    }
+
+    fn restore_entry(
+        files: &AnchoredDir,
+        transaction: &AnchoredDir,
+        backup: &str,
+        active: &str,
+        existed: bool,
+    ) -> Result<(), BackendError> {
         if existed {
-            let temp = active.with_extension(format!(
-                "{}.recovering",
-                active
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .unwrap_or("tmp")
-            ));
-            durable_private_copy(backup, &temp)?;
-            fs::rename(&temp, active)
-                .map_err(|e| BackendError::Internal(format!("restore local file: {e}")))?;
-        } else if active.exists() {
-            fs::remove_file(active)
-                .map_err(|e| BackendError::Internal(format!("remove partial local file: {e}")))?;
+            let bytes = transaction.read_file(backup)?.ok_or_else(|| {
+                BackendError::Internal("missing local file transaction backup".into())
+            })?;
+            let digest = Sha256::digest(active.as_bytes());
+            let temp = format!(".recovering-{digest:x}");
+            files.create_private_file(&temp, &bytes)?;
+            files.rename_to(&temp, files, active)?;
+        } else if files.file_exists(active)? {
+            files.remove_file(active)?;
         }
         Ok(())
     }
 
-    fn recover_transaction_locked(&self, paths: &FileTransactionPaths) -> Result<(), BackendError> {
-        if !paths.dir.exists() {
+    fn recover_transaction_locked(
+        &self,
+        chain: &LocalFileChain,
+        root: &AnchoredDir,
+        stem: &str,
+    ) -> Result<(), BackendError> {
+        let Some(transaction) = root.open_dir(stem)? else {
             return Ok(());
-        }
-        ensure_private_real_directory(&paths.dir)?;
-        if !paths.journal.exists() {
-            return Self::remove_transaction_dir(paths);
-        }
-        ensure_regular_no_symlink(&paths.journal)?;
-        let journal: FileUploadJournal = serde_json::from_slice(
-            &fs::read(&paths.journal)
-                .map_err(|e| BackendError::Internal(format!("read file upload journal: {e}")))?,
-        )
-        .map_err(|e| BackendError::Internal(format!("parse file upload journal: {e}")))?;
+        };
+        transaction.repair_private_mode()?;
+        let Some(journal_bytes) = transaction.read_file("journal.json")? else {
+            return Self::remove_transaction_dir(root, &transaction, stem);
+        };
+        let journal: FileUploadJournal = serde_json::from_slice(&journal_bytes)
+            .map_err(|e| BackendError::Internal(format!("parse file upload journal: {e}")))?;
         if journal.version != 1
-            || (journal.had_age && !paths.old_age.exists())
-            || (journal.had_meta && !paths.old_meta.exists())
+            || (journal.had_age && !transaction.file_exists("old.age")?)
+            || (journal.had_meta && !transaction.file_exists("old.meta.json")?)
         {
             return Err(BackendError::Internal(
                 "invalid local file upload journal".into(),
             ));
         }
-        if journal.had_age {
-            ensure_regular_no_symlink(&paths.old_age)?;
-        }
-        if journal.had_meta {
-            ensure_regular_no_symlink(&paths.old_meta)?;
-        }
-        Self::restore_path(&paths.old_age, &paths.active_age, journal.had_age)?;
-        Self::restore_path(&paths.old_meta, &paths.active_meta, journal.had_meta)?;
-        sync_directory(
-            paths
-                .active_age
-                .parent()
-                .ok_or_else(|| BackendError::Internal("file path has no parent".into()))?,
+        let active_age = format!("{stem}.age");
+        let active_meta = format!("{stem}.meta.json");
+        Self::restore_entry(
+            &chain.files,
+            &transaction,
+            "old.age",
+            &active_age,
+            journal.had_age,
         )?;
-        fs::remove_file(&paths.journal)
-            .map_err(|e| BackendError::Internal(format!("remove file upload journal: {e}")))?;
-        sync_directory(&paths.dir)?;
-        Self::remove_transaction_dir(paths)
+        Self::restore_entry(
+            &chain.files,
+            &transaction,
+            "old.meta.json",
+            &active_meta,
+            journal.had_meta,
+        )?;
+        chain.files.sync()?;
+        transaction.remove_file("journal.json")?;
+        transaction.sync()?;
+        Self::remove_transaction_dir(root, &transaction, stem)
     }
 
-    fn recover_all_locked(&self, vault: &str) -> Result<(), BackendError> {
-        let fdir = files_dir(&self.store_path, vault)?;
-        if !ensure_existing_real_directory(&fdir)? {
+    fn recover_all_locked(&self, chain: &LocalFileChain) -> Result<(), BackendError> {
+        self.file_swap_barrier("before-recovery", &chain.files_dir)?;
+        let Some(root) = chain.transactions.as_ref() else {
             return Ok(());
-        }
-        let root = fdir.join(".transactions");
-        if !root.exists() {
-            return Ok(());
-        }
-        ensure_private_real_directory(&root)?;
-        let mut stems = Vec::new();
-        for entry in fs::read_dir(&root)
-            .map_err(|e| BackendError::Internal(format!("read file transactions: {e}")))?
-        {
-            let entry =
-                entry.map_err(|e| BackendError::Internal(format!("read file transaction: {e}")))?;
-            let kind = entry.file_type().map_err(|e| {
-                BackendError::Internal(format!("inspect file transaction entry: {e}"))
-            })?;
-            if kind.is_symlink() || !kind.is_dir() {
-                return Err(BackendError::Internal(
-                    "refusing unsafe file transaction entry".into(),
-                ));
-            }
-            stems.push(entry.file_name().to_string_lossy().into_owned());
-        }
-        stems.sort();
-        for stem in stems {
-            let paths = FileTransactionPaths::from_stem(&fdir, &stem)?;
-            self.recover_transaction_locked(&paths)?;
+        };
+        for stem in root.entry_names()? {
+            self.recover_transaction_locked(chain, root, &stem)?;
         }
         Ok(())
     }
 
     fn upload_transaction_locked(
         &self,
-        vault: &str,
+        chain: &mut LocalFileChain,
         request: FileUploadRequest,
         create_only: bool,
     ) -> Result<FileInfo, BackendError> {
-        let fdir = files_dir(&self.store_path, vault)?;
-        ensure_private_real_directory(&fdir)?;
-
-        self.recover_all_locked(vault)?;
+        self.recover_all_locked(chain)?;
         let original_size = request.content.len() as u64;
-        let paths = FileTransactionPaths::new(&self.store_path, vault, &request.name)?;
-        let had_age = paths.active_age.exists();
-        let had_meta = paths.active_meta.exists();
+        let stem = storage_stem(&request.name)?;
+        #[cfg(test)]
+        let paths = FileTransactionPaths::from_stem(&chain.files_dir, &stem)?;
+        let active_age = format!("{stem}.age");
+        let active_meta = format!("{stem}.meta.json");
+        let had_age = chain.files.file_exists(&active_age)?;
+        let had_meta = chain.files.file_exists(&active_meta)?;
         if had_age != had_meta {
             return Err(BackendError::Internal(
                 "local file content and metadata are inconsistent".into(),
@@ -593,29 +893,39 @@ impl LocalFileBackend {
             metadata: request.metadata,
             tags: request.tags,
         };
-        let transaction_root = paths
-            .dir
-            .parent()
-            .ok_or_else(|| BackendError::Internal("transaction path has no parent".into()))?;
-        ensure_private_real_directory(transaction_root)?;
-        if paths.dir.exists() {
-            self.recover_transaction_locked(&paths)?;
+        if chain.transactions.is_none() {
+            chain.transactions = Some(chain.files.open_or_create_private_dir(".transactions")?);
         }
-        ensure_private_real_directory(&paths.dir)?;
+        let transaction_root = chain
+            .transactions
+            .as_ref()
+            .expect("transaction root was initialized");
+        if transaction_root.open_dir(&stem)?.is_some() {
+            self.recover_transaction_locked(chain, transaction_root, &stem)?;
+        }
+        let transaction = transaction_root.open_or_create_private_dir(&stem)?;
 
         let staged = (|| {
-            crypto::encrypt_to_file(&paths.staged_age, &request.content, &self.recipients)?;
-            sync_file(&paths.staged_age)?;
-            write_file_meta(&paths.staged_meta, &info)?;
-            sync_file(&paths.staged_meta)?;
+            let ciphertext = crypto::encrypt_bytes(&request.content, &self.recipients)?;
+            transaction.create_private_file("new.age", &ciphertext)?;
+            let metadata = serde_json::to_vec_pretty(&info)
+                .map_err(|e| BackendError::Internal(format!("serialize file meta: {e}")))?;
+            transaction.create_private_file("new.meta.json", &metadata)?;
             if had_age {
-                durable_private_copy(&paths.active_age, &paths.old_age)?;
-                durable_private_copy(&paths.active_meta, &paths.old_meta)?;
+                let old_age = chain.files.read_file(&active_age)?.ok_or_else(|| {
+                    BackendError::Internal("missing active file ciphertext".into())
+                })?;
+                let old_meta = chain
+                    .files
+                    .read_file(&active_meta)?
+                    .ok_or_else(|| BackendError::Internal("missing active file metadata".into()))?;
+                transaction.create_private_file("old.age", &old_age)?;
+                transaction.create_private_file("old.meta.json", &old_meta)?;
             }
-            sync_directory(&paths.dir)
+            transaction.sync()
         })();
         if let Err(error) = staged {
-            let _ = Self::remove_transaction_dir(&paths);
+            let _ = Self::remove_transaction_dir(transaction_root, &transaction, &stem);
             return Err(error);
         }
         self.file_crash(0)?;
@@ -628,33 +938,30 @@ impl LocalFileBackend {
         let journal_bytes = serde_json::to_vec(&journal)
             .map_err(|e| BackendError::Internal(format!("serialize file upload journal: {e}")))?;
         let published = (|| {
-            write_private(&paths.journal_temp, journal_bytes)
-                .map_err(|e| BackendError::Internal(format!("write file upload journal: {e}")))?;
-            sync_file(&paths.journal_temp)?;
-            fs::rename(&paths.journal_temp, &paths.journal)
-                .map_err(|e| BackendError::Internal(format!("publish file upload journal: {e}")))?;
-            sync_directory(&paths.dir)
+            transaction.create_private_file("journal.tmp", &journal_bytes)?;
+            transaction.rename_to("journal.tmp", &transaction, "journal.json")?;
+            transaction.sync()
         })();
         if let Err(error) = published {
-            if paths.journal.exists() {
-                self.recover_transaction_locked(&paths)?;
+            if transaction.file_exists("journal.json")? {
+                self.recover_transaction_locked(chain, transaction_root, &stem)?;
             } else {
-                Self::remove_transaction_dir(&paths)?;
+                Self::remove_transaction_dir(transaction_root, &transaction, &stem)?;
             }
             return Err(error);
         }
         self.file_crash(1)?;
+        self.file_swap_barrier("before-active-rename", &chain.files_dir)?;
 
         let activated = (|| {
             #[cfg(test)]
             tests::record_file_event("active-rename", &paths.active_age);
-            fs::rename(&paths.staged_age, &paths.active_age)
-                .map_err(|e| BackendError::Internal(format!("activate file ciphertext: {e}")))?;
-            sync_directory(&fdir)?;
+            transaction.rename_to("new.age", &chain.files, &active_age)?;
+            chain.files.sync()?;
             Ok::<(), BackendError>(())
         })();
         if let Err(error) = activated {
-            self.recover_transaction_locked(&paths)?;
+            self.recover_transaction_locked(chain, transaction_root, &stem)?;
             return Err(error);
         }
         self.file_crash(2)?;
@@ -662,23 +969,21 @@ impl LocalFileBackend {
         let activated = (|| {
             #[cfg(test)]
             tests::record_file_event("active-rename", &paths.active_meta);
-            fs::rename(&paths.staged_meta, &paths.active_meta)
-                .map_err(|e| BackendError::Internal(format!("activate file metadata: {e}")))?;
-            sync_directory(&fdir)?;
+            transaction.rename_to("new.meta.json", &chain.files, &active_meta)?;
+            chain.files.sync()?;
             Ok::<(), BackendError>(())
         })();
         if let Err(error) = activated {
-            self.recover_transaction_locked(&paths)?;
+            self.recover_transaction_locked(chain, transaction_root, &stem)?;
             return Err(error);
         }
         self.file_crash(3)?;
 
-        fs::remove_file(&paths.journal)
-            .map_err(|e| BackendError::Internal(format!("commit file upload: {e}")))?;
-        sync_directory(&paths.dir)?;
-        sync_directory(&fdir)?;
+        transaction.remove_file("journal.json")?;
+        transaction.sync()?;
+        chain.files.sync()?;
         self.file_crash(4)?;
-        Self::remove_transaction_dir(&paths)?;
+        Self::remove_transaction_dir(transaction_root, &transaction, &stem)?;
         Ok(info)
     }
 
@@ -688,9 +993,9 @@ impl LocalFileBackend {
         request: FileUploadRequest,
         create_only: bool,
     ) -> Result<FileInfo, BackendError> {
-        let chain = ensure_writable_local_file_chain(&self.store_path, vault)?;
+        let mut chain = ensure_writable_local_file_chain(&self.store_path, vault)?;
         let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
-        self.recover_all_locked(vault)?;
+        self.recover_all_locked(&chain)?;
         if let Some(secret_name) = Self::attachment_secret_name(&request.name) {
             if !super::secrets::active_secret_exists_by_metadata_locked(
                 &self.store_path,
@@ -704,7 +1009,7 @@ impl LocalFileBackend {
                 });
             }
         }
-        self.upload_transaction_locked(vault, request, create_only)
+        self.upload_transaction_locked(&mut chain, request, create_only)
     }
 }
 
@@ -759,16 +1064,17 @@ impl FileBackend for LocalFileBackend {
             });
         };
         let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
-        self.recover_all_locked(vault)?;
-        let ap = file_age_path(&self.store_path, vault, name)?;
-        if !ap.exists() {
+        self.recover_all_locked(&chain)?;
+        self.file_swap_barrier("before-download-read", &chain.files_dir)?;
+        let stem = storage_stem(name)?;
+        let active_age = format!("{stem}.age");
+        let Some(ciphertext) = chain.files.read_file(&active_age)? else {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
                 suggestion: None,
             });
-        }
-
-        crypto::decrypt_bytes_from_file(&ap, &self.identity)
+        };
+        Ok(crypto::decrypt_bytes(&ciphertext, &self.identity)?.to_vec())
     }
 
     async fn list_files(
@@ -780,22 +1086,20 @@ impl FileBackend for LocalFileBackend {
             return Ok(Vec::new());
         };
         let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
-        self.recover_all_locked(vault)?;
-        let fdir = chain.files_dir;
+        self.recover_all_locked(&chain)?;
 
         let mut results = Vec::new();
-        let entries = fs::read_dir(&fdir)
-            .map_err(|e| BackendError::Internal(format!("read files dir: {e}")))?;
-
-        for entry in entries.flatten() {
-            let fname = entry.file_name().to_string_lossy().to_string();
+        for fname in chain.files.entry_names()? {
             if !fname.ends_with(".meta.json") {
                 continue;
             }
-
-            let info = match read_file_meta(&entry.path()) {
-                Ok(i) => i,
-                Err(_) => continue,
+            let info: FileInfo = match chain
+                .files
+                .read_file(&fname)?
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            {
+                Some(info) => info,
+                None => continue,
             };
 
             // Apply prefix filter
@@ -835,25 +1139,27 @@ impl FileBackend for LocalFileBackend {
             });
         };
         let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
-        self.recover_all_locked(vault)?;
-        let ap = file_age_path(&self.store_path, vault, name)?;
-        let mp = file_meta_path(&self.store_path, vault, name)?;
+        self.recover_all_locked(&chain)?;
+        let stem = storage_stem(name)?;
+        let active_age = format!("{stem}.age");
+        let active_meta = format!("{stem}.meta.json");
 
-        if !ap.exists() && !mp.exists() {
+        let has_age = chain.files.file_exists(&active_age)?;
+        let has_meta = chain.files.file_exists(&active_meta)?;
+        if !has_age && !has_meta {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
                 suggestion: None,
             });
         }
 
-        if ap.exists() {
-            fs::remove_file(&ap)
-                .map_err(|e| BackendError::Internal(format!("remove file age: {e}")))?;
+        if has_age {
+            chain.files.remove_file(&active_age)?;
         }
-        if mp.exists() {
-            fs::remove_file(&mp)
-                .map_err(|e| BackendError::Internal(format!("remove file meta: {e}")))?;
+        if has_meta {
+            chain.files.remove_file(&active_meta)?;
         }
+        chain.files.sync()?;
 
         Ok(())
     }
@@ -867,16 +1173,17 @@ impl FileBackend for LocalFileBackend {
             });
         };
         let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
-        self.recover_all_locked(vault)?;
-        let mp = file_meta_path(&self.store_path, vault, name)?;
-        if !mp.exists() {
+        self.recover_all_locked(&chain)?;
+        let stem = storage_stem(name)?;
+        let active_meta = format!("{stem}.meta.json");
+        let Some(metadata) = chain.files.read_file(&active_meta)? else {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
                 suggestion: None,
             });
-        }
-
-        read_file_meta(&mp)
+        };
+        serde_json::from_slice(&metadata)
+            .map_err(|error| BackendError::Internal(format!("parse file metadata: {error}")))
     }
 }
 
@@ -890,6 +1197,18 @@ mod tests {
 
     fn file_crash_hooks() -> &'static Mutex<HashMap<PathBuf, u8>> {
         static HOOKS: OnceLock<Mutex<HashMap<PathBuf, u8>>> = OnceLock::new();
+        HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    #[derive(Clone)]
+    struct FileSwapHook {
+        external: PathBuf,
+        parked: PathBuf,
+    }
+
+    fn file_swap_hooks() -> &'static Mutex<HashMap<(PathBuf, &'static str), FileSwapHook>> {
+        static HOOKS: OnceLock<Mutex<HashMap<(PathBuf, &'static str), FileSwapHook>>> =
+            OnceLock::new();
         HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
@@ -919,6 +1238,42 @@ mod tests {
             .lock()
             .unwrap()
             .insert(store_path.to_path_buf(), stage);
+    }
+
+    fn install_file_swap(store_path: &Path, stage: &'static str, external: &Path, parked: &Path) {
+        file_swap_hooks().lock().unwrap().insert(
+            (store_path.to_path_buf(), stage),
+            FileSwapHook {
+                external: external.to_path_buf(),
+                parked: parked.to_path_buf(),
+            },
+        );
+    }
+
+    pub(super) fn run_file_swap_hook(
+        store_path: &Path,
+        stage: &'static str,
+        files_dir: &Path,
+    ) -> Result<(), BackendError> {
+        let Some(hook) = file_swap_hooks()
+            .lock()
+            .unwrap()
+            .remove(&(store_path.to_path_buf(), stage))
+        else {
+            return Ok(());
+        };
+        fs::rename(files_dir, &hook.parked).map_err(|error| {
+            BackendError::Internal(format!("test park files directory: {error}"))
+        })?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&hook.external, files_dir).map_err(|error| {
+            BackendError::Internal(format!("test swap files directory: {error}"))
+        })?;
+        #[cfg(not(unix))]
+        return Err(BackendError::Internal(
+            "directory swap hook is Unix-only".into(),
+        ));
+        Ok(())
     }
 
     pub(super) fn run_file_crash_hook(store_path: &Path, stage: u8) -> Result<(), BackendError> {
@@ -1469,6 +1824,148 @@ mod tests {
             metadata: HashMap::from([("marker".into(), marker.into())]),
             tags: HashMap::from([("marker".into(), marker.into())]),
         }
+    }
+
+    #[cfg(unix)]
+    fn restore_swapped_files(files_dir: &Path, parked: &Path) {
+        fs::remove_file(files_dir).unwrap();
+        fs::rename(parked, files_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_remains_anchored_when_files_path_is_swapped_after_lock() {
+        let (backend, tmp) = test_file_backend();
+        backend
+            .upload_file(
+                "default",
+                upload_request("anchored.txt", b"original", "old"),
+                None,
+            )
+            .await
+            .unwrap();
+        let files_dir = tmp.path().join("vaults/default/files");
+        let parked = tmp.path().join("parked-files");
+        let external = tmp.path().join("external-files");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("sentinel"), b"external").unwrap();
+        let external_before = tree_snapshot(&external);
+        install_file_swap(
+            &backend.store_path,
+            "before-download-read",
+            &external,
+            &parked,
+        );
+
+        let bytes = backend
+            .download_file("default", "anchored.txt", None)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"original");
+        assert_eq!(tree_snapshot(&external), external_before);
+        restore_swapped_files(&files_dir, &parked);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn activation_remains_in_one_anchored_generation_when_files_path_is_swapped() {
+        let (backend, tmp) = test_file_backend();
+        backend
+            .upload_file(
+                "default",
+                upload_request("anchored.txt", b"old", "old"),
+                None,
+            )
+            .await
+            .unwrap();
+        let files_dir = tmp.path().join("vaults/default/files");
+        let parked = tmp.path().join("parked-files");
+        let external = tmp.path().join("external-files");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("sentinel"), b"external").unwrap();
+        let external_before = tree_snapshot(&external);
+        install_file_swap(
+            &backend.store_path,
+            "before-active-rename",
+            &external,
+            &parked,
+        );
+
+        backend
+            .upload_file(
+                "default",
+                upload_request("anchored.txt", b"new", "new"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tree_snapshot(&external), external_before);
+        assert!(fs::read_dir(parked.join(".transactions"))
+            .unwrap()
+            .next()
+            .is_none());
+        restore_swapped_files(&files_dir, &parked);
+        assert_eq!(
+            backend
+                .download_file("default", "anchored.txt", None)
+                .await
+                .unwrap(),
+            b"new"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recovery_remains_anchored_when_files_path_is_swapped() {
+        let (backend, tmp) = test_file_backend();
+        backend
+            .upload_file(
+                "default",
+                upload_request("anchored.txt", b"old", "old"),
+                None,
+            )
+            .await
+            .unwrap();
+        let identity = backend.identity.clone();
+        let recipients = backend.recipients.clone();
+        install_file_crash(&backend.store_path, 2);
+        backend
+            .upload_file(
+                "default",
+                upload_request("anchored.txt", b"partial", "partial"),
+                None,
+            )
+            .await
+            .expect_err("injected crash");
+        drop(backend);
+
+        let files_dir = tmp.path().join("vaults/default/files");
+        let parked = tmp.path().join("parked-files");
+        let external = tmp.path().join("external-files");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("sentinel"), b"external").unwrap();
+        let external_before = tree_snapshot(&external);
+        let restarted = LocalFileBackend::new(tmp.path().to_path_buf(), identity, recipients);
+        install_file_swap(&restarted.store_path, "before-recovery", &external, &parked);
+
+        let info = restarted
+            .get_file_info("default", "anchored.txt")
+            .await
+            .unwrap();
+        assert_eq!(info.metadata.get("marker").map(String::as_str), Some("old"));
+        assert_eq!(tree_snapshot(&external), external_before);
+        assert!(fs::read_dir(parked.join(".transactions"))
+            .unwrap()
+            .next()
+            .is_none());
+        restore_swapped_files(&files_dir, &parked);
+        assert_eq!(
+            restarted
+                .download_file("default", "anchored.txt", None)
+                .await
+                .unwrap(),
+            b"old"
+        );
     }
 
     #[tokio::test]

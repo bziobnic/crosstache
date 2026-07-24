@@ -188,3 +188,41 @@ test-first:
 - `cargo check --all-targets --all-features` — passed
 - `cargo fmt --all -- --check` — passed
 - `git diff --check` — passed
+
+## Fourth review remediation
+
+The post-lock path substitution and long-directory conflict findings were
+addressed test-first:
+
+- `LocalFileChain` now retains verified directory handles for the store,
+  vaults root, selected vault, files directory, and transaction root.
+- On Unix, including macOS, all post-validation file storage operations are
+  relative to those handles using no-follow `openat`, `mkdirat`, `renameat`,
+  `unlinkat`, and handle-backed directory iteration and sync. Recovery,
+  staging, backups, journal publication, activation, metadata/ciphertext
+  reads, listing, deletion, and cleanup no longer re-resolve the configured
+  filesystem path.
+- File encryption is produced in memory and written through the anchored
+  transaction handle; decryption consumes ciphertext read through the anchored
+  files handle. Anchored opens reject symlinks and non-regular file entries.
+- Deterministic barriers rename the verified files directory after locking and
+  replace its configured path with a symlink to a prepared external directory.
+  Download, active-pair replacement, and crash recovery remain entirely on the
+  original open generation. The external tree remains byte-for-byte unchanged
+  and transactions are never split between generations.
+- When a maximum-length key leaves no room for an in-directory conflict
+  suffix, suggestion generation now falls back deterministically to a valid
+  root-level filename. Preflight and no-policy upload preserve their conflict
+  contracts, keep existing bytes unchanged, and never degrade the conflict to
+  a validation error.
+
+### Final verification after fourth remediation
+
+- `cargo test --features ui web::files::tests --lib` — 21 passed
+- `cargo test --features ui backend::local::files::tests --lib` — 24 passed
+- `cargo test --features ui web:: --lib` — 166 passed
+- Hermetic `cargo test --features ui --lib` — 1086 passed, 1 ignored
+- `cargo clippy --all-targets --features ui -- -D warnings` — passed
+- `cargo check --all-targets --all-features` — passed
+- `cargo fmt --all -- --check` — passed
+- `git diff --check` — passed
