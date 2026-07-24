@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.29.0 — App UX modernization (2026-07-24)
+
+### Added
+
+- Added first-run desktop setup and actionable startup recovery for local,
+  Azure, and AWS backends, including safe previews, retry, configuration
+  access, and redacted diagnostics.
+- Added recoverable Trash and Undo workflows, typed secret editing, global
+  command search, structured filters, managed upload queues, and persistent
+  Settings and Help surfaces.
+- Added time-bounded reveal and clipboard protection, workspace-aware context,
+  hierarchical folders, and responsive stacked content layouts down to 390 px.
+
+### Changed
+
+- Reworked core secret and file workflows for keyboard and screen-reader use,
+  with modal focus management, ARIA tabs and trees, durable errors, explicit
+  operation status, and safer destructive confirmations.
+- Made navigation, vault switching, window closing, and setup application
+  respect dirty drafts and in-flight saves without silently losing work.
+
+### Fixed
+
+- Prevented stale asynchronous results from replacing newer workspace, list,
+  upload, setup, and protected-value state.
+- Preserved unreadable existing configuration during desktop setup and granted
+  the startup shell only its explicit Tauri command permissions.
+
 ## v0.28.0 — Web UI attachment links (2026-07-22)
 
 ### Added
