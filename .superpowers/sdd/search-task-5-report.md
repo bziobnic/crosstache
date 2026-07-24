@@ -25,6 +25,15 @@ Implemented the responsive content pattern for secret and file lists:
 - Built accessible control names from a hidden action verb plus the visible
   complete identifier, and linked visible priority metadata as the accessible
   description. No `aria-label` masks visible descendants.
+- Preserved focus across DOM replacement. Keyboard checkbox changes restore
+  focus to the replacement checkbox for the same exact item, so Tab continues
+  to the next logical item. Pointer or programmatic rerenders do not move focus
+  unless the replaced control actually owned `document.activeElement`.
+- Added an explicit breakpoint focus policy. Equivalent row activation and
+  selection controls map by surface, kind, and full item identity. Sort,
+  resizer, or unmatched surface focus falls back to the newly visible
+  programmatic surface region. Focus outside the disappearing content surface
+  remains untouched.
 - Hid the complete desktop table in stacked mode, removing its sort controls,
   columns, and resize separators from the accessibility tree and focus order.
 - Preserved loading, empty, filtered, and failed list states in both renderers.
@@ -59,6 +68,12 @@ Review remediation was also test-first:
 - Expanded state coverage found a critical axe violation where a failed-state
   `listitem` lacked a list parent. State content now uses ordinary semantics
   and loading skeletons are hidden from assistive technology.
+- The second review's focus tests failed before implementation: Space left
+  replacement secret and file checkboxes inactive, and 769→768 left the
+  replacement stacked activation inactive. Identity-marked controls and
+  surface-scoped focus capture/restore made both directions green, including
+  activation, checkbox, sort, resizer, fallback-region, and outside-focus
+  cases.
 
 ## Verification
 

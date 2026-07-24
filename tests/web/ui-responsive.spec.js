@@ -12,13 +12,17 @@ const nestedFolder = 'teams/platform/production';
 const longFileLeaf = `${'archive-'.repeat(13)}tail.txt`;
 const longFileName = `${nestedFolder}/${longFileLeaf}`;
 
-async function createLongSecret(page) {
+async function createSecret(page, name, folder = nestedFolder) {
   await page.locator('#new-secret').click();
   const form = page.locator('#secret-form');
-  await form.locator('input[name="name"]').fill(longName);
+  await form.locator('input[name="name"]').fill(name);
   await form.locator('textarea[name="value"]').fill('responsive value');
-  await form.locator('input[name="folder"]').fill(nestedFolder);
+  await form.locator('input[name="folder"]').fill(folder);
   await page.getByRole('button', { name: 'Create secret' }).click();
+}
+
+async function createLongSecret(page) {
+  await createSecret(page, longName);
 }
 
 async function expectNoHorizontalOverflow(page) {
@@ -61,6 +65,7 @@ for (const viewport of [
     await page.setViewportSize(viewport);
     await page.goto(baseURL);
     await createLongSecret(page);
+    await createSecret(page, 'zz-next-secret');
 
     const list = page.locator('#secrets-stacked');
     await expect(list).toBeVisible();
@@ -70,8 +75,10 @@ for (const viewport of [
     await expect(activation).toContainText(longName);
     await expect(activation).toHaveAccessibleDescription(new RegExp(`Folder: ${nestedFolder}`));
     await expect(activation.locator('..')).toContainText(nestedFolder);
-    expect(await activation.ariaSnapshot()).toContain(`button "Edit secret ${longName}"`);
-    await expect(page.locator('#secrets-stacked .stacked-identifier')).toHaveText(longName);
+    await expect.poll(() => activation.ariaSnapshot()).toContain(
+      `button "Edit secret ${longName}"`,
+    );
+    await expect(page.locator('#secrets-stacked .stacked-identifier').filter({ hasText: longName })).toHaveText(longName);
     await expectNoHorizontalOverflow(page);
     await expectNoSeriousOrCriticalAxeViolations(page);
 
@@ -89,6 +96,9 @@ for (const viewport of [
     await expect(checkbox).toBeFocused();
     await page.keyboard.press('Space');
     await expect(checkbox).toBeChecked();
+    await expect(checkbox).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('checkbox', { name: 'Select secret zz-next-secret', exact: true })).toBeFocused();
     await expectNoHorizontalOverflow(page);
   });
 }
@@ -97,6 +107,7 @@ test('stacked file rows preserve full paths and expose exactly one action in eit
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(baseURL);
   await uploadDirect(page);
+  await uploadDirect(page, { name: 'zz-next-file.txt' });
   await page.getByRole('tab', { name: 'Files' }).click();
   await page.getByRole('button', { name: 'Refresh files' }).click();
 
@@ -106,7 +117,7 @@ test('stacked file rows preserve full paths and expose exactly one action in eit
   await expect(download).toHaveAccessibleDescription(/Size: .* Type: text\/plain/);
   await expect(row.locator('button, a, input')).toHaveCount(1);
   await expect(page.locator('#files-stacked').getByRole('heading', { name: nestedFolder })).toHaveCount(1);
-  await expect(page.locator('#files-stacked .stacked-identifier')).toHaveText(longFileName);
+  await expect(page.locator('#files-stacked .stacked-identifier').filter({ hasText: longFileName })).toHaveText(longFileName);
   await expectNoHorizontalOverflow(page);
 
   await page.getByRole('button', { name: 'Select', exact: true }).click();
@@ -117,6 +128,12 @@ test('stacked file rows preserve full paths and expose exactly one action in eit
   await checkbox.focus();
   await page.keyboard.press('Space');
   await expect(checkbox).toBeChecked();
+  await expect(checkbox).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('checkbox', {
+    name: `Select file ${nestedFolder}/zz-next-file.txt`,
+    exact: true,
+  })).toBeFocused();
   await expectNoSeriousOrCriticalAxeViolations(page);
   await expectNoHorizontalOverflow(page);
 });
@@ -206,17 +223,64 @@ test('runtime breakpoint changes replace the complete semantic surface and focus
   await createLongSecret(page);
   await expect(page.locator('#secrets-table')).toBeVisible();
   await expect(page.locator('#secrets-table').getByRole('separator')).toHaveCount(4);
+  const desktopAction = page.getByRole('button', { name: `Edit secret ${longName}`, exact: true });
+  await desktopAction.focus();
+  await expect(desktopAction).toBeFocused();
 
   await page.setViewportSize({ width: 768, height: 700 });
   await expect(page.locator('#secrets-table')).toBeHidden();
   await expect(page.locator('#secrets-table').getByRole('separator')).toHaveCount(0);
   await expect(page.locator('#secrets-table').getByRole('button')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: `Edit secret ${longName}`, exact: true })).toBeVisible();
+  const stackedAction = page.getByRole('button', { name: `Edit secret ${longName}`, exact: true });
+  await expect(stackedAction).toBeVisible();
+  await expect(stackedAction).toBeFocused();
 
   await page.setViewportSize({ width: 769, height: 700 });
   await expect(page.locator('#secrets-table')).toBeVisible();
   await expect(page.locator('#secrets-stacked')).toBeHidden();
   await expect(page.locator('#secrets-table').getByRole('separator')).toHaveCount(4);
+  await expect(desktopAction).toBeFocused();
+
+  const sort = page.locator('#secrets-table th[data-sort-key="name"] .sort-button');
+  await sort.focus();
+  await page.setViewportSize({ width: 768, height: 700 });
+  await expect(page.locator('#secrets-stacked')).toBeFocused();
+  await page.setViewportSize({ width: 769, height: 700 });
+  await expect(page.locator('#secrets-table')).toBeFocused();
+
+  const resizer = page.locator('#secrets-table').getByRole('separator').first();
+  await resizer.focus();
+  await page.setViewportSize({ width: 768, height: 700 });
+  await expect(page.locator('#secrets-stacked')).toBeFocused();
+  expect(await page.evaluate(() => document.activeElement?.hidden)).toBeFalsy();
+
+  await page.setViewportSize({ width: 769, height: 700 });
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  const tableCheckbox = page.locator('#secrets-table').getByRole('checkbox', {
+    name: `Select secret ${longName}`,
+    exact: true,
+  });
+  await tableCheckbox.focus();
+  await page.setViewportSize({ width: 768, height: 700 });
+  const stackedCheckbox = page.locator('#secrets-stacked').getByRole('checkbox', {
+    name: `Select secret ${longName}`,
+    exact: true,
+  });
+  await expect(stackedCheckbox).toBeFocused();
+  await page.setViewportSize({ width: 769, height: 700 });
+  await expect(tableCheckbox).toBeFocused();
+  await tableCheckbox.click();
+  await expect(tableCheckbox).toBeFocused();
+
+  await page.locator('#refresh-secrets').focus();
+  await tableCheckbox.evaluate((control) => {
+    control.checked = !control.checked;
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await expect(page.locator('#refresh-secrets')).toBeFocused();
+  await page.setViewportSize({ width: 768, height: 700 });
+  await expect(page.locator('#refresh-secrets')).toBeFocused();
+  await expectNoSeriousOrCriticalAxeViolations(page);
 });
 
 test('sheets fill the viewport below 544px', async ({ page, baseURL }) => {

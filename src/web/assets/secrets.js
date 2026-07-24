@@ -810,13 +810,63 @@ function syncContentSurfaces(kind) {
   stacked.hidden = tableMode;
 }
 
+function contentSurface(kind, mode = responsiveContentMode) {
+  return $(`#${kind}-${mode === 'table' ? 'table' : 'stacked'}`);
+}
+
+function markContentControl(control, kind, id, type) {
+  control.dataset.contentKind = kind;
+  control.dataset.contentId = id;
+  control.dataset.contentControl = type;
+  return control;
+}
+
+function findContentControl(kind, id, type, mode = responsiveContentMode) {
+  if (!id) return null;
+  return [...contentSurface(kind, mode).querySelectorAll('[data-content-id]')]
+    .find((control) => (
+      control.dataset.contentId === id
+      && control.dataset.contentControl === type
+    )) || null;
+}
+
+function captureResponsiveFocus(mode) {
+  const active = document.activeElement;
+  for (const kind of ['secrets', 'files']) {
+    const surface = contentSurface(kind, mode);
+    if (!surface.contains(active)) continue;
+    const owner = active.closest?.('[data-content-id]');
+    return {
+      kind,
+      id: owner?.dataset.contentId || '',
+      control: owner?.dataset.contentControl || '',
+    };
+  }
+  return null;
+}
+
+function restoreResponsiveFocus(snapshot, mode) {
+  if (!snapshot) return;
+  const state = selectionState(snapshot.kind);
+  const preferred = state.enabled ? 'selection' : 'activation';
+  const target = findContentControl(
+    snapshot.kind,
+    snapshot.id,
+    snapshot.control || preferred,
+    mode,
+  ) || findContentControl(snapshot.kind, snapshot.id, preferred, mode);
+  (target || contentSurface(snapshot.kind, mode)).focus({ preventScroll: true });
+}
+
 function refreshResponsiveContentMode() {
   const next = XvUiModel.contentMode(Number(responsiveWindow.innerWidth) || 1024);
   if (next === responsiveContentMode) return;
+  const focus = captureResponsiveFocus(responsiveContentMode);
   responsiveContentMode = next;
-  for (const kind of ['secrets', 'files']) syncContentSurfaces(kind);
   if (secretsState === 'ready') renderSecrets();
   if (filesState === 'ready') renderFiles();
+  for (const kind of ['secrets', 'files']) syncContentSurfaces(kind);
+  restoreResponsiveFocus(focus, next);
 }
 
 function initResponsiveContent() {
@@ -1039,12 +1089,17 @@ function selectionCell(kind, id) {
   checkbox.checked = state.ids.has(id);
   checkbox.disabled = state.pending;
   checkbox.setAttribute('aria-label', `Select ${kind === 'secrets' ? 'secret' : 'file'} ${id}`);
+  markContentControl(checkbox, kind, id, 'selection');
   checkbox.onclick = (e) => e.stopPropagation();
   checkbox.onchange = () => {
+    const restoreFocus = document.activeElement === checkbox;
     if (checkbox.checked) state.ids.add(id);
     else state.ids.delete(id);
     resetBulkConfirmation(kind);
     renderSelectionKind(kind);
+    if (restoreFocus) {
+      findContentControl(kind, id, 'selection')?.focus({ preventScroll: true });
+    }
   };
   td.onclick = (e) => e.stopPropagation();
   td.appendChild(checkbox);
@@ -2067,6 +2122,8 @@ function secretRow(row) {
       const actionLabel = secretSelection.enabled ? `Select secret ${name}` : `Edit secret ${name}`;
       const nameCell = itemNameCell('secret', name, activate, actionLabel);
       nameCell.classList.add('column-secret-name');
+      const action = nameCell.querySelector('button');
+      if (action) markContentControl(action, 'secrets', name, 'activation');
       tr.appendChild(nameCell);
       continue;
     }
@@ -2127,6 +2184,7 @@ function stackedActivation(kind, row, ids) {
   activation.className = `stacked-activation ${kind === 'files' ? 'file-link' : ''}`;
   activation.setAttribute('aria-labelledby', `${ids.action} ${ids.identifier}`);
   activation.setAttribute('aria-describedby', ids.metadata);
+  markContentControl(activation, kind, row.identifier, 'activation');
   if (activation.tagName === 'BUTTON') activation.type = 'button';
   const action = document.createElement('span');
   action.className = 'sr-only';
@@ -3405,7 +3463,10 @@ function fileRow(row) {
   if (fileSelection.enabled) tr.appendChild(selectionCell('files', name));
   for (const [index, cell] of [f.name, fmtSize(f.size), f.content_type, XvUiModel.formatDate(f.last_modified)].entries()) {
     if (index === 0) {
-      tr.appendChild(fileNameCell(name));
+      const nameCell = fileNameCell(name);
+      const action = nameCell.querySelector('a, button');
+      if (action) markContentControl(action, 'files', name, 'activation');
+      tr.appendChild(nameCell);
       continue;
     }
     const td = document.createElement('td');
