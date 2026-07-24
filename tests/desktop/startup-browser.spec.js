@@ -22,6 +22,7 @@ const mockScript = (snapshot) => `
   window.__mockTauri = {
     snapshot: ${JSON.stringify(snapshot)},
     calls: [],
+    emitted: [],
     listeners: new Map(),
     unlistenCount: 0,
     previewMode: 'auto',
@@ -85,6 +86,9 @@ const mockScript = (snapshot) => `
           window.__mockTauri.listeners.delete(event);
           window.__mockTauri.unlistenCount += 1;
         };
+      },
+      emit: async (event, payload) => {
+        window.__mockTauri.emitted.push({ event, payload });
       },
     },
   };
@@ -193,7 +197,7 @@ test('mounted setup flow owns stale work and sends only provider allowlisted fie
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
   await page.evaluate(() => window.dispatchEvent(new Event('beforeunload')));
-  expect(await page.evaluate(() => window.__mockTauri.unlistenCount)).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__mockTauri.unlistenCount)).toBe(2);
 });
 
 test('desktop capability grants only the registered startup command surface', async () => {
@@ -214,6 +218,28 @@ test('desktop capability grants only the registered startup command surface', as
     expect(buildScript).toContain(`"${command}"`);
     expect(capability.permissions).toContain(`allow-${command.replaceAll('_', '-')}`);
   }
+});
+
+test('mounted loading shell approves native close requests and cleans up its listener', async ({ page }) => {
+  await boot(page, { kind: 'loading-configuration' });
+  await expect.poll(() => page.evaluate(
+    () => window.__mockTauri.listeners.has('xv://window-close-requested'),
+  )).toBe(true);
+
+  await page.evaluate(() =>
+    window.__mockTauri.listeners.get('xv://window-close-requested')({
+      event: 'xv://window-close-requested',
+      id: 2,
+      payload: null,
+    }));
+  expect(await page.evaluate(() => window.__mockTauri.emitted)).toEqual([
+    { event: 'xv://window-close-approved', payload: null },
+  ]);
+
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeunload')));
+  await expect.poll(() => page.evaluate(
+    () => window.__mockTauri.listeners.has('xv://window-close-requested'),
+  )).toBe(false);
 });
 
 test('mounted recovery runs native actions, Retry, CLI disclosure, and cleanup', async ({ page }) => {
@@ -263,5 +289,5 @@ test('mounted recovery runs native actions, Retry, CLI disclosure, and cleanup',
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
   await page.evaluate(() => window.dispatchEvent(new Event('beforeunload')));
-  expect(await page.evaluate(() => window.__mockTauri.unlistenCount)).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__mockTauri.unlistenCount)).toBe(2);
 });

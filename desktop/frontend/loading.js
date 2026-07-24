@@ -450,6 +450,10 @@ export const mountBrowser = () => {
       return internals.invoke('plugin:event|unlisten', { event, eventId });
     };
   };
+  const emit = (event, payload = null) => {
+    if (globalTauri?.event?.emit) return globalTauri.event.emit(event, payload);
+    return internals.invoke('plugin:event|emit', { event, payload });
+  };
   const workflow = createStartupWorkflow({
     invoke,
     listen,
@@ -458,6 +462,10 @@ export const mountBrowser = () => {
       root.querySelector('h1')?.focus();
     },
   });
+  const stopCloseListener = listen(
+    'xv://window-close-requested',
+    () => emit('xv://window-close-approved'),
+  ).catch(() => null);
 
   const showFormError = (form, error) => {
     form.querySelector('[data-form-status]').textContent =
@@ -564,7 +572,10 @@ export const mountBrowser = () => {
       button.textContent = help.hidden ? 'Show CLI' : 'Hide CLI';
     }
   });
-  window.addEventListener('beforeunload', () => workflow.stop(), { once: true });
+  window.addEventListener('beforeunload', () => {
+    workflow.stop();
+    stopCloseListener.then((stop) => stop?.());
+  }, { once: true });
   workflow.start().catch((error) => root.replaceChildren(document.createTextNode(safeError(error).message)));
   return workflow;
 };
