@@ -8,7 +8,7 @@
 #![allow(deprecated)] // aws-smithy-mocks-experimental is deprecated but still functional
 
 use aws_sdk_secretsmanager::Client;
-use aws_smithy_mocks_experimental::{mock, mock_client, RuleMode};
+use aws_smithy_mocks_experimental::{mock, RuleMode};
 use aws_smithy_runtime_api::client::http::{
     HttpClient, HttpConnector, HttpConnectorFuture, HttpConnectorSettings, SharedHttpConnector,
 };
@@ -53,6 +53,13 @@ impl HttpClient for MockHttpClient {
     ) -> SharedHttpConnector {
         SharedHttpConnector::new(MockHttpClient)
     }
+}
+
+macro_rules! mock_client {
+    ($aws_crate:ident, $mode:expr, $rules:expr) => {
+        aws_smithy_mocks_experimental::mock_client!($aws_crate, $mode, $rules, |builder| builder
+            .http_client(MockHttpClient))
+    };
 }
 
 /// Build an `AwsSecretBackend` directly around a mock client.
@@ -301,12 +308,7 @@ async fn get_secret_not_found_maps_to_backend_not_found() {
         secrets_manager_error_response("ResourceNotFoundException", "Secret not found")
     });
 
-    let client = mock_client!(
-        aws_sdk_secretsmanager,
-        RuleMode::MatchAny,
-        &[&rule],
-        |builder| builder.http_client(MockHttpClient)
-    );
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::MatchAny, &[&rule]);
     let backend = aws_secret_backend(client);
 
     let result = backend
@@ -426,12 +428,7 @@ async fn secret_exists_false_on_not_found() {
         secrets_manager_error_response("ResourceNotFoundException", "not found")
     });
 
-    let client = mock_client!(
-        aws_sdk_secretsmanager,
-        RuleMode::MatchAny,
-        &[&rule],
-        |builder| builder.http_client(MockHttpClient)
-    );
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::MatchAny, &[&rule]);
     let backend = aws_secret_backend(client);
 
     assert!(!backend.secret_exists("myproj-kv", "missing").await.unwrap());
@@ -473,8 +470,7 @@ async fn set_secret_update_path_when_already_exists() {
             &update_secret_mock,
             &describe,
             &tag
-        ],
-        |builder| builder.http_client(MockHttpClient)
+        ]
     );
     let backend = aws_secret_backend(client);
 
@@ -950,12 +946,7 @@ async fn get_vault_returns_vault_not_found_when_marker_missing() {
     let rule = mock!(Client::describe_secret).then_http_response(|| {
         secrets_manager_error_response("ResourceNotFoundException", "not found")
     });
-    let client = mock_client!(
-        aws_sdk_secretsmanager,
-        RuleMode::MatchAny,
-        &[&rule],
-        |builder| builder.http_client(MockHttpClient)
-    );
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::MatchAny, &[&rule]);
     let backend = aws_vault_backend(client);
 
     let err = backend.get_vault("missing-vault", None).await.unwrap_err();
@@ -1225,12 +1216,7 @@ async fn native_rotate_not_found_maps_to_backend_not_found() {
         secrets_manager_error_response("ResourceNotFoundException", "Secret not found")
     });
 
-    let client = mock_client!(
-        aws_sdk_secretsmanager,
-        RuleMode::MatchAny,
-        &[&rule],
-        |builder| builder.http_client(MockHttpClient)
-    );
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::MatchAny, &[&rule]);
     let backend = aws_secret_backend(client);
 
     let result = backend.native_rotate("myproj-kv", "missing-secret").await;
@@ -1254,12 +1240,7 @@ async fn native_rotate_without_lambda_explains_how_to_configure_one() {
         )
     });
 
-    let client = mock_client!(
-        aws_sdk_secretsmanager,
-        RuleMode::MatchAny,
-        &[&rule],
-        |builder| builder.http_client(MockHttpClient)
-    );
+    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::MatchAny, &[&rule]);
     let backend = aws_secret_backend(client);
 
     let result = backend.native_rotate("myproj-kv", "db-password").await;

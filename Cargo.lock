@@ -1995,6 +1995,7 @@ dependencies = [
  "aws-sdk-cloudtrail",
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
+ "aws-smithy-http-client",
  "aws-smithy-mocks-experimental",
  "aws-smithy-runtime-api",
  "axum",
