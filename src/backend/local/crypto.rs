@@ -18,6 +18,17 @@ use zeroize::Zeroizing;
 
 use crate::backend::error::BackendError;
 
+#[cfg(test)]
+thread_local! {
+    static DECRYPTED_ALLOCATION: std::cell::Cell<Option<(usize, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_decrypted_allocation() -> Option<(usize, usize)> {
+    DECRYPTED_ALLOCATION.take()
+}
+
 /// Encrypt `plaintext` and write the ciphertext to `path`.
 pub fn encrypt_to_file(
     path: &Path,
@@ -171,7 +182,20 @@ pub fn decrypt_from_reader<R: Read>(
     decrypted
         .read_to_end(&mut plaintext)
         .map_err(|e| BackendError::Internal(format!("read plaintext: {e}")))?;
+    #[cfg(test)]
+    {
+        DECRYPTED_ALLOCATION.set(Some((plaintext.as_ptr() as usize, plaintext.capacity())));
+    }
     Ok(plaintext)
+}
+
+/// Move plaintext out of its zeroizing guard without copying its allocation.
+///
+/// The caller should keep the emptied guard in scope until the returned vector
+/// is ready to be returned. Any early error before this point still drops and
+/// zeroizes the populated guard.
+pub(crate) fn take_plaintext_allocation(plaintext: &mut Zeroizing<Vec<u8>>) -> Vec<u8> {
+    std::mem::take(&mut **plaintext)
 }
 
 /// Read and decrypt the age file at `path`, returning the plaintext as a
@@ -418,6 +442,18 @@ mod tests {
         encrypt_to_file(&secret_file, b"", &recipients).unwrap();
         let decrypted = decrypt_from_file(&secret_file, &identity).unwrap();
         assert_eq!(&*decrypted, "");
+    }
+
+    #[test]
+    fn taking_plaintext_allocation_moves_capacity_and_empties_guard() {
+        let mut guarded = Zeroizing::new(vec![0x5a; 1024]);
+        let pointer = guarded.as_ptr();
+        let capacity = guarded.capacity();
+        let plaintext = take_plaintext_allocation(&mut guarded);
+        assert!(guarded.is_empty());
+        assert_eq!(guarded.capacity(), 0);
+        assert_eq!(plaintext.as_ptr(), pointer);
+        assert_eq!(plaintext.capacity(), capacity);
     }
 
     #[cfg(unix)]

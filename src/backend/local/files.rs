@@ -132,6 +132,16 @@ struct AnchoredDir {
     display: PathBuf,
 }
 
+#[cfg(unix)]
+#[derive(Debug)]
+struct StableSymlink {
+    target: std::ffi::OsString,
+    uid: libc::uid_t,
+    mode: u32,
+    parent_uid: libc::uid_t,
+    parent_mode: u32,
+}
+
 impl AnchoredDir {
     fn open_path(path: &Path) -> Result<Self, BackendError> {
         #[cfg(unix)]
@@ -214,6 +224,94 @@ impl AnchoredDir {
                 ))),
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn read_stable_symlink(&self, name: &str) -> Result<Option<StableSymlink>, BackendError> {
+        use std::ffi::{CString, OsString};
+        use std::mem::MaybeUninit;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::MetadataExt;
+
+        validate_relative_component(name)?;
+        let name = CString::new(name)
+            .map_err(|_| BackendError::Internal("symlink name contains NUL".into()))?;
+        let inspect = || -> Result<Option<libc::stat>, BackendError> {
+            let mut stat = MaybeUninit::<libc::stat>::uninit();
+            let result = unsafe {
+                libc::fstatat(
+                    self.file.as_raw_fd(),
+                    name.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(BackendError::Internal(format!(
+                    "inspect anchored symlink: {error}"
+                )));
+            }
+            Ok(Some(unsafe { stat.assume_init() }))
+        };
+
+        let Some(before) = inspect()? else {
+            return Ok(None);
+        };
+        if before.st_mode & libc::S_IFMT != libc::S_IFLNK {
+            return Ok(None);
+        }
+        let parent = self.file.metadata().map_err(|error| {
+            BackendError::Internal(format!("inspect symlink parent handle: {error}"))
+        })?;
+        let mut bytes = vec![0_u8; 4096];
+        let length = unsafe {
+            libc::readlinkat(
+                self.file.as_raw_fd(),
+                name.as_ptr(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+            )
+        };
+        if length < 0 {
+            return Err(BackendError::Internal(format!(
+                "read anchored symlink: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let length = usize::try_from(length)
+            .map_err(|_| BackendError::Internal("invalid symlink length".into()))?;
+        if length == bytes.len() {
+            return Err(BackendError::Internal(
+                "configured-store symlink target is too long".into(),
+            ));
+        }
+        bytes.truncate(length);
+        #[cfg(test)]
+        tests::run_configured_link_swap_hook(&self.display.join(name.to_string_lossy().as_ref()))?;
+        let after = inspect()?.ok_or_else(|| {
+            BackendError::Internal("configured-store symlink changed during inspection".into())
+        })?;
+        if before.st_dev != after.st_dev
+            || before.st_ino != after.st_ino
+            || before.st_uid != after.st_uid
+            || before.st_mode != after.st_mode
+        {
+            return Err(BackendError::Internal(
+                "configured-store symlink changed during inspection".into(),
+            ));
+        }
+        Ok(Some(StableSymlink {
+            target: OsString::from_vec(bytes),
+            uid: before.st_uid,
+            mode: u32::from(before.st_mode),
+            parent_uid: parent.uid(),
+            parent_mode: parent.mode(),
+        }))
     }
 
     fn open_or_create_private_dir(&self, name: &str) -> Result<Self, BackendError> {
@@ -566,60 +664,6 @@ fn local_file_chain_paths(store_path: &Path, vault: &str) -> Result<[PathBuf; 4]
     ])
 }
 
-#[cfg(unix)]
-fn resolve_trusted_system_symlinks(path: &Path) -> Result<PathBuf, BackendError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| BackendError::Internal(format!("resolve current directory: {error}")))?
-            .join(path)
-    };
-    let mut resolved = PathBuf::from("/");
-    let mut tail = Vec::new();
-    let mut components = absolute.components();
-    let _ = components.next();
-    for component in components {
-        if !tail.is_empty() {
-            tail.push(component.as_os_str().to_os_string());
-            continue;
-        }
-        let candidate = resolved.join(component.as_os_str());
-        match fs::symlink_metadata(&candidate) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                if metadata.uid() == 0 && metadata.mode() & 0o022 == 0 {
-                    resolved = candidate.canonicalize().map_err(|error| {
-                        BackendError::Internal(format!(
-                            "resolve trusted system symlink {}: {error}",
-                            candidate.display()
-                        ))
-                    })?;
-                } else {
-                    return Err(BackendError::Internal(format!(
-                        "refusing unsafe configured-store symlink {}",
-                        candidate.display()
-                    )));
-                }
-            }
-            Ok(_) => resolved.push(component.as_os_str()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                tail.push(component.as_os_str().to_os_string());
-            }
-            Err(error) => {
-                return Err(BackendError::Internal(format!(
-                    "inspect configured store component: {error}"
-                )))
-            }
-        }
-    }
-    for component in tail {
-        resolved.push(component);
-    }
-    Ok(resolved)
-}
-
 fn open_configured_store(
     store_path: &Path,
     create: bool,
@@ -637,14 +681,13 @@ fn open_configured_store(
                 })?
                 .join(store_path)
         };
-        let resolved = resolve_trusted_system_symlinks(store_path)?;
-        let mut components = resolved.components();
+        let mut components = logical.components();
         if !matches!(components.next(), Some(Component::RootDir)) {
             return Err(BackendError::Internal(
                 "configured store did not resolve to an absolute path".into(),
             ));
         }
-        let names = components
+        let mut names = components
             .map(|component| match component {
                 Component::Normal(name) => name.to_str().map(str::to_string).ok_or_else(|| {
                     BackendError::Internal("configured store component is not UTF-8".into())
@@ -655,8 +698,43 @@ fn open_configured_store(
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut directory = AnchoredDir::open_path(Path::new("/"))?;
+        if let Some(alias) = names.first() {
+            if let Some(link) = directory.read_stable_symlink(alias)? {
+                let expected = match alias.as_str() {
+                    "var" => Some("private/var"),
+                    "tmp" => Some("private/tmp"),
+                    _ => None,
+                };
+                let target = link.target.to_str();
+                let trusted = cfg!(target_os = "macos")
+                    && expected == target
+                    && link.uid == 0
+                    && link.mode & 0o022 == 0
+                    && link.parent_uid == 0
+                    && link.parent_mode & 0o022 == 0;
+                if !trusted {
+                    return Err(BackendError::Internal(format!(
+                        "refusing unsafe configured-store symlink /{alias}"
+                    )));
+                }
+                let mut expanded = target
+                    .expect("trusted target is present")
+                    .split('/')
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                expanded.extend(names.into_iter().skip(1));
+                names = expanded;
+            }
+        }
         for (index, name) in names.iter().enumerate() {
             let final_component = index + 1 == names.len();
+            if directory.read_stable_symlink(name)?.is_some() {
+                return Err(BackendError::Internal(format!(
+                    "refusing unsafe configured-store symlink {}/{}",
+                    directory.display.display(),
+                    name
+                )));
+            }
             directory = match directory.open_dir(name)? {
                 Some(next) => next,
                 None if create && final_component => {
@@ -1190,7 +1268,10 @@ impl FileBackend for LocalFileBackend {
                 suggestion: None,
             });
         };
-        Ok(crypto::decrypt_from_reader(ciphertext, &self.identity)?.to_vec())
+        let mut plaintext = crypto::decrypt_from_reader(ciphertext, &self.identity)?;
+        let output = crypto::take_plaintext_allocation(&mut plaintext);
+        debug_assert!(plaintext.is_empty());
+        Ok(output)
     }
 
     async fn list_files(
@@ -1326,6 +1407,30 @@ mod tests {
         static HOOKS: OnceLock<Mutex<HashMap<(PathBuf, &'static str), FileSwapHook>>> =
             OnceLock::new();
         HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn configured_link_swap_hooks() -> &'static Mutex<HashMap<PathBuf, PathBuf>> {
+        static HOOKS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+        HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    #[cfg(unix)]
+    fn install_configured_link_swap(link: &Path, replacement: &Path) {
+        configured_link_swap_hooks()
+            .lock()
+            .unwrap()
+            .insert(link.to_path_buf(), replacement.to_path_buf());
+    }
+
+    #[cfg(unix)]
+    pub(super) fn run_configured_link_swap_hook(link: &Path) -> Result<(), BackendError> {
+        let Some(replacement) = configured_link_swap_hooks().lock().unwrap().remove(link) else {
+            return Ok(());
+        };
+        fs::remove_file(link)
+            .map_err(|error| BackendError::Internal(format!("test remove symlink: {error}")))?;
+        std::os::unix::fs::symlink(replacement, link)
+            .map_err(|error| BackendError::Internal(format!("test replace symlink: {error}")))
     }
 
     fn file_events() -> &'static Mutex<Vec<(String, PathBuf)>> {
@@ -2622,6 +2727,32 @@ mod tests {
         assert_eq!(tree_snapshot(&external), before);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn retained_parent_symlink_inspection_rejects_an_inode_swap() {
+        let tmp = TempDir::new().unwrap();
+        let first = tmp.path().join("first");
+        let replacement = tmp.path().join("replacement");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(first.join("sentinel"), b"first").unwrap();
+        fs::write(replacement.join("sentinel"), b"replacement").unwrap();
+        let first_before = tree_snapshot(&first);
+        let replacement_before = tree_snapshot(&replacement);
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+        let parent = AnchoredDir::open_path(tmp.path()).unwrap();
+        install_configured_link_swap(&link, &replacement);
+
+        let error = parent
+            .read_stable_symlink("link")
+            .expect_err("a replaced symlink inode must fail closed");
+        assert!(matches!(error, BackendError::Internal(message)
+                if message.contains("changed during inspection")));
+        assert_eq!(tree_snapshot(&first), first_before);
+        assert_eq!(tree_snapshot(&replacement), replacement_before);
+    }
+
     #[tokio::test]
     async fn large_file_replacement_streams_ciphertext_and_backups_in_bounded_chunks() {
         let _guard = file_event_test_lock().lock().await;
@@ -2675,6 +2806,37 @@ mod tests {
             "ciphertext must not be materialized by read_file: {:?}",
             stats.full_reads
         );
+    }
+
+    #[tokio::test]
+    async fn large_download_transfers_the_zeroizing_plaintext_allocation_without_cloning() {
+        let _guard = file_event_test_lock().lock().await;
+        let (backend, _tmp) = test_file_backend();
+        let bytes = vec![0x5c; 100 * 1024 * 1024];
+        backend
+            .upload_file(
+                "default",
+                FileUploadRequest {
+                    name: "hundred-megabytes.bin".into(),
+                    content: bytes,
+                    content_type: None,
+                    groups: Vec::new(),
+                    metadata: HashMap::new(),
+                    tags: HashMap::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let downloaded = backend
+            .download_file("default", "hundred-megabytes.bin", None)
+            .await
+            .unwrap();
+        let decrypted = crypto::take_decrypted_allocation().expect("decrypted allocation");
+        assert_eq!(downloaded.len(), 100 * 1024 * 1024);
+        assert_eq!(downloaded.as_ptr() as usize, decrypted.0);
+        assert_eq!(downloaded.capacity(), decrypted.1);
     }
 
     #[cfg(unix)]

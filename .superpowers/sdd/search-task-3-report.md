@@ -268,3 +268,43 @@ amplification, and attachment authorization findings were addressed test-first:
   host-clipboard integration test because this environment returned an empty
   clipboard immediately after setting it. The isolated clipboard rerun failed
   identically; it is unrelated to local file storage.
+
+## Sixth review remediation
+
+The trusted-link race and final download allocation findings were addressed
+test-first:
+
+- Configured-store traversal no longer performs path-based
+  `symlink_metadata`/`canonicalize` resolution. Unix traversal retains the
+  parent directory handle, inspects a candidate link with
+  `fstatat(AT_SYMLINK_NOFOLLOW)`, reads it with `readlinkat`, and rechecks the
+  same device/inode, owner, and mode before using the captured target.
+- Production permits only the standard macOS root aliases
+  `/var -> private/var` and `/tmp -> private/tmp`, and only when the link and
+  retained root parent are root-owned and not group/world writable. Every
+  captured target component is subsequently opened through no-follow
+  directory handles. All other intermediate links fail closed.
+- A deterministic barrier replaces a link inode after `readlinkat` but before
+  revalidation. Inspection rejects the changed inode and leaves both prepared
+  target trees byte-for-byte unchanged; a later replacement cannot redirect
+  work because traversal does not follow the link after inspection.
+- Successful file decryption now transfers the `Vec` allocation out of its
+  `Zeroizing` guard with `mem::take` rather than cloning it. The populated guard
+  remains responsible for zeroization on every error path, while the successful
+  guard is empty before it drops.
+- A unit regression proves pointer/capacity preservation and an empty source
+  guard. A 100 MiB upload/download regression observes the decryption
+  allocation and proves the returned download owns that exact pointer and
+  capacity.
+
+### Final verification after sixth remediation
+
+- `cargo test --features ui backend::local::files::tests --lib -- --test-threads=1`
+  — 30 passed
+- `cargo test --features ui web::files::tests --lib` — 21 passed
+- `cargo test --features ui web:: --lib` — 166 passed
+- Hermetic `cargo test --features ui --lib` — 1093 passed, 1 ignored
+- `cargo clippy --features ui --all-targets -- -D warnings` — passed
+- `cargo check --all-targets --all-features` — passed
+- `cargo fmt --all -- --check` — passed
+- `git diff --check` — passed
