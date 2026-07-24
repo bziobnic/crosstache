@@ -1,9 +1,12 @@
 //! Upload preflight and conflict-safe file operations for the web API.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Multipart, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Multipart, Query, Request, State};
+use axum::http::{header, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,12 +20,15 @@ use super::errors::ApiErrorBody;
 use super::WebState;
 
 pub(crate) const MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
+pub(crate) const MAX_MULTIPART_ENVELOPE_BYTES: usize = MAX_UPLOAD_BYTES as usize + 64 * 1024;
 pub(crate) const MAX_PREFLIGHT_BODY_BYTES: usize = 512 * 1024;
 const MAX_CANDIDATES: usize = 1000;
 const MAX_CLIENT_ID_BYTES: usize = 256;
 const MAX_NAME_BYTES: usize = 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 256;
 const MAX_DESTINATION_BYTES: usize = 1024;
+const MAX_SUGGESTION_ATTEMPTS: usize = 100;
+const MAX_PREFLIGHT_METADATA_LOOKUPS: usize = 2000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +109,38 @@ fn invalid(message: &'static str, field: &'static str) -> ApiError {
     super::api::validation_error(StatusCode::BAD_REQUEST, message, Some(field))
 }
 
+fn validate_upload_size(size: u64) -> Result<(), ApiError> {
+    if size > MAX_UPLOAD_BYTES {
+        return Err(super::api::validation_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "The upload is too large.",
+            Some("file"),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn enforce_upload_envelope(
+    request: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    if request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > MAX_MULTIPART_ENVELOPE_BYTES)
+    {
+        return Err(super::api::validation_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "The upload request is too large.",
+            Some("file"),
+        )
+        .into_response());
+    }
+    Ok(next.run(request).await)
+}
+
 fn file_conflict(name: &str, suggested_name: Option<String>) -> ApiError {
     ApiError::Structured {
         status: StatusCode::CONFLICT,
@@ -135,10 +173,18 @@ fn validate_candidate(candidate: &UploadCandidate) -> Result<String, ApiError> {
             "client_id",
         ));
     }
-    if candidate.content_type.len() > MAX_CONTENT_TYPE_BYTES {
-        return Err(invalid("The content type is too long.", "content_type"));
-    }
+    validate_content_type(&candidate.content_type)?;
     destination_name(&candidate.destination, &candidate.name)
+}
+
+fn validate_content_type(content_type: &str) -> Result<(), ApiError> {
+    if content_type.is_empty()
+        || content_type.len() > MAX_CONTENT_TYPE_BYTES
+        || content_type.parse::<mime_guess::Mime>().is_err()
+    {
+        return Err(invalid("Provide a valid content type.", "content_type"));
+    }
+    Ok(())
 }
 
 fn renamed_name(name: &str, number: usize) -> String {
@@ -161,9 +207,50 @@ async fn exists(files: &dyn FileBackend, vault: &str, name: &str) -> Result<bool
 }
 
 async fn suggestion(files: &dyn FileBackend, vault: &str, name: &str) -> Result<String, ApiError> {
-    for number in 2..=10_001 {
+    for number in 2..(2 + MAX_SUGGESTION_ATTEMPTS) {
         let candidate = renamed_name(name, number);
         if !exists(files, vault, &candidate).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(invalid(
+        "No available rename suggestion could be found.",
+        "name",
+    ))
+}
+
+async fn exists_cached(
+    files: &dyn FileBackend,
+    vault: &str,
+    name: &str,
+    cache: &mut HashMap<String, bool>,
+    lookup_count: &mut usize,
+) -> Result<bool, ApiError> {
+    if let Some(exists) = cache.get(name) {
+        return Ok(*exists);
+    }
+    if *lookup_count >= MAX_PREFLIGHT_METADATA_LOOKUPS {
+        return Err(invalid(
+            "The upload preflight requires too many conflict checks.",
+            "files",
+        ));
+    }
+    *lookup_count += 1;
+    let destination_exists = exists(files, vault, name).await?;
+    cache.insert(name.to_string(), destination_exists);
+    Ok(destination_exists)
+}
+
+async fn suggestion_cached(
+    files: &dyn FileBackend,
+    vault: &str,
+    name: &str,
+    cache: &mut HashMap<String, bool>,
+    lookup_count: &mut usize,
+) -> Result<String, ApiError> {
+    for number in 2..(2 + MAX_SUGGESTION_ATTEMPTS) {
+        let candidate = renamed_name(name, number);
+        if !exists_cached(files, vault, &candidate, cache, lookup_count).await? {
             return Ok(candidate);
         }
     }
@@ -188,17 +275,44 @@ pub(crate) async fn preflight(
     }
     let target = query.target(&state)?;
     let files = files_backend(target.backend.as_ref())?;
+    let atomic_create = crate::backend::atomic_file_create_available(target.backend.as_ref());
     let mut results = Vec::with_capacity(body.files.len());
+    let mut existence_cache = HashMap::new();
+    let mut lookup_count = 0;
     for candidate in body.files {
         let name = validate_candidate(&candidate)?;
+        if !atomic_create {
+            results.push(UploadPreflightResult {
+                client_id: candidate.client_id,
+                status: "unsupported",
+                existing_name: None,
+                suggested_name: None,
+                max_bytes: MAX_UPLOAD_BYTES,
+            });
+            continue;
+        }
         // Metadata lookup is also the backend-specific name/path validation
         // boundary. Perform it even for oversized candidates, then report size
         // as the primary actionable result without attempting any write.
-        let destination_exists = exists(files, &target.context.vault, &name).await?;
+        let destination_exists = exists_cached(
+            files,
+            &target.context.vault,
+            &name,
+            &mut existence_cache,
+            &mut lookup_count,
+        )
+        .await?;
         let (status, existing_name, suggested_name) = if candidate.size > MAX_UPLOAD_BYTES {
             ("too-large", None, None)
         } else if destination_exists {
-            let suggested = suggestion(files, &target.context.vault, &name).await?;
+            let suggested = suggestion_cached(
+                files,
+                &target.context.vault,
+                &name,
+                &mut existence_cache,
+                &mut lookup_count,
+            )
+            .await?;
             ("conflict", Some(name), Some(suggested))
         } else {
             ("ready", None, None)
@@ -235,6 +349,14 @@ pub(crate) async fn upload(
         ),
         _ => None,
     };
+    let scoped_target = query.target_context(&state)?;
+    if query.policy != Some(ConflictPolicy::Replace)
+        && !crate::backend::atomic_file_create_available(scoped_target.backend.as_ref())
+    {
+        return Err(ApiError::Backend(BackendError::Unsupported(
+            "atomic create-only file upload".into(),
+        )));
+    }
 
     while let Some(field) = multipart.next_field().await.map_err(|_| {
         super::api::validation_error(
@@ -251,21 +373,17 @@ pub(crate) async fn upload(
             .map(str::to_string)
             .ok_or_else(|| invalid("Choose a file with a name.", "file"))?;
         let content_type = field.content_type().map(str::to_string);
+        if let Some(content_type) = content_type.as_deref() {
+            validate_content_type(content_type)?;
+        }
         let content = field
             .bytes()
             .await
             .map_err(|_| invalid("The upload could not be read.", "file"))?
             .to_vec();
-        if content.len() as u64 > MAX_UPLOAD_BYTES {
-            return Err(super::api::validation_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "The upload is too large.",
-                Some("file"),
-            ));
-        }
-        let target = query.target_context(&state)?;
-        let vault = &target.context.vault;
-        let files = files_backend(target.backend.as_ref())?;
+        validate_upload_size(content.len() as u64)?;
+        let vault = &scoped_target.context.vault;
+        let files = files_backend(scoped_target.backend.as_ref())?;
         let name = target_name.as_deref().unwrap_or(&original_name);
         if name.is_empty() || name.len() > MAX_NAME_BYTES {
             return Err(invalid("The file name is invalid.", "target"));
@@ -455,6 +573,43 @@ mod tests {
         };
         assert_eq!(joined("/docs", "report.pdf"), "/docs/report.pdf");
         assert_eq!(joined("docs/", "report.pdf"), "docs/report.pdf");
+    }
+
+    #[test]
+    fn multipart_envelope_truthfully_allows_exact_max_file_and_rejects_max_plus_one() {
+        assert!(super::MAX_MULTIPART_ENVELOPE_BYTES > super::MAX_UPLOAD_BYTES as usize);
+        assert!(
+            super::MAX_MULTIPART_ENVELOPE_BYTES <= super::MAX_UPLOAD_BYTES as usize + 64 * 1024
+        );
+        assert!(super::validate_upload_size(super::MAX_UPLOAD_BYTES).is_ok());
+        assert!(super::validate_upload_size(super::MAX_UPLOAD_BYTES + 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn multipart_route_enforces_envelope_boundary_from_content_length_without_allocating_it()
+    {
+        let app = web::build_router(testutil::test_state());
+        let request = |length: usize| {
+            Request::post("/api/files?policy=replace")
+                .header(header::HOST, "127.0.0.1:1")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B")
+                .header(header::CONTENT_LENGTH, length)
+                .body(Body::from("--B--\r\n"))
+                .unwrap()
+        };
+        let at_limit = app
+            .clone()
+            .oneshot(request(super::MAX_MULTIPART_ENVELOPE_BYTES))
+            .await
+            .unwrap();
+        assert_ne!(at_limit.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let over_limit = app
+            .oneshot(request(super::MAX_MULTIPART_ENVELOPE_BYTES + 1))
+            .await
+            .unwrap();
+        assert_eq!(over_limit.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -655,9 +810,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preflight_reports_atomic_create_unsupported_without_metadata_lookup() {
+        let backend = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "primary",
+            crate::backend::BackendCapabilities {
+                has_file_storage: true,
+                has_atomic_file_create: false,
+                ..Default::default()
+            },
+        ));
+        backend.files.lock().unwrap().insert(
+            "existing.txt".into(),
+            (b"existing".to_vec(), "text/plain".into()),
+        );
+        let state = state_with_backends(backend.clone(), backend.clone());
+        let app = web::build_router(state);
+        let candidate = json!({"files":[{
+            "client_id":"1", "name":"existing.txt", "size":1,
+            "content_type":"text/plain", "destination":""
+        }]});
+        let response = app
+            .oneshot(
+                Request::post("/api/files/preflight")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(candidate.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["results"][0]["status"], "unsupported");
+        assert_eq!(backend.file_info_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn unsupported_atomic_policies_fail_without_mutation_but_replace_remains_available() {
+        let backend = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "primary",
+            crate::backend::BackendCapabilities {
+                has_file_storage: true,
+                has_atomic_file_create: false,
+                ..Default::default()
+            },
+        ));
+        let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
+        for uri in [
+            "/api/files",
+            "/api/files?policy=skip",
+            "/api/files?policy=rename&target=renamed.txt",
+        ] {
+            let (status, body) = upload(app.clone(), uri, "source.txt", "must-not-write").await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(body["error"]["code"], "xv-operation-unsupported");
+            assert!(backend.files.lock().unwrap().is_empty());
+        }
+        let (status, _) = upload(app, "/api/files?policy=replace", "source.txt", "replace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(backend.files.lock().unwrap()["source.txt"].0, b"replace");
+    }
+
+    #[tokio::test]
+    async fn invalid_content_type_is_field_specific_and_redacted() {
+        for content_type in ["", "not a mime", "text/plain\r\nx-secret: marker"] {
+            let (status, body) = json_request(
+                "POST",
+                "/api/files/preflight",
+                json!({"files":[{
+                    "client_id":"1", "name":"a", "size":1,
+                    "content_type":content_type, "destination":""
+                }]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"]["field"], "content_type");
+            if !content_type.is_empty() {
+                assert!(!body.to_string().contains(content_type));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn explicit_scope_targets_only_the_exact_alias_backend_and_vault() {
         let capabilities = crate::backend::BackendCapabilities {
             has_file_storage: true,
+            has_atomic_file_create: true,
             ..Default::default()
         };
         let primary = Arc::new(testutil::stub::StubBackend::with_capabilities(
@@ -747,5 +988,85 @@ mod tests {
         }
         assert_eq!(successes, 1);
         assert_eq!(conflicts, 11);
+    }
+
+    #[tokio::test]
+    async fn duplicate_preflight_candidates_share_bounded_metadata_lookups() {
+        let backend = Arc::new(testutil::stub::StubBackend::new());
+        backend.files.lock().unwrap().insert(
+            "report.pdf".into(),
+            (b"old".to_vec(), "application/pdf".into()),
+        );
+        let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
+        let files: Vec<Value> = (0..100)
+            .map(|index| {
+                json!({
+                    "client_id": index.to_string(),
+                    "name":"report.pdf",
+                    "size":3,
+                    "content_type":"application/pdf",
+                    "destination":""
+                })
+            })
+            .collect();
+        let response = app
+            .oneshot(
+                Request::post("/api/files/preflight")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"files":files}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            backend.file_info_calls() <= 2,
+            "duplicate candidates must share conflict and suggestion lookups"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_preflight_has_a_request_wide_metadata_lookup_budget() {
+        let backend = Arc::new(testutil::stub::StubBackend::new());
+        let mut candidates = Vec::new();
+        {
+            let mut stored = backend.files.lock().unwrap();
+            for file_index in 0..30 {
+                let name = format!("report-{file_index}.pdf");
+                stored.insert(name.clone(), (b"old".to_vec(), "application/pdf".into()));
+                for suffix in 2..101 {
+                    stored.insert(
+                        format!("report-{file_index} ({suffix}).pdf"),
+                        (b"old".to_vec(), "application/pdf".into()),
+                    );
+                }
+                candidates.push(json!({
+                    "client_id": file_index.to_string(),
+                    "name":name,
+                    "size":3,
+                    "content_type":"application/pdf",
+                    "destination":""
+                }));
+            }
+        }
+        let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
+        let response = app
+            .oneshot(
+                Request::post("/api/files/preflight")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"files":candidates}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            backend.file_info_calls() <= 2000,
+            "preflight must stop at its request-wide lookup budget"
+        );
     }
 }

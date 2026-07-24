@@ -148,6 +148,9 @@ pub struct BackendCapabilities {
     /// Backend can atomically guard source revision and destination absence
     /// while moving a complete secret.
     pub has_atomic_rename: bool,
+    /// File backend can create a destination only when absent at the provider
+    /// commit point, without a check-then-write race.
+    pub has_atomic_file_create: bool,
     /// Backend supports preserving/changing the enabled flag.
     pub has_enable_disable: bool,
     /// Multi-vault/namespace support.
@@ -201,6 +204,7 @@ impl Default for BackendCapabilities {
             has_atomic_record_conversion: false,
             has_conditional_record_conversion: false,
             has_atomic_rename: false,
+            has_atomic_file_create: false,
             has_enable_disable: false,
             has_vaults: false,
             has_file_storage: false,
@@ -286,6 +290,15 @@ pub(crate) fn conditional_record_conversion_available(backend: &dyn Backend) -> 
 /// primitive.
 pub(crate) fn atomic_rename_available(backend: &dyn Backend) -> bool {
     backend.capabilities().has_atomic_rename && backend.secrets().supports_atomic_rename()
+}
+
+/// Whether file upload conflict policies can use a real create-only primitive.
+#[cfg(feature = "file-ops")]
+pub(crate) fn atomic_file_create_available(backend: &dyn Backend) -> bool {
+    backend.capabilities().has_atomic_file_create
+        && backend
+            .files()
+            .is_some_and(FileBackend::supports_atomic_create)
 }
 
 #[cfg(test)]

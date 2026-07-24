@@ -203,6 +203,7 @@ mod tag_budget_tests {
             has_atomic_record_conversion: false,
             has_conditional_record_conversion: false,
             has_atomic_rename: false,
+            has_atomic_file_create: false,
             has_enable_disable: false,
             has_vaults: true,
             has_file_storage: false,

@@ -62,3 +62,51 @@ was corrected without normalizing away backend-specific path syntax.
 
 No tests were weakened or removed. No workspace-global routing state was
 introduced, and no remote branch was pushed.
+
+## Independent review remediation
+
+The initial implementation received a FAIL/FAIL review. Every finding was
+remediated test-first:
+
+- Local create-only and replace uploads now use private staged ciphertext and
+  metadata, durable old-pair backups, an atomically published journal, ordered
+  file/directory syncs, exclusive vault locking, and journal-removal as the
+  commit point.
+- Recovery runs before every Local file read, list, delete, and upload. Before
+  commit it restores the exact old ciphertext/metadata pair (or removes a
+  partial create); after commit it preserves the exact new pair and cleans
+  residue.
+- Crash injection covers pre-journal staging, published journal, ciphertext
+  activation, metadata activation, and post-commit cleanup. Restart tests prove
+  exact bytes plus groups/metadata/tags, successful create-only retry, and
+  recovery through every entrypoint.
+- Transaction directories/files are owner-only and symlinked transaction roots
+  or artifacts fail closed. The journal contains no raw file name; the existing
+  encoded file stem is reused, so no extra plaintext path is introduced.
+- Added truthful `has_atomic_file_create` plus an implementation predicate.
+  Local advertises and implements it; AWS/Azure do not. Effective UI context
+  exposes the combined truth, including the advertised-but-unimplemented test.
+- Unsupported preflight returns per-file `unsupported` before metadata calls.
+  Default/Skip/Rename uploads reject safely without mutation; explicit Replace
+  remains available on ordinary file-storage backends.
+- The 100 MiB file maximum is unchanged. Multipart has a tightly bounded
+  64 KiB envelope allowance, a Content-Length fast rejection, and the normal
+  streaming/body limit for unknown lengths. Boundary tests cover exact max,
+  max + 1, and route envelope max + 1 without allocating a giant body.
+- Preflight caches duplicate metadata checks, caps each suggestion search at
+  100 attempts, and enforces a request-wide 2,000-lookup budget. Duplicate and
+  adversarial call-count tests lock the bounds.
+- Candidate and multipart content types are parsed as MIME. Empty, malformed,
+  control-containing, and oversized values receive field-specific redacted
+  errors.
+
+### Final verification after remediation
+
+- `cargo test --features ui web::files::tests --lib` — 16 passed
+- `cargo test --features ui backend::local::files::tests --lib` — 15 passed
+- `cargo test --features ui web:: --lib` — 160 passed
+- Hermetic `cargo test --features ui --lib` — 1072 passed, 1 ignored
+- `cargo clippy --all-targets --features ui -- -D warnings` — passed
+- `cargo check --all-targets --all-features` — passed
+- `cargo fmt --all -- --check` — passed
+- `git diff --check` — passed

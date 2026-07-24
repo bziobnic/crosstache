@@ -85,6 +85,7 @@ pub(crate) fn test_state() -> Arc<WebState> {
 
 pub(crate) mod stub {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -112,12 +113,16 @@ pub(crate) mod stub {
         conversion_cas_race_value: Option<&'static str>,
         revision_validation_supported: bool,
         atomic_rename_supported: bool,
+        #[cfg(feature = "file-ops")]
+        atomic_file_create_supported: bool,
         rename_source_race: bool,
         pub secrets: Mutex<HashMap<String, SecretRequest>>,
         revisions: Mutex<HashMap<String, String>>,
         pub deleted: Mutex<HashMap<String, SecretRequest>>,
         #[cfg(feature = "file-ops")]
         pub files: Mutex<HashMap<String, StoredFile>>,
+        #[cfg(feature = "file-ops")]
+        file_info_calls: AtomicUsize,
     }
 
     impl StubBackend {
@@ -136,6 +141,7 @@ pub(crate) mod stub {
                     has_atomic_record_conversion: true,
                     has_conditional_record_conversion: true,
                     has_atomic_rename: true,
+                    has_atomic_file_create: true,
                     #[cfg(feature = "file-ops")]
                     has_file_storage: true,
                     ..Default::default()
@@ -149,6 +155,8 @@ pub(crate) mod stub {
         ) -> Self {
             let revision_validation_supported = capabilities.has_conditional_record_conversion;
             let atomic_rename_supported = capabilities.has_atomic_rename;
+            #[cfg(feature = "file-ops")]
+            let atomic_file_create_supported = capabilities.has_atomic_file_create;
             Self {
                 name,
                 capabilities,
@@ -160,12 +168,16 @@ pub(crate) mod stub {
                 conversion_cas_race_value: None,
                 revision_validation_supported,
                 atomic_rename_supported,
+                #[cfg(feature = "file-ops")]
+                atomic_file_create_supported,
                 rename_source_race: false,
                 secrets: Mutex::new(HashMap::new()),
                 revisions: Mutex::new(HashMap::new()),
                 deleted: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
                 files: Mutex::new(HashMap::new()),
+                #[cfg(feature = "file-ops")]
+                file_info_calls: AtomicUsize::new(0),
             }
         }
 
@@ -230,6 +242,17 @@ pub(crate) mod stub {
 
         pub(crate) fn without_atomic_rename_support(mut self) -> Self {
             self.atomic_rename_supported = false;
+            self
+        }
+
+        #[cfg(feature = "file-ops")]
+        pub(crate) fn file_info_calls(&self) -> usize {
+            self.file_info_calls.load(Ordering::SeqCst)
+        }
+
+        #[cfg(feature = "file-ops")]
+        pub(crate) fn without_atomic_file_create_support(mut self) -> Self {
+            self.atomic_file_create_supported = false;
             self
         }
     }
@@ -697,6 +720,10 @@ pub(crate) mod stub {
     #[cfg(feature = "file-ops")]
     #[async_trait]
     impl crate::backend::FileBackend for StubBackend {
+        fn supports_atomic_create(&self) -> bool {
+            self.atomic_file_create_supported
+        }
+
         async fn upload_file(
             &self,
             _vault: &str,
@@ -793,6 +820,7 @@ pub(crate) mod stub {
             _vault: &str,
             name: &str,
         ) -> Result<crate::blob::models::FileInfo, BackendError> {
+            self.file_info_calls.fetch_add(1, Ordering::SeqCst);
             self.files
                 .lock()
                 .unwrap()

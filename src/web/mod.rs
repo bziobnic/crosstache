@@ -318,7 +318,15 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
                 files::MAX_PREFLIGHT_BODY_BYTES,
             )),
         )
-        .route("/files", get(api::files::list_files).post(files::upload))
+        .route(
+            "/files",
+            get(api::files::list_files)
+                .post(files::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    files::MAX_MULTIPART_ENVELOPE_BYTES,
+                ))
+                .layer(axum::middleware::from_fn(files::enforce_upload_envelope)),
+        )
         .route(
             "/files/{name}",
             get(api::files::download_file).delete(api::files::delete_file),

@@ -217,6 +217,7 @@ impl Backend for LocalBackend {
             has_atomic_record_conversion: true,
             has_conditional_record_conversion: true,
             has_atomic_rename: true,
+            has_atomic_file_create: cfg!(feature = "file-ops"),
             has_enable_disable: true,
             has_vaults: true,
             has_file_storage: cfg!(feature = "file-ops"),
@@ -312,6 +313,7 @@ mod tests {
         assert!(caps.has_vaults);
         assert!(caps.has_conditional_record_conversion);
         assert!(caps.has_atomic_rename);
+        assert_eq!(caps.has_atomic_file_create, cfg!(feature = "file-ops"));
         assert!(caps.has_versioning);
         assert!(caps.has_groups);
         assert!(caps.has_folders);

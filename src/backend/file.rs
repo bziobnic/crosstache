@@ -26,6 +26,11 @@ use super::error::BackendError;
 /// [`list_files_hierarchical`]: FileBackend::list_files_hierarchical
 #[async_trait]
 pub trait FileBackend: Send + Sync {
+    /// Truthful implementation-side capability for atomic create-only upload.
+    fn supports_atomic_create(&self) -> bool {
+        false
+    }
+
     /// Upload a file. The optional [`ProgressReporter`] enables progress bars.
     async fn upload_file(
         &self,

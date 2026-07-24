@@ -91,6 +91,7 @@ pub(crate) struct CapabilitySummary {
     pub(crate) conversion: bool,
     pub(crate) conditional_conversion: bool,
     pub(crate) atomic_rename: bool,
+    pub(crate) atomic_file_create: bool,
     pub(crate) metadata: bool,
 }
 
@@ -433,6 +434,16 @@ impl CapabilitySummary {
             conversion: conditional_conversion,
             conditional_conversion,
             atomic_rename: atomic_rename_available(backend),
+            atomic_file_create: {
+                #[cfg(feature = "file-ops")]
+                {
+                    crate::backend::atomic_file_create_available(backend)
+                }
+                #[cfg(not(feature = "file-ops"))]
+                {
+                    false
+                }
+            },
             metadata: true,
         }
     }
@@ -455,6 +466,18 @@ mod tests {
 
         assert!(!context.capabilities.conversion);
         assert!(!context.capabilities.conditional_conversion);
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[test]
+    fn atomic_file_create_is_not_advertised_without_the_backend_primitive() {
+        use crate::backend::Backend as _;
+
+        let backend =
+            crate::web::testutil::stub::StubBackend::new().without_atomic_file_create_support();
+        let context = crate::web::testutil::test_context(&backend, "default", 30);
+        assert!(backend.capabilities().has_atomic_file_create);
+        assert!(!context.capabilities.atomic_file_create);
     }
 
     use crate::backend::BackendRegistry;
@@ -686,6 +709,10 @@ vaults = [
         assert_eq!(json["connection"]["state"], "connected");
         assert_eq!(json["capabilities"]["conditional_conversion"], true);
         assert_eq!(json["capabilities"]["atomic_rename"], true);
+        assert_eq!(
+            json["capabilities"]["atomic_file_create"],
+            cfg!(feature = "file-ops")
+        );
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
     }
 
