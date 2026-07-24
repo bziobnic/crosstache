@@ -604,12 +604,20 @@ where
     Ok(Some(canonical))
 }
 
-async fn setup_base(path: &Path) -> Config {
+async fn setup_base_with<Load, Loaded>(path: &Path, load: Load) -> Result<Config, CrosstacheError>
+where
+    Load: FnOnce() -> Loaded,
+    Loaded: Future<Output = Result<Config, CrosstacheError>>,
+{
     if path.exists() {
-        load_config_no_validation().await.unwrap_or_default()
+        load().await
     } else {
-        Config::default()
+        Ok(Config::default())
     }
+}
+
+async fn setup_base(path: &Path) -> Result<Config, CrosstacheError> {
+    setup_base_with(path, load_config_no_validation).await
 }
 
 #[tauri::command]
@@ -621,7 +629,10 @@ pub fn startup_status(state: State<'_, StartupStore>) -> StartupSnapshot {
 pub async fn preview_setup(request: SetupRequest) -> Result<SetupPreview, SafeSetupError> {
     let (backend, vault) = request_scope(&request);
     let path = config_path()?;
-    let candidate = build_setup_config(&request, setup_base(&path).await)
+    let base = setup_base(&path)
+        .await
+        .map_err(|error| safe_error("preview-setup", backend, vault, &error))?;
+    let candidate = build_setup_config(&request, base)
         .map_err(|error| safe_error("preview-setup", backend, vault, &error))?;
 
     Ok(SetupPreview {
@@ -648,14 +659,15 @@ async fn apply_setup_request(
     let backend = backend.to_string();
     let vault = vault.to_string();
     let path = config_path()?;
+    let base = setup_base(&path)
+        .await
+        .map_err(|error| safe_error("apply-setup", &backend, &vault, &error))?;
     let generation = state.begin_setup_attempt().ok_or_else(|| {
         generic_safe_error(
             "apply-setup",
             "Setup can only begin from setup or recovery, with no operation in progress.",
         )
     })?;
-    let base = setup_base(&path).await;
-
     let connection = async {
         let connecting = StartupSnapshot::connecting(&backend, &vault, path.display().to_string());
         if !advance_and_emit(
@@ -1482,6 +1494,25 @@ mod tests {
         for (request, expected) in cases {
             assert_eq!(request_scope(&request), expected);
         }
+    }
+
+    #[test]
+    fn existing_unreadable_config_is_never_replaced_with_defaults() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("xv.conf");
+            std::fs::write(&path, b"unreadable existing config").unwrap();
+
+            let result = setup_base_with(&path, || async {
+                Err(CrosstacheError::unknown(
+                    "injected unreadable configuration",
+                ))
+            })
+            .await;
+
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"unreadable existing config");
+        });
     }
 
     #[test]
