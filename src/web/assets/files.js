@@ -110,6 +110,14 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
       } else if (event.type === 'preflight-started' || event.type === 'retry') {
         lifecycle.preflightComplete = false;
       }
+      if (event.type === 'decision-upload') {
+        Object.assign(lifecycle, {
+          loaded: 0,
+          error: null,
+          evidence: '',
+          result: null,
+        });
+      }
       Object.assign(entry, lifecycle, patch, { state });
       return { ...entry };
     },
@@ -169,7 +177,7 @@ export function validateUploadConfirmation(response, { expectedName, policy }) {
     && typeof response === 'object'
     && response.name === expectedName;
   const matchesPolicy = policy === 'skip'
-    ? response?.status === 'skipped'
+    ? response?.status === undefined || response?.status === 'skipped'
     : response?.status !== 'skipped';
   if (!matchesName || !matchesPolicy) {
     throw Object.assign(
@@ -184,7 +192,18 @@ export function uploadConflictDecision({ policy, suggestedName = null, allowRepl
   if (!policy) return null;
   if (!['skip', 'replace', 'rename'].includes(policy)) throw new TypeError('Unknown conflict policy');
   if (policy === 'replace' && !allowReplace) throw new TypeError('Replace is unsupported by this backend');
-  if (policy === 'rename' && !suggestedName) throw new TypeError('Rename requires a suggested name');
+  if (policy === 'rename') {
+    const components = typeof suggestedName === 'string' ? suggestedName.split('/') : [];
+    if (
+      !suggestedName
+      || suggestedName.startsWith('/')
+      || suggestedName.includes('\\')
+      || suggestedName.includes('\0')
+      || components.some((component) => !component || component === '.' || component === '..')
+    ) {
+      throw new TypeError('Rename requires a safe suggested name');
+    }
+  }
   return { policy, target: policy === 'rename' ? suggestedName : null };
 }
 
@@ -327,33 +346,55 @@ export function mountUploadQueue({
     return control;
   }
 
-  function resolveConflict(id, policy, applyAll) {
-    const targetBatch = batch;
-    if (!exactBatchCurrent(targetBatch)) return;
-    const source = targetBatch.queue.get(id);
-    const decision = uploadConflictDecision({
-      policy,
-      suggestedName: source.suggestedName,
-      allowReplace: true,
-    });
-    const targets = applyAll
-      ? targetBatch.queue.items().filter(({ state }) => state === 'awaiting-conflict')
-      : [source];
-    for (const targetItem of targets) {
-      const targetDecision = uploadConflictDecision({
+  function applyConflictPolicy(targetBatch, targetItem, policy, { retrySkip = false } = {}) {
+    let decision;
+    try {
+      decision = uploadConflictDecision({
         policy,
         suggestedName: targetItem.suggestedName,
         allowReplace: true,
       });
-      if (targetDecision.policy === 'skip') {
-        targetBatch.queue.event(targetItem.id, { type: 'skipped' }, {
-          policy: 'skip',
-          result: 'Skipped because a destination file already exists.',
-          file: null,
-        });
-      } else {
-        targetBatch.queue.event(targetItem.id, { type: 'decision-upload' }, targetDecision);
-      }
+    } catch {
+      targetBatch.queue.event(targetItem.id, { type: 'failed' }, {
+        error: 'The server did not provide a safe conflict target.',
+      });
+      return false;
+    }
+    if (decision.policy === 'skip' && !retrySkip) {
+      targetBatch.queue.event(targetItem.id, { type: 'skipped' }, {
+        policy: 'skip',
+        result: 'Skipped because a destination file already exists.',
+        file: null,
+      });
+    } else {
+      targetBatch.queue.event(targetItem.id, { type: 'decision-upload' }, decision);
+    }
+    return true;
+  }
+
+  function resolveConflict(id, policy, applyAll) {
+    const targetBatch = batch;
+    if (!exactBatchCurrent(targetBatch)) return;
+    const source = targetBatch.queue.get(id);
+    let decision;
+    try {
+      decision = uploadConflictDecision({
+        policy,
+        suggestedName: source.suggestedName,
+        allowReplace: true,
+      });
+    } catch {
+      applyConflictPolicy(targetBatch, source, policy);
+      render();
+      schedule(targetBatch);
+      return null;
+    }
+    if (applyAll) targetBatch.applyAllPolicy = policy;
+    const targets = applyAll
+      ? targetBatch.queue.items().filter(({ state }) => state === 'awaiting-conflict')
+      : [source];
+    for (const targetItem of targets) {
+      applyConflictPolicy(targetBatch, targetItem, policy);
     }
     render();
     schedule(targetBatch);
@@ -371,6 +412,7 @@ export function mountUploadQueue({
       summaryItems.replaceChildren();
     }
     const retried = targetBatch.queue.retry(ids);
+    if (retried.length) targetBatch.evidenceRefresh = null;
     for (const entry of retried) targetBatch.queue.event(entry.id, { type: 'preflight-started' });
     render();
     if (retried.length) void preflight(targetBatch);
@@ -391,10 +433,11 @@ export function mountUploadQueue({
     }
   }
 
-  function createRow(entry, targetBatch) {
+  function createRow(id, targetBatch) {
+    const binding = Object.freeze({ id });
     const row = document.createElement('li');
     row.className = 'upload-item';
-    row.dataset.uploadId = entry.id;
+    row.dataset.uploadId = id;
     const name = document.createElement('strong');
     name.className = 'upload-item-name';
     const status = document.createElement('span');
@@ -408,9 +451,9 @@ export function mountUploadQueue({
     apply.type = 'checkbox';
     apply.onchange = () => {
       if (!exactBatchCurrent(targetBatch)) return;
-      const current = targetBatch.queue.get(entry.id);
+      const current = targetBatch.queue.get(id);
       if (current.state !== 'awaiting-conflict') return;
-      targetBatch.queue.event(entry.id, { type: 'preference-changed' }, {
+      targetBatch.queue.event(id, { type: 'preference-changed' }, {
         applyAll: apply.checked,
       });
     };
@@ -418,19 +461,19 @@ export function mountUploadQueue({
     fieldset.append(
       legend,
       button('Skip', () => resolveConflict(
-        entry.id,
+        id,
         'skip',
-        targetBatch.queue.get(entry.id).applyAll,
+        targetBatch.queue.get(id).applyAll,
       )),
       button('Replace', () => resolveConflict(
-        entry.id,
+        id,
         'replace',
-        targetBatch.queue.get(entry.id).applyAll,
+        targetBatch.queue.get(id).applyAll,
       )),
       button('Rename', () => resolveConflict(
-        entry.id,
+        id,
         'rename',
-        targetBatch.queue.get(entry.id).applyAll,
+        targetBatch.queue.get(id).applyAll,
       )),
       applyLabel,
     );
@@ -439,21 +482,22 @@ export function mountUploadQueue({
     const cancelAction = document.createElement('div');
     cancelAction.className = 'upload-item-actions';
     const cancel = button(
-      `Cancel ${entry.name}`,
-      () => cancelItem(entry.id),
+      'Cancel upload',
+      () => cancelItem(id),
       'button ghost compact',
     );
     cancelAction.appendChild(cancel);
     const retryAction = document.createElement('div');
     retryAction.className = 'upload-item-actions';
     const retryItem = button(
-      `Retry ${entry.name}`,
-      () => retryItems([entry.id]),
+      'Retry upload',
+      () => retryItems([id]),
       'button secondary compact',
     );
     retryAction.appendChild(retryItem);
     row.append(name, status, progress, fieldset, detail, cancelAction, retryAction);
-    targetBatch.rows.set(entry.id, {
+    targetBatch.rows.set(id, {
+      binding,
       row,
       name,
       status,
@@ -468,7 +512,7 @@ export function mountUploadQueue({
       retryItem,
     });
     queueItems.appendChild(row);
-    return targetBatch.rows.get(entry.id);
+    return targetBatch.rows.get(id);
   }
 
   function render() {
@@ -478,7 +522,7 @@ export function mountUploadQueue({
     queueSurface.hidden = false;
     byId('upload-queue-context').textContent = `${formatScope(targetBatch.scope)} · destination: ${targetBatch.destination || 'Vault root'}`;
     for (const entry of entries) {
-      const controls = targetBatch.rows.get(entry.id) || createRow(entry, targetBatch);
+      const controls = targetBatch.rows.get(entry.id) || createRow(entry.id, targetBatch);
       controls.name.textContent = entry.displayName;
       controls.status.textContent = UPLOAD_STATUS_LABELS[entry.state];
       if (['finishing', 'reconciling', 'awaiting-conflict', 'failed', 'ambiguous'].includes(entry.state)) {
@@ -530,19 +574,44 @@ export function mountUploadQueue({
     destination.disabled = false;
     setPending(false);
     renderSummary(entries);
+    if (targetBatch.evidenceRefresh) {
+      updateDestinationOptions(getFiles());
+      return;
+    }
     void refreshFiles(targetBatch.scope).then(() => {
       if (exactBatchCurrent(targetBatch)) updateDestinationOptions(getFiles());
     }).catch(() => {});
   }
 
+  function evidenceSnapshot(targetBatch) {
+    if (!targetBatch.evidenceRefresh) {
+      targetBatch.evidenceRefresh = (async () => {
+        try {
+          const refreshed = await refreshFiles(targetBatch.scope);
+          if (!exactBatchCurrent(targetBatch) || refreshed !== true) {
+            return { available: false, files: [] };
+          }
+          return {
+            available: true,
+            files: getFiles().map((file) => ({ ...file })),
+          };
+        } catch {
+          return { available: false, files: [] };
+        }
+      })();
+    }
+    return targetBatch.evidenceRefresh;
+  }
+
   async function reconcileUncertain(targetBatch, id) {
     if (!exactBatchCurrent(targetBatch)) return;
     const entry = targetBatch.queue.get(id);
-    try {
-      await refreshFiles(targetBatch.scope);
-      if (!exactBatchCurrent(targetBatch)) return;
+    const snapshot = await evidenceSnapshot(targetBatch);
+    if (!exactBatchCurrent(targetBatch)) return;
+    if (targetBatch.queue.get(id).state !== 'reconciling') return;
+    if (snapshot.available) {
       const targetName = entry.target || entry.fullName;
-      const after = getFiles().find(({ name }) => name === targetName) || null;
+      const after = snapshot.files.find(({ name }) => name === targetName) || null;
       const evidence = uploadEvidenceState({
         before: entry.before,
         after,
@@ -553,12 +622,10 @@ export function mountUploadQueue({
       }, {
         evidence: evidence.evidence,
       });
-    } catch {
-      if (exactBatchCurrent(targetBatch)) {
-        targetBatch.queue.event(id, { type: 'evidence-unavailable' }, {
-          evidence: 'The server could not be refreshed, so completion remains unconfirmed.',
-        });
-      }
+    } else {
+      targetBatch.queue.event(id, { type: 'evidence-unavailable' }, {
+        evidence: 'The server metadata refresh was interrupted, so completion remains unconfirmed.',
+      });
     }
     if (!exactBatchCurrent(targetBatch)) return;
     render();
@@ -611,7 +678,9 @@ export function mountUploadQueue({
         file: null,
         result: confirmed.status === 'skipped'
           ? 'Skipped because a destination file already exists.'
-          : 'Server confirmed the upload.',
+          : entry.policy === 'skip'
+            ? 'Uploaded because the destination no longer existed.'
+            : 'Server confirmed the upload.',
       });
       render();
       schedule(targetBatch);
@@ -622,6 +691,14 @@ export function mountUploadQueue({
           suggestedName: error.details?.suggested_name,
           error: 'The destination changed after preflight. Choose what to do.',
         });
+        if (targetBatch.applyAllPolicy) {
+          applyConflictPolicy(
+            targetBatch,
+            targetBatch.queue.get(entry.id),
+            targetBatch.applyAllPolicy,
+            { retrySkip: true },
+          );
+        }
         render();
         schedule(targetBatch);
       } else if (error?.name === 'AbortError' || error?.name === 'NetworkError' || error?.ambiguous) {
@@ -636,7 +713,12 @@ export function mountUploadQueue({
         schedule(targetBatch);
       }
     } finally {
-      if (exactBatchCurrent(targetBatch)) targetBatch.controllers.delete(entry.id);
+      if (
+        exactBatchCurrent(targetBatch)
+        && targetBatch.controllers.get(entry.id) === controller
+      ) {
+        targetBatch.controllers.delete(entry.id);
+      }
     }
   }
 
@@ -678,6 +760,13 @@ export function mountUploadQueue({
           targetBatch.queue.event(result.client_id, { type: 'conflict' }, {
             suggestedName: result.suggested_name,
           });
+          if (targetBatch.applyAllPolicy) {
+            applyConflictPolicy(
+              targetBatch,
+              targetBatch.queue.get(result.client_id),
+              targetBatch.applyAllPolicy,
+            );
+          }
         } else {
           targetBatch.queue.event(result.client_id, { type: 'failed' }, {
             error: result.status === 'too-large'
@@ -736,6 +825,8 @@ export function mountUploadQueue({
       destination: chosenDestination,
       scope,
       scopeGeneration,
+      applyAllPolicy: null,
+      evidenceRefresh: null,
       released: false,
     };
     const targetBatch = batch;
@@ -770,6 +861,9 @@ export function mountUploadQueue({
     debugRetained: () => ({
       hasBatch: Boolean(batch),
       fileReferences: batch?.queue.items().filter(({ file }) => file).length || 0,
+      rowFileReferences: batch
+        ? [...batch.rows.values()].filter(({ binding }) => 'file' in binding).length
+        : 0,
       names: batch?.queue.items().map(({ name }) => name) || [],
       controllers: batch?.controllers.size || 0,
       operationIds: ownedOperationIds.size,

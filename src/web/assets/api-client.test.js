@@ -190,3 +190,86 @@ for (const [label, responseText] of [
     }), (error) => error?.ambiguous === true && error?.name === 'AmbiguousUploadError');
   });
 }
+
+for (const phase of ['factory', 'open', 'header', 'send']) {
+  test(`XHR upload cleans up and emits one terminal event when ${phase} throws synchronously`, async () => {
+    const inflight = [];
+    const operations = [];
+    let added = 0;
+    let removed = 0;
+    const signal = {
+      aborted: false,
+      addEventListener() { added++; },
+      removeEventListener() { removed++; },
+    };
+    const xhr = {
+      upload: {},
+      open() {
+        if (phase === 'open') throw new Error('open failed');
+      },
+      setRequestHeader() {
+        if (phase === 'header') throw new Error('header failed');
+      },
+      send() {
+        if (phase === 'send') throw new Error('send failed');
+      },
+      abort() {},
+    };
+    const client = createApiClient({
+      token: 'session-token',
+      onInflight: (count) => inflight.push(count),
+      onOperation: (event) => operations.push(event),
+      xhrFactory: () => {
+        if (phase === 'factory') throw new Error('factory failed');
+        return xhr;
+      },
+    });
+
+    await assert.rejects(client.upload({
+      path: '/api/files',
+      formData: new FormData(),
+      signal,
+    }), new RegExp(`${phase} failed`));
+
+    assert.deepEqual(inflight, [1, 0]);
+    assert.deepEqual(operations.map(({ status }) => status), ['started', 'failed']);
+    assert.equal(removed, added);
+    if (phase !== 'factory') {
+      assert.equal(xhr.onload, null);
+      assert.equal(xhr.onerror, null);
+      assert.equal(xhr.onabort, null);
+      assert.equal(xhr.upload.onprogress, null);
+      assert.equal(xhr.upload.onload, null);
+    }
+  });
+}
+
+test('XHR upload ignores a synchronous send throw after an already terminal callback', async () => {
+  const operations = [];
+  const inflight = [];
+  const xhr = {
+    upload: {},
+    open() {},
+    setRequestHeader() {},
+    send() {
+      this.status = 200;
+      this.responseText = '{"name":"only-once.txt"}';
+      this.onload();
+      throw new Error('late send throw');
+    },
+    abort() {},
+  };
+  const client = createApiClient({
+    token: 'session-token',
+    xhrFactory: () => xhr,
+    onOperation: (event) => operations.push(event),
+    onInflight: (count) => inflight.push(count),
+  });
+
+  assert.deepEqual(await client.upload({
+    path: '/api/files',
+    formData: new FormData(),
+  }), { name: 'only-once.txt' });
+  assert.deepEqual(operations.map(({ status }) => status), ['started', 'succeeded']);
+  assert.deepEqual(inflight, [1, 0]);
+});

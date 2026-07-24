@@ -68,6 +68,7 @@ test('managed queue bounds transfers, distinguishes Finishing, and keeps a named
   expect(await page.evaluate(() => window.__xvUploadDebug())).toEqual({
     hasBatch: false,
     fileReferences: 0,
+    rowFileReferences: 0,
     names: [],
     controllers: 0,
     operationIds: 0,
@@ -188,6 +189,77 @@ test('mismatched 2xx confirmation reconciles instead of completing', async ({ pa
   await expect(page.locator('#upload-summary')).not.toContainText('Completed');
 });
 
+test('two uncertain items share one evidence refresh and retain pending ownership until it settles', async ({ page, baseURL }) => {
+  let releaseEvidence;
+  const evidenceGate = new Promise((resolve) => { releaseEvidence = resolve; });
+  let uploadRequests = 0;
+  let evidenceRefreshes = 0;
+  await page.route('**/api/files?*', async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === 'POST' && url.pathname === '/api/files') {
+      uploadRequests++;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await route.continue().catch(() => {});
+      return;
+    }
+    if (route.request().method() === 'GET' && url.pathname === '/api/files' && uploadRequests === 2) {
+      evidenceRefreshes++;
+      await evidenceGate;
+    }
+    await route.continue();
+  });
+  await openFiles(page, baseURL);
+  await page.locator('#file-input').setInputFiles([
+    { name: 'uncertain-one.txt', mimeType: 'text/plain', buffer: Buffer.alloc(64 * 1024, 1) },
+    { name: 'uncertain-two.txt', mimeType: 'text/plain', buffer: Buffer.alloc(64 * 1024, 2) },
+  ]);
+  await expect.poll(() => uploadRequests).toBe(2);
+  await page.getByRole('button', { name: 'Cancel uncertain-one.txt' }).click();
+  await page.getByRole('button', { name: 'Cancel uncertain-two.txt' }).click();
+  await expect(page.getByText('Reconciling server evidence…')).toHaveCount(2);
+  expect(await page.evaluate(() => window.__xvTestStoreSnapshot().scopedMutationPending)).toBe(true);
+  await expect.poll(() => evidenceRefreshes).toBe(1);
+  releaseEvidence();
+  await expect(page.locator('#upload-summary-items li')).toHaveCount(2);
+  expect(evidenceRefreshes).toBe(1);
+});
+
+test('manual refresh abort makes evidence unavailable rather than falsely missing', async ({ page, baseURL }) => {
+  let uploadSeen = false;
+  let releaseEvidence;
+  const evidenceGate = new Promise((resolve) => { releaseEvidence = resolve; });
+  let evidenceRefreshes = 0;
+  await page.route('**/api/files?*', async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === 'POST' && url.pathname === '/api/files') {
+      uploadSeen = true;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await route.continue().catch(() => {});
+      return;
+    }
+    if (route.request().method() === 'GET' && url.pathname === '/api/files' && uploadSeen) {
+      evidenceRefreshes++;
+      if (evidenceRefreshes === 1) await evidenceGate;
+    }
+    await route.continue();
+  });
+  await openFiles(page, baseURL);
+  await page.locator('#file-input').setInputFiles({
+    name: 'manual-refresh-race.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.alloc(64 * 1024, 4),
+  });
+  await expect.poll(() => uploadSeen).toBe(true);
+  await page.getByRole('button', { name: 'Cancel manual-refresh-race.txt' }).click();
+  await expect(page.getByText('Reconciling server evidence…')).toBeVisible();
+  await page.getByRole('button', { name: 'Refresh files' }).dispatchEvent('click');
+  releaseEvidence();
+  await expect(page.locator('#upload-summary')).toContainText(
+    'manual-refresh-race.txt: Completion could not be confirmed',
+  );
+  await expect(page.locator('#upload-summary')).not.toContainText('Cancelled');
+});
+
 test('sibling progress preserves focused conflict controls and apply-all state', async ({ page, baseURL }) => {
   await openFiles(page, baseURL);
   await page.locator('#file-input').setInputFiles({
@@ -221,6 +293,128 @@ test('sibling progress preserves focused conflict controls and apply-all state',
   await expect(page.getByRole('link', { name: 'persistent-conflict (2).txt' })).toBeVisible();
 });
 
+test('apply-all rename persists for a delayed transfer-time conflict using its own safe suggestion', async ({ page, baseURL }) => {
+  await openFiles(page, baseURL);
+  await page.locator('#file-input').setInputFiles({
+    name: 'policy-anchor.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('seed'),
+  });
+  await expect(page.locator('#upload-summary')).toBeVisible();
+  await page.getByRole('button', { name: 'Dismiss summary' }).click();
+
+  let releaseLateConflict;
+  const lateConflictGate = new Promise((resolve) => { releaseLateConflict = resolve; });
+  let releaseLateRetry;
+  const lateRetryGate = new Promise((resolve) => { releaseLateRetry = resolve; });
+  let resolveLateRetry;
+  const lateRetrySeen = new Promise((resolve) => { resolveLateRetry = resolve; });
+  let delayedAttempts = 0;
+  await page.route('**/api/files?*', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() !== 'POST' || url.pathname !== '/api/files') {
+      await route.continue();
+      return;
+    }
+    const body = request.postDataBuffer()?.toString() || '';
+    if (!body.includes('late-policy.txt')) {
+      await route.continue();
+      return;
+    }
+    delayedAttempts++;
+    if (delayedAttempts === 1) {
+      await lateConflictGate;
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'xv-file-conflict',
+            message: 'Destination changed',
+            details: { suggested_name: 'late-policy (2).txt' },
+          },
+        }),
+      });
+      return;
+    }
+    resolveLateRetry();
+    await lateRetryGate;
+    await route.continue();
+  });
+  await page.locator('#file-input').setInputFiles([
+    { name: 'policy-anchor.txt', mimeType: 'text/plain', buffer: Buffer.from('again') },
+    { name: 'late-policy.txt', mimeType: 'text/plain', buffer: Buffer.from('late') },
+  ]);
+  const anchor = page.locator('.upload-item').filter({ hasText: 'policy-anchor.txt' });
+  await anchor.getByLabel('Apply to all remaining conflicts').check();
+  await anchor.getByRole('button', { name: 'Rename' }).click();
+  releaseLateConflict();
+  await lateRetrySeen;
+  await expect.poll(() => page.evaluate(() => window.__xvUploadDebug().controllers)).toBe(1);
+  releaseLateRetry();
+  await expect(page.getByRole('link', { name: 'late-policy (2).txt' })).toBeVisible();
+  await expect(page.getByText('Needs a conflict decision')).toHaveCount(0);
+  expect(delayedAttempts).toBe(2);
+});
+
+test('apply-all skip reports an upload when a delayed conflict disappeared', async ({ page, baseURL }) => {
+  await openFiles(page, baseURL);
+  await page.locator('#file-input').setInputFiles({
+    name: 'skip-anchor.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('seed'),
+  });
+  await expect(page.locator('#upload-summary')).toBeVisible();
+  await page.getByRole('button', { name: 'Dismiss summary' }).click();
+
+  let releaseLateConflict;
+  const lateConflictGate = new Promise((resolve) => { releaseLateConflict = resolve; });
+  let delayedAttempts = 0;
+  await page.route('**/api/files?*', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const body = request.postDataBuffer()?.toString() || '';
+    if (request.method() !== 'POST' || url.pathname !== '/api/files' || !body.includes('late-skip.txt')) {
+      await route.continue();
+      return;
+    }
+    delayedAttempts++;
+    if (delayedAttempts === 1) {
+      await lateConflictGate;
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'xv-file-conflict',
+            message: 'Destination changed',
+            details: { suggested_name: 'late-skip (2).txt' },
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ name: 'late-skip.txt', size: 4 }),
+    });
+  });
+  await page.locator('#file-input').setInputFiles([
+    { name: 'skip-anchor.txt', mimeType: 'text/plain', buffer: Buffer.from('again') },
+    { name: 'late-skip.txt', mimeType: 'text/plain', buffer: Buffer.from('late') },
+  ]);
+  const anchor = page.locator('.upload-item').filter({ hasText: 'skip-anchor.txt' });
+  await anchor.getByLabel('Apply to all remaining conflicts').check();
+  await anchor.getByRole('button', { name: 'Skip', exact: true }).click();
+  releaseLateConflict();
+  await expect(page.locator('#upload-summary')).toContainText(
+    'late-skip.txt: Completed — Uploaded because the destination no longer existed.',
+  );
+  expect(delayedAttempts).toBe(2);
+});
+
 test('terminal batch requires explicit dismissal before a new selection', async ({ page, baseURL }) => {
   await openFiles(page, baseURL);
   await page.locator('#file-input').setInputFiles({
@@ -247,6 +441,33 @@ test('terminal batch requires explicit dismissal before a new selection', async 
     buffer: Buffer.from('allowed'),
   });
   await expect(page.locator('#upload-summary')).toContainText('after-dismissal.txt: Completed');
+});
+
+test('completed and skipped rows retain no File bytes before explicit dismissal', async ({ page, baseURL }) => {
+  await openFiles(page, baseURL);
+  await page.locator('#file-input').setInputFiles({
+    name: 'released-bytes.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.alloc(128 * 1024, 9),
+  });
+  await expect(page.locator('#upload-summary')).toBeVisible();
+  expect(await page.evaluate(() => window.__xvUploadDebug())).toMatchObject({
+    fileReferences: 0,
+    rowFileReferences: 0,
+  });
+  await page.getByRole('button', { name: 'Dismiss summary' }).click();
+
+  await page.locator('#file-input').setInputFiles({
+    name: 'released-bytes.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('conflict'),
+  });
+  await page.getByRole('button', { name: 'Skip' }).click();
+  await expect(page.locator('#upload-summary')).toContainText('released-bytes.txt: Completed');
+  expect(await page.evaluate(() => window.__xvUploadDebug())).toMatchObject({
+    fileReferences: 0,
+    rowFileReferences: 0,
+  });
 });
 
 test('a dismissed batch callback cannot mutate a newer batch in the same scope', async ({ page, baseURL }) => {
@@ -445,6 +666,7 @@ test('failed context transition preserves owned summary while a committed transi
   expect(await page.evaluate(() => window.__xvUploadDebug())).toEqual({
     hasBatch: false,
     fileReferences: 0,
+    rowFileReferences: 0,
     names: [],
     controllers: 0,
     operationIds: 0,
