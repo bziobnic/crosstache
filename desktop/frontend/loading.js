@@ -462,9 +462,63 @@ export const mountBrowser = () => {
       root.querySelector('h1')?.focus();
     },
   });
+  let closeDialog = null;
+  const requestWindowClose = () => {
+    const dirtyForm = root.querySelector('form[data-dirty="true"]');
+    if (!dirtyForm) return emit('xv://window-close-approved');
+    if (closeDialog?.isConnected) {
+      closeDialog.querySelector('[data-close-action="keep"]')?.focus();
+      return null;
+    }
+
+    const returnFocus = dirtyForm.querySelector('input, button');
+    const dialog = document.createElement('dialog');
+    dialog.className = 'close-confirmation';
+    dialog.setAttribute('role', 'alertdialog');
+    dialog.setAttribute('aria-labelledby', 'close-confirmation-title');
+    const title = document.createElement('h2');
+    title.id = 'close-confirmation-title';
+    title.textContent = 'Discard setup changes?';
+    const description = document.createElement('p');
+    description.textContent = 'Your unfinished setup values will be lost.';
+    const actions = document.createElement('div');
+    actions.className = 'close-confirmation-actions';
+    const keep = document.createElement('button');
+    keep.type = 'button';
+    keep.dataset.closeAction = 'keep';
+    keep.textContent = 'Keep editing';
+    const discard = document.createElement('button');
+    discard.type = 'button';
+    discard.className = 'danger-action';
+    discard.textContent = 'Discard and close';
+    const dismiss = () => {
+      dialog.close();
+      dialog.remove();
+      closeDialog = null;
+    };
+    keep.addEventListener('click', () => {
+      dismiss();
+      returnFocus?.focus();
+    });
+    discard.addEventListener('click', () => {
+      dismiss();
+      emit('xv://window-close-approved');
+    });
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      keep.click();
+    });
+    actions.append(keep, discard);
+    dialog.append(title, description, actions);
+    document.body.append(dialog);
+    closeDialog = dialog;
+    dialog.showModal();
+    keep.focus();
+    return null;
+  };
   const stopCloseListener = listen(
     'xv://window-close-requested',
-    () => emit('xv://window-close-approved'),
+    requestWindowClose,
   ).catch(() => null);
 
   const showFormError = (form, error) => {
@@ -505,6 +559,7 @@ export const mountBrowser = () => {
   root.addEventListener('input', ({ target }) => {
     const form = target.closest('form');
     if (!form) return;
+    form.dataset.dirty = 'true';
     clearPreview(form);
     target.setAttribute('aria-invalid', 'false');
     const fieldError = target.name

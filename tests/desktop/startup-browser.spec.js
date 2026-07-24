@@ -242,6 +242,41 @@ test('mounted loading shell approves native close requests and cleans up its lis
   )).toBe(false);
 });
 
+test('dirty setup requires an explicit discard before native close approval', async ({ page }) => {
+  await boot(page, {
+    kind: 'setup-required',
+    config_path: '/Users/example/.config/xv/xv.conf',
+  });
+  await page.getByRole('button', { name: /Create local vault/ }).click();
+  const storePath = page.locator('[name="store_path"]');
+  await storePath.fill('/tmp/unfinished-store');
+
+  await page.evaluate(() =>
+    window.__mockTauri.listeners.get('xv://window-close-requested')({
+      event: 'xv://window-close-requested',
+      id: 2,
+      payload: null,
+    }));
+  await expect(page.getByRole('alertdialog', { name: 'Discard setup changes?' })).toBeVisible();
+  expect(await page.evaluate(() => window.__mockTauri.emitted)).toEqual([]);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+
+  await page.getByRole('button', { name: 'Keep editing' }).click();
+  await expect(page.getByRole('alertdialog', { name: 'Discard setup changes?' })).toBeHidden();
+  await expect(storePath).toBeFocused();
+
+  await page.evaluate(() =>
+    window.__mockTauri.listeners.get('xv://window-close-requested')({
+      event: 'xv://window-close-requested',
+      id: 3,
+      payload: null,
+    }));
+  await page.getByRole('button', { name: 'Discard and close' }).click();
+  expect(await page.evaluate(() => window.__mockTauri.emitted)).toEqual([
+    { event: 'xv://window-close-approved', payload: null },
+  ]);
+});
+
 test('mounted recovery runs native actions, Retry, CLI disclosure, and cleanup', async ({ page }) => {
   await page.setViewportSize({ width: 1180, height: 800 });
   await boot(page, {
