@@ -68,3 +68,16 @@ test('secret and file selection states have no serious or critical violations', 
   await page.getByRole('checkbox', { name: 'Select file selection-file.txt' }).check();
   await expectNoSeriousOrCriticalAxeViolations(page);
 });
+
+test('tab and partial visible-selection states have no serious or critical violations', async ({ page, baseURL }) => {
+  await page.goto(baseURL);
+  await createSecret(page, 'first-a11y-secret');
+  await createSecret(page, 'second-a11y-secret');
+  await page.getByRole('tab', { name: 'Secrets' }).focus();
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowLeft');
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select secret first-a11y-secret' }).check();
+  await expect(page.locator('#select-all-secrets')).toHaveAttribute('aria-checked', 'mixed');
+  await expectNoSeriousOrCriticalAxeViolations(page);
+});

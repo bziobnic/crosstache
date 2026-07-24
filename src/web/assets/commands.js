@@ -217,8 +217,9 @@ export function createCommandRegistry() {
     replaceMetadata,
     search,
     isCurrent(result, context) {
-      if (!result || result.operationGeneration !== operationGeneration
-        || result.contextGeneration !== String(context?.version || '')) return false;
+      if (!result
+        || result.contextGeneration !== String(context?.version || '')
+        || (result.kind !== 'command' && result.operationGeneration !== operationGeneration)) return false;
       if (result.kind === 'workspace') {
         const source = result.sourceScope;
         return source.alias === (context?.workspace?.alias || '')
@@ -353,6 +354,12 @@ export function mountCommandPalette({
     if (result.kind === 'command') {
       if (result.id === 'search-local') {
         focusLocalSearch();
+        // A pointer activation can apply its final focus step after the option's
+        // click handler. Reassert the promised destination once that event has
+        // fully settled, but only while the same command result is still valid.
+        queueMicrotask(() => {
+          if (dialog.hidden && activationStillCurrent(result)) focusLocalSearch();
+        });
         return true;
       }
       if (result.id === 'new-secret') {

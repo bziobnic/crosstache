@@ -1,7 +1,7 @@
 import { createApiClient } from './api-client.js';
 import { createStore, draftReducer } from './store.js';
 import { createDialogManager, guardNavigation } from './dialogs.js';
-import { announce } from './accessibility.js';
+import { announce, mountTabs } from './accessibility.js';
 import { mountSecrets } from './secrets.js';
 import { createPreferenceClient } from './preferences.js';
 import { formatContextLine, mountContextRail } from './context.js';
@@ -125,6 +125,7 @@ mountSecrets({
   contextRail,
   commandRegistry,
 });
+mountTabs(document.getElementById('vault-tabs'));
 mountCommandPalette({
   registry: commandRegistry,
   store,

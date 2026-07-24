@@ -33,6 +33,8 @@ const INDEX_HTML: &str = include_str!("assets/index.html");
 #[cfg(test)]
 const UI_MODEL_JS: &str = include_str!("assets/ui-model.js");
 #[cfg(test)]
+const ACCESSIBILITY_JS: &str = include_str!("assets/accessibility.js");
+#[cfg(test)]
 const APP_JS: &str = concat!(
     include_str!("assets/app.js"),
     include_str!("assets/context.js"),
@@ -884,7 +886,9 @@ mod tests {
     #[test]
     fn ui_selection_uses_visible_items_and_mixed_header_state() {
         assert!(APP_JS.contains("function syncSelectionUi(kind, visibleIds)"));
-        assert!(APP_JS.contains("selectAll.indeterminate = selectedVisible > 0 && !allVisible"));
+        assert!(ACCESSIBILITY_JS.contains("export function syncVisibleSelection({"));
+        assert!(APP_JS.contains("elements.selectAll.indeterminate = visible.mixed"));
+        assert!(APP_JS.contains("visible.mixed ? 'mixed' : String(visible.checked)"));
         assert!(APP_JS.contains("for (const id of visibleIds)"));
         assert!(APP_JS.contains("clearSelection('secrets')"));
         assert!(APP_JS.contains("clearSelection('files')"));
@@ -1074,9 +1078,9 @@ mod tests {
             "@media (max-width: 34rem)",
             "@media (prefers-reduced-motion: reduce)",
             ":focus-visible",
-            ".column-groups",
-            ".column-note",
-            ".column-file-type",
+            ".stacked-list",
+            ".stacked-activation:focus-visible",
+            ".stacked-selection",
         ] {
             assert!(STYLE_CSS.contains(rule), "missing {rule}");
         }
@@ -1101,9 +1105,8 @@ mod tests {
             assert!(INDEX_HTML.contains(marker), "missing {marker}");
             assert!(APP_JS.contains(marker), "missing {marker}");
         }
-        assert!(STYLE_CSS.contains(
-            ".column-file-size, .column-file-type, .column-file-modified { display:none; }"
-        ));
+        assert!(APP_JS.contains("table.hidden = !tableMode"));
+        assert!(APP_JS.contains("stacked.hidden = tableMode"));
         assert!(!STYLE_CSS.contains("#secrets-table, #files-table { table-layout:auto; }"));
         assert!(STYLE_CSS.contains(".selection-column { width:2.75rem;"));
         for rule in [
@@ -1138,7 +1141,8 @@ mod tests {
         assert!(APP_JS.contains("function itemNameCell(kind, name, activate, accessibleLabel)"));
         assert!(APP_JS.contains("button.className = 'item-name-content row-action'"));
         assert!(APP_JS.contains("`Edit secret ${name}`"));
-        assert!(APP_JS.contains("`Select file ${name}`"));
+        assert!(APP_JS.contains("itemNameCell('file', name, null, '')"));
+        assert!(APP_JS.contains("`Select ${kind === 'secrets' ? 'secret' : 'file'} ${id}`"));
         assert!(STYLE_CSS.contains(".row-action:focus-visible"));
     }
 
@@ -1171,9 +1175,9 @@ mod tests {
         assert!(APP_JS.contains(
             "const sorted = query.trim() ? visible : sortedTableItems('files', visible);"
         ));
-        assert!(
-            APP_JS.contains("for (const secret of sorted) tbody.appendChild(secretRow(secret));")
-        );
-        assert!(APP_JS.contains("for (const file of sorted) tbody.appendChild(fileRow(file));"));
+        assert!(APP_JS.contains("const rows = XvUiModel.contentRows('secrets', sorted);"));
+        assert!(APP_JS.contains("for (const row of rows) tbody.appendChild(secretRow(row));"));
+        assert!(APP_JS.contains("const rows = XvUiModel.contentRows('files', sorted"));
+        assert!(APP_JS.contains("for (const row of rows) tbody.appendChild(fileRow(row));"));
     }
 }

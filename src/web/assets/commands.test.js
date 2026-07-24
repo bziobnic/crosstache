@@ -140,6 +140,36 @@ test('registry results carry frozen exact target and operation generations', () 
   }), false);
 });
 
+test('built-in commands stay valid across same-context list publication races', () => {
+  const registry = createCommandRegistry();
+  const context = {
+    version: 'v1',
+    workspace: { alias: 'one', entries: [] },
+    backend: 'local',
+    vault: 'first',
+  };
+  registry.replaceMetadata({
+    secrets: [],
+    files: [],
+    scope: { alias: 'one', backend: 'local', vault: 'first' },
+    contextGeneration: 'v1',
+    dataGeneration: 'secrets-ready:files-loading',
+  });
+  const command = registry.search('', { context })
+    .find(({ id }) => id === 'search-local');
+
+  registry.replaceMetadata({
+    secrets: [],
+    files: [{ name: 'settled.txt' }],
+    scope: { alias: 'one', backend: 'local', vault: 'first' },
+    contextGeneration: 'v1',
+    dataGeneration: 'secrets-ready:files-ready',
+  });
+
+  assert.equal(registry.isCurrent(command, context), true);
+  assert.equal(registry.isCurrent(command, { ...context, version: 'v2' }), false);
+});
+
 test('command registry exposes required shortcuts and explicit result surface and scope', () => {
   const registry = createCommandRegistry();
   assert.deepEqual(

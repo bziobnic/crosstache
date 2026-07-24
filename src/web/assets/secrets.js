@@ -1,8 +1,11 @@
 import * as XvUiModel from './ui-model.js';
-import { buildMetadataIndex, searchIndex, shortcutIntent } from './commands.js';
+import { buildMetadataIndex, searchIndex } from './commands.js';
 import { mountFilterControls, mountUploadQueue } from './files.js';
 import { guardNavigation } from './dialogs.js';
-import { setProtectedValueStatus } from './accessibility.js';
+import {
+  setProtectedValueStatus,
+  syncVisibleSelection,
+} from './accessibility.js';
 import { contextQuery, formatContextLine } from './context.js';
 import {
   bindOwnedRetry,
@@ -1068,15 +1071,25 @@ function syncSelectionUi(kind, visibleIds) {
 function updateSelectionControls(kind) {
   const state = selectionState(kind);
   const elements = selectionElements(kind);
-  const visibleIds = state.visibleIds;
-  const selectedVisible = visibleIds.filter((id) => state.ids.has(id)).length;
-  const allVisible = visibleIds.length > 0 && selectedVisible === visibleIds.length;
-  elements.selectAll.checked = allVisible;
-  elements.selectAll.indeterminate = selectedVisible > 0 && !allVisible;
-  elements.selectAll.disabled = visibleIds.length === 0;
+  const visible = syncVisibleSelection({
+    visibleIds: state.visibleIds,
+    selectedIds: state.ids,
+  });
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  elements.selectAll.checked = visible.checked;
+  elements.selectAll.indeterminate = visible.mixed;
+  elements.selectAll.setAttribute(
+    'aria-checked',
+    visible.mixed ? 'mixed' : String(visible.checked),
+  );
+  elements.selectAll.setAttribute(
+    'aria-label',
+    `Select all ${visible.visibleCount} visible ${visible.visibleCount === 1 ? singular : kind}`,
+  );
+  elements.selectAll.disabled = visible.visibleCount === 0;
   elements.count.textContent = `${state.ids.size} selected`;
   elements.deleteButton.disabled = state.pending || state.ids.size === 0;
-  elements.selectAll.disabled = state.pending || visibleIds.length === 0;
+  elements.selectAll.disabled = state.pending || visible.visibleCount === 0;
   if (kind === 'secrets') $('#bulk-move-secrets').disabled = state.pending || state.ids.size === 0;
 }
 
@@ -1104,15 +1117,6 @@ function selectionCell(kind, id) {
   td.onclick = (e) => e.stopPropagation();
   td.appendChild(checkbox);
   return td;
-}
-
-function toggleSelected(kind, id) {
-  const state = selectionState(kind);
-  if (state.pending) return;
-  if (state.ids.has(id)) state.ids.delete(id);
-  else state.ids.add(id);
-  resetBulkConfirmation(kind);
-  renderSelectionKind(kind);
 }
 
 // ---- state ----
@@ -2110,17 +2114,13 @@ function itemNameCell(kind, name, activate, accessibleLabel) {
 function secretRow(row) {
   const s = row.source;
   const name = row.identifier;
-  const activate = () => {
-    if (secretSelection.enabled) toggleSelected('secrets', name);
-    else openDrawer(name);
-  };
+  const activate = secretSelection.enabled ? null : () => openDrawer(name);
   const tr = document.createElement('tr');
   if (secretSelection.ids.has(name)) tr.classList.add('selected-row');
   if (secretSelection.enabled) tr.appendChild(selectionCell('secrets', name));
   for (const [index, cell] of [name, s.folder, s.groups, s.note, XvUiModel.formatDate(s.updated_on)].entries()) {
     if (index === 0) {
-      const actionLabel = secretSelection.enabled ? `Select secret ${name}` : `Edit secret ${name}`;
-      const nameCell = itemNameCell('secret', name, activate, actionLabel);
+      const nameCell = itemNameCell('secret', name, activate, `Edit secret ${name}`);
       nameCell.classList.add('column-secret-name');
       const action = nameCell.querySelector('button');
       if (action) markContentControl(action, 'secrets', name, 'activation');
@@ -2142,7 +2142,7 @@ function secretRow(row) {
     }
     tr.appendChild(td);
   }
-  tr.onclick = activate;
+  if (activate) tr.onclick = activate;
   return tr;
 }
 
@@ -3249,23 +3249,6 @@ $('#delete').onclick = async () => {
 $('#tab-secrets').onclick = () => switchTab('secrets');
 $('#tab-files').onclick = () => switchTab('files');
 $('#tab-trash').onclick = () => switchTab('trash');
-for (const tab of [$('#tab-secrets'), $('#tab-files'), $('#tab-trash')]) {
-  tab.onkeydown = async (event) => {
-    const intent = shortcutIntent(event);
-    if (!intent?.startsWith('tab-')) return;
-    const tabs = [$('#tab-secrets'), $('#tab-files'), $('#tab-trash')].filter((candidate) => !candidate.hidden);
-    const index = tabs.indexOf(tab);
-    let target = null;
-    if (intent === 'tab-arrowright') target = tabs[(index + 1) % tabs.length];
-    if (intent === 'tab-arrowleft') target = tabs[(index - 1 + tabs.length) % tabs.length];
-    if (intent === 'tab-home') target = tabs[0];
-    if (intent === 'tab-end') target = tabs.at(-1);
-    if (!target) return;
-    event.preventDefault();
-    await target.onclick();
-    target.focus();
-  };
-}
 let activeTab = 'secrets';
 async function switchTab(which) {
   if (authRecoveryActive || store.snapshot().contextSwitchPending) return;
@@ -3436,7 +3419,7 @@ $('#file-search-clear').onclick = () => {
 
 function fileNameCell(name) {
   if (fileSelection.enabled) {
-    const cell = itemNameCell('file', name, () => toggleSelected('files', name), `Select file ${name}`);
+    const cell = itemNameCell('file', name, null, '');
     cell.classList.add('column-file-name');
     return cell;
   }
@@ -3475,9 +3458,6 @@ function fileRow(row) {
     if (index === 3) td.classList.add('column-file-modified');
     td.textContent = cell || '';
     tr.appendChild(td);
-  }
-  if (fileSelection.enabled) {
-    tr.onclick = () => toggleSelected('files', name);
   }
   return tr;
 }
