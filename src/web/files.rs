@@ -148,6 +148,21 @@ fn file_conflict(name: &str, suggested_name: Option<String>) -> ApiError {
     }
 }
 
+fn validate_backend_file_name(
+    files: &dyn FileBackend,
+    name: &str,
+    field: &'static str,
+) -> Result<(), ApiError> {
+    match files.validate_file_name(name) {
+        Ok(()) => Ok(()),
+        Err(BackendError::InvalidArgument(_)) => Err(invalid(
+            "The file name is not valid for this backend.",
+            field,
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn destination_name(destination: &str, name: &str) -> Result<String, ApiError> {
     if name.is_empty() {
         return Err(invalid("Choose a file with a name.", "name"));
@@ -281,6 +296,15 @@ pub(crate) async fn preflight(
     let mut lookup_count = 0;
     for candidate in body.files {
         let name = validate_candidate(&candidate)?;
+        validate_backend_file_name(
+            files,
+            &name,
+            if candidate.destination.is_empty() {
+                "name"
+            } else {
+                "destination"
+            },
+        )?;
         if !atomic_create {
             results.push(UploadPreflightResult {
                 client_id: candidate.client_id,
@@ -350,6 +374,10 @@ pub(crate) async fn upload(
         _ => None,
     };
     let scoped_target = query.target_context(&state)?;
+    let scoped_files = files_backend(scoped_target.backend.as_ref())?;
+    if let Some(name) = target_name.as_deref() {
+        validate_backend_file_name(scoped_files, name, "target")?;
+    }
     if query.policy != Some(ConflictPolicy::Replace)
         && !crate::backend::atomic_file_create_available(scoped_target.backend.as_ref())
     {
@@ -372,6 +400,16 @@ pub(crate) async fn upload(
             .file_name()
             .map(str::to_string)
             .ok_or_else(|| invalid("Choose a file with a name.", "file"))?;
+        let name = target_name.as_deref().unwrap_or(&original_name);
+        validate_backend_file_name(
+            scoped_files,
+            name,
+            if target_name.is_some() {
+                "target"
+            } else {
+                "file"
+            },
+        )?;
         let content_type = field.content_type().map(str::to_string);
         if let Some(content_type) = content_type.as_deref() {
             validate_content_type(content_type)?;
@@ -383,8 +421,7 @@ pub(crate) async fn upload(
             .to_vec();
         validate_upload_size(content.len() as u64)?;
         let vault = &scoped_target.context.vault;
-        let files = files_backend(scoped_target.backend.as_ref())?;
-        let name = target_name.as_deref().unwrap_or(&original_name);
+        let files = scoped_files;
         if name.is_empty() || name.len() > MAX_NAME_BYTES {
             return Err(invalid("The file name is invalid.", "target"));
         }
@@ -892,6 +929,49 @@ mod tests {
                 assert!(!body.to_string().contains(content_type));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn backend_name_validation_is_field_specific_before_metadata_or_mutation() {
+        let limited = Arc::new(testutil::stub::StubBackend::new().with_file_name_limit(10));
+        let limited_app = web::build_router(state_with_backends(limited.clone(), limited.clone()));
+        let candidate = json!({"files":[{
+            "client_id":"1", "name":"name.txt", "size":1,
+            "content_type":"text/plain", "destination":"folder"
+        }]});
+        let response = limited_app
+            .oneshot(
+                Request::post("/api/files/preflight")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(candidate.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["field"], "destination");
+        assert_eq!(limited.file_info_calls(), 0);
+        assert!(limited.files.lock().unwrap().is_empty());
+
+        let unlimited = Arc::new(testutil::stub::StubBackend::new());
+        let app = web::build_router(state_with_backends(unlimited.clone(), unlimited));
+        let response = app
+            .oneshot(
+                Request::post("/api/files/preflight")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(candidate.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

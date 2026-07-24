@@ -123,6 +123,8 @@ pub(crate) mod stub {
         pub files: Mutex<HashMap<String, StoredFile>>,
         #[cfg(feature = "file-ops")]
         file_info_calls: AtomicUsize,
+        #[cfg(feature = "file-ops")]
+        file_name_limit: Option<usize>,
     }
 
     impl StubBackend {
@@ -178,6 +180,8 @@ pub(crate) mod stub {
                 files: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
                 file_info_calls: AtomicUsize::new(0),
+                #[cfg(feature = "file-ops")]
+                file_name_limit: None,
             }
         }
 
@@ -253,6 +257,12 @@ pub(crate) mod stub {
         #[cfg(feature = "file-ops")]
         pub(crate) fn without_atomic_file_create_support(mut self) -> Self {
             self.atomic_file_create_supported = false;
+            self
+        }
+
+        #[cfg(feature = "file-ops")]
+        pub(crate) fn with_file_name_limit(mut self, limit: usize) -> Self {
+            self.file_name_limit = Some(limit);
             self
         }
     }
@@ -720,6 +730,15 @@ pub(crate) mod stub {
     #[cfg(feature = "file-ops")]
     #[async_trait]
     impl crate::backend::FileBackend for StubBackend {
+        fn validate_file_name(&self, name: &str) -> Result<(), BackendError> {
+            if self.file_name_limit.is_some_and(|limit| name.len() > limit) {
+                return Err(BackendError::InvalidArgument(
+                    "file name exceeds backend limit".into(),
+                ));
+            }
+            Ok(())
+        }
+
         fn supports_atomic_create(&self) -> bool {
             self.atomic_file_create_supported
         }

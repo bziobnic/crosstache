@@ -26,6 +26,11 @@ use super::error::BackendError;
 /// [`list_files_hierarchical`]: FileBackend::list_files_hierarchical
 #[async_trait]
 pub trait FileBackend: Send + Sync {
+    /// Validate a logical file key using this backend's actual storage rules.
+    fn validate_file_name(&self, _name: &str) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     /// Truthful implementation-side capability for atomic create-only upload.
     fn supports_atomic_create(&self) -> bool {
         false

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
@@ -30,17 +31,39 @@ fn encode_name(name: &str) -> String {
     url::form_urlencoded::byte_serialize(name.as_bytes()).collect()
 }
 
+const PLATFORM_SAFE_NAME_MAX: usize = 255;
+const LONGEST_ACTIVE_SUFFIX_BYTES: usize = ".meta.json".len();
+
+fn validate_logical_file_name(name: &str) -> Result<(), BackendError> {
+    if name.is_empty() || name.len() > PLATFORM_SAFE_NAME_MAX {
+        return Err(BackendError::InvalidArgument(
+            "local file key must contain 1 to 255 UTF-8 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn storage_stem(name: &str) -> Result<String, BackendError> {
+    validate_logical_file_name(name)?;
+    let encoded = encode_name(name);
+    if encoded.len() + LONGEST_ACTIVE_SUFFIX_BYTES <= PLATFORM_SAFE_NAME_MAX {
+        return Ok(encoded);
+    }
+    let digest = Sha256::digest(name.as_bytes());
+    Ok(format!("h-{digest:x}"))
+}
+
 fn files_dir(store_path: &Path, vault: &str) -> Result<PathBuf, BackendError> {
     paths::files_dir(store_path, vault)
 }
 
 fn file_age_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
-    let enc = encode_name(name);
+    let enc = storage_stem(name)?;
     Ok(files_dir(store_path, vault)?.join(format!("{enc}.age")))
 }
 
 fn file_meta_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf, BackendError> {
-    let enc = encode_name(name);
+    let enc = storage_stem(name)?;
     Ok(files_dir(store_path, vault)?.join(format!("{enc}.meta.json")))
 }
 
@@ -77,28 +100,74 @@ fn sync_directory(path: &Path) -> Result<(), BackendError> {
         .map_err(|e| BackendError::Internal(format!("sync directory {}: {e}", path.display())))?;
     #[cfg(not(unix))]
     let _ = path;
+    #[cfg(test)]
+    tests::record_file_event("sync-dir", path);
     Ok(())
 }
 
 fn ensure_private_real_directory(path: &Path) -> Result<(), BackendError> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(BackendError::Internal(format!(
-                "refusing unsafe file transaction directory {}",
-                path.display()
-            )));
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(BackendError::Internal(format!(
+                    "refusing unsafe file transaction directory {}",
+                    path.display()
+                )));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+                // SAFETY: `geteuid` takes no arguments and has no preconditions.
+                if metadata.uid() != unsafe { libc::geteuid() } {
+                    return Err(BackendError::Internal(
+                        "file transaction directory is not owned by the current user".into(),
+                    ));
+                }
+                if metadata.permissions().mode() & 0o777 != 0o700 {
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(
+                        |error| {
+                            BackendError::Internal(format!(
+                                "repair file transaction directory permissions: {error}"
+                            ))
+                        },
+                    )?;
+                    sync_directory(path)?;
+                    if let Some(parent) = path.parent() {
+                        sync_directory(parent)?;
+                    }
+                }
+            }
         }
-    } else {
-        create_private_dir(path).map_err(|e| {
-            BackendError::Internal(format!("create file transaction directory: {e}"))
-        })?;
-        let metadata = fs::symlink_metadata(path).map_err(|e| {
-            BackendError::Internal(format!("inspect file transaction directory: {e}"))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(BackendError::Internal(
-                "file transaction directory is unsafe".into(),
-            ));
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| {
+                BackendError::Internal("file transaction directory has no parent".into())
+            })?;
+            ensure_existing_real_directory(parent)?
+                .then_some(())
+                .ok_or_else(|| {
+                    BackendError::Internal("file transaction parent does not exist".into())
+                })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                let mut builder = fs::DirBuilder::new();
+                builder.mode(0o700);
+                builder.create(path).map_err(|error| {
+                    BackendError::Internal(format!("create file transaction directory: {error}"))
+                })?;
+            }
+            #[cfg(not(unix))]
+            fs::create_dir(path).map_err(|error| {
+                BackendError::Internal(format!("create file transaction directory: {error}"))
+            })?;
+            sync_directory(path)?;
+            sync_directory(parent)?;
+        }
+        Err(error) => {
+            return Err(BackendError::Internal(format!(
+                "inspect file transaction directory: {error}"
+            )))
         }
     }
     Ok(())
@@ -164,7 +233,7 @@ struct FileTransactionPaths {
 impl FileTransactionPaths {
     fn new(store_path: &Path, vault: &str, name: &str) -> Result<Self, BackendError> {
         let fdir = files_dir(store_path, vault)?;
-        let stem = encode_name(name);
+        let stem = storage_stem(name)?;
         Self::from_stem(&fdir, &stem)
     }
 
@@ -455,6 +524,8 @@ impl LocalFileBackend {
         self.file_crash(1)?;
 
         let activated = (|| {
+            #[cfg(test)]
+            tests::record_file_event("active-rename", &paths.active_age);
             fs::rename(&paths.staged_age, &paths.active_age)
                 .map_err(|e| BackendError::Internal(format!("activate file ciphertext: {e}")))?;
             sync_directory(&fdir)?;
@@ -467,6 +538,8 @@ impl LocalFileBackend {
         self.file_crash(2)?;
 
         let activated = (|| {
+            #[cfg(test)]
+            tests::record_file_event("active-rename", &paths.active_meta);
             fs::rename(&paths.staged_meta, &paths.active_meta)
                 .map_err(|e| BackendError::Internal(format!("activate file metadata: {e}")))?;
             sync_directory(&fdir)?;
@@ -519,6 +592,17 @@ impl LocalFileBackend {
 
 #[async_trait]
 impl FileBackend for LocalFileBackend {
+    fn validate_file_name(&self, name: &str) -> Result<(), BackendError> {
+        validate_logical_file_name(name)?;
+        let stem = storage_stem(name)?;
+        if stem.len() + LONGEST_ACTIVE_SUFFIX_BYTES > PLATFORM_SAFE_NAME_MAX {
+            return Err(BackendError::InvalidArgument(
+                "local file key cannot be represented safely".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn supports_atomic_create(&self) -> bool {
         true
     }
@@ -529,6 +613,7 @@ impl FileBackend for LocalFileBackend {
         request: FileUploadRequest,
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError> {
+        self.validate_file_name(&request.name)?;
         self.upload_with_policy(vault, request, false)
     }
 
@@ -538,6 +623,7 @@ impl FileBackend for LocalFileBackend {
         request: FileUploadRequest,
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError> {
+        self.validate_file_name(&request.name)?;
         self.upload_with_policy(vault, request, true)
     }
 
@@ -547,6 +633,7 @@ impl FileBackend for LocalFileBackend {
         name: &str,
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<Vec<u8>, BackendError> {
+        self.validate_file_name(name)?;
         let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         if !vault_dir.exists() {
             return Err(BackendError::NotFound {
@@ -627,6 +714,7 @@ impl FileBackend for LocalFileBackend {
     }
 
     async fn delete_file(&self, vault: &str, name: &str) -> Result<(), BackendError> {
+        self.validate_file_name(name)?;
         let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         if !vault_dir.exists() {
             return Err(BackendError::NotFound {
@@ -659,6 +747,7 @@ impl FileBackend for LocalFileBackend {
     }
 
     async fn get_file_info(&self, vault: &str, name: &str) -> Result<FileInfo, BackendError> {
+        self.validate_file_name(name)?;
         let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         if !vault_dir.exists() {
             return Err(BackendError::NotFound {
@@ -691,6 +780,22 @@ mod tests {
     fn file_crash_hooks() -> &'static Mutex<HashMap<PathBuf, u8>> {
         static HOOKS: OnceLock<Mutex<HashMap<PathBuf, u8>>> = OnceLock::new();
         HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn file_events() -> &'static Mutex<Vec<(String, PathBuf)>> {
+        static EVENTS: OnceLock<Mutex<Vec<(String, PathBuf)>>> = OnceLock::new();
+        EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub(super) fn record_file_event(kind: &str, path: &Path) {
+        file_events()
+            .lock()
+            .unwrap()
+            .push((kind.to_string(), path.to_path_buf()));
+    }
+
+    fn take_file_events() -> Vec<(String, PathBuf)> {
+        std::mem::take(&mut *file_events().lock().unwrap())
     }
 
     fn install_file_crash(store_path: &Path, stage: u8) {
@@ -1334,6 +1439,135 @@ mod tests {
             Err(BackendError::NotFound { .. })
         ));
         assert!(!paths.dir.exists());
+    }
+
+    #[tokio::test]
+    async fn local_name_validation_honors_logical_and_encoded_component_boundaries() {
+        let (backend, tmp) = test_file_backend();
+        let ascii_255 = "a".repeat(255);
+        let ascii_256 = "a".repeat(256);
+        backend.validate_file_name(&ascii_255).unwrap();
+        assert!(matches!(
+            backend.validate_file_name(&ascii_256),
+            Err(BackendError::InvalidArgument(_))
+        ));
+
+        let multibyte_254 = "é".repeat(127);
+        let multibyte_256 = "é".repeat(128);
+        backend.validate_file_name(&multibyte_254).unwrap();
+        assert!(matches!(
+            backend.validate_file_name(&multibyte_256),
+            Err(BackendError::InvalidArgument(_))
+        ));
+        let stem = storage_stem(&multibyte_254).unwrap();
+        assert!(
+            stem.len() + ".meta.json".len() <= PLATFORM_SAFE_NAME_MAX,
+            "percent expansion must switch to a fixed safe stem"
+        );
+
+        backend
+            .upload_file(
+                "default",
+                upload_request(&ascii_255, b"boundary", "marker"),
+                None,
+            )
+            .await
+            .unwrap();
+        let downloaded = backend
+            .download_file("default", &ascii_255, None)
+            .await
+            .unwrap();
+        assert_eq!(downloaded, b"boundary");
+        let meta_path = file_meta_path(tmp.path(), "default", &ascii_255).unwrap();
+        assert!(meta_path.exists());
+        assert!(meta_path.file_name().unwrap().as_encoded_bytes().len() <= PLATFORM_SAFE_NAME_MAX);
+    }
+
+    #[tokio::test]
+    async fn invalid_local_name_fails_before_creating_transaction_artifacts() {
+        let (backend, tmp) = test_file_backend();
+        let error = backend
+            .upload_file(
+                "default",
+                upload_request(&"x".repeat(256), b"bytes", "marker"),
+                None,
+            )
+            .await
+            .expect_err("overlong logical key must fail");
+        assert!(matches!(error, BackendError::InvalidArgument(_)));
+        assert!(!tmp
+            .path()
+            .join("vaults/default/files/.transactions")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn fresh_directory_links_are_durable_before_first_active_rename() {
+        let (backend, tmp) = test_file_backend();
+        let fdir = tmp.path().join("vaults/default/files");
+        fs::remove_dir(&fdir).unwrap();
+        take_file_events();
+
+        backend
+            .upload_file(
+                "default",
+                upload_request("durable.txt", b"bytes", "marker"),
+                None,
+            )
+            .await
+            .unwrap();
+        let events = take_file_events();
+        let active = events
+            .iter()
+            .position(|(kind, _)| kind == "active-rename")
+            .expect("active rename event");
+        let transaction_root = fdir.join(".transactions");
+        for required in [
+            tmp.path().join("vaults/default"),
+            fdir.clone(),
+            transaction_root,
+        ] {
+            assert!(
+                events[..active]
+                    .iter()
+                    .any(|(kind, path)| kind == "sync-dir" && path == &required),
+                "{} must be synced before active mutation: {events:?}",
+                required.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_transaction_directories_are_repaired_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (backend, _tmp) = test_file_backend();
+        let paths =
+            FileTransactionPaths::new(&backend.store_path, "default", "repair.txt").unwrap();
+        ensure_private_real_directory(paths.dir.parent().unwrap()).unwrap();
+        ensure_private_real_directory(&paths.dir).unwrap();
+        fs::set_permissions(
+            paths.dir.parent().unwrap(),
+            fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_private_real_directory(paths.dir.parent().unwrap()).unwrap();
+        ensure_private_real_directory(&paths.dir).unwrap();
+        assert_eq!(
+            fs::metadata(paths.dir.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&paths.dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[tokio::test]

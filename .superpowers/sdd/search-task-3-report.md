@@ -110,3 +110,41 @@ remediated test-first:
 - `cargo check --all-targets --all-features` — passed
 - `cargo fmt --all -- --check` — passed
 - `git diff --check` — passed
+
+## Second review remediation
+
+A follow-up durability and platform-boundary review was also addressed
+test-first:
+
+- Newly created Local `files`, `.transactions`, and per-file transaction
+  directories are synced together with their parent links before the first
+  active ciphertext or metadata rename. An ordered event test starts from a
+  fresh files directory and proves every required sync precedes mutation.
+- Existing transaction roots and children must be real directories owned by
+  the current user. Overly permissive modes are repaired to `0700` and synced;
+  wrong ownership fails closed where ownership metadata is available. Existing
+  symlink rejection remains covered.
+- Local logical file keys now have a truthful platform-safe limit of 255 UTF-8
+  bytes. Boundary tests cover ASCII 255/256 and multibyte 254/256.
+- Percent-encoded names that would exceed the component limit use a fixed
+  SHA-256 storage stem. Existing names whose encoded components already fit
+  retain their previous stems, while a valid 255-byte name round-trips through
+  upload and download.
+- Invalid Local names fail before transaction artifacts are created. The web
+  preflight and multipart routes validate the complete destination name before
+  metadata lookup or file buffering and return stable, redacted,
+  field-specific errors.
+- Name validation is a backend contract with a permissive default, so providers
+  do not accidentally inherit Local filesystem constraints. AWS continues to
+  apply its existing provider-specific validation.
+
+### Final verification after second remediation
+
+- `cargo test --features ui web::files::tests --lib` — 17 passed
+- `cargo test --features ui backend::local::files::tests --lib` — 19 passed
+- `cargo test --features ui web:: --lib` — 162 passed
+- Hermetic `cargo test --features ui --lib` — 1077 passed, 1 ignored
+- `cargo clippy --all-targets --features ui -- -D warnings` — passed
+- `cargo check --all-targets --all-features` — passed
+- `cargo fmt --all -- --check` — passed
+- `git diff --check` — passed
