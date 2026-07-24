@@ -843,24 +843,50 @@ fn load_from_env(config: &mut Config) {
 
 pub async fn save_config(config: &Config) -> Result<()> {
     let config_path = Config::get_config_path()?;
+    save_config_to_path(config, &config_path).await
+}
 
-    // Create parent directories if they don't exist
-    if let Some(parent) = config_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    // Serialize to TOML format
+pub(crate) async fn save_config_to_path(
+    config: &Config,
+    config_path: &std::path::Path,
+) -> Result<()> {
     let contents = toml::to_string_pretty(config)
         .map_err(|e| CrosstacheError::serialization(e.to_string()))?;
-
-    crate::utils::helpers::write_sensitive_file_async(&config_path, contents.as_bytes()).await?;
-
-    Ok(())
+    crate::utils::helpers::atomic_write_file_no_follow_async(config_path, contents.as_bytes(), true)
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{NamedBackendEntry, *};
+
+    #[tokio::test]
+    async fn settings_save_to_path_is_atomic_private_and_parseable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("xv.conf");
+
+        save_config_to_path(&Config::default(), &path)
+            .await
+            .unwrap();
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        toml::from_str::<Config>(&contents).unwrap();
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .count(),
+            1
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[test]
     fn test_azure_credential_type_from_str() {
