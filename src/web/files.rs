@@ -163,13 +163,18 @@ fn validate_backend_file_name(
     }
 }
 
-fn destination_name(destination: &str, name: &str) -> Result<String, ApiError> {
+fn validate_generic_file_name(name: &str, field: &'static str) -> Result<(), ApiError> {
     if name.is_empty() {
-        return Err(invalid("Choose a file with a name.", "name"));
+        return Err(invalid("Choose a file with a name.", field));
     }
     if name.len() > MAX_NAME_BYTES {
-        return Err(invalid("The file name is too long.", "name"));
+        return Err(invalid("The file name is too long.", field));
     }
+    Ok(())
+}
+
+fn destination_name(destination: &str, name: &str) -> Result<String, ApiError> {
+    validate_generic_file_name(name, "name")?;
     if destination.len() > MAX_DESTINATION_BYTES {
         return Err(invalid("The destination is too long.", "destination"));
     }
@@ -202,15 +207,61 @@ fn validate_content_type(content_type: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn renamed_name(name: &str, number: usize) -> String {
-    let (stem, extension) = match name.rsplit_once('.') {
+fn renamed_name_parts(name: &str) -> (&str, &str, Option<&str>) {
+    let (directory, filename) = match name.rsplit_once('/') {
+        Some((directory, filename)) => (directory, filename),
+        None => ("", name),
+    };
+    let (stem, extension) = match filename.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
-        _ => (name, None),
+        _ => (filename, None),
+    };
+    (directory, stem, extension)
+}
+
+fn renamed_name(directory: &str, stem: &str, extension: Option<&str>, number: usize) -> String {
+    let prefix = if directory.is_empty() {
+        String::new()
+    } else {
+        format!("{directory}/")
     };
     match extension {
-        Some(extension) => format!("{stem} ({number}).{extension}"),
-        None => format!("{stem} ({number})"),
+        Some(extension) => format!("{prefix}{stem} ({number}).{extension}"),
+        None => format!("{prefix}{stem} ({number})"),
     }
+}
+
+fn backend_valid_renamed_name(
+    files: &dyn FileBackend,
+    name: &str,
+    number: usize,
+) -> Result<Option<String>, ApiError> {
+    let (directory, original_stem, extension) = renamed_name_parts(name);
+    for preserve_extension in [true, false] {
+        let mut stem = if preserve_extension {
+            original_stem.to_string()
+        } else {
+            name.rsplit_once('/')
+                .map_or(name, |(_, filename)| filename)
+                .to_string()
+        };
+        let extension = preserve_extension.then_some(extension).flatten();
+        for _ in 0..=MAX_NAME_BYTES {
+            let candidate = renamed_name(directory, &stem, extension, number);
+            if candidate.len() <= MAX_NAME_BYTES {
+                match files.validate_file_name(&candidate) {
+                    Ok(()) => return Ok(Some(candidate)),
+                    Err(BackendError::InvalidArgument(_)) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let Some((index, _)) = stem.char_indices().next_back() else {
+                break;
+            };
+            stem.truncate(index);
+        }
+    }
+    Ok(None)
 }
 
 async fn exists(files: &dyn FileBackend, vault: &str, name: &str) -> Result<bool, ApiError> {
@@ -223,7 +274,9 @@ async fn exists(files: &dyn FileBackend, vault: &str, name: &str) -> Result<bool
 
 async fn suggestion(files: &dyn FileBackend, vault: &str, name: &str) -> Result<String, ApiError> {
     for number in 2..(2 + MAX_SUGGESTION_ATTEMPTS) {
-        let candidate = renamed_name(name, number);
+        let Some(candidate) = backend_valid_renamed_name(files, name, number)? else {
+            break;
+        };
         if !exists(files, vault, &candidate).await? {
             return Ok(candidate);
         }
@@ -264,7 +317,9 @@ async fn suggestion_cached(
     lookup_count: &mut usize,
 ) -> Result<String, ApiError> {
     for number in 2..(2 + MAX_SUGGESTION_ATTEMPTS) {
-        let candidate = renamed_name(name, number);
+        let Some(candidate) = backend_valid_renamed_name(files, name, number)? else {
+            break;
+        };
         if !exists_cached(files, vault, &candidate, cache, lookup_count).await? {
             return Ok(candidate);
         }
@@ -296,6 +351,7 @@ pub(crate) async fn preflight(
     let mut lookup_count = 0;
     for candidate in body.files {
         let name = validate_candidate(&candidate)?;
+        validate_backend_file_name(files, &candidate.name, "name")?;
         validate_backend_file_name(
             files,
             &name,
@@ -376,6 +432,7 @@ pub(crate) async fn upload(
     let scoped_target = query.target_context(&state)?;
     let scoped_files = files_backend(scoped_target.backend.as_ref())?;
     if let Some(name) = target_name.as_deref() {
+        validate_generic_file_name(name, "target")?;
         validate_backend_file_name(scoped_files, name, "target")?;
     }
     if query.policy != Some(ConflictPolicy::Replace)
@@ -400,16 +457,11 @@ pub(crate) async fn upload(
             .file_name()
             .map(str::to_string)
             .ok_or_else(|| invalid("Choose a file with a name.", "file"))?;
+        validate_generic_file_name(&original_name, "file")?;
         let name = target_name.as_deref().unwrap_or(&original_name);
-        validate_backend_file_name(
-            scoped_files,
-            name,
-            if target_name.is_some() {
-                "target"
-            } else {
-                "file"
-            },
-        )?;
+        if target_name.is_none() {
+            validate_backend_file_name(scoped_files, name, "file")?;
+        }
         let content_type = field.content_type().map(str::to_string);
         if let Some(content_type) = content_type.as_deref() {
             validate_content_type(content_type)?;
@@ -422,10 +474,6 @@ pub(crate) async fn upload(
         validate_upload_size(content.len() as u64)?;
         let vault = &scoped_target.context.vault;
         let files = scoped_files;
-        if name.is_empty() || name.len() > MAX_NAME_BYTES {
-            return Err(invalid("The file name is invalid.", "target"));
-        }
-
         let request = FileUploadRequest {
             name: name.to_string(),
             content,
@@ -494,14 +542,18 @@ pub(crate) async fn upload(
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use axum::body::Body;
+    use axum::body::Bytes;
     use axum::http::{header, Request, StatusCode};
     use http_body_util::BodyExt;
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
+    use crate::backend::FileBackend;
     use crate::web::{self, testutil};
 
     fn state_with_backends(
@@ -781,6 +833,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn suggestions_at_backend_name_limit_are_valid_utf8_safe_and_uploadable() {
+        let backend = Arc::new(testutil::stub::StubBackend::new().with_file_name_limit(255));
+        let ascii = format!("{}.txt", "a".repeat(251));
+        let multibyte = format!("{}.txt", "é".repeat(125));
+        {
+            let mut files = backend.files.lock().unwrap();
+            files.insert(ascii.clone(), (b"old".to_vec(), "text/plain".into()));
+            files.insert(multibyte.clone(), (b"old".to_vec(), "text/plain".into()));
+        }
+        let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
+        let body = json!({"files":[
+            {"client_id":"ascii", "name":ascii, "size":3,
+             "content_type":"text/plain", "destination":""},
+            {"client_id":"utf8", "name":multibyte, "size":3,
+             "content_type":"text/plain", "destination":""}
+        ]});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/files/preflight")
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let ascii_suggestion = body["results"][0]["suggested_name"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let utf8_suggestion = body["results"][1]["suggested_name"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for suggestion in [&ascii_suggestion, &utf8_suggestion] {
+            assert!(suggestion.len() <= 255);
+            assert!(suggestion.ends_with(" (2).txt"));
+            backend.validate_file_name(suggestion).unwrap();
+            assert!(!backend.files.lock().unwrap().contains_key(suggestion));
+        }
+
+        let uri = format!(
+            "/api/files?policy=rename&target={}",
+            url::form_urlencoded::byte_serialize(ascii_suggestion.as_bytes()).collect::<String>()
+        );
+        let (status, _) = upload(app, &uri, "source.txt", "new").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(backend.files.lock().unwrap()[&ascii_suggestion].0, b"new");
+        assert_eq!(backend.files.lock().unwrap()[&ascii].0, b"old");
+    }
+
+    #[tokio::test]
     async fn preflight_is_bounded_and_rejects_unknown_fields() {
         let files: Vec<Value> = (0..=1000)
             .map(|index| {
@@ -955,6 +1065,11 @@ mod tests {
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(body["error"]["field"], "destination");
+        assert_eq!(
+            limited.file_name_validation_calls(),
+            2,
+            "preflight must validate the original name before the combined destination"
+        );
         assert_eq!(limited.file_info_calls(), 0);
         assert!(limited.files.lock().unwrap().is_empty());
 
@@ -972,6 +1087,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn invalid_rename_target_precedes_any_multipart_body_or_backend_access() {
+        let backend = Arc::new(testutil::stub::StubBackend::new());
+        let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
+        let content_polls = Arc::new(AtomicUsize::new(0));
+        let long_name = "x".repeat(super::MAX_NAME_BYTES + 1);
+        let polls = content_polls.clone();
+        let stream = futures::stream::unfold(false, move |done| {
+            let polls = polls.clone();
+            async move {
+                if done {
+                    None
+                } else {
+                    polls.fetch_add(1, Ordering::SeqCst);
+                    Some((
+                        Ok::<_, Infallible>(Bytes::from_static(
+                            b"--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"source.txt\"\r\n\r\nmust-not-buffer\r\n--B--\r\n",
+                        )),
+                        true,
+                    ))
+                }
+            }
+        });
+        let uri = format!("/api/files?policy=rename&target={long_name}");
+        let response = app
+            .oneshot(
+                Request::post(uri)
+                    .header(header::HOST, "127.0.0.1:1")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B")
+                    .body(Body::from_stream(stream))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["field"], "target");
+        assert_eq!(content_polls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.file_name_validation_calls(), 0);
+        assert_eq!(backend.file_info_calls(), 0);
+        assert!(backend.files.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_original_multipart_name_is_attributed_to_file_before_backend_access() {
+        let backend = Arc::new(testutil::stub::StubBackend::new());
+        let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
+        let long_name = "x".repeat(super::MAX_NAME_BYTES + 1);
+        let (status, body) = upload(
+            app,
+            "/api/files?policy=replace",
+            &long_name,
+            "must-not-write",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["field"], "file");
+        assert_eq!(backend.file_name_validation_calls(), 0);
+        assert_eq!(backend.file_info_calls(), 0);
+        assert!(backend.files.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

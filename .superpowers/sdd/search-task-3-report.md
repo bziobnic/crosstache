@@ -148,3 +148,43 @@ test-first:
 - `cargo check --all-targets --all-features` — passed
 - `cargo fmt --all -- --check` — passed
 - `git diff --check` — passed
+
+## Third review remediation
+
+The complete Local path chain and name-suggestion review was addressed
+test-first:
+
+- Every Local file entrypoint validates the configured
+  `store/vaults/<vault>/files` directory chain before locking or accessing file
+  data. A symlinked vault now fails closed for metadata, download, list, delete,
+  replace upload, and create-only upload while leaving a prepared external tree
+  byte-for-byte unchanged.
+- File locks are opened through the existing component-by-component
+  no-follow helper. After lock acquisition, the complete chain is revalidated;
+  on Unix its directory and lock-file device/inode identities must still match
+  the pre-lock handles, detecting path substitution during acquisition.
+- Missing store, vaults root, vault, and files directories are created
+  sequentially as owner-only `0700` directories. Every new directory and its
+  parent link are synced. An ordered fresh-store test proves the store parent,
+  store, vaults root, and vault are durable before the first active file rename.
+- Conflict suggestions now preserve the directory and extension where
+  possible, truncate only on UTF-8 character boundaries, and validate every
+  candidate against the selected backend before a bounded metadata lookup.
+  ASCII and multibyte logical-name boundaries produce valid deterministic
+  suggestions that round-trip through rename upload without collision.
+- Preflight validates the original candidate name independently before its
+  combined destination path. Generic rename-target validation happens before
+  the multipart body is polled; original multipart filename validation happens
+  before backend access or whole-field buffering. Stable errors identify
+  `name`, `destination`, `target`, or `file` without echoing rejected values.
+
+### Final verification after third remediation
+
+- `cargo test --features ui web::files::tests --lib` — 20 passed
+- `cargo test --features ui backend::local::files::tests --lib` — 21 passed
+- `cargo test --features ui web:: --lib` — 165 passed
+- Hermetic `cargo test --features ui --lib` — 1082 passed, 1 ignored
+- `cargo clippy --all-targets --features ui -- -D warnings` — passed
+- `cargo check --all-targets --all-features` — passed
+- `cargo fmt --all -- --check` — passed
+- `git diff --check` — passed

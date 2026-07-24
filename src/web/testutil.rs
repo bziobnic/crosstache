@@ -124,6 +124,8 @@ pub(crate) mod stub {
         #[cfg(feature = "file-ops")]
         file_info_calls: AtomicUsize,
         #[cfg(feature = "file-ops")]
+        file_name_validation_calls: AtomicUsize,
+        #[cfg(feature = "file-ops")]
         file_name_limit: Option<usize>,
     }
 
@@ -180,6 +182,8 @@ pub(crate) mod stub {
                 files: Mutex::new(HashMap::new()),
                 #[cfg(feature = "file-ops")]
                 file_info_calls: AtomicUsize::new(0),
+                #[cfg(feature = "file-ops")]
+                file_name_validation_calls: AtomicUsize::new(0),
                 #[cfg(feature = "file-ops")]
                 file_name_limit: None,
             }
@@ -252,6 +256,11 @@ pub(crate) mod stub {
         #[cfg(feature = "file-ops")]
         pub(crate) fn file_info_calls(&self) -> usize {
             self.file_info_calls.load(Ordering::SeqCst)
+        }
+
+        #[cfg(feature = "file-ops")]
+        pub(crate) fn file_name_validation_calls(&self) -> usize {
+            self.file_name_validation_calls.load(Ordering::SeqCst)
         }
 
         #[cfg(feature = "file-ops")]
@@ -731,6 +740,8 @@ pub(crate) mod stub {
     #[async_trait]
     impl crate::backend::FileBackend for StubBackend {
         fn validate_file_name(&self, name: &str) -> Result<(), BackendError> {
+            self.file_name_validation_calls
+                .fetch_add(1, Ordering::SeqCst);
             if self.file_name_limit.is_some_and(|limit| name.len() > limit) {
                 return Err(BackendError::InvalidArgument(
                     "file name exceeds backend limit".into(),

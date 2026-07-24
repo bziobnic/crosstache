@@ -11,13 +11,14 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::backend::error::BackendError;
 use crate::backend::file::FileBackend;
 use crate::blob::models::{FileInfo, FileListRequest, FileUploadRequest};
-use crate::utils::helpers::{create_private_dir, write_private};
+use crate::utils::helpers::{open_private_lock_file_no_follow, write_private};
 use crate::utils::progress::ProgressReporter;
 
 use super::{crypto, paths};
@@ -189,6 +190,127 @@ fn ensure_existing_real_directory(path: &Path) -> Result<bool, BackendError> {
         ));
     }
     Ok(true)
+}
+
+struct LocalFileChain {
+    vault_dir: PathBuf,
+    files_dir: PathBuf,
+    #[cfg(unix)]
+    directory_ids: [(u64, u64); 4],
+}
+
+fn local_file_chain_paths(store_path: &Path, vault: &str) -> Result<[PathBuf; 4], BackendError> {
+    let vault_dir = paths::vault_dir(store_path, vault)?;
+    Ok([
+        store_path.to_path_buf(),
+        paths::vaults_dir(store_path),
+        vault_dir.clone(),
+        vault_dir.join("files"),
+    ])
+}
+
+fn existing_local_file_chain(
+    store_path: &Path,
+    vault: &str,
+) -> Result<Option<LocalFileChain>, BackendError> {
+    let chain = local_file_chain_paths(store_path, vault)?;
+    for directory in &chain {
+        if !ensure_existing_real_directory(directory)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(local_file_chain_from_paths(&chain)?))
+}
+
+fn ensure_writable_local_file_chain(
+    store_path: &Path,
+    vault: &str,
+) -> Result<LocalFileChain, BackendError> {
+    let chain = local_file_chain_paths(store_path, vault)?;
+    let store_parent = store_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let store_parent = store_parent.unwrap_or_else(|| Path::new("."));
+    ensure_existing_real_directory(store_parent)?
+        .then_some(())
+        .ok_or_else(|| BackendError::Internal("local store parent does not exist".into()))?;
+    for directory in &chain {
+        ensure_private_real_directory(directory)?;
+    }
+    local_file_chain_from_paths(&chain)
+}
+
+fn local_file_chain_from_paths(chain: &[PathBuf; 4]) -> Result<LocalFileChain, BackendError> {
+    #[cfg(unix)]
+    let directory_ids = {
+        use std::os::unix::fs::MetadataExt;
+
+        let mut ids = [(0, 0); 4];
+        for (index, directory) in chain.iter().enumerate() {
+            let metadata = fs::symlink_metadata(directory).map_err(|error| {
+                BackendError::Internal(format!("inspect local file directory identity: {error}"))
+            })?;
+            ids[index] = (metadata.dev(), metadata.ino());
+        }
+        ids
+    };
+    Ok(LocalFileChain {
+        vault_dir: chain[2].clone(),
+        files_dir: chain[3].clone(),
+        #[cfg(unix)]
+        directory_ids,
+    })
+}
+
+fn lock_local_file_chain(
+    store_path: &Path,
+    vault: &str,
+    chain: &LocalFileChain,
+) -> Result<fs::File, BackendError> {
+    let lock_path = chain.vault_dir.join(".lock");
+    let lock_file = open_private_lock_file_no_follow(&lock_path)
+        .map_err(|error| BackendError::Internal(format!("open local file lock: {error}")))?;
+    lock_file.lock_exclusive().map_err(|error| {
+        BackendError::Internal(format!("local file vault lock failed: {error}"))
+    })?;
+    let checked = existing_local_file_chain(store_path, vault)?.ok_or_else(|| {
+        BackendError::Internal("local file directory chain changed while locking".into())
+    })?;
+    if checked.vault_dir != chain.vault_dir || checked.files_dir != chain.files_dir || {
+        #[cfg(unix)]
+        {
+            checked.directory_ids != chain.directory_ids
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    } {
+        return Err(BackendError::Internal(
+            "local file directory chain changed while locking".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let opened = lock_file
+            .metadata()
+            .map_err(|error| BackendError::Internal(format!("inspect local file lock: {error}")))?;
+        let linked = fs::symlink_metadata(&lock_path).map_err(|error| {
+            BackendError::Internal(format!("inspect linked local file lock: {error}"))
+        })?;
+        if linked.file_type().is_symlink()
+            || !linked.is_file()
+            || opened.dev() != linked.dev()
+            || opened.ino() != linked.ino()
+        {
+            return Err(BackendError::Internal(
+                "local file lock changed while locking".into(),
+            ));
+        }
+    }
+    Ok(lock_file)
 }
 
 fn ensure_regular_no_symlink(path: &Path) -> Result<(), BackendError> {
@@ -566,12 +688,8 @@ impl LocalFileBackend {
         request: FileUploadRequest,
         create_only: bool,
     ) -> Result<FileInfo, BackendError> {
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        if !vault_dir.exists() {
-            create_private_dir(&vault_dir)
-                .map_err(|e| BackendError::Internal(format!("mkdir vault files root: {e}")))?;
-        }
-        let _lock = super::secrets::lock_vault(&vault_dir)?;
+        let chain = ensure_writable_local_file_chain(&self.store_path, vault)?;
+        let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
         self.recover_all_locked(vault)?;
         if let Some(secret_name) = Self::attachment_secret_name(&request.name) {
             if !super::secrets::active_secret_exists_by_metadata_locked(
@@ -634,14 +752,13 @@ impl FileBackend for LocalFileBackend {
         _reporter: Option<&dyn ProgressReporter>,
     ) -> Result<Vec<u8>, BackendError> {
         self.validate_file_name(name)?;
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        if !vault_dir.exists() {
+        let Some(chain) = existing_local_file_chain(&self.store_path, vault)? else {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
                 suggestion: None,
             });
-        }
-        let _lock = super::secrets::lock_vault(&vault_dir)?;
+        };
+        let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
         self.recover_all_locked(vault)?;
         let ap = file_age_path(&self.store_path, vault, name)?;
         if !ap.exists() {
@@ -659,16 +776,12 @@ impl FileBackend for LocalFileBackend {
         vault: &str,
         request: FileListRequest,
     ) -> Result<Vec<FileInfo>, BackendError> {
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        if !vault_dir.exists() {
+        let Some(chain) = existing_local_file_chain(&self.store_path, vault)? else {
             return Ok(Vec::new());
-        }
-        let _lock = super::secrets::lock_vault(&vault_dir)?;
+        };
+        let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
         self.recover_all_locked(vault)?;
-        let fdir = files_dir(&self.store_path, vault)?;
-        if !fdir.exists() {
-            return Ok(Vec::new());
-        }
+        let fdir = chain.files_dir;
 
         let mut results = Vec::new();
         let entries = fs::read_dir(&fdir)
@@ -715,14 +828,13 @@ impl FileBackend for LocalFileBackend {
 
     async fn delete_file(&self, vault: &str, name: &str) -> Result<(), BackendError> {
         self.validate_file_name(name)?;
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        if !vault_dir.exists() {
+        let Some(chain) = existing_local_file_chain(&self.store_path, vault)? else {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
                 suggestion: None,
             });
-        }
-        let _lock = super::secrets::lock_vault(&vault_dir)?;
+        };
+        let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
         self.recover_all_locked(vault)?;
         let ap = file_age_path(&self.store_path, vault, name)?;
         let mp = file_meta_path(&self.store_path, vault, name)?;
@@ -748,14 +860,13 @@ impl FileBackend for LocalFileBackend {
 
     async fn get_file_info(&self, vault: &str, name: &str) -> Result<FileInfo, BackendError> {
         self.validate_file_name(name)?;
-        let vault_dir = paths::vault_dir(&self.store_path, vault)?;
-        if !vault_dir.exists() {
+        let Some(chain) = existing_local_file_chain(&self.store_path, vault)? else {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
                 suggestion: None,
             });
-        }
-        let _lock = super::secrets::lock_vault(&vault_dir)?;
+        };
+        let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
         self.recover_all_locked(vault)?;
         let mp = file_meta_path(&self.store_path, vault, name)?;
         if !mp.exists() {
@@ -773,7 +884,7 @@ impl FileBackend for LocalFileBackend {
 mod tests {
     use super::*;
     use crate::backend::local::crypto::generate_keypair;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
 
@@ -785,6 +896,11 @@ mod tests {
     fn file_events() -> &'static Mutex<Vec<(String, PathBuf)>> {
         static EVENTS: OnceLock<Mutex<Vec<(String, PathBuf)>>> = OnceLock::new();
         EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    fn file_event_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
     pub(super) fn record_file_event(kind: &str, path: &Path) {
@@ -844,6 +960,40 @@ mod tests {
 
         let backend = LocalFileBackend::new(store, identity, recipients);
         (backend, tmp)
+    }
+
+    fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(root: &Path, current: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            let mut entries = fs::read_dir(current)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    snapshot.insert(relative.clone(), b"<directory>".to_vec());
+                    walk(root, &path, snapshot);
+                } else if kind.is_symlink() {
+                    snapshot.insert(
+                        relative,
+                        fs::read_link(&path)
+                            .unwrap()
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    );
+                } else {
+                    snapshot.insert(relative, fs::read(path).unwrap());
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        walk(root, root, &mut snapshot);
+        snapshot
     }
 
     #[tokio::test]
@@ -923,6 +1073,124 @@ mod tests {
                 .map(|_| ()),
         ] {
             assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_file_entrypoint_rejects_symlinked_vault_without_touching_external_tree() {
+        use std::os::unix::fs::symlink;
+
+        let (backend, tmp) = test_file_backend();
+        let external = tmp.path().join("external-vault");
+        fs::create_dir_all(external.join("files")).unwrap();
+        fs::write(external.join("files/existing.age"), b"external ciphertext").unwrap();
+        fs::write(
+            external.join("files/existing.meta.json"),
+            br#"{"name":"existing","size":19}"#,
+        )
+        .unwrap();
+        symlink(&external, tmp.path().join("vaults/linked")).unwrap();
+        let before = tree_snapshot(&external);
+
+        let list_request = || FileListRequest {
+            prefix: None,
+            groups: None,
+            limit: None,
+            delimiter: None,
+        };
+        let upload_request = || upload_request("new.txt", b"must not escape", "marker");
+        let results = [
+            backend
+                .get_file_info("linked", "existing")
+                .await
+                .map(|_| ()),
+            backend
+                .download_file("linked", "existing", None)
+                .await
+                .map(|_| ()),
+            backend
+                .list_files("linked", list_request())
+                .await
+                .map(|_| ()),
+            backend.delete_file("linked", "existing").await,
+            backend
+                .upload_file("linked", upload_request(), None)
+                .await
+                .map(|_| ()),
+            backend
+                .upload_file_if_absent("linked", upload_request(), None)
+                .await
+                .map(|_| ()),
+        ];
+        for result in results {
+            assert!(
+                matches!(result, Err(BackendError::Internal(_))),
+                "unsafe chain must fail closed: {result:?}"
+            );
+            assert_eq!(
+                tree_snapshot(&external),
+                before,
+                "external tree changed after rejected operation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_store_and_vault_links_are_durable_before_file_mutation() {
+        let _event_guard = file_event_test_lock().lock().await;
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        let (identity, recipients) = generate_keypair(&key_path, &recipients_path).unwrap();
+        let store = tmp.path().join("fresh-store");
+        let backend = LocalFileBackend::new(store.clone(), identity, recipients);
+        take_file_events();
+
+        backend
+            .upload_file(
+                "fresh",
+                upload_request("durable.txt", b"bytes", "marker"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let events: Vec<_> = take_file_events()
+            .into_iter()
+            .filter(|(_, path)| path.starts_with(&store) || path == tmp.path())
+            .collect();
+        let active = events
+            .iter()
+            .position(|(kind, _)| kind == "active-rename")
+            .expect("active rename event");
+        for required in [
+            tmp.path().to_path_buf(),
+            store.clone(),
+            store.join("vaults"),
+            store.join("vaults/fresh"),
+        ] {
+            assert!(
+                events[..active]
+                    .iter()
+                    .any(|(kind, path)| kind == "sync-dir" && path == &required),
+                "{} must be synced before file mutation: {events:?}",
+                required.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for directory in [
+                store.clone(),
+                store.join("vaults"),
+                store.join("vaults/fresh"),
+            ] {
+                assert_eq!(
+                    fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
         }
     }
 
@@ -1503,6 +1771,7 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_directory_links_are_durable_before_first_active_rename() {
+        let _event_guard = file_event_test_lock().lock().await;
         let (backend, tmp) = test_file_backend();
         let fdir = tmp.path().join("vaults/default/files");
         fs::remove_dir(&fdir).unwrap();
@@ -1516,7 +1785,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let events = take_file_events();
+        let events: Vec<_> = take_file_events()
+            .into_iter()
+            .filter(|(_, path)| path.starts_with(tmp.path()))
+            .collect();
         let active = events
             .iter()
             .position(|(kind, _)| kind == "active-rename")
