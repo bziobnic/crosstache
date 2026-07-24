@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
@@ -17,6 +18,7 @@ class FakeElement {
     this.disabled = false;
     this.hidden = false;
     this.listeners = new Map();
+    this.children = [];
   }
 
   addEventListener(type, listener) {
@@ -30,13 +32,22 @@ class FakeElement {
   dispatch(type) {
     this.listeners.get(type)?.({ currentTarget: this, preventDefault() {} });
   }
+
+  append(child) {
+    this.children.push(child);
+  }
+
+  querySelectorAll(selector) {
+    return selector === 'option' ? this.children : [];
+  }
 }
 
-function fakeDocument(ids) {
+function fakeDocument(ids, { createElements = false } = {}) {
   const elements = new Map(Object.entries(ids));
   return {
     documentElement: new FakeElement(),
     getElementById: (id) => elements.get(id) ?? null,
+    ...(createElements ? { createElement: () => new FakeElement() } : {}),
   };
 }
 
@@ -53,6 +64,64 @@ test('boundTimeout constrains protected exposure to the configured policy', () =
   assert.equal(boundTimeout(15, 30), 15);
   assert.equal(boundTimeout(120, 0), 120);
   assert.equal(boundTimeout(-1, 30), 0);
+});
+
+async function mountedTimeoutOption({ requested, policy }) {
+  const timeout = new FakeElement();
+  const document = fakeDocument({ 'exposure-timeout-select': timeout }, { createElements: true });
+  const values = {
+    theme: 'system',
+    density: 'comfortable',
+    exposure_timeout_seconds: requested,
+  };
+  const mounted = mountSettings({
+    preferences: {
+      async load() { return values; },
+      get(key, fallback) { return values[key] ?? fallback; },
+      set() { return true; },
+    },
+    securityPolicy: policy,
+    document,
+    mediaQuery: { matches: false },
+  });
+  await mounted.ready;
+  return timeout.children.find((option) => option.value === timeout.value);
+}
+
+test('nonstandard timeout labels distinguish current values from actual policy clamps', async () => {
+  assert.equal((await mountedTimeoutOption({ requested: 17, policy: 0 })).textContent,
+    '17 seconds (current)');
+  assert.equal((await mountedTimeoutOption({ requested: 17, policy: 30 })).textContent,
+    '17 seconds (current)');
+  assert.equal((await mountedTimeoutOption({ requested: 120, policy: 17 })).textContent,
+    '17 seconds (policy limit)');
+});
+
+test('zero policy permits the requested timeout while a zero timeout hides immediately', async () => {
+  assert.equal(boundTimeout(120, 0), 120);
+  assert.equal((await mountedTimeoutOption({ requested: 0, policy: 0 })).textContent,
+    '0 seconds (current)');
+
+  const timeout = new FakeElement('0');
+  const status = new FakeElement();
+  const values = { theme: 'system', density: 'comfortable', exposure_timeout_seconds: 30 };
+  const mounted = mountSettings({
+    preferences: {
+      async load() { return values; },
+      get(key, fallback) { return values[key] ?? fallback; },
+      set(key, value) { values[key] = value; return true; },
+    },
+    securityPolicy: 0,
+    document: fakeDocument({
+      'exposure-timeout-select': timeout,
+      'settings-live': status,
+    }),
+    mediaQuery: { matches: false },
+  });
+  await mounted.ready;
+  timeout.value = '0';
+  timeout.dispatch('change');
+  assert.equal(status.textContent, 'Protected values hide immediately.');
 });
 
 test('mountSettings persists through the preference owner and resets layout only', async () => {
@@ -142,6 +211,7 @@ const diagnosticContext = {
   environment: { name: 'prod' },
   connection: { state: 'connected', url: 'http://127.0.0.1:1234/?token=leak' },
   security: { clipboard_timeout_seconds: 30 },
+  preferences: { exposure_timeout_seconds: 15 },
   capabilities: { files: true, trash: false, restore: false, purge: true },
   token: 'secret-token',
 };
@@ -161,6 +231,34 @@ test('buildHelpDiagnostics is useful and allowlist-redacted', () => {
   }
   assert.match(diagnostics, /Capabilities: files, purge/);
   assert.ok(!diagnostics.includes('trash='));
+  assert.match(diagnostics, /Security policy limit \(seconds\): 30/);
+  assert.match(diagnostics, /Effective protected-value timeout \(seconds\): 15/);
+  assert.ok(!diagnostics.includes('Protected value timeout: 30'));
+});
+
+test('zero security policy is reported as no limit without changing effective timeout semantics', () => {
+  const diagnostics = buildHelpDiagnostics({
+    ...diagnosticContext,
+    security: { clipboard_timeout_seconds: 0 },
+    preferences: { exposure_timeout_seconds: 0 },
+  });
+  assert.match(diagnostics, /Security policy limit \(seconds\): none/);
+  assert.match(diagnostics, /Effective protected-value timeout \(seconds\): 0/);
+});
+
+test('diagnostics do not invent unavailable security or preference values', () => {
+  const diagnostics = buildHelpDiagnostics({ version: '0.26.2' });
+  assert.ok(!diagnostics.includes('Security policy limit'));
+  assert.ok(!diagnostics.includes('Effective protected-value timeout'));
+});
+
+test('Help states the exact local bearer-session boundary in plain language', async () => {
+  const markup = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  assert.match(markup, /accepts connections only from this computer/i);
+  assert.match(markup, /removed from the address bar and kept in this browser tab/i);
+  assert.match(markup, /Any app or browser on this computer with that link can access this session while Crosstache is running\./);
+  assert.match(markup, /Do not share it\./);
+  assert.match(markup, /Copied diagnostics omit the link and token\./);
 });
 
 test('mountHelp copies only the redacted diagnostic contract', async () => {
@@ -181,4 +279,27 @@ test('mountHelp copies only the redacted diagnostic contract', async () => {
   assert.equal(writes.length, 1);
   assert.equal(writes[0], buildHelpDiagnostics(diagnosticContext));
   assert.equal(status.textContent, 'Diagnostics copied.');
+});
+
+test('mountHelp loads server preferences before copying the effective timeout', async () => {
+  const copy = new FakeElement();
+  const writes = [];
+  let loaded = false;
+  mountHelp({
+    context: () => ({ ...diagnosticContext, preferences: undefined }),
+    preferences: {
+      async load() { loaded = true; },
+      snapshot() {
+        return loaded ? { exposure_timeout_seconds: 17 } : { exposure_timeout_seconds: 30 };
+      },
+    },
+    document: fakeDocument({
+      'help-copy-diagnostics': copy,
+      'help-copy-status': new FakeElement(),
+    }),
+    clipboard: { async writeText(value) { writes.push(value); } },
+  });
+  copy.dispatch('click');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(writes[0], /Effective protected-value timeout \(seconds\): 17/);
 });

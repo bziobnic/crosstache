@@ -38,7 +38,7 @@ function setControlValue(control, value) {
   if (control) control.value = String(value);
 }
 
-function ensureTimeoutOption(document, control, value) {
+function ensureTimeoutOption(document, control, value, { policyDerived = false } = {}) {
   if (!control || !document?.createElement) return;
   const stringValue = String(value);
   const exists = [...(control.querySelectorAll?.('option') ?? [])]
@@ -46,7 +46,7 @@ function ensureTimeoutOption(document, control, value) {
   if (exists) return;
   const option = document.createElement('option');
   option.value = stringValue;
-  option.textContent = `${stringValue} seconds (policy)`;
+  option.textContent = `${stringValue} seconds (${policyDerived ? 'policy limit' : 'current'})`;
   control.append(option);
 }
 
@@ -61,6 +61,7 @@ export function mountSettings({
   const density = document?.getElementById?.('density-select');
   const reset = document?.getElementById?.('layout-reset');
   const status = document?.getElementById?.('settings-live');
+  const policyCopy = document?.getElementById?.('timeout-policy-copy');
 
   function policyLimit() {
     const policy = resolve(securityPolicy);
@@ -72,21 +73,26 @@ export function mountSettings({
   function refresh() {
     const selectedTheme = preferences.get('theme', 'system');
     const selectedDensity = preferences.get('density', 'comfortable');
-    const selectedTimeout = boundTimeout(
+    const requestedTimeout = nonNegativeInteger(
       preferences.get('exposure_timeout_seconds', 30),
-      policyLimit(),
     );
-    ensureTimeoutOption(document, timeout, selectedTimeout);
+    const limit = policyLimit();
+    const selectedTimeout = boundTimeout(requestedTimeout, limit);
+    ensureTimeoutOption(document, timeout, selectedTimeout, {
+      policyDerived: limit > 0 && requestedTimeout > limit,
+    });
     setControlValue(theme, selectedTheme);
     setControlValue(density, selectedDensity);
     setControlValue(timeout, selectedTimeout);
     applyPresentation(document, selectedTheme, selectedDensity, mediaQuery);
 
-    const limit = policyLimit();
     for (const option of timeout?.querySelectorAll?.('option') ?? []) {
       const value = nonNegativeInteger(option.value);
       option.disabled = limit > 0 && value > limit;
     }
+    if (policyCopy) policyCopy.textContent = limit > 0
+      ? `This app limits the timeout to ${limit} seconds. A saved 0-second timeout hides protected values immediately.`
+      : 'No application maximum is configured. A saved 0-second timeout hides protected values immediately.';
   }
 
   const onTheme = () => {
@@ -105,7 +111,7 @@ export function mountSettings({
     setControlValue(timeout, value);
     if (status) status.textContent = value > 0
       ? `Protected values hide after ${value} seconds.`
-      : 'Protected values use the application security policy.';
+      : 'Protected values hide immediately.';
   };
   const onReset = () => {
     const widths = {
@@ -157,6 +163,10 @@ export function buildHelpDiagnostics(context) {
   const capabilities = safe.capabilities && typeof safe.capabilities === 'object'
     ? safe.capabilities
     : {};
+  const policyValue = safe.security?.clipboard_timeout_seconds;
+  const hasPolicy = Number.isSafeInteger(policyValue) && policyValue >= 0;
+  const policy = hasPolicy ? policyValue : null;
+  const effectiveTimeout = safe.preferences?.exposure_timeout_seconds;
   const lines = [
     `Crosstache ${String(safe.version ?? 'unknown')}`,
     cleanLine('Config', safe.config_path ?? safe.configPath),
@@ -166,7 +176,12 @@ export function buildHelpDiagnostics(context) {
     cleanLine('Project', safe.project?.name),
     cleanLine('Environment', safe.environment?.name),
     cleanLine('Connection', safe.connection?.state),
-    cleanLine('Protected value timeout', safe.security?.clipboard_timeout_seconds),
+    hasPolicy
+      ? cleanLine('Security policy limit (seconds)', policy > 0 ? policy : 'none')
+      : null,
+    Number.isSafeInteger(effectiveTimeout) && effectiveTimeout >= 0
+      ? cleanLine('Effective protected-value timeout (seconds)', effectiveTimeout)
+      : null,
     cleanLine(
       'Capabilities',
       ['files', 'trash', 'restore', 'purge']
@@ -194,6 +209,7 @@ function capabilityCopy(context) {
 
 export function mountHelp({
   context,
+  preferences,
   document = globalThis.document,
   clipboard = globalThis.navigator?.clipboard,
 }) {
@@ -202,6 +218,14 @@ export function mountHelp({
 
   function currentContext() {
     return resolve(context) ?? {};
+  }
+
+  function diagnosticContext() {
+    const current = currentContext();
+    const preferenceSnapshot = preferences?.snapshot?.();
+    return preferenceSnapshot
+      ? { ...current, preferences: preferenceSnapshot }
+      : current;
   }
 
   function refresh() {
@@ -216,7 +240,8 @@ export function mountHelp({
   const onCopy = async () => {
     try {
       if (typeof clipboard?.writeText !== 'function') throw new Error('Clipboard unavailable');
-      await clipboard.writeText(buildHelpDiagnostics(currentContext()));
+      try { await preferences?.load?.(); } catch (_) { /* preference client owns its safe error */ }
+      await clipboard.writeText(buildHelpDiagnostics(diagnosticContext()));
       if (status) status.textContent = 'Diagnostics copied.';
     } catch (_) {
       if (status) status.textContent = 'Diagnostics could not be copied.';

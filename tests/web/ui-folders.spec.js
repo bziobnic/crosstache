@@ -193,6 +193,10 @@ test('48rem layouts show full identifiers and ten-level trees keep increasing in
   await expect(primary).toHaveCSS('overflow', 'visible');
 
   await page.setViewportSize({ width: 1024, height: 900 });
+  await expect(page.locator('#secrets-workspace .folder-sidebar')).toBeHidden();
+  await expect(page.locator('#secrets-folder-filter-open')).toBeVisible();
+  await page.setViewportSize({ width: 1025, height: 900 });
+  await expect(page.locator('#secrets-workspace .folder-sidebar')).toBeVisible();
   await page.locator('#secrets-folders-expand-all').click();
   const tree = page.getByRole('tree', { name: 'Secret folders' });
   const deepest = treeitem(tree, /^j,/);

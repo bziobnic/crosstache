@@ -459,7 +459,7 @@
     </section>
     <section class="utility-group" aria-labelledby="help-security-title">
       <h3 id="help-security-title">Local-session security</h3>
-      <p>This UI is served locally. The session link is scoped to this tab and removed from the address bar after opening. It is never included in copied diagnostics.</p>
+      <p>This UI accepts connections only from this computer. The session link is removed from the address bar and kept in this browser tab. Any app or browser on this computer with that link can access this session while Crosstache is running. Do not share it. Copied diagnostics omit the link and token.</p>
     </section>
     <section class="utility-group help-diagnostics" aria-labelledby="help-diagnostics-title">
       <h3 id="help-diagnostics-title">Diagnostics</h3>
@@ -499,7 +499,7 @@
           <option value="120">2 minutes</option>
         </select>
       </label>
-      <p>Longer choices are limited by the application security policy.</p>
+      <p id="timeout-policy-copy">Loading the application security policy…</p>
     </section>
     <section class="utility-group" aria-labelledby="settings-lists-title">
       <h3 id="settings-lists-title">Lists</h3>

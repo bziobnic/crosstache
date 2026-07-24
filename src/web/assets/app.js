@@ -56,6 +56,7 @@ const settings = mountSettings({
 });
 const help = mountHelp({
   context: () => store.snapshot().context,
+  preferences,
 });
 store.subscribe((_snapshot, event) => {
   if (event.type === 'context/loaded' || event.type === 'context/switch-succeeded') {

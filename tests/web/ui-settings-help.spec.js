@@ -10,6 +10,9 @@ test('Settings applies live presentation preferences through the server owner', 
   await expect(settings.getByRole('heading', { name: 'Settings' })).toBeVisible();
   await expect(settings.getByLabel('Theme')).toBeFocused();
   await expect(settings.getByLabel('Protected value timeout')).toHaveValue('30');
+  await expect(settings.locator('#timeout-policy-copy')).toHaveText(
+    'No application maximum is configured. A saved 0-second timeout hides protected values immediately.',
+  );
 
   const darkSaved = page.waitForResponse((response) => (
     response.url().endsWith('/api/preferences') && response.request().method() === 'PUT'
@@ -66,6 +69,12 @@ test('Help explains the current capability boundary and copies redacted diagnost
   await expect(help.getByRole('heading', { name: 'Effective context' })).toBeVisible();
   await expect(help.locator('#help-context-summary')).toContainText('local · playwright');
   await expect(help.locator('#help-capabilities')).toContainText(/Files: (Available|Unavailable)/);
+  await expect(help.getByRole('heading', { name: 'Local-session security' })
+    .locator('..')).toContainText('accepts connections only from this computer');
+  await expect(help.getByRole('heading', { name: 'Local-session security' })
+    .locator('..')).toContainText('Any app or browser on this computer with that link can access this session while Crosstache is running.');
+  await expect(help.getByRole('heading', { name: 'Local-session security' })
+    .locator('..')).toContainText('Do not share it.');
   await expect(help.locator('#help-config-path')).toContainText(/xv[\\/]xv\.conf$/);
   await expect(help.locator('#help-version')).not.toBeEmpty();
 
@@ -75,6 +84,9 @@ test('Help explains the current capability boundary and copies redacted diagnost
   expect(diagnostics).toContain('Crosstache');
   expect(diagnostics).toContain('Backend: local');
   expect(diagnostics).toContain('Vault: playwright');
+  expect(diagnostics).toContain('Security policy limit (seconds): none');
+  expect(diagnostics).toContain('Effective protected-value timeout (seconds): 30');
+  expect(diagnostics).not.toContain('Protected value timeout:');
   expect(diagnostics).not.toMatch(/https?:\/\/|127\.0\.0\.1|localhost|token=/i);
   await expectNoSeriousOrCriticalAxeViolations(page);
 
