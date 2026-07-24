@@ -15,6 +15,112 @@ use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewWindow};
 
 const STARTUP_STATE_EVENT: &str = "xv://startup-state";
+const PACKAGE_SMOKE_ROOT: &str = "XV_DESKTOP_PACKAGE_SMOKE_ROOT";
+const PACKAGE_SMOKE_MARKER: &str = "XV_PACKAGE_SMOKE_STATE=";
+
+#[derive(Debug, Clone)]
+struct PackageSmokeEnvironment {
+    root: PathBuf,
+    temp_parent: PathBuf,
+    home: PathBuf,
+    config: PathBuf,
+    data: PathBuf,
+    no_parent_config: Option<String>,
+    project: Option<OsString>,
+    backend: Option<String>,
+    age_key: Option<OsString>,
+    age_key_file: Option<OsString>,
+    argument_count: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PackageSmokeSetup {
+    request: SetupRequest,
+    config_path: PathBuf,
+}
+
+fn canonical_directory(path: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    canonical.is_dir().then_some(canonical)
+}
+
+fn is_package_smoke_root_name(name: &str) -> bool {
+    name.strip_prefix("xv-package-smoke.")
+        .is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+fn package_smoke_setup(environment: PackageSmokeEnvironment) -> Option<PackageSmokeSetup> {
+    let root = canonical_directory(&environment.root)?;
+    let temp_parent = canonical_directory(&environment.temp_parent)?;
+    let root_name = root.file_name()?.to_str()?;
+    if root.parent()? != temp_parent
+        || !is_package_smoke_root_name(root_name)
+        || environment.no_parent_config.as_deref() != Some("1")
+        || environment.project.is_some()
+        || environment.backend.is_some()
+        || environment.age_key.is_some()
+        || environment.age_key_file.is_some()
+        || environment.argument_count != 1
+    {
+        return None;
+    }
+
+    let home = canonical_directory(&environment.home)?;
+    let config = canonical_directory(&environment.config)?;
+    let data = canonical_directory(&environment.data)?;
+    if home != root.join("home") || config != root.join("config") || data != root.join("data") {
+        return None;
+    }
+
+    let config_path = config.join("xv/xv.conf");
+    if config_path.exists() {
+        return None;
+    }
+
+    Some(PackageSmokeSetup {
+        request: SetupRequest::Local {
+            store_path: root.join("store"),
+            key_file: root.join("local-key.txt"),
+            vault: "package-smoke".into(),
+        },
+        config_path,
+    })
+}
+
+fn package_smoke_setup_from_environment() -> Option<PackageSmokeSetup> {
+    let root = std::env::var_os(PACKAGE_SMOKE_ROOT).map(PathBuf::from)?;
+    let environment = PackageSmokeEnvironment {
+        root,
+        temp_parent: std::env::temp_dir(),
+        home: PathBuf::from(std::env::var_os("HOME")?),
+        config: PathBuf::from(std::env::var_os("XDG_CONFIG_HOME")?),
+        data: PathBuf::from(std::env::var_os("XDG_DATA_HOME")?),
+        no_parent_config: std::env::var("XV_NO_PARENT_CONFIG").ok(),
+        project: std::env::var_os("XV_DESKTOP_PROJECT"),
+        backend: std::env::var("XV_BACKEND").ok(),
+        age_key: std::env::var_os("AGE_KEY"),
+        age_key_file: std::env::var_os("AGE_KEY_FILE"),
+        argument_count: std::env::args_os().count(),
+    };
+    let setup = package_smoke_setup(environment)?;
+    (Config::get_config_path().ok()? == setup.config_path).then_some(setup)
+}
+
+fn package_smoke_marker_value(state: StartupState) -> Option<&'static str> {
+    match state {
+        StartupState::SetupRequired => Some("setup-required"),
+        StartupState::Ready => Some("ready"),
+        _ => None,
+    }
+}
+
+fn package_smoke_marker(state: StartupState) {
+    if let Some(marker) = package_smoke_marker_value(state) {
+        eprintln!("{PACKAGE_SMOKE_MARKER}{marker}");
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -489,6 +595,14 @@ pub async fn apply_setup(
     window: WebviewWindow,
     state: State<'_, StartupStore>,
 ) -> Result<SetupOutcome, SafeSetupError> {
+    apply_setup_request(request, &window, &state).await
+}
+
+async fn apply_setup_request(
+    request: SetupRequest,
+    window: &WebviewWindow,
+    state: &StartupStore,
+) -> Result<SetupOutcome, SafeSetupError> {
     let (backend, vault) = request_scope(&request);
     let backend = backend.to_string();
     let vault = vault.to_string();
@@ -504,8 +618,8 @@ pub async fn apply_setup(
     let connection = async {
         let connecting = StartupSnapshot::connecting(&backend, &vault, path.display().to_string());
         if !advance_and_emit(
-            &window,
-            &state,
+            window,
+            state,
             generation,
             StartupEvent::SetupVerified,
             connecting,
@@ -516,7 +630,7 @@ pub async fn apply_setup(
             ));
         }
 
-        connect_saved_configuration(&window, &state, generation, &path, &backend, &vault)
+        connect_saved_configuration(window, state, generation, &path, &backend, &vault)
             .await
             .map(|_| ())
     };
@@ -530,7 +644,7 @@ pub async fn apply_setup(
     {
         Ok(outcome) => outcome,
         Err(safe) => {
-            publish_failure(&window, &state, generation, &path, safe.clone());
+            publish_failure(window, state, generation, &path, safe.clone());
             return Err(safe);
         }
     };
@@ -734,6 +848,17 @@ async fn run_startup_attempt(
                 "The startup attempt was superseded.",
             ));
         }
+        if let Some(smoke) =
+            package_smoke_setup_from_environment().filter(|smoke| smoke.config_path == path)
+        {
+            package_smoke_marker(StartupState::SetupRequired);
+            apply_setup_request(smoke.request, &window, store).await?;
+            let snapshot = store.snapshot();
+            if snapshot.state == StartupState::Ready {
+                package_smoke_marker(StartupState::Ready);
+            }
+            return Ok(snapshot);
+        }
         return Ok(required);
     }
 
@@ -786,6 +911,154 @@ mod tests {
             StartupSnapshot::ready("local", "vault", "/safe/xv.conf")
         ));
         (store, generation)
+    }
+
+    fn package_smoke_environment(root: &Path, temp_parent: &Path) -> PackageSmokeEnvironment {
+        let home = root.join("home");
+        let config = root.join("config");
+        let data = root.join("data");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        PackageSmokeEnvironment {
+            root: root.to_path_buf(),
+            temp_parent: temp_parent.to_path_buf(),
+            home,
+            config,
+            data,
+            no_parent_config: Some("1".into()),
+            project: None,
+            backend: None,
+            age_key: None,
+            age_key_file: None,
+            argument_count: 1,
+        }
+    }
+
+    #[test]
+    fn package_smoke_accepts_only_the_fixed_isolated_local_setup() {
+        let parent = tempfile::tempdir().unwrap();
+        let temp_parent = parent.path().canonicalize().unwrap();
+        let root = temp_parent.join("xv-package-smoke.ABC123");
+        let environment = package_smoke_environment(&root, &temp_parent);
+        let setup = package_smoke_setup(environment.clone()).unwrap();
+
+        assert_eq!(
+            setup.request,
+            SetupRequest::Local {
+                store_path: root.join("store"),
+                key_file: root.join("local-key.txt"),
+                vault: "package-smoke".into(),
+            }
+        );
+        assert_eq!(setup.config_path, root.join("config/xv/xv.conf"));
+    }
+
+    #[test]
+    fn package_smoke_rejects_every_environment_or_argument_escape_without_writing() {
+        let parent = tempfile::tempdir().unwrap();
+        let temp_parent = parent.path().canonicalize().unwrap();
+        let root = temp_parent.join("xv-package-smoke.DEF456");
+        let environment = package_smoke_environment(&root, &temp_parent);
+        let wrong_home = root.join("wrong-home");
+        let wrong_config = root.join("wrong-config");
+        let wrong_data = root.join("wrong-data");
+        for path in [&wrong_home, &wrong_config, &wrong_data] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+
+        let wrong_name = temp_parent.join("not-a-package-smoke-root");
+        let wrong_name_environment = package_smoke_environment(&wrong_name, &temp_parent);
+        let wrong_length = temp_parent.join("xv-package-smoke.short");
+        let wrong_length_environment = package_smoke_environment(&wrong_length, &temp_parent);
+        let wrong_characters = temp_parent.join("xv-package-smoke.AB!123");
+        let wrong_characters_environment =
+            package_smoke_environment(&wrong_characters, &temp_parent);
+
+        let rejected = vec![
+            PackageSmokeEnvironment {
+                temp_parent: root.clone(),
+                ..environment.clone()
+            },
+            wrong_name_environment,
+            wrong_length_environment,
+            wrong_characters_environment,
+            PackageSmokeEnvironment {
+                home: wrong_home,
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                config: wrong_config,
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                data: wrong_data,
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                no_parent_config: Some("0".into()),
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                no_parent_config: None,
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                project: Some("outside-project".into()),
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                backend: Some("local".into()),
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                age_key: Some("AGE-SECRET-KEY-1outside".into()),
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                age_key_file: Some(root.join("outside-key").into_os_string()),
+                ..environment.clone()
+            },
+            PackageSmokeEnvironment {
+                argument_count: 2,
+                ..environment.clone()
+            },
+        ];
+
+        for invalid in rejected {
+            assert!(package_smoke_setup(invalid).is_none());
+            assert!(!root.join("store").exists());
+            assert!(!root.join("local-key.txt").exists());
+        }
+        let existing_config = root.join("config/xv/xv.conf");
+        std::fs::create_dir_all(existing_config.parent().unwrap()).unwrap();
+        std::fs::write(&existing_config, "prior configuration").unwrap();
+        assert!(package_smoke_setup(environment).is_none());
+        assert!(!root.join("store").exists());
+        assert!(!root.join("local-key.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(existing_config).unwrap(),
+            "prior configuration"
+        );
+    }
+
+    #[test]
+    fn package_smoke_markers_are_limited_to_stable_state_names() {
+        assert_eq!(
+            package_smoke_marker_value(StartupState::SetupRequired),
+            Some("setup-required")
+        );
+        assert_eq!(
+            package_smoke_marker_value(StartupState::Ready),
+            Some("ready")
+        );
+        for state in [
+            StartupState::LoadingConfiguration,
+            StartupState::Connecting,
+            StartupState::RecoverableFailure,
+        ] {
+            assert_eq!(package_smoke_marker_value(state), None);
+        }
     }
 
     #[test]

@@ -19,8 +19,22 @@ cargo run --manifest-path desktop/src-tauri/Cargo.toml -- --project /path/to/pro
 XV_DESKTOP_PROJECT=/path/to/project cargo run --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
-For an isolated local-backend smoke test, set `XV_BACKEND=local` and provide a
-temporary `XDG_CONFIG_HOME` as described in the web UI test documentation.
+With no configuration, the source app shows the interactive Setup Required
+screen. Use the package smoke below for the isolated, automated Local setup
+verification.
+
+## Test the desktop startup flow
+
+```bash
+cargo test -p xv-desktop
+bash tests/desktop/package-smoke.sh
+```
+
+The package smoke builds an unsigned local `.app`, launches its executable
+directly, and uses a temporary HOME/XDG root. Its explicitly opt-in internal
+package-smoke hook accepts only that validated root, performs the normal Local
+setup/list path, and emits token-free startup state markers. It is not a
+desktop user feature and writes no vault secret records.
 
 ## Bundle a macOS app
 
@@ -34,3 +48,10 @@ cargo tauri build --bundles app --no-sign --ci
 
 This proof of concept creates an unsigned `.app`. Public distribution still
 requires Developer ID signing and notarization.
+
+To run the isolated bundle check after a build:
+
+```bash
+cd ../..
+bash tests/desktop/package-smoke.sh
+```
