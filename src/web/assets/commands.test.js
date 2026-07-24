@@ -6,12 +6,18 @@ import {
   createCommandRegistry,
   searchIndex,
   shouldHandleShortcut,
+  shortcutIntent,
 } from './commands.js';
 
 test('shortcuts do not fire in compatible form controls', () => {
-  for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
+  for (const target of [
+    { tagName: 'INPUT', isContentEditable: false },
+    { tagName: 'TEXTAREA', isContentEditable: false },
+    { tagName: 'SELECT', isContentEditable: false },
+    { tagName: 'DIV', isContentEditable: true },
+  ]) {
     assert.equal(shouldHandleShortcut({
-      target: { tagName, isContentEditable: false },
+      target,
       key: '/',
       metaKey: false,
       ctrlKey: false,
@@ -28,6 +34,109 @@ test('shortcuts do not fire in compatible form controls', () => {
     key: '/',
     metaKey: false,
     ctrlKey: false,
+  }), false);
+});
+
+test('every global shortcut uses one exact modifier composition and editable-control matrix', () => {
+  const base = {
+    target: { tagName: 'MAIN', isContentEditable: false, closest: () => null },
+    altKey: false,
+    shiftKey: false,
+    metaKey: false,
+    ctrlKey: false,
+    repeat: false,
+    isComposing: false,
+    getModifierState: () => false,
+  };
+  assert.equal(shortcutIntent({ ...base, key: 'k', metaKey: true }), 'open-palette');
+  assert.equal(shortcutIntent({ ...base, key: 'k', ctrlKey: true }), 'open-palette');
+  assert.equal(shortcutIntent({ ...base, key: 'n', metaKey: true }), 'new-secret');
+  assert.equal(shortcutIntent({ ...base, key: '/' }), 'search-local');
+  assert.equal(shortcutIntent({ ...base, key: 'Escape' }), 'dismiss-topmost');
+  for (const key of ['ArrowLeft', 'ArrowRight', 'Home', 'End']) {
+    assert.equal(shortcutIntent({ ...base, key }), `tab-${key.toLowerCase()}`);
+  }
+
+  for (const target of [
+    { tagName: 'INPUT', isContentEditable: false },
+    { tagName: 'TEXTAREA', isContentEditable: false },
+    { tagName: 'SELECT', isContentEditable: false },
+    { tagName: 'DIV', isContentEditable: true },
+  ]) {
+    for (const event of [
+      { key: 'k', metaKey: true },
+      { key: 'n', ctrlKey: true },
+      { key: '/' },
+      { key: 'Escape' },
+      { key: 'ArrowRight' },
+    ]) {
+      assert.equal(shortcutIntent({
+        ...base,
+        ...event,
+        target: { ...target, closest: () => null },
+      }), null);
+    }
+  }
+  assert.equal(shortcutIntent({
+    ...base,
+    key: 'Escape',
+    target: {
+      tagName: 'INPUT',
+      isContentEditable: false,
+      closest: (selector) => selector === '[role="dialog"]' ? {} : null,
+    },
+  }, { allowOwnedEscape: true }), 'dismiss-topmost');
+
+  for (const rejected of [
+    { key: 'k', metaKey: true, ctrlKey: true },
+    { key: 'k', metaKey: true, shiftKey: true },
+    { key: 'k', metaKey: true, altKey: true },
+    { key: '/', ctrlKey: true },
+    { key: '/', repeat: true },
+    { key: '/', isComposing: true },
+    { key: '/', keyCode: 229 },
+    { key: '/', getModifierState: (name) => name === 'AltGraph' },
+  ]) {
+    assert.equal(shortcutIntent({ ...base, ...rejected }), null);
+  }
+});
+
+test('registry results carry frozen exact target and operation generations', () => {
+  const registry = createCommandRegistry();
+  registry.replaceMetadata({
+    secrets: [{ name: 'same-name' }],
+    scope: { alias: 'one', backend: 'local', vault: 'first' },
+    contextGeneration: 'v1',
+  });
+  const [result] = registry.search('same-name', {
+    context: {
+      version: 'v1',
+      workspace: { alias: 'one', entries: [] },
+      backend: 'local',
+      vault: 'first',
+    },
+  });
+  assert.deepEqual(result.target, {
+    alias: 'one',
+    backend: 'local',
+    vault: 'first',
+    surface: 'secrets',
+    item: 'same-name',
+  });
+  assert.equal(Object.isFrozen(result.target), true);
+  assert.equal(typeof result.operationGeneration, 'number');
+  assert.equal(result.contextGeneration, 'v1');
+
+  registry.replaceMetadata({
+    secrets: [{ name: 'same-name' }],
+    scope: { alias: 'two', backend: 'local', vault: 'second' },
+    contextGeneration: 'v2',
+  });
+  assert.equal(registry.isCurrent(result, {
+    version: 'v2',
+    workspace: { alias: 'two' },
+    backend: 'local',
+    vault: 'second',
   }), false);
 });
 

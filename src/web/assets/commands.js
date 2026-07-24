@@ -32,10 +32,32 @@ const DEFAULT_COMMANDS = Object.freeze([
   }),
 ]);
 
-export function shouldHandleShortcut(event) {
-  const target = event?.target;
-  if (!target || target.isContentEditable) return false;
-  return !['INPUT', 'TEXTAREA', 'SELECT'].includes(String(target.tagName || '').toUpperCase());
+function isEditableTarget(target) {
+  return Boolean(target?.isContentEditable)
+    || ['INPUT', 'TEXTAREA', 'SELECT'].includes(String(target?.tagName || '').toUpperCase());
+}
+
+export function shortcutIntent(event, { allowOwnedEscape = false } = {}) {
+  if (!event || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
+    || event.getModifierState?.('AltGraph')) return null;
+  const key = event.key?.toLowerCase();
+  const ownedEscape = allowOwnedEscape
+    && key === 'escape'
+    && Boolean(event.target?.closest?.('[role="dialog"]'));
+  if (isEditableTarget(event.target) && !ownedEscape) return null;
+  if (event.altKey || event.shiftKey) return null;
+  const modifierCount = Number(Boolean(event.metaKey)) + Number(Boolean(event.ctrlKey));
+  if (key === 'k' && modifierCount === 1) return 'open-palette';
+  if (key === 'n' && modifierCount === 1) return 'new-secret';
+  if (modifierCount !== 0) return null;
+  if (key === '/') return 'search-local';
+  if (key === 'escape') return 'dismiss-topmost';
+  if (['arrowleft', 'arrowright', 'home', 'end'].includes(key)) return `tab-${key}`;
+  return null;
+}
+
+export function shouldHandleShortcut(event, options) {
+  return Boolean(shortcutIntent(event, options));
 }
 
 function named(value) {
@@ -55,11 +77,14 @@ function paletteMatch(values, query) {
 }
 
 export function createCommandRegistry() {
+  let operationGeneration = 0;
+  let metadataSignature = '';
   let metadata = Object.freeze({
     secrets: Object.freeze([]),
     files: Object.freeze([]),
     folders: Object.freeze([]),
     scope: normalizedScope(),
+    contextGeneration: '',
   });
 
   function replaceMetadata({
@@ -67,8 +92,10 @@ export function createCommandRegistry() {
     files = [],
     folders = [],
     scope = {},
+    contextGeneration = '',
+    dataGeneration = '',
   } = {}) {
-    metadata = Object.freeze({
+    const nextMetadata = {
       secrets: Object.freeze(secrets.map((secret) => Object.freeze({
         name: secret?.original_name || secret?.name || '',
         folder: secret?.folder || '',
@@ -87,16 +114,42 @@ export function createCommandRegistry() {
         surface: typeof folder === 'string' ? 'secrets' : (folder?.surface || 'secrets'),
       }))),
       scope: normalizedScope(scope),
-    });
+      contextGeneration: String(contextGeneration || scope?.version || ''),
+      dataGeneration: String(dataGeneration),
+    };
+    const nextSignature = JSON.stringify(nextMetadata);
+    if (nextSignature === metadataSignature) return operationGeneration;
+    metadataSignature = nextSignature;
+    operationGeneration++;
+    metadata = Object.freeze(nextMetadata);
+    return operationGeneration;
   }
 
   function search(query, { context } = {}) {
     const normalizedQuery = normalizeSearchText(query);
     const scope = metadata.scope.backend ? metadata.scope : normalizedScope(context);
+    const contextGeneration = metadata.contextGeneration || String(context?.version || '');
+    const result = (values) => {
+      const target = Object.freeze({
+        alias: values.scope.alias,
+        backend: values.scope.backend,
+        vault: values.scope.vault,
+        surface: values.surface,
+        item: values.item || values.name || values.id || '',
+      });
+      return Object.freeze({
+        ...values,
+        scope: values.scope,
+        target,
+        sourceScope: normalizedScope(context),
+        operationGeneration,
+        contextGeneration,
+      });
+    };
     const results = [];
     for (const command of DEFAULT_COMMANDS) {
       if (normalizedQuery && !paletteMatch([command.label, command.id], normalizedQuery)) continue;
-      results.push(Object.freeze({
+      results.push(result({
         ...command,
         kind: 'command',
         name: command.label,
@@ -113,7 +166,7 @@ export function createCommandRegistry() {
         secret.record_type,
         secret.type,
       ], normalizedQuery)) continue;
-      results.push(Object.freeze({
+      results.push(result({
         kind: 'secret',
         name: secret.original_name || secret.name || '',
         folder: secret.folder || '',
@@ -123,7 +176,7 @@ export function createCommandRegistry() {
     }
     for (const file of metadata.files) {
       if (!paletteMatch([file.name, file.folder, file.content_type], normalizedQuery)) continue;
-      results.push(Object.freeze({
+      results.push(result({
         kind: 'file',
         name: file.name || '',
         folder: file.folder || '',
@@ -133,7 +186,7 @@ export function createCommandRegistry() {
     }
     for (const folder of metadata.folders) {
       if (!paletteMatch([folder.name, folder.path], normalizedQuery)) continue;
-      results.push(Object.freeze({
+      results.push(result({
         kind: 'folder',
         name: folder.name || folder.path || '',
         surface: folder.surface || 'secrets',
@@ -142,15 +195,16 @@ export function createCommandRegistry() {
     }
     for (const workspace of context?.workspace?.entries || []) {
       if (!paletteMatch([workspace.alias, workspace.backend, workspace.vault], normalizedQuery)) continue;
-      results.push(Object.freeze({
+      const destination = normalizedScope({
+        alias: workspace.alias,
+        backend: workspace.backend,
+        vault: workspace.vault,
+      });
+      results.push(result({
         kind: 'workspace',
         name: workspace.alias,
         surface: 'context',
-        scope: normalizedScope({
-          alias: workspace.alias,
-          backend: workspace.backend,
-          vault: workspace.vault,
-        }),
+        scope: destination,
         contextChanging: workspace.alias !== context?.workspace?.alias,
       }));
     }
@@ -161,6 +215,17 @@ export function createCommandRegistry() {
     commands: () => DEFAULT_COMMANDS,
     replaceMetadata,
     search,
+    isCurrent(result, context) {
+      if (!result || result.operationGeneration !== operationGeneration
+        || result.contextGeneration !== String(context?.version || '')) return false;
+      if (result.kind === 'workspace') {
+        const source = result.sourceScope;
+        return source.alias === (context?.workspace?.alias || '')
+          && source.backend === named(context?.backend)
+          && source.vault === named(context?.vault);
+      }
+      return sameScope(result, context);
+    },
     snapshot: () => Object.freeze({
       commandCount: DEFAULT_COMMANDS.length,
       secretCount: metadata.secrets.length,
@@ -212,6 +277,10 @@ export function mountCommandPalette({
 
   function close() {
     query.value = '';
+    query.setAttribute('aria-expanded', 'false');
+    query.removeAttribute('aria-activedescendant');
+    results = [];
+    list.replaceChildren();
     if (dialogs) dialogs.closeModal(dialog);
     else dialog.hidden = true;
   }
@@ -251,10 +320,12 @@ export function mountCommandPalette({
   async function activate(result) {
     const before = store.snapshot();
     if (before.contextSwitchPending || before.savePending || before.scopedMutationPending) return false;
+    if (!registry.isCurrent(result, before.context)) return false;
     if (result.contextChanging) {
       close();
       if (!(await guardNavigation(result))) return false;
-      return Boolean(await activateContext?.(result.scope.alias, { skipGuard: true }));
+      if (!registry.isCurrent(result, currentContext())) return false;
+      return Boolean(await activateContext?.(result.target, { skipGuard: true }));
     }
     if (result.kind !== 'workspace' && result.kind !== 'command' && !sameScope(result, before.context)) {
       render();
@@ -268,6 +339,7 @@ export function mountCommandPalette({
       }
       if (result.id === 'new-secret') {
         if (!(await showSurface('secrets'))) return false;
+        if (!registry.isCurrent(result, currentContext())) return false;
         byId('new-secret')?.click();
         return true;
       }
@@ -275,6 +347,7 @@ export function mountCommandPalette({
     }
     if (result.kind === 'workspace') return true;
     if (!(await showSurface(result.surface))) return false;
+    if (!registry.isCurrent(result, currentContext())) return false;
     clearSurfaceDiscovery(result.surface);
     if (result.kind === 'folder') {
       byId(`${result.surface}-folders-expand-all`)?.click();
@@ -317,11 +390,8 @@ export function mountCommandPalette({
 
   function render() {
     const surface = activeSurface(document);
-    results = registry.search(query.value, { context: currentContext() }).map((result) => (
-      result.id === 'search-local'
-        ? { ...result, name: surface === 'files' ? 'Search files' : 'Search secrets' }
-        : result
-    ));
+    results = registry.search(query.value, { context: currentContext() })
+      .filter((result) => !(surface === 'trash' && result.id === 'search-local'));
     const options = results.map((result, index) => {
       const option = document.createElement('button');
       option.type = 'button';
@@ -329,8 +399,11 @@ export function mountCommandPalette({
       option.id = `command-result-${index}`;
       option.setAttribute('role', 'option');
       option.setAttribute('aria-selected', 'false');
+      option.tabIndex = -1;
       const title = document.createElement('strong');
-      title.textContent = result.name;
+      title.textContent = result.id === 'search-local' && surface === 'files'
+        ? 'Search files'
+        : result.name;
       const scope = document.createElement('small');
       scope.textContent = `${surfaceLabel(result.surface)} · ${result.scope.backend} / ${result.scope.vault}`;
       option.append(title, scope);
@@ -355,6 +428,7 @@ export function mountCommandPalette({
     const top = dialogs?.topModal?.();
     if (top && top !== byId('drawer')) return false;
     query.value = '';
+    query.setAttribute('aria-expanded', 'true');
     render();
     if (dialogs) {
       dialogs.openModal(dialog, {
@@ -377,6 +451,12 @@ export function mountCommandPalette({
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
       setActive(activeIndex - 1);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      setActive(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      setActive(results.length - 1);
     } else if (event.key === 'Enter' && results[activeIndex]) {
       event.preventDefault();
       void activate(results[activeIndex]);
@@ -385,43 +465,39 @@ export function mountCommandPalette({
   opener.onclick = open;
   closer.onclick = close;
 
-  function dismissSelection() {
+  function dismissTopmostTransient() {
+    const notice = byId('action-notice');
+    if (notice && !notice.hidden) {
+      byId('dismiss-action-notice')?.click();
+      return true;
+    }
     const surface = activeSurface(document);
     const cancel = byId(surface === 'files' ? 'cancel-file-selection' : 'cancel-secret-selection');
     if (!cancel?.closest?.('.bulk-toolbar')?.hidden && !cancel.disabled) {
       cancel.click();
       return true;
     }
-    const notice = byId('action-notice');
-    if (notice && !notice.hidden) {
-      byId('dismiss-action-notice')?.click();
-      return true;
-    }
     return false;
   }
 
   document.addEventListener?.('keydown', (event) => {
-    if (event.defaultPrevented) return;
-    const key = event.key?.toLowerCase();
-    const modifier = event.metaKey || event.ctrlKey;
-    if (key === 'escape') {
+    const intent = shortcutIntent(event);
+    if (!intent) return;
+    if (intent === 'dismiss-topmost') {
       if (dialogs?.topModal?.()) return;
-      if (dismissSelection()) event.preventDefault();
-      return;
-    }
-    if (modifier && key === 'k') {
+      if (dismissTopmostTransient()) event.preventDefault();
+    } else if (intent === 'open-palette') {
       event.preventDefault();
       open();
-      return;
-    }
-    if (!shouldHandleShortcut(event)) return;
-    if (!modifier && key === '/') {
+    } else if (intent === 'search-local') {
+      if (activeSurface(document) === 'trash') return;
       event.preventDefault();
       focusLocalSearch();
-    } else if (modifier && key === 'n') {
+    } else if (intent === 'new-secret') {
       event.preventDefault();
-      const result = registry.commands().find(({ id }) => id === 'new-secret');
-      void activate({ ...result, kind: 'command', scope: normalizedScope(currentContext()) });
+      const result = registry.search('new secret', { context: currentContext() })
+        .find(({ id }) => id === 'new-secret');
+      if (result) void activate(result);
     }
   });
 

@@ -40,7 +40,9 @@ test('context rail repeats scope and guards a dirty workspace switch', async ({ 
 test('Commands, Help, and Settings are real keyboard-accessible surfaces', async ({ page, baseURL }) => {
   await page.goto(baseURL);
   await expect(page.locator('#context-line')).toContainText('local / playwright');
+  await expect(page.locator('#secret-list-summary')).toContainText('across');
 
+  await page.locator('#commands-open').focus();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+K' : 'Control+K');
   const commands = page.getByRole('dialog', { name: 'Commands' });
   await expect(commands).toBeVisible();

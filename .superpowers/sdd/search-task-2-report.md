@@ -38,3 +38,26 @@ The full browser run initially exposed three pre-existing refresh tests that att
 - Registry projections exclude values, notes, arbitrary tags, upload state, and unknown fields.
 - Palette result activation revalidates the immutable alias/backend/vault scope before navigating.
 - No branch was pushed.
+
+## Independent Review Remediation
+
+The initial review returned FAIL/FAIL. The remediation adds:
+
+- one `shortcutIntent` eligibility path shared by palette handlers, modal Escape ownership, and tab navigation;
+- exact modifier, editable-control, contenteditable, composition/IME, AltGraph, and repeat suppression;
+- frozen result targets containing alias, backend, vault, surface, and item plus list-operation and context generations;
+- revalidation after navigation guards and tab transitions, with exact tuple activation and response validation instead of post-guard alias lookup;
+- a single input-focused `aria-activedescendant` combobox model with non-tabbable options, Home/End support, and complete open/close cleanup;
+- truthful Trash behavior: `/` is a no-op and the local-search command is omitted;
+- deterministic Escape order: modal/palette, then action notice, then selection;
+- successful workspace, file, folder, Trash, narrow viewport, focus restoration, exact targeting, stale remap, same-name generation, and keyboard matrix coverage.
+
+Remediation RED evidence included missing shortcut-intent and result-generation exports,
+an exact-tuple activation failure, a remap barrier, modal/selection double-dismissal,
+and pending-owner activation. Final remediation verification:
+
+- `node --test src/web/assets/*.test.js` — **149 passed**
+- focused shortcut/context/dialog tests — **31 passed**
+- `tests/web/ui-commands.spec.js` — **6 passed**
+- full browser suite — **53 passed, 1 focus-owner test failed**; that test was
+  corrected to focus its explicit action-notice owner and passed in isolation.

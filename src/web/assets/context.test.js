@@ -223,6 +223,55 @@ test('an already guarded palette activation does not run the navigation guard tw
   assert.equal(fixture.store.snapshot().context.backend, 'local-stage');
 });
 
+test('exact workspace targets cannot be remapped by alias while a guard is pending', async () => {
+  const guard = deferred();
+  let activationCalls = 0;
+  const fixture = await mounted({
+    guardNavigation: () => guard.promise,
+    api: async (method) => {
+      if (method === 'GET') return primary;
+      activationCalls++;
+      return { context: stage, secrets: [] };
+    },
+  });
+  const switching = fixture.rail.switchTo({
+    alias: 'stage',
+    backend: 'local-stage',
+    vault: 'sandbox',
+  });
+  fixture.store.dispatch({
+    type: 'context/loaded',
+    context: {
+      ...primary,
+      version: 'remapped',
+      workspace: {
+        ...primary.workspace,
+        entries: primary.workspace.entries.map((entry) => (
+          entry.alias === 'stage' ? { ...entry, backend: 'evil-remap', vault: 'other' } : entry
+        )),
+      },
+    },
+  });
+  guard.resolve(true);
+
+  assert.equal(await switching, false);
+  assert.equal(activationCalls, 0);
+});
+
+test('exact workspace activation posts the complete approved tuple', async () => {
+  const fixture = await mounted();
+  await fixture.rail.switchTo({
+    alias: 'stage',
+    backend: 'local-stage',
+    vault: 'sandbox',
+  }, { skipGuard: true });
+  assert.deepEqual(fixture.calls.at(-1), {
+    method: 'POST',
+    path: '/api/workspaces/activate',
+    body: { alias: 'stage', backend: 'local-stage', vault: 'sandbox' },
+  });
+});
+
 test('workspace activation emits exact operation lifecycle statuses with one operation ID', async () => {
   const fixture = await mounted();
   const events = [];

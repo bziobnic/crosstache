@@ -204,10 +204,36 @@ export function mountContextRail({
     render(snapshot);
   });
 
-  async function switchTo(alias, { skipGuard = false } = {}) {
+  function resolveExactTarget(context, target) {
+    const entries = context?.workspace?.entries || [];
+    if (typeof target === 'string') {
+      const entry = entries.find((candidate) => candidate.alias === target);
+      return entry ? { alias: entry.alias, backend: entry.backend, vault: entry.vault } : null;
+    }
+    if (!target || typeof target !== 'object') return null;
+    const exact = {
+      alias: String(target.alias || ''),
+      backend: String(target.backend || ''),
+      vault: String(target.vault || ''),
+    };
+    return entries.some((candidate) => candidate.alias === exact.alias
+      && candidate.backend === exact.backend
+      && candidate.vault === exact.vault) ? exact : null;
+  }
+
+  async function switchTo(target, { skipGuard = false } = {}) {
     const before = store.snapshot();
     if (!before.context || before.savePending || before.scopedMutationPending) {
       render(before);
+      return false;
+    }
+    const exactTarget = resolveExactTarget(before.context, target);
+    const sourceVersion = String(before.context.version || '');
+    if (!exactTarget) {
+      store.dispatch({
+        type: 'context/switch-failed',
+        error: errorCopy(new Error('Workspace activation target is unavailable.')),
+      });
       return false;
     }
     if (!skipGuard && !(await guardNavigation())) {
@@ -216,16 +242,10 @@ export function mountContextRail({
     }
 
     const guarded = store.snapshot();
-    if (guarded.savePending || guarded.scopedMutationPending) {
+    if (guarded.savePending || guarded.scopedMutationPending
+      || String(guarded.context?.version || '') !== sourceVersion
+      || !resolveExactTarget(guarded.context, exactTarget)) {
       render(guarded);
-      return false;
-    }
-    const entry = guarded.context.workspace?.entries?.find((candidate) => candidate.alias === alias);
-    if (!entry) {
-      store.dispatch({
-        type: 'context/switch-failed',
-        error: errorCopy(new Error('Workspace activation target is unavailable.')),
-      });
       return false;
     }
 
@@ -234,14 +254,10 @@ export function mountContextRail({
     controller?.abort();
     controller = new AbortController();
     store.dispatch(operationEvent(operationId, 'started'));
-    store.dispatch({ type: 'context/switch-started', alias });
+    store.dispatch({ type: 'context/switch-started', alias: exactTarget.alias });
     const activationRevision = scopedActivityRevision;
     try {
-      const request = {
-        alias: entry.alias,
-        backend: entry.backend,
-        vault: entry.vault,
-      };
+      const request = { ...exactTarget };
       const activated = await apiRequest(
         api,
         'POST',
@@ -265,6 +281,11 @@ export function mountContextRail({
       if (!activated?.context || !Array.isArray(activated?.secrets)) {
         throw new Error('Workspace activation did not return both context and its initial secret list.');
       }
+      if (activated.context.workspace?.alias !== request.alias
+        || named(activated.context.backend) !== request.backend
+        || named(activated.context.vault) !== request.vault) {
+        throw new Error('Workspace activation returned a different backend or vault than requested.');
+      }
       store.dispatch({
         type: 'context/switch-succeeded',
         context: activated.context,
@@ -281,8 +302,8 @@ export function mountContextRail({
       store.dispatch(operationEvent(operationId, 'failed', {
         code: error?.code,
         ...errorCopy(error),
-        backend: entry.backend,
-        vault: entry.vault,
+        backend: exactTarget.backend,
+        vault: exactTarget.vault,
       }));
       return false;
     }

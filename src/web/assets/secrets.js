@@ -1,5 +1,5 @@
 import * as XvUiModel from './ui-model.js';
-import { buildMetadataIndex, searchIndex } from './commands.js';
+import { buildMetadataIndex, searchIndex, shortcutIntent } from './commands.js';
 import { mountFilterControls } from './files.js';
 import { guardNavigation } from './dialogs.js';
 import { setProtectedValueStatus } from './accessibility.js';
@@ -3024,13 +3024,15 @@ $('#tab-files').onclick = () => switchTab('files');
 $('#tab-trash').onclick = () => switchTab('trash');
 for (const tab of [$('#tab-secrets'), $('#tab-files'), $('#tab-trash')]) {
   tab.onkeydown = async (event) => {
+    const intent = shortcutIntent(event);
+    if (!intent?.startsWith('tab-')) return;
     const tabs = [$('#tab-secrets'), $('#tab-files'), $('#tab-trash')].filter((candidate) => !candidate.hidden);
     const index = tabs.indexOf(tab);
     let target = null;
-    if (event.key === 'ArrowRight') target = tabs[(index + 1) % tabs.length];
-    if (event.key === 'ArrowLeft') target = tabs[(index - 1 + tabs.length) % tabs.length];
-    if (event.key === 'Home') target = tabs[0];
-    if (event.key === 'End') target = tabs.at(-1);
+    if (intent === 'tab-arrowright') target = tabs[(index + 1) % tabs.length];
+    if (intent === 'tab-arrowleft') target = tabs[(index - 1 + tabs.length) % tabs.length];
+    if (intent === 'tab-home') target = tabs[0];
+    if (intent === 'tab-end') target = tabs.at(-1);
     if (!target) return;
     event.preventDefault();
     await target.onclick();
@@ -3072,6 +3074,7 @@ let hasSuccessfulFilesSnapshot = false;
 
 function publishCommandMetadata() {
   if (!commandRegistry) return;
+  const scope = captureOperationScope();
   commandRegistry.replaceMetadata({
     secrets,
     files,
@@ -3079,7 +3082,9 @@ function publishCommandMetadata() {
       ...folderPaths('secrets', secrets).map((name) => ({ name, surface: 'secrets' })),
       ...folderPaths('files', files).map((name) => ({ name, surface: 'files' })),
     ],
-    scope: captureOperationScope(),
+    scope,
+    contextGeneration: scope?.version,
+    dataGeneration: `${secretLoadGeneration}:${fileLoadGeneration}`,
   });
 }
 

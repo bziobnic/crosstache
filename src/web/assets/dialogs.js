@@ -1,5 +1,6 @@
 import { isDraftDirty } from './store.js';
 import { setBackgroundInert as updateBackgroundInert } from './accessibility.js';
+import { shortcutIntent } from './commands.js';
 
 const focusableSelector = [
   'button:not([disabled]):not([hidden])',
@@ -69,7 +70,7 @@ export function createDialogManager(document) {
   document.addEventListener?.('keydown', (event) => {
     const modal = modals.at(-1);
     if (!modal) return;
-    if (event.key === 'Escape') {
+    if (shortcutIntent(event, { allowOwnedEscape: true }) === 'dismiss-topmost') {
       event.preventDefault();
       modal.onEscape?.();
       return;
