@@ -9,8 +9,51 @@
 
 use aws_sdk_secretsmanager::Client;
 use aws_smithy_mocks_experimental::{mock, mock_client, RuleMode};
+use aws_smithy_runtime_api::client::http::{
+    HttpClient, HttpConnector, HttpConnectorFuture, HttpConnectorSettings, SharedHttpConnector,
+};
+use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
+use aws_smithy_runtime_api::http::StatusCode;
 use crosstache::backend::aws::{secrets::AwsSecretBackend, vaults::AwsVaultBackend};
 use std::sync::Arc;
+
+fn secrets_manager_error_response(error_type: &str, message: &str) -> HttpResponse {
+    let body = format!(r#"{{"__type":"{error_type}","Message":"{message}"}}"#);
+    let mut response = HttpResponse::new(StatusCode::try_from(400).unwrap(), body.into());
+    response
+        .headers_mut()
+        .insert("x-amzn-errortype", error_type.to_owned());
+    response
+        .headers_mut()
+        .insert("content-type", "application/x-amz-json-1.1");
+    response
+}
+
+#[derive(Debug)]
+struct MockHttpClient;
+
+impl HttpConnector for MockHttpClient {
+    fn call(
+        &self,
+        _request: aws_smithy_runtime_api::client::orchestrator::HttpRequest,
+    ) -> HttpConnectorFuture {
+        HttpConnectorFuture::ready(Ok(HttpResponse::new(
+            StatusCode::try_from(200).unwrap(),
+            "".into(),
+        )))
+    }
+}
+
+impl HttpClient for MockHttpClient {
+    fn http_connector(
+        &self,
+        _settings: &HttpConnectorSettings,
+        _components: &RuntimeComponents,
+    ) -> SharedHttpConnector {
+        SharedHttpConnector::new(MockHttpClient)
+    }
+}
 
 /// Build an `AwsSecretBackend` directly around a mock client.
 pub fn aws_secret_backend(client: Client) -> AwsSecretBackend {
@@ -251,20 +294,19 @@ async fn get_secret_with_value_includes_value() {
 
 #[tokio::test]
 async fn get_secret_not_found_maps_to_backend_not_found() {
-    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
-    use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
     use crosstache::backend::error::BackendError;
     use crosstache::backend::SecretBackend;
 
-    let rule = mock!(Client::describe_secret).then_error(|| {
-        DescribeSecretError::ResourceNotFoundException(
-            ResourceNotFoundException::builder()
-                .message("Secret not found")
-                .build(),
-        )
+    let rule = mock!(Client::describe_secret).then_http_response(|| {
+        secrets_manager_error_response("ResourceNotFoundException", "Secret not found")
     });
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::MatchAny,
+        &[&rule],
+        |builder| builder.http_client(MockHttpClient)
+    );
     let backend = aws_secret_backend(client);
 
     let result = backend
@@ -378,19 +420,18 @@ async fn secret_exists_true_when_describe_succeeds() {
 
 #[tokio::test]
 async fn secret_exists_false_on_not_found() {
-    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
-    use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
     use crosstache::backend::SecretBackend;
 
-    let rule = mock!(Client::describe_secret).then_error(|| {
-        DescribeSecretError::ResourceNotFoundException(
-            ResourceNotFoundException::builder()
-                .message("not found")
-                .build(),
-        )
+    let rule = mock!(Client::describe_secret).then_http_response(|| {
+        secrets_manager_error_response("ResourceNotFoundException", "not found")
     });
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::MatchAny,
+        &[&rule],
+        |builder| builder.http_client(MockHttpClient)
+    );
     let backend = aws_secret_backend(client);
 
     assert!(!backend.secret_exists("myproj-kv", "missing").await.unwrap());
@@ -398,23 +439,17 @@ async fn secret_exists_false_on_not_found() {
 
 #[tokio::test]
 async fn set_secret_update_path_when_already_exists() {
-    use aws_sdk_secretsmanager::operation::create_secret::CreateSecretError;
     use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretOutput;
     use aws_sdk_secretsmanager::operation::put_secret_value::PutSecretValueOutput;
     use aws_sdk_secretsmanager::operation::tag_resource::TagResourceOutput;
     use aws_sdk_secretsmanager::operation::update_secret::UpdateSecretOutput;
-    use aws_sdk_secretsmanager::types::error::ResourceExistsException;
     use crosstache::backend::SecretBackend;
     use crosstache::secret::manager::SecretRequest;
     use zeroize::Zeroizing;
 
     // create_secret returns ResourceExistsException — triggers update path.
-    let create_err = mock!(Client::create_secret).then_error(|| {
-        CreateSecretError::ResourceExistsException(
-            ResourceExistsException::builder()
-                .message("already exists")
-                .build(),
-        )
+    let create_err = mock!(Client::create_secret).then_http_response(|| {
+        secrets_manager_error_response("ResourceExistsException", "already exists")
     });
     // put_secret_value — new version.
     let put_value = mock!(Client::put_secret_value)
@@ -438,7 +473,8 @@ async fn set_secret_update_path_when_already_exists() {
             &update_secret_mock,
             &describe,
             &tag
-        ]
+        ],
+        |builder| builder.http_client(MockHttpClient)
     );
     let backend = aws_secret_backend(client);
 
@@ -908,19 +944,18 @@ async fn create_vault_writes_marker_secret() {
 
 #[tokio::test]
 async fn get_vault_returns_vault_not_found_when_marker_missing() {
-    use aws_sdk_secretsmanager::operation::describe_secret::DescribeSecretError;
-    use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
     use crosstache::backend::error::BackendError;
     use crosstache::backend::VaultBackend;
 
-    let rule = mock!(Client::describe_secret).then_error(|| {
-        DescribeSecretError::ResourceNotFoundException(
-            ResourceNotFoundException::builder()
-                .message("not found")
-                .build(),
-        )
+    let rule = mock!(Client::describe_secret).then_http_response(|| {
+        secrets_manager_error_response("ResourceNotFoundException", "not found")
     });
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::MatchAny,
+        &[&rule],
+        |builder| builder.http_client(MockHttpClient)
+    );
     let backend = aws_vault_backend(client);
 
     let err = backend.get_vault("missing-vault", None).await.unwrap_err();
@@ -1183,20 +1218,19 @@ async fn native_rotate_sends_rotate_secret_for_encoded_name() {
 
 #[tokio::test]
 async fn native_rotate_not_found_maps_to_backend_not_found() {
-    use aws_sdk_secretsmanager::operation::rotate_secret::RotateSecretError;
-    use aws_sdk_secretsmanager::types::error::ResourceNotFoundException;
     use crosstache::backend::error::BackendError;
     use crosstache::backend::SecretBackend;
 
-    let rule = mock!(Client::rotate_secret).then_error(|| {
-        RotateSecretError::ResourceNotFoundException(
-            ResourceNotFoundException::builder()
-                .message("Secret not found")
-                .build(),
-        )
+    let rule = mock!(Client::rotate_secret).then_http_response(|| {
+        secrets_manager_error_response("ResourceNotFoundException", "Secret not found")
     });
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::MatchAny,
+        &[&rule],
+        |builder| builder.http_client(MockHttpClient)
+    );
     let backend = aws_secret_backend(client);
 
     let result = backend.native_rotate("myproj-kv", "missing-secret").await;
@@ -1209,21 +1243,23 @@ async fn native_rotate_not_found_maps_to_backend_not_found() {
 
 #[tokio::test]
 async fn native_rotate_without_lambda_explains_how_to_configure_one() {
-    use aws_sdk_secretsmanager::operation::rotate_secret::RotateSecretError;
-    use aws_sdk_secretsmanager::types::error::InvalidRequestException;
     use crosstache::backend::error::BackendError;
     use crosstache::backend::SecretBackend;
 
     // AWS reports "no rotation Lambda configured" as InvalidRequestException.
-    let rule = mock!(Client::rotate_secret).then_error(|| {
-        RotateSecretError::InvalidRequestException(
-            InvalidRequestException::builder()
-                .message("No Lambda rotation function ARN is associated with this secret")
-                .build(),
+    let rule = mock!(Client::rotate_secret).then_http_response(|| {
+        secrets_manager_error_response(
+            "InvalidRequestException",
+            "No Lambda rotation function ARN is associated with this secret",
         )
     });
 
-    let client = mock_client!(aws_sdk_secretsmanager, RuleMode::Sequential, &[&rule]);
+    let client = mock_client!(
+        aws_sdk_secretsmanager,
+        RuleMode::MatchAny,
+        &[&rule],
+        |builder| builder.http_client(MockHttpClient)
+    );
     let backend = aws_secret_backend(client);
 
     let result = backend.native_rotate("myproj-kv", "db-password").await;
