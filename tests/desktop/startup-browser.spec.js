@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises';
 const indexPath = new URL('../../desktop/frontend/index.html', import.meta.url);
 const cssPath = new URL('../../desktop/frontend/loading.css', import.meta.url);
 const scriptPath = new URL('../../desktop/frontend/loading.js', import.meta.url);
+const capabilityPath = new URL('../../desktop/src-tauri/capabilities/default.json', import.meta.url);
+const buildScriptPath = new URL('../../desktop/src-tauri/build.rs', import.meta.url);
 
 const safeOpenError = {
   code: 'xv-command-failed',
@@ -148,6 +150,13 @@ test('mounted setup flow owns stale work and sends only provider allowlisted fie
       input.value = value;
       form.append(input);
     }
+    const unexpected = Object.assign(document.createElement('input'), {
+      name: 'unexpected_field',
+      value: 'ignored',
+    });
+    form.append(unexpected);
+    unexpected.dispatchEvent(new Event('input', { bubbles: true }));
+    unexpected.remove();
     window.__mockTauri.previewMode = 'deferred';
   });
   await page.getByRole('button', { name: 'Preview setup' }).click();
@@ -169,9 +178,13 @@ test('mounted setup flow owns stale work and sends only provider allowlisted fie
   await expect(page.locator('[data-form-status]')).toBeEmpty();
   await expect(page.getByRole('button', { name: 'Apply setup' })).toBeHidden();
 
+  await page.evaluate(() => { window.__mockTauri.previewMode = 'auto'; });
+  await page.getByRole('button', { name: 'Preview setup' }).click();
+  await expect(page.getByRole('button', { name: 'Apply setup' })).toBeEnabled();
+
   const previewCalls = await page.evaluate(() =>
     window.__mockTauri.calls.filter(({ command }) => command === 'preview_setup'));
-  expect(previewCalls).toHaveLength(2);
+  expect(previewCalls).toHaveLength(3);
   for (const call of previewCalls) {
     expect(call.args.request).not.toHaveProperty('client_secret');
     expect(call.args.request).not.toHaveProperty('access_key');
@@ -181,6 +194,26 @@ test('mounted setup flow owns stale work and sends only provider allowlisted fie
   expect(accessibility.violations).toEqual([]);
   await page.evaluate(() => window.dispatchEvent(new Event('beforeunload')));
   expect(await page.evaluate(() => window.__mockTauri.unlistenCount)).toBe(1);
+});
+
+test('desktop capability grants only the registered startup command surface', async () => {
+  const [capability, buildScript] = await Promise.all([
+    readFile(capabilityPath, 'utf8').then(JSON.parse),
+    readFile(buildScriptPath, 'utf8'),
+  ]);
+  const commands = [
+    'startup_status',
+    'preview_setup',
+    'apply_setup',
+    'retry_startup',
+    'open_config',
+    'copy_diagnostics',
+  ];
+
+  for (const command of commands) {
+    expect(buildScript).toContain(`"${command}"`);
+    expect(capability.permissions).toContain(`allow-${command.replaceAll('_', '-')}`);
+  }
 });
 
 test('mounted recovery runs native actions, Retry, CLI disclosure, and cleanup', async ({ page }) => {

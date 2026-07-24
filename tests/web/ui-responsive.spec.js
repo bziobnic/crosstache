@@ -315,5 +315,5 @@ test('desktop permits exercising the approved responsive breakpoints', async () 
     path.join(workspace, 'desktop/src-tauri/tauri.conf.json'),
     'utf8',
   ));
-  expect(config.app.windows[0].minWidth).toBe(768);
+  expect(config.app.windows[0].minWidth).toBe(390);
 });

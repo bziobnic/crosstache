@@ -499,8 +499,12 @@ export const mountBrowser = () => {
     if (!form) return;
     clearPreview(form);
     target.setAttribute('aria-invalid', 'false');
-    form.querySelector(`#${CSS.escape(target.name)}-error`).textContent = '';
-    form.querySelector('[data-form-status]').textContent = '';
+    const fieldError = target.name
+      ? form.querySelector(`#${CSS.escape(target.name)}-error`)
+      : null;
+    if (fieldError) fieldError.textContent = '';
+    const formStatus = form.querySelector('[data-form-status]');
+    if (formStatus) formStatus.textContent = '';
   });
   root.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -538,7 +542,11 @@ export const mountBrowser = () => {
       button.disabled = true;
       button.textContent = 'Applying…';
       const result = await workflow.apply();
-      if (result.stale) return;
+      if (result.stale) {
+        button.disabled = false;
+        button.textContent = 'Apply setup';
+        return;
+      }
       if (!result.ok) {
         button.disabled = false;
         button.textContent = 'Apply setup';
