@@ -177,8 +177,15 @@ test('mounted setup flow owns stale work and sends only provider allowlisted fie
   await expect(page.getByRole('button', { name: 'Apply setup' })).toBeVisible();
   await page.evaluate(() => { window.__mockTauri.applyMode = 'deferred'; });
   await page.getByRole('button', { name: 'Apply setup' }).click();
+  await expect.poll(() => page.evaluate(() => window.__mockTauri.emitted)).toEqual([
+    { event: 'xv://save-pending-changed', payload: true },
+  ]);
   await page.locator('[name="vault"]').fill('edited-vault');
   await page.evaluate(() => { window.__mockTauri.applyResolvers.shift()({}); });
+  await expect.poll(() => page.evaluate(() => window.__mockTauri.emitted)).toEqual([
+    { event: 'xv://save-pending-changed', payload: true },
+    { event: 'xv://save-pending-changed', payload: false },
+  ]);
   await expect(page.locator('[data-form-status]')).toBeEmpty();
   await expect(page.getByRole('button', { name: 'Apply setup' })).toBeHidden();
 

@@ -604,7 +604,13 @@ export const mountBrowser = () => {
       const form = button.closest('form');
       button.disabled = true;
       button.textContent = 'Applying…';
-      const result = await workflow.apply();
+      await Promise.resolve(emit('xv://save-pending-changed', true)).catch(() => {});
+      let result;
+      try {
+        result = await workflow.apply();
+      } finally {
+        await Promise.resolve(emit('xv://save-pending-changed', false)).catch(() => {});
+      }
       if (result.stale) {
         button.disabled = false;
         button.textContent = 'Apply setup';
