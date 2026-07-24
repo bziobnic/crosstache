@@ -6,6 +6,7 @@ export const UPLOAD_STATES = Object.freeze([
   'awaiting-conflict',
   'uploading',
   'finishing',
+  'reconciling',
   'completed',
   'failed',
   'cancelled',
@@ -29,6 +30,7 @@ const UPLOAD_TRANSITIONS = Object.freeze({
     skipped: 'completed',
     failed: 'failed',
     cancel: 'cancelled',
+    'preference-changed': 'awaiting-conflict',
   }),
   uploading: Object.freeze({
     progress: 'uploading',
@@ -36,7 +38,7 @@ const UPLOAD_TRANSITIONS = Object.freeze({
     'server-confirmed': 'completed',
     failed: 'failed',
     cancelled: 'cancelled',
-    uncertain: 'ambiguous',
+    uncertain: 'reconciling',
     conflict: 'awaiting-conflict',
   }),
   finishing: Object.freeze({
@@ -44,8 +46,13 @@ const UPLOAD_TRANSITIONS = Object.freeze({
     'server-confirmed': 'completed',
     failed: 'failed',
     cancelled: 'cancelled',
-    uncertain: 'ambiguous',
+    uncertain: 'reconciling',
     conflict: 'awaiting-conflict',
+  }),
+  reconciling: Object.freeze({
+    'evidence-present': 'ambiguous',
+    'evidence-missing': 'cancelled',
+    'evidence-unavailable': 'ambiguous',
   }),
   completed: Object.freeze({}),
   failed: Object.freeze({ retry: 'queued' }),
@@ -53,8 +60,6 @@ const UPLOAD_TRANSITIONS = Object.freeze({
   ambiguous: Object.freeze({
     retry: 'queued',
     'server-confirmed': 'completed',
-    'evidence-present': 'ambiguous',
-    'evidence-missing': 'cancelled',
   }),
 });
 
@@ -64,7 +69,7 @@ export function nextUploadState(current, event) {
   return next;
 }
 
-const ACTIVE_UPLOAD_STATES = new Set(['uploading', 'finishing']);
+const ACTIVE_UPLOAD_STATES = new Set(['uploading', 'finishing', 'reconciling']);
 const RETRYABLE_UPLOAD_STATES = new Set(['failed', 'cancelled', 'ambiguous']);
 
 export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
@@ -78,6 +83,7 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
     evidence: '',
     policy: null,
     target: null,
+    applyAll: false,
     preflightComplete: false,
   }));
   const byId = new Map(items.map((item) => [item.id, item]));
@@ -115,7 +121,7 @@ export function createUploadQueue(entries, { maxConcurrent = 1 } = {}) {
       for (const entry of items) {
         if (RETRYABLE_UPLOAD_STATES.has(entry.state) && (!selected || selected.has(entry.id))) {
           this.event(entry.id, { type: 'retry' }, {
-            loaded: 0, error: null, evidence: '', policy: null, target: null,
+            loaded: 0, error: null, evidence: '', policy: null, target: null, applyAll: false,
           });
           retried.push({ ...entry });
         }
@@ -158,6 +164,22 @@ export function validatePreflightResults(candidates, results) {
   return candidates.map(({ id }) => results.find(({ client_id }) => client_id === id));
 }
 
+export function validateUploadConfirmation(response, { expectedName, policy }) {
+  const matchesName = response
+    && typeof response === 'object'
+    && response.name === expectedName;
+  const matchesPolicy = policy === 'skip'
+    ? response?.status === 'skipped'
+    : response?.status !== 'skipped';
+  if (!matchesName || !matchesPolicy) {
+    throw Object.assign(
+      new Error('The server confirmation did not match the requested upload target.'),
+      { name: 'AmbiguousUploadError', ambiguous: true },
+    );
+  }
+  return response;
+}
+
 export function uploadConflictDecision({ policy, suggestedName = null, allowReplace = true }) {
   if (!policy) return null;
   if (!['skip', 'replace', 'rename'].includes(policy)) throw new TypeError('Unknown conflict policy');
@@ -182,6 +204,7 @@ const UPLOAD_STATUS_LABELS = Object.freeze({
   'awaiting-conflict': 'Needs a conflict decision',
   uploading: 'Uploading…',
   finishing: 'Finishing…',
+  reconciling: 'Reconciling server evidence…',
   completed: 'Completed',
   failed: 'Failed',
   cancelled: 'Cancelled',
@@ -231,6 +254,7 @@ export function mountUploadQueue({
   const retry = byId('retry-uploads');
   const destination = byId('upload-destination');
   const concurrencyCopy = byId('upload-concurrency');
+  const newBatchMessage = byId('upload-new-batch-message');
   let batch = null;
   let nextId = 0;
   let scopeGeneration = 0;
@@ -251,10 +275,11 @@ export function mountUploadQueue({
     ));
   }
 
-  function exactScopeCurrent() {
-    return batch
-      && batch.scopeGeneration === scopeGeneration
-      && isScopeCurrent(batch.scope);
+  function exactBatchCurrent(targetBatch = batch) {
+    return targetBatch
+      && batch === targetBatch
+      && targetBatch.scopeGeneration === scopeGeneration
+      && isScopeCurrent(targetBatch.scope);
   }
 
   function clearOwnedState({ clearSummary = true } = {}) {
@@ -269,6 +294,7 @@ export function mountUploadQueue({
     queueSurface.hidden = true;
     retry.hidden = true;
     destination.disabled = false;
+    newBatchMessage.hidden = true;
     if (clearSummary) {
       summaryItems.replaceChildren();
       summary.hidden = true;
@@ -302,15 +328,16 @@ export function mountUploadQueue({
   }
 
   function resolveConflict(id, policy, applyAll) {
-    if (!batch || !exactScopeCurrent()) return;
-    const source = batch.queue.get(id);
+    const targetBatch = batch;
+    if (!exactBatchCurrent(targetBatch)) return;
+    const source = targetBatch.queue.get(id);
     const decision = uploadConflictDecision({
       policy,
       suggestedName: source.suggestedName,
       allowReplace: true,
     });
     const targets = applyAll
-      ? batch.queue.items().filter(({ state }) => state === 'awaiting-conflict')
+      ? targetBatch.queue.items().filter(({ state }) => state === 'awaiting-conflict')
       : [source];
     for (const targetItem of targets) {
       const targetDecision = uploadConflictDecision({
@@ -319,128 +346,175 @@ export function mountUploadQueue({
         allowReplace: true,
       });
       if (targetDecision.policy === 'skip') {
-        batch.queue.event(targetItem.id, { type: 'skipped' }, {
+        targetBatch.queue.event(targetItem.id, { type: 'skipped' }, {
           policy: 'skip',
           result: 'Skipped because a destination file already exists.',
           file: null,
         });
       } else {
-        batch.queue.event(targetItem.id, { type: 'decision-upload' }, targetDecision);
+        targetBatch.queue.event(targetItem.id, { type: 'decision-upload' }, targetDecision);
       }
     }
     render();
-    schedule();
+    schedule(targetBatch);
     return decision;
   }
 
   function retryItems(ids) {
-    if (!batch || !exactScopeCurrent()) return;
-    if (batch.released) {
-      batch.released = false;
+    const targetBatch = batch;
+    if (!exactBatchCurrent(targetBatch)) return;
+    if (targetBatch.released) {
+      targetBatch.released = false;
       destination.disabled = true;
       setPending(true);
+      summary.hidden = true;
+      summaryItems.replaceChildren();
     }
-    const retried = batch.queue.retry(ids);
-    for (const entry of retried) batch.queue.event(entry.id, { type: 'preflight-started' });
+    const retried = targetBatch.queue.retry(ids);
+    for (const entry of retried) targetBatch.queue.event(entry.id, { type: 'preflight-started' });
     render();
-    void preflight();
+    if (retried.length) void preflight(targetBatch);
   }
 
   function cancelItem(id) {
-    if (!batch || !exactScopeCurrent()) return;
-    const entry = batch.queue.get(id);
+    const targetBatch = batch;
+    if (!exactBatchCurrent(targetBatch)) return;
+    const entry = targetBatch.queue.get(id);
     if (['uploading', 'finishing'].includes(entry.state)) {
-      batch.controllers.get(id)?.abort();
+      targetBatch.controllers.get(id)?.abort();
       return;
     }
     if (['queued', 'preflighting', 'awaiting-conflict'].includes(entry.state)) {
-      batch.queue.event(id, { type: 'cancel' });
+      targetBatch.queue.event(id, { type: 'cancel' });
       render();
-      schedule();
+      schedule(targetBatch);
     }
   }
 
-  function renderConflictActions(entry, row) {
+  function createRow(entry, targetBatch) {
+    const row = document.createElement('li');
+    row.className = 'upload-item';
+    row.dataset.uploadId = entry.id;
+    const name = document.createElement('strong');
+    name.className = 'upload-item-name';
+    const status = document.createElement('span');
+    status.className = 'upload-item-status';
+    const progress = document.createElement('progress');
     const fieldset = document.createElement('fieldset');
     fieldset.className = 'upload-conflict-actions';
     const legend = document.createElement('legend');
-    legend.textContent = `Resolve conflict for ${entry.name}`;
     const applyLabel = document.createElement('label');
     const apply = document.createElement('input');
     apply.type = 'checkbox';
+    apply.onchange = () => {
+      if (!exactBatchCurrent(targetBatch)) return;
+      const current = targetBatch.queue.get(entry.id);
+      if (current.state !== 'awaiting-conflict') return;
+      targetBatch.queue.event(entry.id, { type: 'preference-changed' }, {
+        applyAll: apply.checked,
+      });
+    };
     applyLabel.append(apply, ' Apply to all remaining conflicts');
     fieldset.append(
       legend,
-      button('Skip', () => resolveConflict(entry.id, 'skip', apply.checked)),
-      button('Replace', () => resolveConflict(entry.id, 'replace', apply.checked)),
-      button('Rename', () => resolveConflict(entry.id, 'rename', apply.checked)),
+      button('Skip', () => resolveConflict(
+        entry.id,
+        'skip',
+        targetBatch.queue.get(entry.id).applyAll,
+      )),
+      button('Replace', () => resolveConflict(
+        entry.id,
+        'replace',
+        targetBatch.queue.get(entry.id).applyAll,
+      )),
+      button('Rename', () => resolveConflict(
+        entry.id,
+        'rename',
+        targetBatch.queue.get(entry.id).applyAll,
+      )),
       applyLabel,
     );
-    row.appendChild(fieldset);
+    const detail = document.createElement('small');
+    detail.className = 'upload-item-evidence';
+    const cancelAction = document.createElement('div');
+    cancelAction.className = 'upload-item-actions';
+    const cancel = button(
+      `Cancel ${entry.name}`,
+      () => cancelItem(entry.id),
+      'button ghost compact',
+    );
+    cancelAction.appendChild(cancel);
+    const retryAction = document.createElement('div');
+    retryAction.className = 'upload-item-actions';
+    const retryItem = button(
+      `Retry ${entry.name}`,
+      () => retryItems([entry.id]),
+      'button secondary compact',
+    );
+    retryAction.appendChild(retryItem);
+    row.append(name, status, progress, fieldset, detail, cancelAction, retryAction);
+    targetBatch.rows.set(entry.id, {
+      row,
+      name,
+      status,
+      progress,
+      fieldset,
+      legend,
+      apply,
+      detail,
+      cancelAction,
+      cancel,
+      retryAction,
+      retryItem,
+    });
+    queueItems.appendChild(row);
+    return targetBatch.rows.get(entry.id);
   }
 
   function render() {
-    if (!batch) return;
-    const entries = batch.queue.items();
+    const targetBatch = batch;
+    if (!exactBatchCurrent(targetBatch)) return;
+    const entries = targetBatch.queue.items();
     queueSurface.hidden = false;
-    byId('upload-queue-context').textContent = `${formatScope(batch.scope)} · destination: ${batch.destination || 'Vault root'}`;
-    queueItems.replaceChildren(...entries.map((entry) => {
-      const row = document.createElement('li');
-      row.className = 'upload-item';
-      row.dataset.uploadId = entry.id;
-      const name = document.createElement('strong');
-      name.className = 'upload-item-name';
-      name.textContent = entry.displayName;
-      const status = document.createElement('span');
-      status.className = 'upload-item-status';
-      status.textContent = UPLOAD_STATUS_LABELS[entry.state];
-      if (['finishing', 'awaiting-conflict', 'failed', 'ambiguous'].includes(entry.state)) {
-        status.setAttribute('role', 'status');
-        status.setAttribute('aria-live', 'polite');
+    byId('upload-queue-context').textContent = `${formatScope(targetBatch.scope)} · destination: ${targetBatch.destination || 'Vault root'}`;
+    for (const entry of entries) {
+      const controls = targetBatch.rows.get(entry.id) || createRow(entry, targetBatch);
+      controls.name.textContent = entry.displayName;
+      controls.status.textContent = UPLOAD_STATUS_LABELS[entry.state];
+      if (['finishing', 'reconciling', 'awaiting-conflict', 'failed', 'ambiguous'].includes(entry.state)) {
+        controls.status.setAttribute('role', 'status');
+        controls.status.setAttribute('aria-live', 'polite');
+      } else {
+        controls.status.removeAttribute('role');
+        controls.status.removeAttribute('aria-live');
       }
-      row.append(name, status);
-      if (['uploading', 'finishing'].includes(entry.state)) {
-        const progress = document.createElement('progress');
-        progress.max = entry.total || entry.size || 1;
-        if (entry.state === 'uploading') progress.value = entry.loaded || 0;
-        progress.setAttribute('aria-label', `Upload progress for ${entry.name}`);
-        row.appendChild(progress);
+      controls.progress.hidden = !['uploading', 'finishing'].includes(entry.state);
+      controls.progress.max = entry.total || entry.size || 1;
+      if (entry.state === 'uploading') {
+        controls.progress.value = entry.loaded || 0;
+      } else {
+        controls.progress.removeAttribute('value');
       }
-      if (entry.state === 'awaiting-conflict') renderConflictActions(entry, row);
-      if (entry.evidence || entry.error || entry.result) {
-        const detail = document.createElement('small');
-        detail.className = 'upload-item-evidence';
-        detail.textContent = entry.evidence || entry.error || entry.result;
-        row.appendChild(detail);
-      }
-      if (['queued', 'preflighting', 'awaiting-conflict', 'uploading', 'finishing'].includes(entry.state)) {
-        const actions = document.createElement('div');
-        actions.className = 'upload-item-actions';
-        actions.appendChild(button(
-          `Cancel ${entry.name}`,
-          () => cancelItem(entry.id),
-          'button ghost compact',
-        ));
-        row.appendChild(actions);
-      }
-      if (RETRYABLE_UPLOAD_STATES.has(entry.state)) {
-        const actions = document.createElement('div');
-        actions.className = 'upload-item-actions';
-        actions.appendChild(button(
-          `Retry ${entry.name}`,
-          () => retryItems([entry.id]),
-          'button secondary compact',
-        ));
-        row.appendChild(actions);
-      }
-      return row;
-    }));
-    retry.hidden = batch.queue.retryable().length === 0;
-    finishIfSettled();
+      controls.progress.setAttribute('aria-label', `Upload progress for ${entry.name}`);
+      controls.fieldset.hidden = entry.state !== 'awaiting-conflict';
+      controls.legend.textContent = `Resolve conflict for ${entry.name}`;
+      controls.apply.checked = entry.applyAll;
+      const detail = entry.evidence || entry.error || entry.result;
+      controls.detail.hidden = !detail;
+      controls.detail.textContent = detail || '';
+      controls.cancelAction.hidden = ![
+        'queued', 'preflighting', 'awaiting-conflict', 'uploading', 'finishing',
+      ].includes(entry.state);
+      controls.cancel.textContent = `Cancel ${entry.name}`;
+      controls.retryAction.hidden = !RETRYABLE_UPLOAD_STATES.has(entry.state);
+      controls.retryItem.textContent = `Retry ${entry.name}`;
+    }
+    retry.hidden = targetBatch.queue.retryable().length === 0;
+    finishIfSettled(targetBatch);
   }
 
-  function appendSummary(entries) {
-    summaryItems.append(...entries.map((entry) => {
+  function renderSummary(entries) {
+    summaryItems.replaceChildren(...entries.map((entry) => {
       const item = document.createElement('li');
       item.textContent = `${entry.displayName}: ${UPLOAD_STATUS_LABELS[entry.state]}${entry.result ? ` — ${entry.result}` : ''}${entry.evidence ? ` — ${entry.evidence}` : ''}`;
       return item;
@@ -448,25 +522,25 @@ export function mountUploadQueue({
     summary.hidden = false;
   }
 
-  function finishIfSettled() {
-    if (!batch || batch.released) return;
-    const entries = batch.queue.items();
+  function finishIfSettled(targetBatch) {
+    if (!exactBatchCurrent(targetBatch) || targetBatch.released) return;
+    const entries = targetBatch.queue.items();
     if (entries.some(({ state }) => !['completed', 'failed', 'cancelled', 'ambiguous'].includes(state))) return;
-    batch.released = true;
+    targetBatch.released = true;
     destination.disabled = false;
     setPending(false);
-    appendSummary(entries);
-    void refreshFiles(batch.scope).then(() => {
-      if (exactScopeCurrent()) updateDestinationOptions(getFiles());
+    renderSummary(entries);
+    void refreshFiles(targetBatch.scope).then(() => {
+      if (exactBatchCurrent(targetBatch)) updateDestinationOptions(getFiles());
     }).catch(() => {});
   }
 
-  async function reconcileUncertain(id, error) {
-    if (!batch) return;
-    const entry = batch.queue.get(id);
+  async function reconcileUncertain(targetBatch, id) {
+    if (!exactBatchCurrent(targetBatch)) return;
+    const entry = targetBatch.queue.get(id);
     try {
-      await refreshFiles(batch.scope);
-      if (!exactScopeCurrent()) return;
+      await refreshFiles(targetBatch.scope);
+      if (!exactBatchCurrent(targetBatch)) return;
       const targetName = entry.target || entry.fullName;
       const after = getFiles().find(({ name }) => name === targetName) || null;
       const evidence = uploadEvidenceState({
@@ -474,33 +548,34 @@ export function mountUploadQueue({
         after,
         expectedSize: entry.size,
       });
-      batch.queue.event(id, {
+      targetBatch.queue.event(id, {
         type: evidence.state === 'cancelled' ? 'evidence-missing' : 'evidence-present',
       }, {
         evidence: evidence.evidence,
       });
     } catch {
-      if (exactScopeCurrent()) {
-        batch.queue.event(id, { type: 'evidence-present' }, {
+      if (exactBatchCurrent(targetBatch)) {
+        targetBatch.queue.event(id, { type: 'evidence-unavailable' }, {
           evidence: 'The server could not be refreshed, so completion remains unconfirmed.',
         });
       }
     }
+    if (!exactBatchCurrent(targetBatch)) return;
     render();
-    schedule();
+    schedule(targetBatch);
   }
 
-  async function transfer(entry) {
-    if (!batch || !exactScopeCurrent()) return;
+  async function transfer(targetBatch, entry) {
+    if (!exactBatchCurrent(targetBatch)) return;
     const controller = new AbortController();
-    batch.controllers.set(entry.id, controller);
+    targetBatch.controllers.set(entry.id, controller);
     const attempt = (entry.attempt || 0) + 1;
-    batch.queue.event(entry.id, { type: 'progress' }, { attempt });
+    targetBatch.queue.event(entry.id, { type: 'progress' }, { attempt });
     render();
     const form = new FormData();
     form.append('file', entry.file, entry.name);
-    let path = appendQuery('/api/files', scopeQuery(batch.scope));
-    const uploadQuery = new URLSearchParams({ destination: batch.destination });
+    let path = appendQuery('/api/files', scopeQuery(targetBatch.scope));
+    const uploadQuery = new URLSearchParams({ destination: targetBatch.destination });
     if (entry.policy) {
       uploadQuery.set('policy', entry.policy);
       if (entry.target) uploadQuery.set('target', entry.target);
@@ -515,63 +590,68 @@ export function mountUploadQueue({
         signal: controller.signal,
         operationId,
         onProgress: ({ loaded, total, finishing }) => {
-          if (!batch || !exactScopeCurrent()) return;
-          const current = batch.queue.get(entry.id);
+          if (!exactBatchCurrent(targetBatch)) return;
+          const current = targetBatch.queue.get(entry.id);
+          if (!['uploading', 'finishing'].includes(current.state)) return;
           const event = finishing && current.state === 'uploading'
             ? { type: 'bytes-sent' }
             : { type: 'progress' };
-          batch.queue.event(entry.id, event, { loaded, total });
+          targetBatch.queue.event(entry.id, event, { loaded, total });
           render();
         },
       });
-      if (!batch || !exactScopeCurrent()) return;
-      batch.queue.event(entry.id, { type: 'server-confirmed' }, {
+      if (!exactBatchCurrent(targetBatch)) return;
+      const confirmed = validateUploadConfirmation(response, {
+        expectedName: entry.target || entry.fullName,
+        policy: entry.policy,
+      });
+      targetBatch.queue.event(entry.id, { type: 'server-confirmed' }, {
         loaded: entry.size,
         total: entry.size,
         file: null,
-        result: response?.status === 'skipped'
+        result: confirmed.status === 'skipped'
           ? 'Skipped because a destination file already exists.'
           : 'Server confirmed the upload.',
       });
       render();
-      schedule();
+      schedule(targetBatch);
     } catch (error) {
-      if (!batch || !exactScopeCurrent()) return;
+      if (!exactBatchCurrent(targetBatch)) return;
       if (error?.code === 'xv-file-conflict') {
-        batch.queue.event(entry.id, { type: 'conflict' }, {
+        targetBatch.queue.event(entry.id, { type: 'conflict' }, {
           suggestedName: error.details?.suggested_name,
           error: 'The destination changed after preflight. Choose what to do.',
         });
         render();
-        schedule();
+        schedule(targetBatch);
       } else if (error?.name === 'AbortError' || error?.name === 'NetworkError' || error?.ambiguous) {
-        batch.queue.event(entry.id, { type: 'uncertain' }, {
+        targetBatch.queue.event(entry.id, { type: 'uncertain' }, {
           evidence: 'Refreshing server metadata to determine the outcome…',
         });
         render();
-        await reconcileUncertain(entry.id, error);
+        await reconcileUncertain(targetBatch, entry.id);
       } else {
-        batch.queue.event(entry.id, { type: 'failed' }, { error: safeUploadError(error) });
+        targetBatch.queue.event(entry.id, { type: 'failed' }, { error: safeUploadError(error) });
         render();
-        schedule();
+        schedule(targetBatch);
       }
     } finally {
-      batch?.controllers.delete(entry.id);
+      if (exactBatchCurrent(targetBatch)) targetBatch.controllers.delete(entry.id);
     }
   }
 
-  function schedule() {
-    if (!batch || !exactScopeCurrent()) return;
-    for (const entry of batch.queue.claimReady()) void transfer(entry);
+  function schedule(targetBatch = batch) {
+    if (!exactBatchCurrent(targetBatch)) return;
+    for (const entry of targetBatch.queue.claimReady()) void transfer(targetBatch, entry);
     render();
   }
 
-  async function preflight() {
-    const targetBatch = batch;
+  async function preflight(targetBatch = batch) {
+    if (!exactBatchCurrent(targetBatch)) return;
     const candidates = targetBatch.queue.items()
       .filter(({ state }) => state === 'preflighting');
     if (!candidates.length) {
-      schedule();
+      schedule(targetBatch);
       return;
     }
     try {
@@ -588,18 +668,18 @@ export function mountUploadQueue({
           })),
         },
       );
-      if (batch !== targetBatch || !exactScopeCurrent()) return;
+      if (!exactBatchCurrent(targetBatch)) return;
       const results = validatePreflightResults(candidates, response?.results);
       for (const result of results) {
-        if (batch.queue.get(result.client_id).state !== 'preflighting') continue;
+        if (targetBatch.queue.get(result.client_id).state !== 'preflighting') continue;
         if (result.status === 'ready') {
-          batch.queue.event(result.client_id, { type: 'preflight-ready' });
+          targetBatch.queue.event(result.client_id, { type: 'preflight-ready' });
         } else if (result.status === 'conflict') {
-          batch.queue.event(result.client_id, { type: 'conflict' }, {
+          targetBatch.queue.event(result.client_id, { type: 'conflict' }, {
             suggestedName: result.suggested_name,
           });
         } else {
-          batch.queue.event(result.client_id, { type: 'failed' }, {
+          targetBatch.queue.event(result.client_id, { type: 'failed' }, {
             error: result.status === 'too-large'
               ? `This file exceeds the ${Math.floor(result.max_bytes / 1024 / 1024)} MB limit.`
               : 'This backend cannot guarantee a conflict-safe upload.',
@@ -607,12 +687,12 @@ export function mountUploadQueue({
         }
       }
       render();
-      schedule();
-    } catch (error) {
-      if (batch !== targetBatch || !exactScopeCurrent()) return;
-      for (const entry of batch.queue.items()) {
+      schedule(targetBatch);
+    } catch {
+      if (!exactBatchCurrent(targetBatch)) return;
+      for (const entry of targetBatch.queue.items()) {
         if (entry.state === 'preflighting') {
-          batch.queue.event(entry.id, { type: 'failed' }, {
+          targetBatch.queue.event(entry.id, { type: 'failed' }, {
             error: 'The upload preflight response was invalid. Retry this item.',
           });
         }
@@ -623,8 +703,15 @@ export function mountUploadQueue({
 
   async function start(fileList) {
     const files = [...(fileList || [])];
-    if (!files.length || activeBatch()) return false;
-    if (batch?.released) clearOwnedState({ clearSummary: false });
+    if (!files.length) return false;
+    if (batch) {
+      if (batch.released) {
+        newBatchMessage.hidden = false;
+        newBatchMessage.focus();
+      }
+      return false;
+    }
+    newBatchMessage.hidden = true;
     const scope = structuredClone(getContext());
     const chosenDestination = destination.value;
     const existing = getFiles();
@@ -645,21 +732,23 @@ export function mountUploadQueue({
     batch = {
       queue: createUploadQueue(entries, { maxConcurrent: limit }),
       controllers: new Map(),
+      rows: new Map(),
       destination: chosenDestination,
       scope,
       scopeGeneration,
       released: false,
     };
+    const targetBatch = batch;
     destination.disabled = true;
     setPending(true);
-    for (const entry of entries) batch.queue.event(entry.id, { type: 'preflight-started' });
+    for (const entry of entries) targetBatch.queue.event(entry.id, { type: 'preflight-started' });
     render();
-    await preflight();
-    return true;
+    await preflight(targetBatch);
+    return exactBatchCurrent(targetBatch);
   }
 
   retry.onclick = () => {
-    if (!batch || !exactScopeCurrent()) return;
+    if (!exactBatchCurrent(batch)) return;
     retryItems();
   };
   byId('dismiss-upload-summary').onclick = () => {

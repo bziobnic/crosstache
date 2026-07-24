@@ -5,6 +5,7 @@ import {
   nextUploadState,
   uploadConflictDecision,
   uploadEvidenceState,
+  validateUploadConfirmation,
   validatePreflightResults,
 } from './files.js';
 
@@ -34,7 +35,10 @@ test('the exact queue state machine rejects impossible transitions', () => {
   assert.equal(nextUploadState('queued', { type: 'transfer-started' }), 'uploading');
   assert.equal(nextUploadState('awaiting-conflict', { type: 'decision-upload' }), 'queued');
   assert.equal(nextUploadState('uploading', { type: 'cancelled' }), 'cancelled');
-  assert.equal(nextUploadState('uploading', { type: 'uncertain' }), 'ambiguous');
+  assert.equal(nextUploadState('uploading', { type: 'uncertain' }), 'reconciling');
+  assert.equal(nextUploadState('reconciling', { type: 'evidence-missing' }), 'cancelled');
+  assert.equal(nextUploadState('reconciling', { type: 'evidence-present' }), 'ambiguous');
+  assert.throws(() => nextUploadState('reconciling', { type: 'retry' }), /Invalid upload transition/);
   assert.throws(() => nextUploadState('completed', { type: 'preflight-ready' }), /Invalid upload transition/);
 });
 
@@ -113,4 +117,31 @@ test('metadata evidence labels uncertain completion without guessing', () => {
     uploadEvidenceState({ before: null, after: null, expectedSize: 7 }),
     { state: 'cancelled', evidence: 'Server metadata confirms no destination file.' },
   );
+});
+
+test('upload confirmation must match the immutable logical target and policy', () => {
+  assert.deepEqual(
+    validateUploadConfirmation(
+      { name: 'docs/report.txt' },
+      { expectedName: 'docs/report.txt', policy: null },
+    ),
+    { name: 'docs/report.txt' },
+  );
+  assert.deepEqual(
+    validateUploadConfirmation(
+      { name: 'docs/report.txt', status: 'skipped' },
+      { expectedName: 'docs/report.txt', policy: 'skip' },
+    ),
+    { name: 'docs/report.txt', status: 'skipped' },
+  );
+  for (const [response, expected] of [
+    [{ name: 'elsewhere/report.txt' }, { expectedName: 'docs/report.txt', policy: null }],
+    [{ name: 'docs/report.txt', status: 'skipped' }, { expectedName: 'docs/report.txt', policy: 'replace' }],
+    [{ name: 'docs/report.txt' }, { expectedName: 'docs/report.txt', policy: 'skip' }],
+  ]) {
+    assert.throws(
+      () => validateUploadConfirmation(response, expected),
+      (error) => error?.name === 'AmbiguousUploadError' && error?.ambiguous === true,
+    );
+  }
 });
