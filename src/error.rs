@@ -158,8 +158,8 @@ fn looks_like_opaque_token(candidate: &str) -> bool {
     let is_long_hex = candidate.len() >= 32
         && has_digit
         && candidate.bytes().all(|byte| byte.is_ascii_hexdigit());
-    let is_long_single_case_alpha =
-        candidate.len() >= 32 && candidate.bytes().all(|byte| byte.is_ascii_alphabetic());
+    let is_long_alphabetic =
+        candidate.len() >= 24 && candidate.bytes().all(|byte| byte.is_ascii_alphabetic());
     let is_long_alphanumeric = candidate.len() >= 24
         && has_digit
         && candidate.bytes().all(|byte| byte.is_ascii_alphanumeric());
@@ -169,12 +169,17 @@ fn looks_like_opaque_token(candidate: &str) -> bool {
         || (has_digit && punctuation_kinds >= 1)
         || (has_upper && has_lower && has_digit)
         || is_long_hex
-        || is_long_single_case_alpha
+        || is_long_alphabetic
         || is_long_alphanumeric
         || has_token_padding
 }
 
 fn is_safe_camel_case_identifier(candidate: &str) -> bool {
+    // Deliberately recognize diagnostic type roles, not provider-specific
+    // class names. This is a narrow syntax exception rather than an exhaustive
+    // allowlist of SDK identifiers.
+    const SAFE_TYPE_SUFFIXES: [&str; 3] = ["Credential", "Exception", "Error"];
+
     if !candidate.bytes().all(|byte| byte.is_ascii_alphabetic())
         || !candidate
             .bytes()
@@ -184,12 +189,16 @@ fn is_safe_camel_case_identifier(candidate: &str) -> bool {
         return false;
     }
 
-    candidate
+    let has_readable_word_boundary = candidate
         .as_bytes()
         .windows(2)
-        .filter(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
-        .count()
-        >= 2
+        .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase());
+    has_readable_word_boundary
+        && SAFE_TYPE_SUFFIXES.iter().any(|suffix| {
+            candidate
+                .strip_suffix(suffix)
+                .is_some_and(|prefix| !prefix.is_empty())
+        })
 }
 
 fn is_safe_diagnostic_scalar(candidate: &str) -> bool {
@@ -202,7 +211,11 @@ fn is_safe_diagnostic_scalar(candidate: &str) -> bool {
 
     let key = key.to_ascii_lowercase();
     if key.ends_with("version") {
-        return numeric_segments(value, &['.', '-']);
+        let numeric_value = value
+            .strip_suffix("-preview")
+            .or_else(|| value.strip_suffix("-beta"))
+            .unwrap_or(value);
+        return numeric_segments(numeric_value, &['.', '-']);
     }
     if key == "retry-after" {
         return value
@@ -215,9 +228,7 @@ fn is_safe_diagnostic_scalar(candidate: &str) -> bool {
     }
     if key == "request-id" {
         return value.strip_prefix("req-").is_some_and(|number| {
-            !number.is_empty()
-                && number.len() <= 12
-                && number.bytes().all(|byte| byte.is_ascii_digit())
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
         });
     }
     key == "status-code" && value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_digit())

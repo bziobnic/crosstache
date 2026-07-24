@@ -1180,6 +1180,8 @@ mod tests {
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
             "abcdefghijklmnopqrstuvwx==",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "AbcDefGhiJklMnoPqrStuVwx",
+            "abcdefghijklmnopqrstuvwx",
         ];
         let safe = SafeSetupError::from_message(&tokens.join(" "));
 
@@ -1196,12 +1198,16 @@ mod tests {
         let raw = concat!(
             "api-version=2023-07-01 ",
             "x-ms-version=2023-11-03 ",
+            "api-version=2023-07-01-preview ",
+            "x-ms-version=2024-01-01-beta ",
             "Retry-After=120-seconds ",
             "sdk-version=1.2.3 ",
             "request-id=req-42 ",
+            "request-id=req-1234567890123 ",
             "status-code=429 ",
             "DefaultAzureCredential RequestFailedException ",
-            "ManagedIdentityCredential ServiceRequestException"
+            "ManagedIdentityCredential ServiceRequestException ",
+            "NoCredentialsError CredentialsError"
         );
 
         let safe = SafeSetupError::from_message(raw);
@@ -1211,11 +1217,33 @@ mod tests {
 
     #[test]
     fn diagnostics_never_exempt_safe_shaped_values_under_sensitive_keys() {
-        let raw = "token=2023-07-01 password=120-seconds client_secret=1.2.3";
+        let raw = concat!(
+            "token=2023-07-01-preview ",
+            "password=120-seconds ",
+            "client_secret=req-1234567890123"
+        );
         let safe = SafeSetupError::from_message(raw);
 
-        for forbidden in ["2023-07-01", "120-seconds", "1.2.3"] {
+        for forbidden in ["2023-07-01-preview", "120-seconds", "req-1234567890123"] {
             assert!(!safe.diagnostics.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn diagnostics_reject_malformed_safe_scalar_lookalikes() {
+        let values = [
+            "api-version=2023-07-01-previewSECRET",
+            "x-ms-version=2024-01-01-betaSECRET",
+            "request-id=req-1234567890123-secret",
+            "api-version=abcdefghijklmnopqrstuvwxyz123456",
+        ];
+        let safe = SafeSetupError::from_message(&values.join(" "));
+
+        for value in values {
+            assert!(
+                !safe.diagnostics.contains(value),
+                "diagnostics leaked malformed scalar lookalike: {value}"
+            );
         }
     }
 
