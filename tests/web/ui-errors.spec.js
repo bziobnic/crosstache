@@ -312,6 +312,8 @@ test('dismissed stale retry clears handlers and ignores its late failure', async
 
 test('failed workspace activation preserves both current-scope stale refresh owners', async ({ page, baseURL }) => {
   await page.goto(baseURL);
+  await expect(page.locator('#secret-list-summary')).toContainText('across');
+  await expect(page.locator('#file-list-summary')).toContainText('across');
 
   let failOldSecrets = true;
   let failOldFiles = true;
@@ -390,6 +392,8 @@ test('failed workspace activation preserves both current-scope stale refresh own
 
 test('in-flight current refresh settles and retries after workspace activation failure', async ({ page, baseURL }) => {
   await page.goto(baseURL);
+  await expect(page.locator('#secret-list-summary')).toContainText('across');
+  await expect(page.locator('#file-list-summary')).toContainText('across');
 
   let secretRefreshRequests = 0;
   let releaseRefresh;
@@ -438,6 +442,8 @@ test('in-flight current refresh settles and retries after workspace activation f
 
 test('workspace transition clears both refresh owners before delayed new-scope files settle', async ({ page, baseURL }) => {
   await page.goto(baseURL);
+  await expect(page.locator('#secret-list-summary')).toContainText('across');
+  await expect(page.locator('#file-list-summary')).toContainText('across');
 
   let failOldSecrets = true;
   let failOldFiles = true;

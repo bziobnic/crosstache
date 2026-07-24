@@ -243,8 +243,19 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:0; b
 .confirmation-actions { display:flex; justify-content:flex-end; gap:.5rem; }
 .application-dialog { width:min(32rem, calc(100vw - 2rem)); }
 .application-dialog h3 { margin:1.2rem 0 .5rem; font-size:.9rem; }
-.command-list { display:grid; gap:.5rem; margin:1rem 0; }
-.command-list button { justify-content:flex-start; text-align:left; }
+.command-query { display:flex; align-items:center; gap:.55rem; margin:.8rem 0 .5rem; padding:0 .7rem;
+  border:1px solid var(--color-border); border-radius:var(--radius-control); background:var(--color-surface-subtle); }
+.command-query:focus-within { border-color:var(--color-accent); box-shadow:var(--focus-ring); }
+.command-query input { flex:1; min-width:0; padding:.65rem 0; border:0; background:transparent; box-shadow:none; }
+.command-query input:focus-visible { box-shadow:none; }
+.command-list { display:grid; gap:.35rem; max-height:min(22rem, 52vh); margin:.5rem 0 1rem; overflow:auto; }
+.command-result { display:grid; gap:.15rem; justify-content:stretch; padding:.65rem .75rem; text-align:left;
+  border:1px solid transparent; background:transparent; color:var(--color-text); }
+.command-result strong { overflow-wrap:anywhere; }
+.command-result small { color:var(--color-text-muted); }
+.command-result:hover, .command-result[aria-selected="true"] { border-color:var(--color-border);
+  background:var(--color-surface-subtle); }
+.command-empty { margin:.75rem 0 1rem; }
 .shortcut-list { display:grid; grid-template-columns:max-content 1fr; gap:.5rem .8rem; margin:.5rem 0; }
 .shortcut-list dt { font-weight:700; }
 .shortcut-list dd { margin:0; color:var(--color-text-muted); }

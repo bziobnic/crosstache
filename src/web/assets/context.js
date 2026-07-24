@@ -204,13 +204,13 @@ export function mountContextRail({
     render(snapshot);
   });
 
-  async function switchTo(alias) {
+  async function switchTo(alias, { skipGuard = false } = {}) {
     const before = store.snapshot();
     if (!before.context || before.savePending || before.scopedMutationPending) {
       render(before);
       return false;
     }
-    if (!(await guardNavigation())) {
+    if (!skipGuard && !(await guardNavigation())) {
       render(store.snapshot());
       return false;
     }

@@ -95,6 +95,7 @@ export function mountSecrets({
   dialogs,
   preferences = null,
   contextRail = null,
+  commandRegistry = null,
   token,
   exposureClock = globalThis,
   clipboard = globalThis.navigator?.clipboard,
@@ -1926,6 +1927,7 @@ $('#refresh-secrets').onclick = () => loadSecrets(currentVault, captureOperation
 
 function renderSecrets() {
   if (secretsState !== 'ready') return; // keep the loading/failed placeholder
+  publishCommandMetadata();
   const query = $('#search').value;
   const tbody = $('#secrets-table tbody');
   tbody.innerHTML = '';
@@ -3068,6 +3070,19 @@ let fileLoadGeneration = 0;
 let fileLoadController = null;
 let hasSuccessfulFilesSnapshot = false;
 
+function publishCommandMetadata() {
+  if (!commandRegistry) return;
+  commandRegistry.replaceMetadata({
+    secrets,
+    files,
+    folders: [
+      ...folderPaths('secrets', secrets).map((name) => ({ name, surface: 'secrets' })),
+      ...folderPaths('files', files).map((name) => ({ name, surface: 'files' })),
+    ],
+    scope: captureOperationScope(),
+  });
+}
+
 function resetListDiscoveryState() {
   $('#search').value = '';
   $('#file-search').value = '';
@@ -3139,6 +3154,7 @@ $('#refresh-files').onclick = () => loadFiles(currentVault, captureOperationScop
 
 function renderFiles() {
   if (filesState !== 'ready') return;
+  publishCommandMetadata();
   const tbody = $('#files-table tbody');
   tbody.innerHTML = '';
   const query = $('#file-search').value;

@@ -1,7 +1,84 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { buildMetadataIndex, searchIndex } from './commands.js';
+import {
+  buildMetadataIndex,
+  createCommandRegistry,
+  searchIndex,
+  shouldHandleShortcut,
+} from './commands.js';
+
+test('shortcuts do not fire in compatible form controls', () => {
+  for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
+    assert.equal(shouldHandleShortcut({
+      target: { tagName, isContentEditable: false },
+      key: '/',
+      metaKey: false,
+      ctrlKey: false,
+    }), false);
+  }
+  assert.equal(shouldHandleShortcut({
+    target: { tagName: 'MAIN', isContentEditable: false },
+    key: '/',
+    metaKey: false,
+    ctrlKey: false,
+  }), true);
+  assert.equal(shouldHandleShortcut({
+    target: { tagName: 'DIV', isContentEditable: true },
+    key: '/',
+    metaKey: false,
+    ctrlKey: false,
+  }), false);
+});
+
+test('command registry exposes required shortcuts and explicit result surface and scope', () => {
+  const registry = createCommandRegistry();
+  assert.deepEqual(
+    registry.commands().map(({ id, shortcut }) => [id, shortcut]),
+    [
+      ['open-palette', 'mod+k'],
+      ['search-local', '/'],
+      ['new-secret', 'mod+n'],
+      ['dismiss-topmost', 'escape'],
+    ],
+  );
+
+  registry.replaceMetadata({
+    secrets: [{ name: 'database-login', folder: 'prod', groups: ['ops'] }],
+    files: [{ name: 'reports/quarter.pdf', content_type: 'application/pdf' }],
+    folders: [{ name: 'prod', surface: 'secrets' }],
+    scope: { alias: 'main', backend: 'local', vault: 'work' },
+  });
+  const results = registry.search('prod', {
+    context: {
+      workspace: {
+        alias: 'main',
+        entries: [{ alias: 'other', backend: 'aws', vault: 'shared' }],
+      },
+      backend: 'local',
+      vault: 'work',
+    },
+  });
+  assert.equal(results.some(({ kind, name }) => kind === 'secret' && name === 'database-login'), true);
+  assert.equal(results.some(({ kind, name }) => kind === 'folder' && name === 'prod'), true);
+  for (const result of results) {
+    assert.equal(typeof result.surface, 'string');
+    assert.equal(typeof result.scope?.backend, 'string');
+    assert.equal(typeof result.scope?.vault, 'string');
+  }
+});
+
+test('palette queries are ephemeral and never retained by the registry', () => {
+  const registry = createCommandRegistry();
+  registry.replaceMetadata({
+    secrets: [{ name: 'one' }],
+    scope: { alias: 'main', backend: 'local', vault: 'work' },
+  });
+  registry.search('one', {
+    context: { workspace: { alias: 'main', entries: [] }, backend: 'local', vault: 'work' },
+  });
+  assert.doesNotMatch(JSON.stringify(registry.snapshot()), /query|one(?=.*query)/i);
+});
 
 test('metadata index excludes values notes and prior queries', () => {
   const index = buildMetadataIndex({

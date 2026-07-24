@@ -5,6 +5,7 @@ import { announce } from './accessibility.js';
 import { mountSecrets } from './secrets.js';
 import { createPreferenceClient } from './preferences.js';
 import { formatContextLine, mountContextRail } from './context.js';
+import { createCommandRegistry, mountCommandPalette } from './commands.js';
 
 // Persist the session token per tab, then scrub it from the URL.
 const TOKEN_STORAGE_KEY = 'xv.ui.token';
@@ -39,6 +40,13 @@ const api = createApiClient({
 const dialogs = createDialogManager(document);
 const preferences = createPreferenceClient(api);
 const themeSelect = document.getElementById('theme-select');
+const commandRegistry = createCommandRegistry();
+
+const confirmNavigation = () => guardNavigation({
+  draft: store.snapshot().draft,
+  savePending: store.snapshot().savePending,
+  confirmDiscard: () => dialogs.confirmDiscard(),
+});
 
 function applyTheme(theme) {
   if (document.documentElement) document.documentElement.dataset.theme = theme;
@@ -67,11 +75,7 @@ void preferences.load().then(() => {
 const contextRail = token ? mountContextRail({
   store,
   api,
-  guardNavigation: () => guardNavigation({
-    draft: store.snapshot().draft,
-    savePending: store.snapshot().savePending,
-    confirmDiscard: () => dialogs.confirmDiscard(),
-  }),
+  guardNavigation: confirmNavigation,
 }) : null;
 
 function bindApplicationDialog({ openId, dialogId, closeId, initialFocus }) {
@@ -91,40 +95,6 @@ function bindApplicationDialog({ openId, dialogId, closeId, initialFocus }) {
   return { open, dialog, close: dismiss };
 }
 
-const commandsPanel = bindApplicationDialog({
-  openId: 'commands-open',
-  dialogId: 'commands-dialog',
-  closeId: 'commands-close',
-  initialFocus: () => document.querySelector(
-    '#commands-dialog [data-command-target]:not([hidden]):not([disabled])',
-  ),
-});
-const commandButtons = [
-  ...(document.querySelectorAll?.('#commands-dialog [data-command-target]') || []),
-];
-function syncCommandAvailability() {
-  for (const command of commandButtons) {
-    const target = document.getElementById(command.dataset.commandTarget);
-    command.hidden = !target || target.hidden || target.disabled;
-  }
-}
-const openCommands = commandsPanel.open.onclick;
-commandsPanel.open.onclick = () => {
-  syncCommandAvailability();
-  openCommands();
-};
-for (const command of commandButtons) {
-  const target = document.getElementById(command.dataset.commandTarget);
-  command.onclick = async () => {
-    commandsPanel.close();
-    if (target.id === 'search' || target.id === 'new-secret') {
-      await document.getElementById('tab-secrets').onclick();
-    }
-    if (target.id === 'search') target.focus();
-    else target.click();
-  };
-}
-
 bindApplicationDialog({
   openId: 'help-open',
   dialogId: 'help-dialog',
@@ -138,13 +108,6 @@ bindApplicationDialog({
   initialFocus: () => themeSelect,
 });
 
-document.addEventListener?.('keydown', (event) => {
-  if (!(event.key?.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey))) return;
-  if (dialogs.topModal()) return;
-  event.preventDefault();
-  document.getElementById('commands-open').click();
-});
-
 themeSelect.onchange = async () => {
   await preferences.load();
   const theme = themeSelect.value;
@@ -152,4 +115,20 @@ themeSelect.onchange = async () => {
   applyTheme(theme);
 };
 
-mountSecrets({ api, store, dialogs, announce, preferences, token, contextRail });
+mountSecrets({
+  api,
+  store,
+  dialogs,
+  announce,
+  preferences,
+  token,
+  contextRail,
+  commandRegistry,
+});
+mountCommandPalette({
+  registry: commandRegistry,
+  store,
+  dialogs,
+  guardNavigation: confirmNavigation,
+  activateContext: (alias, options) => contextRail?.switchTo(alias, options),
+});

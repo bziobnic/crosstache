@@ -396,14 +396,14 @@
 
 <section id="commands-dialog" class="confirmation-dialog application-dialog" role="dialog" aria-modal="true" aria-labelledby="commands-title" aria-describedby="commands-description" tabindex="-1" hidden>
   <h2 id="commands-title">Commands</h2>
-  <p id="commands-description">Choose an available action in the current effective context.</p>
-  <div class="command-list">
-    <button type="button" class="button secondary" data-command-target="search">Search secrets</button>
-    <button type="button" class="button secondary" data-command-target="new-secret">New secret</button>
-    <button type="button" class="button secondary" data-command-target="tab-secrets">Show Secrets</button>
-    <button type="button" class="button secondary" data-command-target="tab-files">Show Files</button>
-    <button type="button" class="button secondary" data-command-target="tab-trash">Show Trash</button>
-  </div>
+  <p id="commands-description">Search actions and loaded metadata in the current effective context.</p>
+  <label class="command-query">
+    <span class="sr-only">Search commands and vault metadata</span>
+    <svg class="icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+    <input id="commands-query" type="search" role="combobox" aria-label="Search commands and vault metadata" aria-autocomplete="list" aria-controls="commands-results" aria-expanded="true" autocomplete="off" spellcheck="false">
+  </label>
+  <div id="commands-results" class="command-list" role="listbox" aria-label="Command palette results"></div>
+  <p id="commands-empty" class="command-empty" role="status" hidden>No matching commands or loaded metadata.</p>
   <div class="confirmation-actions">
     <button type="button" id="commands-close" class="button ghost">Close</button>
   </div>
@@ -416,6 +416,8 @@
   <h3>Keyboard shortcuts</h3>
   <dl class="shortcut-list">
     <dt><kbd>⌘K</kbd> or <kbd>Ctrl+K</kbd></dt><dd>Open Commands</dd>
+    <dt><kbd>/</kbd></dt><dd>Search the current list</dd>
+    <dt><kbd>⌘N</kbd> or <kbd>Ctrl+N</kbd></dt><dd>Create a secret</dd>
     <dt><kbd>Escape</kbd></dt><dd>Close the current dialog</dd>
     <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Move between content tabs</dd>
   </dl>

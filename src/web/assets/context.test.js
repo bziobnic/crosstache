@@ -212,6 +212,17 @@ test('mounted switch commits context and list together after the guard', async (
     'local-stage / sandbox · checkout · stage');
 });
 
+test('an already guarded palette activation does not run the navigation guard twice', async () => {
+  let guardCalls = 0;
+  const fixture = await mounted({
+    guardNavigation: async () => { guardCalls++; return false; },
+  });
+
+  assert.equal(await fixture.rail.switchTo('stage', { skipGuard: true }), true);
+  assert.equal(guardCalls, 0);
+  assert.equal(fixture.store.snapshot().context.backend, 'local-stage');
+});
+
 test('workspace activation emits exact operation lifecycle statuses with one operation ID', async () => {
   const fixture = await mounted();
   const events = [];
