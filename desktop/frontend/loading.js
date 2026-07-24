@@ -105,6 +105,25 @@ const FIELD_SETS = {
   ],
 };
 
+const SAFE_ERROR_LIMITS = {
+  code: 128,
+  operation: 128,
+  backend: 128,
+  vault: 512,
+  message: 1_024,
+  hint: 1_024,
+  diagnostics: 16_384,
+};
+const GENERIC_SAFE_ERROR = Object.freeze({
+  code: 'xv-command-failed',
+  operation: 'desktop-command',
+  backend: 'unknown',
+  vault: '',
+  message: 'Crosstache could not complete this operation.',
+  hint: 'Try again or open the configuration file.',
+  diagnostics: 'No safe diagnostics are available.',
+});
+
 const FORM_COPY = {
   local: ['Create local vault', 'Local storage stays on this device. No provider login is needed.'],
   azure: ['Connect Azure', 'Crosstache uses your Azure CLI session; it never collects a client secret.'],
@@ -249,29 +268,47 @@ export function validateSetup(kind, values) {
   return errors;
 }
 
-const requestFor = (kind, values) => {
+const requestFor = (kind, values = {}) => {
+  const fields = FIELD_SETS[kind];
+  if (!fields) throw new TypeError('Unsupported setup backend.');
   const clean = Object.fromEntries(
-    Object.entries(values).map(([name, value]) => [name, String(value).trim()]),
+    fields.map(([name]) => [name, String(values?.[name] ?? '').trim()]),
   );
   if (kind === 'aws' && !clean.profile) clean.profile = null;
-  return { backend: kind, ...clean };
+  return Object.freeze({ backend: kind, ...clean });
 };
 
-const safeError = (error) =>
-  error && typeof error === 'object'
-    ? error
-    : {
-        code: 'xv-command-failed',
-        operation: 'desktop-command',
-        message: String(error || 'The operation failed.'),
-        hint: 'Try again or open the configuration file.',
-        diagnostics: 'No additional safe diagnostics were provided.',
-      };
+const safeError = (error) => {
+  if (!error || typeof error !== 'object' || Array.isArray(error)) {
+    return GENERIC_SAFE_ERROR;
+  }
+  const expected = Object.keys(SAFE_ERROR_LIMITS);
+  const actual = Object.keys(error);
+  if (
+    actual.length !== expected.length
+    || !expected.every((field) => (
+      Object.hasOwn(error, field)
+      && typeof error[field] === 'string'
+      && error[field].length <= SAFE_ERROR_LIMITS[field]
+    ))
+    || !error.code.startsWith('xv-')
+    || !error.operation
+    || !error.backend
+    || !error.message
+    || !error.hint
+    || !error.diagnostics
+  ) {
+    return GENERIC_SAFE_ERROR;
+  }
+  return Object.freeze(Object.fromEntries(expected.map((field) => [field, error[field]])));
+};
 
 export function createStartupWorkflow({ invoke, listen, onRender }) {
   let selectedKind = null;
   let configPath = CONFIG_FALLBACK;
   let previewedRequest = null;
+  let setupEpoch = 0;
+  let snapshotEpoch = 0;
   let stopListening = null;
   const render = (view) => {
     onRender(view);
@@ -285,10 +322,17 @@ export function createStartupWorkflow({ invoke, listen, onRender }) {
   return {
     async start() {
       renderState({ kind: 'loading-configuration' });
+      const requestEpoch = ++snapshotEpoch;
       try {
-        stopListening = await listen('xv://startup-state', ({ payload }) => renderState(payload));
-        return renderState(await invoke('startup_status'));
+        stopListening = await listen('xv://startup-state', ({ payload }) => {
+          snapshotEpoch += 1;
+          renderState(payload);
+        });
+        const state = await invoke('startup_status');
+        if (requestEpoch !== snapshotEpoch) return { stale: true };
+        return renderState(state);
       } catch (error) {
+        if (requestEpoch !== snapshotEpoch) return { stale: true };
         return render(renderRecovery(safeError(error)));
       }
     },
@@ -298,34 +342,61 @@ export function createStartupWorkflow({ invoke, listen, onRender }) {
     selectBackend(kind) {
       selectedKind = kind;
       previewedRequest = null;
+      setupEpoch += 1;
       return render(renderSetupForm(kind, { configPath }));
     },
     invalidatePreview() {
       previewedRequest = null;
+      setupEpoch += 1;
     },
     async preview(kind, values) {
+      if (!FIELD_SETS[kind]) {
+        return { ok: false, error: GENERIC_SAFE_ERROR };
+      }
       const errors = validateSetup(kind, values);
       if (Object.keys(errors).length) return { ok: false, errors };
+      if (selectedKind !== kind) {
+        selectedKind = kind;
+        setupEpoch += 1;
+      }
+      const generation = ++setupEpoch;
+      previewedRequest = null;
       const request = requestFor(kind, values);
       try {
         const preview = await invoke('preview_setup', { request });
-        selectedKind = kind;
-        previewedRequest = request;
-        return { ok: true, preview, request };
+        if (generation !== setupEpoch || selectedKind !== kind) {
+          return { ok: false, stale: true };
+        }
+        previewedRequest = { generation, kind, request };
+        return { ok: true, preview, request, generation };
       } catch (error) {
+        if (generation !== setupEpoch || selectedKind !== kind) {
+          return { ok: false, stale: true };
+        }
         return { ok: false, error: safeError(error) };
       }
     },
     async apply() {
-      if (!previewedRequest) {
-        return { ok: false, error: { message: 'Preview setup before applying changes.' } };
+      const preview = previewedRequest;
+      if (
+        !preview
+        || preview.generation !== setupEpoch
+        || preview.kind !== selectedKind
+      ) {
+        return { ok: false, error: GENERIC_SAFE_ERROR };
       }
-      const request = previewedRequest;
       previewedRequest = null;
       try {
-        return { ok: true, result: await invoke('apply_setup', { request }) };
+        const result = await invoke('apply_setup', { request: preview.request });
+        if (preview.generation !== setupEpoch || preview.kind !== selectedKind) {
+          return { ok: false, stale: true };
+        }
+        return { ok: true, result };
       } catch (error) {
-        previewedRequest = request;
+        if (preview.generation !== setupEpoch || preview.kind !== selectedKind) {
+          return { ok: false, stale: true };
+        }
+        previewedRequest = preview;
         return { ok: false, error: safeError(error) };
       }
     },
@@ -338,6 +409,9 @@ export function createStartupWorkflow({ invoke, listen, onRender }) {
       }
     },
     chooseBackend() {
+      selectedKind = null;
+      previewedRequest = null;
+      setupEpoch += 1;
       return renderState({ kind: 'setup-required', config_path: configPath });
     },
     async openConfig() {
@@ -352,13 +426,19 @@ export function createStartupWorkflow({ invoke, listen, onRender }) {
 const collectValues = (form) =>
   Object.fromEntries(new FormData(form).entries());
 
-const mountBrowser = () => {
+export const mountBrowser = () => {
   const root = document.querySelector('#app');
   const internals = globalThis.__TAURI_INTERNALS__;
-  if (!root || !internals?.invoke) return;
+  const globalTauri = globalThis.__TAURI__;
+  const invoke = globalTauri?.core?.invoke
+    ? (command, args) => globalTauri.core.invoke(command, args)
+    : internals?.invoke
+      ? (command, args) => internals.invoke(command, args)
+      : null;
+  if (!root || !invoke) return null;
 
   const listen = async (event, handler) => {
-    if (globalThis.__TAURI__?.event?.listen) return globalThis.__TAURI__.event.listen(event, handler);
+    if (globalTauri?.event?.listen) return globalTauri.event.listen(event, handler);
     const callbackId = internals.transformCallback(handler);
     const eventId = await internals.invoke('plugin:event|listen', {
       event,
@@ -371,7 +451,7 @@ const mountBrowser = () => {
     };
   };
   const workflow = createStartupWorkflow({
-    invoke: (command, args) => internals.invoke(command, args),
+    invoke,
     listen,
     onRender(view) {
       view.mount(root);
@@ -406,8 +486,10 @@ const mountBrowser = () => {
     for (const input of form.elements) {
       if (!input.name) continue;
       const message = errors[input.name] || '';
+      const error = form.querySelector(`#${CSS.escape(input.name)}-error`);
+      if (!error) continue;
       input.setAttribute('aria-invalid', String(Boolean(message)));
-      form.querySelector(`#${CSS.escape(input.name)}-error`).textContent = message;
+      error.textContent = message;
     }
     form.querySelector('[aria-invalid="true"]')?.focus();
   };
@@ -425,6 +507,7 @@ const mountBrowser = () => {
     const form = event.target;
     showValidation(form, {});
     const result = await workflow.preview(form.dataset.setupKind, collectValues(form));
+    if (result.stale) return;
     if (!result.ok) {
       if (result.errors) showValidation(form, result.errors);
       if (result.error) showFormError(form, result.error);
@@ -455,6 +538,7 @@ const mountBrowser = () => {
       button.disabled = true;
       button.textContent = 'Applying…';
       const result = await workflow.apply();
+      if (result.stale) return;
       if (!result.ok) {
         button.disabled = false;
         button.textContent = 'Apply setup';
@@ -474,6 +558,7 @@ const mountBrowser = () => {
   });
   window.addEventListener('beforeunload', () => workflow.stop(), { once: true });
   workflow.start().catch((error) => root.replaceChildren(document.createTextNode(safeError(error).message)));
+  return workflow;
 };
 
 if (typeof document !== 'undefined') mountBrowser();

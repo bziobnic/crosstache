@@ -3,6 +3,16 @@ import assert from 'node:assert/strict';
 
 import { createStartupWorkflow } from '../../desktop/frontend/loading.js';
 
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+};
+
 const createHarness = (snapshot = {
   kind: 'setup-required',
   config_path: '/tmp/isolated-xv.conf',
@@ -49,6 +59,45 @@ test('mocked startup reaches setup without any real filesystem command', async (
   assert.match(harness.views.at(-1).textContent, /\/tmp\/isolated-xv\.conf/);
 });
 
+test('a startup event owns the surface over an older pending status response', async () => {
+  const status = deferred();
+  const views = [];
+  let listener;
+  const workflow = createStartupWorkflow({
+    invoke: async (command) => {
+      assert.equal(command, 'startup_status');
+      return status.promise;
+    },
+    listen: async (_event, handler) => {
+      listener = handler;
+      return () => {};
+    },
+    onRender: (view) => views.push(view),
+  });
+
+  const starting = workflow.start();
+  await Promise.resolve();
+  listener({
+    payload: {
+      kind: 'recoverable-failure',
+      error: {
+        code: 'xv-auth-failed',
+        operation: 'list-secrets',
+        backend: 'azure',
+        vault: 'team',
+        message: 'Authentication failed.',
+        hint: 'Sign in and retry.',
+        diagnostics: 'Session unavailable.',
+      },
+    },
+  });
+  status.resolve({ kind: 'loading-configuration' });
+  await starting;
+
+  assert.match(views.at(-1).textContent, /xv-auth-failed/);
+  assert.doesNotMatch(views.at(-1).textContent, /Loading configuration/);
+});
+
 test('all provider previews send only their documented non-secret fields', async () => {
   const harness = createHarness();
   const cases = [
@@ -79,6 +128,110 @@ test('all provider previews send only their documented non-secret fields', async
     assert.doesNotMatch(serialized, /secret|password|token|access_key/i);
   }
   assert.equal(harness.calls.filter(({ command }) => command === 'preview_setup').length, 3);
+});
+
+test('provider requests drop unknown and credential-like values before IPC', async () => {
+  const harness = createHarness();
+
+  const local = await harness.workflow.preview('local', {
+    store_path: '/tmp/store',
+    key_file: '/tmp/key',
+    vault: 'personal',
+    client_secret: 'must-not-cross-ipc',
+    access_key: 'must-not-cross-ipc',
+    unrelated: 'must-not-cross-ipc',
+  });
+
+  assert.equal(local.ok, true);
+  assert.deepEqual(harness.calls.at(-1), {
+    command: 'preview_setup',
+    args: {
+      request: {
+        backend: 'local',
+        store_path: '/tmp/store',
+        key_file: '/tmp/key',
+        vault: 'personal',
+      },
+    },
+  });
+});
+
+test('an unknown backend is rejected before IPC', async () => {
+  const harness = createHarness();
+
+  const result = await harness.workflow.preview('custom', {
+    vault: 'personal',
+    client_secret: 'must-not-cross-ipc',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(harness.calls.length, 0);
+});
+
+test('editing during an in-flight preview makes its completion inert', async () => {
+  const pending = deferred();
+  const calls = [];
+  const workflow = createStartupWorkflow({
+    invoke: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'preview_setup') return pending.promise;
+      return {};
+    },
+    listen: async () => () => {},
+    onRender: () => {},
+  });
+
+  workflow.selectBackend('local');
+  const previewing = workflow.preview('local', {
+    store_path: '/tmp/store',
+    key_file: '/tmp/key',
+    vault: 'personal',
+  });
+  workflow.invalidatePreview();
+  pending.resolve({ backend: 'local', vault: 'personal' });
+  const result = await previewing;
+
+  assert.equal(result.stale, true);
+  assert.equal((await workflow.apply()).ok, false);
+  assert.equal(calls.filter(({ command }) => command === 'apply_setup').length, 0);
+});
+
+test('a stale apply failure cannot restore preview ownership after an edit', async () => {
+  const applying = deferred();
+  const calls = [];
+  const workflow = createStartupWorkflow({
+    invoke: async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'preview_setup') return { backend: 'local', vault: 'personal' };
+      if (command === 'apply_setup') return applying.promise;
+      return {};
+    },
+    listen: async () => () => {},
+    onRender: () => {},
+  });
+  workflow.selectBackend('local');
+  await workflow.preview('local', {
+    store_path: '/tmp/store',
+    key_file: '/tmp/key',
+    vault: 'personal',
+  });
+
+  const pendingApply = workflow.apply();
+  workflow.invalidatePreview();
+  applying.reject({
+    code: 'xv-config-invalid',
+    operation: 'apply-setup',
+    backend: 'local',
+    vault: 'personal',
+    message: 'The candidate configuration is invalid.',
+    hint: 'Review fields.',
+    diagnostics: 'No values were persisted.',
+  });
+  const result = await pendingApply;
+
+  assert.equal(result.stale, true);
+  assert.equal((await workflow.apply()).ok, false);
+  assert.equal(calls.filter(({ command }) => command === 'apply_setup').length, 1);
 });
 
 test('apply is impossible before preview and reuses the exact previewed request', async () => {
@@ -233,4 +386,36 @@ test('provider command errors are rendered only through the safe recovery model'
   await workflow.start();
   assert.match(views.at(-1).textContent, /not markup/);
   assert.doesNotMatch(views.at(-1).html, /<script>/);
+});
+
+test('raw rejection strings, Error objects, and malformed objects use fixed generic recovery copy', async () => {
+  const unsafeFailures = [
+    'token=raw-string-secret',
+    new Error('Bearer raw-error-secret'),
+    { message: 'client_secret=raw-object-secret' },
+    {
+      code: 'xv-auth-failed',
+      operation: 'list-secrets',
+      backend: 'azure',
+      vault: 'team',
+      message: 'x'.repeat(2_000),
+      hint: 'Retry.',
+      diagnostics: 'redacted',
+    },
+  ];
+
+  for (const failure of unsafeFailures) {
+    const views = [];
+    const workflow = createStartupWorkflow({
+      invoke: async () => { throw failure; },
+      listen: async () => () => {},
+      onRender: (view) => views.push(view),
+    });
+
+    await workflow.start();
+    const rendered = `${views.at(-1).textContent} ${views.at(-1).html}`;
+    assert.match(rendered, /xv-command-failed/);
+    assert.match(rendered, /Crosstache could not complete this operation/);
+    assert.doesNotMatch(rendered, /raw-string-secret|raw-error-secret|raw-object-secret|x{100}/);
+  }
 });

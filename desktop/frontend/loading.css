@@ -149,6 +149,12 @@ h1 {
   letter-spacing: -.035em;
 }
 
+h1:focus-visible {
+  border-radius: 4px;
+  outline: 3px solid var(--mint);
+  outline-offset: 6px;
+}
+
 h2 { margin: 0 0 6px; font-size: 1rem; }
 
 .lede {
