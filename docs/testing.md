@@ -80,6 +80,27 @@ PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npm run test:browser
 PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-errors.spec.js
 ```
 
+Responsive visual coverage lives in `tests/web/ui-visual.spec.js`. Four
+visual-only Playwright projects exercise 1180×760, 820×560, 768×700, and
+390×844; each project captures the same realistic long-name vault in light and
+dark themes. The fixture fixes displayed dates and fonts, requests reduced
+motion, disables screenshot animations, checks for horizontal page overflow,
+and runs axe before each capture. Committed baselines are stored under
+`tests/web/snapshots/<project>/`.
+
+Generate or intentionally refresh all eight baselines, then inspect every
+image before committing it:
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-visual.spec.js --update-snapshots
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-visual.spec.js
+```
+
+The `functional-chromium` project excludes the visual spec, and the four
+visual projects include only that spec. This keeps ordinary browser tests at
+one execution per test while allowing a mixed functional-and-visual command
+to run the complete responsive gate.
+
 The fixture builds `xv --features ui`, launches `xv ui --no-open`, and exposes
 the generated `baseURL` and `vault` to each test. Each app process receives an
 explicit environment with a temporary `HOME`, `XDG_CONFIG_HOME`,

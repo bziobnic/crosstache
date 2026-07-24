@@ -217,6 +217,21 @@ test('desktop table keeps sorting and resizing controls above the breakpoint', a
   await expect(page.locator('#secrets-table .sort-button')).toHaveCount(5);
 });
 
+test('constrained desktop keeps table mode but replaces the folder rail with its filter sheet', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 820, height: 560 });
+  await page.goto(baseURL);
+
+  await expect(page.locator('#secrets-table')).toBeVisible();
+  await expect(page.locator('#secrets-stacked')).toBeHidden();
+  await expect(page.locator('#secrets-workspace .folder-sidebar')).toBeHidden();
+  const filterFolders = page.getByRole('button', { name: 'Filter folders' });
+  await expect(filterFolders).toBeVisible();
+  await filterFolders.click();
+  await expect(page.getByRole('dialog', { name: 'Filter secret folders' })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await expectNoSeriousOrCriticalAxeViolations(page);
+});
+
 test('runtime breakpoint changes replace the complete semantic surface and focus order', async ({ page, baseURL }) => {
   await page.setViewportSize({ width: 769, height: 700 });
   await page.goto(baseURL);
