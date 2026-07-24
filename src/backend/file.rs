@@ -34,6 +34,22 @@ pub trait FileBackend: Send + Sync {
         reporter: Option<&dyn ProgressReporter>,
     ) -> Result<FileInfo, BackendError>;
 
+    /// Create a file only when the destination is absent at the backend's
+    /// commit point. Implementations must never replace an existing file.
+    ///
+    /// Backends that cannot provide this atomic guarantee reject the
+    /// operation; callers must not emulate it with a check-then-upload race.
+    async fn upload_file_if_absent(
+        &self,
+        _vault: &str,
+        _request: FileUploadRequest,
+        _reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<FileInfo, BackendError> {
+        Err(BackendError::Unsupported(
+            "atomic create-only file upload".into(),
+        ))
+    }
+
     /// Download a file's contents by name.
     async fn download_file(
         &self,

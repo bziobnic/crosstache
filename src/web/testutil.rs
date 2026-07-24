@@ -719,6 +719,31 @@ pub(crate) mod stub {
             Ok(info)
         }
 
+        async fn upload_file_if_absent(
+            &self,
+            _vault: &str,
+            request: crate::blob::models::FileUploadRequest,
+            _reporter: Option<&dyn crate::utils::progress::ProgressReporter>,
+        ) -> Result<crate::blob::models::FileInfo, BackendError> {
+            let mut files = self.files.lock().unwrap();
+            if files.contains_key(&request.name) {
+                return Err(BackendError::DestinationExists { name: request.name });
+            }
+            let info = file_info(
+                &request.name,
+                request.content.len() as u64,
+                request
+                    .content_type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream"),
+            );
+            files.insert(
+                request.name.clone(),
+                (request.content, info.content_type.clone()),
+            );
+            Ok(info)
+        }
+
         async fn download_file(
             &self,
             _vault: &str,

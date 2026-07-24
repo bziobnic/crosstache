@@ -47,6 +47,19 @@ impl ApiErrorBody {
             None,
         )
     }
+
+    pub(crate) fn file_conflict(name: &str, suggested_name: Option<String>) -> Self {
+        Self::new(
+            "xv-file-conflict",
+            "A file with that name already exists.",
+            "Choose Skip, Replace, or Rename before retrying the upload.",
+            Some("file"),
+            Some(serde_json::json!({
+                "existing_name": name,
+                "suggested_name": suggested_name,
+            })),
+        )
+    }
 }
 
 pub(crate) fn status_error(status: StatusCode) -> ApiErrorBody {

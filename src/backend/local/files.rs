@@ -95,15 +95,48 @@ impl LocalFileBackend {
             .map(|(secret, _)| secret)
             .filter(|secret| !secret.is_empty())
     }
-}
 
-#[async_trait]
-impl FileBackend for LocalFileBackend {
-    async fn upload_file(
+    fn upload_locked(
         &self,
         vault: &str,
         request: FileUploadRequest,
-        _reporter: Option<&dyn ProgressReporter>,
+        create_only: bool,
+    ) -> Result<FileInfo, BackendError> {
+        let fdir = files_dir(&self.store_path, vault)?;
+        create_private_dir(&fdir)
+            .map_err(|e| BackendError::Internal(format!("mkdir files: {e}")))?;
+
+        let original_size = request.content.len() as u64;
+        let ap = file_age_path(&self.store_path, vault, &request.name)?;
+        let mp = file_meta_path(&self.store_path, vault, &request.name)?;
+        if create_only && (ap.exists() || mp.exists()) {
+            return Err(BackendError::DestinationExists { name: request.name });
+        }
+
+        crypto::encrypt_to_file(&ap, &request.content, &self.recipients)?;
+
+        let now = Utc::now();
+        let info = FileInfo {
+            name: request.name,
+            size: original_size,
+            content_type: request
+                .content_type
+                .unwrap_or_else(|| "application/octet-stream".into()),
+            last_modified: now,
+            etag: format!("\"{}\"", uuid::Uuid::new_v4()),
+            groups: request.groups,
+            metadata: request.metadata,
+            tags: request.tags,
+        };
+        write_file_meta(&mp, &info)?;
+        Ok(info)
+    }
+
+    fn upload_with_policy(
+        &self,
+        vault: &str,
+        request: FileUploadRequest,
+        create_only: bool,
     ) -> Result<FileInfo, BackendError> {
         let vault_dir = paths::vault_dir(&self.store_path, vault)?;
         if !vault_dir.exists() {
@@ -124,34 +157,28 @@ impl FileBackend for LocalFileBackend {
                 });
             }
         }
-        let fdir = files_dir(&self.store_path, vault)?;
-        create_private_dir(&fdir)
-            .map_err(|e| BackendError::Internal(format!("mkdir files: {e}")))?;
+        self.upload_locked(vault, request, create_only)
+    }
+}
 
-        let original_size = request.content.len() as u64;
-        let ap = file_age_path(&self.store_path, vault, &request.name)?;
-        let mp = file_meta_path(&self.store_path, vault, &request.name)?;
+#[async_trait]
+impl FileBackend for LocalFileBackend {
+    async fn upload_file(
+        &self,
+        vault: &str,
+        request: FileUploadRequest,
+        _reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<FileInfo, BackendError> {
+        self.upload_with_policy(vault, request, false)
+    }
 
-        // Encrypt and write file content
-        crypto::encrypt_to_file(&ap, &request.content, &self.recipients)?;
-
-        let now = Utc::now();
-        let info = FileInfo {
-            name: request.name.clone(),
-            size: original_size,
-            content_type: request
-                .content_type
-                .unwrap_or_else(|| "application/octet-stream".into()),
-            last_modified: now,
-            etag: format!("\"{}\"", uuid::Uuid::new_v4()),
-            groups: request.groups,
-            metadata: request.metadata,
-            tags: request.tags,
-        };
-
-        write_file_meta(&mp, &info)?;
-
-        Ok(info)
+    async fn upload_file_if_absent(
+        &self,
+        vault: &str,
+        request: FileUploadRequest,
+        _reporter: Option<&dyn ProgressReporter>,
+    ) -> Result<FileInfo, BackendError> {
+        self.upload_with_policy(vault, request, true)
     }
 
     async fn download_file(
@@ -620,6 +647,52 @@ mod tests {
         assert_eq!(info.groups, vec!["test"]);
         assert_eq!(info.metadata.get("uploaded_by").unwrap(), "test-agent");
         assert_eq!(info.tags.get("version").unwrap(), "1.0");
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_if_absent_preserves_exactly_one_winner() {
+        let (backend, _tmp) = test_file_backend();
+        let backend = std::sync::Arc::new(backend);
+        let first = FileUploadRequest {
+            name: "race.txt".into(),
+            content: b"first".to_vec(),
+            content_type: Some("text/plain".into()),
+            groups: Vec::new(),
+            metadata: HashMap::new(),
+            tags: HashMap::new(),
+        };
+        let second = FileUploadRequest {
+            name: "race.txt".into(),
+            content: b"second".to_vec(),
+            content_type: Some("text/plain".into()),
+            groups: Vec::new(),
+            metadata: HashMap::new(),
+            tags: HashMap::new(),
+        };
+        let a = {
+            let backend = backend.clone();
+            tokio::spawn(async move { backend.upload_file_if_absent("default", first, None).await })
+        };
+        let b = {
+            let backend = backend.clone();
+            tokio::spawn(
+                async move { backend.upload_file_if_absent("default", second, None).await },
+            )
+        };
+        let results = [a.await.unwrap(), b.await.unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(BackendError::DestinationExists { .. })))
+                .count(),
+            1
+        );
+        let bytes = backend
+            .download_file("default", "race.txt", None)
+            .await
+            .unwrap();
+        assert!(bytes == b"first" || bytes == b"second");
     }
 
     #[tokio::test]

@@ -20,6 +20,8 @@ pub(crate) mod api;
 pub(crate) mod auth;
 mod context;
 pub(crate) mod errors;
+#[cfg(feature = "file-ops")]
+mod files;
 mod folder_tokens;
 mod preferences;
 mod secrets;
@@ -311,9 +313,12 @@ pub(crate) fn build_router(state: Arc<WebState>) -> Router {
     #[cfg(feature = "file-ops")]
     let api = api
         .route(
-            "/files",
-            get(api::files::list_files).post(api::files::upload_file),
+            "/files/preflight",
+            post(files::preflight).layer(axum::extract::DefaultBodyLimit::max(
+                files::MAX_PREFLIGHT_BODY_BYTES,
+            )),
         )
+        .route("/files", get(api::files::list_files).post(files::upload))
         .route(
             "/files/{name}",
             get(api::files::download_file).delete(api::files::delete_file),

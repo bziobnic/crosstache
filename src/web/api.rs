@@ -65,7 +65,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn validation_error(
+pub(crate) fn validation_error(
     status: StatusCode,
     message: &'static str,
     field: Option<&'static str>,
@@ -369,8 +369,7 @@ pub(crate) async fn move_secret(
 pub(crate) mod files {
     use super::*;
     use crate::backend::FileBackend;
-    use crate::blob::models::{FileListRequest, FileUploadRequest};
-    use axum::extract::Multipart;
+    use crate::blob::models::FileListRequest;
     use axum::http::header;
     use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
@@ -443,62 +442,6 @@ pub(crate) mod files {
             .await?,
         ))
     }
-
-    pub(crate) async fn upload_file(
-        State(state): State<Arc<WebState>>,
-        Query(q): Query<VaultQuery>,
-        mut multipart: Multipart,
-    ) -> Result<Json<crate::blob::models::FileInfo>, ApiError> {
-        while let Some(field) = multipart.next_field().await.map_err(|_| {
-            validation_error(
-                StatusCode::BAD_REQUEST,
-                "The upload could not be read.",
-                Some("file"),
-            )
-        })? {
-            if field.name() != Some("file") {
-                continue;
-            }
-            let name = field.file_name().map(str::to_string).ok_or_else(|| {
-                validation_error(
-                    StatusCode::BAD_REQUEST,
-                    "Choose a file with a name.",
-                    Some("file"),
-                )
-            })?;
-            let content_type = field.content_type().map(str::to_string);
-            let content = field
-                .bytes()
-                .await
-                .map_err(|_| {
-                    validation_error(
-                        StatusCode::BAD_REQUEST,
-                        "The upload could not be read.",
-                        Some("file"),
-                    )
-                })?
-                .to_vec();
-            let request = FileUploadRequest {
-                name,
-                content,
-                content_type,
-                groups: Vec::new(),
-                metadata: std::collections::HashMap::new(),
-                tags: std::collections::HashMap::new(),
-            };
-            let target = q.target(&state)?;
-            let info = files_backend(target.backend.as_ref())?
-                .upload_file(&target.context.vault, request, None)
-                .await?;
-            return Ok(Json(info));
-        }
-        Err(validation_error(
-            StatusCode::BAD_REQUEST,
-            "Choose a file to upload.",
-            Some("file"),
-        ))
-    }
-
     pub(crate) async fn download_file(
         State(state): State<Arc<WebState>>,
         Path(name): Path<String>,
