@@ -585,6 +585,10 @@ fn atomic_write_file_no_follow_unix(path: &Path, content: &[u8], private: bool) 
             )));
         }
 
+        // Caller-visible commit point: after renameat succeeds, the previous
+        // bytes are no longer recoverable through this API. Any later
+        // directory-sync failure can reduce crash durability, but must not be
+        // reported as an operation failure after the replacement committed.
         let renamed = unsafe {
             libc::renameat(
                 parent.directory.as_raw_fd(),
@@ -601,12 +605,16 @@ fn atomic_write_file_no_follow_unix(path: &Path, content: &[u8], private: bool) 
             )));
         }
         temp_exists = false;
-        parent.directory.sync_all().map_err(|error| {
-            CrosstacheError::config(format!(
-                "Failed to sync atomic destination directory for '{}': {error}",
-                parent.absolute.display()
-            ))
-        })
+
+        #[cfg(test)]
+        let directory_sync = tests::run_atomic_post_rename_sync_hook(path)
+            .and_then(|()| parent.directory.sync_all());
+        #[cfg(not(test))]
+        let directory_sync = parent.directory.sync_all();
+        // Best effort only: renameat is the commit point above. Do not leak
+        // destination details or claim failure after committed bytes changed.
+        let _ = directory_sync;
+        Ok(())
     })();
 
     match operation {
@@ -1046,6 +1054,8 @@ fn atomic_write_file_no_follow_windows(path: &Path, content: &[u8], private: boo
             }
         }
 
+        // Caller-visible Windows commit point. No fallible operation is
+        // performed after the handle-relative rename succeeds.
         windows_rename_into_parent(&temporary, &parent.directory, &parent.destination).map_err(
             |error| {
                 CrosstacheError::config(format!(
@@ -1361,6 +1371,44 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn atomic_post_rename_sync_failures(
+    ) -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+        static FAILURES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+            std::sync::OnceLock::new();
+        FAILURES.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+    }
+
+    #[cfg(unix)]
+    fn install_atomic_post_rename_sync_failure(path: &Path) {
+        atomic_post_rename_sync_failures()
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf());
+    }
+
+    #[cfg(unix)]
+    pub(super) fn run_atomic_post_rename_sync_hook(path: &Path) -> std::io::Result<()> {
+        if atomic_post_rename_sync_failures()
+            .lock()
+            .unwrap()
+            .remove(path)
+        {
+            return Err(std::io::Error::other(
+                "injected post-rename directory sync failure",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn atomic_post_rename_sync_failure_pending(path: &Path) -> bool {
+        atomic_post_rename_sync_failures()
+            .lock()
+            .unwrap()
+            .contains(path)
+    }
+
+    #[cfg(unix)]
     pub(super) fn run_atomic_parent_swap_hook(path: &Path) -> Result<()> {
         let Some(parked_parent) = atomic_parent_swap_hooks().lock().unwrap().remove(path) else {
             return Ok(());
@@ -1573,6 +1621,22 @@ mod tests {
         );
         assert!(std::fs::read_dir(&parent).unwrap().next().is_none());
         assert_eq!(std::fs::read_dir(&parked).unwrap().count(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn atomic_write_reports_success_after_post_commit_directory_sync_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        std::fs::write(&path, b"old").unwrap();
+        install_atomic_post_rename_sync_failure(&path);
+
+        let result = atomic_write_file_no_follow(&path, b"new", true);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!atomic_post_rename_sync_failure_pending(&path));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[test]
