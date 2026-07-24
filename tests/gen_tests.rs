@@ -23,6 +23,7 @@ mod gen_integration_tests {
             )
             .env("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000")
             .env("XV_NO_PARENT_CONFIG", "1")
+            .env_remove("RUST_LOG")
             .output()
             .expect("failed to execute xv binary");
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
