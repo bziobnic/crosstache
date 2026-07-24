@@ -151,6 +151,9 @@ test('command registry exposes required shortcuts and explicit result surface an
       ['dismiss-topmost', 'escape'],
     ],
   );
+  assert.equal(registry.search('', {
+    context: { workspace: { alias: '', entries: [] }, backend: '', vault: '' },
+  }).some(({ id }) => id === 'open-palette'), false);
 
   registry.replaceMetadata({
     secrets: [{ name: 'database-login', folder: 'prod', groups: ['ops'] }],

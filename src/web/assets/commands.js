@@ -148,6 +148,7 @@ export function createCommandRegistry() {
     };
     const results = [];
     for (const command of DEFAULT_COMMANDS) {
+      if (command.id === 'open-palette') continue;
       if (normalizedQuery && !paletteMatch([command.label, command.id], normalizedQuery)) continue;
       results.push(result({
         ...command,
@@ -289,6 +290,14 @@ export function mountCommandPalette({
     return store.snapshot().context;
   }
 
+  function activationStillCurrent(result) {
+    const snapshot = store.snapshot();
+    return !snapshot.contextSwitchPending
+      && !snapshot.savePending
+      && !snapshot.scopedMutationPending
+      && registry.isCurrent(result, snapshot.context);
+  }
+
   async function showSurface(surface) {
     if (!['secrets', 'files', 'trash'].includes(surface)) return true;
     const tab = byId(`tab-${surface}`);
@@ -297,18 +306,27 @@ export function mountCommandPalette({
     return tab.getAttribute('aria-selected') === 'true';
   }
 
-  function clearSurfaceDiscovery(surface) {
+  function clearSurfaceDiscovery(surface, result) {
+    if (!activationStillCurrent(result)) return false;
     const singular = surface === 'files' ? 'file' : 'secret';
     const search = byId(surface === 'files' ? 'file-search' : 'search');
     if (search?.value) {
+      if (!activationStillCurrent(result)) return false;
       search.value = '';
       search.dispatchEvent(new Event('input', { bubbles: true }));
     }
     const clearFilters = byId(`${singular}-filters-clear`);
-    if (clearFilters && !clearFilters.hidden) clearFilters.click();
+    if (clearFilters && !clearFilters.hidden) {
+      if (!activationStillCurrent(result)) return false;
+      clearFilters.click();
+    }
     const allItems = [...document.querySelectorAll?.(`#${surface}-folder-tree .folder-tree-item`) || []]
       .find((item) => item.querySelector('.folder-tree-label')?.textContent === 'All items');
-    allItems?.click();
+    if (allItems) {
+      if (!activationStillCurrent(result)) return false;
+      allItems.click();
+    }
+    return true;
   }
 
   function focusLocalSearch() {
@@ -320,11 +338,11 @@ export function mountCommandPalette({
   async function activate(result) {
     const before = store.snapshot();
     if (before.contextSwitchPending || before.savePending || before.scopedMutationPending) return false;
-    if (!registry.isCurrent(result, before.context)) return false;
+    if (!activationStillCurrent(result)) return false;
     if (result.contextChanging) {
       close();
       if (!(await guardNavigation(result))) return false;
-      if (!registry.isCurrent(result, currentContext())) return false;
+      if (!activationStillCurrent(result)) return false;
       return Boolean(await activateContext?.(result.target, { skipGuard: true }));
     }
     if (result.kind !== 'workspace' && result.kind !== 'command' && !sameScope(result, before.context)) {
@@ -339,7 +357,7 @@ export function mountCommandPalette({
       }
       if (result.id === 'new-secret') {
         if (!(await showSurface('secrets'))) return false;
-        if (!registry.isCurrent(result, currentContext())) return false;
+        if (!activationStillCurrent(result)) return false;
         byId('new-secret')?.click();
         return true;
       }
@@ -347,30 +365,35 @@ export function mountCommandPalette({
     }
     if (result.kind === 'workspace') return true;
     if (!(await showSurface(result.surface))) return false;
-    if (!registry.isCurrent(result, currentContext())) return false;
-    clearSurfaceDiscovery(result.surface);
+    if (!activationStillCurrent(result)) return false;
+    if (!clearSurfaceDiscovery(result.surface, result)) return false;
     if (result.kind === 'folder') {
+      if (!activationStillCurrent(result)) return false;
       byId(`${result.surface}-folders-expand-all`)?.click();
       const folder = [...document.querySelectorAll?.(`#${result.surface}-folder-tree .folder-tree-item`) || []]
         .find((item) => item.querySelector('.folder-tree-label')?.textContent === result.name);
+      if (!activationStillCurrent(result)) return false;
       folder?.click();
       folder?.focus();
       return Boolean(folder);
     }
     const search = byId(result.surface === 'files' ? 'file-search' : 'search');
     if (search) {
+      if (!activationStillCurrent(result)) return false;
       search.value = result.name;
       search.dispatchEvent(new Event('input', { bubbles: true }));
     }
     if (result.kind === 'secret') {
       const action = [...document.querySelectorAll?.('#secrets-table .row-action') || []]
         .find((button) => button.textContent.trim() === result.name);
+      if (!activationStillCurrent(result)) return false;
       action?.click();
       return Boolean(action);
     }
     if (result.kind === 'file') {
       const link = [...document.querySelectorAll?.('#files-table .file-link') || []]
         .find((candidate) => candidate.textContent.trim() === result.name);
+      if (!activationStillCurrent(result)) return false;
       link?.focus();
       return Boolean(link);
     }
