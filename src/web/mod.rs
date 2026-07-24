@@ -846,17 +846,16 @@ mod tests {
     fn ui_secret_drawer_lists_attachments_as_links() {
         assert!(INDEX_HTML.contains("id=\"attachments-section\""));
         assert!(INDEX_HTML.contains("id=\"attachments-list\""));
-        assert!(APP_JS.contains("/attachments${vaultQS(currentVault)}"));
+        assert!(APP_JS.contains("/attachments${vaultQS(scope.vault, scope)}"));
         assert!(APP_JS.contains("downloadFile(f.name, base)"));
         assert!(STYLE_CSS.contains(".attachment-link"));
     }
 
     #[test]
-    fn ui_marks_group_children_for_indentation() {
-        assert!(APP_JS.contains("renderRow(it, true)"));
-        assert!(APP_JS.contains("tr.classList.add('folder-child')"));
+    fn ui_replaces_flat_group_indentation_with_folder_navigation() {
+        assert!(!APP_JS.contains("tr.classList.add('folder-child')"));
         assert!(APP_JS.contains("td.classList.add('item-name')"));
-        assert!(STYLE_CSS.contains(".folder-child .item-name"));
+        assert!(INDEX_HTML.contains("class=\"folder-tree\" role=\"tree\""));
     }
 
     #[test]

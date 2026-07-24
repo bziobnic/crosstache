@@ -589,6 +589,7 @@ pub(crate) async fn upload(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -973,8 +974,14 @@ mod tests {
         let multibyte = format!("{}.txt", "é".repeat(125));
         {
             let mut files = backend.files.lock().unwrap();
-            files.insert(ascii.clone(), (b"old".to_vec(), "text/plain".into()));
-            files.insert(multibyte.clone(), (b"old".to_vec(), "text/plain".into()));
+            files.insert(
+                ascii.clone(),
+                (b"old".to_vec(), "text/plain".into(), HashMap::new()),
+            );
+            files.insert(
+                multibyte.clone(),
+                (b"old".to_vec(), "text/plain".into(), HashMap::new()),
+            );
         }
         let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
         let body = json!({"files":[
@@ -1029,11 +1036,10 @@ mod tests {
         let backend = Arc::new(testutil::stub::StubBackend::new().with_file_name_limit(255));
         let directory = "d".repeat(253);
         let existing = format!("{directory}/x");
-        backend
-            .files
-            .lock()
-            .unwrap()
-            .insert(existing.clone(), (b"old".to_vec(), "text/plain".into()));
+        backend.files.lock().unwrap().insert(
+            existing.clone(),
+            (b"old".to_vec(), "text/plain".into(), HashMap::new()),
+        );
         let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
         let candidate = json!({"files":[{
             "client_id":"long-dir", "name":"x", "size":3,
@@ -1151,7 +1157,7 @@ mod tests {
         ));
         backend.files.lock().unwrap().insert(
             "existing.txt".into(),
-            (b"existing".to_vec(), "text/plain".into()),
+            (b"existing".to_vec(), "text/plain".into(), HashMap::new()),
         );
         let state = state_with_backends(backend.clone(), backend.clone());
         let app = web::build_router(state);
@@ -1438,7 +1444,7 @@ mod tests {
         let backend = Arc::new(testutil::stub::StubBackend::new());
         backend.files.lock().unwrap().insert(
             "report.pdf".into(),
-            (b"old".to_vec(), "application/pdf".into()),
+            (b"old".to_vec(), "application/pdf".into(), HashMap::new()),
         );
         let app = web::build_router(state_with_backends(backend.clone(), backend.clone()));
         let files: Vec<Value> = (0..100)
@@ -1478,11 +1484,14 @@ mod tests {
             let mut stored = backend.files.lock().unwrap();
             for file_index in 0..30 {
                 let name = format!("report-{file_index}.pdf");
-                stored.insert(name.clone(), (b"old".to_vec(), "application/pdf".into()));
+                stored.insert(
+                    name.clone(),
+                    (b"old".to_vec(), "application/pdf".into(), HashMap::new()),
+                );
                 for suffix in 2..101 {
                     stored.insert(
                         format!("report-{file_index} ({suffix}).pdf"),
-                        (b"old".to_vec(), "application/pdf".into()),
+                        (b"old".to_vec(), "application/pdf".into(), HashMap::new()),
                     );
                 }
                 candidates.push(json!({

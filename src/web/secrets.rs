@@ -864,6 +864,7 @@ mod tests {
             (
                 b"encrypted-attachment".to_vec(),
                 "application/octet-stream".into(),
+                std::collections::HashMap::new(),
             ),
         );
         let app = crate::web::build_router(state_with_types(

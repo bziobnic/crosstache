@@ -433,10 +433,11 @@ pub(crate) mod files {
         Path(name): Path<String>,
         Query(q): Query<VaultQuery>,
     ) -> Result<Json<Vec<crate::blob::models::FileInfo>>, ApiError> {
+        let target = q.target(&state)?;
         Ok(Json(
             crate::secret::attachments::list_attachments(
-                files_backend(&state)?,
-                q.vault(&state),
+                files_backend(target.backend.as_ref())?,
+                &target.context.vault,
                 &name,
             )
             .await?,

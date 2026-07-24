@@ -2497,6 +2497,8 @@ function isCurrentDrawer(generation, selection) {
 function clearDrawerState() {
   clearConversionPreview();
   clearConversionFields();
+  $('#attachments-section').hidden = true;
+  $('#attachments-list').replaceChildren();
   editing = null;
   drawerScope = null;
   editingMeta = null;
@@ -2993,6 +2995,8 @@ async function openDrawerNow(name, invoker, scope) {
       $('#current-secret-type').textContent = `Current type: ${isRecordMeta(meta) ? (tags[TYPE_TAG] || 'Typed') : 'Plain'}`;
       if (isRecordMeta(meta)) await openRecord(name, meta, tags, generation, scope);
       if (generation !== drawerGeneration || !canStartScopedAction(scope)) return;
+      await loadAttachments(name, generation, scope);
+      if (generation !== drawerGeneration || !canStartScopedAction(scope)) return;
     } catch (e) {
       if (generation !== drawerGeneration) return;
       // Without the fetched metadata a save would send enabled:true and no
@@ -3015,6 +3019,46 @@ async function openDrawerNow(name, invoker, scope) {
     $('#drawer').hidden = false;
     f.elements.name.focus?.();
   }
+}
+
+// Attachment listing is non-fatal: the secret remains editable when the
+// backend cannot enumerate its associated files.
+async function loadAttachments(name, generation, scope) {
+  if (!ctx.capabilities.files) return;
+  let attachments;
+  try {
+    attachments = await api(
+      'GET',
+      `/api/secrets/${encodeURIComponent(name)}/attachments${vaultQS(scope.vault, scope)}`,
+    );
+  } catch (error) {
+    if (generation !== drawerGeneration || !canStartScopedAction(scope)) return;
+    showError('#secret-form-error', new Error(`Could not load attachments: ${error.message}`));
+    return;
+  }
+  if (generation !== drawerGeneration || !canStartScopedAction(scope) || !attachments.length) return;
+  const list = $('#attachments-list');
+  list.replaceChildren();
+  for (const f of attachments) {
+    const base = f.name.slice(f.name.lastIndexOf('/') + 1);
+    const item = document.createElement('li');
+    const link = document.createElement('a');
+    link.className = 'attachment-link';
+    link.href = `/api/files/${encodeURIComponent(f.name)}${vaultQS(scope.vault, scope)}`;
+    link.download = base;
+    link.appendChild(icon('file'));
+    const label = document.createElement('span');
+    label.textContent = base;
+    link.appendChild(label);
+    link.onclick = (event) => { event.preventDefault(); downloadFile(f.name, base); };
+    item.appendChild(link);
+    const size = document.createElement('span');
+    size.className = 'attachment-size';
+    size.textContent = fmtSize(f.size);
+    item.appendChild(size);
+    list.appendChild(item);
+  }
+  $('#attachments-section').hidden = false;
 }
 
 // Fetches the envelope so secret fields are editable. Values live in JS
@@ -3812,7 +3856,7 @@ $('#bulk-delete-secrets').onclick = () => bulkDelete('secrets').catch(fail);
 $('#bulk-delete-files').onclick = () => bulkDelete('files').catch(fail);
 $('#bulk-move-secrets').onclick = () => bulkMoveSecrets().catch(fail);
 
-async function downloadFile(name) {
+async function downloadFile(name, saveAs = name) {
   const scope = captureOperationScope();
   if (!canStartScopedAction(scope)) return;
   try {
@@ -3820,7 +3864,7 @@ async function downloadFile(name) {
     const blob = await res.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = name;
+    a.download = saveAs;
     a.click();
     URL.revokeObjectURL(a.href);
   } catch (e) { fail(e); }

@@ -799,10 +799,11 @@ pub(crate) mod stub {
                     .content_type
                     .as_deref()
                     .unwrap_or("application/octet-stream"),
+                request.metadata.clone(),
             );
             files.insert(
                 request.name.clone(),
-                (request.content, info.content_type.clone()),
+                (request.content, info.content_type.clone(), request.metadata),
             );
             Ok(info)
         }
