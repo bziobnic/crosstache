@@ -325,3 +325,108 @@ test('Settings failures remain global after close and explicit Retry recovers sa
   await expect(page.getByRole('button', { name: 'Edit secret settings-retry-vault-usable' })).toBeVisible();
   await expectNoSeriousOrCriticalAxeViolations(page);
 });
+
+test('committed capability loss clears Files and atomically focuses an available tab', async ({ page, baseURL }) => {
+  let fileReads = 0;
+  await page.route('**/api/files?*', async (route) => {
+    fileReads++;
+    if (fileReads === 1) {
+      await route.fulfill({
+        json: [{
+          name: 'old-context-file.txt',
+          size: 12,
+          content_type: 'text/plain',
+          last_modified: '2026-07-24T00:00:00Z',
+        }],
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'old-files-stale', message: 'old file refresh failed' } }),
+    });
+  });
+  await page.route('**/api/workspaces/activate', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.context.capabilities.files = false;
+    body.secrets = [{ name: 'new-context-secret' }];
+    await route.fulfill({ response, json: body });
+  });
+  await page.goto(baseURL);
+  await page.getByRole('tab', { name: 'Files' }).click();
+  await expect(page.getByRole('link', { name: 'old-context-file.txt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Select', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select file old-context-file.txt' }).check();
+  await page.locator('#refresh-files').click();
+  await expect(page.locator('#file-refresh-error')).toBeVisible();
+
+  await page.locator('#workspace-select').selectOption('sandbox');
+
+  const secretsTab = page.getByRole('tab', { name: 'Secrets' });
+  const filesTab = page.locator('#tab-files');
+  await expect(page.locator('#context-line')).toContainText('local / sandbox');
+  await expect(secretsTab).toBeFocused();
+  await expect(secretsTab).toHaveAttribute('aria-selected', 'true');
+  await expect(secretsTab).toHaveAttribute('tabindex', '0');
+  await expect(filesTab).toBeHidden();
+  await expect(filesTab).toHaveAttribute('aria-selected', 'false');
+  await expect(filesTab).toHaveAttribute('tabindex', '-1');
+  await expect(page.getByRole('tabpanel', { name: 'Secrets' })).toBeVisible();
+  await expect(page.locator('#files-view')).toBeHidden();
+  await expect(page.locator('#files-table tbody tr')).toHaveCount(0);
+  await expect(page.locator('#files-stacked .stacked-row')).toHaveCount(0);
+  await expect(page.locator('#file-bulk-bar')).toBeHidden();
+  await expect(page.locator('#file-refresh-error')).toBeHidden();
+  await expect(page.getByText('old-context-file.txt')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Edit secret new-context-secret' })).toBeVisible();
+  await expect(page.locator('#vault-tabs [role="tab"][aria-selected="true"]')).toHaveCount(1);
+  await expect(page.locator('#vault-tabs [role="tab"][tabindex="0"]')).toHaveCount(1);
+});
+
+test('committed capability loss clears Trash while a failed transition preserves it', async ({ page, baseURL }) => {
+  await page.route('**/api/secrets/deleted?*', async (route) => route.fulfill({
+    json: [{
+      name: 'old-deleted-secret',
+      original_name: 'old-deleted-secret',
+      deleted_on: '2026-07-24T00:00:00Z',
+    }],
+  }));
+  await page.goto(baseURL);
+  await page.getByRole('tab', { name: 'Trash' }).click();
+  await expect(page.getByText('old-deleted-secret')).toBeVisible();
+
+  await page.route('**/api/workspaces/activate', async (route) => route.fulfill({
+    status: 500,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: { code: 'switch-failed', message: 'switch failed' } }),
+  }));
+  await page.locator('#workspace-select').selectOption('sandbox');
+  await expect(page.locator('#context-error')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Trash' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByText('old-deleted-secret')).toBeVisible();
+
+  await page.unroute('**/api/workspaces/activate');
+  await page.route('**/api/workspaces/activate', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.context.capabilities.soft_delete = false;
+    body.context.capabilities.restore = false;
+    body.context.capabilities.purge = false;
+    await route.fulfill({ response, json: body });
+  });
+  await page.locator('#workspace-select').selectOption('sandbox');
+
+  await expect(page.locator('#context-line')).toContainText('local / sandbox');
+  await expect(page.getByRole('tab', { name: 'Secrets' })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Secrets' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#tab-trash')).toBeHidden();
+  await expect(page.locator('#tab-trash')).toHaveAttribute('aria-selected', 'false');
+  await expect(page.locator('#tab-trash')).toHaveAttribute('tabindex', '-1');
+  await expect(page.locator('#trash-view')).toBeHidden();
+  await expect(page.locator('#trash-table tbody tr')).toHaveCount(0);
+  await expect(page.getByText('old-deleted-secret')).toHaveCount(0);
+  await expect(page.locator('#vault-tabs [role="tab"][aria-selected="true"]')).toHaveCount(1);
+  await expect(page.locator('#vault-tabs [role="tab"][tabindex="0"]')).toHaveCount(1);
+});

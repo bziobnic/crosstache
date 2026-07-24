@@ -99,6 +99,7 @@ export function mountSecrets({
   preferences = null,
   contextRail = null,
   commandRegistry = null,
+  tabs = null,
   token,
   exposureClock = globalThis,
   clipboard = globalThis.navigator?.clipboard,
@@ -1880,10 +1881,53 @@ function showAuthRecovery() {
   $('#auth-recovery').hidden = false;
 }
 
+function clearUnavailableFilesState() {
+  fileLoadController?.abort();
+  fileLoadController = null;
+  fileLoadGeneration++;
+  files = [];
+  filesState = 'ready';
+  hasSuccessfulFilesSnapshot = false;
+  fileSearchIndex = buildMetadataIndex();
+  folderTokenIndexes.files = null;
+  clearSelection('files');
+  clearError('#file-error');
+  clearError('#file-refresh-error');
+  $('#files-table tbody').replaceChildren();
+  $('#files-stacked').replaceChildren();
+  $('#files-folder-tree').replaceChildren();
+  $('#files-mobile-folder-tree').replaceChildren();
+  $('#file-item-count').textContent = 'Files unavailable';
+  $('#file-list-summary').textContent = 'File storage is unavailable in this context.';
+  uploadManager?.updateDestinations();
+}
+
+function clearUnavailableTrashState() {
+  trashLoadGeneration++;
+  deletedSecrets = [];
+  trashState = 'ready';
+  pendingUndo = null;
+  $('#action-notice').hidden = true;
+  clearError('#trash-error');
+  $('#trash-table tbody').replaceChildren();
+  $('#trash-item-count').textContent = 'Trash unavailable';
+  $('#trash-list-summary').textContent = 'Trash is unavailable in this context.';
+}
+
 function applyContextCapabilities() {
   $('#backend-badge').textContent = ctx.backend;
-  $('#tab-files').hidden = !ctx.capabilities.files;
-  $('#tab-trash').hidden = !ctx.capabilities.soft_delete;
+  const filesAvailable = !!ctx.capabilities.files;
+  const trashAvailable = !!ctx.capabilities.soft_delete;
+  if (!filesAvailable) clearUnavailableFilesState();
+  if (!trashAvailable) clearUnavailableTrashState();
+  if (!filesAvailable || !trashAvailable) {
+    invalidateExposureLifecycle({ announceHidden: false, clearStatus: true });
+    forgetProtectedValues();
+  }
+  $('#tab-files').hidden = !filesAvailable;
+  $('#tab-trash').hidden = !trashAvailable;
+  const selectedTab = tabs?.sync?.();
+  if (selectedTab?.id?.startsWith('tab-')) activeTab = selectedTab.id.slice(4);
 }
 
 async function init() {
@@ -3370,6 +3414,11 @@ async function loadFiles(vault, scope = captureOperationScope(), errorOwner = nu
 $('#refresh-files').onclick = () => loadFiles(currentVault, captureOperationScope());
 
 function renderFiles() {
+  if (!ctx?.capabilities.files) {
+    $('#files-table tbody').replaceChildren();
+    $('#files-stacked').replaceChildren();
+    return;
+  }
   if (filesState !== 'ready') return;
   publishCommandMetadata();
   const tbody = $('#files-table tbody');

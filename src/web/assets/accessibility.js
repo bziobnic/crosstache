@@ -84,22 +84,46 @@ export function mountTabs(tablist) {
   tablist.setAttribute('role', 'tablist');
   const selector = '[role="tab"]';
   const document = tablist.ownerDocument;
+  let syncing = false;
+  let activatingFallback = false;
+  let current = null;
 
   function activate(tab) {
     return tab.click?.();
   }
 
   function sync() {
+    if (syncing) return current;
+    syncing = true;
+    const allTabs = [...(tablist.querySelectorAll?.(selector) || [])];
     const tabs = availableItems(tablist, selector);
-    const selected = tabs.find((tab) => tab.getAttribute('aria-selected') === 'true') || tabs[0];
-    for (const tab of tabs) {
+    const previous = allTabs.find((tab) => tab.getAttribute('aria-selected') === 'true') || null;
+    const selected = tabs.find((tab) => tab === previous)
+      || tabs.find((tab) => tab.tabIndex === 0)
+      || tabs[0]
+      || null;
+    current = selected;
+    for (const tab of allTabs) {
       const active = tab === selected;
       tab.tabIndex = active ? 0 : -1;
+      tab.setAttribute('aria-selected', String(active));
       const panel = document?.getElementById?.(tab.getAttribute('aria-controls'));
       if (panel) {
         panel.setAttribute('role', 'tabpanel');
         if (!panel.getAttribute('aria-labelledby')) panel.setAttribute('aria-labelledby', tab.id);
+        panel.hidden = !active;
       }
+    }
+    const replacedUnavailableSelection = Boolean(selected && previous !== selected);
+    if (replacedUnavailableSelection) selected.focus?.();
+    syncing = false;
+    if (replacedUnavailableSelection && !activatingFallback) {
+      activatingFallback = true;
+      activate(selected);
+      queueMicrotask(() => {
+        activatingFallback = false;
+        sync();
+      });
     }
     return selected;
   }

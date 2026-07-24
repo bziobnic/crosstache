@@ -920,11 +920,62 @@ mod tests {
 
     #[test]
     fn ui_selection_changes_reset_bulk_confirmation() {
-        assert!(APP_JS.contains("function resetBulkConfirmation(kind)"));
-        assert!(
-            APP_JS.matches("resetBulkConfirmation(kind);").count() >= 4,
-            "every selection mutation path must disarm bulk delete"
+        let between = |start, end| {
+            APP_JS
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing selection path {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing selection boundary {end}"))
+                .0
+        };
+        let reset = between(
+            "function resetBulkConfirmation(kind) {",
+            "function renderSelectionKind(kind) {",
         );
+        assert!(reset.contains("if (!state.pending)"));
+        assert!(reset.contains("resetConfirmation(selectionElements(kind).deleteButton, 'Delete')"));
+
+        let mode = between(
+            "function setSelectionMode(kind, enabled) {",
+            "function clearSelection(kind) {",
+        );
+        assert!(mode.contains("state.ids.clear();"));
+        assert!(mode.contains("resetConfirmation(elements.deleteButton, 'Delete');"));
+
+        let reconcile = between(
+            "function syncSelectionUi(kind, visibleIds) {",
+            "function updateSelectionControls(kind) {",
+        );
+        assert!(reconcile.contains("state.ids.delete(id);"));
+        assert!(reconcile.contains("if (selectionChanged) resetBulkConfirmation(kind);"));
+
+        let row_checkbox = between("function selectionCell(kind, id) {", "// ---- state ----");
+        assert!(row_checkbox.contains("if (checkbox.checked) state.ids.add(id);"));
+        assert!(row_checkbox.contains("else state.ids.delete(id);"));
+        assert!(row_checkbox.contains("resetBulkConfirmation(kind);"));
+
+        let visible = between(
+            "function setVisibleSelection(kind, checked) {",
+            "async function runBounded(items, limit, operation) {",
+        );
+        assert!(visible.contains("if (checked) state.ids.add(id);"));
+        assert!(visible.contains("else state.ids.delete(id);"));
+        assert!(visible.contains("resetBulkConfirmation(kind);"));
+
+        let bulk_delete = between(
+            "async function bulkDelete(kind) {",
+            "async function bulkMoveSecrets() {",
+        );
+        assert!(bulk_delete.contains("if (result.ok) state.ids.delete(result.item);"));
+        assert!(bulk_delete.contains("setBulkPending(kind, false, '');"));
+
+        let bulk_move = between(
+            "async function bulkMoveSecrets() {",
+            "$('#select-secrets').onclick",
+        );
+        assert!(bulk_move.contains("if (result.ok) state.ids.delete(result.item);"));
+        assert!(bulk_move.contains("resetConfirmation(moveButton, 'Move');"));
     }
 
     #[test]
@@ -947,7 +998,15 @@ mod tests {
         assert!(APP_JS.contains("filesState = 'loading';"));
         assert!(APP_JS.contains("filesState = hasSuccessfulFilesSnapshot ? 'ready' : 'failed';"));
         assert!(APP_JS.contains("if (!hasSuccessfulFilesSnapshot) {"));
-        assert!(APP_JS.contains("function renderFiles() {\n  if (filesState !== 'ready') return;"));
+        let render = APP_JS
+            .split_once("function renderFiles() {")
+            .expect("file renderer")
+            .1
+            .split_once("$('#file-search').oninput")
+            .expect("file renderer boundary")
+            .0;
+        assert!(render.contains("if (!ctx?.capabilities.files) {"));
+        assert!(render.contains("if (filesState !== 'ready') return;"));
     }
 
     #[test]

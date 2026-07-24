@@ -41,6 +41,7 @@ const dialogs = createDialogManager(document);
 const preferences = createPreferenceClient(api);
 const themeSelect = document.getElementById('theme-select');
 const commandRegistry = createCommandRegistry();
+const tabs = mountTabs(document.getElementById('vault-tabs'));
 
 const confirmNavigation = () => guardNavigation({
   draft: store.snapshot().draft,
@@ -124,8 +125,8 @@ mountSecrets({
   token,
   contextRail,
   commandRegistry,
+  tabs,
 });
-mountTabs(document.getElementById('vault-tabs'));
 mountCommandPalette({
   registry: commandRegistry,
   store,

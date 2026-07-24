@@ -103,6 +103,42 @@ test('mountTabs activates focused tabs with arrows and Home/End', () => {
   mounted.destroy();
 });
 
+test('mountTabs sync replaces a dynamically unavailable selected tab exactly once', async () => {
+  const { document, tablist, tabs } = tabFixture();
+  const mounted = mountTabs(tablist);
+  tabs[0].setAttribute('aria-selected', 'false');
+  tabs[0].tabIndex = -1;
+  tabs[1].setAttribute('aria-selected', 'true');
+  tabs[1].tabIndex = 0;
+  document.getElementById('secrets-view').hidden = true;
+  document.getElementById('files-view').hidden = false;
+  tabs[1].hidden = true;
+
+  const selected = mounted.sync();
+
+  assert.equal(selected, tabs[0]);
+  assert.deepEqual(tabs.map((tab) => tab.getAttribute('aria-selected')), ['true', 'false', 'false']);
+  assert.deepEqual(tabs.map((tab) => tab.tabIndex), [0, -1, -1]);
+  assert.equal(document.getElementById('secrets-view').hidden, false);
+  assert.equal(document.getElementById('files-view').hidden, true);
+  assert.equal(document.activeElement, tabs[0]);
+  assert.equal(tabs[0].clicked, 1);
+
+  mounted.sync();
+  assert.equal(tabs[0].clicked, 1);
+
+  await Promise.resolve();
+  tabs[0].setAttribute('aria-disabled', 'true');
+  tabs[1].hidden = false;
+  tabs[1].disabled = true;
+  mounted.sync();
+  assert.deepEqual(tabs.map((tab) => tab.getAttribute('aria-selected')), ['false', 'false', 'true']);
+  assert.deepEqual(tabs.map((tab) => tab.tabIndex), [-1, -1, 0]);
+  assert.equal(document.activeElement, tabs[2]);
+  assert.equal(tabs[2].clicked, 1);
+  mounted.destroy();
+});
+
 test('syncVisibleSelection reports visible-only checked and mixed state', () => {
   const selectedIds = new Set(['visible-a', 'filtered-out']);
   assert.deepEqual(

@@ -23,6 +23,14 @@ responsive focus handoff.
   built-in command stale between palette render and activation. A new unit
   test failed on that exact generation race before the registry rule was
   corrected.
+- Remediation tests first showed that a committed capability loss could leave
+  a hidden Files or Trash tab selected, keep its panel and prior-context rows
+  in the DOM, and leave focus without a visible tab owner.
+- A dynamic unit case then showed that hidden, disabled, and `aria-disabled`
+  tabs were not all normalized after the selected tab became unavailable.
+- The exact Rust web gate initially failed after the brittle reset-call count
+  was replaced, exposing a second stale assertion for the guarded Files
+  renderer. Both assertions now verify the relevant implementation paths.
 
 ## Implementation
 
@@ -53,11 +61,22 @@ responsive focus handoff.
 - Updated embedded-asset assertions to the current stacked-renderer and
   selection contracts so the Rust web gate checks the shipped implementation
   rather than obsolete pre-responsive source strings.
+- Committed context capability changes now synchronously clear unavailable
+  Files or Trash rows, selections, errors, protected-value state, and stale
+  load ownership before the available fallback tab is exposed.
+- Pending and failed context transitions retain the current tab and rendered
+  snapshot; only a successful committed context applies capability changes.
+- Tab synchronization now normalizes every tab and panel dynamically,
+  activates and focuses an available fallback exactly once, and uses a
+  reentrancy guard for click-driven application callbacks.
+- The bulk-selection Rust assertion now checks the clear, reconciliation,
+  row-checkbox, visible-checkbox, delete, and move paths directly rather than
+  relying on a hard-coded source-text call count.
 
 ## Verification
 
-- `npm run test:unit` — 178 passed.
-- Full Playwright suite — 91 passed.
+- `npm run test:unit` — 179 passed.
+- Full Playwright suite — 93 passed.
 - Command/context race sequence — 14 passed.
 - Final focused tab/selection regression — 5 passed.
 - `cargo test --features ui --lib web::tests::` — 46 passed.
@@ -79,3 +98,4 @@ responsive focus handoff.
 - `src/web/mod.rs`
 - `tests/web/ui-accessibility.spec.js`
 - `tests/web/ui-navigation.spec.js`
+- `tests/web/ui-context.spec.js`
