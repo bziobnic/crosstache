@@ -40,6 +40,36 @@ validated_temp_root() {
   [[ "$resolved" == "$temp_root" ]]
 }
 
+remove_temp_root() {
+  [[ "${XV_PACKAGE_SMOKE_FORCE_CLEANUP_FAILURE:-0}" != 1 ]] || return 1
+  rm -rf -- "$temp_root"
+}
+
+cleanup_completed_root() {
+  if ! validated_temp_root; then
+    printf 'package smoke refused cleanup outside its mktemp root: %s\n' "$temp_root" >&2
+    return 1
+  fi
+  if ! remove_temp_root; then
+    printf 'package smoke cleanup failed; logs retained at: %s\n' "$temp_root" >&2
+    return 1
+  fi
+  if [[ -e "$temp_root" ]]; then
+    printf 'package smoke cleanup left its mktemp root in place: %s\n' "$temp_root" >&2
+    return 1
+  fi
+}
+
+if [[ "${XV_PACKAGE_SMOKE_TEST_CLEANUP_STATUS:-0}" == 1 ]]; then
+  cleanup_status=0
+  XV_PACKAGE_SMOKE_FORCE_CLEANUP_FAILURE=1 cleanup_completed_root || cleanup_status=$?
+  cleanup_retained=0
+  [[ -d "$temp_root" ]] && cleanup_retained=1
+  rm -rf -- "$temp_root"
+  [[ "$cleanup_status" -eq 1 && "$cleanup_retained" -eq 1 ]]
+  exit 0
+fi
+
 terminate_app() {
   local attempt exit_status watchdog_pid forced_termination
   if ! kill -0 "$app_pid" 2>/dev/null; then
@@ -99,13 +129,14 @@ finish() {
     fi
   fi
   if [[ "$status" -eq 0 && "$completed" -eq 1 ]]; then
-    validated_temp_root || {
-      printf 'package smoke refused cleanup outside its mktemp root: %s\n' "$temp_root" >&2
-      exit 1
-    }
-    rm -rf -- "$temp_root"
+    if cleanup_completed_root; then
+      printf 'package smoke passed\n'
+    else
+      status=1
+    fi
   fi
-  return "$status"
+  trap - EXIT
+  exit "$status"
 }
 trap finish EXIT
 
@@ -170,4 +201,3 @@ else
 fi
 [[ "$termination" -eq 0 ]] || fail "packaged executable did not terminate cleanly after SIGTERM"
 completed=1
-printf 'package smoke passed\n'

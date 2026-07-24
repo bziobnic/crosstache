@@ -39,6 +39,46 @@ struct PackageSmokeSetup {
     config_path: PathBuf,
 }
 
+fn path_is_strictly_absent(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+fn package_smoke_paths_strictly_absent(setup: &PackageSmokeSetup) -> bool {
+    let (store_path, key_file) = match &setup.request {
+        SetupRequest::Local {
+            store_path,
+            key_file,
+            ..
+        } => (store_path, key_file),
+        _ => return false,
+    };
+    let Some(config_namespace) = setup.config_path.parent() else {
+        return false;
+    };
+    let Some(key_parent) = key_file.parent() else {
+        return false;
+    };
+    let recipients_file = key_parent.join("recipients.txt");
+
+    let absent = [
+        config_namespace,
+        setup.config_path.as_path(),
+        store_path.as_path(),
+        key_file.as_path(),
+        recipients_file.as_path(),
+    ]
+    .into_iter()
+    .all(path_is_strictly_absent);
+    absent
+}
+
+fn package_smoke_request_after_marker(setup: PackageSmokeSetup) -> Option<SetupRequest> {
+    package_smoke_paths_strictly_absent(&setup).then_some(setup.request)
+}
+
 fn canonical_directory(path: &Path) -> Option<PathBuf> {
     let canonical = path.canonicalize().ok()?;
     canonical.is_dir().then_some(canonical)
@@ -79,14 +119,15 @@ fn package_smoke_setup(environment: PackageSmokeEnvironment) -> Option<PackageSm
         return None;
     }
 
-    Some(PackageSmokeSetup {
+    let setup = PackageSmokeSetup {
         request: SetupRequest::Local {
             store_path: root.join("store"),
             key_file: root.join("local-key.txt"),
             vault: "package-smoke".into(),
         },
         config_path,
-    })
+    };
+    package_smoke_paths_strictly_absent(&setup).then_some(setup)
 }
 
 fn package_smoke_setup_from_environment() -> Option<PackageSmokeSetup> {
@@ -848,11 +889,14 @@ async fn run_startup_attempt(
                 "The startup attempt was superseded.",
             ));
         }
-        if let Some(smoke) =
-            package_smoke_setup_from_environment().filter(|smoke| smoke.config_path == path)
+        if let Some(smoke) = package_smoke_setup_from_environment()
+            .filter(|smoke| smoke.config_path == path && package_smoke_paths_strictly_absent(smoke))
         {
             package_smoke_marker(StartupState::SetupRequired);
-            apply_setup_request(smoke.request, &window, store).await?;
+            let Some(request) = package_smoke_request_after_marker(smoke) else {
+                return Ok(required);
+            };
+            apply_setup_request(request, &window, store).await?;
             let snapshot = store.snapshot();
             if snapshot.state == StartupState::Ready {
                 package_smoke_marker(StartupState::Ready);
@@ -1040,6 +1084,252 @@ mod tests {
             std::fs::read_to_string(existing_config).unwrap(),
             "prior configuration"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_smoke_rejects_preexisting_or_linked_derived_paths_without_mutation() {
+        use std::os::unix::fs::symlink;
+
+        fn case(temp_parent: &Path, suffix: &str) -> (PathBuf, PackageSmokeEnvironment) {
+            let root = temp_parent.join(format!("xv-package-smoke.{suffix}"));
+            let environment = package_smoke_environment(&root, temp_parent);
+            (root, environment)
+        }
+
+        fn record_rejection(
+            environment: PackageSmokeEnvironment,
+            label: &'static str,
+            accepted: &mut Vec<&'static str>,
+        ) {
+            if package_smoke_setup(environment).is_some() {
+                accepted.push(label);
+            }
+        }
+
+        fn assert_external_directory_unchanged(path: &Path) {
+            assert_eq!(
+                std::fs::read(path.join("marker")).unwrap(),
+                b"external marker"
+            );
+            let entries: Vec<_> = std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(entries, [OsString::from("marker")]);
+        }
+
+        let parent = tempfile::tempdir().unwrap();
+        let temp_parent = parent.path().canonicalize().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let external_directory = external.path().join("directory");
+        std::fs::create_dir(&external_directory).unwrap();
+        std::fs::write(external_directory.join("marker"), b"external marker").unwrap();
+        let external_file = external.path().join("external-file");
+        std::fs::write(&external_file, b"external bytes").unwrap();
+        let mut accepted = Vec::new();
+
+        let (root, environment) = case(&temp_parent, "A10001");
+        std::fs::create_dir(root.join("store")).unwrap();
+        std::fs::write(root.join("store/marker"), b"store bytes").unwrap();
+        record_rejection(environment, "existing store directory", &mut accepted);
+        assert_eq!(
+            std::fs::read(root.join("store/marker")).unwrap(),
+            b"store bytes"
+        );
+        assert!(!root.join("local-key.txt").exists());
+
+        let (root, environment) = case(&temp_parent, "A10002");
+        std::fs::write(root.join("store"), b"store file").unwrap();
+        record_rejection(environment, "existing store file", &mut accepted);
+        assert_eq!(std::fs::read(root.join("store")).unwrap(), b"store file");
+        assert!(!root.join("local-key.txt").exists());
+
+        let (root, environment) = case(&temp_parent, "A10003");
+        std::fs::write(root.join("local-key.txt"), b"key bytes").unwrap();
+        record_rejection(environment, "existing key file", &mut accepted);
+        assert_eq!(
+            std::fs::read(root.join("local-key.txt")).unwrap(),
+            b"key bytes"
+        );
+        assert!(!root.join("store").exists());
+
+        let (root, environment) = case(&temp_parent, "A10004");
+        std::fs::write(root.join("recipients.txt"), b"recipient bytes").unwrap();
+        record_rejection(environment, "existing recipients file", &mut accepted);
+        assert_eq!(
+            std::fs::read(root.join("recipients.txt")).unwrap(),
+            b"recipient bytes"
+        );
+        assert!(!root.join("store").exists());
+        assert!(!root.join("local-key.txt").exists());
+
+        let (root, environment) = case(&temp_parent, "A10005");
+        std::fs::create_dir(root.join("config/xv")).unwrap();
+        record_rejection(
+            environment,
+            "existing config namespace directory",
+            &mut accepted,
+        );
+        assert!(root.join("config/xv").is_dir());
+        assert!(!root.join("store").exists());
+
+        let (root, environment) = case(&temp_parent, "A10006");
+        std::fs::write(root.join("config/xv"), b"namespace bytes").unwrap();
+        record_rejection(environment, "existing config namespace file", &mut accepted);
+        assert_eq!(
+            std::fs::read(root.join("config/xv")).unwrap(),
+            b"namespace bytes"
+        );
+        assert!(!root.join("store").exists());
+
+        let (root, environment) = case(&temp_parent, "A10007");
+        symlink(&external_directory, root.join("store")).unwrap();
+        record_rejection(environment, "external store symlink", &mut accepted);
+        assert!(std::fs::symlink_metadata(root.join("store"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_external_directory_unchanged(&external_directory);
+        assert!(!root.join("local-key.txt").exists());
+
+        let (root, environment) = case(&temp_parent, "A10008");
+        let internal_directory = root.join("internal-target");
+        std::fs::create_dir(&internal_directory).unwrap();
+        std::fs::write(internal_directory.join("marker"), b"internal bytes").unwrap();
+        symlink(&internal_directory, root.join("store")).unwrap();
+        record_rejection(environment, "internal store symlink", &mut accepted);
+        assert_eq!(
+            std::fs::read(internal_directory.join("marker")).unwrap(),
+            b"internal bytes"
+        );
+        assert!(!root.join("local-key.txt").exists());
+
+        let (root, environment) = case(&temp_parent, "A10009");
+        symlink(&external_file, root.join("local-key.txt")).unwrap();
+        record_rejection(environment, "external key symlink", &mut accepted);
+        assert_eq!(std::fs::read(&external_file).unwrap(), b"external bytes");
+        assert!(!root.join("store").exists());
+
+        let (root, environment) = case(&temp_parent, "A10010");
+        symlink(root.join("missing-store"), root.join("store")).unwrap();
+        record_rejection(environment, "dangling store symlink", &mut accepted);
+        assert!(std::fs::symlink_metadata(root.join("store"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!root.join("missing-store").exists());
+
+        let (root, environment) = case(&temp_parent, "A10011");
+        symlink(root.join("missing-key"), root.join("local-key.txt")).unwrap();
+        record_rejection(environment, "dangling key symlink", &mut accepted);
+        assert!(std::fs::symlink_metadata(root.join("local-key.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!root.join("missing-key").exists());
+
+        let (root, environment) = case(&temp_parent, "A10012");
+        symlink(&external_file, root.join("recipients.txt")).unwrap();
+        record_rejection(environment, "external recipients symlink", &mut accepted);
+        assert_eq!(std::fs::read(&external_file).unwrap(), b"external bytes");
+        assert!(!root.join("store").exists());
+        assert!(!root.join("local-key.txt").exists());
+
+        let (root, environment) = case(&temp_parent, "A10013");
+        symlink(root.join("missing-recipients"), root.join("recipients.txt")).unwrap();
+        record_rejection(environment, "dangling recipients symlink", &mut accepted);
+        assert!(std::fs::symlink_metadata(root.join("recipients.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!root.join("missing-recipients").exists());
+
+        let (root, environment) = case(&temp_parent, "A10014");
+        std::fs::create_dir(root.join("config/xv")).unwrap();
+        symlink(&external_file, root.join("config/xv/xv.conf")).unwrap();
+        record_rejection(environment, "external config file symlink", &mut accepted);
+        assert_eq!(std::fs::read(&external_file).unwrap(), b"external bytes");
+        assert!(!root.join("store").exists());
+
+        let (root, environment) = case(&temp_parent, "A10015");
+        std::fs::create_dir(root.join("config/xv")).unwrap();
+        symlink(root.join("missing-config"), root.join("config/xv/xv.conf")).unwrap();
+        record_rejection(environment, "dangling config file symlink", &mut accepted);
+        assert!(std::fs::symlink_metadata(root.join("config/xv/xv.conf"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!root.join("missing-config").exists());
+
+        let (root, environment) = case(&temp_parent, "A10016");
+        symlink(&external_directory, root.join("config/xv")).unwrap();
+        record_rejection(
+            environment,
+            "external config namespace symlink",
+            &mut accepted,
+        );
+        assert_external_directory_unchanged(&external_directory);
+        assert!(!root.join("store").exists());
+
+        let (root, environment) = case(&temp_parent, "A10017");
+        symlink(root.join("missing-namespace"), root.join("config/xv")).unwrap();
+        record_rejection(
+            environment,
+            "dangling config namespace symlink",
+            &mut accepted,
+        );
+        assert!(std::fs::symlink_metadata(root.join("config/xv"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!root.join("missing-namespace").exists());
+
+        let (root, environment) = case(&temp_parent, "A10018");
+        let internal_namespace = root.join("internal-namespace");
+        std::fs::create_dir(&internal_namespace).unwrap();
+        std::fs::write(internal_namespace.join("marker"), b"internal namespace").unwrap();
+        symlink(&internal_namespace, root.join("config/xv")).unwrap();
+        record_rejection(
+            environment,
+            "internal config namespace symlink",
+            &mut accepted,
+        );
+        assert_eq!(
+            std::fs::read(internal_namespace.join("marker")).unwrap(),
+            b"internal namespace"
+        );
+        assert!(!root.join("store").exists());
+
+        let (root, environment) = case(&temp_parent, "A10019");
+        let internal_key = root.join("internal-key");
+        std::fs::write(&internal_key, b"internal key bytes").unwrap();
+        symlink(&internal_key, root.join("local-key.txt")).unwrap();
+        record_rejection(environment, "internal key symlink", &mut accepted);
+        assert_eq!(std::fs::read(&internal_key).unwrap(), b"internal key bytes");
+        assert!(!root.join("store").exists());
+
+        assert!(accepted.is_empty(), "accepted unsafe paths: {accepted:?}");
+    }
+
+    #[test]
+    fn package_smoke_revalidation_rejects_a_derived_path_created_after_guarding() {
+        let parent = tempfile::tempdir().unwrap();
+        let temp_parent = parent.path().canonicalize().unwrap();
+        let root = temp_parent.join("xv-package-smoke.RACE01");
+        let environment = package_smoke_environment(&root, &temp_parent);
+        let setup = package_smoke_setup(environment).unwrap();
+
+        std::fs::write(root.join("recipients.txt"), b"raced bytes").unwrap();
+
+        assert!(package_smoke_request_after_marker(setup).is_none());
+        assert_eq!(
+            std::fs::read(root.join("recipients.txt")).unwrap(),
+            b"raced bytes"
+        );
+        assert!(!root.join("store").exists());
+        assert!(!root.join("local-key.txt").exists());
+        assert!(!root.join("config/xv").exists());
     }
 
     #[test]
