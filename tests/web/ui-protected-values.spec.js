@@ -99,12 +99,12 @@ test('reveal inactivity resets and hides on timeout, visibility, blur, close, an
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.stack || error.message));
   await installClipboard(page);
+  await page.clock.install();
   await page.goto(baseURL);
   await page.waitForTimeout(100);
   expect(pageErrors).toEqual([]);
   await createAndOpenSecret(page, 'reveal-lifecycle', 'short-lived-value');
   await expectPlainValueControlsOutsideLabel(page);
-  await page.clock.install();
 
   const value = page.locator('#secret-form textarea[name="value"]');
   const reveal = page.getByRole('button', { name: 'Reveal value', exact: true });
@@ -117,6 +117,7 @@ test('reveal inactivity resets and hides on timeout, visibility, blur, close, an
   await expectNoSeriousOrCriticalAxeViolations(page);
   await page.clock.runFor(29_000);
   await value.dispatchEvent('pointerdown');
+  await expect(status).toHaveText('Value revealed. Hides in 30 seconds.');
   await page.clock.runFor(29_000);
   await expect(value).toHaveValue('short-lived-value');
   await page.clock.runFor(1_000);
