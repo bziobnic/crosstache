@@ -18,6 +18,16 @@ Priority definitions:
 
 The recommendations below are in strict priority order.
 
+## Implementation evidence status
+
+The modernization implementation is traceable in the
+[14-item evidence matrix](APP-UX-IMPLEMENTATION-EVIDENCE.md). All fourteen
+items are implemented and the 29-task modernization backlog is complete. The
+matrix distinguishes historical task evidence from the fresh final Rust,
+JavaScript, Playwright, visual, and isolated package-smoke gates, and explicitly
+identifies invalid-cloud recovery as mounted/renderer coverage rather than
+claiming fresh packaged invalid-cloud launches.
+
 ## 1. P0 — Protect unsaved edits from every navigation path
 
 **Observed:** The secret drawer can contain changed fields, but `Cancel`, a

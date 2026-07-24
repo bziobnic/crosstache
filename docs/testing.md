@@ -120,6 +120,52 @@ node --test src/web/assets/*.test.js
 PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-accessibility.spec.js tests/web/ui-trash.spec.js tests/web/ui-protected-values.spec.js
 ```
 
+## Desktop onboarding and product-polish coverage
+
+The native desktop shell has a first-run Setup Required flow and a recoverable
+startup screen. Run it from source with `cargo run --manifest-path
+desktop/src-tauri/Cargo.toml`; with no configuration, choose Local to create a
+vault or choose Azure/AWS and validate the nonsecret configuration before it is
+saved. The web workspace includes the effective context rail, Trash and Undo,
+the typed secret editor, command palette (`Cmd/Ctrl+K`), upload queue,
+responsive stacked rows below 768px, and context-led Settings and Help sheets.
+
+The desktop static and isolated startup checks are:
+
+```bash
+cargo test -p xv-desktop
+node --test desktop/frontend/loading.test.js
+node tests/desktop/startup-smoke.js
+bash -n tests/desktop/package-smoke.sh
+```
+
+`tests/desktop/package-smoke.sh` builds an unsigned local macOS bundle and
+launches it only with an isolated Local HOME/XDG root. It must be run on a host
+that permits GUI launch; do not treat a headless `Abort trap: 6` as a package
+pass. The task ledger records a separate host pass, but release/final sign-off
+requires a fresh result.
+
+## Final app UX modernization gate
+
+Run these commands for final sign-off, then record their exact output/counts in
+`docs/APP-UX-IMPLEMENTATION-EVIDENCE.md`:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+node --test src/web/assets/*.test.js desktop/frontend/*.test.js
+npx playwright test
+bash tests/desktop/package-smoke.sh
+```
+
+The final manual matrix is controller-owned: packaged desktop against isolated
+Local plus representative invalid Azure/AWS configurations, and `xv ui`
+against isolated Local, at 1180×760, 820×560, 768×700, and 390×844 in light,
+dark, and keyboard-only modes. Exercise startup/recovery, scope, Trash,
+typed editing, command palette, upload queue, responsive rows, Settings, and
+Help without recording secret values in screenshots.
+
 ## Live integration (Azure required) — manual / weekly
 
 Tests in `tests/e2e_integration_tests.rs` are `#[ignore]`'d by default.

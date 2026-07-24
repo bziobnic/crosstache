@@ -44,6 +44,7 @@ pre-commit leak scanner that matches files against your *actual* vault values.
 - [Pre-commit leak scanner — `xv scan`](#pre-commit-leak-scanner--xv-scan)
 - [Terminal UI — `xv tui`](#terminal-ui--xv-tui)
 - [Web UI — `xv ui`](#web-ui--xv-ui)
+- [Desktop app](#desktop-app)
 - [Scripting & CI](#scripting--ci) — exit codes, JSON envelope, examples
 - [Configuration](#configuration)
 - [Authentication](#authentication)
@@ -1424,6 +1425,31 @@ xv ui                                     # binds 127.0.0.1, opens your browser
 Same backend layer as the CLI (Azure, AWS, local all work). Loopback-only,
 per-session bearer token, no TLS and no login by design — see
 [`docs/web-ui.md`](docs/web-ui.md) for the full security model and reference.
+
+The workspace shows the resolved backend/vault context and includes protected
+value timing, Trash with Undo/restore, typed secret editing, command palette
+(`Cmd/Ctrl+K`), file search and upload queue, responsive stacked rows below
+768px, plus context-led Settings and Help. Use Settings for theme, density,
+and the policy-bounded protected-value timeout; Help contains session scope,
+capabilities, shortcuts, and redacted diagnostics.
+
+## Desktop app
+
+The macOS desktop shell hosts the same workspace:
+
+```bash
+cargo run --manifest-path desktop/src-tauri/Cargo.toml
+```
+
+With no valid configuration it starts at **Setup Required**. Create a Local
+vault or enter Azure/AWS setup details; the app validates the
+candidate before saving it. Startup failures remain on a recovery screen with
+Retry, Choose backend, Open configuration, and Copy diagnostics rather than
+requiring a separate CLI repair step. For project configuration discovery, use
+`--project /path/to/project` (or `XV_DESKTOP_PROJECT`).
+
+For the exact desktop tests and the unsigned, isolated Local package smoke,
+see [desktop/README.md](desktop/README.md) and [docs/testing.md](docs/testing.md).
 
 ---
 
