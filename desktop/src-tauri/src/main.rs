@@ -1,10 +1,15 @@
-use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
 use tauri::{Emitter, Listener, Manager};
+
+mod startup;
+use startup::{
+    apply_setup, copy_diagnostics, open_config, preview_setup, retry_startup, startup_status,
+    StartupStore,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 enum CloseDecision {
@@ -38,59 +43,17 @@ fn close_decision(save_pending: bool, approved: bool) -> CloseDecision {
     }
 }
 
-fn project_directory() -> Result<Option<PathBuf>, String> {
-    let mut args = std::env::args_os().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--project" {
-            return args
-                .next()
-                .map(PathBuf::from)
-                .map(Some)
-                .ok_or_else(|| "--project requires a directory path".to_string());
-        }
-    }
-
-    Ok(std::env::var_os("XV_DESKTOP_PROJECT").map(PathBuf::from))
-}
-
-fn show_startup_error(window: &tauri::WebviewWindow, error: &str) {
-    let message = serde_json::to_string(error).unwrap_or_else(|_| "\"startup failed\"".into());
-    let _ = window.eval(format!("window.showStartupError({message})"));
-}
-
-async fn start_server(window: tauri::WebviewWindow) -> Result<(), String> {
-    if let Some(project) = project_directory()? {
-        std::env::set_current_dir(&project).map_err(|e| {
-            format!(
-                "could not use project directory '{}': {e}",
-                project.display()
-            )
-        })?;
-    }
-
-    let config = crosstache::config::load_config_no_validation()
-        .await
-        .map_err(|e| e.to_string())?;
-    let server = crosstache::web::prepare_web(config, None, None)
-        .await
-        .map_err(|e| e.to_string())?;
-    let url = server
-        .url()
-        .parse()
-        .map_err(|e| format!("invalid embedded UI URL: {e}"))?;
-
-    #[cfg(debug_assertions)]
-    println!("xv desktop embedded UI: {}", server.url());
-
-    window
-        .navigate(url)
-        .map_err(|e| format!("could not open the embedded UI: {e}"))?;
-
-    server.serve().await.map_err(|e| e.to_string())
-}
-
 fn main() {
     tauri::Builder::default()
+        .manage(StartupStore::from_environment())
+        .invoke_handler(tauri::generate_handler![
+            startup_status,
+            preview_setup,
+            apply_setup,
+            retry_startup,
+            open_config,
+            copy_diagnostics
+        ])
         .setup(|app| {
             let window = app
                 .get_webview_window("main")
@@ -122,12 +85,12 @@ fn main() {
                     }
                 }
             });
-            let error_window = window.clone();
+            let startup_handle = app.handle().clone();
 
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = start_server(window).await {
-                    eprintln!("xv desktop startup failed: {error}");
-                    show_startup_error(&error_window, &error);
+                let state = startup_handle.state::<StartupStore>();
+                if startup::run_startup(window, &state).await.is_err() {
+                    eprintln!("xv desktop startup entered recovery");
                 }
             });
 
