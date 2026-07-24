@@ -457,7 +457,7 @@ pub(crate) mod files {
         // is decrypted with the vault's attachment key; everything else passes
         // through untouched.
         let bytes = crate::secret::attachments::download_decrypted(
-            state.backend.secrets(),
+            target.backend.secrets(),
             backend,
             vault,
             &name,
@@ -704,6 +704,95 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&bytes[..], b"BEGIN CERT");
+    }
+
+    #[cfg(feature = "file-ops")]
+    #[tokio::test]
+    async fn scoped_attachment_download_uses_the_selected_backends_key() {
+        use std::sync::Arc;
+
+        use crate::backend::Backend;
+        use crate::secret::attachments;
+
+        let primary = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "primary",
+            crate::backend::BackendCapabilities {
+                has_file_storage: true,
+                ..Default::default()
+            },
+        ));
+        let stage = Arc::new(testutil::stub::StubBackend::with_capabilities(
+            "stage",
+            crate::backend::BackendCapabilities {
+                has_file_storage: true,
+                ..Default::default()
+            },
+        ));
+        let primary_trait: Arc<dyn crate::backend::Backend> = primary;
+        let stage_trait: Arc<dyn crate::backend::Backend> = stage.clone();
+        let registry = Arc::new(crate::backend::BackendRegistry::for_test(
+            "primary",
+            vec![
+                ("primary", primary_trait.clone()),
+                ("stage", stage_trait.clone()),
+            ],
+        ));
+        let mut context = testutil::test_context(primary_trait.as_ref(), "default", 30);
+        context.workspace.configured = true;
+        context
+            .workspace
+            .entries
+            .push(crate::web::context::WorkspaceEntrySummary {
+                alias: "stage".into(),
+                backend: "stage".into(),
+                vault: "sandbox".into(),
+                default: false,
+            });
+        let state = Arc::new(crate::web::WebState::new(
+            primary_trait,
+            context,
+            "test-token".into(),
+            crate::records::builtin_types(),
+            crate::web::preferences::PreferenceStore::new(
+                std::env::temp_dir()
+                    .join(format!("xv-web-attachment-scope-{}", uuid::Uuid::new_v4()))
+                    .join("ui.json"),
+                30,
+            ),
+            registry,
+        ));
+        attachments::upload_encrypted(
+            stage.secrets(),
+            stage.files().unwrap(),
+            "sandbox",
+            crate::blob::models::FileUploadRequest {
+                name: attachments::attachment_blob_name("db-cert", "cert.pem"),
+                content: b"STAGE CERT".to_vec(),
+                content_type: Some("application/x-pem-file".into()),
+                groups: Vec::new(),
+                metadata: std::collections::HashMap::new(),
+                tags: std::collections::HashMap::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let response = crate::web::build_router(state)
+            .oneshot(
+                Request::get(
+                    "/api/files/attachments%2Fdb-cert%2Fcert.pem?alias=stage&backend=stage&vault=sandbox",
+                )
+                .header(header::HOST, "127.0.0.1:1")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"STAGE CERT");
     }
 
     #[tokio::test]
