@@ -71,6 +71,7 @@ impl LocalBackend {
         raw_config: Option<&crate::config::settings::LocalConfig>,
     ) -> Result<Self, BackendError> {
         let config = ResolvedLocalConfig::from_raw(raw_config);
+        config.validate()?;
 
         // Ensure store directory exists
         fs::create_dir_all(&config.store_path).map_err(|e| {

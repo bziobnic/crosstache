@@ -221,14 +221,18 @@ pub fn build_setup_config(request: &SetupRequest, mut base: Config) -> Result<Co
             let key_file = persisted_path(key_file, "Local key file")?;
             required(vault, "Local vault")?;
 
-            base.backend = Some("local".into());
-            base.local = Some(LocalConfig {
+            let local = LocalConfig {
                 store_path: Some(store_path),
                 key_file: Some(key_file),
                 default_vault: Some(vault.clone()),
                 encrypt_metadata: None,
                 opaque_filenames: None,
-            });
+            };
+            crate::backend::local::config::ResolvedLocalConfig::from_raw(Some(&local))
+                .validate()?;
+
+            base.backend = Some("local".into());
+            base.local = Some(local);
             base.aws = None;
             base.subscription_id.clear();
             base.tenant_id.clear();
@@ -655,6 +659,97 @@ mod tests {
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_local_vault_fails_before_store_key_or_config_side_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        let prior = b"prior config must survive invalid local vault syntax";
+        tokio::fs::write(&path, prior).await.unwrap();
+        let request = SetupRequest::Local {
+            store_path: root.path().join("store"),
+            key_file: root.path().join("key.txt"),
+            vault: "../invalid".into(),
+        };
+
+        let result = setup_and_save(request, Config::default(), &path).await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), prior);
+        assert!(!root.path().join("store").exists());
+        assert!(!root.path().join("key.txt").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsafe_local_path_components_fail_before_any_side_effect() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        let prior = b"prior config must survive unsafe candidate paths";
+        tokio::fs::write(&path, prior).await.unwrap();
+        let request = SetupRequest::Local {
+            store_path: root.path().join("nested").join("..").join("store"),
+            key_file: root.path().join("key.txt"),
+            vault: "default".into(),
+        };
+
+        let result = setup_and_save(request, Config::default(), &path).await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), prior);
+        assert!(!root.path().join("nested").exists());
+        assert!(!root.path().join("store").exists());
+        assert!(!root.path().join("key.txt").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn valid_local_vault_and_path_edge_cases_build_without_side_effects() {
+        let root = tempfile::tempdir().unwrap();
+        for vault in ["default", "work-secrets", "team_1", "Vault123"] {
+            let request = SetupRequest::Local {
+                store_path: root.path().join(vault).join("store"),
+                key_file: PathBuf::from("keys").join(format!("{vault}.txt")),
+                vault: vault.into(),
+            };
+            let config = build_setup_config(&request, Config::default()).unwrap();
+            assert_eq!(config.default_vault, vault);
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn local_store_and_key_lexical_aliases_are_rejected_without_lookup() {
+        let entry = "xv-setup-candidate-alias-never-created";
+        let request = SetupRequest::Local {
+            store_path: PathBuf::from(entry),
+            key_file: std::env::current_dir().unwrap().join(entry),
+            vault: "default".into(),
+        };
+
+        assert!(build_setup_config(&request, Config::default()).is_err());
+        assert!(!PathBuf::from(entry).exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_store_and_key_aliases_through_existing_parents_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let request = SetupRequest::Local {
+            store_path: real.join("not-created"),
+            key_file: alias.join("not-created"),
+            vault: "default".into(),
+        };
+
+        assert!(build_setup_config(&request, Config::default()).is_err());
+        assert!(!real.join("not-created").exists());
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn save_failure_after_verification_preserves_prior_target_bytes() {
@@ -798,6 +893,78 @@ mod tests {
         assert_eq!(round_trip, safe);
         assert!(safe.diagnostics.chars().count() <= 2048);
         assert!(!safe.diagnostics.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn diagnostics_redact_encoded_urls_unc_opaque_tokens_and_zero_guid() {
+        let raw = concat!(
+            "callback=https%253A%252F%252Fuser%253Apassword%2540example.test",
+            "%252Fvault%253Fsig%253Dquery-secret%2523fragment-secret; ",
+            "config=\\\\server\\private\\config\\xv.conf; ",
+            "opaque.token/value+secret==; ",
+            "tenant=00000000-0000-0000-0000-000000000000"
+        );
+
+        let safe = SafeSetupError::from_message(raw);
+        let serialized = serde_json::to_string(&safe).unwrap();
+        serde_json::from_str::<SafeSetupError>(&serialized).unwrap();
+
+        for forbidden in [
+            "user",
+            "password",
+            "query-secret",
+            "fragment-secret",
+            "server",
+            "private",
+            "opaque.token/value+secret==",
+            "00000000",
+        ] {
+            assert!(
+                !safe.diagnostics.contains(forbidden),
+                "diagnostics partially leaked {forbidden}: {}",
+                safe.diagnostics
+            );
+            assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn diagnostics_preserve_ordinary_safe_provider_guidance() {
+        let raw =
+            "Connection timed out while listing the selected vault. Check the network and retry.";
+
+        let safe = SafeSetupError::from_message(raw);
+
+        assert_eq!(safe.diagnostics, raw);
+        assert!(!safe.message.contains("[REDACTED]"));
+        assert!(!safe.hint.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn diagnostics_redact_adjacent_opaque_tokens_without_partial_overlap() {
+        let first = "opaque.token/value+first-secret==";
+        let second = "opaque.token/value+second-secret==";
+        let safe = SafeSetupError::from_message(&format!("{first} {second}"));
+
+        assert!(!safe.diagnostics.contains(first));
+        assert!(!safe.diagnostics.contains(second));
+        assert!(!safe.diagnostics.contains("opaque.token"));
+        assert!(!safe.diagnostics.contains("first-secret"));
+        assert!(!safe.diagnostics.contains("second-secret"));
+    }
+
+    #[test]
+    fn diagnostics_handle_malformed_percent_input_and_preserve_safe_versions() {
+        let raw = "Azure CLI 2.61.0; TLS/1.3; region us-east-1; malformed=%ZZ%E0%A4%A";
+
+        let safe = SafeSetupError::from_message(raw);
+        let serialized = serde_json::to_string(&safe).unwrap();
+        serde_json::from_str::<SafeSetupError>(&serialized).unwrap();
+
+        assert!(safe.diagnostics.contains("Azure CLI 2.61.0"));
+        assert!(safe.diagnostics.contains("TLS/1.3"));
+        assert!(safe.diagnostics.contains("region us-east-1"));
+        assert!(safe.diagnostics.chars().count() <= 2048);
     }
 
     #[test]

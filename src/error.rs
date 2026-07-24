@@ -151,22 +151,85 @@ fn redact_setup_diagnostics(value: &str) -> String {
         slot.get_or_init(|| Regex::new(expression).expect("setup redaction regex must compile"))
     }
 
-    static URL: OnceLock<Regex> = OnceLock::new();
-    static JWT: OnceLock<Regex> = OnceLock::new();
     static AUTH_HEADER: OnceLock<Regex> = OnceLock::new();
-    static BEARER: OnceLock<Regex> = OnceLock::new();
-    static ENCODED_SENSITIVE_PAIR: OnceLock<Regex> = OnceLock::new();
+    static URL: OnceLock<Regex> = OnceLock::new();
     static SENSITIVE_PAIR: OnceLock<Regex> = OnceLock::new();
-    static UNIX_PATH: OnceLock<Regex> = OnceLock::new();
-    static WINDOWS_PATH: OnceLock<Regex> = OnceLock::new();
+    static AUTH_SCHEME: OnceLock<Regex> = OnceLock::new();
     static GUID: OnceLock<Regex> = OnceLock::new();
     static AWS_ACCESS_KEY: OnceLock<Regex> = OnceLock::new();
     static AWS_ACCOUNT_ID: OnceLock<Regex> = OnceLock::new();
+    static JWT: OnceLock<Regex> = OnceLock::new();
     static OPAQUE_TOKEN: OnceLock<Regex> = OnceLock::new();
+    static UNC_PATH: OnceLock<Regex> = OnceLock::new();
+    static WINDOWS_PATH: OnceLock<Regex> = OnceLock::new();
+    static UNIX_PATH: OnceLock<Regex> = OnceLock::new();
 
-    let mut safe = value.to_string();
-    safe = pattern(&URL, r#"(?i)\b(?:https?|ftp)://[^\s<>"']+"#)
+    // Bound attacker/provider-controlled input before repeated decoding and
+    // matching. Decode a small fixed number of layers so encoded URLs,
+    // headers, query credentials, and userinfo reach the same full-entity
+    // redaction rules as their literal forms.
+    let mut safe: String = value.chars().take(16_384).collect();
+    for _ in 0..4 {
+        let decoded = percent_encoding::percent_decode_str(&safe)
+            .decode_utf8_lossy()
+            .into_owned();
+        if decoded == safe {
+            break;
+        }
+        safe = decoded;
+    }
+    safe = crate::utils::format::sanitize_control_chars(&safe);
+
+    // Redact broad, structured entities before token/path substrings. This
+    // prevents later patterns from leaving a prefix or suffix of the same
+    // credential visible.
+    safe = pattern(
+        &AUTH_HEADER,
+        r"(?im)\b(?:authorization|proxy-authorization|x-api-key|x-amz-security-token|cookie|set-cookie)\s*:\s*[^\r\n]+",
+    )
+    .replace_all(&safe, "[AUTH HEADER REDACTED]")
+    .into_owned();
+    safe = pattern(&URL, r#"(?i)\b(?:https?|ftp)://[^\s<>"';]+"#)
         .replace_all(&safe, "[URL REDACTED]")
+        .into_owned();
+    safe = pattern(
+        &SENSITIVE_PAIR,
+        r#"(?i)\b(?:authorization|proxy-authorization|client[_-]?secret|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|access[_-]?key(?:[_-]?id)?|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|token|api[_-]?key|accountkey|sharedaccesssignature|sig(?:nature)?|credential|client[_-]?assertion)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)"#,
+    )
+    .replace_all(&safe, "[CREDENTIAL REDACTED]")
+    .into_owned();
+    safe = pattern(
+        &AUTH_SCHEME,
+        r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+",
+    )
+    .replace_all(&safe, "[AUTH CREDENTIAL REDACTED]")
+    .into_owned();
+    safe = pattern(
+        &GUID,
+        r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    )
+    .replace_all(&safe, "[IDENTIFIER REDACTED]")
+    .into_owned();
+    safe = pattern(&AWS_ACCESS_KEY, r"(?i)\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+        .replace_all(&safe, "[IDENTIFIER REDACTED]")
+        .into_owned();
+    safe = pattern(&AWS_ACCOUNT_ID, r"\b[0-9]{12}\b")
+        .replace_all(&safe, "[IDENTIFIER REDACTED]")
+        .into_owned();
+    safe = pattern(
+        &UNC_PATH,
+        r#"(?i)(?:\\\\|//)[^\\/\s;,'"]+(?:[\\/][^\\/\s;,'"]+)+"#,
+    )
+    .replace_all(&safe, "[PATH REDACTED]")
+    .into_owned();
+    safe = pattern(
+        &WINDOWS_PATH,
+        r#"(?i)\b[A-Z]:\\(?:[^\\\s;,'"]+\\?)*[^\\\s;,'"]*"#,
+    )
+    .replace_all(&safe, "[PATH REDACTED]")
+    .into_owned();
+    safe = pattern(&UNIX_PATH, r#"(^|[\s=:'"(])((?:/[^\s;,'"()]+)+)"#)
+        .replace_all(&safe, "$1[PATH REDACTED]")
         .into_owned();
     safe = pattern(
         &JWT,
@@ -174,49 +237,11 @@ fn redact_setup_diagnostics(value: &str) -> String {
     )
     .replace_all(&safe, "[TOKEN REDACTED]")
     .into_owned();
-    safe = pattern(
-        &AUTH_HEADER,
-        r"(?im)\b(?:authorization|proxy-authorization|x-api-key|x-amz-security-token|cookie|set-cookie)\s*:\s*[^\r\n]+",
-    )
-    .replace_all(&safe, "[AUTH HEADER REDACTED]")
-    .into_owned();
-    safe = pattern(&BEARER, r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
-        .replace_all(&safe, "Bearer [REDACTED]")
-        .into_owned();
-    safe = pattern(
-        &ENCODED_SENSITIVE_PAIR,
-        r"(?i)\b(?:authorization|client[_-]?secret|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|access[_-]?key(?:[_-]?id)?|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|token|api[_-]?key|accountkey|sharedaccesssignature|sig(?:nature)?|credential|client[_-]?assertion)%3d[^\s;]+",
-    )
-    .replace_all(&safe, "[ENCODED CREDENTIAL REDACTED]")
-    .into_owned();
-    safe = pattern(
-        &SENSITIVE_PAIR,
-        r#"(?i)\b(?:authorization|proxy-authorization|client[_-]?secret|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|access[_-]?key(?:[_-]?id)?|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|token|api[_-]?key|accountkey|sharedaccesssignature|sig(?:nature)?|credential|client[_-]?assertion)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)"#,
-    )
-    .replace_all(&safe, "[CREDENTIAL REDACTED]")
-    .into_owned();
-    safe = pattern(&WINDOWS_PATH, r#"(?i)\b[A-Z]:\\(?:[^\\\s;,'"]+\\?)+"#)
-        .replace_all(&safe, "[PATH REDACTED]")
-        .into_owned();
-    safe = pattern(&UNIX_PATH, r#"(?:/[^\s;,'"()]+)+"#)
-        .replace_all(&safe, "[PATH REDACTED]")
-        .into_owned();
-    safe = pattern(
-        &GUID,
-        r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
-    )
-    .replace_all(&safe, "[IDENTIFIER REDACTED]")
-    .into_owned();
-    safe = pattern(&AWS_ACCESS_KEY, r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
-        .replace_all(&safe, "[IDENTIFIER REDACTED]")
-        .into_owned();
-    safe = pattern(&AWS_ACCOUNT_ID, r"\b[0-9]{12}\b")
-        .replace_all(&safe, "[IDENTIFIER REDACTED]")
-        .into_owned();
-    safe = pattern(&OPAQUE_TOKEN, r"\b[A-Za-z0-9_-]{24,}\b")
+    safe = pattern(&OPAQUE_TOKEN, r"(?i)[A-Za-z0-9._~+/=-]{20,}")
         .replace_all(&safe, "[TOKEN REDACTED]")
         .into_owned();
 
+    // Truncate only after all replacements, using Unicode scalar boundaries.
     safe_setup_text(&safe, 2048)
 }
 
