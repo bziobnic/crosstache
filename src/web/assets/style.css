@@ -180,7 +180,9 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transpa
   color:var(--color-text-muted); }
 .data-surface tbody tr:hover { background:color-mix(in srgb, var(--color-accent) 6%, transparent); }
 .stacked-list { display:grid; min-width:0; }
-.stacked-folder-header { width:100%; padding:.55rem .85rem; overflow-wrap:anywhere;
+.stacked-group { min-width:0; }
+.stacked-group-list { min-width:0; }
+.stacked-folder-header { width:100%; margin:0; padding:.55rem .85rem; overflow-wrap:anywhere;
   border-bottom:1px solid var(--color-border); color:var(--color-text-muted);
   background:var(--color-surface-subtle); font-size:.7rem; font-weight:730;
   letter-spacing:.04em; }
@@ -190,7 +192,8 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transpa
 .stacked-row:last-child { border-bottom:0; }
 .stacked-row.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transparent); }
 .stacked-selection { width:1rem; height:1rem; margin:.9rem 0 .9rem .85rem; accent-color:var(--color-accent); }
-.stacked-activation { min-width:0; display:grid; gap:.35rem; padding:.75rem .85rem;
+.stacked-content { min-width:0; display:grid; gap:.35rem; padding:.75rem .85rem; }
+.stacked-activation { min-width:0; display:grid; padding:.75rem .85rem .25rem;
   border:0; border-radius:0; color:var(--color-text); background:transparent;
   box-shadow:none; text-align:left; text-decoration:none; }
 .stacked-activation:hover { border-color:transparent; background:color-mix(in srgb, var(--color-accent) 6%, transparent); }
@@ -198,6 +201,7 @@ tr.selected-row { background:color-mix(in srgb, var(--color-accent) 12%, transpa
 .stacked-identifier { min-width:0; overflow-wrap:anywhere; word-break:break-word; }
 .stacked-metadata { min-width:0; display:flex; flex-wrap:wrap; gap:.2rem .8rem;
   color:var(--color-text-muted); font-size:.72rem; }
+.stacked-row > .stacked-metadata { padding:0 .85rem .75rem; }
 .stacked-metadata-item { min-width:0; overflow-wrap:anywhere; }
 .stacked-metadata-label { font-weight:680; }
 .item-name { color:var(--color-text); }

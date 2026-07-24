@@ -541,7 +541,7 @@ function showStackedListState(kind, state) {
     const skeletons = Array.from({ length: 3 }, () => {
       const row = document.createElement('div');
       row.className = 'stacked-row skeleton-row';
-      row.setAttribute('role', 'listitem');
+      row.setAttribute('aria-hidden', 'true');
       const content = document.createElement('div');
       content.className = 'skeleton-content';
       content.append(document.createElement('span'), document.createElement('span'));
@@ -552,7 +552,6 @@ function showStackedListState(kind, state) {
     return;
   }
   const stateItem = document.createElement('div');
-  stateItem.setAttribute('role', 'listitem');
   stateItem.appendChild(emptyStateContent(kind, state));
   container.replaceChildren(stateItem);
 }
@@ -2090,9 +2089,10 @@ function secretRow(row) {
   return tr;
 }
 
-function stackedMetadata(metadata) {
+function stackedMetadata(metadata, id) {
   const container = document.createElement('span');
   container.className = 'stacked-metadata';
+  container.id = id;
   for (const { label, value } of metadata.filter((entry) => entry.value)) {
     const item = document.createElement('span');
     item.className = 'stacked-metadata-item';
@@ -2107,27 +2107,34 @@ function stackedMetadata(metadata) {
   return container;
 }
 
-function stackedActivation(kind, row) {
-  const singular = kind === 'secrets' ? 'secret' : 'file';
-  const selecting = selectionState(kind).enabled;
-  const label = `${selecting ? 'Select' : (kind === 'secrets' ? 'Edit' : 'Download')} ${singular} ${row.identifier}`;
-  const activation = kind === 'files' && !selecting
-    ? document.createElement('a')
-    : document.createElement('button');
-  activation.className = `stacked-activation ${kind === 'files' && !selecting ? 'file-link' : ''}`;
-  activation.setAttribute('aria-label', label);
-  if (activation.tagName === 'BUTTON') activation.type = 'button';
+function stackedIdentifier(row, id) {
   const identifier = document.createElement('strong');
   identifier.className = 'stacked-identifier';
+  identifier.id = id;
   identifier.textContent = row.identifier;
-  activation.append(identifier, stackedMetadata(row.metadata));
+  return identifier;
+}
+
+function stackedActionText(kind, selecting) {
+  const singular = kind === 'secrets' ? 'secret' : 'file';
+  return `${selecting ? 'Select' : (kind === 'secrets' ? 'Edit' : 'Download')} ${singular}`;
+}
+
+function stackedActivation(kind, row, ids) {
+  const activation = kind === 'files'
+    ? document.createElement('a')
+    : document.createElement('button');
+  activation.className = `stacked-activation ${kind === 'files' ? 'file-link' : ''}`;
+  activation.setAttribute('aria-labelledby', `${ids.action} ${ids.identifier}`);
+  activation.setAttribute('aria-describedby', ids.metadata);
+  if (activation.tagName === 'BUTTON') activation.type = 'button';
+  const action = document.createElement('span');
+  action.className = 'sr-only';
+  action.id = ids.action;
+  action.textContent = stackedActionText(kind, false);
+  activation.append(action, stackedIdentifier(row, ids.identifier));
   if (kind === 'secrets') {
-    activation.onclick = () => {
-      if (selecting) toggleSelected(kind, row.identifier);
-      else openDrawer(row.identifier);
-    };
-  } else if (selecting) {
-    activation.onclick = () => toggleSelected(kind, row.identifier);
+    activation.onclick = () => openDrawer(row.identifier);
   } else {
     activation.href = `/api/files/${encodeURIComponent(row.identifier)}${vaultQS(currentVault)}`;
     activation.download = row.identifier;
@@ -2142,31 +2149,52 @@ function stackedActivation(kind, row) {
 function renderStackedRows(kind, rows) {
   const container = $(`#${kind}-stacked`);
   const state = selectionState(kind);
-  const children = [];
-  let previousFolder = null;
-  for (const row of rows) {
-    const folder = row.folder || 'Unfiled';
-    if (folder !== previousFolder) {
-      const heading = document.createElement('div');
-      heading.className = 'stacked-folder-header';
-      heading.setAttribute('role', 'presentation');
-      heading.textContent = folder;
-      children.push(heading);
-      previousFolder = folder;
+  const groups = XvUiModel.groupContentRows(rows).map((group, groupIndex) => {
+    const section = document.createElement('section');
+    section.className = 'stacked-group';
+    const heading = document.createElement('h3');
+    heading.className = 'stacked-folder-header';
+    heading.id = `${kind}-stacked-group-${groupIndex}`;
+    heading.textContent = group.label;
+    const list = document.createElement('div');
+    list.className = 'stacked-group-list';
+    list.setAttribute('role', 'list');
+    list.setAttribute('aria-labelledby', heading.id);
+    for (const [rowIndex, row] of group.rows.entries()) {
+      const prefix = `${kind}-stacked-${groupIndex}-${rowIndex}`;
+      const ids = {
+        action: `${prefix}-action`,
+        identifier: `${prefix}-identifier`,
+        metadata: `${prefix}-metadata`,
+      };
+      const item = document.createElement('div');
+      item.className = 'stacked-row';
+      item.setAttribute('role', 'listitem');
+      if (state.ids.has(row.identifier)) item.classList.add('selected-row');
+      const metadata = stackedMetadata(row.metadata, ids.metadata);
+      if (state.enabled) {
+        const selection = selectionCell(kind, row.identifier).firstElementChild;
+        selection.classList.add('stacked-selection');
+        selection.removeAttribute('aria-label');
+        selection.setAttribute('aria-labelledby', `${ids.action} ${ids.identifier}`);
+        selection.setAttribute('aria-describedby', ids.metadata);
+        const content = document.createElement('div');
+        content.className = 'stacked-content';
+        const action = document.createElement('span');
+        action.className = 'sr-only';
+        action.id = ids.action;
+        action.textContent = stackedActionText(kind, true);
+        content.append(action, stackedIdentifier(row, ids.identifier), metadata);
+        item.append(selection, content);
+      } else {
+        item.append(stackedActivation(kind, row, ids), metadata);
+      }
+      list.appendChild(item);
     }
-    const item = document.createElement('div');
-    item.className = 'stacked-row';
-    item.setAttribute('role', 'listitem');
-    if (state.ids.has(row.identifier)) item.classList.add('selected-row');
-    if (state.enabled) {
-      const selection = selectionCell(kind, row.identifier);
-      selection.classList.add('stacked-selection');
-      item.appendChild(selection.firstElementChild);
-    }
-    item.appendChild(stackedActivation(kind, row));
-    children.push(item);
-  }
-  container.replaceChildren(...children);
+    section.append(heading, list);
+    return section;
+  });
+  container.replaceChildren(...groups);
 }
 
 // ---- trash ----

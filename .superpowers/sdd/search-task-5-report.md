@@ -14,10 +14,17 @@ Implemented the responsive content pattern for secret and file lists:
 - Added separate semantic stacked renderers below the breakpoint. Each item is
   one list item with the full identifier first, priority metadata second, and
   one clear Edit, Download, or Select activation control.
-- Added full-width folder headers and untruncated, wrapping identifiers and
+- Added deterministic semantic folder sections: one real heading and labelled
+  list per folder, Unfiled first, folders collated consistently, and the
+  current row sort retained within each group.
+- Added full-width folder headings and untruncated, wrapping identifiers and
   metadata.
-- Kept selection checkboxes out of non-selection mode and preserved exact
-  selection behavior in stacked mode.
+- Kept selection checkboxes out of non-selection mode. In selection mode the
+  checkbox is the sole actionable control and visible identifier/metadata
+  remain inert labelled and described content.
+- Built accessible control names from a hidden action verb plus the visible
+  complete identifier, and linked visible priority metadata as the accessible
+  description. No `aria-label` masks visible descendants.
 - Hid the complete desktop table in stacked mode, removing its sort controls,
   columns, and resize separators from the accessibility tree and focus order.
 - Preserved loading, empty, filtered, and failed list states in both renderers.
@@ -43,15 +50,25 @@ and observed failing because the empty stacked surface had no visible state or
 action. The implementation then introduced a shared loading/empty/filtered/
 failed renderer, and the regression passed.
 
+Review remediation was also test-first:
+
+- `stacked groups use one deterministic heading per folder...` failed because
+  `groupContentRows` did not exist.
+- The updated selection test failed because the checkbox had no metadata
+  description and exposed a second Select button.
+- Expanded state coverage found a critical axe violation where a failed-state
+  `listitem` lacked a list parent. State content now uses ordinary semantics
+  and loading skeletons are hidden from assistive technology.
+
 ## Verification
 
-- `node --test src/web/assets/ui-model.test.js` — 37 passed.
-- `node --test src/web/assets/*.test.js` — 173 passed.
+- `node --test src/web/assets/ui-model.test.js` — 38 passed.
+- `node --test src/web/assets/*.test.js` — 174 passed.
 - `env PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers npx playwright test tests/web/ui-responsive.spec.js --reporter=dot`
-  — 6 passed.
+  — 10 passed.
 - Responsive plus accessibility, folder, command, and upload Playwright
-  regression group — 43 passed.
-- `cargo test -p xv-desktop` — passed.
+  regression group — 47 passed.
+- `cargo test -p xv-desktop` — 2 passed.
 - `cargo fmt --all -- --check` — passed.
 - `cargo clippy --features ui --all-targets -- -D warnings` — passed.
 - `git diff --check` — passed.

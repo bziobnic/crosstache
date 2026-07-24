@@ -198,6 +198,26 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
     });
   }
 
+  function groupContentRows(rows = []) {
+    const groups = new Map();
+    for (const row of rows) {
+      const folder = row.folder || '';
+      if (!groups.has(folder)) groups.set(folder, []);
+      groups.get(folder).push(row);
+    }
+    return [...groups]
+      .sort(([left], [right]) => {
+        if (!left) return right ? -1 : 0;
+        if (!right) return 1;
+        return collator.compare(left, right);
+      })
+      .map(([folder, groupedRows]) => Object.freeze({
+        folder,
+        label: folder || 'Unfiled',
+        rows: Object.freeze([...groupedRows]),
+      }));
+  }
+
   function normalizeFolderPath(value) {
     if (typeof value !== 'string') return '';
     return value.split('/').filter((segment) => segment !== '').join('/');
@@ -789,7 +809,8 @@ const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: tr
 export { PROTECTED_MASK, formatDate, expirationDate, createProtectedState,
   typeCards, buildTypedDraft, groupSuggestions, conversionSummary,
   protectedDisplay, revealProtected, editProtected, hideProtected, loadProtected,
-  sortedCopy, normalizeWidths, resizeAdjacentWidths, contentMode, contentRows, normalizeFolderPath,
+  sortedCopy, normalizeWidths, resizeAdjacentWidths, contentMode, contentRows,
+  groupContentRows, normalizeFolderPath,
   FOLDER_ALL, FOLDER_UNFILED, folderIdentity, folderIdentityKey, sameFolderIdentity,
   buildFolderTree, buildFolderViewModel, initialExpansion, createFolderTokenIndex,
   folderPreferenceKey, loadFolderExpansion,

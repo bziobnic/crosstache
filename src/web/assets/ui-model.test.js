@@ -163,6 +163,26 @@ test('responsive content rows preserve complete identifiers and priority metadat
   ]);
 });
 
+test('stacked groups use one deterministic heading per folder and retain current row order', () => {
+  const rows = model.contentRows('secrets', [
+    { name: 'zeta', folder: 'teams/beta' },
+    { name: 'second', folder: 'teams/alpha' },
+    { name: 'first', folder: 'teams/alpha' },
+    { name: 'root' },
+    { name: 'again', folder: 'teams/beta' },
+  ]);
+
+  assert.deepEqual(model.groupContentRows(rows).map((group) => ({
+    folder: group.folder,
+    label: group.label,
+    names: group.rows.map((row) => row.identifier),
+  })), [
+    { folder: '', label: 'Unfiled', names: ['root'] },
+    { folder: 'teams/alpha', label: 'teams/alpha', names: ['second', 'first'] },
+    { folder: 'teams/beta', label: 'teams/beta', names: ['zeta', 'again'] },
+  ]);
+});
+
 test('slash paths become nested folder nodes with stable unfiled node', () => {
   const tree = model.buildFolderTree([
     { name: 'a', folder: 'apps/prod' },
