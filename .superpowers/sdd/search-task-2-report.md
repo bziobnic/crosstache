@@ -59,5 +59,10 @@ and pending-owner activation. Final remediation verification:
 - `node --test src/web/assets/*.test.js` — **149 passed**
 - focused shortcut/context/dialog tests — **31 passed**
 - `tests/web/ui-commands.spec.js` — **6 passed**
-- full browser suite — **53 passed, 1 focus-owner test failed**; that test was
-  corrected to focus its explicit action-notice owner and passed in isolation.
+- full browser suite on the final committed source — **54 passed**
+
+The second review remediation centralizes post-await activation validation in
+`activationStillCurrent`, checks every pending owner and immutable generation
+immediately before discovery or navigation mutation, and omits the
+self-referential `open-palette` command from palette results while retaining its
+registered shortcut.
