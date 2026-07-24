@@ -702,6 +702,48 @@ mod tests {
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_store_cannot_collide_with_derived_recipients_before_side_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        let prior = b"prior config survives a store and recipients collision";
+        tokio::fs::write(&path, prior).await.unwrap();
+        let request = SetupRequest::Local {
+            store_path: root.path().join("recipients.txt"),
+            key_file: root.path().join("key.txt"),
+            vault: "default".into(),
+        };
+
+        let result = setup_and_save(request, Config::default(), &path).await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), prior);
+        assert!(!root.path().join("recipients.txt").exists());
+        assert!(!root.path().join("key.txt").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_key_cannot_collide_with_derived_recipients_before_side_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("xv.conf");
+        let prior = b"prior config survives a key and recipients collision";
+        tokio::fs::write(&path, prior).await.unwrap();
+        let request = SetupRequest::Local {
+            store_path: root.path().join("store"),
+            key_file: root.path().join("recipients.txt"),
+            vault: "default".into(),
+        };
+
+        let result = setup_and_save(request, Config::default(), &path).await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), prior);
+        assert!(!root.path().join("store").exists());
+        assert!(!root.path().join("recipients.txt").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn valid_local_vault_and_path_edge_cases_build_without_side_effects() {
         let root = tempfile::tempdir().unwrap();
@@ -748,6 +790,67 @@ mod tests {
 
         assert!(build_setup_config(&request, Config::default()).is_err());
         assert!(!real.join("not-created").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_store_and_recipients_aliases_through_existing_parents_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let request = SetupRequest::Local {
+            store_path: real.join("recipients.txt"),
+            key_file: alias.join("key.txt"),
+            vault: "default".into(),
+        };
+
+        assert!(build_setup_config(&request, Config::default()).is_err());
+        assert!(!real.join("recipients.txt").exists());
+        assert!(!real.join("key.txt").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_key_symlinked_to_recipients_is_rejected_before_backend_action() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let recipients = root.path().join("recipients.txt");
+        let key_alias = root.path().join("key-alias.txt");
+        std::fs::write(&recipients, b"existing recipients").unwrap();
+        symlink(&recipients, &key_alias).unwrap();
+        let request = SetupRequest::Local {
+            store_path: root.path().join("store"),
+            key_file: key_alias,
+            vault: "default".into(),
+        };
+
+        assert!(build_setup_config(&request, Config::default()).is_err());
+        assert!(!root.path().join("store").exists());
+        assert_eq!(std::fs::read(&recipients).unwrap(), b"existing recipients");
+    }
+
+    #[test]
+    fn valid_adjacent_local_paths_do_not_collide() {
+        let root = tempfile::tempdir().unwrap();
+        let request = SetupRequest::Local {
+            store_path: root.path().join("store"),
+            key_file: root.path().join("key.txt"),
+            vault: "default".into(),
+        };
+
+        let config = build_setup_config(&request, Config::default()).unwrap();
+        let expected_store = root.path().join("store").to_string_lossy().into_owned();
+
+        assert_eq!(
+            config.local.as_ref().unwrap().store_path.as_deref(),
+            Some(expected_store.as_str())
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
@@ -965,6 +1068,34 @@ mod tests {
         assert!(safe.diagnostics.contains("TLS/1.3"));
         assert!(safe.diagnostics.contains("region us-east-1"));
         assert!(safe.diagnostics.chars().count() <= 2048);
+    }
+
+    #[test]
+    fn diagnostics_preserve_safe_provider_type_names() {
+        let raw =
+            "DefaultAzureCredential returned RequestFailedException while contacting Azure SDK.";
+
+        let safe = SafeSetupError::from_message(raw);
+
+        assert_eq!(safe.diagnostics, raw);
+    }
+
+    #[test]
+    fn diagnostics_redact_realistic_unlabelled_token_variants() {
+        let tokens = [
+            "opaque.token/value+secret==",
+            "Ab3dEfGhIjKlMnOpQrStUvWxYz012345==",
+            "aB3_dE4-fG5_hI6-jK7_lM8-nO9",
+            "9f86d081884c7d659a2feaa0c55ad015",
+        ];
+        let safe = SafeSetupError::from_message(&tokens.join(" "));
+
+        for token in tokens {
+            assert!(
+                !safe.diagnostics.contains(token),
+                "diagnostics leaked token variant: {token}"
+            );
+        }
     }
 
     #[test]

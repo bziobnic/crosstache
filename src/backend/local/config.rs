@@ -76,10 +76,23 @@ impl ResolvedLocalConfig {
         super::paths::validate_vault_name(&self.default_vault)?;
         let store_path = normalized_candidate_path(&self.store_path, "local store path")?;
         let key_file = normalized_candidate_path(&self.key_file, "local key file")?;
-        if store_path == key_file {
-            return Err(BackendError::InvalidArgument(
-                "local store path and key file must be different".into(),
-            ));
+        let recipients_file =
+            normalized_candidate_path(&self.recipients_file, "local recipients file")?;
+        for (left_name, left, right_name, right) in [
+            ("store path", &store_path, "key file", &key_file),
+            (
+                "store path",
+                &store_path,
+                "recipients file",
+                &recipients_file,
+            ),
+            ("key file", &key_file, "recipients file", &recipients_file),
+        ] {
+            if left == right {
+                return Err(BackendError::InvalidArgument(format!(
+                    "local {left_name} and {right_name} must be different"
+                )));
+            }
         }
         Ok(())
     }
@@ -208,5 +221,67 @@ mod tests {
         let cfg = ResolvedLocalConfig::from_raw(Some(&raw));
         assert!(cfg.encrypt_metadata);
         assert!(!cfg.opaque_filenames);
+    }
+
+    #[test]
+    fn validation_is_idempotent_for_nonexistent_and_existing_final_components() {
+        let root = tempfile::tempdir().unwrap();
+        let raw = LocalConfig {
+            store_path: Some(root.path().join("store").to_string_lossy().into_owned()),
+            key_file: Some(root.path().join("key.txt").to_string_lossy().into_owned()),
+            default_vault: Some("default".into()),
+            encrypt_metadata: None,
+            opaque_filenames: None,
+        };
+        let config = ResolvedLocalConfig::from_raw(Some(&raw));
+
+        config.validate().unwrap();
+        config.validate().unwrap();
+
+        std::fs::create_dir(&config.store_path).unwrap();
+        std::fs::write(&config.key_file, b"existing key").unwrap();
+        std::fs::write(&config.recipients_file, b"existing recipients").unwrap();
+
+        config.validate().unwrap();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn collision_errors_use_only_safe_field_labels() {
+        let root = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                root.path().join("same"),
+                root.path().join("same"),
+                "store path and key file",
+            ),
+            (
+                root.path().join("recipients.txt"),
+                root.path().join("key.txt"),
+                "store path and recipients file",
+            ),
+            (
+                root.path().join("store"),
+                root.path().join("recipients.txt"),
+                "key file and recipients file",
+            ),
+        ];
+
+        for (store_path, key_file, expected_labels) in cases {
+            let raw = LocalConfig {
+                store_path: Some(store_path.to_string_lossy().into_owned()),
+                key_file: Some(key_file.to_string_lossy().into_owned()),
+                default_vault: Some("default".into()),
+                encrypt_metadata: None,
+                opaque_filenames: None,
+            };
+            let error = ResolvedLocalConfig::from_raw(Some(&raw))
+                .validate()
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains(expected_labels), "{error}");
+            assert!(!error.contains(&root.path().to_string_lossy().into_owned()));
+        }
     }
 }

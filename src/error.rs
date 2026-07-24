@@ -143,6 +143,24 @@ fn safe_setup_text(value: &str, max_chars: usize) -> String {
         .collect()
 }
 
+fn looks_like_opaque_token(candidate: &str) -> bool {
+    let has_upper = candidate.bytes().any(|byte| byte.is_ascii_uppercase());
+    let has_lower = candidate.bytes().any(|byte| byte.is_ascii_lowercase());
+    let has_digit = candidate.bytes().any(|byte| byte.is_ascii_digit());
+    let punctuation_kinds = b"._~+/=-"
+        .iter()
+        .filter(|punctuation| candidate.as_bytes().contains(punctuation))
+        .count();
+    let is_long_hex = candidate.len() >= 32
+        && has_digit
+        && candidate.bytes().all(|byte| byte.is_ascii_hexdigit());
+
+    punctuation_kinds >= 2
+        || (has_digit && punctuation_kinds >= 1)
+        || (has_upper && has_lower && has_digit)
+        || is_long_hex
+}
+
 fn redact_setup_diagnostics(value: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
@@ -237,8 +255,15 @@ fn redact_setup_diagnostics(value: &str) -> String {
     )
     .replace_all(&safe, "[TOKEN REDACTED]")
     .into_owned();
-    safe = pattern(&OPAQUE_TOKEN, r"(?i)[A-Za-z0-9._~+/=-]{20,}")
-        .replace_all(&safe, "[TOKEN REDACTED]")
+    safe = pattern(&OPAQUE_TOKEN, r"[A-Za-z0-9._~+/=-]{20,}")
+        .replace_all(&safe, |captures: &regex::Captures<'_>| {
+            let candidate = &captures[0];
+            if looks_like_opaque_token(candidate) {
+                "[TOKEN REDACTED]".to_string()
+            } else {
+                candidate.to_string()
+            }
+        })
         .into_owned();
 
     // Truncate only after all replacements, using Unicode scalar boundaries.
