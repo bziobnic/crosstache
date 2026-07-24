@@ -182,10 +182,31 @@
     <div id="dropzone">
       <div class="dropzone-content">
         <span class="dropzone-icon"><svg class="icon" aria-hidden="true"><use href="#icon-upload"></use></svg></span>
-        <span><strong>Drop files here to upload</strong><small>or <button id="browse-files" class="linkish" type="button">browse from your computer</button></small><small id="dropzone-context" data-context-copy></small></span>
+        <span><strong>Drop files here to upload</strong><small>100 MB per file · <span id="upload-concurrency">up to 1 upload at a time</span></small><small>or <button id="browse-files" class="linkish" type="button">browse from your computer</button></small><small id="dropzone-context" data-context-copy></small></span>
         <input id="file-input" type="file" multiple hidden>
       </div>
     </div>
+    <div class="upload-destination">
+      <label for="upload-destination">Upload destination</label>
+      <select id="upload-destination"><option value="">Vault root</option></select>
+    </div>
+    <section id="upload-queue" class="upload-queue" aria-labelledby="upload-queue-heading" hidden>
+      <div class="upload-queue-heading">
+        <div>
+          <h2 id="upload-queue-heading">Uploads</h2>
+          <small id="upload-queue-context"></small>
+        </div>
+        <button id="retry-uploads" class="button secondary compact" type="button" hidden>Retry unfinished</button>
+      </div>
+      <ol id="upload-queue-items" class="upload-queue-items"></ol>
+    </section>
+    <section id="upload-summary" class="upload-summary" aria-labelledby="upload-summary-heading" aria-live="polite" hidden>
+      <div>
+        <h2 id="upload-summary-heading">Upload summary</h2>
+        <ul id="upload-summary-items"></ul>
+      </div>
+      <button id="dismiss-upload-summary" class="button ghost compact" type="button">Dismiss summary</button>
+    </section>
     <div id="files-workspace" class="vault-workspace">
       <aside class="folder-sidebar" aria-labelledby="files-folder-heading">
         <div class="folder-sidebar-heading">

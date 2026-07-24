@@ -101,6 +101,11 @@ pub(crate) struct SecuritySummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct TransferSummary {
+    pub(crate) max_concurrent_uploads: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct EffectiveUiContext {
     pub(crate) backend: String,
     pub(crate) backend_kind: BackendKind,
@@ -112,6 +117,7 @@ pub(crate) struct EffectiveUiContext {
     pub(crate) connection: ConnectionSummary,
     pub(crate) capabilities: CapabilitySummary,
     pub(crate) security: SecuritySummary,
+    pub(crate) transfers: TransferSummary,
     pub(crate) version: &'static str,
 }
 
@@ -324,6 +330,9 @@ pub(crate) async fn resolve_ui_context_from_effective(
         capabilities,
         security: SecuritySummary {
             clipboard_timeout_seconds: config.clipboard_timeout,
+        },
+        transfers: TransferSummary {
+            max_concurrent_uploads: config.get_blob_config().max_concurrent_uploads.max(1),
         },
         version: env!("CARGO_PKG_VERSION"),
     };
@@ -628,6 +637,7 @@ vaults = [
         assert_eq!(json["sources"]["project"], "project");
         assert_eq!(json["sources"]["environment"], "project");
         assert_eq!(json["security"]["clipboard_timeout_seconds"], 17);
+        assert_eq!(json["transfers"]["max_concurrent_uploads"], 3);
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
 
         let text = json.to_string().to_ascii_lowercase();
@@ -713,6 +723,7 @@ vaults = [
             json["capabilities"]["atomic_file_create"],
             cfg!(feature = "file-ops")
         );
+        assert_eq!(json["transfers"]["max_concurrent_uploads"], 3);
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
     }
 

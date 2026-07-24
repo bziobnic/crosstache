@@ -1,6 +1,6 @@
 import * as XvUiModel from './ui-model.js';
 import { buildMetadataIndex, searchIndex, shortcutIntent } from './commands.js';
-import { mountFilterControls } from './files.js';
+import { mountFilterControls, mountUploadQueue } from './files.js';
 import { guardNavigation } from './dialogs.js';
 import { setProtectedValueStatus } from './accessibility.js';
 import { contextQuery, formatContextLine } from './context.js';
@@ -1527,6 +1527,7 @@ async function requestDrawerClose(afterClose) {
 store.subscribe((snapshot, event) => {
   if (event.type === 'context/switch-succeeded') {
     clearRefreshOwnersForScopeTransition();
+    uploadManager?.refreshContext();
   }
   syncDraftControls();
   if (snapshot.contextSwitchPending) {
@@ -1786,6 +1787,7 @@ async function init() {
     throw e;
   }
   currentVault = ctx.vault;
+  uploadManager?.refreshContext();
   applyContextCapabilities();
   ({ types } = await api('GET', '/api/types'));
   const picker = $('#type-picker');
@@ -3066,6 +3068,7 @@ async function switchTab(which) {
 
 // ---- files ----
 let files = [];
+let uploadManager = null;
 let fileSearchIndex = buildMetadataIndex();
 let filesState = 'ready';
 let fileLoadGeneration = 0;
@@ -3129,6 +3132,7 @@ async function loadFiles(vault, scope = captureOperationScope(), errorOwner = nu
     if (generation !== fileLoadGeneration) return false;
     folderTokenIndexes.files = tokenIndex;
     files = loadedFiles;
+    uploadManager?.updateDestinations();
     fileSearchIndex = buildMetadataIndex({
       files,
       folders: folderPaths('files', files),
@@ -3552,27 +3556,25 @@ async function downloadFile(name) {
   } catch (e) { fail(e); }
 }
 
+uploadManager = mountUploadQueue({
+  document,
+  api,
+  getContext: captureOperationScope,
+  scopeQuery: (scope) => vaultQS(scope.vault, scope),
+  formatScope: formatContextLine,
+  refreshFiles: (scope) => loadFiles(scope.vault, scope),
+  getFiles: () => files,
+  setPending: (pending) => {
+    if (pending) beginScopedMutation();
+    else endScopedMutation();
+  },
+  isScopeCurrent: scopeMatchesCurrent,
+});
+
 async function uploadFiles(fileList) {
   const operationScope = captureOperationScope();
-  if (!canStartScopedAction(operationScope)) return;
-  const uploadVault = operationScope.vault;
-  const uploadScope = formatContextLine(operationScope);
-  beginScopedMutation();
-  setSavePending(true);
-  try {
-    for (const file of fileList) {
-      const form = new FormData();
-      form.append('file', file, file.name);
-      try {
-        await api('POST', `/api/files${vaultQS(uploadVault, operationScope)}`, form);
-        toast(`Uploaded ${file.name} to ${uploadScope}`);
-      } catch (e) { fail(e); }
-    }
-    if (scopeMatchesCurrent(operationScope)) await loadFiles(uploadVault, operationScope);
-  } finally {
-    setSavePending(false);
-    endScopedMutation();
-  }
+  if (!canStartScopedAction(operationScope)) return false;
+  return uploadManager.start(fileList);
 }
 
 const dz = $('#dropzone');
@@ -3583,7 +3585,11 @@ $('#browse-files').onclick = () => {
   if (!canStartScopedAction()) return;
   $('#file-input').click();
 };
-$('#file-input').onchange = (e) => uploadFiles(e.target.files).catch(fail);
+$('#file-input').onchange = (e) => {
+  const selected = [...e.target.files];
+  e.target.value = '';
+  uploadFiles(selected).catch(fail);
+};
 
 initColumnResizing();
 initSorting();

@@ -88,3 +88,81 @@ test('API client emits cancelled for aborts without leaking the request', async 
   assert.deepEqual(events.map(({ status }) => status), ['started', 'cancelled']);
   assert.doesNotMatch(JSON.stringify(events), new RegExp(secretMarker));
 });
+
+test('XHR upload reports progress, enters finishing, and resolves parsed 2xx response', async () => {
+  const events = [];
+  const xhr = {
+    upload: {},
+    open(method, path) { this.method = method; this.path = path; },
+    setRequestHeader(name, value) { this.header = [name, value]; },
+    send(body) {
+      this.body = body;
+      this.upload.onprogress({ lengthComputable: true, loaded: 4, total: 8 });
+      this.upload.onload();
+      this.status = 201;
+      this.responseText = '{"name":"report.pdf"}';
+      this.onload();
+    },
+  };
+  const client = createApiClient({ token: 'session-token', xhrFactory: () => xhr });
+  const formData = new FormData();
+
+  const result = await client.upload({
+    path: '/api/files?vault=one',
+    formData,
+    onProgress: (event) => events.push(event),
+  });
+
+  assert.deepEqual(result, { name: 'report.pdf' });
+  assert.deepEqual(events, [
+    { loaded: 4, total: 8 },
+    { loaded: 8, total: 8, finishing: true },
+  ]);
+  assert.deepEqual(xhr.header, ['Authorization', 'Bearer session-token']);
+});
+
+test('XHR upload wires AbortSignal to xhr.abort and rejects with AbortError', async () => {
+  const controller = new AbortController();
+  let xhr;
+  const client = createApiClient({
+    token: 'session-token',
+    xhrFactory: () => (xhr = {
+      upload: {},
+      open() {},
+      setRequestHeader() {},
+      send() {},
+      abort() { this.onabort(); },
+    }),
+  });
+  const pending = client.upload({
+    path: '/api/files',
+    formData: new FormData(),
+    signal: controller.signal,
+  });
+  controller.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.ok(xhr);
+});
+
+test('XHR upload with an already-aborted signal settles without sending bytes', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let sent = false;
+  const client = createApiClient({
+    token: 'session-token',
+    xhrFactory: () => ({
+      upload: {},
+      open() {},
+      setRequestHeader() {},
+      send() { sent = true; },
+      abort() {},
+    }),
+  });
+
+  await assert.rejects(client.upload({
+    path: '/api/files',
+    formData: new FormData(),
+    signal: controller.signal,
+  }), { name: 'AbortError' });
+  assert.equal(sent, false);
+});

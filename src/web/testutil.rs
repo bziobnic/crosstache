@@ -37,7 +37,7 @@ pub(crate) fn test_context(
 ) -> super::context::EffectiveUiContext {
     use super::context::{
         CapabilitySummary, ConnectionSummary, ContextSource, ContextSources, EffectiveUiContext,
-        SecuritySummary, WorkspaceEntrySummary, WorkspaceSummary,
+        SecuritySummary, TransferSummary, WorkspaceEntrySummary, WorkspaceSummary,
     };
 
     EffectiveUiContext {
@@ -70,6 +70,9 @@ pub(crate) fn test_context(
         capabilities: CapabilitySummary::from_backend(backend),
         security: SecuritySummary {
             clipboard_timeout_seconds: clipboard_timeout,
+        },
+        transfers: TransferSummary {
+            max_concurrent_uploads: 3,
         },
         version: env!("CARGO_PKG_VERSION"),
     }
