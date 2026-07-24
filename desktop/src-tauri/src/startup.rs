@@ -8,9 +8,11 @@ use crosstache::config::setup::{
 use crosstache::config::{load_config_no_validation, Config};
 use crosstache::error::{CrosstacheError, SafeSetupError};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::{Emitter, State, WebviewWindow};
+use tauri::{Emitter, Manager, State, WebviewWindow};
 
 const STARTUP_STATE_EVENT: &str = "xv://startup-state";
 
@@ -34,17 +36,17 @@ pub enum StartupEvent {
     RetryRequested,
 }
 
-pub fn transition(state: StartupState, event: StartupEvent) -> StartupState {
+pub fn transition(state: StartupState, event: StartupEvent) -> Option<StartupState> {
     match (state, event) {
         (StartupState::LoadingConfiguration, StartupEvent::ConfigMissing) => {
-            StartupState::SetupRequired
+            Some(StartupState::SetupRequired)
         }
         (StartupState::LoadingConfiguration, StartupEvent::ConfigLoaded)
         | (StartupState::SetupRequired, StartupEvent::SetupVerified)
         | (StartupState::RecoverableFailure, StartupEvent::SetupVerified) => {
-            StartupState::Connecting
+            Some(StartupState::Connecting)
         }
-        (StartupState::Connecting, StartupEvent::Connected) => StartupState::Ready,
+        (StartupState::Connecting, StartupEvent::Connected) => Some(StartupState::Ready),
         (
             StartupState::LoadingConfiguration
             | StartupState::Connecting
@@ -52,11 +54,11 @@ pub fn transition(state: StartupState, event: StartupEvent) -> StartupState {
             | StartupState::RecoverableFailure
             | StartupState::Ready,
             StartupEvent::StartupFailed,
-        ) => StartupState::RecoverableFailure,
+        ) => Some(StartupState::RecoverableFailure),
         (StartupState::RecoverableFailure, StartupEvent::RetryRequested) => {
-            StartupState::LoadingConfiguration
+            Some(StartupState::LoadingConfiguration)
         }
-        _ => state,
+        _ => None,
     }
 }
 
@@ -145,28 +147,60 @@ enum StartupOperation {
     Setup,
 }
 
-pub struct StartupStore(Mutex<StartupData>);
+pub struct StartupStore {
+    data: Mutex<StartupData>,
+    launch_project: Result<Option<PathBuf>, SafeSetupError>,
+}
 
 impl StartupStore {
-    pub fn new(config_path: String) -> Self {
-        Self(Mutex::new(StartupData {
-            generation: 0,
-            snapshot: StartupSnapshot::loading(config_path),
-            active_operation: None,
-        }))
+    #[cfg(test)]
+    fn new(config_path: String) -> Self {
+        Self::with_launch_project(config_path, Ok(None))
+    }
+
+    fn with_launch_project(
+        config_path: String,
+        launch_project: Result<Option<PathBuf>, SafeSetupError>,
+    ) -> Self {
+        Self {
+            data: Mutex::new(StartupData {
+                generation: 0,
+                snapshot: StartupSnapshot::loading(config_path),
+                active_operation: None,
+            }),
+            launch_project,
+        }
     }
 
     pub fn from_environment() -> Self {
         let path = Config::get_config_path()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        Self::new(path)
+        let launch_project = std::env::current_dir()
+            .map_err(|_| {
+                generic_safe_error(
+                    "load-project",
+                    "The desktop launch directory could not be resolved.",
+                )
+            })
+            .and_then(|base| {
+                resolve_launch_project(
+                    std::env::args_os().skip(1),
+                    std::env::var_os("XV_DESKTOP_PROJECT"),
+                    &base,
+                )
+            });
+        Self::with_launch_project(path, launch_project)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, StartupData> {
-        self.0
+        self.data
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn launch_project(&self) -> Result<Option<PathBuf>, SafeSetupError> {
+        self.launch_project.clone()
     }
 
     pub fn snapshot(&self) -> StartupSnapshot {
@@ -187,7 +221,7 @@ impl StartupStore {
         if data.active_operation.is_some()
             || data.snapshot.state != StartupState::RecoverableFailure
             || transition(data.snapshot.state, StartupEvent::RetryRequested)
-                != StartupState::LoadingConfiguration
+                != Some(StartupState::LoadingConfiguration)
         {
             return None;
         }
@@ -215,7 +249,29 @@ impl StartupStore {
 
     fn advance(&self, generation: u64, event: StartupEvent, snapshot: StartupSnapshot) -> bool {
         let mut data = self.lock();
-        if data.generation != generation || transition(data.snapshot.state, event) != snapshot.state
+        if data.generation != generation
+            || transition(data.snapshot.state, event) != Some(snapshot.state)
+        {
+            return false;
+        }
+        data.snapshot = snapshot;
+        if is_terminal(data.snapshot.state) {
+            data.active_operation = None;
+        }
+        true
+    }
+
+    fn advance_from(
+        &self,
+        generation: u64,
+        expected: StartupState,
+        event: StartupEvent,
+        snapshot: StartupSnapshot,
+    ) -> bool {
+        let mut data = self.lock();
+        if data.generation != generation
+            || data.snapshot.state != expected
+            || transition(data.snapshot.state, event) != Some(snapshot.state)
         {
             return false;
         }
@@ -272,6 +328,23 @@ fn generic_safe_error(operation: &str, diagnostic: &str) -> SafeSetupError {
     error
 }
 
+async fn apply_setup_commit_contract<Commit, Connection>(
+    backend: &str,
+    vault: &str,
+    commit: Commit,
+    connection: Connection,
+) -> Result<SetupOutcome, SafeSetupError>
+where
+    Commit: Future<Output = Result<SetupOutcome, CrosstacheError>>,
+    Connection: Future<Output = Result<(), SafeSetupError>>,
+{
+    let outcome = commit
+        .await
+        .map_err(|error| safe_error("apply-setup", backend, vault, &error))?;
+    let _ = connection.await;
+    Ok(outcome)
+}
+
 fn emit_snapshot(window: &WebviewWindow, snapshot: &StartupSnapshot) {
     let _ = window.emit(STARTUP_STATE_EVENT, snapshot);
 }
@@ -307,20 +380,81 @@ fn publish_failure(
     );
 }
 
-pub fn project_directory() -> Result<Option<PathBuf>, SafeSetupError> {
-    let mut args = std::env::args_os().skip(1);
+fn bundled_recovery_url() -> tauri::Url {
+    tauri::Url::parse("tauri://localhost").expect("bundled recovery URL is a valid constant")
+}
+
+fn handle_server_result<T, E>(
+    store: &StartupStore,
+    generation: u64,
+    config_path: &str,
+    backend: &str,
+    vault: &str,
+    result: Result<T, E>,
+) -> Option<StartupSnapshot> {
+    if result.is_ok() {
+        return None;
+    }
+    let error = safe_error(
+        "serve",
+        backend,
+        vault,
+        &CrosstacheError::unknown("The embedded server stopped unexpectedly."),
+    );
+    let snapshot = StartupSnapshot::recoverable(error, config_path);
+    store
+        .advance_from(
+            generation,
+            StartupState::Ready,
+            StartupEvent::StartupFailed,
+            snapshot.clone(),
+        )
+        .then_some(snapshot)
+}
+
+fn resolve_launch_project<I>(
+    args: I,
+    environment_project: Option<OsString>,
+    launch_directory: &Path,
+) -> Result<Option<PathBuf>, SafeSetupError>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let mut requested = None;
     while let Some(arg) = args.next() {
         if arg == "--project" {
-            return args.next().map(PathBuf::from).map(Some).ok_or_else(|| {
+            requested = Some(args.next().map(PathBuf::from).ok_or_else(|| {
                 generic_safe_error(
                     "load-project",
                     "The desktop --project option did not include a directory.",
                 )
-            });
+            })?);
+            break;
         }
     }
+    let Some(requested) = requested.or_else(|| environment_project.map(PathBuf::from)) else {
+        return Ok(None);
+    };
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        launch_directory.join(requested)
+    };
+    let canonical = absolute.canonicalize().map_err(|_| {
+        generic_safe_error(
+            "load-project",
+            "The configured project directory could not be resolved.",
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(generic_safe_error(
+            "load-project",
+            "The configured project scope is not a directory.",
+        ));
+    }
 
-    Ok(std::env::var_os("XV_DESKTOP_PROJECT").map(PathBuf::from))
+    Ok(Some(canonical))
 }
 
 async fn setup_base(path: &Path) -> Config {
@@ -367,30 +501,43 @@ pub async fn apply_setup(
     })?;
     let base = setup_base(&path).await;
 
-    let outcome = match setup_and_save(request, base, &path).await {
+    let connection = async {
+        let connecting = StartupSnapshot::connecting(&backend, &vault, path.display().to_string());
+        if !advance_and_emit(
+            &window,
+            &state,
+            generation,
+            StartupEvent::SetupVerified,
+            connecting,
+        ) {
+            return Err(generic_safe_error(
+                "apply-setup",
+                "The setup attempt was superseded.",
+            ));
+        }
+
+        connect_saved_configuration(&window, &state, generation, &path, &backend, &vault)
+            .await
+            .map(|_| ())
+    };
+    let outcome = match apply_setup_commit_contract(
+        &backend,
+        &vault,
+        setup_and_save(request, base, &path),
+        connection,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
-        Err(error) => {
-            let safe = safe_error("apply-setup", &backend, &vault, &error);
+        Err(safe) => {
             publish_failure(&window, &state, generation, &path, safe.clone());
             return Err(safe);
         }
     };
 
-    let connecting = StartupSnapshot::connecting(&backend, &vault, path.display().to_string());
-    if !advance_and_emit(
-        &window,
-        &state,
-        generation,
-        StartupEvent::SetupVerified,
-        connecting,
-    ) {
-        return Err(generic_safe_error(
-            "apply-setup",
-            "The setup attempt was superseded.",
-        ));
-    }
-
-    connect_saved_configuration(&window, &state, generation, &path, &backend, &vault).await?;
+    // Persistence is the setup commit point. Any later connection failure has
+    // already published recovery (unless superseded) and must not be reported
+    // as a failed setup, because the verified configuration is committed.
     Ok(outcome)
 }
 
@@ -504,9 +651,28 @@ async fn connect_configuration(
         return Err(safe);
     }
 
+    let server_window = window.clone();
+    let server_handle = window.app_handle().clone();
+    let server_config_path = path.display().to_string();
+    let server_backend = backend.to_string();
+    let server_vault = vault.to_string();
     tauri::async_runtime::spawn(async move {
-        if server.serve().await.is_err() {
-            eprintln!("xv desktop embedded server stopped unexpectedly");
+        let result = server.serve().await;
+        let store = server_handle.state::<StartupStore>();
+        if let Some(recovery) = handle_server_result(
+            &store,
+            generation,
+            &server_config_path,
+            &server_backend,
+            &server_vault,
+            result,
+        ) {
+            // The stored snapshot is authoritative for the newly loaded
+            // recovery page (`startup_status`). A navigation error is ignored
+            // here so it cannot replace the original safe serve failure with
+            // a raw Tauri diagnostic.
+            let _ = server_window.navigate(bundled_recovery_url());
+            emit_snapshot(&server_window, &recovery);
         }
     });
     Ok(ready)
@@ -536,7 +702,7 @@ async fn run_startup_attempt(
         }
     };
 
-    let project = match project_directory() {
+    let project = match store.launch_project() {
         Ok(project) => project,
         Err(error) => {
             publish_failure(&window, store, generation, &path, error.clone());
@@ -603,7 +769,24 @@ mod tests {
     use super::*;
     use crosstache::config::setup::SetupRequest;
     use crosstache::error::SafeSetupError;
+    use std::ffi::OsString;
     use std::path::PathBuf;
+
+    fn ready_store() -> (StartupStore, u64) {
+        let store = StartupStore::new("/safe/xv.conf".into());
+        let generation = store.begin_attempt();
+        assert!(store.advance(
+            generation,
+            StartupEvent::ConfigLoaded,
+            StartupSnapshot::connecting("local", "vault", "/safe/xv.conf")
+        ));
+        assert!(store.advance(
+            generation,
+            StartupEvent::Connected,
+            StartupSnapshot::ready("local", "vault", "/safe/xv.conf")
+        ));
+        (store, generation)
+    }
 
     #[test]
     fn missing_config_routes_to_setup_required() {
@@ -612,7 +795,7 @@ mod tests {
                 StartupState::LoadingConfiguration,
                 StartupEvent::ConfigMissing
             ),
-            StartupState::SetupRequired
+            Some(StartupState::SetupRequired)
         );
     }
 
@@ -620,18 +803,18 @@ mod tests {
     fn verified_setup_connects_before_ready() {
         assert_eq!(
             transition(StartupState::SetupRequired, StartupEvent::SetupVerified),
-            StartupState::Connecting
+            Some(StartupState::Connecting)
         );
         assert_eq!(
             transition(StartupState::Connecting, StartupEvent::Connected),
-            StartupState::Ready
+            Some(StartupState::Ready)
         );
         assert_eq!(
             transition(
                 StartupState::RecoverableFailure,
                 StartupEvent::SetupVerified
             ),
-            StartupState::Connecting
+            Some(StartupState::Connecting)
         );
     }
 
@@ -642,14 +825,14 @@ mod tests {
                 StartupState::LoadingConfiguration,
                 StartupEvent::StartupFailed
             ),
-            StartupState::RecoverableFailure
+            Some(StartupState::RecoverableFailure)
         );
         assert_eq!(
             transition(
                 StartupState::RecoverableFailure,
                 StartupEvent::RetryRequested
             ),
-            StartupState::LoadingConfiguration
+            Some(StartupState::LoadingConfiguration)
         );
     }
 
@@ -660,16 +843,35 @@ mod tests {
                 StartupState::LoadingConfiguration,
                 StartupEvent::ConfigLoaded
             ),
-            StartupState::Connecting
+            Some(StartupState::Connecting)
         );
         assert_eq!(
             transition(StartupState::SetupRequired, StartupEvent::Connected),
-            StartupState::SetupRequired
+            None
         );
         assert_eq!(
             transition(StartupState::LoadingConfiguration, StartupEvent::Connected),
-            StartupState::LoadingConfiguration
+            None
         );
+    }
+
+    #[test]
+    fn invalid_same_state_event_is_rejected_without_mutation() {
+        let store = StartupStore::new("/safe/xv.conf".into());
+        let generation = store.begin_attempt();
+        let before = store.snapshot();
+
+        assert!(!store.advance(
+            generation,
+            StartupEvent::Connected,
+            StartupSnapshot::loading("/different/path")
+        ));
+        assert_eq!(store.snapshot(), before);
+        assert!(store.advance(
+            generation,
+            StartupEvent::ConfigMissing,
+            StartupSnapshot::setup_required("/safe/xv.conf")
+        ));
     }
 
     #[test]
@@ -802,5 +1004,158 @@ mod tests {
         assert!(store.begin_retry_attempt().is_some());
         assert!(store.begin_retry_attempt().is_none());
         assert!(store.begin_setup_attempt().is_none());
+    }
+
+    #[test]
+    fn post_commit_connection_failure_returns_success_with_committed_bytes() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let config_path = directory.path().join("xv.conf");
+            let prior = b"previous configuration bytes";
+            std::fs::write(&config_path, prior).unwrap();
+            let request = SetupRequest::Local {
+                store_path: directory.path().join("store"),
+                key_file: directory.path().join("identity.txt"),
+                vault: "committed-vault".into(),
+            };
+            let commit = setup_and_save(request, Config::default(), &config_path);
+            let connection_failure =
+                generic_safe_error("connect", "Injected post-commit connection failure.");
+            let store = StartupStore::new(config_path.display().to_string());
+            let loading = store.begin_attempt();
+            assert!(store.advance(
+                loading,
+                StartupEvent::ConfigMissing,
+                StartupSnapshot::setup_required(config_path.display().to_string())
+            ));
+            let setup = store.begin_setup_attempt().unwrap();
+            let connection = async {
+                assert!(store.advance(
+                    setup,
+                    StartupEvent::SetupVerified,
+                    StartupSnapshot::connecting(
+                        "local",
+                        "committed-vault",
+                        config_path.display().to_string(),
+                    )
+                ));
+                assert!(store.advance(
+                    setup,
+                    StartupEvent::StartupFailed,
+                    StartupSnapshot::recoverable(
+                        connection_failure.clone(),
+                        config_path.display().to_string(),
+                    )
+                ));
+                Err(connection_failure.clone())
+            };
+
+            let result =
+                apply_setup_commit_contract("local", "committed-vault", commit, connection)
+                    .await
+                    .unwrap();
+
+            assert_eq!(result.preview.backend, "local");
+            assert_eq!(result.preview.vault, "committed-vault");
+            assert_eq!(store.snapshot().state, StartupState::RecoverableFailure);
+            assert!(!serde_json::to_string(&result)
+                .unwrap()
+                .contains("connection_error"));
+            assert_ne!(std::fs::read(&config_path).unwrap(), prior);
+        });
+    }
+
+    #[test]
+    fn active_server_failure_enters_recovery_and_enables_retry() {
+        let (store, generation) = ready_store();
+
+        let recovery = handle_server_result(
+            &store,
+            generation,
+            "/safe/xv.conf",
+            "local",
+            "vault",
+            Err::<(), _>("injected serve failure"),
+        )
+        .unwrap();
+
+        assert_eq!(recovery.state, StartupState::RecoverableFailure);
+        assert_eq!(store.snapshot(), recovery);
+        assert!(store.begin_retry_attempt().is_some());
+        let serialized = serde_json::to_string(&recovery).unwrap();
+        assert!(!serialized.contains("injected serve failure"));
+        assert!(!serialized.contains("token="));
+        assert_eq!(bundled_recovery_url().as_str(), "tauri://localhost");
+    }
+
+    #[test]
+    fn stale_server_failure_cannot_replace_the_current_generation() {
+        let (store, stale_generation) = ready_store();
+        let current_generation = store.begin_attempt();
+        assert!(store.advance(
+            current_generation,
+            StartupEvent::ConfigLoaded,
+            StartupSnapshot::connecting("local", "new-vault", "/safe/xv.conf")
+        ));
+        assert!(store.advance(
+            current_generation,
+            StartupEvent::Connected,
+            StartupSnapshot::ready("local", "new-vault", "/safe/xv.conf")
+        ));
+        let current = store.snapshot();
+
+        assert!(handle_server_result(
+            &store,
+            stale_generation,
+            "/safe/xv.conf",
+            "local",
+            "vault",
+            Err::<(), _>("stale injected serve failure"),
+        )
+        .is_none());
+        assert_eq!(store.snapshot(), current);
+    }
+
+    #[test]
+    fn server_failure_is_inert_until_its_generation_is_ready() {
+        let store = StartupStore::new("/safe/xv.conf".into());
+        let generation = store.begin_attempt();
+        assert!(store.advance(
+            generation,
+            StartupEvent::ConfigLoaded,
+            StartupSnapshot::connecting("local", "vault", "/safe/xv.conf")
+        ));
+        let connecting = store.snapshot();
+
+        assert!(handle_server_result(
+            &store,
+            generation,
+            "/safe/xv.conf",
+            "local",
+            "vault",
+            Err::<(), _>("premature injected serve failure"),
+        )
+        .is_none());
+        assert_eq!(store.snapshot(), connecting);
+    }
+
+    #[test]
+    fn relative_launch_project_is_resolved_once_before_cwd_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(project.join("project")).unwrap();
+        let args = vec![OsString::from("--project"), OsString::from("project")];
+        let resolved = resolve_launch_project(args.clone(), None, directory.path()).unwrap();
+        let store = StartupStore::with_launch_project("/safe/xv.conf".into(), Ok(resolved.clone()));
+
+        assert_eq!(
+            store.launch_project().unwrap(),
+            Some(project.canonicalize().unwrap())
+        );
+        assert_eq!(store.launch_project().unwrap(), resolved);
+        assert_ne!(
+            resolve_launch_project(args, None, &project).unwrap(),
+            resolved
+        );
     }
 }
