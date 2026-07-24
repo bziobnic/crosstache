@@ -75,102 +75,48 @@ fn file_meta_path(store_path: &Path, vault: &str, name: &str) -> Result<PathBuf,
 // Metadata persisted alongside each file
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn sync_directory(path: &Path) -> Result<(), BackendError> {
-    #[cfg(unix)]
     fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|e| BackendError::Internal(format!("sync directory {}: {e}", path.display())))?;
-    #[cfg(not(unix))]
-    let _ = path;
-    #[cfg(test)]
     tests::record_file_event("sync-dir", path);
     Ok(())
 }
 
+#[cfg(test)]
 fn ensure_private_real_directory(path: &Path) -> Result<(), BackendError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(BackendError::Internal(format!(
-                    "refusing unsafe file transaction directory {}",
-                    path.display()
-                )));
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-                // SAFETY: `geteuid` takes no arguments and has no preconditions.
-                if metadata.uid() != unsafe { libc::geteuid() } {
-                    return Err(BackendError::Internal(
-                        "file transaction directory is not owned by the current user".into(),
-                    ));
-                }
-                if metadata.permissions().mode() & 0o777 != 0o700 {
-                    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(
-                        |error| {
-                            BackendError::Internal(format!(
-                                "repair file transaction directory permissions: {error}"
-                            ))
-                        },
-                    )?;
-                    sync_directory(path)?;
-                    if let Some(parent) = path.parent() {
-                        sync_directory(parent)?;
-                    }
-                }
-            }
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(BackendError::Internal(format!(
+                "refusing unsafe file transaction directory {}",
+                path.display()
+            )))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let parent = path.parent().ok_or_else(|| {
-                BackendError::Internal("file transaction directory has no parent".into())
-            })?;
-            ensure_existing_real_directory(parent)?
-                .then_some(())
-                .ok_or_else(|| {
-                    BackendError::Internal("file transaction parent does not exist".into())
-                })?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                let mut builder = fs::DirBuilder::new();
-                builder.mode(0o700);
-                builder.create(path).map_err(|error| {
-                    BackendError::Internal(format!("create file transaction directory: {error}"))
-                })?;
-            }
-            #[cfg(not(unix))]
             fs::create_dir(path).map_err(|error| {
-                BackendError::Internal(format!("create file transaction directory: {error}"))
+                BackendError::Internal(format!("create test transaction directory: {error}"))
             })?;
-            sync_directory(path)?;
-            sync_directory(parent)?;
         }
         Err(error) => {
             return Err(BackendError::Internal(format!(
-                "inspect file transaction directory: {error}"
+                "inspect test transaction directory: {error}"
             )))
         }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            BackendError::Internal(format!("set test transaction permissions: {error}"))
+        })?;
+    }
+    sync_directory(path)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
     }
     Ok(())
-}
-
-fn ensure_existing_real_directory(path: &Path) -> Result<bool, BackendError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(BackendError::Internal(format!(
-                "inspect local file directory: {error}"
-            )))
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(BackendError::Internal(
-            "refusing unsafe local file directory".into(),
-        ));
-    }
-    Ok(true)
 }
 
 struct LocalFileChain {
@@ -179,7 +125,6 @@ struct LocalFileChain {
     _vaults: AnchoredDir,
     vault: AnchoredDir,
     files: AnchoredDir,
-    transactions: Option<AnchoredDir>,
 }
 
 struct AnchoredDir {
@@ -338,12 +283,44 @@ impl AnchoredDir {
     }
 
     fn create_private_file(&self, name: &str, bytes: &[u8]) -> Result<(), BackendError> {
-        let mut file = self
-            .open_file_with_flags(name, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o600)?
-            .ok_or_else(|| BackendError::Internal("create anchored file failed".into()))?;
+        let mut file = self.create_private_file_handle(name)?;
         file.write_all(bytes)
             .map_err(|error| BackendError::Internal(format!("write anchored file: {error}")))?;
         file.sync_all()
+            .map_err(|error| BackendError::Internal(format!("sync anchored file: {error}")))
+    }
+
+    fn create_private_file_handle(&self, name: &str) -> Result<fs::File, BackendError> {
+        self.open_file_with_flags(name, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o600)?
+            .ok_or_else(|| BackendError::Internal("create anchored file failed".into()))
+    }
+
+    fn copy_file_to(
+        &self,
+        source: &str,
+        destination_dir: &Self,
+        destination: &str,
+    ) -> Result<(), BackendError> {
+        let mut input = self
+            .open_file(source)?
+            .ok_or_else(|| BackendError::Internal("missing anchored source file".into()))?;
+        let mut output = destination_dir.create_private_file_handle(destination)?;
+        let mut buffer = zeroize::Zeroizing::new([0_u8; 64 * 1024]);
+        loop {
+            let count = input
+                .read(&mut buffer[..])
+                .map_err(|error| BackendError::Internal(format!("read anchored file: {error}")))?;
+            if count == 0 {
+                break;
+            }
+            #[cfg(test)]
+            tests::record_transfer_chunk(count);
+            output
+                .write_all(&buffer[..count])
+                .map_err(|error| BackendError::Internal(format!("write anchored file: {error}")))?;
+        }
+        output
+            .sync_all()
             .map_err(|error| BackendError::Internal(format!("sync anchored file: {error}")))
     }
 
@@ -415,6 +392,8 @@ impl AnchoredDir {
     }
 
     fn read_file(&self, name: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        #[cfg(test)]
+        tests::record_full_file_read(name);
         let Some(mut file) = self.open_file(name)? else {
             return Ok(None);
         };
@@ -587,17 +566,147 @@ fn local_file_chain_paths(store_path: &Path, vault: &str) -> Result<[PathBuf; 4]
     ])
 }
 
+#[cfg(unix)]
+fn resolve_trusted_system_symlinks(path: &Path) -> Result<PathBuf, BackendError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| BackendError::Internal(format!("resolve current directory: {error}")))?
+            .join(path)
+    };
+    let mut resolved = PathBuf::from("/");
+    let mut tail = Vec::new();
+    let mut components = absolute.components();
+    let _ = components.next();
+    for component in components {
+        if !tail.is_empty() {
+            tail.push(component.as_os_str().to_os_string());
+            continue;
+        }
+        let candidate = resolved.join(component.as_os_str());
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if metadata.uid() == 0 && metadata.mode() & 0o022 == 0 {
+                    resolved = candidate.canonicalize().map_err(|error| {
+                        BackendError::Internal(format!(
+                            "resolve trusted system symlink {}: {error}",
+                            candidate.display()
+                        ))
+                    })?;
+                } else {
+                    return Err(BackendError::Internal(format!(
+                        "refusing unsafe configured-store symlink {}",
+                        candidate.display()
+                    )));
+                }
+            }
+            Ok(_) => resolved.push(component.as_os_str()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tail.push(component.as_os_str().to_os_string());
+            }
+            Err(error) => {
+                return Err(BackendError::Internal(format!(
+                    "inspect configured store component: {error}"
+                )))
+            }
+        }
+    }
+    for component in tail {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn open_configured_store(
+    store_path: &Path,
+    create: bool,
+) -> Result<Option<AnchoredDir>, BackendError> {
+    #[cfg(unix)]
+    {
+        use std::path::Component;
+
+        let logical = if store_path.is_absolute() {
+            store_path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| {
+                    BackendError::Internal(format!("resolve current directory: {error}"))
+                })?
+                .join(store_path)
+        };
+        let resolved = resolve_trusted_system_symlinks(store_path)?;
+        let mut components = resolved.components();
+        if !matches!(components.next(), Some(Component::RootDir)) {
+            return Err(BackendError::Internal(
+                "configured store did not resolve to an absolute path".into(),
+            ));
+        }
+        let names = components
+            .map(|component| match component {
+                Component::Normal(name) => name.to_str().map(str::to_string).ok_or_else(|| {
+                    BackendError::Internal("configured store component is not UTF-8".into())
+                }),
+                _ => Err(BackendError::Internal(
+                    "configured store contains unsafe path components".into(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut directory = AnchoredDir::open_path(Path::new("/"))?;
+        for (index, name) in names.iter().enumerate() {
+            let final_component = index + 1 == names.len();
+            directory = match directory.open_dir(name)? {
+                Some(next) => next,
+                None if create && final_component => {
+                    // `display` is diagnostic/test-hook state only; the handle
+                    // remains anchored to the already-validated resolved
+                    // parent. Preserve the configured spelling (for example
+                    // macOS `/var` rather than `/private/var`).
+                    if let Some(parent) = logical.parent() {
+                        directory.display = parent.to_path_buf();
+                    }
+                    directory.open_or_create_private_dir(name)?
+                }
+                None => return Ok(None),
+            };
+        }
+        directory.display = logical;
+        directory.repair_private_mode()?;
+        Ok(Some(directory))
+    }
+    #[cfg(not(unix))]
+    {
+        match AnchoredDir::open_path(store_path) {
+            Ok(directory) => Ok(Some(directory)),
+            Err(_) if create => {
+                let parent = store_path.parent().ok_or_else(|| {
+                    BackendError::Internal("configured store has no parent".into())
+                })?;
+                let parent = AnchoredDir::open_path(parent)?;
+                let name = store_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        BackendError::Internal("invalid configured store name".into())
+                    })?;
+                parent.open_or_create_private_dir(name).map(Some)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 fn existing_local_file_chain(
     store_path: &Path,
     vault: &str,
 ) -> Result<Option<LocalFileChain>, BackendError> {
     let chain = local_file_chain_paths(store_path, vault)?;
-    for directory in &chain {
-        if !ensure_existing_real_directory(directory)? {
-            return Ok(None);
-        }
-    }
-    Ok(Some(local_file_chain_from_paths(&chain)?))
+    let Some(store) = open_configured_store(store_path, false)? else {
+        return Ok(None);
+    };
+    local_file_chain_from_store(chain, store, false)
 }
 
 fn ensure_writable_local_file_chain(
@@ -605,50 +714,46 @@ fn ensure_writable_local_file_chain(
     vault: &str,
 ) -> Result<LocalFileChain, BackendError> {
     let chain = local_file_chain_paths(store_path, vault)?;
-    let store_parent = store_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    let store_parent = store_parent.unwrap_or_else(|| Path::new("."));
-    ensure_existing_real_directory(store_parent)?
-        .then_some(())
-        .ok_or_else(|| BackendError::Internal("local store parent does not exist".into()))?;
-    for directory in &chain {
-        ensure_private_real_directory(directory)?;
-    }
-    local_file_chain_from_paths(&chain)
+    let store = open_configured_store(store_path, true)?
+        .ok_or_else(|| BackendError::Internal("configured store parent does not exist".into()))?;
+    local_file_chain_from_store(chain, store, true)?
+        .ok_or_else(|| BackendError::Internal("failed to create local file chain".into()))
 }
 
-fn local_file_chain_from_paths(chain: &[PathBuf; 4]) -> Result<LocalFileChain, BackendError> {
-    let store = AnchoredDir::open_path(&chain[0])?;
-    store.repair_private_mode()?;
-    let vaults = store
-        .open_dir("vaults")?
-        .ok_or_else(|| BackendError::Internal("vaults directory disappeared".into()))?;
+fn local_file_chain_from_store(
+    chain: [PathBuf; 4],
+    store: AnchoredDir,
+    create: bool,
+) -> Result<Option<LocalFileChain>, BackendError> {
+    let vaults = match store.open_dir("vaults")? {
+        Some(directory) => directory,
+        None if create => store.open_or_create_private_dir("vaults")?,
+        None => return Ok(None),
+    };
     vaults.repair_private_mode()?;
     let vault_name = chain[2]
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| BackendError::Internal("vault name is not valid UTF-8".into()))?;
-    let vault = vaults
-        .open_dir(vault_name)?
-        .ok_or_else(|| BackendError::Internal("vault directory disappeared".into()))?;
+    let vault = match vaults.open_dir(vault_name)? {
+        Some(directory) => directory,
+        None if create => vaults.open_or_create_private_dir(vault_name)?,
+        None => return Ok(None),
+    };
     vault.repair_private_mode()?;
-    let files = vault
-        .open_dir("files")?
-        .ok_or_else(|| BackendError::Internal("files directory disappeared".into()))?;
+    let files = match vault.open_dir("files")? {
+        Some(directory) => directory,
+        None if create => vault.open_or_create_private_dir("files")?,
+        None => return Ok(None),
+    };
     files.repair_private_mode()?;
-    let transactions = files.open_dir(".transactions")?;
-    if let Some(transactions) = transactions.as_ref() {
-        transactions.repair_private_mode()?;
-    }
-    Ok(LocalFileChain {
+    Ok(Some(LocalFileChain {
         files_dir: chain[3].clone(),
         _store: store,
         _vaults: vaults,
         vault,
         files,
-        transactions,
-    })
+    }))
 }
 
 fn lock_local_file_chain(
@@ -743,6 +848,28 @@ impl LocalFileBackend {
             .filter(|secret| !secret.is_empty())
     }
 
+    fn active_secret_exists_in_chain(
+        &self,
+        chain: &LocalFileChain,
+        name: &str,
+    ) -> Result<bool, BackendError> {
+        let Some(secrets) = chain.vault.open_dir("secrets")? else {
+            return Ok(false);
+        };
+        for entry in secrets.entry_names()? {
+            if !entry.ends_with(".meta.json") {
+                continue;
+            }
+            let raw = secrets.read_file(&entry)?.ok_or_else(|| {
+                BackendError::Internal("active secret metadata disappeared".into())
+            })?;
+            if super::secrets::secret_name_from_metadata_bytes(&raw, &self.identity)? == name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     #[cfg(test)]
     fn file_crash(&self, stage: u8) -> Result<(), BackendError> {
         tests::run_file_crash_hook(&self.store_path, stage)
@@ -787,12 +914,9 @@ impl LocalFileBackend {
         existed: bool,
     ) -> Result<(), BackendError> {
         if existed {
-            let bytes = transaction.read_file(backup)?.ok_or_else(|| {
-                BackendError::Internal("missing local file transaction backup".into())
-            })?;
             let digest = Sha256::digest(active.as_bytes());
             let temp = format!(".recovering-{digest:x}");
-            files.create_private_file(&temp, &bytes)?;
+            transaction.copy_file_to(backup, files, &temp)?;
             files.rename_to(&temp, files, active)?;
         } else if files.file_exists(active)? {
             files.remove_file(active)?;
@@ -847,18 +971,19 @@ impl LocalFileBackend {
 
     fn recover_all_locked(&self, chain: &LocalFileChain) -> Result<(), BackendError> {
         self.file_swap_barrier("before-recovery", &chain.files_dir)?;
-        let Some(root) = chain.transactions.as_ref() else {
+        let Some(root) = chain.files.open_dir(".transactions")? else {
             return Ok(());
         };
+        root.repair_private_mode()?;
         for stem in root.entry_names()? {
-            self.recover_transaction_locked(chain, root, &stem)?;
+            self.recover_transaction_locked(chain, &root, &stem)?;
         }
         Ok(())
     }
 
     fn upload_transaction_locked(
         &self,
-        chain: &mut LocalFileChain,
+        chain: &LocalFileChain,
         request: FileUploadRequest,
         create_only: bool,
     ) -> Result<FileInfo, BackendError> {
@@ -893,39 +1018,34 @@ impl LocalFileBackend {
             metadata: request.metadata,
             tags: request.tags,
         };
-        if chain.transactions.is_none() {
-            chain.transactions = Some(chain.files.open_or_create_private_dir(".transactions")?);
-        }
-        let transaction_root = chain
-            .transactions
-            .as_ref()
-            .expect("transaction root was initialized");
+        let transaction_root = chain.files.open_or_create_private_dir(".transactions")?;
         if transaction_root.open_dir(&stem)?.is_some() {
-            self.recover_transaction_locked(chain, transaction_root, &stem)?;
+            self.recover_transaction_locked(chain, &transaction_root, &stem)?;
         }
         let transaction = transaction_root.open_or_create_private_dir(&stem)?;
 
         let staged = (|| {
-            let ciphertext = crypto::encrypt_bytes(&request.content, &self.recipients)?;
-            transaction.create_private_file("new.age", &ciphertext)?;
+            let output = transaction.create_private_file_handle("new.age")?;
+            let output =
+                crypto::encrypt_to_file_handle(output, &request.content, &self.recipients)?;
+            output
+                .sync_all()
+                .map_err(|error| BackendError::Internal(format!("sync ciphertext: {error}")))?;
             let metadata = serde_json::to_vec_pretty(&info)
                 .map_err(|e| BackendError::Internal(format!("serialize file meta: {e}")))?;
             transaction.create_private_file("new.meta.json", &metadata)?;
             if had_age {
-                let old_age = chain.files.read_file(&active_age)?.ok_or_else(|| {
-                    BackendError::Internal("missing active file ciphertext".into())
-                })?;
-                let old_meta = chain
+                chain
                     .files
-                    .read_file(&active_meta)?
-                    .ok_or_else(|| BackendError::Internal("missing active file metadata".into()))?;
-                transaction.create_private_file("old.age", &old_age)?;
-                transaction.create_private_file("old.meta.json", &old_meta)?;
+                    .copy_file_to(&active_age, &transaction, "old.age")?;
+                chain
+                    .files
+                    .copy_file_to(&active_meta, &transaction, "old.meta.json")?;
             }
             transaction.sync()
         })();
         if let Err(error) = staged {
-            let _ = Self::remove_transaction_dir(transaction_root, &transaction, &stem);
+            let _ = Self::remove_transaction_dir(&transaction_root, &transaction, &stem);
             return Err(error);
         }
         self.file_crash(0)?;
@@ -944,9 +1064,9 @@ impl LocalFileBackend {
         })();
         if let Err(error) = published {
             if transaction.file_exists("journal.json")? {
-                self.recover_transaction_locked(chain, transaction_root, &stem)?;
+                self.recover_transaction_locked(chain, &transaction_root, &stem)?;
             } else {
-                Self::remove_transaction_dir(transaction_root, &transaction, &stem)?;
+                Self::remove_transaction_dir(&transaction_root, &transaction, &stem)?;
             }
             return Err(error);
         }
@@ -961,7 +1081,7 @@ impl LocalFileBackend {
             Ok::<(), BackendError>(())
         })();
         if let Err(error) = activated {
-            self.recover_transaction_locked(chain, transaction_root, &stem)?;
+            self.recover_transaction_locked(chain, &transaction_root, &stem)?;
             return Err(error);
         }
         self.file_crash(2)?;
@@ -974,7 +1094,7 @@ impl LocalFileBackend {
             Ok::<(), BackendError>(())
         })();
         if let Err(error) = activated {
-            self.recover_transaction_locked(chain, transaction_root, &stem)?;
+            self.recover_transaction_locked(chain, &transaction_root, &stem)?;
             return Err(error);
         }
         self.file_crash(3)?;
@@ -983,7 +1103,7 @@ impl LocalFileBackend {
         transaction.sync()?;
         chain.files.sync()?;
         self.file_crash(4)?;
-        Self::remove_transaction_dir(transaction_root, &transaction, &stem)?;
+        Self::remove_transaction_dir(&transaction_root, &transaction, &stem)?;
         Ok(info)
     }
 
@@ -993,23 +1113,19 @@ impl LocalFileBackend {
         request: FileUploadRequest,
         create_only: bool,
     ) -> Result<FileInfo, BackendError> {
-        let mut chain = ensure_writable_local_file_chain(&self.store_path, vault)?;
+        let chain = ensure_writable_local_file_chain(&self.store_path, vault)?;
         let _lock = lock_local_file_chain(&self.store_path, vault, &chain)?;
         self.recover_all_locked(&chain)?;
         if let Some(secret_name) = Self::attachment_secret_name(&request.name) {
-            if !super::secrets::active_secret_exists_by_metadata_locked(
-                &self.store_path,
-                &self.identity,
-                vault,
-                secret_name,
-            )? {
+            self.file_swap_barrier("before-attachment-validation", &chain.vault.display)?;
+            if !self.active_secret_exists_in_chain(&chain, secret_name)? {
                 return Err(BackendError::NotFound {
                     name: secret_name.to_string(),
                     suggestion: None,
                 });
             }
         }
-        self.upload_transaction_locked(&mut chain, request, create_only)
+        self.upload_transaction_locked(&chain, request, create_only)
     }
 }
 
@@ -1068,13 +1184,13 @@ impl FileBackend for LocalFileBackend {
         self.file_swap_barrier("before-download-read", &chain.files_dir)?;
         let stem = storage_stem(name)?;
         let active_age = format!("{stem}.age");
-        let Some(ciphertext) = chain.files.read_file(&active_age)? else {
+        let Some(ciphertext) = chain.files.open_file(&active_age)? else {
             return Err(BackendError::NotFound {
                 name: name.to_string(),
                 suggestion: None,
             });
         };
-        Ok(crypto::decrypt_bytes(&ciphertext, &self.identity)?.to_vec())
+        Ok(crypto::decrypt_from_reader(ciphertext, &self.identity)?.to_vec())
     }
 
     async fn list_files(
@@ -1215,6 +1331,38 @@ mod tests {
     fn file_events() -> &'static Mutex<Vec<(String, PathBuf)>> {
         static EVENTS: OnceLock<Mutex<Vec<(String, PathBuf)>>> = OnceLock::new();
         EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    #[derive(Default)]
+    struct TransferStats {
+        max_chunk: usize,
+        full_reads: Vec<String>,
+    }
+
+    fn transfer_stats() -> &'static Mutex<TransferStats> {
+        static STATS: OnceLock<Mutex<TransferStats>> = OnceLock::new();
+        STATS.get_or_init(|| Mutex::new(TransferStats::default()))
+    }
+
+    pub(super) fn record_transfer_chunk(count: usize) {
+        let mut stats = transfer_stats().lock().unwrap();
+        stats.max_chunk = stats.max_chunk.max(count);
+    }
+
+    pub(super) fn record_full_file_read(name: &str) {
+        transfer_stats()
+            .lock()
+            .unwrap()
+            .full_reads
+            .push(name.to_string());
+    }
+
+    fn reset_transfer_stats() {
+        *transfer_stats().lock().unwrap() = TransferStats::default();
+    }
+
+    fn take_transfer_stats() -> TransferStats {
+        std::mem::take(&mut *transfer_stats().lock().unwrap())
     }
 
     fn file_event_test_lock() -> &'static tokio::sync::Mutex<()> {
@@ -2376,5 +2524,218 @@ mod tests {
 
         let mode = fs::metadata(&meta_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "meta.json mode should be 0600, got {mode:o}");
+    }
+
+    #[tokio::test]
+    async fn waiter_refreshes_transactions_created_after_its_pre_lock_snapshot() {
+        let (backend, _tmp) = test_file_backend();
+        let chain_a = ensure_writable_local_file_chain(&backend.store_path, "default").unwrap();
+        let chain_b = existing_local_file_chain(&backend.store_path, "default")
+            .unwrap()
+            .unwrap();
+        assert!(chain_a.files.open_dir(".transactions").unwrap().is_none());
+        assert!(chain_b.files.open_dir(".transactions").unwrap().is_none());
+
+        let lock_a = lock_local_file_chain(&backend.store_path, "default", &chain_a).unwrap();
+        install_file_crash(&backend.store_path, 2);
+        backend
+            .upload_transaction_locked(
+                &chain_a,
+                upload_request("partial.txt", b"partial", "partial"),
+                false,
+            )
+            .expect_err("first waiter should stop after half activation");
+        drop(lock_a);
+
+        let lock_b = lock_local_file_chain(&backend.store_path, "default", &chain_b).unwrap();
+        backend.recover_all_locked(&chain_b).unwrap();
+        assert!(!chain_b
+            .files
+            .file_exists(&format!("{}.age", storage_stem("partial.txt").unwrap()))
+            .unwrap());
+        assert!(chain_b
+            .files
+            .open_dir(".transactions")
+            .unwrap()
+            .unwrap()
+            .entry_names()
+            .unwrap()
+            .is_empty());
+        drop(lock_b);
+
+        assert!(matches!(
+            backend.download_file("default", "partial.txt", None).await,
+            Err(BackendError::NotFound { .. })
+        ));
+        assert!(backend
+            .list_files(
+                "default",
+                FileListRequest {
+                    prefix: None,
+                    groups: None,
+                    limit: None,
+                    delimiter: None,
+                },
+            )
+            .await
+            .unwrap()
+            .iter()
+            .all(|file| file.name != "partial.txt"));
+        assert!(matches!(
+            backend.delete_file("default", "partial.txt").await,
+            Err(BackendError::NotFound { .. })
+        ));
+        backend
+            .upload_file(
+                "default",
+                upload_request("different.txt", b"complete", "complete"),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_store_rejects_user_controlled_intermediate_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let external = tmp.path().join("external");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("sentinel"), b"untouched").unwrap();
+        let link = tmp.path().join("user-link");
+        std::os::unix::fs::symlink(&external, &link).unwrap();
+        let key_path = tmp.path().join("key.txt");
+        let recipients_path = tmp.path().join("recipients.txt");
+        let (identity, recipients) = generate_keypair(&key_path, &recipients_path).unwrap();
+        let before = tree_snapshot(&external);
+        let backend = LocalFileBackend::new(link.join("store"), identity, recipients);
+
+        let result = backend
+            .upload_file(
+                "default",
+                upload_request("proof.txt", b"proof", "proof"),
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(BackendError::Internal(message))
+            if message.contains("configured-store symlink")));
+        assert_eq!(tree_snapshot(&external), before);
+    }
+
+    #[tokio::test]
+    async fn large_file_replacement_streams_ciphertext_and_backups_in_bounded_chunks() {
+        let _guard = file_event_test_lock().lock().await;
+        let (backend, _tmp) = test_file_backend();
+        let old = vec![0x31; 4 * 1024 * 1024];
+        let new = vec![0xa7; 4 * 1024 * 1024];
+        backend
+            .upload_file(
+                "default",
+                FileUploadRequest {
+                    name: "large.bin".into(),
+                    content: old,
+                    content_type: None,
+                    groups: Vec::new(),
+                    metadata: HashMap::new(),
+                    tags: HashMap::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        reset_transfer_stats();
+        backend
+            .upload_file(
+                "default",
+                FileUploadRequest {
+                    name: "large.bin".into(),
+                    content: new.clone(),
+                    content_type: None,
+                    groups: Vec::new(),
+                    metadata: HashMap::new(),
+                    tags: HashMap::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .download_file("default", "large.bin", None)
+                .await
+                .unwrap(),
+            new
+        );
+        let stats = take_transfer_stats();
+        assert!(stats.max_chunk > 0);
+        assert!(stats.max_chunk <= 64 * 1024);
+        assert!(
+            stats.full_reads.iter().all(|name| !name.ends_with(".age")),
+            "ciphertext must not be materialized by read_file: {:?}",
+            stats.full_reads
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn attachment_validation_uses_retained_vault_generation_after_path_swap() {
+        let (backend, tmp) = test_file_backend();
+        let vault = tmp.path().join("vaults/default");
+        let secrets = vault.join("secrets");
+        fs::create_dir(&secrets).unwrap();
+        let now = Utc::now();
+        let metadata = super::super::secrets::SecretMeta {
+            name: "source".into(),
+            original_name: "source".into(),
+            content_type: "text/plain".into(),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+            expires_on: None,
+            not_before: None,
+            tags: HashMap::new(),
+            groups: Vec::new(),
+            note: None,
+            folder: None,
+            version: "v1".into(),
+            revision: "retained".into(),
+        };
+        fs::write(
+            secrets.join("source.meta.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let parked = tmp.path().join("parked-vault");
+        let external = tmp.path().join("external-vault");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("sentinel"), b"untouched").unwrap();
+        let before = tree_snapshot(&external);
+        install_file_swap(
+            &backend.store_path,
+            "before-attachment-validation",
+            &external,
+            &parked,
+        );
+
+        backend
+            .upload_file(
+                "default",
+                upload_request("attachments/source/proof.txt", b"proof", "proof"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tree_snapshot(&external), before);
+        fs::remove_file(&vault).unwrap();
+        fs::rename(&parked, &vault).unwrap();
+        assert_eq!(
+            backend
+                .download_file("default", "attachments/source/proof.txt", None)
+                .await
+                .unwrap(),
+            b"proof"
+        );
     }
 }

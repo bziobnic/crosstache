@@ -691,34 +691,20 @@ pub(crate) fn lock_vault_shared(vault_dir: &Path) -> Result<fs::File, BackendErr
 }
 
 #[cfg(feature = "file-ops")]
-pub(crate) fn active_secret_exists_by_metadata_locked(
-    store_path: &Path,
+pub(crate) fn secret_name_from_metadata_bytes(
+    raw: &[u8],
     identity: &age::x25519::Identity,
-    vault: &str,
-    name: &str,
-) -> Result<bool, BackendError> {
-    let secrets = secrets_dir(store_path, vault)?;
-    if !secrets.exists() {
-        return Ok(false);
-    }
-    for entry in fs::read_dir(&secrets)
-        .map_err(|e| BackendError::Internal(format!("read secrets dir: {e}")))?
-        .flatten()
-    {
-        let path = entry.path();
-        if !path.is_file()
-            || !path
-                .file_name()
-                .and_then(|file| file.to_str())
-                .is_some_and(|file| file.ends_with(".meta.json"))
-        {
-            continue;
-        }
-        if read_meta(&path, identity)?.name == name {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+) -> Result<String, BackendError> {
+    let metadata: SecretMeta = if crypto::is_age_encrypted(raw) {
+        let plaintext = crypto::decrypt_bytes(raw, identity)
+            .map_err(|e| BackendError::Internal(format!("decrypt secret metadata: {e}")))?;
+        serde_json::from_slice(&plaintext)
+            .map_err(|e| BackendError::Internal(format!("parse secret metadata: {e}")))?
+    } else {
+        serde_json::from_slice(raw)
+            .map_err(|e| BackendError::Internal(format!("parse secret metadata: {e}")))?
+    };
+    Ok(metadata.name)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

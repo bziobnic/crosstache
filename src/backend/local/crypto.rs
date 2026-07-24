@@ -24,14 +24,6 @@ pub fn encrypt_to_file(
     plaintext: &[u8],
     recipients: &[age::x25519::Recipient],
 ) -> Result<(), BackendError> {
-    let boxed_recipients: Vec<Box<dyn age::Recipient + Send>> = recipients
-        .iter()
-        .map(|r| Box::new(r.clone()) as Box<dyn age::Recipient + Send>)
-        .collect();
-
-    let encryptor = age::Encryptor::with_recipients(boxed_recipients)
-        .ok_or_else(|| BackendError::Internal("no recipients provided".into()))?;
-
     #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -48,6 +40,29 @@ pub fn encrypt_to_file(
     let file = File::create(path)
         .map_err(|e| BackendError::Internal(format!("create {}: {e}", path.display())))?;
 
+    let file = encrypt_to_file_handle(file, plaintext, recipients)?;
+    file.sync_all()
+        .map_err(|e| BackendError::Internal(format!("sync {}: {e}", path.display())))?;
+
+    Ok(())
+}
+
+/// Stream `plaintext` through age into an already-open output handle.
+///
+/// The caller retains control of how the handle was opened (for example via
+/// `openat(2)` with `O_NOFOLLOW`) and receives it back after age has flushed
+/// its final authentication tag.
+pub fn encrypt_to_file_handle(
+    file: File,
+    plaintext: &[u8],
+    recipients: &[age::x25519::Recipient],
+) -> Result<File, BackendError> {
+    let boxed_recipients: Vec<Box<dyn age::Recipient + Send>> = recipients
+        .iter()
+        .map(|r| Box::new(r.clone()) as Box<dyn age::Recipient + Send>)
+        .collect();
+    let encryptor = age::Encryptor::with_recipients(boxed_recipients)
+        .ok_or_else(|| BackendError::Internal("no recipients provided".into()))?;
     let mut writer = encryptor
         .wrap_output(file)
         .map_err(|e| BackendError::Internal(format!("encrypt init: {e}")))?;
@@ -58,9 +73,7 @@ pub fn encrypt_to_file(
 
     writer
         .finish()
-        .map_err(|e| BackendError::Internal(format!("encrypt finish: {e}")))?;
-
-    Ok(())
+        .map_err(|e| BackendError::Internal(format!("encrypt finish: {e}")))
 }
 
 /// The age v1 ASCII-armor / binary header prefix. Used to detect whether a
@@ -131,6 +144,34 @@ pub fn decrypt_bytes(
         .map_err(|e| BackendError::Internal(format!("read plaintext: {e}")))?;
 
     Ok(buf)
+}
+
+/// Stream age ciphertext from an already-open reader and return plaintext.
+///
+/// File operations use this instead of first materializing the entire
+/// ciphertext in memory. The returned plaintext remains zeroized on drop.
+pub fn decrypt_from_reader<R: Read>(
+    reader: R,
+    identity: &age::x25519::Identity,
+) -> Result<Zeroizing<Vec<u8>>, BackendError> {
+    let decryptor = match age::Decryptor::new_buffered(BufReader::new(reader))
+        .map_err(|e| BackendError::Internal(format!("decrypt header: {e}")))?
+    {
+        age::Decryptor::Recipients(d) => d,
+        _other => {
+            return Err(BackendError::Internal(
+                "unexpected passphrase-encrypted data".into(),
+            ));
+        }
+    };
+    let mut decrypted = decryptor
+        .decrypt(std::iter::once(identity as &dyn age::Identity))
+        .map_err(|e| BackendError::Internal(format!("decrypt: {e}")))?;
+    let mut plaintext = Zeroizing::new(Vec::new());
+    decrypted
+        .read_to_end(&mut plaintext)
+        .map_err(|e| BackendError::Internal(format!("read plaintext: {e}")))?;
+    Ok(plaintext)
 }
 
 /// Read and decrypt the age file at `path`, returning the plaintext as a

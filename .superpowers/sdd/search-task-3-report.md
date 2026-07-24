@@ -226,3 +226,45 @@ addressed test-first:
 - `cargo check --all-targets --all-features` — passed
 - `cargo fmt --all -- --check` — passed
 - `git diff --check` — passed
+
+## Fifth review remediation
+
+The remaining transaction freshness, configured-store ancestry, memory
+amplification, and attachment authorization findings were addressed test-first:
+
+- Recovery never relies on a pre-lock `.transactions` snapshot. Every recovery
+  opens the transaction root through the retained files handle after acquiring
+  the vault lock. A deterministic two-waiter regression snapshots an absent
+  root twice, leaves a half-activated create from waiter A, and proves waiter B
+  discovers and removes it before a different-name upload succeeds.
+- The configured store is opened component-by-component from the filesystem
+  root (or resolved current directory) using anchored no-follow directory
+  opens. Only root-owned, non-group/world-writable system symlinks such as the
+  macOS `/var` indirection are resolved. A user-controlled intermediate
+  symlink is rejected before any external-tree mutation.
+- File ciphertext is encrypted directly into an anchored transaction handle
+  and decrypted directly from an anchored active-file handle. Replacement
+  backups and crash restores copy through a zeroizing 64 KiB buffer instead of
+  materializing complete ciphertext files. A 4 MiB replace/download regression
+  verifies exact bytes, bounded chunks, and no full `.age` reads.
+- Attachment authorization scans active secret metadata through the retained
+  vault generation after locking. A deterministic vault-path swap immediately
+  before validation proves the original generation authorizes and receives the
+  attachment while the replacement tree remains byte-for-byte unchanged.
+
+### Final verification after fifth remediation
+
+- `cargo test --features ui backend::local::files::tests --lib -- --test-threads=1`
+  — 28 passed
+- `cargo test --features ui web::files::tests --lib` — 21 passed
+- `cargo test --features ui web:: --lib` — 166 passed
+- Hermetic `cargo test --features ui --lib` — 1090 passed, 1 ignored
+- `cargo clippy --features ui --all-targets -- -D warnings` — passed
+- `cargo check --all-targets --all-features` — passed
+- `cargo fmt --all -- --check` — passed
+- `git diff --check` — passed
+- `cargo test --features ui --all-targets` reached both complete library and
+  binary suites at 1090 passed/1 ignored, then stopped at the pre-existing
+  host-clipboard integration test because this environment returned an empty
+  clipboard immediately after setting it. The isolated clipboard rerun failed
+  identically; it is unrelated to local file storage.
