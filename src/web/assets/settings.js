@@ -164,7 +164,11 @@ export function buildHelpDiagnostics(context) {
   const policyValue = safe.security?.clipboard_timeout_seconds;
   const hasPolicy = Number.isSafeInteger(policyValue) && policyValue >= 0;
   const policy = hasPolicy ? policyValue : null;
-  const effectiveTimeout = safe.preferences?.exposure_timeout_seconds;
+  const requestedTimeout = safe.preferences?.exposure_timeout_seconds;
+  const hasRequestedTimeout = Number.isSafeInteger(requestedTimeout) && requestedTimeout >= 0;
+  const effectiveTimeout = hasRequestedTimeout
+    ? boundTimeout(requestedTimeout, policyValue)
+    : null;
   const lines = [
     `Crosstache ${String(safe.version ?? 'unknown')}`,
     cleanLine('Config', safe.config_path ?? safe.configPath),
@@ -177,7 +181,7 @@ export function buildHelpDiagnostics(context) {
     hasPolicy
       ? cleanLine('Security policy limit (seconds)', policy > 0 ? policy : 'none')
       : null,
-    Number.isSafeInteger(effectiveTimeout) && effectiveTimeout >= 0
+    hasRequestedTimeout
       ? cleanLine('Effective protected-value timeout (seconds)', effectiveTimeout)
       : null,
     cleanLine(

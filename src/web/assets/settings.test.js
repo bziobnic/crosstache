@@ -246,6 +246,25 @@ test('zero security policy is reported as no limit without changing effective ti
   assert.match(diagnostics, /Effective protected-value timeout \(seconds\): 0/);
 });
 
+test('diagnostics apply the shared timeout boundary to every available policy combination', () => {
+  const cases = [
+    { requested: 30, policy: 17, effective: 17 },
+    { requested: 23, policy: 0, effective: 23 },
+    { requested: 0, policy: 17, effective: 0 },
+  ];
+  for (const { requested, policy, effective } of cases) {
+    const diagnostics = buildHelpDiagnostics({
+      ...diagnosticContext,
+      security: { clipboard_timeout_seconds: policy },
+      preferences: { exposure_timeout_seconds: requested },
+    });
+    assert.match(
+      diagnostics,
+      new RegExp(`Effective protected-value timeout \\(seconds\\): ${effective}`),
+    );
+  }
+});
+
 test('diagnostics do not invent unavailable security or preference values', () => {
   const diagnostics = buildHelpDiagnostics({ version: '0.26.2' });
   assert.ok(!diagnostics.includes('Security policy limit'));

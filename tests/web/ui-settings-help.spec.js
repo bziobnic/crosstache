@@ -200,6 +200,17 @@ test('failed preference read still enforces the live policy at Settings, reveal,
     .toHaveText('17 seconds (policy limit)');
   await page.keyboard.press('Escape');
 
+  await page.locator('#help-open').click();
+  const help = page.getByRole('dialog', { name: 'Help' });
+  await help.getByRole('button', { name: 'Copy redacted diagnostics' }).click();
+  await expect(help.locator('#help-copy-status')).toHaveText('Diagnostics copied.');
+  const diagnostics = await page.evaluate(() => navigator.clipboard.readText());
+  expect(diagnostics).toContain('Security policy limit (seconds): 17');
+  expect(diagnostics).toContain('Effective protected-value timeout (seconds): 17');
+  expect(diagnostics).not.toContain('Effective protected-value timeout (seconds): 30');
+  expect(preferenceWrites).toBe(0);
+  await page.keyboard.press('Escape');
+
   await page.locator('#new-secret').click();
   await page.locator('#secret-form input[name="name"]').fill('policy-clamped');
   await page.locator('#secret-form textarea[name="value"]').fill('fixture-only');
