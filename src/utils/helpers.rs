@@ -18,7 +18,21 @@ type FileMode = u32;
 enum FileOpenBehavior {
     Replace,
     Exclusive,
+    #[cfg(any(feature = "ui", test))]
     Lock,
+}
+
+impl FileOpenBehavior {
+    fn is_lock(self) -> bool {
+        #[cfg(any(feature = "ui", test))]
+        {
+            matches!(self, Self::Lock)
+        }
+        #[cfg(not(any(feature = "ui", test)))]
+        {
+            false
+        }
+    }
 }
 
 /// Write bytes to a file with mode 0o600 (owner read/write only).
@@ -111,6 +125,7 @@ pub fn write_file_no_follow(path: &Path, content: &[u8], overwrite: bool) -> Res
 ///
 /// Missing parent directories are created owner-only (0700 on Unix), and the
 /// lock file itself is created owner-only (0600 on Unix).
+#[cfg(any(feature = "ui", test))]
 pub fn open_private_lock_file_no_follow(path: &Path) -> Result<std::fs::File> {
     write_file_no_follow_with_mode(path, &[], FileOpenBehavior::Lock, 0o600, 0o700)
 }
@@ -253,6 +268,7 @@ fn write_file_no_follow_with_mode(
         let (access_mode, create_mode) = match behavior {
             FileOpenBehavior::Replace => (libc::O_WRONLY, libc::O_TRUNC),
             FileOpenBehavior::Exclusive => (libc::O_WRONLY, libc::O_EXCL),
+            #[cfg(any(feature = "ui", test))]
             FileOpenBehavior::Lock => (libc::O_RDWR, libc::O_EXCL),
         };
         let mut fd = unsafe {
@@ -264,7 +280,7 @@ fn write_file_no_follow_with_mode(
             )
         };
         if fd < 0
-            && matches!(behavior, FileOpenBehavior::Lock)
+            && behavior.is_lock()
             && std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists
         {
             fd = unsafe {
@@ -352,6 +368,7 @@ fn write_file_no_follow_with_mode(
             FileOpenBehavior::Exclusive => {
                 options.create_new(true);
             }
+            #[cfg(any(feature = "ui", test))]
             FileOpenBehavior::Lock => {
                 options.read(true);
             }

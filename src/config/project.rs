@@ -98,6 +98,7 @@ pub fn resolve_effective_backend<'a>(
 }
 
 /// Display-safe provenance for the effective backend selection.
+#[cfg(any(feature = "ui", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackendSelectionSource {
     Cli,
@@ -109,6 +110,7 @@ pub(crate) enum BackendSelectionSource {
 
 /// A config snapshot whose backend has been folded through the same
 /// precedence chain used by CLI and desktop web startup.
+#[cfg(any(feature = "ui", test))]
 pub(crate) struct EffectiveBackendConfig {
     pub(crate) config: crate::config::Config,
     pub(crate) source: BackendSelectionSource,
@@ -120,6 +122,7 @@ pub(crate) struct EffectiveBackendConfig {
 /// global config > built-in Azure. The input may be either a raw config
 /// loaded by the desktop shell or the provenance-enriched config prepared by
 /// `main.rs`; both produce the same effective snapshot.
+#[cfg(any(feature = "ui", test))]
 pub(crate) async fn resolve_effective_backend_config(
     config: &crate::config::Config,
     cwd: &Path,
@@ -341,6 +344,7 @@ pub(crate) enum EnvironmentSelectionSource {
 pub(crate) struct ResolvedEnvironment<'a> {
     pub(crate) name: &'a str,
     pub(crate) profile: &'a EnvProfile,
+    #[cfg_attr(not(any(feature = "ui", test)), allow(dead_code))]
     pub(crate) source: EnvironmentSelectionSource,
 }
 

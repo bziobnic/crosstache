@@ -32,6 +32,7 @@ pub trait FileBackend: Send + Sync {
     }
 
     /// Truthful implementation-side capability for atomic create-only upload.
+    #[cfg(any(feature = "ui", test))]
     fn supports_atomic_create(&self) -> bool {
         false
     }
@@ -49,6 +50,7 @@ pub trait FileBackend: Send + Sync {
     ///
     /// Backends that cannot provide this atomic guarantee reject the
     /// operation; callers must not emulate it with a check-then-upload race.
+    #[cfg(any(feature = "ui", test))]
     async fn upload_file_if_absent(
         &self,
         _vault: &str,

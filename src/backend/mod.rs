@@ -293,7 +293,7 @@ pub(crate) fn atomic_rename_available(backend: &dyn Backend) -> bool {
 }
 
 /// Whether file upload conflict policies can use a real create-only primitive.
-#[cfg(feature = "file-ops")]
+#[cfg(all(feature = "file-ops", any(feature = "ui", test)))]
 pub(crate) fn atomic_file_create_available(backend: &dyn Backend) -> bool {
     backend.capabilities().has_atomic_file_create
         && backend

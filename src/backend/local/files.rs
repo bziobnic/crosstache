@@ -133,6 +133,11 @@ struct AnchoredDir {
 }
 
 #[cfg(unix)]
+type AnchoredFileMode = libc::mode_t;
+#[cfg(not(unix))]
+type AnchoredFileMode = u32;
+
+#[cfg(unix)]
 #[derive(Debug)]
 struct StableSymlink {
     target: std::ffi::OsString,
@@ -140,6 +145,13 @@ struct StableSymlink {
     mode: u32,
     parent_uid: libc::uid_t,
     parent_mode: u32,
+}
+
+#[cfg(unix)]
+#[allow(clippy::useless_conversion)]
+fn stable_symlink_mode(mode: libc::mode_t) -> u32 {
+    // `mode_t` is narrower on macOS but already `u32` on Linux.
+    u32::from(mode)
 }
 
 impl AnchoredDir {
@@ -308,7 +320,7 @@ impl AnchoredDir {
         Ok(Some(StableSymlink {
             target: OsString::from_vec(bytes),
             uid: before.st_uid,
-            mode: u32::from(before.st_mode),
+            mode: stable_symlink_mode(before.st_mode),
             parent_uid: parent.uid(),
             parent_mode: parent.mode(),
         }))
@@ -426,7 +438,7 @@ impl AnchoredDir {
         &self,
         name: &str,
         flags: libc::c_int,
-        mode: libc::mode_t,
+        mode: AnchoredFileMode,
     ) -> Result<Option<fs::File>, BackendError> {
         validate_relative_component(name)?;
         #[cfg(unix)]
@@ -467,7 +479,6 @@ impl AnchoredDir {
         }
         #[cfg(not(unix))]
         {
-            use std::os::windows::fs::OpenOptionsExt;
             let mut options = fs::OpenOptions::new();
             options.read(flags & libc::O_RDONLY == libc::O_RDONLY);
             options.write(flags & libc::O_WRONLY != 0);
@@ -546,39 +557,47 @@ impl AnchoredDir {
     }
 
     fn remove_file(&self, name: &str) -> Result<(), BackendError> {
-        self.unlink(name, 0)
-    }
-
-    fn remove_dir(&self, name: &str) -> Result<(), BackendError> {
-        self.unlink(name, libc::AT_REMOVEDIR)
-    }
-
-    fn unlink(&self, name: &str, flags: libc::c_int) -> Result<(), BackendError> {
         validate_relative_component(name)?;
         #[cfg(unix)]
         {
-            use std::ffi::CString;
-            use std::os::fd::AsRawFd;
-            let name = CString::new(name)
-                .map_err(|_| BackendError::Internal("unlink name contains NUL".into()))?;
-            let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), flags) };
-            if result < 0 {
-                return Err(BackendError::Internal(format!(
-                    "remove anchored entry: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            Ok(())
+            self.unlink(name, 0)
         }
         #[cfg(not(unix))]
-        if flags == libc::AT_REMOVEDIR {
-            fs::remove_dir(self.display.join(name)).map_err(|error| {
-                BackendError::Internal(format!("remove anchored directory: {error}"))
-            })
-        } else {
+        {
             fs::remove_file(self.display.join(name))
                 .map_err(|error| BackendError::Internal(format!("remove anchored file: {error}")))
         }
+    }
+
+    fn remove_dir(&self, name: &str) -> Result<(), BackendError> {
+        validate_relative_component(name)?;
+        #[cfg(unix)]
+        {
+            self.unlink(name, libc::AT_REMOVEDIR)
+        }
+        #[cfg(not(unix))]
+        {
+            fs::remove_dir(self.display.join(name)).map_err(|error| {
+                BackendError::Internal(format!("remove anchored directory: {error}"))
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn unlink(&self, name: &str, flags: libc::c_int) -> Result<(), BackendError> {
+        validate_relative_component(name)?;
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        let name = CString::new(name)
+            .map_err(|_| BackendError::Internal("unlink name contains NUL".into()))?;
+        let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), flags) };
+        if result < 0 {
+            return Err(BackendError::Internal(format!(
+                "remove anchored entry: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
     }
 
     fn entry_names(&self) -> Result<Vec<String>, BackendError> {
@@ -1220,6 +1239,7 @@ impl FileBackend for LocalFileBackend {
         Ok(())
     }
 
+    #[cfg(any(feature = "ui", test))]
     fn supports_atomic_create(&self) -> bool {
         true
     }
@@ -1234,6 +1254,7 @@ impl FileBackend for LocalFileBackend {
         self.upload_with_policy(vault, request, false)
     }
 
+    #[cfg(any(feature = "ui", test))]
     async fn upload_file_if_absent(
         &self,
         vault: &str,

@@ -151,6 +151,7 @@ fn materialize(registry: &BackendRegistry, entry: &WorkspaceEntry) -> Result<Arc
 /// workspace may select a different named backend, so this falls back to a
 /// lazy one-name registry built from the same config. This preserves the
 /// workspace layer's "construct only what is touched" rule.
+#[cfg(any(feature = "ui", test))]
 pub(crate) fn materialize_default_entry(
     config: &crate::config::Config,
     workspace: &Workspace,

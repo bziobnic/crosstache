@@ -133,6 +133,7 @@ impl ContextManager {
     /// Display and server startup paths use this seam so project discovery
     /// and local-context discovery describe the same directory without
     /// changing the process-wide current directory.
+    #[cfg(any(feature = "ui", test))]
     pub(crate) async fn load_for_cwd(cwd: &std::path::Path) -> Result<Self> {
         Self::load_from(Some(cwd)).await
     }
