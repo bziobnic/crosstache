@@ -280,29 +280,33 @@ impl AnchoredDir {
         let parent = self.file.metadata().map_err(|error| {
             BackendError::Internal(format!("inspect symlink parent handle: {error}"))
         })?;
-        let mut bytes = vec![0_u8; 4096];
-        let length = unsafe {
-            libc::readlinkat(
-                self.file.as_raw_fd(),
-                name.as_ptr(),
-                bytes.as_mut_ptr().cast(),
-                bytes.len(),
-            )
+        let read_target = || -> Result<Vec<u8>, BackendError> {
+            let mut bytes = vec![0_u8; 4096];
+            let length = unsafe {
+                libc::readlinkat(
+                    self.file.as_raw_fd(),
+                    name.as_ptr(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                )
+            };
+            if length < 0 {
+                return Err(BackendError::Internal(format!(
+                    "read anchored symlink: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let length = usize::try_from(length)
+                .map_err(|_| BackendError::Internal("invalid symlink length".into()))?;
+            if length == bytes.len() {
+                return Err(BackendError::Internal(
+                    "configured-store symlink target is too long".into(),
+                ));
+            }
+            bytes.truncate(length);
+            Ok(bytes)
         };
-        if length < 0 {
-            return Err(BackendError::Internal(format!(
-                "read anchored symlink: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let length = usize::try_from(length)
-            .map_err(|_| BackendError::Internal("invalid symlink length".into()))?;
-        if length == bytes.len() {
-            return Err(BackendError::Internal(
-                "configured-store symlink target is too long".into(),
-            ));
-        }
-        bytes.truncate(length);
+        let bytes = read_target()?;
         #[cfg(test)]
         tests::run_configured_link_swap_hook(&self.display.join(name.to_string_lossy().as_ref()))?;
         let after = inspect()?.ok_or_else(|| {
@@ -312,6 +316,7 @@ impl AnchoredDir {
             || before.st_ino != after.st_ino
             || before.st_uid != after.st_uid
             || before.st_mode != after.st_mode
+            || bytes != read_target()?
         {
             return Err(BackendError::Internal(
                 "configured-store symlink changed during inspection".into(),
