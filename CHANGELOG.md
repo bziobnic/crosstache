@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.30.0 — Rotation scheduling, local audit trail, git-native versioning, first-party CI/CD (2026-07-25)
 
 ### Added
 
