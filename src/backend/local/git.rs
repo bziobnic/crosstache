@@ -185,11 +185,16 @@ impl LocalGitStore {
         }
 
         let mut args: Vec<String> = Vec::new();
-        // Supply an identity only when the user has none configured, so
-        // existing user.name/user.email and signing settings win.
-        if !self.has_committer_identity() {
+        // Supply the missing halves of the committer identity, independently:
+        // git needs BOTH user.name and user.email (auto-detection can fail in
+        // minimal environments), and a commit that dies on identity would error
+        // the mutation *after* the secret write already landed. Whichever half
+        // the user configured always wins — only the absent half is filled in.
+        if !self.has_git_config("user.name") {
             args.push("-c".into());
             args.push("user.name=crosstache".into());
+        }
+        if !self.has_git_config("user.email") {
             args.push("-c".into());
             args.push("user.email=xv@localhost".into());
         }
@@ -236,9 +241,9 @@ impl LocalGitStore {
         Ok(())
     }
 
-    /// Whether git can already determine a committer identity.
-    fn has_committer_identity(&self) -> bool {
-        self.run(&["config", "user.email"])
+    /// Whether git resolves a non-empty value for `key` (any config scope).
+    fn has_git_config(&self, key: &str) -> bool {
+        self.run(&["config", key])
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false)
     }
@@ -684,6 +689,54 @@ mod tests {
             !diff.contains("plaintext-metadata-value"),
             "diff must not print file contents: {diff}"
         );
+    }
+
+    #[test]
+    fn commit_fills_only_the_missing_identity_half() {
+        // Bugbot (PR #384): email configured but no name meant no fallback at
+        // all, so the commit died on identity AFTER the secret write landed.
+        // Each half must be filled independently, preserving the configured one.
+        let (_tmp, git) = fixture();
+        git.ensure_repo().unwrap();
+        // Repo-local config: email present, name absent. HOME is not touched,
+        // but a developer's global name could leak in — remove it from this
+        // repo's resolution by setting local scope only and unsetting nothing
+        // global (local email + fallback name is the asserted pair below).
+        git.run(&["config", "user.email", "operator@example.com"])
+            .unwrap();
+        let has_global_name = git.run(&["config", "user.name"]).is_ok();
+
+        write_secret(&git, "A", "ct");
+        git.commit("set A")
+            .expect("a half-configured identity must not fail the commit");
+
+        let author = git.run(&["log", "-1", "--pretty=%an <%ae>"]).unwrap();
+        assert!(
+            author.contains("operator@example.com"),
+            "the configured email half must win: {author}"
+        );
+        if !has_global_name {
+            assert!(
+                author.starts_with("crosstache "),
+                "the missing name half must be filled: {author}"
+            );
+        }
+    }
+
+    #[test]
+    fn commit_succeeds_with_no_identity_at_all() {
+        let (_tmp, git) = fixture();
+        git.ensure_repo().unwrap();
+        // Force both halves empty in the repo scope regardless of global config.
+        git.run(&["config", "user.name", ""]).ok();
+        git.run(&["config", "user.email", ""]).ok();
+
+        write_secret(&git, "A", "ct");
+        git.commit("set A")
+            .expect("fallback identity must cover both halves");
+        let author = git.run(&["log", "-1", "--pretty=%an <%ae>"]).unwrap();
+        assert!(author.contains("crosstache"), "{author}");
+        assert!(author.contains("xv@localhost"), "{author}");
     }
 
     #[test]
