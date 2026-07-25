@@ -207,6 +207,14 @@ pub(crate) fn crosstache_error(error: CrosstacheError) -> (StatusCode, ApiErrorB
             "The operation was blocked by a security finding.".into(),
             "Review the finding and remove the sensitive value before retrying.",
         ),
+        RotationDue { count } => (
+            format!("{count} secret(s) are due for rotation."),
+            "Run 'xv rotate --due' to rotate them.",
+        ),
+        AuditChainBroken { seq, .. } => (
+            format!("The audit log failed integrity verification at record {seq}."),
+            "The log may have been altered. Investigate before trusting its history.",
+        ),
         RenameIncomplete { .. } => (
             "The secret was renamed, but the original could not be removed.".into(),
             "Refresh the vault and verify both secrets before retrying deletion.",
@@ -318,6 +326,12 @@ pub(crate) fn backend_error(error: BackendError) -> (StatusCode, ApiErrorBody) {
             "xv-rename-incomplete",
             "The secret was renamed, but the original could not be removed.",
             "Refresh the vault and verify both secrets before retrying deletion.",
+        ),
+        Decryption(_) => generic(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "xv-decryption-failed",
+            "The secret could not be decrypted.",
+            "The configured age identity may not match this store, or the data may be damaged.",
         ),
         Internal(_) | Other(_) => generic(
             StatusCode::INTERNAL_SERVER_ERROR,

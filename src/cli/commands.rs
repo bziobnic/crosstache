@@ -1580,7 +1580,8 @@ pub enum GitCommands {
 
     /// Show the store's commit history, newest first.
     Log {
-        /// Restrict history to commits touching this secret.
+        /// Restrict history to commits recorded for this secret (matched by
+        /// commit subject, so it works with opaque on-disk filenames too).
         secret: Option<String>,
         /// Maximum commits to show (0 = all).
         #[arg(long, default_value = "20")]

@@ -57,7 +57,7 @@ $ xv git log
 | Command | Description |
 |---------|-------------|
 | `xv git init` | Create the repository and write the managed `.gitignore`. Idempotent. |
-| `xv git log [SECRET]` | History, newest first. A secret name filters to commits touching it. `--limit N` (0 = all). Honors `--format json\|yaml\|csv`. |
+| `xv git log [SECRET]` | History, newest first. A secret name filters to the commits recorded for it (matched by commit subject, so `[local].opaque_filenames` does not hide history; renames match on both names). `--limit N` (0 = all). Honors `--format json\|yaml\|csv`. |
 | `xv git status` | Uncommitted changes in the store. |
 | `xv git diff [REV]` | Which files a commit changed. **Names only, never contents.** |
 | `xv git push [REMOTE] [--branch B]` | Push the store. |

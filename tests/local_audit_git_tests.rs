@@ -97,7 +97,10 @@ async fn audit_records_the_full_secret_lifecycle() {
     assert!(be.capabilities().has_audit);
     let audit = be.audit().expect("AuditBackend when [local].audit is on");
 
-    // set → get(value) → update → delete → restore → get → purge
+    // set → get(value) → update → delete → restore → delete → purge.
+    // Purge follows a *delete*: since the transactional-store rework, purge
+    // applies only to soft-deleted (trashed) secrets and errors on an active
+    // one, so the lifecycle re-deletes before purging.
     be.secrets()
         .set_secret("default", request("DB_PASSWORD", "hunter2"))
         .await
@@ -123,6 +126,10 @@ async fn audit_records_the_full_secret_lifecycle() {
         .await
         .unwrap();
     be.secrets()
+        .delete_secret("default", "DB_PASSWORD")
+        .await
+        .unwrap();
+    be.secrets()
         .purge_secret("default", "DB_PASSWORD")
         .await
         .unwrap();
@@ -138,6 +145,7 @@ async fn audit_records_the_full_secret_lifecycle() {
             "UpdateSecret",
             "DeleteSecret",
             "RestoreSecret",
+            "DeleteSecret",
             "PurgeSecret",
         ],
         "every mutation and value read must be recorded, in order"
@@ -154,11 +162,11 @@ async fn audit_records_the_full_secret_lifecycle() {
         .get_secret_events("default", "DB_PASSWORD", None, 30)
         .await
         .unwrap();
-    assert_eq!(scoped.len(), 6);
+    assert_eq!(scoped.len(), 7);
 
     assert_eq!(
         be.audit_log().unwrap().verify_chain("default").unwrap(),
-        ChainStatus::Intact { records: 6 }
+        ChainStatus::Intact { records: 7 }
     );
 }
 
@@ -634,4 +642,123 @@ async fn failures_are_not_audited_when_auditing_is_off() {
     let be = backend(&tmp, false, false);
     let _ = be.secrets().get_secret("default", "NOPE", true).await;
     assert!(!tmp.path().join("store/vaults/default/.audit").exists());
+}
+
+#[tokio::test]
+async fn renames_are_audited_and_committed() {
+    // `rename_secret` arrived with the transactional-store rework; it must flow
+    // through the same audit/git hooks as every other mutation.
+    let tmp = TempDir::new().unwrap();
+    let be = backend(&tmp, true, true);
+    be.secrets()
+        .set_secret("default", request("OLD_NAME", "v"))
+        .await
+        .unwrap();
+
+    be.secrets()
+        .rename_secret("default", "OLD_NAME", "NEW_NAME")
+        .await
+        .unwrap();
+
+    let records = audit_records(&tmp);
+    let rename = records
+        .iter()
+        .find(|r| r["operation"] == "RenameSecret")
+        .expect("the rename must be recorded");
+    assert_eq!(
+        rename["resource_name"], "OLD_NAME",
+        "the record keys on the source name, joining the pre-rename history"
+    );
+    assert_eq!(rename["status"], "Succeeded");
+
+    // And a failed rename (missing source) is recorded too.
+    let err = be
+        .secrets()
+        .rename_secret("default", "GHOST", "ANYTHING")
+        .await
+        .expect_err("renaming a missing secret fails");
+    let _ = err;
+    let records = audit_records(&tmp);
+    let failed = records
+        .iter()
+        .rev()
+        .find(|r| r["operation"] == "RenameSecret" && r["resource_name"] == "GHOST")
+        .expect("the failed attempt must be recorded");
+    assert_ne!(failed["status"], "Succeeded");
+
+    let subjects = std::process::Command::new("git")
+        .arg("-C")
+        .arg(tmp.path().join("store"))
+        .args(["log", "--pretty=%s"])
+        .output()
+        .unwrap();
+    let subjects = String::from_utf8_lossy(&subjects.stdout);
+    assert!(
+        subjects.contains("rename OLD_NAME to NEW_NAME"),
+        "the rename should be its own commit: {subjects}"
+    );
+
+    assert_eq!(
+        be.audit_log().unwrap().verify_chain("default").unwrap(),
+        ChainStatus::Intact { records: 3 },
+        "set + rename + failed rename: the chain must verify across all three"
+    );
+}
+
+#[tokio::test]
+async fn git_log_filter_survives_opaque_filenames() {
+    // End-to-end for the Bugbot finding: with opaque filenames the committed
+    // paths are keyed-hash stems, so only subject-based filtering can find a
+    // secret's history.
+    let tmp = TempDir::new().unwrap();
+    let cfg = LocalConfig {
+        store_path: Some(tmp.path().join("store").to_string_lossy().to_string()),
+        key_file: Some(tmp.path().join("key.txt").to_string_lossy().to_string()),
+        default_vault: Some("default".into()),
+        encrypt_metadata: None,
+        opaque_filenames: Some(true),
+        audit: None,
+        git: Some(true),
+    };
+    let be = LocalBackend::new(Some(&cfg)).expect("create local backend");
+
+    be.secrets()
+        .set_secret("default", request("DB_PASSWORD", "v1"))
+        .await
+        .unwrap();
+    be.secrets()
+        .set_secret("default", request("OTHER", "v"))
+        .await
+        .unwrap();
+    be.secrets()
+        .set_secret("default", request("DB_PASSWORD", "v2"))
+        .await
+        .unwrap();
+
+    // Confirm the layout really is opaque — no committed path contains the name.
+    let tracked = std::process::Command::new("git")
+        .arg("-C")
+        .arg(tmp.path().join("store"))
+        .args(["ls-files"])
+        .output()
+        .unwrap();
+    let tracked = String::from_utf8_lossy(&tracked.stdout);
+    assert!(
+        !tracked.contains("DB_PASSWORD"),
+        "precondition: paths must be opaque, got {tracked}"
+    );
+
+    let subjects: Vec<String> = be
+        .git_store()
+        .unwrap()
+        .log(Some("DB_PASSWORD"), 0)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.subject)
+        .collect();
+    assert_eq!(
+        subjects,
+        vec!["set DB_PASSWORD", "set DB_PASSWORD"],
+        "opaque paths must not hide the secret's history"
+    );
 }

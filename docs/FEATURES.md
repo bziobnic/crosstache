@@ -302,7 +302,7 @@ Additive: `xv history`/`xv rollback` are unchanged on every backend.
 | Command | Description |
 |---------|-------------|
 | `xv git init` | Create the repository and write the managed `.gitignore`. Works before `git = true` is set; idempotent |
-| `xv git log [secret]` | Commit history, newest first; a secret name filters to commits touching it (`--limit`, `--format`) |
+| `xv git log [secret]` | Commit history, newest first; a secret name filters to the commits recorded for it — subject-matched, so opaque filenames do not hide history (`--limit`, `--format`) |
 | `xv git status` | Uncommitted changes in the store |
 | `xv git diff [rev]` | Which files a commit changed — names only, never contents |
 | `xv git push [remote]` | Push the store to a remote (`--branch`) |

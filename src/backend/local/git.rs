@@ -245,11 +245,16 @@ impl LocalGitStore {
 
     /// Commit history, newest first. `limit` of 0 means unlimited.
     ///
-    /// `path_filter` restricts history to commits touching a path — used by
-    /// `xv git log <secret>` to show one secret's timeline.
+    /// `secret_filter` restricts history to commits *recorded for* that secret,
+    /// by matching the commit subjects this module writes (`set NAME`,
+    /// `rename OLD to NEW`, …) — never by pathspec. Paths would miss every
+    /// commit under `[local].opaque_filenames`, where on-disk stems are keyed
+    /// hashes that contain no trace of the name; subjects always carry the
+    /// plain name on both layouts, and keep matching across a legacy→opaque
+    /// migration that renames every file.
     pub fn log(
         &self,
-        path_filter: Option<&str>,
+        secret_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<GitCommit>, BackendError> {
         if !self.is_repo() {
@@ -262,19 +267,15 @@ impl LocalGitStore {
             // naive format would use.
             "--pretty=format:%h\u{1f}%aI\u{1f}%s".into(),
         ];
-        if limit > 0 {
+        // With a filter, fetch everything and bound *after* filtering —
+        // otherwise `-nN` would count non-matching commits against the limit.
+        if limit > 0 && secret_filter.is_none() {
             args.push(format!("-n{limit}"));
-        }
-        if let Some(filter) = path_filter {
-            args.push("--".into());
-            // Match the secret anywhere in the tree: callers pass a bare secret
-            // name, not a store-relative path.
-            args.push(format!("*{filter}*"));
         }
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = self.run(&arg_refs)?;
-        Ok(out
+        let mut commits: Vec<GitCommit> = out
             .lines()
             .filter(|l| !l.trim().is_empty())
             .filter_map(|line| {
@@ -285,7 +286,15 @@ impl LocalGitStore {
                     subject: parts.next().unwrap_or_default().to_string(),
                 })
             })
-            .collect())
+            .collect();
+
+        if let Some(name) = secret_filter {
+            commits.retain(|c| subject_mentions(&c.subject, name));
+            if limit > 0 {
+                commits.truncate(limit);
+            }
+        }
+        Ok(commits)
     }
 
     /// `git status --short` output for the store.
@@ -384,6 +393,29 @@ impl LocalGitStore {
     }
 }
 
+/// Whether a commit subject written by this module refers to `name`.
+///
+/// The subject vocabulary is closed — every auto-commit message is produced by
+/// [`LocalSecretBackend`](super::secrets::LocalSecretBackend)'s hooks — so exact
+/// verb matching is possible and preferred over a substring search, which would
+/// let a secret named `A` match every other secret's history.
+///
+/// A rename matches on either side, so `xv git log NEW_NAME` picks up the
+/// commit that created the name and `xv git log OLD_NAME` shows where the old
+/// history ends. A name that itself contains `" to "` can over-match the rename
+/// patterns; that ambiguity is inherent to a flat subject line and acceptable
+/// for a history *view* (nothing security-relevant keys off this filter).
+fn subject_mentions(subject: &str, name: &str) -> bool {
+    for verb in ["set", "update", "delete", "restore", "purge"] {
+        if subject == format!("{verb} {name}") {
+            return true;
+        }
+    }
+    subject.starts_with(&format!("rollback {name} to "))
+        || subject.starts_with(&format!("rename {name} to "))
+        || (subject.starts_with("rename ") && subject.ends_with(&format!(" to {name}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,14 +501,86 @@ mod tests {
         write_secret(&git, "BETA", "ct2");
         git.commit("set BETA").unwrap();
         write_secret(&git, "ALPHA", "ct3");
-        git.commit("rotate ALPHA").unwrap();
+        git.commit("update ALPHA").unwrap();
 
         let alpha = git.log(Some("ALPHA"), 0).unwrap();
         let subjects: Vec<&str> = alpha.iter().map(|c| c.subject.as_str()).collect();
-        assert_eq!(subjects, vec!["rotate ALPHA", "set ALPHA"]);
+        assert_eq!(subjects, vec!["update ALPHA", "set ALPHA"]);
 
         assert_eq!(git.log(None, 0).unwrap().len(), 3);
         assert_eq!(git.log(None, 2).unwrap().len(), 2);
+        // With a filter, the limit bounds MATCHING commits, not raw history —
+        // "set BETA" between the two ALPHA commits must not eat the budget.
+        assert_eq!(git.log(Some("ALPHA"), 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn log_filter_works_when_paths_are_opaque_stems() {
+        // The regression Bugbot caught: with [local].opaque_filenames the
+        // committed paths are keyed-hash stems that contain no trace of the
+        // secret name, so a pathspec filter (`*NAME*`) matches nothing. The
+        // filter must key on commit subjects, which always carry plain names.
+        let (_tmp, git) = fixture();
+        write_secret(&git, "T5KQZJ2MBQXW3ZL6", "opaque-ct-1");
+        git.commit("set DB_PASSWORD").unwrap();
+        write_secret(&git, "9YHFA4WNPRC8E2VD", "opaque-ct-2");
+        git.commit("set OTHER").unwrap();
+        write_secret(&git, "T5KQZJ2MBQXW3ZL6", "opaque-ct-3");
+        git.commit("update DB_PASSWORD").unwrap();
+
+        let subjects: Vec<String> = git
+            .log(Some("DB_PASSWORD"), 0)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.subject)
+            .collect();
+        assert_eq!(
+            subjects,
+            vec!["update DB_PASSWORD", "set DB_PASSWORD"],
+            "opaque on-disk paths must not hide a secret's history"
+        );
+    }
+
+    #[test]
+    fn log_filter_matches_whole_names_not_substrings() {
+        // A secret named "A" must not match every subject containing an A —
+        // the closed subject vocabulary allows exact matching.
+        let (_tmp, git) = fixture();
+        write_secret(&git, "A", "ct");
+        git.commit("set A").unwrap();
+        write_secret(&git, "ALPHA", "ct");
+        git.commit("set ALPHA").unwrap();
+
+        let a = git.log(Some("A"), 0).unwrap();
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(a[0].subject, "set A");
+    }
+
+    #[test]
+    fn log_filter_matches_both_sides_of_a_rename() {
+        let (_tmp, git) = fixture();
+        write_secret(&git, "OLD", "ct");
+        git.commit("set OLD").unwrap();
+        write_secret(&git, "NEW", "ct");
+        git.commit("rename OLD to NEW").unwrap();
+        write_secret(&git, "NEW", "ct2");
+        git.commit("update NEW").unwrap();
+
+        let old = git.log(Some("OLD"), 0).unwrap();
+        let old_subjects: Vec<&str> = old.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(
+            old_subjects,
+            vec!["rename OLD to NEW", "set OLD"],
+            "the old name's history should end at the rename"
+        );
+
+        let new = git.log(Some("NEW"), 0).unwrap();
+        let new_subjects: Vec<&str> = new.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(
+            new_subjects,
+            vec!["update NEW", "rename OLD to NEW"],
+            "the new name's history should start at the rename"
+        );
     }
 
     #[test]
