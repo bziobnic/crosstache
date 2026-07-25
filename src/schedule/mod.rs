@@ -264,6 +264,14 @@ fn quote_if_needed(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Which native scheduler is in use.
+///
+/// Every variant is matched by the rendering and lifecycle code on all
+/// platforms, but each is only *constructed* by [`Platform::detect`] on its own
+/// `target_os` (plus by tests, which exercise all three everywhere). Without
+/// the exemption, dead-code analysis on any single platform flags the other
+/// two variants as never constructed — exactly what CI's Linux clippy run does
+/// to `Launchd`.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Launchd,
