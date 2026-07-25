@@ -87,13 +87,18 @@ pushed, it cannot be.
 The age identity is what decrypts every secret in the store. Git history is
 effectively permanent, so a key committed once is very hard to expunge.
 
-Two independent protections:
+Three independent protections:
 
 1. A **managed `.gitignore`** block listing the identity and recipients files
    plus lock files. Your own `.gitignore` lines outside that block are preserved.
-2. A **pre-commit check in `xv` itself**: before each commit, the staged path list
-   is inspected and the commit is **refused** if key material appears. This is the
-   actual gate — `.gitignore` is a convenience that `git add -f` can defeat.
+2. A **content scan before each commit**: the staged index is searched for
+   `AGE-SECRET-KEY-1` — the prefix every age identity line carries — and the
+   commit is **refused** on a hit. This is the actual gate: it catches a key at
+   any path under any name (`key.txt.bak`, a paste into a notes file), in every
+   layout, and survives both `git add -f` and renames.
+3. A **path check** for the configured `key_file`/`recipients_file` when they
+   resolve inside the store — still wanted for the recipients file, whose
+   contents are public keys and therefore invisible to the content scan.
 
 ```console
 $ xv set A --value v

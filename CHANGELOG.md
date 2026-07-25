@@ -104,9 +104,11 @@
   becomes a real git repository committed after every mutation, so `git log`,
   `git diff`, `git bisect`, and `git push` operate on actual history.
   `xv git init|log|status|diff|push|pull`. Only age **ciphertext** and metadata
-  are committed; the age identity and recipients files are excluded by a managed
-  `.gitignore` *and* by a pre-commit staged-path check that refuses the commit
-  outright (`.gitignore` alone is defeatable with `git add -f`). `xv git diff`
+  are committed; the age identity is excluded by a managed `.gitignore`, by a
+  pre-commit **content scan** of the staged index for the `AGE-SECRET-KEY-1`
+  identity marker (catches a key at any path under any name, in every layout,
+  surviving `git add -f` and renames), and by a path check for the configured
+  key/recipients files when they resolve inside the store. `xv git diff`
   reports names only, never contents. `xv git pull` is fast-forward only, since a
   merge conflict inside age ciphertext is unresolvable. Additive:
   `xv history`/`xv rollback` are unchanged on every backend. Azure and AWS are
